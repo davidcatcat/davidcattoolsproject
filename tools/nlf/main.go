@@ -19,7 +19,7 @@ import (
 	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/search"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
 
 const usage = `nlf — Natural Language Find (v` + version + `)
 Find files by describing them in Chinese or English. Deterministic and read-only; no AI calls.
