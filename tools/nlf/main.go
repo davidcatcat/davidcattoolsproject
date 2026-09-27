@@ -39,7 +39,13 @@ Examples (English):
   nlf "find pem files under /etc"
   nlf "go files containing TODO modified in the last 7 days"
   nlf "10 largest files excluding node_modules and .git"
-  nlf "newest 3 md files in ~/Documents"
+
+Date & time (local time; a range is start <= mtime < end, and an end date is included):
+  nlf '找 2026 年 9 月的 pdf 檔'      nlf '找 9 月修改的 yml 檔'   (no year = this year)
+  nlf '查 2026 年 9 月 28 日改了什麼檔案'   nlf '找 9 月 1 日到 9 月 15 日修改的 log'
+  nlf '找昨天 23:00 到今天 02:00 修改的 log'   nlf '找最近 6 小時修改的 conf'
+  nlf 'files modified on 2026-09-28'   nlf 'log files modified from Sep 1 to Sep 15'
+  nlf '找本月修改的 yaml'   nlf 'conf files modified in the last 6 hours'
 
 Flags:
   --explain        show how the query is understood; never searches
@@ -50,9 +56,8 @@ Flags:
   --version        print version
 
 --explain   nlf --explain "找 ovpn 檔"
-  Prints the parsed conditions and an approximate find command in macOS or
-  GNU/Linux syntax, matching this OS (for reference only; nlf never runs it).
-  Nothing is searched, nothing is asked.
+  Prints the parsed conditions and an approximate find command for this OS (macOS
+  or GNU/Linux syntax; reference only, nlf never runs it). Nothing is searched.
 
 --confirm   nlf --confirm "找 ovpn 檔"
   Prints the execution plan (root, conditions, approximate command) and a
@@ -60,14 +65,13 @@ Flags:
   searches; any other answer (n, Enter, yes, EOF, ...) prints "Cancelled.".
 
 Safety:
-  Read-only. nlf does not modify, create or delete files, does not run a
-  shell or any other program, and never uses sudo. Unreadable paths are
-  skipped and listed on stderr.
+  Read-only. nlf does not modify, create or delete files, does not run a shell
+  or any other program, and never uses sudo. Unreadable paths are skipped.
 
 Supported conditions (combined with AND):
   extension  .go  *.md  go files  找 ovpn 檔  go 或 md 檔  副檔名 heic  圖片  images
   content    containing "text"  包含 "文字"  內容有「錯誤」  ignore case / 不分大小寫
-  modified   last 7 days  older than 30 days  today  最近 7 天  3 天前  昨天
+  modified   today  昨天  本月  2026-09-28  9 月  9/1 到 9/15  最近 6 小時  last 7 days  3 天前
   size       larger than 10MB  at most 1KB  大於 10MB  10MB 以上   (1 KB = 1024 bytes)
   count      top 10  最多 10 個  10 largest  最大的 5 個  newest 3  最新的 3 個
   exclude    exclude node_modules and .git  排除 vendor、build 目錄  排除 src/gen

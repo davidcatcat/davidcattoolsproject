@@ -540,6 +540,12 @@ func TestHelpContent(t *testing.T) {
 		"0  files found, or --confirm was cancelled", "1  valid query, but no files found", "2  error",
 		// tips
 		"Quote exact content", "Quote paths with spaces", "never\n    silently widens the search",
+		// date & time
+		"Date & time", "start <= mtime < end", "an end date is included", "no year = this year",
+		"nlf '找 2026 年 9 月的 pdf 檔'", "nlf '找 9 月修改的 yml 檔'", "nlf '查 2026 年 9 月 28 日改了什麼檔案'",
+		"nlf '找 9 月 1 日到 9 月 15 日修改的 log'", "nlf '找最近 6 小時修改的 conf'", "nlf '找昨天 23:00 到今天 02:00 修改的 log'",
+		"nlf '找本月修改的 yaml'", "nlf 'files modified on 2026-09-28'", "nlf 'log files modified from Sep 1 to Sep 15'",
+		"nlf 'conf files modified in the last 6 hours'",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--help is missing %q", want)
@@ -772,5 +778,63 @@ func TestGNUSortPipeline(t *testing.T) {
 		if string(got) != want {
 			t.Errorf("%s:\n cmd  %s\n find %q\n nlf  %q", in, cmd, got, want)
 		}
+	}
+}
+
+// TestDateSearchEndToEnd runs date queries through the CLI against files
+// with fixed modification times around the month and day boundaries.
+func TestDateSearchEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	loc := testNow.Location()
+	times := map[string]time.Time{
+		"a-0831-2359.log": time.Date(2026, 8, 31, 23, 59, 0, 0, loc),
+		"b-0901-0000.log": time.Date(2026, 9, 1, 0, 0, 0, 0, loc),
+		"c-0915-1200.log": time.Date(2026, 9, 15, 12, 0, 0, 0, loc),
+		"d-0915-1200.yml": time.Date(2026, 9, 15, 12, 0, 0, 0, loc),
+		"e-0926-0130.log": time.Date(2026, 9, 26, 1, 30, 0, 0, loc),
+		"f-0926-2330.log": time.Date(2026, 9, 26, 23, 30, 0, 0, loc),
+		"g-0927-0130.log": time.Date(2026, 9, 27, 1, 30, 0, 0, loc),
+		"h-0930-2359.log": time.Date(2026, 9, 30, 23, 59, 0, 0, loc),
+		"i-1001-0000.log": time.Date(2026, 10, 1, 0, 0, 0, 0, loc),
+	}
+	for n, mt := range times {
+		mkfiles(t, dir, map[string]string{n: strings.Repeat("x", len(n))})
+		if err := os.Chtimes(filepath.Join(dir, n), mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// testNow is 2026-09-27 12:00 local.
+	tests := []struct {
+		query string
+		want  string
+	}{
+		{"找 2026 年 9 月的檔案", "b-0901-0000.log,c-0915-1200.log,d-0915-1200.yml,e-0926-0130.log,f-0926-2330.log,g-0927-0130.log,h-0930-2359.log"},
+		{"找 9 月修改的 yml 檔", "d-0915-1200.yml"},
+		{"找 9 月 1 日到 9 月 15 日修改的 log", "b-0901-0000.log,c-0915-1200.log"},
+		{"找昨天 23:00 到今天 02:00 修改的 log", "f-0926-2330.log,g-0927-0130.log"},
+		{"找凌晨 1 點到 2 點修改的檔案", "g-0927-0130.log"},
+		{"找今天修改的 log", "g-0927-0130.log"},
+		{"找昨天修改的 log", "e-0926-0130.log,f-0926-2330.log"},
+		{"找本月最新的 2 個 log", "h-0930-2359.log,g-0927-0130.log"},
+		{"files modified on 2026-10-01", "i-1001-0000.log"},
+		{"log files from Sep 1 to Sep 15", "b-0901-0000.log,c-0915-1200.log"},
+		{"找上個月修改的檔案", "a-0831-2359.log"},
+	}
+	for _, tt := range tests {
+		out, errOut, code := nlf(t, "--dir", dir, tt.query)
+		if got := strings.Join(paths(dir, out), ","); code != 0 || got != tt.want {
+			t.Errorf("%s: code=%d\n got  %s\n want %s\n%s", tt.query, code, got, tt.want, errOut)
+		}
+	}
+	// Invalid dates and backwards ranges fail with exit 2 and search nothing.
+	for _, q := range []string{"找 2026-02-29 的檔案", "找 9/20 到 9/10 的檔案", "找今天 25:00 到 26:00 的檔案", "03/04/2026"} {
+		if out, _, code := nlf(t, "--dir", dir, q); code != 2 || out != "" {
+			t.Errorf("%s: code=%d out=%q, want exit 2 and no output", q, code, out)
+		}
+	}
+	// --confirm shows the range in the plan.
+	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "找 2026-09-28 修改的 yml 檔")
+	if !strings.Contains(plan, "modified:      2026-09-28 00:00:00 <= mtime < 2026-09-29 00:00:00") || !strings.Contains(plan, "time zone:") {
+		t.Errorf("plan does not show the date range:\n%s", plan)
 	}
 }

@@ -113,14 +113,8 @@ func (p *parser) step() error {
 	if _, ok := p.accept(weakExcludePhrases); ok {
 		return p.excludeNames(true, t.raw)
 	}
-	if _, ok := p.accept(todayPhrases); ok {
-		p.after(midnight(p.q.Now))
-		return nil
-	}
-	if _, ok := p.accept(yesterdayPhrases); ok {
-		p.after(midnight(p.q.Now).AddDate(0, 0, -1))
-		p.before(midnight(p.q.Now))
-		return nil
+	if ok, err := p.dateExpr(); ok || err != nil {
+		return err
 	}
 	if ok, err := p.comparator(); ok || err != nil {
 		return err
@@ -655,7 +649,9 @@ func init() {
 		largestPhrases, newestPhrases, withinPhrases, olderPhrases, countUnits, extTriggers,
 		todayPhrases, yesterdayPhrases, orPhrases, notPhrases, mapKeys(cmpPhrases), mapKeys(postfixPhrases),
 		fillers, fileNouns, pathTriggers, extCopula, softContentPhrases,
-		mapKeys(timeUnits), mapKeys(sizeUnits)}
+		mapKeys(timeUnits), mapKeys(sizeUnits),
+		datePreps, rangeTo, betweenAnd, sincePost, nowWords, mapKeys(dayWords), mapKeys(monthWords),
+		mapKeys(yearWords), mapKeys(monthNames), {"am", "pm"}}
 	for _, l := range lists {
 		for _, ph := range l {
 			for _, w := range strings.Fields(ph) {

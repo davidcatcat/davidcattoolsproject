@@ -116,7 +116,12 @@ func init() {
 
 	lists := [][]string{ignoreCasePhrases, contentPhrases, excludePhrases, weakExcludePhrases, excludeTail, listSeps,
 		limitPhrases, largestPhrases, newestPhrases, postNumLargest, postNumNewest, withinPhrases, olderPhrases, countUnits,
-		fileNouns, extTriggers, extCopula, softContentPhrases, pathTriggers, fillers, todayPhrases, yesterdayPhrases, orPhrases, notPhrases}
+		fileNouns, extTriggers, extCopula, softContentPhrases, pathTriggers, fillers, todayPhrases, yesterdayPhrases, orPhrases, notPhrases,
+		datePreps, rangeTo, betweenAnd, sincePost, nowWords, mapKeys(dayWords), mapKeys(monthWords), mapKeys(yearWords),
+		// 下午 and 中午 must be words, or the fillers 下 / 中 would split them;
+		// the other period words and 點 / 號 are matched as unknown Han text
+		// so that words like 帳號 or 重點 are not split.
+		{"下午", "中午"}}
 	for _, l := range lists {
 		addCJKFrom(l)
 	}
@@ -211,6 +216,10 @@ var extAliases = map[string][]string{
 	"java": {"java"}, "c": {"c", "h"}, "cpp": {"cpp", "cc", "hpp"}, "c++": {"cpp", "cc", "hpp"},
 	"rust": {"rs"}, "rs": {"rs"}, "swift": {"swift"}, "ruby": {"rb"}, "rb": {"rb"}, "php": {"php"},
 	"log": {"log"}, "logs": {"log"},
+	// Common operations file types that name themselves (no semantic mapping:
+	// "conf" is *.conf, "tf" is *.tf; "terraform" is deliberately not an alias).
+	"conf": {"conf"}, "cfg": {"cfg"}, "ini": {"ini"}, "tf": {"tf"}, "tfvars": {"tfvars"},
+	"pem": {"pem"}, "crt": {"crt"}, "service": {"service"},
 	"pdf": {"pdf"}, "pdfs": {"pdf"},
 	"word": {"docx", "doc"}, "docx": {"docx"}, "doc": {"doc"},
 	"excel": {"xlsx", "xls"}, "xlsx": {"xlsx"}, "xls": {"xls"},
@@ -246,4 +255,5 @@ var fillers = []string{
 	"被", "過", "过", "裡", "裡面", "里", "里面", "中", "之中", "下", "底下", "下面",
 	"目錄", "目录", "資料夾", "资料夹", "有", "是", "了", "一下", "一些", "哪些", "那些", "大小", "時間", "时间",
 	"為", "为", "可以", "嗎", "吗", "呢", "吧", "以", "就好", "即可", "個", "个", "範圍", "范围", "都",
+	"改了", "什麼", "什么",
 }

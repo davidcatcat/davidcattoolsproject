@@ -60,7 +60,9 @@ func TestParse(t *testing.T) {
 		{"超過30天", Query{ModifiedBefore: ago(30 * day)}},
 		{"30 days ago", Query{ModifiedBefore: ago(30 * day)}},
 		{"3天前修改的", Query{ModifiedBefore: ago(3 * day)}},
-		{"today", Query{ModifiedAfter: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)}},
+		// today is a calendar day [00:00, next 00:00), like yesterday
+		{"today", Query{ModifiedAfter: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC),
+			ModifiedBefore: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)}},
 		{"昨天修改的", Query{ModifiedAfter: time.Date(2026, 9, 26, 0, 0, 0, 0, time.UTC),
 			ModifiedBefore: time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)}},
 

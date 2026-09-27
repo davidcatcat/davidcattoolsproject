@@ -41,11 +41,19 @@ func Conditions(q *Query, lang Lang) []Condition {
 		}
 		add(pick("內容包含", "content:"), fmt.Sprintf("%q (%s)", c, sens))
 	}
-	if !q.ModifiedAfter.IsZero() {
-		add(pick("修改時間", "modified:"), pick("晚於 ", "after ")+q.ModifiedAfter.Format(timeLayout))
+	switch after, before := q.ModifiedAfter, q.ModifiedBefore; {
+	case !after.IsZero() && !before.IsZero():
+		add(pick("修改時間", "modified:"), after.Format(timeLayout)+" <= mtime < "+before.Format(timeLayout))
+	case !after.IsZero():
+		add(pick("修改時間", "modified:"), pick("晚於 ", "after ")+after.Format(timeLayout)+" (mtime >= "+after.Format(timeLayout)+")")
+	case !before.IsZero():
+		add(pick("修改時間", "modified:"), pick("早於 ", "before ")+before.Format(timeLayout)+" (mtime < "+before.Format(timeLayout)+")")
 	}
-	if !q.ModifiedBefore.IsZero() {
-		add(pick("修改時間", "modified:"), pick("早於 ", "before ")+q.ModifiedBefore.Format(timeLayout))
+	if t := q.ModifiedAfter; !t.IsZero() || !q.ModifiedBefore.IsZero() {
+		if t.IsZero() {
+			t = q.ModifiedBefore
+		}
+		add(pick("時區", "time zone:"), t.Format("MST (-07:00)")+pick("，本機時間", ", local time"))
 	}
 	for _, s := range q.Sizes {
 		add(pick("檔案大小", "size:"), s.Op+" "+HumanBytes(s.Bytes))

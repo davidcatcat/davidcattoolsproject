@@ -255,3 +255,61 @@ func TestSymlinksBelowRootAreNotFollowed(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+// TestDateRangeBoundaries checks start <= mtime < end on real files whose
+// modification times sit exactly on and next to the range boundaries.
+func TestDateRangeBoundaries(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 9, 28, 10, 30, 0, 0, loc)
+	at := func(mo time.Month, d, h, mi, s, ns int) time.Time { return time.Date(2026, mo, d, h, mi, s, ns, loc) }
+	dir := t.TempDir()
+	files := map[string]time.Time{
+		"0831-235959":      at(8, 31, 23, 59, 59, 0),
+		"0831-last-ns":     at(8, 31, 23, 59, 59, 999_999_999),
+		"0901-000000":      at(9, 1, 0, 0, 0, 0),
+		"0915-120000":      at(9, 15, 12, 0, 0, 0),
+		"0915-235959":      at(9, 15, 23, 59, 59, 0),
+		"0916-000000":      at(9, 16, 0, 0, 0, 0),
+		"0928-005959":      at(9, 28, 0, 59, 59, 0),
+		"0928-010000":      at(9, 28, 1, 0, 0, 0),
+		"0928-045959":      at(9, 28, 4, 59, 59, 0),
+		"0928-050000":      at(9, 28, 5, 0, 0, 0),
+		"0930-235959":      at(9, 30, 23, 59, 59, 0),
+		"0930-last-ns":     at(9, 30, 23, 59, 59, 999_999_999),
+		"1001-000000":      at(10, 1, 0, 0, 0, 0),
+		"1001-000000-plus": at(10, 1, 0, 0, 0, 1),
+	}
+	for n, mt := range files {
+		p := filepath.Join(dir, n)
+		write(t, p, nil)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(p); err != nil || !info.ModTime().Equal(mt) {
+			t.Skipf("file system does not keep nanosecond mtimes (%v)", err)
+		}
+	}
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"找 2026 年 9 月的檔案", []string{"0901-000000", "0915-120000", "0915-235959", "0916-000000",
+			"0928-005959", "0928-010000", "0928-045959", "0928-050000", "0930-235959", "0930-last-ns"}},
+		{"找 9 月 1 日到 9 月 15 日的檔案", []string{"0901-000000", "0915-120000", "0915-235959"}},
+		{"找 2026-09-16 的檔案", []string{"0916-000000"}},
+		{"找 9 月 28 日凌晨 1 點到 5 點的檔案", []string{"0928-010000", "0928-045959"}},
+		{"找 8 月的檔案", []string{"0831-235959", "0831-last-ns"}},
+		{"找 10 月的檔案", []string{"1001-000000", "1001-000000-plus"}},
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.query, got, tt.want)
+		}
+	}
+}
