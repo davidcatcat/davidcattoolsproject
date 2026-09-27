@@ -1,0 +1,65 @@
+nlf — Natural Language Find (v0.1.0)
+Find files by describing them in Chinese or English. Deterministic and read-only; no AI calls.
+
+Usage:
+  nlf [flags] "<query>"
+
+Examples (中文):
+  nlf "找 ovpn 檔"
+  nlf --dir ~/Downloads "找 ovpn 檔"
+  nlf '找內容包含 "20.2.250.249" 的檔案'
+  nlf "找最近 7 天修改的 go 檔"
+  nlf "找最大的 5 個檔案"
+  nlf "排除 vendor 和 node_modules，找 go 檔"
+
+Examples (English):
+  nlf "find pem files under /etc"
+  nlf "go files containing TODO modified in the last 7 days"
+  nlf "10 largest files excluding node_modules and .git"
+  nlf "newest 3 md files in ~/Documents"
+
+Flags:
+  --explain        show how the query is understood; never searches
+  --confirm        show the execution plan first; search only if you answer y or Y
+  -l, --long       print size and modification time before each path
+  -d, --dir PATH   directory to search (default: current directory)
+  -h, --help       show this help
+  --version        print version
+
+--explain   nlf --explain "找 ovpn 檔"
+  Prints the parsed conditions and an approximate macOS find command (for
+  reference only; nlf never runs it). Nothing is searched, nothing is asked.
+
+--confirm   nlf --confirm "找 ovpn 檔"
+  Prints the execution plan (root, conditions, approximate command) and a
+  safety summary, then asks "Execute this search? [y/N]". Only y or Y
+  searches; any other answer (n, Enter, yes, EOF, ...) prints "Cancelled.".
+
+Safety:
+  Read-only. nlf does not modify, create or delete files, does not run a
+  shell or any other program, and never uses sudo. Unreadable paths are
+  skipped and listed on stderr.
+
+Supported conditions (combined with AND):
+  extension  .go  *.md  go files  找 ovpn 檔  go 或 md 檔  副檔名 heic  圖片  images
+  content    containing "text"  包含 "文字"  內容有「錯誤」  ignore case / 不分大小寫
+  modified   last 7 days  older than 30 days  today  最近 7 天  3 天前  昨天
+  size       larger than 10MB  at most 1KB  大於 10MB  10MB 以上   (1 KB = 1024 bytes)
+  count      top 10  最多 10 個  10 largest  最大的 5 個  newest 3  最新的 3 個
+  exclude    exclude node_modules and .git  排除 vendor、build 目錄  排除 src/gen
+  Not supported: OR between conditions, negation (不包含 / without), regex.
+
+Search root (default: current directory):
+  --dir ~/Downloads   in ~/Documents   在 ./src   under /tmp   在 "~/My Docs"
+  Name the location with --dir or in the query, not both.
+
+Exit status:
+  0  files found, or --confirm was cancelled
+  1  valid query, but no files found
+  2  error: query not understood, bad flag, missing or unreadable location
+
+Tips:
+  - Quote exact content: 包含 "20.2.250.249", containing "hello world"
+  - Quote paths with spaces: 在 "~/My Docs"
+  - If nlf does not understand a word it stops with an error; it never
+    silently widens the search. Check a query with --explain.

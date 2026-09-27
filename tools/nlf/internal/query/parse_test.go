@@ -95,6 +95,50 @@ func TestParse(t *testing.T) {
 		{"最近修改的 5 個檔案", Query{Limit: 5, Sort: SortNewest}},
 		{"last 5 files", Query{Limit: 5, Sort: SortNewest}},
 
+		// arbitrary extension + file noun (v0.1.1)
+		{"找 ovpn 檔", Query{Extensions: []string{"ovpn"}}},
+		{"find ovpn files", Query{Extensions: []string{"ovpn"}}},
+		{"find pem files", Query{Extensions: []string{"pem"}}},
+		{"找 tfstate 檔", Query{Extensions: []string{"tfstate"}}},
+		{"找 conf 檔案", Query{Extensions: []string{"conf"}}},
+		{"ovpn 和 pem 檔", Query{Extensions: []string{"ovpn", "pem"}}},
+		{"find banana files", Query{Extensions: []string{"banana"}}}, // any word + noun is an extension by design
+		{".ovpn", Query{Extensions: []string{"ovpn"}}},
+		{"副檔名是 ovpn", Query{Extensions: []string{"ovpn"}}},
+		// aliases keep working
+		{"find python files", Query{Extensions: []string{"py"}}},
+		{"word 檔", Query{Extensions: []string{"docx", "doc"}}},
+		{"images", Query{Extensions: imageExts}},
+		{"go files larger than 1kb", Query{Extensions: []string{"go"}, Sizes: []SizeCond{{">", 1 << 10}}}},
+
+		// exclude must not swallow a following extension
+		{"exclude vendor and go files", Query{ExcludeDirs: []string{"vendor"}, Extensions: []string{"go"}}},
+		{"排除 vendor 和 go 檔", Query{ExcludeDirs: []string{"vendor"}, Extensions: []string{"go"}}},
+		{"exclude vendor and go and md files", Query{ExcludeDirs: []string{"vendor"}, Extensions: []string{"go", "md"}}},
+		{"exclude vendor and ovpn files", Query{ExcludeDirs: []string{"vendor"}, Extensions: []string{"ovpn"}}},
+		{"except vendor dir", Query{ExcludeDirs: []string{"vendor"}}},
+		{"不要 tmp 目錄", Query{ExcludeDirs: []string{"tmp"}}},
+		{"exclude logs dir", Query{ExcludeDirs: []string{"logs"}}},
+		{`排除 ".go"`, Query{ExcludeDirs: []string{".go"}}},
+		{"exclude ./src/gen", Query{ExcludeDirs: []string{"./src/gen"}}},
+
+		// unquoted content is taken whole up to a space or punctuation
+		{"包含 錯誤訊息", Query{Contents: []string{"錯誤訊息"}}},
+		{"內容包含 系統錯誤", Query{Contents: []string{"系統錯誤"}}},
+		{"找內容有 API連線失敗 的檔案", Query{Contents: []string{"API連線失敗"}}},
+		{"包含 錯誤訊息，大於 1KB", Query{Contents: []string{"錯誤訊息"}, Sizes: []SizeCond{{">", 1 << 10}}}},
+
+		// unquoted paths keep non-ASCII characters
+		{"在 ~/文件 找 go 檔", Query{Root: "~/文件", Extensions: []string{"go"}}},
+		{"in ~/Documents/報告 pdf files", Query{Root: "~/Documents/報告", Extensions: []string{"pdf"}}},
+		{"在 ./中文路徑 找 txt 檔", Query{Root: "./中文路徑", Extensions: []string{"txt"}}},
+		{`在 "/Users/foo/中文 目錄" 找 md 檔`, Query{Root: "/Users/foo/中文 目錄", Extensions: []string{"md"}}},
+		{"在 ~/圖片", Query{Root: "~/圖片"}},
+
+		// numeric boundaries
+		{"top 2147483647", Query{Limit: 2147483647}},
+		{"last 292 years", Query{ModifiedAfter: ago(292 * 365 * day)}},
+
 		// combined
 		{"找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendor，最多 10 個", Query{
 			ModifiedAfter: ago(7 * day), Sizes: []SizeCond{{">", 1 << 20}}, Extensions: []string{"go"},
@@ -138,6 +182,47 @@ func TestParseErrors(t *testing.T) {
 		{"最近 7 天 超過 30 天", "contradict"},
 		{"top 1.5", "positive whole number"},
 		{"more than 10", "number needs a unit"},
+
+		// negative wording is rejected, never turned into an exclusion
+		{"files without TODO", "negative conditions are not supported"},
+		{"不包括 TODO 的檔案", "negative conditions are not supported"},
+		{"不含 TODO", "negative conditions are not supported"},
+		{"except vendor", "unclear whether this excludes a directory"},
+		{"不要 tmp", "unclear whether this excludes a directory"},
+		{"除了 TODO", "unclear whether this excludes a directory"},
+
+		// file types cannot be excluded in v0.1
+		{"exclude go files", "can only exclude directories"},
+		{"exclude test files", "can only exclude directories"},
+		{"除了 go 檔以外", "can only exclude directories"},
+		{"排除 .go", "looks like a file type"},
+		{"exclude *.log", "looks like a file type"},
+		{"exclude images", "looks like a file type"},
+
+		// empty content
+		{`""`, "search text must not be empty"},
+		{`包含 ""`, "search text must not be empty"},
+		{`containing ""`, "search text must not be empty"},
+		{`go files ""`, "search text must not be empty"},
+
+		// unquoted content glued to a keyword is ambiguous
+		{"包含 設定檔", "ambiguous"},
+		{"包含 10個", "ambiguous"},
+		{"包含 系統有問題", "ambiguous"},
+		{"包含 系統 錯誤", `cannot understand: "錯誤"`}, // not merged into "系統錯誤"
+
+		// overflow
+		{"top 99999999999999999999", "count is too large"},
+		{"top 2147483648", "count is too large"},
+		{"last 1000 years", "time span is too large"},
+		{"last 99999999999999999999 days", "time span is too large"},
+		{"larger than 8388608 TB", "file size is too large"},
+		{"larger than 99999999999999999999 GB", "file size is too large"},
+
+		// ordinary words are not extensions
+		{"large files", `cannot understand: "large"`},
+		{"delete files", `cannot understand: "delete"`},
+		{"find ovpn", `cannot understand: "ovpn"`}, // no noun, no trigger
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -167,5 +252,51 @@ func TestErrorMessageIsChineseForChineseInput(t *testing.T) {
 	}
 	if got := pe.Message(DetectLang("找 香蕉")); !strings.Contains(got, "看不懂這個詞：「香蕉」") {
 		t.Errorf("message = %q", got)
+	}
+}
+
+func TestFindCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		q    Query
+		want string
+	}{
+		{"symlink root gets a trailing slash", Query{Root: "/tmp", RootSymlink: true},
+			"find /tmp/ -type f -print"},
+		{"root starting with a dash", Query{Root: "-dir"},
+			"find ./-dir -type f -print"},
+		{"only directories are pruned", Query{ExcludeDirs: []string{"vendor", ".git"}},
+			`find . -type d \( -iname vendor -o -iname .git \) -prune -o -type f -print`},
+		{"relative exclude path", Query{ExcludeDirs: []string{"./src/gen"}},
+			`find . -type d \( -path ./src/gen \) -prune -o -type f -print`},
+		{"unnormalized exclude path", Query{ExcludeDirs: []string{"./src//gen/"}},
+			`find . -type d \( -path ./src/gen \) -prune -o -type f -print`},
+		{"exclude path under a symlink root", Query{Root: "/tmp", RootSymlink: true, ExcludeDirs: []string{"./a b"}},
+			`find /tmp/ -type d \( -path '/tmp/a b' \) -prune -o -type f -print`},
+		{"quoting", Query{Root: "/x/it's", Contents: []string{"-e"}},
+			`find '/x/it'\''s' -type f -exec grep -qIF -- -e {} \; -print`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FindCommand(&tt.q); got != tt.want {
+				t.Errorf("FindCommand()\n got  %s\n want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExplainSaysApproximate(t *testing.T) {
+	for _, in := range []string{"go files", "go 檔"} {
+		q, err := Parse(in, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := Explain(q)
+		if strings.Contains(out, "等效") || strings.Contains(out, "Equivalent") {
+			t.Errorf("Explain(%q) claims equivalence:\n%s", in, out)
+		}
+		if !strings.Contains(out, "近似") && !strings.Contains(out, "Approximate") {
+			t.Errorf("Explain(%q) should call the command approximate:\n%s", in, out)
+		}
 	}
 }

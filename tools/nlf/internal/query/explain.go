@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"path"
 	"strings"
 	"time"
 	"unicode"
@@ -9,7 +10,71 @@ import (
 
 const timeLayout = "2006-01-02 15:04:05"
 
-// Explain describes how the query was understood, followed by an equivalent
+// Condition is one understood search condition, ready for display.
+type Condition struct {
+	Label, Value string
+}
+
+// Conditions lists the conditions of q (everything except the root) with
+// labels in the given language.
+func Conditions(q *Query, lang Lang) []Condition {
+	zh := lang == Chinese
+	pick := func(c, e string) string {
+		if zh {
+			return c
+		}
+		return e
+	}
+	var cs []Condition
+	add := func(label, value string) { cs = append(cs, Condition{label, value}) }
+	if len(q.Extensions) > 0 {
+		exts := make([]string, len(q.Extensions))
+		for i, e := range q.Extensions {
+			exts[i] = "." + e
+		}
+		add(pick("副檔名", "extension:"), strings.Join(exts, pick(" 或 ", " or ")))
+	}
+	for _, c := range q.Contents {
+		sens := pick("區分大小寫", "case-sensitive")
+		if q.IgnoreCase {
+			sens = pick("不分大小寫", "ignore case")
+		}
+		add(pick("內容包含", "content:"), fmt.Sprintf("%q (%s)", c, sens))
+	}
+	if !q.ModifiedAfter.IsZero() {
+		add(pick("修改時間", "modified:"), pick("晚於 ", "after ")+q.ModifiedAfter.Format(timeLayout))
+	}
+	if !q.ModifiedBefore.IsZero() {
+		add(pick("修改時間", "modified:"), pick("早於 ", "before ")+q.ModifiedBefore.Format(timeLayout))
+	}
+	for _, s := range q.Sizes {
+		add(pick("檔案大小", "size:"), s.Op+" "+HumanBytes(s.Bytes))
+	}
+	if len(q.ExcludeDirs) > 0 {
+		add(pick("排除目錄", "exclude dirs:"), strings.Join(q.ExcludeDirs, ", "))
+	}
+	switch q.Sort {
+	case SortLargest:
+		add(pick("排序", "order:"), pick("檔案由大到小", "largest first"))
+	case SortNewest:
+		add(pick("排序", "order:"), pick("最近修改的在前", "newest first"))
+	}
+	if q.Limit > 0 {
+		add(pick("數量上限", "limit:"), fmt.Sprint(q.Limit))
+	}
+	return cs
+}
+
+// FormatConditions renders conditions as indented, aligned rows.
+func FormatConditions(cs []Condition) string {
+	var b strings.Builder
+	for _, c := range cs {
+		fmt.Fprintf(&b, "  %s %s\n", padRight(c.Label, 14), c.Value)
+	}
+	return b.String()
+}
+
+// Explain describes how the query was understood, followed by an approximate
 // macOS find command for reference.
 func Explain(q *Query) string {
 	zh := q.Lang == Chinese
@@ -20,63 +85,32 @@ func Explain(q *Query) string {
 		return e
 	}
 	var b strings.Builder
-	row := func(label, value string) { fmt.Fprintf(&b, "  %s %s\n", padRight(label, 14), value) }
-
 	b.WriteString(pick("解析結果：\n", "Understood as:\n"))
-	row(pick("搜尋位置", "root:"), rootOrDot(q.Root))
-	if len(q.Extensions) > 0 {
-		exts := make([]string, len(q.Extensions))
-		for i, e := range q.Extensions {
-			exts[i] = "." + e
-		}
-		row(pick("副檔名", "extension:"), strings.Join(exts, pick(" 或 ", " or ")))
-	}
-	for _, c := range q.Contents {
-		cs := pick("區分大小寫", "case-sensitive")
-		if q.IgnoreCase {
-			cs = pick("不分大小寫", "ignore case")
-		}
-		row(pick("內容包含", "content:"), fmt.Sprintf("%q (%s)", c, cs))
-	}
-	if !q.ModifiedAfter.IsZero() {
-		row(pick("修改時間", "modified:"), pick("晚於 ", "after ")+q.ModifiedAfter.Format(timeLayout))
-	}
-	if !q.ModifiedBefore.IsZero() {
-		row(pick("修改時間", "modified:"), pick("早於 ", "before ")+q.ModifiedBefore.Format(timeLayout))
-	}
-	for _, s := range q.Sizes {
-		row(pick("檔案大小", "size:"), s.Op+" "+HumanBytes(s.Bytes))
-	}
-	if len(q.ExcludeDirs) > 0 {
-		row(pick("排除目錄", "exclude dirs:"), strings.Join(q.ExcludeDirs, ", "))
-	}
-	switch q.Sort {
-	case SortLargest:
-		row(pick("排序", "order:"), pick("檔案由大到小", "largest first"))
-	case SortNewest:
-		row(pick("排序", "order:"), pick("最近修改的在前", "newest first"))
-	}
-	if q.Limit > 0 {
-		row(pick("數量上限", "limit:"), fmt.Sprint(q.Limit))
-	}
-	b.WriteString(pick("\n等效的 macOS 指令（僅供參考，nlf 不會執行它）：\n", "\nEquivalent macOS command (for reference; nlf does not run it):\n"))
+	b.WriteString(FormatConditions(append([]Condition{{pick("搜尋位置", "root:"), rootOrDot(q.Root)}}, Conditions(q, q.Lang)...)))
+	b.WriteString(pick("\n近似的 macOS 指令（僅供參考，nlf 不會執行它）：\n", "\nApproximate macOS command for reference; nlf does not execute it:\n"))
 	b.WriteString("  " + FindCommand(q) + "\n")
 	return b.String()
 }
 
-// FindCommand renders q as a BSD find (macOS) pipeline.
+// FindCommand renders q as an approximate BSD find (macOS) pipeline. It is
+// for reference only: ordering, tie-breaking and some edge cases (binary
+// detection, case folding) can differ from nlf's own search.
 func FindCommand(q *Query) string {
-	parts := []string{"find", shellQuote(rootOrDot(q.Root))}
+	root := findRoot(q)
+	parts := []string{"find", shellQuote(root)}
 	if len(q.ExcludeDirs) > 0 {
 		var ex []string
 		for _, d := range q.ExcludeDirs {
 			if strings.Contains(d, "/") {
-				ex = append(ex, "-path", shellQuote(strings.TrimSuffix(rootOrDot(q.Root), "/")+"/"+d))
+				// find prints paths as root + "/" + rel, so match that form.
+				rel := strings.TrimPrefix(path.Clean(d), "./")
+				ex = append(ex, "-path", shellQuote(strings.TrimSuffix(root, "/")+"/"+rel))
 			} else {
 				ex = append(ex, "-iname", shellQuote(d))
 			}
 		}
-		parts = append(parts, `\(`, strings.Join(joinOr(ex, 2), " "), `\)`, "-prune", "-o")
+		// Only directories are pruned, like nlf; a file named "vendor" is kept.
+		parts = append(parts, "-type", "d", `\(`, strings.Join(joinOr(ex, 2), " "), `\)`, "-prune", "-o")
 	}
 	parts = append(parts, "-type", "f")
 	if len(q.Extensions) > 0 {
@@ -158,6 +192,20 @@ func joinOr(args []string, n int) []string {
 func rootOrDot(r string) string {
 	if r == "" {
 		return "."
+	}
+	return r
+}
+
+// findRoot is the starting point for the find command: a symlinked root
+// gets a trailing "/" so BSD find descends into it, and a root starting
+// with "-" gets "./" so find does not read it as an option.
+func findRoot(q *Query) string {
+	r := rootOrDot(q.Root)
+	if strings.HasPrefix(r, "-") {
+		r = "./" + r
+	}
+	if q.RootSymlink && !strings.HasSuffix(r, "/") {
+		r += "/"
 	}
 	return r
 }

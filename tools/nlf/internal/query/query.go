@@ -62,4 +62,8 @@ type Query struct {
 
 	Lang Lang // language of the original request
 	Now  time.Time
+
+	// RootSymlink is set by the caller when Root is a symlink to a
+	// directory, so Explain can make find follow it like the search does.
+	RootSymlink bool
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/query"
 	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/search"
@@ -19,53 +21,89 @@ import (
 const version = "0.1.0"
 
 const usage = `nlf — Natural Language Find (v` + version + `)
+Find files by describing them in Chinese or English. Deterministic and read-only; no AI calls.
 
 Usage:
   nlf [flags] "<query>"
 
+Examples (中文):
+  nlf "找 ovpn 檔"
+  nlf --dir ~/Downloads "找 ovpn 檔"
+  nlf '找內容包含 "20.2.250.249" 的檔案'
+  nlf "找最近 7 天修改的 go 檔"
+  nlf "找最大的 5 個檔案"
+  nlf "排除 vendor 和 node_modules，找 go 檔"
+
+Examples (English):
+  nlf "find pem files under /etc"
+  nlf "go files containing TODO modified in the last 7 days"
+  nlf "10 largest files excluding node_modules and .git"
+  nlf "newest 3 md files in ~/Documents"
+
 Flags:
-  --explain        show how the query is understood and an equivalent find command; do not search
+  --explain        show how the query is understood; never searches
+  --confirm        show the execution plan first; search only if you answer y or Y
   -l, --long       print size and modification time before each path
   -d, --dir PATH   directory to search (default: current directory)
   -h, --help       show this help
   --version        print version
 
-Examples:
-  nlf "go files containing TODO modified in the last 7 days"
-  nlf "larger than 100MB excluding node_modules and .git, 10 largest"
-  nlf "找出最近 3 天修改、大於 1MB 的 pdf 檔，最多 10 個"
-  nlf "在 ~/Documents 包含 \"發票\" 的 txt 檔，排除 Archive"
-  nlf --explain "最大的 5 個圖片"
+--explain   nlf --explain "找 ovpn 檔"
+  Prints the parsed conditions and an approximate macOS find command (for
+  reference only; nlf never runs it). Nothing is searched, nothing is asked.
 
-Understood conditions (combined with AND):
-  extension  .go  *.md  go files  pdf 檔  go 或 md 檔  圖片  images  副檔名 heic
-  content    containing "text"  包含 TODO  內容有「錯誤」  ignore case / 不分大小寫
-  modified   last 7 days  within 2 hours  older than 30 days  3 days ago  today  yesterday
-             最近 7 天  3 小時內  超過 30 天  3 天前  今天  昨天
-  size       larger than 10MB  smaller than 1KB  at least 1GB  大於 10MB  10MB 以上  小於 1KB
-  count      top 10  first 5  最多 10 個  前 10 個  10 largest  最大的 5 個  最新的 3 個
-  exclude    exclude node_modules and .git  排除 vendor、build 目錄
-  location   in ~/Documents  在 ./src  (or --dir)
+--confirm   nlf --confirm "找 ovpn 檔"
+  Prints the execution plan (root, conditions, approximate command) and a
+  safety summary, then asks "Execute this search? [y/N]". Only y or Y
+  searches; any other answer (n, Enter, yes, EOF, ...) prints "Cancelled.".
 
-Sizes use 1 KB = 1024 bytes. Put text containing spaces or Chinese in quotes.
-nlf is read-only and never uses sudo; unreadable paths are skipped and reported.
+Safety:
+  Read-only. nlf does not modify, create or delete files, does not run a
+  shell or any other program, and never uses sudo. Unreadable paths are
+  skipped and listed on stderr.
 
-Exit status: 0 files found, 1 no files found, 2 error.
+Supported conditions (combined with AND):
+  extension  .go  *.md  go files  找 ovpn 檔  go 或 md 檔  副檔名 heic  圖片  images
+  content    containing "text"  包含 "文字"  內容有「錯誤」  ignore case / 不分大小寫
+  modified   last 7 days  older than 30 days  today  最近 7 天  3 天前  昨天
+  size       larger than 10MB  at most 1KB  大於 10MB  10MB 以上   (1 KB = 1024 bytes)
+  count      top 10  最多 10 個  10 largest  最大的 5 個  newest 3  最新的 3 個
+  exclude    exclude node_modules and .git  排除 vendor、build 目錄  排除 src/gen
+  Not supported: OR between conditions, negation (不包含 / without), regex.
+
+Search root (default: current directory):
+  --dir ~/Downloads   in ~/Documents   在 ./src   under /tmp   在 "~/My Docs"
+  Name the location with --dir or in the query, not both.
+
+Exit status:
+  0  files found, or --confirm was cancelled
+  1  valid query, but no files found
+  2  error: query not understood, bad flag, missing or unreadable location
+
+Tips:
+  - Quote exact content: 包含 "20.2.250.249", containing "hello world"
+  - Quote paths with spaces: 在 "~/My Docs"
+  - If nlf does not understand a word it stops with an error; it never
+    silently widens the search. Check a query with --explain.
 `
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, time.Now()))
+	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, time.Now()))
 }
 
 type options struct {
 	help, version bool
 	explain, long bool
+	confirm       bool
 	dir           string
 	words         []string
 }
 
-func run(args []string, stdout, stderr io.Writer, now time.Time) int {
+func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time) int {
 	opts, err := parseArgs(args)
+	if err == nil && opts.explain && opts.confirm {
+		err = errors.New("--explain only shows the plan and --confirm asks before searching; use one of them")
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "nlf: %v\nRun 'nlf --help' for usage.\n", err)
 		return 2
@@ -111,10 +149,43 @@ func run(args []string, stdout, stderr io.Writer, now time.Time) int {
 		q.Root = opts.dir
 	}
 	q.Root = expandHome(q.Root)
+	for i, d := range q.ExcludeDirs {
+		q.ExcludeDirs[i] = expandHome(d)
+	}
+	if q.ExcludeDirs, err = search.NormalizeExcludes(q.Root, q.ExcludeDirs); err != nil {
+		var ee *search.ExcludeError
+		if errors.As(err, &ee) && ee.Self {
+			fmt.Fprintf(stderr, msg("nlf：不能排除搜尋位置本身：「%s」\n", "nlf: cannot exclude the search location itself: %q\n"), ee.Path)
+		} else if errors.As(err, &ee) {
+			fmt.Fprintf(stderr, msg("nlf：排除路徑不在搜尋位置之內：「%s」\n提示：排除路徑請寫成相對於搜尋位置的路徑，例如 排除 src/generated\n",
+				"nlf: exclude path is outside the search location: %q\nhint: write exclude paths relative to the search location, e.g. exclude src/generated\n"), ee.Path)
+		} else {
+			fmt.Fprintf(stderr, "nlf: %v\n", err)
+		}
+		return 2
+	}
 
+	if opts.explain || opts.confirm {
+		// Let the displayed find command follow a symlinked root (e.g. /tmp)
+		// the same way the search does.
+		if li, err := os.Lstat(rootOrDot(q.Root)); err == nil && li.Mode()&fs.ModeSymlink != 0 {
+			if fi, err := os.Stat(rootOrDot(q.Root)); err == nil && fi.IsDir() {
+				q.RootSymlink = true
+			}
+		}
+	}
 	if opts.explain {
 		fmt.Fprint(stdout, query.Explain(q))
 		return 0
+	}
+	if opts.confirm {
+		// The plan and prompt go to stderr so stdout stays a clean list of paths.
+		fmt.Fprint(stderr, executionPlan(q, search.RunEffects()))
+		fmt.Fprint(stderr, "Execute this search? [y/N]: ")
+		if !approved(stdin) {
+			fmt.Fprint(stderr, "\nCancelled.\n")
+			return 0
+		}
 	}
 
 	found := 0
@@ -126,10 +197,7 @@ func run(args []string, stdout, stderr io.Writer, now time.Time) int {
 			fmt.Fprintln(stdout, r.Path)
 		}
 	})
-	root := q.Root
-	if root == "" {
-		root = "."
-	}
+	root := rootOrDot(q.Root)
 	if err != nil {
 		switch {
 		case errors.Is(err, fs.ErrPermission):
@@ -137,6 +205,10 @@ func run(args []string, stdout, stderr io.Writer, now time.Time) int {
 				"nlf: permission denied reading %q. nlf never uses sudo.\n%s"), root, permissionHint(lang))
 		case errors.Is(err, fs.ErrNotExist):
 			fmt.Fprintf(stderr, msg("nlf：找不到搜尋位置「%s」\n", "nlf: search location %q does not exist\n"), root)
+			if strings.ContainsFunc(root, func(r rune) bool { return r >= utf8.RuneSelf }) {
+				fmt.Fprint(stderr, msg("提示：路徑與後面的文字之間請加空白，或把路徑加上引號，例如 在 \"~/我的文件\" 找 pdf 檔\n",
+					"hint: separate the path from the following words with a space, or quote it, e.g. in \"~/My Docs\"\n"))
+			}
 		default:
 			fmt.Fprintf(stderr, "nlf: %v\n", err)
 		}
@@ -190,6 +262,8 @@ func parseArgs(args []string) (*options, error) {
 			o.version = true
 		case a == "--explain":
 			o.explain = true
+		case a == "--confirm":
+			o.confirm = true
 		case a == "-l" || a == "--long":
 			o.long = true
 		case a == "-d" || a == "--dir":
@@ -207,6 +281,59 @@ func parseArgs(args []string) (*options, error) {
 		}
 	}
 	return o, nil
+}
+
+// executionPlan describes what a search will do before it runs. The find
+// command is shown for understanding only; nlf never executes it.
+func executionPlan(q *query.Query, e search.Effects) string {
+	yn := func(b bool) string {
+		if b {
+			return "YES"
+		}
+		return "NO"
+	}
+	var b strings.Builder
+	b.WriteString("NLF execution plan\n\n")
+	b.WriteString("Search root:\n  " + rootOrDot(q.Root) + "\n\n")
+	b.WriteString("Conditions:\n")
+	if cs := query.Conditions(q, query.English); len(cs) > 0 {
+		b.WriteString(query.FormatConditions(cs))
+	} else {
+		b.WriteString("  (none: every regular file)\n")
+	}
+	b.WriteString("\nApproximate macOS command (for reference only; nlf does not execute it):\n")
+	b.WriteString("  " + query.FindCommand(q) + "\n\n")
+	fmt.Fprintf(&b, `Safety:
+  Read files:        %s
+  Modify files:      %s
+  Create files:      %s
+  Delete files:      %s
+  Execute shell:     %s
+  sudo required:     %s
+
+Risk:
+  %s
+
+`, yn(e.ReadFiles), yn(e.ModifyFiles), yn(e.CreateFiles), yn(e.DeleteFiles), yn(e.ExecuteShell), yn(e.Sudo), e.Risk())
+	return b.String()
+}
+
+// approved reads one line and reports whether it is exactly "y" or "Y".
+// Anything else, including an empty line, "yes" and EOF, cancels.
+func approved(r io.Reader) bool {
+	line, err := bufio.NewReader(r).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false
+	}
+	line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	return line == "y" || line == "Y"
+}
+
+func rootOrDot(r string) string {
+	if r == "" {
+		return "."
+	}
+	return r
 }
 
 func expandHome(p string) string {

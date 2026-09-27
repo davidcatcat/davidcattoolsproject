@@ -5,6 +5,7 @@ package search
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -15,6 +16,28 @@ import (
 
 	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/query"
 )
+
+// Effects describes what Run does to the system. It backs the safety
+// summary shown by nlf --confirm; TestProductionCodeIsReadOnly checks the
+// source so this declaration cannot silently drift from the code.
+type Effects struct {
+	ReadFiles, ModifyFiles, CreateFiles, DeleteFiles, ExecuteShell, Sudo bool
+}
+
+// RunEffects returns the effects of Run: it reads directories and files and
+// does nothing else.
+func RunEffects() Effects { return Effects{ReadFiles: true} }
+
+// Risk classifies e as "DESTRUCTIVE", "WRITE" or "READ-ONLY".
+func (e Effects) Risk() string {
+	switch {
+	case e.DeleteFiles:
+		return "DESTRUCTIVE"
+	case e.ModifyFiles || e.CreateFiles || e.ExecuteShell || e.Sudo:
+		return "WRITE"
+	}
+	return "READ-ONLY"
+}
 
 // Result is one matching regular file.
 type Result struct {
@@ -46,6 +69,11 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 		root += string(filepath.Separator)
 	}
 
+	ex, err := newExcluder(root, q.ExcludeDirs)
+	if err != nil {
+		return rep, err
+	}
+
 	var collected []Result
 	count := 0
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -60,7 +88,7 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 			return nil
 		}
 		if d.IsDir() {
-			if path != root && excluded(root, path, d.Name(), q.ExcludeDirs) {
+			if path != root && ex.match(root, path, d) {
 				return fs.SkipDir
 			}
 			return nil
@@ -121,16 +149,134 @@ func (r *Report) record(path string, err error) {
 	r.OtherErrors = append(r.OtherErrors, err)
 }
 
-func excluded(root, path, name string, dirs []string) bool {
-	rel, _ := filepath.Rel(root, path)
+// ExcludeError reports an exclude path that cannot apply to the search root.
+type ExcludeError struct {
+	Path string
+	Self bool // the path is the search root itself (otherwise it is outside it)
+}
+
+func (e *ExcludeError) Error() string {
+	if e.Self {
+		return fmt.Sprintf("exclude path %q is the search location itself", e.Path)
+	}
+	return fmt.Sprintf("exclude path %q is outside the search location", e.Path)
+}
+
+// NormalizeExcludes rewrites exclude paths (entries containing "/") relative
+// to root, e.g. "./src/gen", "src/gen/" and "<abs root>/src/gen" all become
+// "./src/gen". Names without "/" are returned unchanged. A "~" prefix must
+// already be expanded. Paths outside root, or root itself, are an error so an
+// exclusion never silently does nothing.
+func NormalizeExcludes(root string, dirs []string) ([]string, error) {
+	if root == "" {
+		root = "."
+	}
+	var out []string
 	for _, d := range dirs {
-		if strings.Contains(d, "/") {
-			if filepath.Clean(d) == rel {
+		if !strings.Contains(d, "/") && !strings.ContainsRune(d, filepath.Separator) {
+			out = append(out, d)
+			continue
+		}
+		p := filepath.FromSlash(d)
+		if filepath.IsAbs(p) {
+			rel, ok := relUnder(root, p)
+			if !ok {
+				return nil, &ExcludeError{Path: d}
+			}
+			p = rel
+		}
+		p = filepath.Clean(p)
+		if p == "." {
+			return nil, &ExcludeError{Path: d, Self: true}
+		}
+		if p == ".." || strings.HasPrefix(p, ".."+string(filepath.Separator)) {
+			return nil, &ExcludeError{Path: d}
+		}
+		out = append(out, "./"+filepath.ToSlash(p))
+	}
+	return out, nil
+}
+
+// relUnder returns abs relative to root when abs lies inside root, trying
+// the paths as given first and then with symlinks resolved (/tmp vs /private/tmp).
+func relUnder(root, abs string) (string, bool) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	inside := func(r string) bool {
+		return r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator))
+	}
+	if rel, err := filepath.Rel(absRoot, abs); err == nil && inside(rel) {
+		return rel, true
+	}
+	rr, err1 := filepath.EvalSymlinks(absRoot)
+	ra, err2 := filepath.EvalSymlinks(abs)
+	if err1 == nil && err2 == nil {
+		if rel, err := filepath.Rel(rr, ra); err == nil && inside(rel) {
+			return rel, true
+		}
+	}
+	return "", false
+}
+
+// excluder decides which directories to skip.
+type excluder struct {
+	names []string
+	paths []pathExclude
+}
+
+type pathExclude struct {
+	rel  string      // cleaned, OS-separated path relative to root
+	info fs.FileInfo // the directory it names, if it exists
+}
+
+func newExcluder(root string, dirs []string) (*excluder, error) {
+	norm, err := NormalizeExcludes(root, dirs)
+	if err != nil {
+		return nil, err
+	}
+	ex := &excluder{}
+	for _, d := range norm {
+		if !strings.HasPrefix(d, "./") {
+			ex.names = append(ex.names, d)
+			continue
+		}
+		rel := filepath.Clean(filepath.FromSlash(d))
+		pe := pathExclude{rel: rel}
+		if info, err := os.Lstat(filepath.Join(root, rel)); err == nil {
+			pe.info = info
+		}
+		ex.paths = append(ex.paths, pe)
+	}
+	return ex, nil
+}
+
+func (ex *excluder) match(root, path string, d fs.DirEntry) bool {
+	for _, n := range ex.names {
+		// Names match regardless of case, as documented.
+		if strings.EqualFold(n, d.Name()) {
+			return true
+		}
+	}
+	if len(ex.paths) == 0 {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	for _, pe := range ex.paths {
+		if rel == pe.rel {
+			return true
+		}
+		// A differently-cased spelling excludes the directory only when the
+		// file system itself resolves it to the same directory, so
+		// case-sensitive file systems are not treated as case-insensitive.
+		if pe.info != nil && strings.EqualFold(rel, pe.rel) {
+			if info, err := d.Info(); err == nil && os.SameFile(info, pe.info) {
 				return true
 			}
-		} else if strings.EqualFold(d, name) {
-			// macOS file systems are case-insensitive by default.
-			return true
 		}
 	}
 	return false

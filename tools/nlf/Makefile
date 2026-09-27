@@ -1,7 +1,9 @@
 GO ?= go
 BIN := bin/nlf
+VERSION := $(shell sed -n 's/^const version = "\(.*\)"$$/\1/p' main.go)
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 
-.PHONY: build test vet fmt-check check clean
+.PHONY: build test vet fmt-check check dist clean
 
 build:
 	$(GO) build -trimpath -o $(BIN) .
@@ -16,6 +18,18 @@ fmt-check:
 	@test -z "$$(gofmt -l .)" || (echo "gofmt needed:"; gofmt -l .; exit 1)
 
 check: fmt-check vet test build
+
+# Static binaries (no cgo, no runtime dependencies) for every platform, plus
+# SHA256SUMS, in bin/. Copy one binary to a machine without Go and run it.
+dist:
+	@for p in $(PLATFORMS); do \
+		os=$${p%/*}; arch=$${p#*/}; out=bin/nlf-$(VERSION)-$$os-$$arch; \
+		echo "build $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags "-s -w" -o $$out . || exit 1; \
+	done
+	@cd bin && if command -v sha256sum >/dev/null; then sha256sum nlf-$(VERSION)-*-*; \
+		else shasum -a 256 nlf-$(VERSION)-*-*; fi > SHA256SUMS
+	@echo "wrote bin/SHA256SUMS"
 
 clean:
 	rm -rf bin

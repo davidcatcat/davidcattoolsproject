@@ -27,6 +27,9 @@ type token struct {
 	text string // normalized text used for matching
 	raw  string // original text as typed
 	num  float64
+	// spaceBefore is true when whitespace (or the start of input) precedes
+	// the token, so the parser can tell "設定 檔" from "設定檔".
+	spaceBefore bool
 }
 
 var (
@@ -56,11 +59,20 @@ const cnDigits = "零〇一二兩两三四五六七八九十百千"
 
 func tokenize(s string) ([]token, error) {
 	var toks []token
+	spaced := true
+	emit := func(ts ...token) {
+		for k := range ts {
+			ts[k].spaceBefore = spaced && k == 0
+		}
+		toks = append(toks, ts...)
+		spaced = false
+	}
 	rs := []rune(s)
 	for i := 0; i < len(rs); {
 		r := rs[i]
 		switch {
 		case unicode.IsSpace(r):
+			spaced = true
 			i++
 		case quotePairs[r] != 0:
 			closer := quotePairs[r]
@@ -72,7 +84,7 @@ func tokenize(s string) ([]token, error) {
 				return nil, &Error{Token: string(rs[i:]), zh: "引號沒有結束", en: "unterminated quote"}
 			}
 			lit := string(rs[i+1 : j])
-			toks = append(toks, token{kind: tQuoted, text: lit, raw: string(rs[i : j+1])})
+			emit(token{kind: tQuoted, text: lit, raw: string(rs[i : j+1])})
 			i = j + 1
 		case strings.ContainsRune("<>≥≤＞＜", r):
 			op := map[rune]string{'<': "<", '>': ">", '≥': ">=", '≤': "<=", '＞': ">", '＜': "<"}[r]
@@ -81,21 +93,28 @@ func tokenize(s string) ([]token, error) {
 				op += "="
 				j++
 			}
-			toks = append(toks, token{kind: tOp, text: op, raw: string(rs[i:j])})
+			emit(token{kind: tOp, text: op, raw: string(rs[i:j])})
 			i = j
 		case strings.ContainsRune(punctChars, r):
-			toks = append(toks, token{kind: tPunct, text: string(r), raw: string(r)})
+			emit(token{kind: tPunct, text: string(r), raw: string(r)})
 			i++
 		case r < utf8.RuneSelf:
 			j := i
 			for j < len(rs) && isWordRune(rs[j]) {
 				j++
 			}
-			toks = append(toks, classifyASCII(string(rs[i:j]))...)
+			if hasPathPrefix(string(rs[i:j])) {
+				// Keep a path whole even when it contains non-ASCII
+				// characters ("~/文件"), so it is never silently cut short.
+				for j < len(rs) && isPathRune(rs[j]) {
+					j++
+				}
+			}
+			emit(classifyASCII(string(rs[i:j]))...)
 			i = j
 		default:
 			if w := longestCJK(rs[i:]); w != "" {
-				toks = append(toks, token{kind: tCJK, text: w, raw: w})
+				emit(token{kind: tCJK, text: w, raw: w})
 				i += utf8.RuneCountInString(w)
 				continue
 			}
@@ -105,17 +124,18 @@ func tokenize(s string) ([]token, error) {
 					j++
 				}
 				if n, ok := parseChineseNumber(string(rs[i:j])); ok {
-					toks = append(toks, token{kind: tNum, text: string(rs[i:j]), raw: string(rs[i:j]), num: float64(n)})
+					emit(token{kind: tNum, text: string(rs[i:j]), raw: string(rs[i:j]), num: float64(n)})
 					i = j
 					continue
 				}
 			}
-			// Unknown non-ASCII character: merge into a run.
-			if n := len(toks); n > 0 && toks[n-1].kind == tHan {
+			// Unknown non-ASCII character: merge into a run, but never
+			// across whitespace ("系統 錯誤" is two words).
+			if n := len(toks); n > 0 && toks[n-1].kind == tHan && !spaced {
 				toks[n-1].text += string(r)
 				toks[n-1].raw += string(r)
 			} else {
-				toks = append(toks, token{kind: tHan, text: string(r), raw: string(r)})
+				emit(token{kind: tHan, text: string(r), raw: string(r)})
 			}
 			i++
 		}
@@ -126,6 +146,27 @@ func tokenize(s string) ([]token, error) {
 func isWordRune(r rune) bool {
 	return r < utf8.RuneSelf && !unicode.IsSpace(r) &&
 		!strings.ContainsRune(punctChars, r) && !strings.ContainsRune(`"<>`, r)
+}
+
+// hasPathPrefix reports whether an ASCII word starts like a path.
+func hasPathPrefix(w string) bool {
+	for _, pre := range []string{"/", "~/", "./", "../"} {
+		if strings.HasPrefix(w, pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPathRune reports whether r may continue an unquoted path. Unlike
+// isWordRune it accepts non-ASCII letters; spaces, separator punctuation
+// and quotes still end the path.
+func isPathRune(r rune) bool {
+	if r < utf8.RuneSelf {
+		return isWordRune(r)
+	}
+	return !unicode.IsSpace(r) && !strings.ContainsRune(punctChars, r) &&
+		!strings.ContainsRune("”’」』", r) && quotePairs[r] == 0
 }
 
 func classifyASCII(raw string) []token {

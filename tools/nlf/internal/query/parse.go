@@ -1,6 +1,7 @@
 package query
 
 import (
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -49,15 +50,23 @@ func (p *parser) cur() (token, bool) {
 // accept consumes the longest phrase from phrases that matches at the
 // current position and returns it.
 func (p *parser) accept(phrases []string) (string, bool) {
+	best, n := p.matchAt(p.pos, phrases)
+	p.pos += n
+	return best, n > 0
+}
+
+// matchAt returns the longest phrase matching at token index pos and its
+// length in tokens, without consuming anything.
+func (p *parser) matchAt(pos int, phrases []string) (string, int) {
 	best, bestLen := "", 0
 	for _, ph := range phrases {
 		parts := strings.Fields(ph)
-		if len(parts) <= bestLen || p.pos+len(parts) > len(p.toks) {
+		if len(parts) <= bestLen || pos+len(parts) > len(p.toks) {
 			continue
 		}
 		ok := true
 		for i, part := range parts {
-			t := p.toks[p.pos+i]
+			t := p.toks[pos+i]
 			if (t.kind != tWord && t.kind != tCJK && t.kind != tPunct && t.kind != tOp) || t.text != part {
 				ok = false
 				break
@@ -67,14 +76,16 @@ func (p *parser) accept(phrases []string) (string, bool) {
 			best, bestLen = ph, len(parts)
 		}
 	}
-	p.pos += bestLen
-	return best, bestLen > 0
+	return best, bestLen
 }
 
 func (p *parser) step() error {
 	t, _ := p.cur()
 	if t.kind == tQuoted {
 		// A bare quoted string is text to search for inside files.
+		if t.text == "" {
+			return errEmptyContent()
+		}
 		p.q.Contents = append(p.q.Contents, t.text)
 		p.pos++
 		return nil
@@ -97,7 +108,10 @@ func (p *parser) step() error {
 		return nil
 	}
 	if _, ok := p.accept(excludePhrases); ok {
-		return p.excludeNames()
+		return p.excludeNames(false, t.raw)
+	}
+	if _, ok := p.accept(weakExcludePhrases); ok {
+		return p.excludeNames(true, t.raw)
 	}
 	if _, ok := p.accept(todayPhrases); ok {
 		p.after(midnight(p.q.Now))
@@ -137,24 +151,52 @@ func (p *parser) step() error {
 
 func (p *parser) contentTerm() error {
 	t, ok := p.cur()
-	if ok && (t.kind == tQuoted || t.kind == tWord || t.kind == tExt || t.kind == tNum || t.kind == tHan) {
-		term := t.raw
-		if t.kind == tQuoted {
-			term = t.text
+	if !ok || !(t.kind == tQuoted || t.kind == tWord || t.kind == tExt || t.kind == tNum || t.kind == tHan) {
+		return &Error{zh: "「包含」後面需要要搜尋的文字", en: `"containing" must be followed by the text to search for`,
+			hintZh: "例如：包含 \"TODO\"", hintEn: `example: containing "TODO"`}
+	}
+	p.pos++
+	if t.kind == tQuoted {
+		if t.text == "" {
+			return errEmptyContent()
 		}
-		if term == "" {
-			return &Error{zh: "要搜尋的內容不能是空字串", en: "search text must not be empty"}
-		}
-		p.q.Contents = append(p.q.Contents, term)
-		p.pos++
+		p.q.Contents = append(p.q.Contents, t.text)
 		return nil
 	}
-	return &Error{zh: "「包含」後面需要要搜尋的文字", en: `"containing" must be followed by the text to search for`,
-		hintZh: "例如：包含 \"TODO\"", hintEn: `example: containing "TODO"`}
+	// Unquoted text runs until whitespace or punctuation, so "API連線失敗"
+	// stays whole. A known word glued to it is ambiguous and must be quoted.
+	term := t.raw
+	for {
+		nt, ok := p.cur()
+		if !ok || nt.spaceBefore || nt.kind == tPunct || nt.kind == tOp || nt.kind == tQuoted {
+			break
+		}
+		if nt.kind == tHan || nt.kind == tNum || nt.kind == tExt || (nt.kind == tWord && !reserved[nt.text]) {
+			term += nt.raw
+			p.pos++
+			continue
+		}
+		if nt.kind == tCJK && slices.Contains(contentBoundaries, nt.text) {
+			break
+		}
+		return &Error{Token: term + nt.raw, zh: "要搜尋的文字與關鍵字連在一起，無法確定範圍", en: "search text runs into a keyword; its extent is ambiguous",
+			hintZh: fmt.Sprintf("提示：請用引號標出要搜尋的文字，例如 包含 \"%s\" 或 包含 \"%s\"", term, term+nt.raw),
+			hintEn: fmt.Sprintf(`hint: quote the text to search for, e.g. containing "%s"`, term+nt.raw)}
+	}
+	p.q.Contents = append(p.q.Contents, term)
+	return nil
 }
 
-func (p *parser) excludeNames() error {
+func errEmptyContent() *Error {
+	return &Error{zh: "要搜尋的內容不能是空字串", en: "search text must not be empty"}
+}
+
+// excludeNames reads the directory names after an exclude phrase. weak
+// phrases ("except", "除了") only count as exclusion when a directory word
+// follows the names.
+func (p *parser) excludeNames(weak bool, phrase string) error {
 	var names []string
+	sawTail := false
 	for {
 		t, ok := p.cur()
 		if !ok {
@@ -168,23 +210,38 @@ func (p *parser) excludeNames() error {
 		if !isName {
 			break
 		}
+		if len(names) > 0 && t.kind != tQuoted && p.extNounAhead(true) {
+			break // "exclude vendor and go files": the rest is an extension condition
+		}
 		name := t.raw
 		if t.kind == tQuoted {
 			name = t.text
 		}
-		names = append(names, strings.TrimSuffix(name, "/"))
 		p.pos++
-		p.accept(excludeTail)
+		_, tail := p.accept(excludeTail)
+		sawTail = sawTail || tail
+		if _, n := p.matchAt(p.pos, fileNouns); n > 0 && !tail && t.kind != tQuoted {
+			// "exclude go files", "exclude test files": files, not a directory.
+			return &Error{Token: phrase + " " + t.raw, zh: "v0.1 只能排除目錄，不能排除某種檔案類型", en: "v0.1 can only exclude directories, not file types",
+				hintZh: "提示：要排除目錄請寫「排除 名稱 目錄」。", hintEn: `hint: to skip a directory write "exclude <name> dir".`}
+		}
+		if t.kind != tQuoted && !tail && looksLikeFileType(t) {
+			// "排除 .go", "exclude *.log", "exclude images": a file type, not a directory.
+			return &Error{Token: t.raw, zh: "這看起來是檔案類型；v0.1 只能排除目錄", en: "this looks like a file type; v0.1 can only exclude directories",
+				hintZh: "提示：如果真的是目錄名稱，請加上「目錄」或引號，例如 排除 \"" + name + "\" 目錄。",
+				hintEn: `hint: if it really is a directory, add "dir" or quotes, e.g. exclude "` + name + `" dir.`}
+		}
+		names = append(names, strings.TrimSuffix(name, "/"))
 		save := p.pos
 		if _, ok := p.accept(listSeps); !ok {
 			// Space-separated list: "排除 node_modules dist".
-			if nt, ok := p.cur(); ok && (isFreeWord(nt) || nt.kind == tQuoted ||
+			if nt, ok := p.cur(); ok && !p.extNounAhead(true) && (isFreeWord(nt) || nt.kind == tQuoted ||
 				(nt.kind == tExt && strings.HasPrefix(nt.raw, "."))) {
 				continue
 			}
 			break
 		}
-		if nt, ok := p.cur(); !ok || nt.kind == tCJK || nt.kind == tNum || (nt.kind == tWord && reserved[nt.text]) {
+		if nt, ok := p.cur(); !ok || nt.kind == tCJK || nt.kind == tNum || (nt.kind == tWord && reserved[nt.text]) || p.extNounAhead(true) {
 			p.pos = save
 			break
 		}
@@ -193,9 +250,53 @@ func (p *parser) excludeNames() error {
 		return &Error{zh: "「排除」後面需要目錄名稱", en: `"exclude" must be followed by a directory name`,
 			hintZh: "例如：排除 node_modules 和 .git", hintEn: "example: exclude node_modules and .git"}
 	}
+	if weak && !sawTail {
+		return &Error{Token: phrase, zh: "無法確定是要排除目錄還是否定條件（v0.1 不支援否定條件）", en: "unclear whether this excludes a directory or negates a condition (negation is not supported in v0.1)",
+			hintZh: "提示：要排除目錄請寫「排除 " + names[0] + "」或「除了 " + names[0] + " 目錄以外」。",
+			hintEn: `hint: to skip a directory write "exclude ` + names[0] + `" or "except ` + names[0] + ` dir".`}
+	}
 	p.q.ExcludeDirs = append(p.q.ExcludeDirs, names...)
 	return nil
 }
+
+// extNounAhead reports whether the tokens at the current position form an
+// extension followed by a file noun ("go files"). With list, a separated
+// list counts too ("go 和 md 檔").
+func (p *parser) extNounAhead(list bool) bool {
+	for i := p.pos; i < len(p.toks) && isExtCandidate(p.toks[i], true, false); {
+		i++
+		if _, n := p.matchAt(i, fileNouns); n > 0 {
+			return true
+		}
+		_, n := p.matchAt(i, listSeps)
+		if n == 0 || !list {
+			return false
+		}
+		i += n
+	}
+	return false
+}
+
+// looksLikeFileType reports whether an exclude name is really a file
+// pattern or type: a glob ("*.log"), a known extension (".go") or an
+// alias ("images").
+func looksLikeFileType(t token) bool {
+	switch t.kind {
+	case tExt:
+		return strings.HasPrefix(t.text, "*") || strings.HasPrefix(t.raw, "*") ||
+			extAliases[strings.TrimPrefix(t.text, ".")] != nil
+	case tWord, tCJK:
+		return strings.Contains(t.raw, "*") || extAliases[t.text] != nil
+	}
+	return false
+}
+
+// maxInt64Float is 2^63, the first float64 that no longer fits in int64
+// (float64(math.MaxInt64) rounds up to it).
+const maxInt64Float = float64(1 << 63)
+
+// maxLimit bounds result counts so they always fit in an int.
+const maxLimit = math.MaxInt32
 
 type qtyKind int
 
@@ -324,12 +425,17 @@ func (p *parser) apply(op string, qty quantity, near string) error {
 			return &Error{Token: qty.raw, zh: "這個比較方式不能用在檔案大小", en: "this comparison does not apply to file size"}
 		}
 		b := qty.n * float64(qty.size)
-		if b > math.MaxInt64 {
+		if b >= maxInt64Float {
 			return &Error{Token: qty.raw, zh: "檔案大小太大", en: "file size is too large"}
 		}
 		p.q.Sizes = append(p.q.Sizes, SizeCond{Op: op, Bytes: int64(b)})
 	case qTime:
-		t := p.q.Now.Add(-time.Duration(qty.n * float64(qty.dur)))
+		d := qty.n * float64(qty.dur)
+		if d >= maxInt64Float {
+			return &Error{Token: qty.raw, zh: "時間範圍太大", en: "time span is too large",
+				hintZh: "提示：最多約 292 年", hintEn: "hint: the maximum is about 292 years"}
+		}
+		t := p.q.Now.Add(-time.Duration(d))
 		switch op {
 		case "within", "limit", "<", "<=":
 			p.after(t)
@@ -353,6 +459,10 @@ func (p *parser) apply(op string, qty quantity, near string) error {
 		}
 		if qty.n < 1 || qty.n != math.Trunc(qty.n) {
 			return &Error{Token: qty.raw, zh: "數量必須是正整數", en: "count must be a positive whole number"}
+		}
+		if qty.n > maxLimit {
+			return &Error{Token: qty.raw, zh: "數量太大", en: "count is too large",
+				hintZh: fmt.Sprintf("提示：最多 %d", maxLimit), hintEn: fmt.Sprintf("hint: the maximum is %d", maxLimit)}
 		}
 		p.q.Limit = int(qty.n)
 		switch op {
@@ -393,28 +503,19 @@ func (p *parser) extension() bool {
 	if trig {
 		p.accept(extCopula)
 	}
-	var cands []token
-	for {
-		t, ok := p.cur()
-		if !ok || !isExtCandidate(t, trig) {
-			break
-		}
-		cands = append(cands, t)
-		p.pos++
-		sep := p.pos
-		if _, ok := p.accept(listSeps); !ok {
-			break
-		}
-		if nt, ok := p.cur(); !ok || !isExtCandidate(nt, trig) {
-			p.pos = sep
-			break
-		}
+	// Any alphanumeric word may name an extension when a file noun follows
+	// ("ovpn 檔", "tfstate files") or a trigger precedes it ("副檔名 heic").
+	// Otherwise only known extensions and aliases are accepted.
+	start := p.pos
+	cands, noun := p.extList(true, trig)
+	if !noun && !trig {
+		p.pos = start
+		cands, noun = p.extList(false, trig)
 	}
 	if len(cands) == 0 {
 		p.pos = save
 		return false
 	}
-	_, noun := p.accept(fileNouns)
 	for _, c := range cands {
 		if c.kind == tWord && aliasNeedsNoun[c.text] && !noun && !trig {
 			p.pos = save
@@ -439,7 +540,35 @@ func isFreeWord(t token) bool {
 	return t.kind == tWord && !reserved[t.text] && extAliases[t.text] == nil
 }
 
-func isExtCandidate(t token, literalOK bool) bool {
+// extList reads a list of extension candidates ("go", "go 和 md") and an
+// optional trailing file noun.
+func (p *parser) extList(literalOK, trig bool) (cands []token, noun bool) {
+	for {
+		t, ok := p.cur()
+		if !ok || !isExtCandidate(t, literalOK, trig) {
+			break
+		}
+		cands = append(cands, t)
+		p.pos++
+		sep := p.pos
+		if _, ok := p.accept(listSeps); !ok {
+			break
+		}
+		if nt, ok := p.cur(); !ok || !isExtCandidate(nt, literalOK, trig) {
+			p.pos = sep
+			break
+		}
+	}
+	if len(cands) > 0 {
+		_, noun = p.accept(fileNouns)
+	}
+	return cands, noun
+}
+
+// isExtCandidate reports whether t can name an extension. literalOK allows
+// any short alphanumeric word; after an explicit trigger ("extension")
+// keywords are allowed too, otherwise they keep their meaning.
+func isExtCandidate(t token, literalOK, trig bool) bool {
 	switch t.kind {
 	case tExt:
 		return true
@@ -447,7 +576,8 @@ func isExtCandidate(t token, literalOK bool) bool {
 		if extAliases[t.text] != nil {
 			return true
 		}
-		return literalOK && t.kind == tWord && isAlnum(t.text) && len(t.text) <= 10
+		return literalOK && t.kind == tWord && isAlnum(t.text) && len(t.text) <= 10 &&
+			!notExtWords[t.text] && (trig || !reserved[t.text])
 	}
 	return false
 }
@@ -521,7 +651,7 @@ func dedupe(in []string) []string {
 var reserved = map[string]bool{}
 
 func init() {
-	lists := [][]string{ignoreCasePhrases, contentPhrases, excludePhrases, listSeps, limitPhrases,
+	lists := [][]string{ignoreCasePhrases, contentPhrases, excludePhrases, weakExcludePhrases, listSeps, limitPhrases,
 		largestPhrases, newestPhrases, withinPhrases, olderPhrases, countUnits, extTriggers,
 		todayPhrases, yesterdayPhrases, orPhrases, notPhrases, mapKeys(cmpPhrases), mapKeys(postfixPhrases),
 		fillers, fileNouns, pathTriggers, extCopula, softContentPhrases,

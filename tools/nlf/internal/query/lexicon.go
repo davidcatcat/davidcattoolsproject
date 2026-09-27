@@ -1,6 +1,9 @@
 package query
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Phrases are space-separated token texts. Chinese phrases are usually a
 // single dictionary token; every Chinese word used here is registered in
@@ -14,9 +17,14 @@ var contentPhrases = []string{"containing", "contains", "contain", "with text", 
 	"包含", "包括", "含有", "內容有", "内容有", "內容包含", "内容包含", "內容含有", "内容含有",
 	"裡面有", "里面有", "關鍵字", "关键字", "內容", "内容", "有關鍵字", "有关键字"}
 
-var excludePhrases = []string{"exclude", "excluding", "except", "except for", "skip", "skipping",
-	"ignore", "ignoring", "not in", "outside of", "without",
-	"排除", "不要", "忽略", "跳過", "跳过", "除了", "不包括", "不含目錄", "不含目录"}
+var excludePhrases = []string{"exclude", "excluding", "skip", "skipping",
+	"ignore", "ignoring", "not in", "outside of",
+	"排除", "忽略", "跳過", "跳过", "不含目錄", "不含目录"}
+
+// weakExcludePhrases also mean "exclude", but only when a directory word
+// follows the names ("except vendor dir", "除了 build 以外", "不要 tmp 目錄");
+// without one, "except TODO" could be about content and is rejected.
+var weakExcludePhrases = []string{"except", "except for", "除了", "不要"}
 
 var excludeTail = []string{"dir", "dirs", "directory", "directories", "folder", "folders",
 	"目錄", "目录", "資料夾", "资料夹", "文件夾", "文件夹", "以外", "之外"}
@@ -106,7 +114,7 @@ func init() {
 		sizeUnits[w] = 1 << 40
 	}
 
-	lists := [][]string{ignoreCasePhrases, contentPhrases, excludePhrases, excludeTail, listSeps,
+	lists := [][]string{ignoreCasePhrases, contentPhrases, excludePhrases, weakExcludePhrases, excludeTail, listSeps,
 		limitPhrases, largestPhrases, newestPhrases, postNumLargest, postNumNewest, withinPhrases, olderPhrases, countUnits,
 		fileNouns, extTriggers, extCopula, softContentPhrases, pathTriggers, fillers, todayPhrases, yesterdayPhrases, orPhrases, notPhrases}
 	for _, l := range lists {
@@ -152,7 +160,27 @@ var yesterdayPhrases = []string{"yesterday", "昨天", "昨日"}
 
 // Words that would change the meaning in ways v0.1 cannot express.
 var orPhrases = []string{"or", "或", "或者", "或是"}
-var notPhrases = []string{"not", "不包含", "不含", "沒有", "没有", "不是"}
+var notPhrases = []string{"not", "without", "不包含", "不含", "不包括", "沒有", "没有", "不是"}
+
+// contentBoundaries may directly follow unquoted search text without a
+// space ("包含TODO且大於1MB"). Any other known word glued to the text is
+// ambiguous ("包含 設定檔": 設定 or 設定檔?) and must be quoted.
+var contentBoundaries = []string{"的", "且", "並", "并", "並且", "并且", "而且", "同時", "同时",
+	"和", "跟", "與", "与", "及", "或", "或者", "或是"}
+
+// notExtWords are common English words that must not be read as a file
+// extension in "<word> files" ("large files" is not "*.large").
+var notExtWords = map[string]bool{}
+
+func init() {
+	for _, w := range strings.Fields(`large larger big bigger biggest small smaller tiny huge old older new newer
+		recent hidden empty binary executable temp temporary backup backups test tests config configuration
+		data media important other others same similar duplicate duplicated these those this more many few
+		several both each most open unused broken your our their his her its
+		delete remove rm move mv copy cp rename edit write`) {
+		notExtWords[w] = true
+	}
+}
 
 var fileNouns = []string{"file", "files", "source", "sources", "code", "document", "documents", "docs",
 	"檔", "檔案", "档", "档案", "文件", "文檔", "文档", "程式", "程式碼", "代碼", "代码", "原始碼", "源碼", "源码", "格式"}

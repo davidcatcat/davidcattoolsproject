@@ -2,6 +2,7 @@ package search
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -166,5 +167,91 @@ func TestMissingRootIsAnError(t *testing.T) {
 	_, err := Run(&query.Query{Root: filepath.Join(t.TempDir(), "nope")}, func(Result) {})
 	if !os.IsNotExist(err) {
 		t.Errorf("err = %v, want not-exist", err)
+	}
+}
+
+func TestNormalizeExcludes(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"vendor", "vendor", false},
+		{"src/gen", "./src/gen", false},
+		{"./src/gen", "./src/gen", false},
+		{"src/gen/", "./src/gen", false},
+		{"src//gen", "./src/gen", false},
+		{"./src/../src/gen", "./src/gen", false},
+		{filepath.Join(root, "src", "gen"), "./src/gen", false},
+		{"../outside", "", true},
+		{"src/../../outside", "", true},
+		{"/definitely/elsewhere", "", true},
+		{"./", "", true},
+		{root, "", true},
+	}
+	for _, tt := range tests {
+		got, err := NormalizeExcludes(root, []string{tt.in})
+		if tt.wantErr {
+			var ee *ExcludeError
+			if !errors.As(err, &ee) {
+				t.Errorf("NormalizeExcludes(%q) err = %v, want *ExcludeError", tt.in, err)
+			}
+			continue
+		}
+		if err != nil || len(got) != 1 || got[0] != tt.want {
+			t.Errorf("NormalizeExcludes(%q) = %v, %v; want %q", tt.in, got, err, tt.want)
+		}
+	}
+}
+
+func TestExcludeRelativeAndAbsolutePaths(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"src/gen/a.go", "src/keep/b.go", "gen/c.go"} {
+		write(t, filepath.Join(dir, n), nil)
+	}
+	for _, ex := range []string{"./src/gen", "src/gen/", filepath.Join(dir, "src/gen")} {
+		got, _ := run(t, &query.Query{Root: dir, ExcludeDirs: []string{ex}})
+		if want := []string{"gen/c.go", "src/keep/b.go"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("exclude %q: got %v, want %v", ex, got, want)
+		}
+	}
+	if _, err := Run(&query.Query{Root: dir, ExcludeDirs: []string{"../x"}}, func(Result) {}); err == nil {
+		t.Error("exclude outside the root should be an error")
+	}
+}
+
+func TestExcludePathCaseFollowsFileSystem(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "src/gen/a.go"), nil)
+	write(t, filepath.Join(dir, "src/keep/b.go"), nil)
+	// Does this file system resolve a differently-cased path to the same dir?
+	a, err1 := os.Stat(filepath.Join(dir, "src/gen"))
+	b, err2 := os.Stat(filepath.Join(dir, "SRC/GEN"))
+	insensitive := err1 == nil && err2 == nil && os.SameFile(a, b)
+
+	got, _ := run(t, &query.Query{Root: dir, ExcludeDirs: []string{"SRC/GEN"}})
+	want := []string{"src/gen/a.go", "src/keep/b.go"}
+	if insensitive {
+		want = []string{"src/keep/b.go"}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("case-insensitive fs=%v: got %v, want %v", insensitive, got, want)
+	}
+}
+
+func TestSymlinksBelowRootAreNotFollowed(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	write(t, filepath.Join(dir, "in.txt"), nil)
+	write(t, filepath.Join(outside, "secret.txt"), nil)
+	for _, l := range [][2]string{{outside, "linkdir"}, {filepath.Join(outside, "secret.txt"), "linkfile.txt"}} {
+		if err := os.Symlink(l[0], filepath.Join(dir, l[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := run(t, &query.Query{Root: dir})
+	if want := []string{"in.txt"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
