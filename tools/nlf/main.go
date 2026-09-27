@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -49,8 +50,9 @@ Flags:
   --version        print version
 
 --explain   nlf --explain "找 ovpn 檔"
-  Prints the parsed conditions and an approximate macOS find command (for
-  reference only; nlf never runs it). Nothing is searched, nothing is asked.
+  Prints the parsed conditions and an approximate find command in macOS or
+  GNU/Linux syntax, matching this OS (for reference only; nlf never runs it).
+  Nothing is searched, nothing is asked.
 
 --confirm   nlf --confirm "找 ovpn 檔"
   Prints the execution plan (root, conditions, approximate command) and a
@@ -175,12 +177,12 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 		}
 	}
 	if opts.explain {
-		fmt.Fprint(stdout, query.Explain(q))
+		fmt.Fprint(stdout, query.Explain(q, query.PlatformFor(runtime.GOOS)))
 		return 0
 	}
 	if opts.confirm {
 		// The plan and prompt go to stderr so stdout stays a clean list of paths.
-		fmt.Fprint(stderr, executionPlan(q, search.RunEffects()))
+		fmt.Fprint(stderr, executionPlan(q, search.RunEffects(), query.PlatformFor(runtime.GOOS)))
 		fmt.Fprint(stderr, "Execute this search? [y/N]: ")
 		if !approved(stdin) {
 			fmt.Fprint(stderr, "\nCancelled.\n")
@@ -202,7 +204,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 		switch {
 		case errors.Is(err, fs.ErrPermission):
 			fmt.Fprintf(stderr, msg("nlf：沒有權限讀取「%s」。nlf 不會自動使用 sudo。\n%s",
-				"nlf: permission denied reading %q. nlf never uses sudo.\n%s"), root, permissionHint(lang))
+				"nlf: permission denied reading %q. nlf never uses sudo.\n%s"), root, permissionHint(lang, runtime.GOOS))
 		case errors.Is(err, fs.ErrNotExist):
 			fmt.Fprintf(stderr, msg("nlf：找不到搜尋位置「%s」\n", "nlf: search location %q does not exist\n"), root)
 			if strings.ContainsFunc(root, func(r rune) bool { return r >= utf8.RuneSelf }) {
@@ -224,7 +226,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 		if n > 5 {
 			fmt.Fprintf(stderr, msg("  …還有 %d 個\n", "  …and %d more\n"), n-5)
 		}
-		fmt.Fprint(stderr, permissionHint(lang))
+		fmt.Fprint(stderr, permissionHint(lang, runtime.GOOS))
 	}
 	if n := len(rep.OtherErrors); n > 0 {
 		fmt.Fprintf(stderr, msg("nlf：有 %d 個位置無法讀取而略過，例如：%v\n",
@@ -238,14 +240,28 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 	return 0
 }
 
-func permissionHint(lang query.Lang) string {
-	if lang == query.Chinese {
+// permissionHint suggests what to do after permission errors. goos picks
+// the platform-specific advice: macOS privacy protection (TCC / Full Disk
+// Access) or Linux file permissions and security modules.
+func permissionHint(lang query.Lang, goos string) string {
+	zh := lang == query.Chinese
+	switch {
+	case goos == "darwin" && zh:
 		return "提示：可縮小搜尋範圍（例如 --dir ~/Documents）或用「排除」跳過這些目錄。" +
 			"macOS 受保護的資料夾（如 ~/Library 的部分內容）需要在「系統設定 › 隱私權與安全性 › 完整磁碟取用權限」授權終端機。\n"
+	case goos == "darwin":
+		return "hint: narrow the search (e.g. --dir ~/Documents) or exclude those directories. " +
+			"macOS-protected folders (parts of ~/Library, etc.) require granting your terminal Full Disk Access " +
+			"in System Settings › Privacy & Security.\n"
+	case zh:
+		return "提示：可縮小搜尋範圍（例如 --dir /var/log）或用「排除」跳過這些目錄。" +
+			"可用 ls -ld 檢查目錄的擁有者與權限；需要時請改用有權限的帳號執行（nlf 不會自動使用 sudo）。" +
+			"SELinux 或 AppArmor 也可能拒絕存取。\n"
+	default:
+		return "hint: narrow the search (e.g. --dir /var/log) or exclude those directories. " +
+			"Check the owner and mode with ls -ld; if needed, run nlf as an account that has access " +
+			"(nlf never uses sudo itself). SELinux or AppArmor can also deny access.\n"
 	}
-	return "hint: narrow the search (e.g. --dir ~/Documents) or exclude those directories. " +
-		"macOS-protected folders (parts of ~/Library, etc.) require granting your terminal Full Disk Access " +
-		"in System Settings › Privacy & Security.\n"
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -285,7 +301,7 @@ func parseArgs(args []string) (*options, error) {
 
 // executionPlan describes what a search will do before it runs. The find
 // command is shown for understanding only; nlf never executes it.
-func executionPlan(q *query.Query, e search.Effects) string {
+func executionPlan(q *query.Query, e search.Effects, p query.Platform) string {
 	yn := func(b bool) string {
 		if b {
 			return "YES"
@@ -301,8 +317,8 @@ func executionPlan(q *query.Query, e search.Effects) string {
 	} else {
 		b.WriteString("  (none: every regular file)\n")
 	}
-	b.WriteString("\nApproximate macOS command (for reference only; nlf does not execute it):\n")
-	b.WriteString("  " + query.FindCommand(q) + "\n\n")
+	b.WriteString("\nApproximate " + p.Name() + " command (for reference only; nlf does not execute it):\n")
+	b.WriteString("  " + query.FindCommand(q, p) + "\n\n")
 	fmt.Fprintf(&b, `Safety:
   Read files:        %s
   Modify files:      %s

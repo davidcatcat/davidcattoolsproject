@@ -74,9 +74,36 @@ func FormatConditions(cs []Condition) string {
 	return b.String()
 }
 
+// Platform selects the dialect of the approximate shell command: BSD tools
+// on macOS or GNU findutils/coreutils on Linux. The find, grep, sort, cut
+// and head parts are the same; only stat differs.
+type Platform int
+
+const (
+	MacOS Platform = iota
+	Linux
+)
+
+// PlatformFor maps a GOOS value to the command dialect: GNU on Linux, BSD
+// (macOS) everywhere else.
+func PlatformFor(goos string) Platform {
+	if goos == "linux" {
+		return Linux
+	}
+	return MacOS
+}
+
+// Name is the platform as shown to users.
+func (p Platform) Name() string {
+	if p == Linux {
+		return "GNU/Linux"
+	}
+	return "macOS"
+}
+
 // Explain describes how the query was understood, followed by an approximate
-// macOS find command for reference.
-func Explain(q *Query) string {
+// find command for platform p.
+func Explain(q *Query, p Platform) string {
 	zh := q.Lang == Chinese
 	pick := func(c, e string) string {
 		if zh {
@@ -87,15 +114,16 @@ func Explain(q *Query) string {
 	var b strings.Builder
 	b.WriteString(pick("解析結果：\n", "Understood as:\n"))
 	b.WriteString(FormatConditions(append([]Condition{{pick("搜尋位置", "root:"), rootOrDot(q.Root)}}, Conditions(q, q.Lang)...)))
-	b.WriteString(pick("\n近似的 macOS 指令（僅供參考，nlf 不會執行它）：\n", "\nApproximate macOS command for reference; nlf does not execute it:\n"))
-	b.WriteString("  " + FindCommand(q) + "\n")
+	b.WriteString(pick("\n近似的 "+p.Name()+" 指令（僅供參考，nlf 不會執行它）：\n",
+		"\nApproximate "+p.Name()+" command for reference; nlf does not execute it:\n"))
+	b.WriteString("  " + FindCommand(q, p) + "\n")
 	return b.String()
 }
 
-// FindCommand renders q as an approximate BSD find (macOS) pipeline. It is
-// for reference only: ordering, tie-breaking and some edge cases (binary
+// FindCommand renders q as an approximate find pipeline for platform p. It
+// is for reference only: ordering, tie-breaking and some edge cases (binary
 // detection, case folding) can differ from nlf's own search.
-func FindCommand(q *Query) string {
+func FindCommand(q *Query, p Platform) string {
 	root := findRoot(q)
 	parts := []string{"find", shellQuote(root)}
 	if len(q.ExcludeDirs) > 0 {
@@ -151,10 +179,18 @@ func FindCommand(q *Query) string {
 	}
 	cmd := strings.Join(parts, " ")
 	switch q.Sort {
-	case SortLargest:
-		cmd += ` -exec stat -f '%z %N' {} + | sort -rn | cut -d' ' -f2-`
-	case SortNewest:
-		cmd += ` -exec stat -f '%m %N' {} + | sort -rn | cut -d' ' -f2-`
+	case SortLargest, SortNewest:
+		// "<size or mtime> <path>" per file: BSD stat -f '%z'/'%m' '%N',
+		// GNU stat -c '%s'/'%Y' '%n'.
+		format := map[Platform]map[SortOrder]string{
+			MacOS: {SortLargest: "%z %N", SortNewest: "%m %N"},
+			Linux: {SortLargest: "%s %n", SortNewest: "%Y %n"},
+		}[p][q.Sort]
+		flag := "-f"
+		if p == Linux {
+			flag = "-c"
+		}
+		cmd += " -exec stat " + flag + " '" + format + "' {} + | sort -rn | cut -d' ' -f2-"
 	default:
 		cmd += " -print"
 	}

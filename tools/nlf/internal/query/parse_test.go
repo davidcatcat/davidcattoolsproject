@@ -258,45 +258,79 @@ func TestErrorMessageIsChineseForChineseInput(t *testing.T) {
 func TestFindCommand(t *testing.T) {
 	tests := []struct {
 		name string
+		p    Platform
 		q    Query
 		want string
 	}{
-		{"symlink root gets a trailing slash", Query{Root: "/tmp", RootSymlink: true},
+		{"symlink root gets a trailing slash", MacOS, Query{Root: "/tmp", RootSymlink: true},
 			"find /tmp/ -type f -print"},
-		{"root starting with a dash", Query{Root: "-dir"},
+		{"root starting with a dash", MacOS, Query{Root: "-dir"},
 			"find ./-dir -type f -print"},
-		{"only directories are pruned", Query{ExcludeDirs: []string{"vendor", ".git"}},
+		{"only directories are pruned", MacOS, Query{ExcludeDirs: []string{"vendor", ".git"}},
 			`find . -type d \( -iname vendor -o -iname .git \) -prune -o -type f -print`},
-		{"relative exclude path", Query{ExcludeDirs: []string{"./src/gen"}},
+		{"relative exclude path", MacOS, Query{ExcludeDirs: []string{"./src/gen"}},
 			`find . -type d \( -path ./src/gen \) -prune -o -type f -print`},
-		{"unnormalized exclude path", Query{ExcludeDirs: []string{"./src//gen/"}},
+		{"unnormalized exclude path", MacOS, Query{ExcludeDirs: []string{"./src//gen/"}},
 			`find . -type d \( -path ./src/gen \) -prune -o -type f -print`},
-		{"exclude path under a symlink root", Query{Root: "/tmp", RootSymlink: true, ExcludeDirs: []string{"./a b"}},
+		{"exclude path under a symlink root", MacOS, Query{Root: "/tmp", RootSymlink: true, ExcludeDirs: []string{"./a b"}},
 			`find /tmp/ -type d \( -path '/tmp/a b' \) -prune -o -type f -print`},
-		{"quoting", Query{Root: "/x/it's", Contents: []string{"-e"}},
+		{"quoting", MacOS, Query{Root: "/x/it's", Contents: []string{"-e"}},
 			`find '/x/it'\''s' -type f -exec grep -qIF -- -e {} \; -print`},
+
+		// BSD stat on macOS, GNU stat on Linux; everything else is shared.
+		{"largest on macOS", MacOS, Query{Sort: SortLargest, Limit: 5},
+			`find . -type f -exec stat -f '%z %N' {} + | sort -rn | cut -d' ' -f2- | head -n 5`},
+		{"newest on macOS", MacOS, Query{Sort: SortNewest},
+			`find . -type f -exec stat -f '%m %N' {} + | sort -rn | cut -d' ' -f2-`},
+		{"largest on Linux", Linux, Query{Sort: SortLargest, Limit: 5},
+			`find . -type f -exec stat -c '%s %n' {} + | sort -rn | cut -d' ' -f2- | head -n 5`},
+		{"newest on Linux", Linux, Query{Sort: SortNewest},
+			`find . -type f -exec stat -c '%Y %n' {} + | sort -rn | cut -d' ' -f2-`},
+		{"unsorted is identical on Linux", Linux, Query{Root: "/var/log", Extensions: []string{"log"}, Contents: []string{"x"},
+			ExcludeDirs: []string{"old"}, Sizes: []SizeCond{{">", 1024}}, Limit: 3},
+			`find /var/log -type d \( -iname old \) -prune -o -type f -iname '*.log' -size +1024c -exec grep -qIF -- x {} \; -print | head -n 3`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := FindCommand(&tt.q); got != tt.want {
+			if got := FindCommand(&tt.q, tt.p); got != tt.want {
 				t.Errorf("FindCommand()\n got  %s\n want %s", got, tt.want)
 			}
 		})
 	}
 }
 
+func TestPlatformFor(t *testing.T) {
+	for goos, want := range map[string]Platform{"darwin": MacOS, "linux": Linux, "freebsd": MacOS, "": MacOS} {
+		if got := PlatformFor(goos); got != want {
+			t.Errorf("PlatformFor(%q) = %v, want %v", goos, got, want)
+		}
+	}
+	if MacOS.Name() != "macOS" || Linux.Name() != "GNU/Linux" {
+		t.Errorf("names: %q %q", MacOS.Name(), Linux.Name())
+	}
+}
+
 func TestExplainSaysApproximate(t *testing.T) {
-	for _, in := range []string{"go files", "go 檔"} {
-		q, err := Parse(in, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		out := Explain(q)
-		if strings.Contains(out, "等效") || strings.Contains(out, "Equivalent") {
-			t.Errorf("Explain(%q) claims equivalence:\n%s", in, out)
-		}
-		if !strings.Contains(out, "近似") && !strings.Contains(out, "Approximate") {
-			t.Errorf("Explain(%q) should call the command approximate:\n%s", in, out)
+	for _, p := range []Platform{MacOS, Linux} {
+		for _, in := range []string{"largest go files", "最大的 go 檔"} {
+			q, err := Parse(in, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := Explain(q, p)
+			if strings.Contains(out, "等效") || strings.Contains(out, "Equivalent") {
+				t.Errorf("Explain(%q) claims equivalence:\n%s", in, out)
+			}
+			if !strings.Contains(out, "近似的 "+p.Name()+" 指令") && !strings.Contains(out, "Approximate "+p.Name()+" command") {
+				t.Errorf("Explain(%q, %s) should call the command approximate for %s:\n%s", in, p.Name(), p.Name(), out)
+			}
+			if !strings.Contains(out, FindCommand(q, p)) {
+				t.Errorf("Explain(%q, %s) does not show the %s command:\n%s", in, p.Name(), p.Name(), out)
+			}
+			other := map[Platform]string{MacOS: "stat -c", Linux: "stat -f"}[p]
+			if strings.Contains(out, other) {
+				t.Errorf("Explain(%q, %s) uses the other platform's %q:\n%s", in, p.Name(), other, out)
+			}
 		}
 	}
 }

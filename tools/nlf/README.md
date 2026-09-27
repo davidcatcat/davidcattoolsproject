@@ -110,8 +110,8 @@ nlf --confirm --dir /home "排除 .cache、node_modules 目錄，找最大的 10
 
 - 搜尋 `/` 時，請排除虛擬檔案系統，或把範圍縮小：`nlf --dir / "exclude /proc and /sys, larger than 100MB"`。含 `/` 的排除路徑是相對於搜尋位置解析的，所以只會排除 `/proc` 本身，不會排除其他名叫 proc 的目錄。
 - 常見的 Linux 檔案系統（ext4、xfs）區分大小寫。排除路徑依檔案系統判斷，大小寫必須寫對；排除「名稱」（不含 `/`）仍然不分大小寫。
-- 沒有權限的目錄會略過並列在 stderr。nlf 不會自動使用 sudo。權限提示裡提到的 macOS「完整磁碟取用權限」在 Linux 上不適用；需要時，請用有權限的帳號自行執行。
-- `--explain` 與 `--confirm` 顯示的是 macOS（BSD）語法的近似指令。`find` 的部分在 GNU find 上大致可以用，但排序用的 `stat -f '%z %N'` / `stat -f '%m %N'` 在 GNU coreutils 要改成 `stat -c '%s %n'` / `stat -c '%Y %n'`。nlf 本身不會執行這些指令。
+- 沒有權限的目錄會略過並列在 stderr。nlf 不會自動使用 sudo。在 Linux 上，權限提示會建議用 `ls -ld` 檢查擁有者與權限、改用有權限的帳號執行，並提醒 SELinux / AppArmor 也可能拒絕存取；macOS 才會提到「完整磁碟取用權限」。
+- 在 Linux 上，`--explain` 與 `--confirm` 顯示的是 GNU/Linux 語法的近似指令（標示為「近似的 GNU/Linux 指令」）。和 macOS 版唯一的差別是排序用的 stat：GNU coreutils 用 `stat -c '%s %n'` / `stat -c '%Y %n'`，macOS 用 `stat -f '%z %N'` / `stat -f '%m %N'`；find、grep、sort、cut、head 的部分兩邊相同。nlf 本身不會執行這些指令。
 - 目前在 macOS 上執行完整測試；Linux 的部分已確認可以 cross-compile、產出的是靜態 ELF，測試也能在 `GOOS=linux` 下編譯，但還沒有在 Linux 主機上實際跑過測試（見 Known limitations）。
 
 ### 解除安裝
@@ -164,7 +164,7 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 - `--confirm` 只接受一整行剛好是 `y` 或 `Y`；`n`、直接按 Enter、`yes`、其他文字、EOF 一律取消，顯示 `Cancelled.`，exit 0。只讀第一行。
 - 執行計畫與提示都寫到 stderr，所以 stdout 仍然只有結果路徑，可以接 pipe。
 - 安全性摘要（Read / Modify / Create / Delete / Execute shell / sudo、Risk）描述 nlf 自己的搜尋：目前一律是 `READ-ONLY`（只讀取目錄與檔案）。這個宣告由測試檢查原始碼維持（不得使用 `os/exec` 或任何會建立、修改、刪除檔案的 `os` 函式）。
-- 計畫裡的 macOS 指令與 `--explain` 一樣只是近似、供理解用；nlf 不會執行它。
+- 計畫裡的指令與 `--explain` 一樣只是近似、供理解用，並依作業系統顯示 macOS 或 GNU/Linux 語法；nlf 不會執行它。
 - `--explain` 與 `--confirm` 不能同時使用（exit 2）。
 
 ### 支援的條件
@@ -182,7 +182,7 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 | 排除目錄 | `exclude node_modules and .git`、`排除 vendor、build 目錄`、`除了 dist 以外`、`except dist dir`、`排除 src/generated`、`排除 ./src/generated` |
 | 搜尋位置 | `in ~/Documents`、`under /tmp`、`在 ./src`，或 `--dir` |
 
-`--explain` 範例：
+`--explain` 範例（在 macOS 上執行；在 Linux 上標題會是「近似的 GNU/Linux 指令」）：
 
 ```text
 $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendor，最多 10 個"
@@ -220,7 +220,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 未加引號的搜尋文字會一直延伸到空白或標點（`包含 API連線失敗`）。如果後面緊接著 nlf 認得的詞（例如 `包含 設定檔`，「檔」是關鍵字），因為無法確定範圍，會報錯要求加引號；只有「的」「且」「和」這類連接詞可以直接接在後面（`包含TODO且大於1MB`）。空字串 `""` 會報錯。
 - 未加引號的路徑會一直延伸到空白或標點，可以包含中文（`在 ~/文件 找 pdf 檔`）。路徑後面請加空白，不要直接接其他字；路徑中有空白時要加引號，例如 `在 "~/My Docs"`。
 - 數量上限最多 2147483647；時間最多約 292 年；超過會報錯。
-- 主要在 macOS 上開發與測試。Linux 的靜態執行檔可以用 `make dist` 產生，測試也能在 `GOOS=linux` 下編譯，但還沒有在 Linux 主機上實際跑過測試。`--explain` / `--confirm` 的近似指令使用 BSD 語法（見「Linux 使用注意事項」）。
+- 主要在 macOS 上開發與測試。Linux 的靜態執行檔可以用 `make dist` 產生，測試也能在 `GOOS=linux` 下編譯，但還沒有在 Linux 主機上實際跑過測試。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 實際執行驗證過。
 - 未支援的說法會回報「看不懂這個詞」；詞彙表在 `internal/query/lexicon.go`，擴充時請一併加測試。
 
 ## Development

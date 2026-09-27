@@ -168,7 +168,7 @@ func TestPermissionDeniedMessage(t *testing.T) {
 	if code != 0 || len(paths(dir, out)) != 3 {
 		t.Errorf("code=%d out=%q", code, out)
 	}
-	for _, want := range []string{"有 1 個位置因權限不足而略過", "不會自動使用 sudo", locked, "完整磁碟取用權限"} {
+	for _, want := range []string{"有 1 個位置因權限不足而略過", "不會自動使用 sudo", locked, permissionHint(query.Chinese, runtime.GOOS)} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("stderr missing %q:\n%s", want, errOut)
 		}
@@ -298,8 +298,8 @@ func TestExplainSymlinkRootAndRelativeExclude(t *testing.T) {
 // TestExplainParity runs the printed find command (read-only) and checks it
 // finds the same files as nlf for the cases --explain is meant to cover.
 func TestExplainParity(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("--explain targets BSD find on macOS")
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("--explain targets BSD tools on macOS and GNU tools on Linux")
 	}
 	dir := t.TempDir()
 	mkfiles(t, dir, map[string]string{"real/a.txt": "TODO", "real/big.txt": strings.Repeat("x", 2048),
@@ -602,7 +602,7 @@ func TestConfirmPlan(t *testing.T) {
 	for _, want := range []string{
 		"NLF execution plan", "Search root:\n  " + dir, "Conditions:", "extension:", ".go", "size:", "> 1 KB",
 		"exclude dirs:", "vendor", "limit:", "3",
-		"Approximate macOS command", "nlf does not execute it",
+		"Approximate " + query.PlatformFor(runtime.GOOS).Name() + " command", "nlf does not execute it",
 		"find " + dir + " -type d \\( -iname vendor \\) -prune -o -type f -iname '*.go' -size +1024c -print | head -n 3",
 		"Read files:        YES", "Modify files:      NO", "Create files:      NO", "Delete files:      NO",
 		"Execute shell:     NO", "sudo required:     NO", "Risk:\n  READ-ONLY", "Execute this search? [y/N]: ",
@@ -694,5 +694,83 @@ func TestProductionCodeIsReadOnly(t *testing.T) {
 	}
 	if e := search.RunEffects(); e != (search.Effects{ReadFiles: true}) || e.Risk() != "READ-ONLY" {
 		t.Errorf("RunEffects() = %+v, %s; want read-only", e, e.Risk())
+	}
+}
+
+func TestPermissionHintByOS(t *testing.T) {
+	mac := []string{permissionHint(query.Chinese, "darwin"), permissionHint(query.English, "darwin")}
+	linux := []string{permissionHint(query.Chinese, "linux"), permissionHint(query.English, "linux")}
+	for _, h := range mac {
+		if !strings.Contains(h, "完整磁碟取用權限") && !strings.Contains(h, "Full Disk Access") {
+			t.Errorf("macOS hint lacks Full Disk Access: %q", h)
+		}
+	}
+	for _, h := range linux {
+		for _, bad := range []string{"macOS", "Full Disk Access", "完整磁碟", "~/Library", "系統設定"} {
+			if strings.Contains(h, bad) {
+				t.Errorf("Linux hint mentions %q: %q", bad, h)
+			}
+		}
+		if !strings.Contains(h, "ls -ld") || !strings.Contains(h, "SELinux") || !strings.Contains(h, "sudo") {
+			t.Errorf("Linux hint lacks permission advice: %q", h)
+		}
+	}
+	if !strings.Contains(linux[0], "提示") || !strings.Contains(linux[1], "hint:") {
+		t.Errorf("Linux hints are not localized: %q", linux)
+	}
+}
+
+func TestExplainAndConfirmUseHostPlatform(t *testing.T) {
+	p := query.PlatformFor(runtime.GOOS)
+	dir := fixture(t)
+	out, _, _ := nlf(t, "--explain", "--dir", dir, "largest 2")
+	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "largest 2")
+	wantFlag := map[query.Platform]string{query.MacOS: "stat -f '%z %N'", query.Linux: "stat -c '%s %n'"}[p]
+	for name, text := range map[string]string{"--explain": out, "--confirm": plan} {
+		if !strings.Contains(text, "Approximate "+p.Name()+" command") || !strings.Contains(text, wantFlag) {
+			t.Errorf("%s on %s should show a %s command with %s:\n%s", name, runtime.GOOS, p.Name(), wantFlag, text)
+		}
+	}
+}
+
+// TestGNUSortPipeline runs the Linux sort pipeline with real GNU stat (stat on
+// Linux, gstat from coreutils on macOS) and checks it orders like nlf.
+func TestGNUSortPipeline(t *testing.T) {
+	stat := "stat"
+	if runtime.GOOS != "linux" {
+		if _, err := exec.LookPath("gstat"); err != nil {
+			t.Skip("GNU stat not available (install coreutils for gstat)")
+		}
+		stat = "gstat"
+	}
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i, n := range []string{"a.txt", "b b.txt", "c.txt", "d.txt"} {
+		p := filepath.Join(dir, n)
+		mkfiles(t, dir, map[string]string{n: strings.Repeat("x", 100*(i%3+1)+i)})
+		mt := base.Add(time.Duration(i) * time.Hour)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, in := range []string{"largest 3", "newest 3"} {
+		q, err := query.Parse(in, testNow)
+		if err != nil {
+			t.Fatal(err)
+		}
+		q.Root = dir
+		cmd := query.FindCommand(q, query.Linux)
+		if !strings.Contains(cmd, "stat -c") {
+			t.Fatalf("not a GNU command: %s", cmd)
+		}
+		cmd = strings.Replace(cmd, "-exec stat ", "-exec "+stat+" ", 1)
+		got, err := exec.Command("sh", "-c", cmd).Output()
+		if err != nil {
+			t.Fatalf("%s: %v", cmd, err)
+		}
+		want, _, _ := nlf(t, "--dir", dir, in)
+		if string(got) != want {
+			t.Errorf("%s:\n cmd  %s\n find %q\n nlf  %q", in, cmd, got, want)
+		}
 	}
 }
