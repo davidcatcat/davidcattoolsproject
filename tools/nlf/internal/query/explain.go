@@ -34,6 +34,19 @@ func Conditions(q *Query, lang Lang) []Condition {
 		}
 		add(pick("副檔名", "extension:"), strings.Join(exts, pick(" 或 ", " or ")))
 	}
+	caseNote := pick("區分大小寫", "case-sensitive")
+	for _, c := range q.Names {
+		add(pick("檔名", "filename:"), nameText(c, pick)+" ("+caseNote+")")
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindName {
+			alts := make([]string, len(g.Names))
+			for i, c := range g.Names {
+				alts[i] = nameText(c, pick)
+			}
+			add(pick("檔名", "filename:"), strings.Join(alts, pick(" 或 ", " OR "))+" ("+pick("符合任一個即可，", "any one matches, ")+caseNote+")")
+		}
+	}
 	sens := pick("區分大小寫", "case-sensitive")
 	if q.IgnoreCase {
 		sens = pick("不分大小寫", "ignore case")
@@ -103,6 +116,40 @@ func Conditions(q *Query, lang Lang) []Condition {
 		add(pick("數量上限", "limit:"), fmt.Sprint(q.Limit))
 	}
 	return cs
+}
+
+// nameText renders a filename condition, e.g. contains "config".
+func nameText(c NameCond, pick func(c, e string) string) string {
+	op := map[NameMatchKind][2]string{
+		NameExact: {"是", "is"}, NameContains: {"包含", "contains"}, NamePrefix: {"開頭是", "starts with"},
+		NameSuffix: {"結尾是", "ends with"}, NameGlob: {"符合 glob", "matches glob"},
+	}[c.Kind]
+	return pick(op[0], op[1]) + " " + fmt.Sprintf("%q", c.Pattern)
+}
+
+// namePattern is c as a find -name pattern: literal text has the glob
+// characters * ? [ \ escaped, a glob is used as is.
+func namePattern(c NameCond) string {
+	lit := c.Pattern
+	if c.Kind != NameGlob {
+		var b strings.Builder
+		for _, r := range lit {
+			if strings.ContainsRune(`*?[\`, r) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(r)
+		}
+		lit = b.String()
+	}
+	switch c.Kind {
+	case NameContains:
+		return "*" + lit + "*"
+	case NamePrefix:
+		return lit + "*"
+	case NameSuffix:
+		return "*" + lit
+	}
+	return lit
 }
 
 // rangeText renders after <= mtime < before; a zero bound is unbounded.
@@ -207,6 +254,19 @@ func FindCommand(q *Query, p Platform) string {
 			parts = append(parts, ex...)
 		} else {
 			parts = append(parts, `\(`, strings.Join(joinOr(ex, 2), " "), `\)`)
+		}
+	}
+	// Filenames are case-sensitive: -name, not -iname.
+	for _, c := range q.Names {
+		parts = append(parts, "-name", shellQuote(namePattern(c)))
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindName {
+			var alts [][]string
+			for _, c := range g.Names {
+				alts = append(alts, []string{"-name", shellQuote(namePattern(c))})
+			}
+			parts = append(parts, anyOf(alts)...)
 		}
 	}
 	for _, s := range q.Sizes {

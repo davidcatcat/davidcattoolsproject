@@ -118,6 +118,7 @@ func init() {
 		limitPhrases, largestPhrases, newestPhrases, postNumLargest, postNumNewest, withinPhrases, olderPhrases, countUnits,
 		fileNouns, extTriggers, extCopula, softContentPhrases, pathTriggers, fillers, todayPhrases, yesterdayPhrases, orPhrases, notPhrases,
 		datePreps, rangeTo, betweenAnd, sincePost, nowWords, mapKeys(dayWords), mapKeys(monthWords), mapKeys(yearWords),
+		nameSubjects, impliedNameOps, mapKeys(nameOps), nameOpen, mapKeys(nameClosing),
 		// 下午 and 中午 must be words, or the fillers 下 / 中 would split them;
 		// the other period words and 點 / 號 are matched as unknown Han text
 		// so that words like 帳號 or 重點 are not split.

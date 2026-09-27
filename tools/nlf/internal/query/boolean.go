@@ -109,6 +109,12 @@ func (p *parser) alternative(left *item, orAt int) error {
 		if lk == KindContent && (t.kind == tHan || isFreeWord(t)) {
 			parse = p.contentTerm // `包含 ERROR 或 FATAL`: a bare word is another search text
 		}
+		if lk == KindName {
+			// "檔名包含 prod 或 staging": a bare name inherits the operator on the left
+			prev := left.alts[len(left.alts)-1]
+			inherit := prev.Names[len(prev.Names)-1].Kind
+			parse = func() error { return p.nameAlternative(inherit) }
+		}
 		d, err := p.parseInto(parse)
 		if err != nil {
 			return err
@@ -139,8 +145,8 @@ func errConnectors(raw string) *Error {
 
 func errOrKind(raw string) *Error {
 	return &Error{Token: raw, zh: "目前 OR 只能連接同類條件", en: "OR currently requires conditions of the same type",
-		hintZh: "提示：「或」可以連接副檔名、內容、修改時間或檔案大小，但兩邊必須同一類，例如 今天或昨天、包含 \"ERROR\" 或 \"FATAL\"、大於 1GB 或小於 1KB；不同類的條件請分成兩次查詢。",
-		hintEn: `hint: "or" joins extensions, contents, modification times or sizes of the same kind, e.g. today or yesterday, containing "ERROR" or "FATAL", larger than 1GB or smaller than 1KB; run separate queries for different kinds.`}
+		hintZh: "提示：「或」可以連接副檔名、檔名、內容、修改時間或檔案大小，但兩邊必須同一類，例如 今天或昨天、包含 \"ERROR\" 或 \"FATAL\"、大於 1GB 或小於 1KB；不同類的條件請分成兩次查詢。",
+		hintEn: `hint: "or" joins extensions, filenames, contents, modification times or sizes of the same kind, e.g. today or yesterday, containing "ERROR" or "FATAL", larger than 1GB or smaller than 1KB; run separate queries for different kinds.`}
 }
 
 // parseInto runs parse on a fresh Query and returns what it produced, so a
@@ -156,7 +162,7 @@ func (p *parser) parseInto(parse func() error) (*Query, error) {
 
 // empty reports whether d holds no condition (fillers, punctuation).
 func (d *Query) empty() bool {
-	return d.Root == "" && len(d.Extensions) == 0 && len(d.Contents) == 0 && !d.IgnoreCase &&
+	return d.Root == "" && len(d.Extensions) == 0 && len(d.Names) == 0 && len(d.Contents) == 0 && !d.IgnoreCase &&
 		len(d.ExcludeDirs) == 0 && len(d.Sizes) == 0 && d.ModifiedAfter.IsZero() && d.ModifiedBefore.IsZero() &&
 		d.Sort == SortNone && d.Limit == 0 && len(d.AnyOf) == 0
 }
@@ -170,6 +176,9 @@ func classify(d *Query) (CondKind, bool) {
 	n, k := 0, KindNone
 	if len(d.Extensions) > 0 {
 		n, k = n+1, KindExtension
+	}
+	if len(d.Names) > 0 {
+		n, k = n+1, KindName
 	}
 	if len(d.Contents) > 0 {
 		n, k = n+1, KindContent
@@ -207,6 +216,7 @@ func (p *parser) merge(it *item) error {
 			q.Root = d.Root
 		}
 		q.Extensions = append(q.Extensions, d.Extensions...)
+		q.Names = append(q.Names, d.Names...)
 		q.Contents = append(q.Contents, d.Contents...)
 		q.ExcludeDirs = append(q.ExcludeDirs, d.ExcludeDirs...)
 		q.Sizes = append(q.Sizes, d.Sizes...)
@@ -232,6 +242,8 @@ func (p *parser) merge(it *item) error {
 			q.Extensions = append(q.Extensions, d.Extensions...) // already any-of
 		case KindContent:
 			g.Contents = append(g.Contents, d.Contents...)
+		case KindName:
+			g.Names = append(g.Names, d.Names...)
 		case KindSize:
 			g.Sizes = append(g.Sizes, d.Sizes...)
 		case KindTime:

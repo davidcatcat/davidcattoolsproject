@@ -37,9 +37,8 @@ Flags:
   or GNU/Linux syntax; reference only, nlf never runs it). Nothing is searched.
 
 --confirm   nlf --confirm "找 ovpn 檔"
-  Prints the execution plan (root, conditions, approximate command) and a
-  safety summary, then asks "Execute this search? [y/N]". Only y or Y
-  searches; any other answer (n, Enter, yes, EOF, ...) prints "Cancelled.".
+  Prints the execution plan and a safety summary, then asks "Execute this search? [y/N]".
+  Only y or Y searches; any other answer (n, Enter, yes, EOF, ...) prints "Cancelled.".
 
 Safety:
   Read-only. nlf does not modify, create or delete files, does not run a shell
@@ -47,6 +46,7 @@ Safety:
 
 Supported conditions (combined with AND):
   extension  .go  *.md  go files  找 ovpn 檔  go 或 md 檔  副檔名 heic  圖片  images
+  filename   檔名是 application.yml  檔名包含 config  filename matches "app-*.yml"  (case-sensitive)
   content    containing "text"  包含 "文字"  內容有「錯誤」  ignore case / 不分大小寫
   modified   today  昨天  本月  2026-09-28  9 月  9/1 到 9/15  最近 6 小時  last 7 days  3 天前
   size       larger than 10MB  at most 1KB  大於 10MB  10MB 以上   (1 KB = 1024 bytes)

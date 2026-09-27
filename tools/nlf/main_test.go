@@ -540,6 +540,8 @@ func TestHelpContent(t *testing.T) {
 		"0  files found, or --confirm was cancelled", "1  valid query, but no files found", "2  error",
 		// tips
 		"Quote exact content", "Quote paths with spaces", "never\n    silently widens the search",
+		// filename search
+		`filename   檔名是 application.yml  檔名包含 config  filename matches "app-*.yml"`, "(case-sensitive)",
 		// boolean OR
 		`or         今天或昨天  包含 "ERROR" 或 "FATAL"  大於 1GB 或小於 1KB`, "same kind; rest is AND", "OR across kinds",
 		// date & time
@@ -919,5 +921,44 @@ func TestOrQAHardeningExitCodes(t *testing.T) {
 	// A plain OR is still accepted (exit 0 or 1, never a parse error).
 	if _, errOut, code := nlf(t, "--dir", dir, "today or yesterday"); code == 2 {
 		t.Errorf("today or yesterday: exit 2: %s", errOut)
+	}
+}
+
+// TestFilenameEndToEnd runs filename queries through the CLI.
+func TestFilenameEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	mkfiles(t, dir, map[string]string{"application.yml": "", "etc/nginx/nginx.conf": "listen 443", "httpd.conf": "",
+		"nginx.conf.bak": "", ".env": "", "core.1234": "", "app-api.log": ""})
+	for _, c := range []struct{ query, want string }{
+		{"找檔名是 application.yml", "application.yml"},
+		{"find files named nginx.conf", "etc/nginx/nginx.conf"},
+		{"找檔名以 .bak 結尾", "nginx.conf.bak"},
+		{`找檔名符合 "core.*"`, "core.1234"},
+		{"找檔名是 nginx.conf 或 httpd.conf", "etc/nginx/nginx.conf,httpd.conf"},
+		{`找檔名是 nginx.conf，而且內容包含 "listen 443"`, "etc/nginx/nginx.conf"},
+		{"檔名是 .env", ".env"},
+	} {
+		out, errOut, code := nlf(t, "--dir", dir, c.query)
+		if got := strings.Join(paths(dir, out), ","); code != 0 || got != c.want {
+			t.Errorf("%s: code=%d got %s want %s\n%s", c.query, code, got, c.want, errOut)
+		}
+	}
+	for _, q := range []string{"檔名是", "filename matches", `檔名符合 "[abc"`, "檔名包含 prod 或今天", "檔名包含 config，不分大小寫"} {
+		if out, errOut, code := nlf(t, "--dir", dir, q); code != 2 || out != "" || errOut == "" {
+			t.Errorf("%s: code=%d out=%q err=%q, want exit 2", q, code, out, errOut)
+		}
+	}
+	ex, _, _ := nlf(t, "--explain", "--dir", dir, "找今天修改，而且檔名包含 config 的 yml")
+	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "filename is nginx.conf or httpd.conf")
+	for name, c := range map[string]struct{ text, row, find string }{
+		"--explain": {ex, `檔名           包含 "config" (區分大小寫)`, "-name '*config*'"},
+		"--confirm": {plan, `filename:      is "nginx.conf" OR is "httpd.conf" (any one matches, case-sensitive)`, `\( -name nginx.conf -o -name httpd.conf \)`},
+	} {
+		if !strings.Contains(c.text, c.row) || !strings.Contains(c.text, c.find) {
+			t.Errorf("%s missing filename row or -name:\n%s", name, c.text)
+		}
+	}
+	if !strings.Contains(plan, "Risk:\n  READ-ONLY") {
+		t.Errorf("--confirm safety changed:\n%s", plan)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -464,5 +465,126 @@ func TestContentOrScan(t *testing.T) {
 		if !reflect.DeepEqual(got, c.want) {
 			t.Errorf("%+v: got %v, want %v", c.q, got, c.want)
 		}
+	}
+}
+
+// TestFilenameSearch matches base names on real files, case-sensitively.
+func TestFilenameSearch(t *testing.T) {
+	dir := t.TempDir()
+	// Application.yml lives in its own directory: on a case-insensitive file
+	// system (macOS default) it would otherwise be the same file as application.yml.
+	for _, n := range []string{"application.yml", "Case/Application.yml", "application-prod.yml", "nginx.conf", "httpd.conf",
+		"nginx.conf.bak", ".env", ".gitignore", "foo bar.conf", "中文設定檔.yml", "app-api.log", "api-app.log",
+		"core.1234", "core.dump", "--weird-name", "name[1].txt", "sub/application.yml", "config/other.txt"} {
+		write(t, filepath.Join(dir, n), nil)
+	}
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"找檔名是 application.yml", []string{"application.yml", "sub/application.yml"}}, // any directory, base name only
+		{`檔名是 "Application.yml"`, []string{"Case/Application.yml"}},                  // case-sensitive
+		{"檔名包含 config", nil}, // "config" is a directory, not a file name
+		{"檔名以 .bak 結尾", []string{"nginx.conf.bak"}},
+		{`檔名符合 "core.*"`, []string{"core.1234", "core.dump"}},
+		{"檔名以 app- 開頭", []string{"app-api.log"}},
+		{"檔名包含 app", []string{"api-app.log", "app-api.log", "application-prod.yml", "application.yml", "sub/application.yml"}},
+		{"檔名是 .env", []string{".env"}},
+		{`檔名符合 ".*"`, []string{".env", ".gitignore"}},
+		{`檔名是 "foo bar.conf"`, []string{"foo bar.conf"}},
+		{`檔名是 "中文設定檔.yml"`, []string{"中文設定檔.yml"}},
+		{"檔名是 --weird-name", []string{"--weird-name"}},
+		{"檔名是 name[1].txt", []string{"name[1].txt"}},
+		{`檔名符合 "*.conf"`, []string{"foo bar.conf", "httpd.conf", "nginx.conf"}},
+		{"檔名是 nginx.conf 或 httpd.conf", []string{"httpd.conf", "nginx.conf"}},
+		{`檔名符合 "*.conf" 或 "*.bak"`, []string{"foo bar.conf", "httpd.conf", "nginx.conf", "nginx.conf.bak"}},
+		{"檔名包含 prod 或 staging 的 yml", []string{"application-prod.yml"}},
+		{"檔名包含 app 且檔名以 app- 開頭", []string{"app-api.log"}},
+		{"找檔名包含 application 的 yml，排除 sub", []string{"application-prod.yml", "application.yml"}},
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, time.Now())
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.query, got, tt.want)
+		}
+	}
+}
+
+// TestFilenameComposite combines filename conditions with time, content and size.
+func TestFilenameComposite(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 9, 28, 10, 30, 0, 0, loc)
+	today, older := time.Date(2026, 9, 28, 9, 0, 0, 0, loc), time.Date(2026, 9, 20, 9, 0, 0, 0, loc)
+	dir := t.TempDir()
+	for _, f := range []struct {
+		name, data string
+		mtime      time.Time
+	}{
+		{"app-config.yml", "a: 1", today},
+		{"old-config.yml", "a: 1", older},
+		{"nginx.conf", "listen 443 ssl;", older},
+		{"sites/nginx.conf", "listen 80;", today},
+		{"httpd.conf", "Listen 443", today},
+		{"prod.yml", "x", today},
+		{"staging.yaml", "x", older},
+		{"prod.json", "x", today},
+		{"big.log", strings.Repeat("x", 2<<20), today},
+		{"small.log", "x", today},
+		{"big.txt", strings.Repeat("x", 2<<20), today},
+	} {
+		p := filepath.Join(dir, f.name)
+		write(t, p, []byte(f.data))
+		if err := os.Chtimes(p, f.mtime, f.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"找今天修改而且檔名包含 config 的檔案", []string{"app-config.yml"}},
+		{`找檔名是 nginx.conf，而且內容包含 "listen 443"`, []string{"nginx.conf"}},
+		{`找檔名符合 "*.log" 且大於 1MB 的檔案`, []string{"big.log"}},
+		{"找檔名是 nginx.conf 或 httpd.conf，今天修改", []string{"httpd.conf", "sites/nginx.conf"}},
+		{"找檔名包含 prod 或 staging 的 yml", []string{"prod.yml", "staging.yaml"}},
+		{"find yaml files whose name contains config", []string{"app-config.yml", "old-config.yml"}},
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.query, got, tt.want)
+		}
+	}
+}
+
+// TestFilenameBeforeContent checks that a file whose name does not match is
+// never opened: an unreadable non-matching file causes no permission error.
+func TestFilenameBeforeContent(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores permissions")
+	}
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "nginx.conf"), []byte("listen 443"))
+	locked := filepath.Join(dir, "other.conf")
+	write(t, locked, []byte("listen 443"))
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	q, _ := query.Parse(`檔名是 nginx.conf，內容包含 "listen 443"`, time.Now())
+	q.Root = dir
+	got, rep := run(t, q)
+	if !reflect.DeepEqual(got, []string{"nginx.conf"}) || len(rep.PermissionDenied) != 0 {
+		t.Errorf("got %v, denied %v; the locked file should not have been opened", got, rep.PermissionDenied)
 	}
 }

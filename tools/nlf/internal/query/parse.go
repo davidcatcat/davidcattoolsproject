@@ -31,6 +31,15 @@ func Parse(input string, now time.Time) (*Query, error) {
 	if !timeSatisfiable(q) {
 		return nil, contradiction // e.g. (today or yesterday) and (July or August)
 	}
+	// "ignore case" only applies to content; never let it look like it
+	// changes filename matching, which is always case-sensitive.
+	hasName := len(q.Names) > 0 || slices.ContainsFunc(q.AnyOf, func(g OrGroup) bool { return g.Kind == KindName })
+	hasContent := len(q.Contents) > 0 || slices.ContainsFunc(q.AnyOf, func(g OrGroup) bool { return g.Kind == KindContent })
+	if q.IgnoreCase && hasName && !hasContent {
+		return nil, &Error{zh: "「不分大小寫」只適用於內容搜尋；檔名比對一律區分大小寫", en: "ignore case applies to content only; filename matching is always case-sensitive",
+			hintZh: "提示：拿掉「不分大小寫」，或用 glob 列出大小寫，例如 檔名符合 \"[Cc]onfig*\"",
+			hintEn: `hint: drop "ignore case", or spell out the cases with a glob, e.g. filename matches "[Cc]onfig*"`}
+	}
 	q.Extensions = dedupe(q.Extensions)
 	q.ExcludeDirs = dedupe(q.ExcludeDirs)
 	return q, nil
@@ -101,6 +110,10 @@ func (p *parser) step() error {
 	if _, ok := p.accept(ignoreCasePhrases); ok {
 		p.q.IgnoreCase = true
 		return nil
+	}
+	// "檔名包含 config" is a filename condition; "包含 config" stays content.
+	if ok, err := p.nameExpr(); ok || err != nil {
+		return err
 	}
 	if _, ok := p.accept(contentPhrases); ok {
 		return p.contentTerm()
@@ -655,7 +668,8 @@ func init() {
 		fillers, fileNouns, pathTriggers, extCopula, softContentPhrases,
 		mapKeys(timeUnits), mapKeys(sizeUnits),
 		datePreps, rangeTo, betweenAnd, sincePost, nowWords, mapKeys(dayWords), mapKeys(monthWords),
-		mapKeys(yearWords), mapKeys(monthNames), {"am", "pm"}}
+		mapKeys(yearWords), mapKeys(monthNames), {"am", "pm"},
+		nameSubjects, impliedNameOps, mapKeys(nameOps)}
 	for _, l := range lists {
 		for _, ph := range l {
 			for _, w := range strings.Fields(ph) {

@@ -2,7 +2,11 @@
 // into a structured, deterministic Query. No network or model calls are made.
 package query
 
-import "time"
+import (
+	"path"
+	"strings"
+	"time"
+)
 
 // Lang selects the language used for messages shown to the user.
 type Lang int
@@ -51,7 +55,44 @@ const (
 	KindContent
 	KindTime
 	KindSize
+	KindName
 )
+
+// NameMatchKind is how a filename condition compares the file's base name.
+type NameMatchKind int
+
+const (
+	NameExact    NameMatchKind = iota // base name == pattern
+	NameContains                      // base name contains pattern
+	NamePrefix                        // base name starts with pattern
+	NameSuffix                        // base name ends with pattern
+	NameGlob                          // path.Match(pattern, base name): *, ?, [...]
+)
+
+// NameCond is a condition on a file's base name (never its directory).
+// Matching is case-sensitive. A NameGlob pattern is validated when parsed.
+type NameCond struct {
+	Kind    NameMatchKind
+	Pattern string
+}
+
+// Match reports whether the base name satisfies the condition.
+func (c NameCond) Match(name string) bool {
+	switch c.Kind {
+	case NameExact:
+		return name == c.Pattern
+	case NameContains:
+		return strings.Contains(name, c.Pattern)
+	case NamePrefix:
+		return strings.HasPrefix(name, c.Pattern)
+	case NameSuffix:
+		return strings.HasSuffix(name, c.Pattern)
+	case NameGlob:
+		ok, err := path.Match(c.Pattern, name)
+		return err == nil && ok
+	}
+	return false
+}
 
 // TimeRange is a half-open range on the modification time,
 // After <= mtime < Before; a zero bound is unbounded.
@@ -72,20 +113,23 @@ type OrGroup struct {
 	Contents []string    // KindContent: at least one term appears in the file
 	Times    []TimeRange // KindTime: mtime lies in at least one range
 	Sizes    []SizeCond  // KindSize: at least one comparison holds
+	Names    []NameCond  // KindName: at least one filename condition holds
 }
 
 // Query is the structured form of a natural-language request.
 //
 // A file matches when every condition holds (AND): its extension is one of
-// Extensions (any-of), it contains every one of Contents, every size
+// Extensions (any-of), its base name satisfies every one of Names, it
+// contains every one of Contents, every size
 // comparison holds, ModifiedAfter <= mtime < ModifiedBefore, and every
 // OrGroup in AnyOf is satisfied by at least one of its alternatives.
 type Query struct {
-	Root        string   // search root; "" means current directory
-	Extensions  []string // lower case, without leading dot (e.g. "go", "tar.gz")
-	Contents    []string // literal substrings that must all appear in the file
-	IgnoreCase  bool     // content matching ignores case
-	ExcludeDirs []string // directory names (or relative paths) to skip
+	Root        string     // search root; "" means current directory
+	Extensions  []string   // lower case, without leading dot (e.g. "go", "tar.gz")
+	Names       []NameCond // filename conditions on the base name, all of which must hold
+	Contents    []string   // literal substrings that must all appear in the file
+	IgnoreCase  bool       // content matching ignores case
+	ExcludeDirs []string   // directory names (or relative paths) to skip
 	Sizes       []SizeCond
 
 	// ModifiedAfter/ModifiedBefore bound the modification time. Zero means unbounded.

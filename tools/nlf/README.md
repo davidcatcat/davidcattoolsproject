@@ -169,7 +169,7 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 
 ### 支援的條件
 
-不同條件之間是 AND；同一類的條件可以用「或 / or」組成 OR 群組（見下方「Boolean OR」）。多個副檔名之間本來就是「任一符合」。
+不同條件之間是 AND（副檔名、檔名、內容、大小、時間…）；同一類的條件可以用「或 / or」組成 OR 群組（見下方「Boolean OR」）。多個副檔名之間本來就是「任一符合」。
 
 | 條件 | 範例 |
 |------|------|
@@ -227,6 +227,44 @@ nlf 'conf files modified in the last 6 hours'
 - **日曆單位用日曆計算：** 日、月、年都用本機時區的日曆計算，不用 24 小時的倍數，所以夏令時間切換的那一天長度是 23 或 25 小時，邊界仍然在午夜。
 - **可以和其他條件組合：** 副檔名、內容、大小、排除、排序、數量都可以一起用，例如 `找 9 月最大的 10 個 log`、`找昨天修改而且包含 "ERROR" 的 log`。多個時間條件會取交集；沒有交集時報錯。
 
+### 檔名搜尋
+
+用明確的「檔名 / 名稱 / 名字 / filename / name」加上比對方式，搜尋檔案的**檔名本身**：
+
+```bash
+nlf '找檔名是 application.yml'
+nlf '找檔名包含 config 的 yml'
+nlf '找檔名以 app- 開頭的 log'
+nlf '找檔名以 .bak 結尾'
+nlf '找檔名符合 "core.*"'
+nlf '找檔名是 nginx.conf 或 httpd.conf'
+nlf 'find files named kubeconfig'
+nlf 'find yaml files whose name contains config'
+```
+
+| 比對方式 | 寫法 | 意思 |
+|---|---|---|
+| 完全相同 | `檔名是 application.yml`、`檔名叫 kubeconfig`、`名稱是 nginx.conf`、`檔名等於 .env`、`名為 docker-compose.yml 的檔案`、`filename is nginx.conf`、`file named .env`、`files named kubeconfig`、`name equals .env` | 檔名 == 值 |
+| 包含 | `檔名包含 config`、`名稱有 backup 的 sql`、`名字包含 nginx`、`filename contains config`、`files whose name contains backup` | 檔名含有這段文字 |
+| 開頭 | `檔名以 app- 開頭`、`名稱開頭是 backup-`、`名字從 nginx 開始`、`filename starts with app-`、`name begins with nginx` | 檔名以這段文字開頭 |
+| 結尾 | `檔名以 .bak 結尾`、`名稱結尾是 .old`、`name ending in .old`、`files whose name ends with .disabled` | 檔名以這段文字結尾 |
+| glob | `檔名符合 "*.conf"`、`名稱符合 "app-*.yml"`、`檔名匹配 "core.*"`、`filename matches "*.conf"`、`filename glob "core.*"` | Go glob（`path.Match`）：`*`、`?`、`[...]` |
+
+規則：
+
+- **只比對檔名，不比對路徑：** `/etc/nginx/nginx.conf` 的檔名是 `nginx.conf`。搜尋位置（`在 /etc/nginx`、`--dir`）的語意不變。
+- **檔名比對區分大小寫；副檔名比對仍然不分大小寫。** `檔名是 Config.yml` 不會找到 `config.yml`。在 macOS 預設不分大小寫的 APFS 上也一樣，這是 nlf 自己的比對規則。
+- **`不分大小寫` / `ignore case` 只影響內容搜尋。** 查詢裡有檔名條件、卻沒有內容條件時，加上它會報錯，不會默默改變檔名比對。需要時請用 glob 列出大小寫，例如 `檔名符合 "[Cc]onfig*"`。
+- **值保持原樣：** 大小寫、點開頭（`.env`、`.gitignore`）、`--weird-name`、`name[1].txt` 都照原樣比對。含空白或中文的檔名請加引號：`檔名是 "foo bar.conf"`、`檔名是 "中文設定檔.yml"`。
+- **完全相同、包含、開頭、結尾都是一般文字比對，只有 glob 使用萬用字元。** 例如 `檔名是 name[1].txt` 就是字面上的 `name[1].txt`。`檔名以 .tar.gz 結尾` 也是一般的結尾比對，和副檔名無關。
+- **glob 不是正規表示式：** 只支援 `*`、`?`、`[...]`，不支援 `**`、`{a,b}`、regex。`*` 也會比對到點開頭的檔名（`*` 找得到 `.env`）。格式錯誤的 glob（例如 `"[abc"`）在解析時就會報「檔名 glob pattern 不合法」（exit 2），不會搜尋。
+- **和其他條件是 AND：** `找檔名包含 config 的 yml` = 檔名包含 config AND 副檔名 .yaml/.yml；`找今天修改而且檔名包含 config 的檔案`；`找檔名是 nginx.conf，而且內容包含 "listen 443"`。檔名條件不會推導成副檔名，反過來也不會。
+- **一定要寫出「檔名 / 名稱 / 名字 / name」：** `找包含 ERROR 的 log` 仍然是內容搜尋；`找檔名包含 ERROR 的 log` 才是檔名。`go 或 md 檔` 仍然是副檔名。
+- **多個檔名條件：** 用「且」連接時是 AND（`檔名包含 config 且檔名以 app- 開頭`）；用「或」連接時是 OR（見下一節）。
+- **OR 可以省略比對方式：** `檔名包含 prod 或 staging`、`檔名是 nginx.conf 或 httpd.conf`、`檔名以 app- 開頭或 api-`、`檔名符合 "*.conf" 或 "*.cfg"`。省略時，「或」後面沿用前一個比對方式；寫出來時用自己的方式（`檔名包含 prod 或檔名是 staging.yml`）。不同比對方式也可以用 OR 連接，因為它們都是檔名條件。
+- **效能：** 檔名在讀取檔案資訊與內容之前就先比對，檔名不符的檔案不會被開啟。
+- **`--explain` / `--confirm`：** 會顯示 `檔名  包含 "config" (區分大小寫)`。近似的 find 指令用 `-name`（不是 `-iname`），一般文字裡的 `* ? [` 會先跳脫。find 的 glob 和 Go glob 大致相同但不完全一樣，實際行為以 nlf 為準。
+
 ### Boolean OR
 
 用「或 / 或者 / 或是 / or」連接**同一類**的條件，符合其中任何一個即可：
@@ -243,6 +281,7 @@ nlf 'log files containing "ERROR" or "panic"'
 | 類型 | 例子 | 意思 |
 |---|---|---|
 | 副檔名 | `go 或 md 檔`、`go or yml or json files`、`go 檔或 md 檔` | 副檔名是其中任何一個 |
+| 檔名 | `檔名是 nginx.conf 或 httpd.conf`、`檔名包含 prod 或 staging`、`filename matches "*.conf" or "*.cfg"`、`檔名包含 prod 或檔名是 staging.yml` | 符合其中任何一個檔名條件 |
 | 內容 | `包含 "ERROR" 或 "FATAL"`、`包含 "ERROR" 或包含 "FATAL"`、`containing "foo" or "bar"`、`包含 "A" 或 "B" 或 "C"` | 內容至少包含其中一個 |
 | 修改時間 | `今天或昨天`、`8 月或 9 月`、`本月或上個月`、`2026-09-01 或 2026-09-15`、`today or yesterday`、`in August or September`、`今天 01:00 到 03:00 或 05:00 到 06:00` | mtime 落在其中任何一個區間 |
 | 檔案大小 | `大於 1GB 或小於 1KB`、`larger than 1GB or smaller than 1KB` | 符合其中任何一個大小條件 |
@@ -307,7 +346,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 
 ## Known limitations (v0.1)
 
-- 不支援不同類條件之間的 OR（`大於 1GB 或今天`）、括號、否定（「不包含 X」「without X」）、依檔名搜尋（例如 `.DS_Store`）、正規表示式、單邊的絕對日期比較（「2026-09-01 之前 / 之後」「before / after Sep 1」；請改用 `since`、`從 … 到 …`）。
+- 不支援不同類條件之間的 OR（`大於 1GB 或今天`）、括號、否定（「不包含 X」「without X」）、正規表示式（包括檔名的正規表示式；檔名請用 glob）、單邊的絕對日期比較（「2026-09-01 之前 / 之後」「before / after Sep 1」；請改用 `since`、`從 … 到 …`）。
 - 未加引號的搜尋文字會一直延伸到空白或標點（`包含 API連線失敗`）。如果後面緊接著 nlf 認得的詞（例如 `包含 設定檔`，「檔」是關鍵字），因為無法確定範圍，會報錯要求加引號；只有「的」「且」「和」這類連接詞可以直接接在後面（`包含TODO且大於1MB`）。空字串 `""` 會報錯。
 - 未加引號的路徑會一直延伸到空白或標點，可以包含中文（`在 ~/文件 找 pdf 檔`）。路徑後面請加空白，不要直接接其他字；路徑中有空白時要加引號，例如 `在 "~/My Docs"`。
 - 數量上限最多 2147483647；時間最多約 292 年；超過會報錯。

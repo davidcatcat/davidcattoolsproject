@@ -94,7 +94,8 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || !matchExt(d.Name(), q.Extensions) {
+		// Cheapest checks first: extension and base name need no Stat and no read.
+		if !d.Type().IsRegular() || !matchExt(d.Name(), q.Extensions) || !matchNames(d.Name(), q) {
 			return nil
 		}
 		info, err := d.Info()
@@ -302,6 +303,22 @@ func matchExt(name string, exts []string) bool {
 func matchSize(size int64, conds []query.SizeCond) bool {
 	for _, c := range conds {
 		if !c.Match(size) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchNames reports whether the base name satisfies every filename
+// condition and at least one condition of each filename OR group.
+func matchNames(name string, q *query.Query) bool {
+	for _, c := range q.Names {
+		if !c.Match(name) {
+			return false
+		}
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == query.KindName && !slices.ContainsFunc(g.Names, func(c query.NameCond) bool { return c.Match(name) }) {
 			return false
 		}
 	}
