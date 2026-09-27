@@ -184,7 +184,7 @@ func TestArgs(t *testing.T) {
 	if out, _, code := nlf(t, "--help"); code != 0 || !strings.Contains(out, "Usage:") {
 		t.Errorf("--help: code=%d", code)
 	}
-	if out, _, code := nlf(t, "--version"); code != 0 || out != "nlf 0.3.0\n" {
+	if out, _, code := nlf(t, "--version"); code != 0 || out != "nlf 0.4.0\n" {
 		t.Errorf("--version: %q", out)
 	}
 	if _, errOut, code := nlf(t, "--bogus", "go files"); code != 2 || !strings.Contains(errOut, "unknown flag") {
