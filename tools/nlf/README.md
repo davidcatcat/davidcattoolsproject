@@ -69,7 +69,7 @@ uname -m      # x86_64 → linux-amd64；aarch64 → linux-arm64
 
 ```bash
 # 可以透過 jump host（bastion）連線時
-scp -J user@bastion bin/nlf-0.1.0-linux-amd64 bin/SHA256SUMS user@target:~/
+scp -J user@bastion bin/nlf-0.2.0-linux-amd64 bin/SHA256SUMS user@target:~/
 
 # 只能用實體媒體（USB）或內部檔案伺服器 / 套件庫時，
 # 把同樣兩個檔案放上去，再從目標機器取回
@@ -85,11 +85,11 @@ sha256sum -c --ignore-missing SHA256SUMS   # 必須顯示 nlf-...-linux-amd64: O
 
 ```bash
 # 系統層級（需要 sudo）
-sudo install -m 755 nlf-0.1.0-linux-amd64 /usr/local/bin/nlf
+sudo install -m 755 nlf-0.2.0-linux-amd64 /usr/local/bin/nlf
 
 # 不需要 sudo：安裝到自己的目錄
 mkdir -p ~/.local/bin
-install -m 755 nlf-0.1.0-linux-amd64 ~/.local/bin/nlf
+install -m 755 nlf-0.2.0-linux-amd64 ~/.local/bin/nlf
 export PATH="$HOME/.local/bin:$PATH"       # 需要的話，加到 ~/.bashrc
 ```
 
