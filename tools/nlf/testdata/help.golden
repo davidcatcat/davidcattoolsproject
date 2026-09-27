@@ -52,11 +52,11 @@ Supported conditions (combined with AND):
   size       larger than 10MB  at most 1KB  大於 10MB  10MB 以上   (1 KB = 1024 bytes)
   count      top 10  最多 10 個  10 largest  最大的 5 個  newest 3  最新的 3 個
   exclude    exclude node_modules and .git  排除 vendor、build 目錄  排除 src/gen
-  Not supported: OR between conditions, negation (不包含 / without), regex.
+  or         今天或昨天  包含 "ERROR" 或 "FATAL"  大於 1GB 或小於 1KB   (same kind; rest is AND)
+  Not supported: OR across kinds (大於 1GB 或今天), NOT (不包含 / without), regex.
 
-Search root (default: current directory):
+Search root (default: current directory; use --dir or the query, not both):
   --dir ~/Downloads   in ~/Documents   在 ./src   under /tmp   在 "~/My Docs"
-  Name the location with --dir or in the query, not both.
 
 Exit status:
   0  files found, or --confirm was cancelled

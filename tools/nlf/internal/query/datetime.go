@@ -195,6 +195,9 @@ func (p *parser) point(ctx *span, yearOK, nowOK bool) (span, bool, error) {
 	}
 	if !ok {
 		base := p.today()
+		if !p.clockBase.IsZero() {
+			base = p.clockBase
+		}
 		inherit := ""
 		if ctx != nil {
 			base = midnight(ctx.lo)

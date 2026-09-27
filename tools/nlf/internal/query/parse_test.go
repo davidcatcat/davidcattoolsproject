@@ -141,6 +141,9 @@ func TestParse(t *testing.T) {
 		{"top 2147483647", Query{Limit: 2147483647}},
 		{"last 292 years", Query{ModifiedAfter: ago(292 * 365 * day)}},
 
+		// size OR (was rejected before OR groups existed)
+		{"larger than 1mb or smaller than 10k", Query{AnyOf: []OrGroup{{Kind: KindSize, Sizes: []SizeCond{{">", 1 << 20}, {"<", 10 << 10}}}}}},
+
 		// combined
 		{"找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendor，最多 10 個", Query{
 			ModifiedAfter: ago(7 * day), Sizes: []SizeCond{{">", 1 << 20}}, Extensions: []string{"go"},
@@ -170,7 +173,7 @@ func TestParseErrors(t *testing.T) {
 	}{
 		{"", "empty query"},
 		{"go files banana", `cannot understand: "banana"`},
-		{"larger than 1mb or smaller than 10k", "OR between conditions"},
+		{"larger than 1mb or modified today", "OR currently requires conditions of the same type"},
 		{"不包含 TODO", "negative conditions"},
 		{`containing "TODO`, "unterminated quote"},
 		{"larger than", "must be followed by a number"},

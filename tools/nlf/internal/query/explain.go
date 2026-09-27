@@ -34,29 +34,61 @@ func Conditions(q *Query, lang Lang) []Condition {
 		}
 		add(pick("副檔名", "extension:"), strings.Join(exts, pick(" 或 ", " or ")))
 	}
+	sens := pick("區分大小寫", "case-sensitive")
+	if q.IgnoreCase {
+		sens = pick("不分大小寫", "ignore case")
+	}
+	orWord := pick(" 或 ", " OR ")
+	anyOne := pick("符合任一個即可", "any one matches")
 	for _, c := range q.Contents {
-		sens := pick("區分大小寫", "case-sensitive")
-		if q.IgnoreCase {
-			sens = pick("不分大小寫", "ignore case")
-		}
 		add(pick("內容包含", "content:"), fmt.Sprintf("%q (%s)", c, sens))
 	}
-	switch after, before := q.ModifiedAfter, q.ModifiedBefore; {
-	case !after.IsZero() && !before.IsZero():
-		add(pick("修改時間", "modified:"), after.Format(timeLayout)+" <= mtime < "+before.Format(timeLayout))
-	case !after.IsZero():
-		add(pick("修改時間", "modified:"), pick("晚於 ", "after ")+after.Format(timeLayout)+" (mtime >= "+after.Format(timeLayout)+")")
-	case !before.IsZero():
-		add(pick("修改時間", "modified:"), pick("早於 ", "before ")+before.Format(timeLayout)+" (mtime < "+before.Format(timeLayout)+")")
-	}
-	if t := q.ModifiedAfter; !t.IsZero() || !q.ModifiedBefore.IsZero() {
-		if t.IsZero() {
-			t = q.ModifiedBefore
+	for _, g := range q.AnyOf {
+		if g.Kind == KindContent {
+			terms := make([]string, len(g.Contents))
+			for i, c := range g.Contents {
+				terms[i] = fmt.Sprintf("%q", c)
+			}
+			add(pick("內容包含", "content:"), strings.Join(terms, orWord)+" ("+anyOne+pick("，", ", ")+sens+")")
 		}
-		add(pick("時區", "time zone:"), t.Format("MST (-07:00)")+pick("，本機時間", ", local time"))
+	}
+	if !q.ModifiedAfter.IsZero() || !q.ModifiedBefore.IsZero() {
+		add(pick("修改時間", "modified:"), rangeText(q.ModifiedAfter, q.ModifiedBefore, pick))
+	}
+	var zone time.Time
+	for _, t := range []time.Time{q.ModifiedAfter, q.ModifiedBefore} {
+		if zone.IsZero() {
+			zone = t
+		}
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindTime {
+			lines := []string{pick("任一區間（OR），符合任一個即可：", "any of (OR), any one matches:")}
+			for _, r := range g.Times {
+				lines = append(lines, "- "+rangeText(r.After, r.Before, pick))
+				for _, t := range []time.Time{r.After, r.Before} {
+					if zone.IsZero() {
+						zone = t
+					}
+				}
+			}
+			add(pick("修改時間", "modified:"), strings.Join(lines, "\n"))
+		}
+	}
+	if !zone.IsZero() {
+		add(pick("時區", "time zone:"), zone.Format("MST (-07:00)")+pick("，本機時間", ", local time"))
 	}
 	for _, s := range q.Sizes {
 		add(pick("檔案大小", "size:"), s.Op+" "+HumanBytes(s.Bytes))
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindSize {
+			sizes := make([]string, len(g.Sizes))
+			for i, s := range g.Sizes {
+				sizes[i] = s.Op + " " + HumanBytes(s.Bytes)
+			}
+			add(pick("檔案大小", "size:"), strings.Join(sizes, orWord)+" ("+anyOne+")")
+		}
 	}
 	if len(q.ExcludeDirs) > 0 {
 		add(pick("排除目錄", "exclude dirs:"), strings.Join(q.ExcludeDirs, ", "))
@@ -73,11 +105,28 @@ func Conditions(q *Query, lang Lang) []Condition {
 	return cs
 }
 
-// FormatConditions renders conditions as indented, aligned rows.
+// rangeText renders after <= mtime < before; a zero bound is unbounded.
+func rangeText(after, before time.Time, pick func(c, e string) string) string {
+	switch {
+	case !after.IsZero() && !before.IsZero():
+		return after.Format(timeLayout) + " <= mtime < " + before.Format(timeLayout)
+	case !after.IsZero():
+		return pick("晚於 ", "after ") + after.Format(timeLayout) + " (mtime >= " + after.Format(timeLayout) + ")"
+	}
+	return pick("早於 ", "before ") + before.Format(timeLayout) + " (mtime < " + before.Format(timeLayout) + ")"
+}
+
+// FormatConditions renders conditions as indented, aligned rows. A value
+// with several lines continues under the first one.
 func FormatConditions(cs []Condition) string {
 	var b strings.Builder
 	for _, c := range cs {
-		fmt.Fprintf(&b, "  %s %s\n", padRight(c.Label, 14), c.Value)
+		label := padRight(c.Label, 14)
+		lines := strings.Split(c.Value, "\n")
+		fmt.Fprintf(&b, "  %s %s\n", label, lines[0])
+		for _, l := range lines[1:] {
+			fmt.Fprintf(&b, "  %s %s\n", strings.Repeat(" ", displayWidth(label)), l)
+		}
 	}
 	return b.String()
 }
@@ -161,29 +210,41 @@ func FindCommand(q *Query, p Platform) string {
 		}
 	}
 	for _, s := range q.Sizes {
-		switch s.Op {
-		case ">":
-			parts = append(parts, "-size", fmt.Sprintf("+%dc", s.Bytes))
-		case ">=":
-			parts = append(parts, "-size", fmt.Sprintf("+%dc", s.Bytes-1))
-		case "<":
-			parts = append(parts, "-size", fmt.Sprintf("-%dc", s.Bytes))
-		case "<=":
-			parts = append(parts, "-size", fmt.Sprintf("-%dc", s.Bytes+1))
+		parts = append(parts, sizeArgs(s)...)
+	}
+	parts = append(parts, timeArgs(q.ModifiedAfter, q.ModifiedBefore)...)
+	// OR groups: \( alt1 -o alt2 ... \)
+	for _, g := range q.AnyOf {
+		var alts [][]string
+		switch g.Kind {
+		case KindSize:
+			for _, s := range g.Sizes {
+				alts = append(alts, sizeArgs(s))
+			}
+		case KindTime:
+			for _, r := range g.Times {
+				alts = append(alts, timeArgs(r.After, r.Before))
+			}
+		}
+		if len(alts) > 0 {
+			parts = append(parts, anyOf(alts)...)
 		}
 	}
-	if !q.ModifiedAfter.IsZero() {
-		parts = append(parts, "-newermt", shellQuote(q.ModifiedAfter.Format(timeLayout)))
-	}
-	if !q.ModifiedBefore.IsZero() {
-		parts = append(parts, "!", "-newermt", shellQuote(q.ModifiedBefore.Format(timeLayout)))
+	flags := "-qIF"
+	if q.IgnoreCase {
+		flags = "-qIiF"
 	}
 	for _, c := range q.Contents {
-		flags := "-qIF"
-		if q.IgnoreCase {
-			flags = "-qIiF"
-		}
 		parts = append(parts, "-exec", "grep", flags, "--", shellQuote(c), "{}", `\;`)
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindContent { // grep -e A -e B matches when any pattern does
+			parts = append(parts, "-exec", "grep", flags)
+			for _, c := range g.Contents {
+				parts = append(parts, "-e", shellQuote(c))
+			}
+			parts = append(parts, "{}", `\;`)
+		}
 	}
 	cmd := strings.Join(parts, " ")
 	switch q.Sort {
@@ -210,6 +271,10 @@ func FindCommand(q *Query, p Platform) string {
 
 // padRight pads s to width terminal columns; CJK characters are two columns wide.
 func padRight(s string, width int) string {
+	return s + strings.Repeat(" ", max(width-displayWidth(s), 1))
+}
+
+func displayWidth(s string) int {
 	w := 0
 	for _, r := range s {
 		if unicode.Is(unicode.Han, r) {
@@ -218,7 +283,50 @@ func padRight(s string, width int) string {
 			w++
 		}
 	}
-	return s + strings.Repeat(" ", max(width-w, 1))
+	return w
+}
+
+func sizeArgs(s SizeCond) []string {
+	switch s.Op {
+	case ">":
+		return []string{"-size", fmt.Sprintf("+%dc", s.Bytes)}
+	case ">=":
+		return []string{"-size", fmt.Sprintf("+%dc", s.Bytes-1)}
+	case "<":
+		return []string{"-size", fmt.Sprintf("-%dc", s.Bytes)}
+	case "<=":
+		return []string{"-size", fmt.Sprintf("-%dc", s.Bytes+1)}
+	}
+	return nil
+}
+
+func timeArgs(after, before time.Time) []string {
+	var args []string
+	if !after.IsZero() {
+		args = append(args, "-newermt", shellQuote(after.Format(timeLayout)))
+	}
+	if !before.IsZero() {
+		args = append(args, "!", "-newermt", shellQuote(before.Format(timeLayout)))
+	}
+	return args
+}
+
+// anyOf joins find expressions with -o inside parentheses.
+func anyOf(alts [][]string) []string {
+	out := []string{`\(`}
+	for i, a := range alts {
+		if i > 0 {
+			out = append(out, "-o")
+		}
+		if len(a) > 2 {
+			out = append(out, `\(`)
+			out = append(out, a...)
+			out = append(out, `\)`)
+		} else {
+			out = append(out, a...)
+		}
+	}
+	return append(out, `\)`)
 }
 
 // joinOr inserts "-o" between groups of n arguments.

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -101,11 +102,14 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 			rep.record(path, err)
 			return nil
 		}
-		if !matchSize(info.Size(), q.Sizes) || !matchTime(info.ModTime(), q) {
+		// Size and mtime are read once; every AND condition and OR group is
+		// evaluated against those values.
+		size, mtime := info.Size(), info.ModTime()
+		if !matchSize(size, q.Sizes) || !matchTime(mtime, q) || !matchGroups(size, mtime, q.AnyOf) {
 			return nil
 		}
-		if len(q.Contents) > 0 {
-			ok, err := containsAll(path, q.Contents, q.IgnoreCase)
+		if hasContent(q) {
+			ok, err := matchContent(path, q)
 			if err != nil {
 				rep.record(path, err)
 				return nil
@@ -304,6 +308,24 @@ func matchSize(size int64, conds []query.SizeCond) bool {
 	return true
 }
 
+// matchGroups reports whether every size and time OR group has at least one
+// matching alternative. Content groups are checked by matchContent.
+func matchGroups(size int64, mtime time.Time, groups []query.OrGroup) bool {
+	for _, g := range groups {
+		switch g.Kind {
+		case query.KindSize:
+			if !slices.ContainsFunc(g.Sizes, func(c query.SizeCond) bool { return c.Match(size) }) {
+				return false
+			}
+		case query.KindTime:
+			if !slices.ContainsFunc(g.Times, func(r query.TimeRange) bool { return r.Match(mtime) }) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func matchTime(t time.Time, q *query.Query) bool {
 	if !q.ModifiedAfter.IsZero() && t.Before(q.ModifiedAfter) {
 		return false
@@ -314,27 +336,65 @@ func matchTime(t time.Time, q *query.Query) bool {
 	return true
 }
 
+func hasContent(q *query.Query) bool {
+	return len(q.Contents) > 0 || slices.ContainsFunc(q.AnyOf, func(g query.OrGroup) bool { return g.Kind == query.KindContent })
+}
+
+// matchContent reports whether the file contains every term of q.Contents
+// (AND) and at least one term of each content OR group. The file is read
+// once for all terms.
+func matchContent(path string, q *query.Query) (bool, error) {
+	terms := append([]string(nil), q.Contents...)
+	type span struct{ lo, hi int } // a content OR group's terms within terms
+	var groups []span
+	for _, g := range q.AnyOf {
+		if g.Kind == query.KindContent {
+			groups = append(groups, span{len(terms), len(terms) + len(g.Contents)})
+			terms = append(terms, g.Contents...)
+		}
+	}
+	satisfied := func(found []bool) bool {
+		for i := range q.Contents {
+			if !found[i] {
+				return false
+			}
+		}
+		for _, g := range groups {
+			if !slices.Contains(found[g.lo:g.hi], true) {
+				return false
+			}
+		}
+		return true
+	}
+	found, err := scanTerms(path, terms, q.IgnoreCase, satisfied)
+	if err != nil || found == nil {
+		return false, err
+	}
+	return satisfied(found), nil
+}
+
 const chunkSize = 64 << 10
 
-// containsAll reports whether the file contains every term. Binary files
-// (a NUL byte in the first chunk) never match, like grep -I.
-func containsAll(path string, terms []string, ignoreCase bool) (bool, error) {
+// scanTerms streams the file once and reports which terms occur in it,
+// stopping as soon as satisfied(found) holds. Binary files (a NUL byte in the
+// first chunk) are skipped like grep -I: found is nil.
+func scanTerms(path string, terms []string, ignoreCase bool, satisfied func(found []bool) bool) ([]bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer f.Close()
 
-	pending := make([][]byte, 0, len(terms))
+	needles := make([][]byte, len(terms))
 	maxLen := 0
-	for _, t := range terms {
-		b := []byte(t)
+	for i, t := range terms {
+		needles[i] = []byte(t)
 		if ignoreCase {
-			b = bytes.ToLower(b)
+			needles[i] = bytes.ToLower(needles[i])
 		}
-		pending = append(pending, b)
-		maxLen = max(maxLen, len(b))
+		maxLen = max(maxLen, len(needles[i]))
 	}
+	found := make([]bool, len(terms))
 
 	buf := make([]byte, chunkSize)
 	var window []byte
@@ -344,7 +404,7 @@ func containsAll(path string, terms []string, ignoreCase bool) (bool, error) {
 		if n > 0 {
 			chunk := buf[:n]
 			if first && bytes.IndexByte(chunk, 0) >= 0 {
-				return false, nil
+				return nil, nil
 			}
 			first = false
 			window = append(window, chunk...)
@@ -352,15 +412,13 @@ func containsAll(path string, terms []string, ignoreCase bool) (bool, error) {
 			if ignoreCase {
 				hay = bytes.ToLower(window)
 			}
-			remaining := pending[:0]
-			for _, t := range pending {
-				if !bytes.Contains(hay, t) {
-					remaining = append(remaining, t)
+			for i, nd := range needles {
+				if !found[i] && bytes.Contains(hay, nd) {
+					found[i] = true
 				}
 			}
-			pending = remaining
-			if len(pending) == 0 {
-				return true, nil
+			if satisfied(found) {
+				return found, nil
 			}
 			// Keep a tail so matches spanning chunk boundaries are found.
 			if keep := max(maxLen-1, 0); len(window) > keep {
@@ -368,10 +426,10 @@ func containsAll(path string, terms []string, ignoreCase bool) (bool, error) {
 			}
 		}
 		if err == io.EOF {
-			return false, nil
+			return found, nil
 		}
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 	}
 }

@@ -20,14 +20,18 @@ func Parse(input string, now time.Time) (*Query, error) {
 			hintZh: "例如：nlf \"最近 7 天修改的 go 檔\"", hintEn: `example: nlf "go files modified in the last 7 days"`}
 	}
 	p := &parser{toks: toks, q: &Query{Lang: DetectLang(input), Now: now}}
-	for p.pos < len(p.toks) {
-		if err := p.step(); err != nil {
-			return nil, err
-		}
+	if err := p.parseAll(); err != nil {
+		return nil, err
 	}
 	q := p.q
+	contradiction := &Error{zh: "修改時間條件互相矛盾，不可能有檔案符合", en: "modification time conditions contradict each other"}
 	if !q.ModifiedAfter.IsZero() && !q.ModifiedBefore.IsZero() && !q.ModifiedAfter.Before(q.ModifiedBefore) {
-		return nil, &Error{zh: "修改時間條件互相矛盾，不可能有檔案符合", en: "modification time conditions contradict each other"}
+		return nil, contradiction
+	}
+	for _, g := range q.AnyOf {
+		if g.Kind == KindTime && !slices.ContainsFunc(g.Times, func(r TimeRange) bool { return r.overlaps(q.ModifiedAfter, q.ModifiedBefore) }) {
+			return nil, contradiction
+		}
 	}
 	q.Extensions = dedupe(q.Extensions)
 	q.ExcludeDirs = dedupe(q.ExcludeDirs)
@@ -38,6 +42,9 @@ type parser struct {
 	toks []token
 	pos  int
 	q    *Query
+	// clockBase is the day a clock time without a date refers to while an OR
+	// alternative is parsed; zero means today.
+	clockBase time.Time
 }
 
 func (p *parser) cur() (token, bool) {
@@ -124,10 +131,6 @@ func (p *parser) step() error {
 	}
 	if p.extension() {
 		return nil
-	}
-	if _, ok := p.accept(orPhrases); ok {
-		return &Error{Token: t.raw, zh: "v0.1 還不支援「或」條件，所有條件都會同時成立", en: "OR between conditions is not supported in v0.1; all conditions are combined with AND",
-			hintZh: "提示：多個副檔名可以寫成「go 或 md 檔」。", hintEn: `hint: several extensions can be written as "go or md files".`}
 	}
 	if _, ok := p.accept(notPhrases); ok {
 		return &Error{Token: t.raw, zh: "v0.1 還不支援否定條件", en: "negative conditions are not supported in v0.1",

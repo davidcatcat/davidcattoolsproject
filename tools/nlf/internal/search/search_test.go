@@ -359,3 +359,110 @@ func TestToNowBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestOrGroups evaluates OR groups on real files: each group needs one
+// matching alternative, and groups are ANDed with each other and the rest.
+func TestOrGroups(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 9, 28, 10, 30, 0, 0, loc)
+	today := time.Date(2026, 9, 28, 9, 0, 0, 0, loc)
+	dir := t.TempDir()
+	for _, f := range []struct {
+		name, data string
+		mtime      time.Time
+	}{
+		{"a.log", "boot ERROR here", today},
+		{"b.log", "FATAL disk", today.AddDate(0, 0, -1)},
+		{"c.log", "ERROR old", today.AddDate(0, 0, -2)},
+		{"d.txt", "ERROR text", today},
+		{"e.log", "INFO fine", today},
+	} {
+		p := filepath.Join(dir, f.name)
+		write(t, p, []byte(f.data))
+		if err := os.Chtimes(p, f.mtime, f.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"找今天或昨天修改的檔案", []string{"a.log", "b.log", "d.txt", "e.log"}},
+		{"找今天或昨天修改的 log", []string{"a.log", "b.log", "e.log"}},
+		{`找包含 "ERROR" 或 "FATAL" 的 log`, []string{"a.log", "b.log", "c.log"}},
+		{`找今天或昨天修改，而且包含 "ERROR" 或 "FATAL" 的 log`, []string{"a.log", "b.log"}},
+		{`find log files containing "ERROR" or "panic" modified today or yesterday`, []string{"a.log"}},
+		{`找包含 "error" 或 "fatal" 不分大小寫的檔案`, []string{"a.log", "b.log", "c.log", "d.txt"}},
+		{`找包含 "ERROR" 且包含 "boot" 的檔案`, []string{"a.log"}},                          // AND unchanged
+		{`找包含 "boot" 或 "disk"、包含 "ERROR" 的檔案`, []string{"a.log"}},                  // AND + OR
+		{"找 2026-09-26 或 2026-09-27 修改的 log", []string{"b.log", "c.log"}},          // disjoint days
+		{"找 2026-09-26 或 2026-09-28 修改的 log", []string{"a.log", "c.log", "e.log"}}, // not merged into one range
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.query, got, tt.want)
+		}
+	}
+}
+
+func TestSizeOrGroup(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "tiny"), bytes.Repeat([]byte("x"), 10))
+	write(t, filepath.Join(dir, "mid"), bytes.Repeat([]byte("x"), 5<<10))
+	write(t, filepath.Join(dir, "big"), bytes.Repeat([]byte("x"), 2<<20))
+	for _, c := range []struct {
+		query string
+		want  []string
+	}{
+		{"找大於 1MB 或小於 1KB 的檔案", []string{"big", "tiny"}},
+		{"files larger than 1MB or smaller than 1KB", []string{"big", "tiny"}},
+		{"找大於 1KB 或小於 1KB 的檔案", []string{"big", "mid", "tiny"}},
+		{"找大於 1MB 或小於 1KB、大於 1 bytes 的檔案", []string{"big", "tiny"}},
+		{"找大於 3MB 或小於 5 bytes 的檔案", nil},
+	} {
+		q, err := query.Parse(c.query, time.Now())
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: got %v, want %v", c.query, got, c.want)
+		}
+	}
+}
+
+// TestContentOrScan checks the shared single-pass scanner with OR terms:
+// chunk boundaries, binary files and AND terms mixed with an OR group.
+func TestContentOrScan(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "span.txt"), append(bytes.Repeat([]byte("a"), chunkSize-3), []byte("FATAL")...))
+	write(t, filepath.Join(dir, "late.txt"), append(bytes.Repeat([]byte("b"), 3*chunkSize), []byte("panic")...))
+	write(t, filepath.Join(dir, "bin.dat"), []byte("ERROR\x00FATAL"))
+	write(t, filepath.Join(dir, "none.txt"), bytes.Repeat([]byte("c"), 2*chunkSize))
+	anyOf := func(terms ...string) []query.OrGroup {
+		return []query.OrGroup{{Kind: query.KindContent, Contents: terms}}
+	}
+	for _, c := range []struct {
+		q    query.Query
+		want []string
+	}{
+		{query.Query{AnyOf: anyOf("ERROR", "FATAL", "panic")}, []string{"late.txt", "span.txt"}},
+		{query.Query{AnyOf: anyOf("fatal", "PANIC"), IgnoreCase: true}, []string{"late.txt", "span.txt"}},
+		{query.Query{Contents: []string{"aaa"}, AnyOf: anyOf("FATAL", "panic")}, []string{"span.txt"}},
+		{query.Query{Contents: []string{"bbb"}, AnyOf: anyOf("nope", "zzz")}, nil},
+		{query.Query{AnyOf: append(anyOf("FATAL"), anyOf("panic")...)}, nil}, // two groups: both needed
+	} {
+		c.q.Root = dir
+		got, _ := run(t, &c.q)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%+v: got %v, want %v", c.q, got, c.want)
+		}
+	}
+}

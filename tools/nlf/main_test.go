@@ -121,7 +121,7 @@ func TestNoMatchesExitsOne(t *testing.T) {
 
 func TestParseErrorExitCode(t *testing.T) {
 	_, errOut, code := nlf(t, "大於 1MB 或 go 檔")
-	if code != 2 || !strings.Contains(errOut, "不支援「或」條件") {
+	if code != 2 || !strings.Contains(errOut, "目前 OR 只能連接同類條件") {
 		t.Errorf("code=%d err=%q", code, errOut)
 	}
 	// "banana files" would now mean *.banana (any word + file noun is an
@@ -540,6 +540,8 @@ func TestHelpContent(t *testing.T) {
 		"0  files found, or --confirm was cancelled", "1  valid query, but no files found", "2  error",
 		// tips
 		"Quote exact content", "Quote paths with spaces", "never\n    silently widens the search",
+		// boolean OR
+		`or         今天或昨天  包含 "ERROR" 或 "FATAL"  大於 1GB 或小於 1KB`, "same kind; rest is AND", "OR across kinds",
 		// date & time
 		"Date & time", "start <= mtime < end", "an end date is included", "no year = this year",
 		"nlf '找 2026 年 9 月的 pdf 檔'", "nlf '找 9 月修改的 yml 檔'", "nlf '查 2026 年 9 月 28 日改了什麼檔案'",
@@ -836,5 +838,69 @@ func TestDateSearchEndToEnd(t *testing.T) {
 	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "找 2026-09-28 修改的 yml 檔")
 	if !strings.Contains(plan, "modified:      2026-09-28 00:00:00 <= mtime < 2026-09-29 00:00:00") || !strings.Contains(plan, "time zone:") {
 		t.Errorf("plan does not show the date range:\n%s", plan)
+	}
+}
+
+// TestOrEndToEnd runs OR queries through the CLI and checks that --explain and
+// --confirm show OR groups as OR, never as separate AND rows.
+func TestOrEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	loc := testNow.Location() // testNow is 2026-09-27 12:00 local
+	for _, f := range []struct {
+		name, data string
+		mtime      time.Time
+	}{
+		{"a.log", "ERROR", time.Date(2026, 9, 27, 9, 0, 0, 0, loc)},
+		{"b.log", "FATAL", time.Date(2026, 9, 26, 9, 0, 0, 0, loc)},
+		{"c.log", "ERROR", time.Date(2026, 9, 25, 9, 0, 0, 0, loc)},
+		{"d.txt", "ERROR", time.Date(2026, 9, 27, 9, 0, 0, 0, loc)},
+		{"e.log", "INFO", time.Date(2026, 9, 27, 9, 0, 0, 0, loc)},
+	} {
+		mkfiles(t, dir, map[string]string{f.name: f.data})
+		if err := os.Chtimes(filepath.Join(dir, f.name), f.mtime, f.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct{ query, want string }{
+		{"找今天或昨天修改的檔案", "a.log,b.log,d.txt,e.log"},
+		{"找今天或昨天修改的 log", "a.log,b.log,e.log"},
+		{`找包含 "ERROR" 或 "FATAL" 的 log`, "a.log,b.log,c.log"},
+		{`找今天或昨天修改，而且包含 "ERROR" 或 "FATAL" 的 log`, "a.log,b.log"},
+		{"找 log 或 txt 檔", "a.log,b.log,c.log,d.txt,e.log"},
+	} {
+		out, errOut, code := nlf(t, "--dir", dir, c.query)
+		if got := strings.Join(paths(dir, out), ","); code != 0 || got != c.want {
+			t.Errorf("%s: code=%d got %s want %s\n%s", c.query, code, got, c.want, errOut)
+		}
+	}
+	// Mixed kinds and dangling ORs are errors: exit 2, nothing searched.
+	for _, q := range []string{"找大於 1GB 或最近 1 小時修改的檔案", `找包含 "ERROR" 或 9 月修改的 log`, "今天 或", "或 今天"} {
+		if out, _, code := nlf(t, "--dir", dir, q); code != 2 || out != "" {
+			t.Errorf("%s: code=%d out=%q, want exit 2", q, code, out)
+		}
+	}
+	_, errOut, _ := nlf(t, "--dir", dir, "找大於 1GB 或最近 1 小時修改的檔案")
+	if !strings.Contains(errOut, "目前 OR 只能連接同類條件") {
+		t.Errorf("mixed OR message: %q", errOut)
+	}
+
+	q := `find log files containing "ERROR" or "panic" modified today or yesterday`
+	ex, _, _ := nlf(t, "--explain", "--dir", dir, q)
+	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, q)
+	for name, text := range map[string]string{"--explain": ex, "--confirm": plan} {
+		for _, want := range []string{`content:       "ERROR" OR "panic" (any one matches, case-sensitive)`,
+			"modified:      any of (OR), any one matches:",
+			"- 2026-09-27 00:00:00 <= mtime < 2026-09-28 00:00:00", "- 2026-09-26 00:00:00 <= mtime < 2026-09-27 00:00:00",
+			"-e ERROR -e panic"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s missing %q:\n%s", name, want, text)
+			}
+		}
+		if strings.Count(text, "content:") != 1 {
+			t.Errorf("%s shows the OR terms as separate rows:\n%s", name, text)
+		}
+	}
+	if !strings.Contains(plan, "Risk:\n  READ-ONLY") {
+		t.Errorf("--confirm safety changed:\n%s", plan)
 	}
 }
