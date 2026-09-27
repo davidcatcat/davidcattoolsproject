@@ -289,7 +289,6 @@ func TestInvalidDatesAndTimes(t *testing.T) {
 		{"2026.09.28", "ambiguous date format", ""},
 		{"26-09-28", "ambiguous date format", ""},
 		{"26/09/28", "ambiguous date format", ""},
-		{"找 9 月 1 日之前的檔案", "", "看不懂這個詞"}, // before/after a date are not supported yet
 		{"files that may contain TODO", `cannot understand: "may"`, ""},
 		{"找 2026 年 3 月前的檔案", "", "看不懂這個時間"},
 	}

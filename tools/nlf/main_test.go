@@ -540,6 +540,8 @@ func TestHelpContent(t *testing.T) {
 		"0  files found, or --confirm was cancelled", "1  valid query, but no files found", "2  error",
 		// tips
 		"Quote exact content", "Quote paths with spaces", "never\n    silently widens the search",
+		// absolute date comparators
+		"nlf '找 2026-09-01 以前修改的檔案'", "nlf 'files modified on or after Sep 1'",
 		// filename search
 		`filename   檔名是 application.yml  檔名包含 config  filename matches "app-*.yml"`, "(case-sensitive)",
 		// boolean OR
@@ -960,5 +962,51 @@ func TestFilenameEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(plan, "Risk:\n  READ-ONLY") {
 		t.Errorf("--confirm safety changed:\n%s", plan)
+	}
+}
+
+// TestAbsoluteComparatorsEndToEnd runs before / after comparators through the CLI.
+func TestAbsoluteComparatorsEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	loc := testNow.Location()
+	for n, mt := range map[string]time.Time{
+		"before.txt":   time.Date(2026, 8, 31, 23, 59, 59, 0, loc),
+		"boundary.txt": time.Date(2026, 9, 1, 0, 0, 0, 0, loc),
+		"during.txt":   time.Date(2026, 9, 1, 12, 0, 0, 0, loc),
+		"after.txt":    time.Date(2026, 9, 2, 0, 0, 0, 0, loc),
+	} {
+		mkfiles(t, dir, map[string]string{n: n})
+		if err := os.Chtimes(filepath.Join(dir, n), mt, mt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct{ query, want string }{
+		{"before Sep 1", "before.txt"},
+		{"找 2026-09-01 以前修改的檔案", "before.txt"},
+		{"on or before Sep 1", "before.txt,boundary.txt,during.txt"},
+		{"找 2026-09-01 或以前修改的檔案", "before.txt,boundary.txt,during.txt"},
+		{"after Sep 1", "after.txt"},
+		{"找 2026-09-01 以後修改的檔案", "after.txt"},
+		{"on or after Sep 1", "after.txt,boundary.txt,during.txt"},
+		{"since Sep 1", "after.txt,boundary.txt,during.txt"},
+		{"before Sep 1 or after Sep 1", "after.txt,before.txt"},
+		{"找 9 月以前修改的 txt 檔", "before.txt"},
+		{"找檔名包含 u 的檔案，2026-09-01 或以後修改", "boundary.txt,during.txt"}, // bo-u-ndary, d-u-ring
+	} {
+		out, errOut, code := nlf(t, "--dir", dir, c.query)
+		if got := strings.Join(paths(dir, out), ","); code != 0 || got != c.want {
+			t.Errorf("%s: code=%d got %s want %s\n%s", c.query, code, got, c.want, errOut)
+		}
+	}
+	for _, q := range []string{"before", "on or after", "before 14:00", "2026-02-29 以前", "找 9 月 20 日以後且 9 月 10 日以前修改的檔案"} {
+		if out, errOut, code := nlf(t, "--dir", dir, q); code != 2 || out != "" || errOut == "" {
+			t.Errorf("%s: code=%d out=%q err=%q, want exit 2", q, code, out, errOut)
+		}
+	}
+	ex, _, _ := nlf(t, "--explain", "--dir", dir, "after Sep 1")
+	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "on or after Sep 1")
+	if !strings.Contains(ex, "after 2026-09-02 00:00:00 (mtime >= 2026-09-02 00:00:00)") ||
+		!strings.Contains(plan, "after 2026-09-01 00:00:00 (mtime >= 2026-09-01 00:00:00)") || !strings.Contains(plan, "Risk:\n  READ-ONLY") {
+		t.Errorf("explain/confirm bounds:\n%s\n%s", ex, plan)
 	}
 }

@@ -588,3 +588,77 @@ func TestFilenameBeforeContent(t *testing.T) {
 		t.Errorf("got %v, denied %v; the locked file should not have been opened", got, rep.PermissionDenied)
 	}
 }
+
+// TestAbsoluteComparatorBoundaries checks before / on or before / after /
+// on or after against real files whose mtimes sit exactly on and one
+// nanosecond before the calendar boundaries of a day, a month and a year.
+func TestAbsoluteComparatorBoundaries(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 9, 28, 10, 30, 0, 0, loc)
+	at := func(y int, mo time.Month, d int) time.Time { return time.Date(y, mo, d, 0, 0, 0, 0, loc) }
+	justBefore := func(t time.Time) time.Time { return t.Add(-time.Nanosecond) }
+	dir := t.TempDir()
+	files := map[string]time.Time{
+		"2024-12-31-last": justBefore(at(2025, 1, 1)),
+		"2025-01-01":      at(2025, 1, 1),
+		"2025-12-31-last": justBefore(at(2026, 1, 1)),
+		"2026-01-01":      at(2026, 1, 1),
+		"0831-last":       justBefore(at(2026, 9, 1)),
+		"0901-0000":       at(2026, 9, 1),
+		"0901-1200":       at(2026, 9, 1).Add(12 * time.Hour),
+		"0901-last":       justBefore(at(2026, 9, 2)),
+		"0902-0000":       at(2026, 9, 2),
+		"0930-last":       justBefore(at(2026, 10, 1)),
+		"1001-0000":       at(2026, 10, 1),
+	}
+	for n, mt := range files {
+		p := filepath.Join(dir, n)
+		write(t, p, nil)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(p); err != nil || !info.ModTime().Equal(mt) {
+			t.Skipf("file system does not keep nanosecond mtimes (%v)", err)
+		}
+	}
+	// Sorted names: 0831-last 0901-0000 0901-1200 0901-last 0902-0000 0930-last 1001-0000
+	//               2024-12-31-last 2025-01-01 2025-12-31-last 2026-01-01
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		// day
+		{"before Sep 1", []string{"0831-last", "2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		{"on or before Sep 1", []string{"0831-last", "0901-0000", "0901-1200", "0901-last", "2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		{"after Sep 1", []string{"0902-0000", "0930-last", "1001-0000"}},
+		{"on or after Sep 1", []string{"0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last", "1001-0000"}},
+		{"since Sep 1", []string{"0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last", "1001-0000"}},
+		{"找 2026-09-01 以前的檔案", []string{"0831-last", "2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		{"找 2026-09-01 以後的檔案", []string{"0902-0000", "0930-last", "1001-0000"}},
+		// month
+		{"before September", []string{"0831-last", "2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		{"after September", []string{"1001-0000"}},
+		{"on or before September", []string{"0831-last", "0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last",
+			"2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		{"找 9 月或以後的檔案", []string{"0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last", "1001-0000"}},
+		// year
+		{"before 2025", []string{"2024-12-31-last"}},
+		{"on or before 2025", []string{"2024-12-31-last", "2025-01-01", "2025-12-31-last"}},
+		{"after 2025", []string{"0831-last", "0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last", "1001-0000", "2026-01-01"}},
+		{"找 2025 年或以後的檔案", []string{"0831-last", "0901-0000", "0901-1200", "0901-last", "0902-0000", "0930-last",
+			"1001-0000", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+		// OR of two comparators
+		{"before Sep 1 or after Sep 30", []string{"0831-last", "1001-0000", "2024-12-31-last", "2025-01-01", "2025-12-31-last", "2026-01-01"}},
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s:\n got  %v\n want %v", tt.query, got, tt.want)
+		}
+	}
+}

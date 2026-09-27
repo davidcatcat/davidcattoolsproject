@@ -86,9 +86,95 @@ func buildMonthNames() map[string]time.Month {
 	return names
 }
 
+// Absolute comparisons against a calendar day, month or year.
+//
+// The calendar expression is first turned into its span [start, end); the
+// comparator then only picks a bound, so days, months and years share one
+// rule:
+//
+//	before X        mtime <  X.start     X 以前 / X 之前
+//	on or before X  mtime <  X.end       X 或以前 / X 以前含當日
+//	after X         mtime >= X.end       X 以後 / X 之後
+//	on or after X   mtime >= X.start     X 或以後 / X 以後含當日  (= since X)
+//
+// "after Sep 1" therefore starts on Sep 2; "since Sep 1" and "on or after
+// Sep 1" start on Sep 1. Times of day are not accepted ("before 14:00" could
+// mean any day), and neither is a range after a comparator.
+type absCmp int
+
+const (
+	cmpBefore absCmp = iota
+	cmpOnOrBefore
+	cmpAfter
+	cmpOnOrAfter
+)
+
+var (
+	absPrefix  = map[string]absCmp{"before": cmpBefore, "on or before": cmpOnOrBefore, "after": cmpAfter, "on or after": cmpOnOrAfter}
+	absPostfix = map[string]absCmp{
+		"以前": cmpBefore, "之前": cmpBefore,
+		"或以前": cmpOnOrBefore, "或之前": cmpOnOrBefore, "以前含當日": cmpOnOrBefore, "之前含當日": cmpOnOrBefore,
+		"以前含当日": cmpOnOrBefore, "之前含当日": cmpOnOrBefore,
+		"以後": cmpAfter, "之後": cmpAfter, "以后": cmpAfter, "之后": cmpAfter,
+		"或以後": cmpOnOrAfter, "或之後": cmpOnOrAfter, "或以后": cmpOnOrAfter, "或之后": cmpOnOrAfter,
+		"以後含當日": cmpOnOrAfter, "之後含當日": cmpOnOrAfter, "以后含当日": cmpOnOrAfter, "之后含当日": cmpOnOrAfter,
+	}
+)
+
+// applyAbs sets the bound for "cmp span".
+func (p *parser) applyAbs(cmp absCmp, s span, from int) error {
+	if s.instant || s.now {
+		return &Error{Token: p.rawFrom(from), zh: "單邊的日期比較只支援日期、月份或年份，不支援時刻", en: "before/after compare against a date, month or year, not a time of day",
+			hintZh: "提示：例如 2026-09-01 以前、9 月以後、2025 年或以前；時間範圍請寫成 今天 1 點到 5 點",
+			hintEn: "hint: e.g. before 2026-09-01, after September, on or before 2025; for times use a range such as today 01:00 to 05:00"}
+	}
+	if _, n := p.matchAt(p.pos, rangeTo); n > 0 {
+		return &Error{Token: p.rawFrom(from) + " " + p.toks[p.pos].raw, zh: "以前 / 以後 不能再接時間範圍", en: "before/after cannot be followed by a range",
+			hintZh: "提示：區間請寫成 9 月 1 日到 9 月 15 日，或 9 月 1 日以後且 9 月 15 日以前"}
+	}
+	switch cmp {
+	case cmpBefore:
+		p.before(s.lo)
+	case cmpOnOrBefore:
+		p.before(s.hi)
+	case cmpAfter:
+		p.after(s.hi)
+	case cmpOnOrAfter:
+		p.after(s.lo)
+	}
+	return nil
+}
+
+// absExpr parses "before / on or before / after / on or after <calendar>".
+// A number that is not a year ("before 30 days") is left to the relative
+// comparator.
+func (p *parser) absExpr() (bool, error) {
+	save := p.pos
+	w, ok := p.accept(mapKeys(absPrefix))
+	if !ok {
+		return false, nil
+	}
+	a, ok, err := p.point(nil, true, false)
+	if err != nil {
+		return true, err
+	}
+	if !ok {
+		if t, ok := p.cur(); ok && t.kind == tNum && w == "before" {
+			p.pos = save // "before 30 days": a duration, handled as before
+			return false, nil
+		}
+		return true, &Error{Token: p.rawFrom(save), zh: "「" + w + "」後面需要日期、月份或年份", en: `"` + w + `" must be followed by a date, month or year`,
+			hintEn: "example: before 2026-09-01, after September, on or before 2025"}
+	}
+	return true, p.applyAbs(absPrefix[w], a, save)
+}
+
 // dateExpr parses a date, a date range or a time range at the current
 // position. It reports false, consuming nothing, when there is none.
 func (p *parser) dateExpr() (bool, error) {
+	if ok, err := p.absExpr(); ok || err != nil {
+		return ok, err
+	}
 	save := p.pos
 	prep, _ := p.accept(datePreps)
 	a, ok, err := p.point(nil, prep != "", false)
@@ -98,6 +184,12 @@ func (p *parser) dateExpr() (bool, error) {
 	if !ok {
 		p.pos = save
 		return false, nil
+	}
+	// "2026-09-01 以前", "9 月或以後", "2025 年以前含當日"
+	if prep == "" {
+		if w, ok := p.accept(mapKeys(absPostfix)); ok {
+			return true, p.applyAbs(absPostfix[w], a, save)
+		}
 	}
 	// "today between 2am and 4am", "yesterday from 23:00 to today 02:00":
 	// a day followed by a range of times on it.
@@ -565,7 +657,12 @@ func (p *parser) unitAt(i int) bool {
 }
 
 // postfixAhead reports whether a duration postfix ("前", "內", "ago") follows.
+// 以前 / 之前 after a month or year are the absolute comparison ("9 月以前"
+// is before September), not a duration; bare 前 ("3 月前") still is.
 func (p *parser) postfixAhead() bool {
+	if _, n := p.matchAt(p.pos, mapKeys(absPostfix)); n > 0 {
+		return false
+	}
 	_, n := p.matchAt(p.pos, mapKeys(postfixPhrases))
 	return n > 0
 }

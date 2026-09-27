@@ -669,7 +669,7 @@ func init() {
 		mapKeys(timeUnits), mapKeys(sizeUnits),
 		datePreps, rangeTo, betweenAnd, sincePost, nowWords, mapKeys(dayWords), mapKeys(monthWords),
 		mapKeys(yearWords), mapKeys(monthNames), {"am", "pm"},
-		nameSubjects, impliedNameOps, mapKeys(nameOps)}
+		nameSubjects, impliedNameOps, mapKeys(nameOps), mapKeys(absPrefix)}
 	for _, l := range lists {
 		for _, ph := range l {
 			for _, w := range strings.Fields(ph) {

@@ -46,6 +46,7 @@ Date & time (local time; a range is start <= mtime < end, and an end date is inc
   nlf '找昨天 23:00 到今天 02:00 修改的 log'   nlf '找最近 6 小時修改的 conf'
   nlf 'files modified on 2026-09-28'   nlf 'log files modified from Sep 1 to Sep 15'
   nlf '找本月修改的 yaml'   nlf 'conf files modified in the last 6 hours'
+  nlf '找 2026-09-01 以前修改的檔案'   nlf 'files modified on or after Sep 1'
 
 Flags:
   --explain        show how the query is understood; never searches
@@ -87,8 +88,7 @@ Exit status:
   2  error: query not understood, bad flag, missing or unreadable location
 
 Tips:
-  - Quote exact content: 包含 "20.2.250.249", containing "hello world"
-  - Quote paths with spaces: 在 "~/My Docs"
+  - Quote exact content: 包含 "20.2.250.249"    Quote paths with spaces: 在 "~/My Docs"
   - If nlf does not understand a word it stops with an error; it never
     silently widens the search. Check a query with --explain.
 `
