@@ -2,7 +2,7 @@
 
 日期：2026-09-28
 範圍：`tools/nlf`，新增日期與時間區間搜尋
-狀態：已實作並驗證，**沒有 commit、沒有 push**，等待 review
+狀態：已實作並驗證，並已 commit、push（`0eba64b`）；之後依 review 做了一次修訂（見下方「Revision 1」），修訂也已 commit 並 push 到 main
 
 ## Summary
 
@@ -12,6 +12,69 @@
 - 搜尋仍然只用 Go 讀取 `FileInfo.ModTime()`，和作業系統無關，不依賴 `find -newermt`、`date` 或 shell。
 - `--explain` / `--confirm` 會把區間顯示成 `2026-09-28 00:00:00 <= mtime < 2026-09-29 00:00:00`，並多一列時區（例如 `CST (+08:00)，本機時間`）。
 - 看不懂或不合法的日期、時間、區間一律報錯（exit 2），不會自動修正、交換或忽略。
+
+## Revision 1：「到現在」與 since 分開（review 修正）
+
+**問題：** 原本 `從 9 月 1 日到現在`、`from Sep 1 until now` 被解析成只有下界（`mtime >= start`），和 since 相同。這樣 mtime 在未來的檔案也會被包含，不符合「到現在」的字面意思。
+
+**修正後的語意：**
+
+| 寫法 | 區間 |
+|---|---|
+| `A 到現在`、`A 至現在`、`A 到目前`、`from A until now`、`from A to now` | `[A 的開始, Query.Now)` |
+| `since A`、`從 A`、`從 A 開始`、`A 以來` | `[A 的開始, 無上限)`（不變） |
+
+**實作：**
+
+- 位置：`internal/query/datetime.go` 的 `dateExpr`。
+- 範圍的結束是 `now` 時，上界改為 `Query.Now`，並套用和其他區間相同的「開始必須早於結束」檢查。所以 `找 12 月 1 日到現在的檔案`（開始在未來）現在會報「開始時間必須早於結束時間」，而不是產生一個空區間。
+- 其他日期與時間的語意都沒有改動。
+
+**新增或修改的測試：**
+
+- `TestDateRanges`：
+  - `從 9 月 1 日到現在`、`9 月 1 日至現在`、`9 月 1 日到目前`、`from Sep 1 until now`、`from Sep 1 to now`、`from 9/1 to now`、`today 01:00 to now` → `ModifiedAfter` = 開始，`ModifiedBefore` = `Query.Now`。
+  - `since Sep 1`、`files modified since September 1`、`從 9 月 1 日`、`9 月 1 日以來`、`從 9 月 1 日開始`、`since yesterday 23:00` 仍然沒有 `ModifiedBefore`。
+  - 原本期望 `到現在` / `until now` / `to now` 沒有上界的 3 筆，改為期望上界是 now。
+- `TestInvalidDatesAndTimes`：`找 12 月 1 日到現在的檔案`、`today 11:00 to now` 都必須報「開始時間必須早於結束時間」。
+- `TestToNowBoundary`（search，實際檔案，mtime 精確到奈秒，now 本身也帶有奈秒）：
+
+| mtime | `從 9 月 1 日到現在` / `from Sep 1 until now` / `from Sep 1 to now` | `since Sep 1` / `9 月 1 日以來` |
+|---|---|---|
+| 08-31 23:59:59.999999999 | ✗ | ✗ |
+| 09-01 00:00:00 | ✓ | ✓ |
+| now − 1ns | ✓ | ✓ |
+| now | ✗ | ✓ |
+| now + 1ns | ✗ | ✓ |
+
+**Runtime（`--explain`，實際執行）：**
+
+```
+從 9 月 1 日到現在   → 修改時間  2026-09-01 00:00:00 <= mtime < 2026-09-28 03:24:05
+from Sep 1 until now → modified:  2026-09-01 00:00:00 <= mtime < 2026-09-28 03:24:05
+from Sep 1 to now    → modified:  2026-09-01 00:00:00 <= mtime < 2026-09-28 03:24:05
+since Sep 1          → modified:  after 2026-09-01 00:00:00 (mtime >= 2026-09-01 00:00:00)
+找 12 月 1 日到現在的檔案 → 開始時間必須早於結束時間（exit 2）
+```
+
+`--explain` 顯示到秒；內部的上界是 `Query.Now` 的完整精度（包含奈秒）。
+
+**文件：** README 的日期表格把「到現在」和「開放區間」拆成兩列；「區間的結束」的規則說明也同步更新。
+
+**Revision 1 驗證：**
+
+| 項目 | 結果 |
+|---|---|
+| `go fmt ./...`（`gofmt -l .`） | 乾淨 |
+| `go vet ./...` | ok |
+| `go test ./...` | PASS（400 個，0 FAIL，0 SKIP；原本是 392） |
+| `go test -race ./...` | PASS |
+| `go test ./... -count=10` | PASS |
+| `go build ./...` | ok |
+| `make check` | PASS |
+| staticcheck | skipped（未安裝） |
+
+修訂涉及的檔案：`internal/query/datetime.go`、`internal/query/datetime_test.go`、`internal/search/search_test.go`、`README.md`，以及本報告。
 
 ## Baseline（修改前）
 
@@ -51,7 +114,7 @@ start <= mtime < end        （時區：執行 nlf 當下的本機時區，也�
   - `A 到 B`：從 A 的開始，到 B 的結束。
   - B 是**日期**時，包含 B 那一整天：`9/1 到 9/15` 為 `[9/1 00:00, 9/16 00:00)`。
   - B 是**時刻**時，不包含那一刻：`1 點到 5 點` 為 `[01:00, 05:00)`。
-  - B 是 `現在` / `now` 時沒有上界，和 `since` 相同。
+  - B 是 `現在` / `now` 時，結束在 `Query.Now` 這一刻（不含），所以 mtime 在未來的檔案不算（Revision 1）。
 - 相對時間與 `since` 只設下界，沒有上界，和既有行為一致。
 - 同一個查詢裡有多個時間條件時，取交集；交集為空時報錯。這沿用既有的 `after()` / `before()` 與矛盾檢查。
 
@@ -86,7 +149,8 @@ start <= mtime < end        （時區：執行 nlf 當下的本機時區，也�
   - `凌晨`、`早上`、`上午`、`中午`、`下午`、`晚上` 加上 `N 點 [M 分]` 或 `N 點半`
 
 **open-ended**
-- `從 9 月 1 日到現在`、`從 9 月 1 日`、`9 月 1 日以來`、`從 9 月 1 日開始`、`since September 1`、`from Sep 1 until now`、`since yesterday 23:00`
+- 到現在，區間為 `[A, now)`：`從 9 月 1 日到現在`、`9 月 1 日至現在`、`9 月 1 日到目前`、`from Sep 1 until now`、`from Sep 1 to now`
+- 沒有上界，區間為 `[A, 無上限)`：`從 9 月 1 日`、`9 月 1 日以來`、`從 9 月 1 日開始`、`since September 1`、`since yesterday 23:00`
 
 **relative time**（沿用既有邏輯，這次確認可用）
 - 中文：`最近 1 小時`、`最近 6 小時`、`最近 30 分鐘`、`過去 2 天`
@@ -113,7 +177,7 @@ start <= mtime < end        （時區：執行 nlf 當下的本機時區，也�
 | 9 | `找凌晨 1 點到 5 點修改的檔案` | 今天，`[01:00, 05:00)` |
 | 10 | `找最近 6 小時修改的 conf` | `[now-6h, 無上限)` |
 | 11 | `找最近 30 分鐘修改的 yml` | `[now-30m, 無上限)` |
-| 12 | `找從 9 月 1 日到現在修改的檔案` | `[09-01, 無上限)` |
+| 12 | `找從 9 月 1 日到現在修改的檔案` | `[09-01, now)`（Revision 1） |
 | 13 | `找 2026 年修改的 tf 檔` | `.tf`，`[2026-01-01, 2027-01-01)` |
 | 14 | `找本月修改的 log` / `找上個月修改的 log` | `[09-01, 10-01)` / `[08-01, 09-01)` |
 | 15 | `找今年修改的 yaml` / `找去年修改的 yaml` | `[2026-01-01, 2027-01-01)` / `[2025-01-01, 2026-01-01)` |
@@ -152,13 +216,13 @@ start <= mtime < end        （時區：執行 nlf 當下的本機時區，也�
 
 ## Tests Added
 
-測試總數：210 → 392 個 test/subtest，全部 PASS，沒有 SKIP。其中日期相關的 subtest 有 174 個。
+測試總數：210 → 392 個 test/subtest（Revision 1 之後是 400），全部 PASS，沒有 SKIP。其中日期相關的 subtest 在 Revision 1 之後有 181 個。
 
 | 測試 | 內容 |
 |---|---|
-| `TestDateRanges`（111 例） | 年、年月、年月日、日曆簡稱、日期區間、開放區間、時間區間、相對時間、交集，全部以 `[from, to)` 精確比對，並檢查邊界使用 now 的時區。now 固定為 2026-09-28 10:30、時區 +08:00，不用 UTC，這樣時區錯誤才會被抓出來 |
+| `TestDateRanges`（116 例） | 年、年月、年月日、日曆簡稱、日期區間、開放區間、時間區間、相對時間、交集，全部以 `[from, to)` 精確比對，並檢查邊界使用 now 的時區。now 固定為 2026-09-28 10:30、時區 +08:00，不用 UTC，這樣時區錯誤才會被抓出來 |
 | `TestDateCombinesWithOtherConditions`（11 例） | 月 + 副檔名 + 排除；日 + 內容；區間 + 排除；區間 + 大小；區間 + 排序 + 數量；ignore case；搜尋位置 |
-| `TestInvalidDatesAndTimes`（42 例） | 不存在的日期與月份、不存在的時刻、結束早於或等於開始、單一時刻、不完整的區間、有歧義的格式、`may` 被當成動詞的情況；中英文錯誤訊息都有檢查 |
+| `TestInvalidDatesAndTimes`（44 例） | 不存在的日期與月份、不存在的時刻、結束早於或等於開始、單一時刻、不完整的區間、有歧義的格式、`may` 被當成動詞的情況；中英文錯誤訊息都有檢查 |
 | `TestNotDates`（10 例 + terraform） | 不應被當成日期的輸入維持原本的行為：`2026 files`、`top 10`、`containing 2026-09-28`、`包含 帳號`、`包含 重點`、`conf` 別名、`terraform 檔` 不等於 `.tf` |
 | `TestCalendarUnitsAcrossDST` | America/New_York：夏令時間開始的那天長 23 小時、結束的那天長 25 小時、3 月長 743 小時，邊界都在午夜。使用 `time/tzdata`，不依賴主機的 zoneinfo |
 | `TestExplainShowsTimeRange` | 區間那一列與時區那一列；開放區間不會顯示成 `<=` 形式 |
@@ -252,7 +316,7 @@ time zone:     CST (+08:00), local time
 |---|---|
 | `go fmt ./...`（`gofmt -l .`） | 乾淨 |
 | `go vet ./...` | ok |
-| `go test ./...` | PASS（392 個，0 FAIL，0 SKIP） |
+| `go test ./...` | PASS（392 個，0 FAIL，0 SKIP；Revision 1 之後 400 個） |
 | `go test -race ./...` | PASS |
 | `go test ./... -count=10` | PASS |
 | `go build ./...` | ok |
@@ -281,7 +345,7 @@ time zone:     CST (+08:00), local time
 - DST 的「不存在時刻」（例如 America/New_York 3/8 的 02:30）會被 Go 往後調到存在的時刻，不會報錯。台灣與中國沒有 DST，不受影響。
 - `may` 單獨出現時，只有在前面有介系詞（`in may`）或後面有日期、年份時才當成五月。`dec`、`mar` 等縮寫一律當成月份；如果有副檔名剛好是 `.dec` 或 `.mar`，要寫成 `.dec`、`*.dec`。
 - 為了不把 `帳號`、`重點` 這類內容文字切開，`點`、`號`、`凌晨`、`早上`、`上午`、`晚上` 沒有加進字典，而是在日期情境中以「未知中文詞」比對。代價是它們和相鄰的未知中文字連在一起時就無法辨識，例如 `點半` 有特別處理，但 `點整` 沒有。
-- 相對時間和「到現在」沒有上界。mtime 在未來的檔案也會被包含，和既有行為一致。
+- 相對時間（`最近 6 小時`）和 `since` 沒有上界，mtime 在未來的檔案也會被包含，和既有行為一致。「到現在」在 Revision 1 之後有上界 `Query.Now`。
 - `上午 12 點` 當成 12:00，`凌晨 12 點` 與 `12am` 當成 00:00，`晚上 12 點` 報錯（因為不清楚是哪一天的午夜）。
 
 ## Recommended Next Steps

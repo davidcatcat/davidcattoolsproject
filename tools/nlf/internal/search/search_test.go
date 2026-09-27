@@ -313,3 +313,49 @@ func TestDateRangeBoundaries(t *testing.T) {
 		}
 	}
 }
+
+// TestToNowBoundary checks that "to now" ends exactly at Query.Now
+// (now-1ns matches, now and later do not) while "since" has no end.
+func TestToNowBoundary(t *testing.T) {
+	loc := time.FixedZone("CST", 8*3600)
+	now := time.Date(2026, 9, 28, 10, 30, 0, 500, loc)
+	dir := t.TempDir()
+	files := map[string]time.Time{
+		"a-before-start": time.Date(2026, 8, 31, 23, 59, 59, 999_999_999, loc),
+		"b-start":        time.Date(2026, 9, 1, 0, 0, 0, 0, loc),
+		"c-now-minus-1":  now.Add(-time.Nanosecond),
+		"d-now":          now,
+		"e-now-plus-1":   now.Add(time.Nanosecond),
+	}
+	for n, mt := range files {
+		p := filepath.Join(dir, n)
+		write(t, p, nil)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(p); err != nil || !info.ModTime().Equal(mt) {
+			t.Skipf("file system does not keep nanosecond mtimes (%v)", err)
+		}
+	}
+	tests := []struct {
+		query string
+		want  []string
+	}{
+		{"找從 9 月 1 日到現在修改的檔案", []string{"b-start", "c-now-minus-1"}},
+		{"from Sep 1 until now", []string{"b-start", "c-now-minus-1"}},
+		{"from Sep 1 to now", []string{"b-start", "c-now-minus-1"}},
+		{"since Sep 1", []string{"b-start", "c-now-minus-1", "d-now", "e-now-plus-1"}},
+		{"找 9 月 1 日以來的檔案", []string{"b-start", "c-now-minus-1", "d-now", "e-now-plus-1"}},
+	}
+	for _, tt := range tests {
+		q, err := query.Parse(tt.query, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tt.query, err)
+		}
+		q.Root = dir
+		got, _ := run(t, q)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%s: got %v, want %v", tt.query, got, tt.want)
+		}
+	}
+}

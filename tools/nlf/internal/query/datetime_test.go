@@ -99,14 +99,19 @@ func TestDateRanges(t *testing.T) {
 		{"files changed between Sep 1 and Sep 15", ymd(2026, 9, 1), ymd(2026, 9, 16)},
 		{"yml files from September 1 through September 15", ymd(2026, 9, 1), ymd(2026, 9, 16)},
 		{"files from 2025 to 2026", ymd(2025, 1, 1), ymd(2027, 1, 1)},
-		// open-ended: since, or "to now"
-		{"找從 9 月 1 日到現在修改的檔案", ymd(2026, 9, 1), none},
+		// "to now" ends at the instant now; since has no end at all
+		{"找從 9 月 1 日到現在修改的檔案", ymd(2026, 9, 1), dtNow},
+		{"找 9 月 1 日至現在的檔案", ymd(2026, 9, 1), dtNow},
+		{"找 9 月 1 日到目前的檔案", ymd(2026, 9, 1), dtNow},
+		{"files changed from Sep 1 until now", ymd(2026, 9, 1), dtNow},
+		{"files changed from Sep 1 to now", ymd(2026, 9, 1), dtNow},
+		{"from 9/1 to now", ymd(2026, 9, 1), dtNow},
+		{"today 01:00 to now", at(2026, 9, 28, 1, 0), dtNow},
 		{"找從 9 月 1 日修改的檔案", ymd(2026, 9, 1), none},
 		{"找 9 月 1 日以來的 log", ymd(2026, 9, 1), none},
 		{"從 9 月 1 日開始修改的檔案", ymd(2026, 9, 1), none},
 		{"files modified since September 1", ymd(2026, 9, 1), none},
-		{"files changed from Sep 1 until now", ymd(2026, 9, 1), none},
-		{"from 9/1 to now", ymd(2026, 9, 1), none},
+		{"since Sep 1", ymd(2026, 9, 1), none},
 
 		// times of day: a clock end is exact
 		{"找今天 2 點到 4 點修改的檔案", at(2026, 9, 28, 2, 0), at(2026, 9, 28, 4, 0)},
@@ -269,6 +274,8 @@ func TestInvalidDatesAndTimes(t *testing.T) {
 		{"找今天 3 點到 3 點的檔案", "", "開始時間必須早於結束時間"},
 		{"找 2026 年到 2025 年的檔案", "", "開始時間必須早於結束時間"},
 		{"找今天 23:00 到昨天 01:00 的檔案", "", "開始時間必須早於結束時間"},
+		{"找 12 月 1 日到現在的檔案", "", "開始時間必須早於結束時間"}, // a future start cannot reach now
+		{"today 11:00 to now", "start time must be before end time", ""},
 
 		// incomplete or ambiguous
 		{"找 2 點修改的檔案", "", "單一時間點不能當作條件"},

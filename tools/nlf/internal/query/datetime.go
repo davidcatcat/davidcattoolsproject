@@ -27,8 +27,10 @@ import (
 // month/day. A range ("A 到 B", "from A to B", "between A and B") starts at
 // the start of A and ends at the end of B, so a date end is inclusive
 // ("9/1 到 9/15" is [9/1, 9/16)), while an end with a clock time is exact
-// ("1 點到 5 點" is [01:00, 05:00)). An end of "now" / "現在" leaves the range
-// open, like "since". Relative times ("last 6 hours", "最近 7 天") are
+// ("1 點到 5 點" is [01:00, 05:00)), and an end of "now" / "現在" is the exact
+// instant Query.Now ("從 9 月 1 日到現在" is [9/1, now), so files with a future
+// mtime are excluded). "since" / "從 A" / "A 以來" have no end at all
+// ([A, unbounded)). Relative times ("last 6 hours", "最近 7 天") are
 // durations and are handled by comparator, not here.
 
 // span is a parsed date or time: a calendar unit [lo, hi), or an instant
@@ -148,12 +150,11 @@ func (p *parser) dateExpr() (bool, error) {
 		p.before(a.hi)
 		return true, nil
 	}
-	if end.now {
-		p.after(a.lo) // "到現在", "until now": open-ended, like since
-		return true, nil
-	}
 	stop := end.hi // a date end is inclusive: "9/1 到 9/15" ends at 9/16 00:00
-	if end.instant {
+	switch {
+	case end.now:
+		stop = p.q.Now // "到現在", "until now": up to, not including, now
+	case end.instant:
 		stop = end.lo // a clock end is exact: "1 點到 5 點" ends at 05:00
 	}
 	if !a.lo.Before(stop) {
