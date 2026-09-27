@@ -230,3 +230,135 @@ func TestTimeRangeMatch(t *testing.T) {
 		t.Error("open-ended range")
 	}
 }
+
+// TestOrQAHardening covers the QA findings on Boolean OR: AND/OR connector
+// collisions, contradictions between several time OR groups, and clock-only
+// alternatives after a range that is not within one day.
+func TestOrQAHardening(t *testing.T) {
+	errs := []struct{ in, en, zh string }{
+		// an AND connector next to an OR word is never skipped silently
+		{"today or and yesterday", "OR and AND cannot be used together without a condition between them", ""},
+		{"today and or yesterday", "OR and AND cannot be used together without a condition between them", ""},
+		{"today or or yesterday", `"or" is repeated`, ""},
+		{"今天 或 且 昨天", "", "OR 和 AND 不能連續使用"},
+		{"今天 且 或 昨天", "", "OR 和 AND 不能連續使用"},
+		{"今天 或 或 昨天", "", "「或」重複了"},
+		{"今天 或 而且 昨天", "", "OR 和 AND 不能連續使用"},
+		{"今天 並且 或 昨天", "", "OR 和 AND 不能連續使用"},
+		{"今天和或昨天", "", "OR 和 AND 不能連續使用"},
+		{`包含 "A" 且 或 "B"`, "", "OR 和 AND 不能連續使用"},
+		{"larger than 1GB and or smaller than 1KB", "OR and AND cannot be used together", ""},
+
+		// several time OR groups must still have a common instant
+		{"找今天或昨天修改，而且 7 月或 8 月修改的檔案", "", "修改時間條件互相矛盾"},
+		{"files modified today or yesterday and in July or August", "modification time conditions contradict each other", ""},
+		{"找 9/1 或 9/15 修改，而且 8 月或 10 月修改的檔案", "", "修改時間條件互相矛盾"},
+		{"找 1 月或 9 月修改，而且 3 月或 4 月修改的檔案", "", "修改時間條件互相矛盾"}, // Jan..Sep is not one range
+		{"找今天或昨天修改，而且 9 月或 8 月、7 月的檔案", "", "修改時間條件互相矛盾"},   // plus a global bound
+
+		// a clock-only alternative needs a day to take
+		{"找昨天 23:00 到今天 02:00 或 05:00 到 06:00 修改的檔案", "", "前一個時間區間跨日，下一個 OR 時間區間需要明確指定日期"},
+		{"yesterday 23:00 to today 02:00 or 05:00 to 06:00", "the next OR time range needs an explicit date", ""},
+		{"找 8 月或 5 點到 6 點修改的檔案", "", "下一個 OR 時間區間需要明確指定日期"},
+		{"找最近 6 小時或 1 點到 2 點修改的檔案", "", "下一個 OR 時間區間需要明確指定日期"},
+	}
+	for _, tt := range errs {
+		t.Run(tt.in, func(t *testing.T) {
+			q, err := Parse(tt.in, dtNow)
+			var pe *Error
+			if !errors.As(err, &pe) {
+				t.Fatalf("Parse(%q) = %+v, %v; want an error", tt.in, q, err)
+			}
+			if tt.en != "" && !strings.Contains(pe.Message(English), tt.en) {
+				t.Errorf("error %q, want %q", pe.Message(English), tt.en)
+			}
+			if tt.zh != "" && !strings.Contains(pe.Message(Chinese), tt.zh) {
+				t.Errorf("error %q, want %q", pe.Message(Chinese), tt.zh)
+			}
+		})
+	}
+
+	valid := []struct {
+		in   string
+		want Query
+	}{
+		{"today or yesterday", Query{AnyOf: []OrGroup{timeGroup(dayRange(2026, 9, 28), dayRange(2026, 9, 27))}}},
+		{"今天或昨天", Query{AnyOf: []OrGroup{timeGroup(dayRange(2026, 9, 28), dayRange(2026, 9, 27))}}},
+		{"today or modified yesterday", Query{AnyOf: []OrGroup{timeGroup(dayRange(2026, 9, 28), dayRange(2026, 9, 27))}}},
+		// both groups keep their alternatives; both overlap in September
+		{"找今天或昨天修改，而且 9 月或 8 月修改的檔案", Query{AnyOf: []OrGroup{
+			timeGroup(dayRange(2026, 9, 28), dayRange(2026, 9, 27)), timeGroup(monthRange(2026, 9), monthRange(2026, 8))}}},
+		{"找 9/1 或 9/15 修改，而且 9 月或 10 月修改的檔案", Query{AnyOf: []OrGroup{
+			timeGroup(dayRange(2026, 9, 1), dayRange(2026, 9, 15)), timeGroup(monthRange(2026, 9), monthRange(2026, 10))}}},
+		{"找 1 月或 9 月修改，而且 9 月的檔案", Query{ModifiedAfter: ymd(2026, 9, 1), ModifiedBefore: ymd(2026, 10, 1),
+			AnyOf: []OrGroup{timeGroup(monthRange(2026, 1), monthRange(2026, 9))}}},
+		// clock-only alternatives: same day, or an explicit date after a cross-midnight range
+		{"找昨天 1 點到 3 點或 5 點到 6 點修改的檔案", Query{AnyOf: []OrGroup{timeGroup(
+			TimeRange{at(2026, 9, 27, 1, 0), at(2026, 9, 27, 3, 0)}, TimeRange{at(2026, 9, 27, 5, 0), at(2026, 9, 27, 6, 0)})}}},
+		{"找昨天 1:00 到 3:00 或 5:00 到 6:00 修改的檔案", Query{AnyOf: []OrGroup{timeGroup(
+			TimeRange{at(2026, 9, 27, 1, 0), at(2026, 9, 27, 3, 0)}, TimeRange{at(2026, 9, 27, 5, 0), at(2026, 9, 27, 6, 0)})}}},
+		{"找昨天 23:00 到今天 02:00 或 今天 05:00 到 06:00 修改的檔案", Query{AnyOf: []OrGroup{timeGroup(
+			TimeRange{at(2026, 9, 27, 23, 0), at(2026, 9, 28, 2, 0)}, TimeRange{at(2026, 9, 28, 5, 0), at(2026, 9, 28, 6, 0)})}}},
+		{"找昨天 23:00 到今天 02:00 或 昨天 20:00 到 21:00 修改的檔案", Query{AnyOf: []OrGroup{timeGroup(
+			TimeRange{at(2026, 9, 27, 23, 0), at(2026, 9, 28, 2, 0)}, TimeRange{at(2026, 9, 27, 20, 0), at(2026, 9, 27, 21, 0)})}}},
+		{"找今天或 5 點到 6 點修改的檔案", Query{AnyOf: []OrGroup{timeGroup( // today is one day: 5-6 is today
+			dayRange(2026, 9, 28), TimeRange{at(2026, 9, 28, 5, 0), at(2026, 9, 28, 6, 0)})}}},
+		// AND words and "or" inside phrases are untouched
+		{`包含 "A" 且包含 "B"`, Query{Contents: []string{"A", "B"}}},
+		{`包含 "A" 或 "B"，而且包含 "C"`, Query{Contents: []string{"C"}, AnyOf: []OrGroup{contentGroup("A", "B")}}},
+		{"exclude vendor and build", Query{ExcludeDirs: []string{"vendor", "build"}}},
+		{"exclude vendor or build", Query{ExcludeDirs: []string{"vendor", "build"}}},
+		{"go and md files", Query{Extensions: []string{"go", "md"}}},
+		{"10MB or more", Query{Sizes: []SizeCond{{">=", 10 << 20}}}},
+		{"10MB 或以上", Query{Sizes: []SizeCond{{">=", 10 << 20}}}},
+		{"files between Sep 1 and Sep 15", Query{ModifiedAfter: ymd(2026, 9, 1), ModifiedBefore: ymd(2026, 9, 16)}},
+	}
+	for _, tt := range valid {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := Parse(tt.in, dtNow)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.in, err)
+			}
+			tt.want.Lang, tt.want.Now = DetectLang(tt.in), dtNow
+			if !sameQuery(got, &tt.want) {
+				t.Errorf("Parse(%q)\n got  %+v\n want %+v", tt.in, *got, tt.want)
+			}
+		})
+	}
+
+	// AND between two days is a valid connector: it fails only as a
+	// contradiction, never as a connector error.
+	for _, in := range []string{"today and yesterday", "今天且昨天"} {
+		_, err := Parse(in, dtNow)
+		var pe *Error
+		if !errors.As(err, &pe) || !strings.Contains(pe.Message(English), "contradict") ||
+			strings.Contains(pe.Message(English), "cannot be used together") {
+			t.Errorf("Parse(%q) = %v; want the time contradiction error, not a connector error", in, err)
+		}
+	}
+}
+
+func TestTimeSatisfiable(t *testing.T) {
+	jan, sep, oct := monthRange(2026, 1), monthRange(2026, 9), monthRange(2026, 10)
+	for _, c := range []struct {
+		name string
+		q    Query
+		want bool
+	}{
+		{"no groups", Query{}, true},
+		{"one group", Query{AnyOf: []OrGroup{timeGroup(jan, sep)}}, true},
+		{"groups overlap in one pair", Query{AnyOf: []OrGroup{timeGroup(jan, sep), timeGroup(oct, sep)}}, true},
+		{"no pair overlaps", Query{AnyOf: []OrGroup{timeGroup(jan, sep), timeGroup(oct, monthRange(2026, 3))}}, false},
+		{"union is not flattened", Query{AnyOf: []OrGroup{timeGroup(jan, sep), timeGroup(monthRange(2026, 5))}}, false},
+		{"global bound excludes all", Query{ModifiedAfter: ymd(2026, 10, 1), AnyOf: []OrGroup{timeGroup(jan, sep)}}, false},
+		{"global bound keeps one", Query{ModifiedBefore: ymd(2026, 2, 1), AnyOf: []OrGroup{timeGroup(jan, sep)}}, true},
+		{"three groups", Query{AnyOf: []OrGroup{timeGroup(jan, sep), timeGroup(sep, oct), timeGroup(dayRange(2026, 9, 15))}}, true},
+		{"open ranges", Query{AnyOf: []OrGroup{timeGroup(TimeRange{After: ymd(2026, 9, 1)}), timeGroup(TimeRange{Before: ymd(2026, 9, 2)})}}, true},
+		{"open ranges apart", Query{AnyOf: []OrGroup{timeGroup(TimeRange{After: ymd(2026, 9, 2)}), timeGroup(TimeRange{Before: ymd(2026, 9, 2)})}}, false},
+		{"size groups ignored", Query{AnyOf: []OrGroup{sizeGroup(SizeCond{">", 1})}}, true},
+	} {
+		if got := timeSatisfiable(&c.q); got != c.want {
+			t.Errorf("%s: timeSatisfiable = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

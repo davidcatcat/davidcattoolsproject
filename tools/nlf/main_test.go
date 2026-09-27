@@ -904,3 +904,20 @@ func TestOrEndToEnd(t *testing.T) {
 		t.Errorf("--confirm safety changed:\n%s", plan)
 	}
 }
+
+// TestOrQAHardeningExitCodes: connector collisions, contradicting time OR
+// groups and dateless clock alternatives fail at parse time (exit 2) and
+// never search.
+func TestOrQAHardeningExitCodes(t *testing.T) {
+	dir := fixture(t)
+	for _, q := range []string{"today or and yesterday", "今天 且 或 昨天", "找今天或昨天修改，而且 7 月或 8 月修改的檔案",
+		"找昨天 23:00 到今天 02:00 或 05:00 到 06:00 修改的檔案"} {
+		if out, errOut, code := nlf(t, "--dir", dir, q); code != 2 || out != "" || errOut == "" {
+			t.Errorf("%s: code=%d out=%q err=%q, want exit 2 with a message", q, code, out, errOut)
+		}
+	}
+	// A plain OR is still accepted (exit 0 or 1, never a parse error).
+	if _, errOut, code := nlf(t, "--dir", dir, "today or yesterday"); code == 2 {
+		t.Errorf("today or yesterday: exit 2: %s", errOut)
+	}
+}

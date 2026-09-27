@@ -28,10 +28,8 @@ func Parse(input string, now time.Time) (*Query, error) {
 	if !q.ModifiedAfter.IsZero() && !q.ModifiedBefore.IsZero() && !q.ModifiedAfter.Before(q.ModifiedBefore) {
 		return nil, contradiction
 	}
-	for _, g := range q.AnyOf {
-		if g.Kind == KindTime && !slices.ContainsFunc(g.Times, func(r TimeRange) bool { return r.overlaps(q.ModifiedAfter, q.ModifiedBefore) }) {
-			return nil, contradiction
-		}
+	if !timeSatisfiable(q) {
+		return nil, contradiction // e.g. (today or yesterday) and (July or August)
 	}
 	q.Extensions = dedupe(q.Extensions)
 	q.ExcludeDirs = dedupe(q.ExcludeDirs)
@@ -43,8 +41,11 @@ type parser struct {
 	pos  int
 	q    *Query
 	// clockBase is the day a clock time without a date refers to while an OR
-	// alternative is parsed; zero means today.
+	// alternative is parsed; zero means today. clockOnly records that a range
+	// started with such a clock time, so an alternative with no day to take
+	// can be rejected.
 	clockBase time.Time
+	clockOnly bool
 }
 
 func (p *parser) cur() (token, bool) {

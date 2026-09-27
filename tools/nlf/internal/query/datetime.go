@@ -208,6 +208,9 @@ func (p *parser) point(ctx *span, yearOK, nowOK bool) (span, bool, error) {
 			p.pos = start
 			return span{}, false, err
 		}
+		if ctx == nil {
+			p.clockOnly = true // a range starting with a bare clock time
+		}
 		return c, true, nil
 	}
 	if d.day {

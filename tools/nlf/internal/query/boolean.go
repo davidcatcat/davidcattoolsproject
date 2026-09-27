@@ -20,11 +20,18 @@ import "time"
 // consumed inside a condition (longest match), and "go 或 md 檔" is an
 // extension list, so neither ever reaches the OR handling here.
 
+// andConnectors are the words that join conditions with AND. They carry no
+// condition of their own (they are fillers or list separators), so they
+// must not be skipped silently next to an OR word: "today and or yesterday"
+// is an error, not "today or yesterday".
+var andConnectors = []string{"and", "且", "而且", "並且", "并且", "並", "并", "同時", "同时",
+	"和", "跟", "與", "与", "及"}
+
 // item is one parsed condition, or an OR group of conditions of one kind.
 type item struct {
-	alts []*Query // the condition, or the alternatives of an OR group
-	kind CondKind // KindNone for a single condition
-	from int      // token index where the item starts, for error messages
+	alts     []*Query // the condition, or the alternatives of an OR group
+	kind     CondKind // KindNone for a single condition
+	from, to int      // token range of the item, for error messages and connector checks
 }
 
 // parseAll parses the whole input into p.q.
@@ -38,7 +45,14 @@ func (p *parser) parseAll() error {
 				return &Error{Token: p.toks[orAt].raw, zh: "「或」前面需要條件", en: `"or" needs a condition before it`,
 					hintZh: "例如：今天或昨天、包含 \"ERROR\" 或 \"FATAL\"", hintEn: `example: today or yesterday, containing "ERROR" or "FATAL"`}
 			}
-			if err := p.alternative(items[len(items)-1], orAt); err != nil {
+			left := items[len(items)-1]
+			// "today and or yesterday": an AND word between the condition and the OR
+			for i := left.to; i < orAt; i++ {
+				if _, n := p.matchAt(i, andConnectors); n > 0 {
+					return errConnectors(p.toks[i].raw + " " + p.toks[orAt].raw)
+				}
+			}
+			if err := p.alternative(left, orAt); err != nil {
 				return err
 			}
 			continue
@@ -49,7 +63,7 @@ func (p *parser) parseAll() error {
 			return err
 		}
 		if !d.empty() {
-			items = append(items, &item{alts: []*Query{d}, from: from})
+			items = append(items, &item{alts: []*Query{d}, from: from, to: p.pos})
 		}
 	}
 	for _, it := range items {
@@ -71,10 +85,13 @@ func (p *parser) alternative(left *item, orAt int) error {
 		}
 	}
 	// "昨天 1 點到 3 點或 5 點到 6 點": a clock-only alternative stays on the
-	// same day as the one before it.
+	// same day as the one before it. When that range is not within one day
+	// ("昨天 23:00 到今天 02:00", "8 月"), there is no day to take, so a
+	// clock-only alternative is rejected instead of guessed.
 	if lk == KindTime {
 		p.clockBase = sameDay(left.alts[len(left.alts)-1])
-		defer func() { p.clockBase = time.Time{} }()
+		p.clockOnly = false
+		defer func() { p.clockBase, p.clockOnly = time.Time{}, false }()
 	}
 	for {
 		t, ok := p.cur()
@@ -84,6 +101,9 @@ func (p *parser) alternative(left *item, orAt int) error {
 		}
 		if _, n := p.matchAt(p.pos, orPhrases); n > 0 {
 			return &Error{Token: p.rawFrom(orAt), zh: "「或」重複了", en: `"or" is repeated`}
+		}
+		if _, n := p.matchAt(p.pos, andConnectors); n > 0 {
+			return errConnectors(orWord + " " + t.raw) // "today or and yesterday"
 		}
 		parse := p.step
 		if lk == KindContent && (t.kind == tHan || isFreeWord(t)) {
@@ -99,10 +119,22 @@ func (p *parser) alternative(left *item, orAt int) error {
 		if rk, ok := classify(d); !ok || rk != lk {
 			return errOrKind(p.rawFrom(left.from))
 		}
+		if lk == KindTime && p.clockOnly && p.clockBase.IsZero() {
+			return &Error{Token: p.rawFrom(left.from), zh: "前一個時間區間跨日，下一個 OR 時間區間需要明確指定日期",
+				en:     "the previous time range is not within one day, so the next OR time range needs an explicit date",
+				hintZh: "提示：例如 昨天 23:00 到今天 02:00 或 今天 05:00 到 06:00",
+				hintEn: "hint: e.g. yesterday 23:00 to today 02:00 or today 05:00 to 06:00"}
+		}
 		left.alts = append(left.alts, d)
 		left.kind = lk
+		left.to = p.pos
 		return nil
 	}
+}
+
+func errConnectors(raw string) *Error {
+	return &Error{Token: raw, zh: "OR 和 AND 不能連續使用", en: "OR and AND cannot be used together without a condition between them",
+		hintZh: "提示：只用其中一個，例如 今天或昨天", hintEn: "hint: use one of them, e.g. today or yesterday"}
 }
 
 func errOrKind(raw string) *Error {
@@ -213,14 +245,44 @@ func (p *parser) merge(it *item) error {
 	return nil
 }
 
-// overlaps reports whether r can hold any time within [after, before).
-func (r TimeRange) overlaps(after, before time.Time) bool {
+// timeSatisfiable reports whether some instant satisfies the global bounds
+// and at least one range of every time OR group, that is, whether
+//
+//	[After, Before) ∩ (g1 r1 ∪ g1 r2 ∪ …) ∩ (g2 r1 ∪ …) ∩ …
+//
+// is non-empty. Unions are kept as lists of ranges and intersected pairwise,
+// never flattened, so "January or September" does not become January to
+// September. This is validation only; search evaluates the groups directly.
+func timeSatisfiable(q *Query) bool {
+	cur := []TimeRange{{After: q.ModifiedAfter, Before: q.ModifiedBefore}}
+	for _, g := range q.AnyOf {
+		if g.Kind != KindTime {
+			continue
+		}
+		var next []TimeRange
+		for _, a := range cur {
+			for _, b := range g.Times {
+				if r, ok := a.intersect(b); ok {
+					next = append(next, r)
+				}
+			}
+		}
+		if len(next) == 0 {
+			return false
+		}
+		cur = next
+	}
+	return true
+}
+
+// intersect returns r ∩ o and whether it is non-empty; zero bounds are unbounded.
+func (r TimeRange) intersect(o TimeRange) (TimeRange, bool) {
 	lo, hi := r.After, r.Before
-	if !after.IsZero() && (lo.IsZero() || after.After(lo)) {
-		lo = after
+	if !o.After.IsZero() && (lo.IsZero() || o.After.After(lo)) {
+		lo = o.After
 	}
-	if !before.IsZero() && (hi.IsZero() || before.Before(hi)) {
-		hi = before
+	if !o.Before.IsZero() && (hi.IsZero() || o.Before.Before(hi)) {
+		hi = o.Before
 	}
-	return lo.IsZero() || hi.IsZero() || lo.Before(hi)
+	return TimeRange{After: lo, Before: hi}, lo.IsZero() || hi.IsZero() || lo.Before(hi)
 }
