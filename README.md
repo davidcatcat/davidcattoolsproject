@@ -82,3 +82,7 @@ description: What this skill does and the concrete situations that should trigge
 ```
 
 Keep the skill focused, define a clear process, and end with checkable completion criteria.
+
+## Tools
+
+- [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
