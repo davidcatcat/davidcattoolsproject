@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A6 完成並 push 到 feature branch；等待 GitHub Actions 與人類 review
+Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
 
 ## Session：A6（top-N heap / sorted-limit memory optimization）
 
@@ -48,6 +48,10 @@ Last updated: 2026-09-28，A6 完成並 push 到 feature branch；等待 GitHub 
 
 ### A6 Current phase
 
+- **A6 已 merge 到 main。** 人類確認 GitHub Actions run `36408168119` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
+- merge 前：`origin/main` = merge base = `5cdd567`，A6 branch ahead 2 / behind 0。
+- main 從 `5cdd567` fast-forward 到 **`ebad6a79188d84bf36cce4abcf372481b1050b14`**，一般 push，沒有 force，也沒有改寫 history；`origin/main` 包含 `b7c4af1` 與 `ebad6a7`。
+- merge 後 final validation（在 main `ebad6a7` 上）：`make check` PASS、`go test -race ./...` PASS、working tree clean。
 - A6 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE WITH CHANGES（已套用）；報告：`reports/nlf/2026-09-28-topn-heap.md`。
 - 20 萬檔案 `largest 5` 的 RSS：66 MiB → 約 10 MiB（接近未排序的完整走訪）；baseline 與 A6 的輸出在 184 + 8997 組對照中全部 byte-identical。
 
@@ -64,15 +68,15 @@ Last updated: 2026-09-28，A6 完成並 push 到 feature branch；等待 GitHub 
 
 ### A6 Exact next action
 
-無。等待 GitHub Actions（ubuntu-latest / macos-latest）與人類 review。**不要 merge A6 到 main；不要開始 A7。**
+無（A6 已 merge）。下一個項目：A7（fuzz / hostile-input hardening），在 `feat/nlf-roadmap-a7-fuzz-hardening-20260928` 進行。
 
 ### A6 Git state
 
 - **Committed（A6）：** YES
 - **A6 branch pushed：** YES（`origin/feat/nlf-roadmap-a6-topn-heap-20260928`）
 - **Main touched by this task：** A5 merge commit（`1a764ab`）與 checkpoint commit（`5cdd567`），都是人類明確要求；另有人類要求的 `f51fc8a`（刪除初始測試腳本）。A6 沒有碰 main。
-- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認並提供 run ID。
-- **Merge to main：** NOT PERFORMED（A6）
+- **GitHub Actions 結果：** run `36408168119`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認並回報）。
+- **Merge to main：** PERFORMED（A6，fast-forward 到 `ebad6a7`，人類明確授權）
 
 ## 先前的 session：A5 depth control（已 merge 到 main，`1a764ab`）
 
