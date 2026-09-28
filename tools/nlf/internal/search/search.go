@@ -4,6 +4,7 @@ package search
 
 import (
 	"bytes"
+	"container/heap"
 	"errors"
 	"fmt"
 	"io"
@@ -54,7 +55,9 @@ type Report struct {
 }
 
 // Run searches q.Root (or ".") and calls emit for each match. With a sort
-// order, results are emitted after the full walk. Nothing is ever written.
+// order, results are emitted after the full walk; with a sort order and a
+// limit, only the best Limit results are kept during the walk. Nothing is
+// ever written.
 func Run(q *query.Query, emit func(Result)) (Report, error) {
 	root := q.Root
 	if root == "" {
@@ -77,6 +80,7 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 	}
 
 	var collected []Result
+	top := newTopNFor(q)
 	count := 0
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -135,7 +139,11 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 		}
 		r := Result{Path: path, Size: info.Size(), ModTime: info.ModTime()}
 		if q.Sort != query.SortNone {
-			collected = append(collected, r)
+			if top != nil {
+				top.add(r)
+			} else {
+				collected = append(collected, r)
+			}
 			return nil
 		}
 		emit(r)
@@ -149,9 +157,10 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 		return rep, walkErr
 	}
 	if q.Sort != query.SortNone {
-		sortResults(collected, q.Sort)
-		if q.Limit > 0 && len(collected) > q.Limit {
-			collected = collected[:q.Limit]
+		if top != nil {
+			collected = top.results()
+		} else {
+			sortResults(collected, q.Sort) // no limit: top handles Limit > 0
 		}
 		for _, r := range collected {
 			emit(r)
@@ -488,18 +497,68 @@ func scanTerms(path string, terms []string, ignoreCase bool, satisfied func(foun
 	}
 }
 
-func sortResults(rs []Result, order query.SortOrder) {
-	sort.SliceStable(rs, func(i, j int) bool {
-		switch order {
-		case query.SortLargest:
-			if rs[i].Size != rs[j].Size {
-				return rs[i].Size > rs[j].Size
-			}
-		case query.SortNewest:
-			if !rs[i].ModTime.Equal(rs[j].ModTime) {
-				return rs[i].ModTime.After(rs[j].ModTime)
-			}
+// better reports whether a sorts before b: larger size or newer mtime first,
+// ties broken by ascending Path. Paths are unique within one Run, so this is
+// a strict total order. sortResults and topN share it.
+func better(a, b Result, order query.SortOrder) bool {
+	switch order {
+	case query.SortLargest:
+		if a.Size != b.Size {
+			return a.Size > b.Size
 		}
-		return rs[i].Path < rs[j].Path
-	})
+	case query.SortNewest:
+		if !a.ModTime.Equal(b.ModTime) {
+			return a.ModTime.After(b.ModTime)
+		}
+	}
+	return a.Path < b.Path
+}
+
+func sortResults(rs []Result, order query.SortOrder) {
+	sort.SliceStable(rs, func(i, j int) bool { return better(rs[i], rs[j], order) })
+}
+
+// topNInitialCap bounds the first allocation: limits up to MaxInt32 are
+// valid, and the heap grows only as results arrive.
+const topNInitialCap = 1024
+
+// topN keeps the n best results seen so far (n >= 1). The worst kept result
+// is at h[0], so a new result either replaces it or is dropped.
+type topN struct {
+	order query.SortOrder
+	n     int
+	h     []Result
+}
+
+// newTopNFor returns a bounded collector when q is sorted with a limit, else nil.
+func newTopNFor(q *query.Query) *topN {
+	if q.Sort == query.SortNone || q.Limit <= 0 {
+		return nil
+	}
+	return &topN{order: q.Sort, n: q.Limit, h: make([]Result, 0, min(q.Limit, topNInitialCap))}
+}
+
+func (t *topN) Len() int           { return len(t.h) }
+func (t *topN) Less(i, j int) bool { return better(t.h[j], t.h[i], t.order) } // worst at root
+func (t *topN) Swap(i, j int)      { t.h[i], t.h[j] = t.h[j], t.h[i] }
+func (t *topN) Push(x any)         { t.h = append(t.h, x.(Result)) }
+func (t *topN) Pop() any           { r := t.h[len(t.h)-1]; t.h = t.h[:len(t.h)-1]; return r }
+
+func (t *topN) add(r Result) {
+	if len(t.h) < t.n {
+		heap.Push(t, r)
+		return
+	}
+	if better(r, t.h[0], t.order) {
+		t.h[0] = r
+		heap.Fix(t, 0)
+	}
+}
+
+// results returns the kept results in output order (not heap order).
+func (t *topN) results() []Result {
+	rs := t.h
+	t.h = nil
+	sortResults(rs, t.order)
+	return rs
 }

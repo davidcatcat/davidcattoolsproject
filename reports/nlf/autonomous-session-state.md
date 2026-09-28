@@ -3,10 +3,90 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: COMPLETE
-Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
+Status: IN PROGRESS
+Last updated: 2026-09-28，A6 QA PASS、Review APPROVE WITH CHANGES（已套用）；A6 報告已寫；準備 commit
 
-## Session：A5（`--max-depth` / `--min-depth`）
+## Session：A6（top-N heap / sorted-limit memory optimization）
+
+- **Purpose：** `largest` / `newest` 搭配數量上限時，用 bounded top-N heap，只保留最多 N 筆；**不得改變任何使用者可見結果**。多 agent 流程；commit 並 push A6 branch，停下來等 review。**A6 絕不 merge 到 main；不做 A7。**
+- **A5 merge：** 人類確認 run `36381666722` 雙平台 SUCCESS 並 APPROVE 後授權。main 已經有 `f51fc8a`（刪除測試腳本），所以改用 merge commit `1a764ab`；checkpoint 記錄為 `5cdd567`；merge 後 `make check`、`go test -race` 通過，working tree clean。
+- **Baseline main SHA：** `5cdd567ccaca627266aeb79ea452fcb5e8e4f461`
+- **Baseline version：** 0.4.0
+- **Feature branch：** `feat/nlf-roadmap-a6-topn-heap-20260928`，從 origin/main（`5cdd567`）建立，沒有 upstream。
+- **Worktree path：** `<session scratchpad>/nlf-a6-worktree`（請用 `git worktree list` 查詢實際路徑）
+- **Main touched by A6：** NO
+
+### A6 design（Lead 草稿，待 design review）
+
+- **既有演算法：** 收集所有符合的 `Result` → `sortResults`（`sort.SliceStable`：主鍵 size 或 mtime 由大到小，同分時 `Path` 字串遞增）→ 截前 N。每個路徑只會被走訪一次，所以 `Path` 唯一，這是一個嚴格的全序。stable 與否不影響結果。
+- **共用 comparator：** `better(a, b Result, order query.SortOrder) bool`，就是 `sortResults` 現在的 less 邏輯。`sortResults` 與 heap 都用它，不會有兩套定義。
+- **只在 `q.Sort != SortNone && q.Limit > 0` 時使用 heap。** `SortNone` 的 `SkipAll` 提早停止路徑、以及沒有上限的排序（收集全部 → 排序）都完全不動。
+- **Heap invariant：** 用 `container/heap`，保留集合中「最差」的一筆在 root，也就是 `Less(i, j) = better(h[j], h[i])`。
+  - largest：size 最小；同 size 時 path 最大
+  - newest：mtime 最舊；同 mtime 時 path 最大
+- **更新：** 數量 < N 時 push；否則若 `better(r, h[0])` 就取代 root 並 `heap.Fix(h, 0)`。heap 永遠最多 N 筆，沒有另一份完整清單。
+- **輸出：** 走訪結束後把 heap 的 N 筆取出，用 `sortResults`（同一個 comparator）排序後依序 emit，不依 heap pop 的順序輸出。
+- **Complexity：** M = 符合數。舊版記憶體 O(M)、時間 O(M log M)。新版（有上限 N）heap 記憶體 O(N)、更新 O(M log N)、最後排序 O(N log N)。沒有上限時維持 O(M) / O(M log M)。
+- **不改：** 走訪、depth、exclude、content、parser、`--explain`（應 byte-identical）、README 查詢範例。
+- **測試：**
+  - oracle／property：固定 seed 產生大量 Result（大量同分），比對舊演算法（完整排序 + 截斷）與 heap。
+  - tie 的 cutoff 案例與 N 的各種邊界。
+  - benchmark：package-private helper 的 allocations。
+  - 20 萬個實體檔案的 RSS 量測，只在本機，CI 不跑。
+  - baseline binary 與 A6 binary 的對照。
+  - mutation 檢查。
+
+### A6 design review 採納的修改（定稿）
+
+- **Heap 初始容量 `min(N, 1024)`，不直接配置 N。** parser 允許的 Limit 上限是 `MaxInt32`；一個 `Result` 是 48 bytes，直接配置 N 時 `top 2147483647 largest` 會嘗試配置約 103 GB 而 crash，舊版則只會隨符合數成長。
+- **分支集中在 `newTopNFor(q)`**：只有 sort 不是 none 且 Limit > 0 才回傳 heap，其他情況回傳 nil，可以直接測試。
+- **不做任何提前剪枝**（例如不因為「贏不了 root」就略過 `d.Info()` 或開檔）：開檔／讀取錯誤會進入 stderr 並影響 exit code。
+- **測試用 `time.Unix(sec, nsec)` 產生時間，不用 `time.Now()`**，並加一個測試確認 `FileInfo.ModTime()` 沒有 monotonic reading。
+- **全序證明：** 每個路徑在一次 Run 中只會出現一次，所以 (主鍵, Path) 是嚴格全序，stable 與否無關；heap 保留的就是最好的 N 筆，最後再用同一個 comparator 排序。
+- **走訪順序不等於路徑順序：** WalkDir 先走 `a/x` 再走 `a-b/x`，但 `"a-b/x" < "a/x"`（`-` 是 0x2d，小於 `/` 的 0x2f）。這個例子用來測 tie-break。
+- version、help、`explain.go` 都不改。
+
+### A6 Current phase
+
+- Git Safety → commit → push
+- QA：PASS（binary 對照 8997 組、oracle 8530 組全部相同，18 個 mutant 全部被抓到）；Review：APPROVE WITH CHANGES。已套用：`TestTopNMatchesFullSort` 在 `-race` 下從 16.6 秒降到約 6.5 秒；移除不會執行的 slice；README 改成 O(min(N, 符合數))。A6 報告 `reports/nlf/2026-09-28-topn-heap.md` 已寫。
+- Implementation 完成：`search.go`（`better`、`topN`、`newTopNFor`）、README 一句、`topn_test.go`、`sortlimit_test.go`。
+  - **20 萬檔案 RSS（中位數）：**
+
+    | 查詢 | baseline | A6 |
+    |------|---------|----|
+    | `largest 5` | 66.3 MiB | **9.8 MiB** |
+    | `newest 5` | 66.4 MiB | **9.6 MiB** |
+    | 未排序完整走訪 | 10.1 MiB | 9.6 MiB |
+    | 沒有上限的 `largest` | 66.1 MiB | 66.1 MiB |
+
+  - **Benchmark：** 20 萬筆時 TopN/largest-5 為 648 B/op、10 allocs；FullSort 為 55 MB/op。
+  - **Baseline 與 A6 binary 對照：** 184 組，stdout、stderr、exit code 全部 byte-identical（含 `-l`、`--null`、`--explain`，以及 `top 2147483647 largest`）。
+  - **Mutation：** 14 個全部被抓到。
+  - **Lead 驗證：** gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0，0 SKIP；query、main、help、workflow、smoke 都沒有修改。
+
+### A6 Remaining work
+
+1. ~~Design review~~ DONE（APPROVE WITH CHANGES）
+2. ~~Implementation（先寫 oracle／tie 測試）~~ DONE
+3. ~~Benchmark + 20 萬檔案 RSS 量測 + baseline 對照~~ DONE
+4. ~~QA + Review（分開）+ mutation~~ DONE
+5. Git Safety
+6. ~~A6 report `reports/nlf/2026-09-28-topn-heap.md`~~ DONE
+7. commit + push A6 branch（不 merge main）
+8. checkpoint COMPLETE
+
+### A6 Exact next action
+
+Git Safety → 明確 staging commit → `git push -u origin feat/nlf-roadmap-a6-topn-heap-20260928` → checkpoint COMPLETE 並 push。
+
+### A6 Git state
+
+- **Committed（A6）：** NO
+- **A6 branch pushed：** NO
+- **Merge A6 to main：** NOT PERFORMED
+
+## 先前的 session：A5 depth control（已 merge 到 main，`1a764ab`）
 
 - **Purpose：** 依 roadmap A5 實作 depth control：在走訪時真正剪枝，而不是走完再過濾。多 agent 流程；先寫測試再改 production；commit 並 push A5 branch，停下來等 review。**A5 絕不 merge 到 main；不做 A6。**
 - **A4 merge：** 人類確認 run `36371257304` 雙平台 SUCCESS 並 APPROVE 後授權。main 從 `c891fcb` fast-forward 到 `76085f8`，checkpoint 記錄為 `0833f52`；merge 後 `make check`、`go test -race` 通過，working tree clean。
@@ -16,7 +96,7 @@ Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
 - **Worktree path：** `<session scratchpad>/nlf-a5-worktree`（請用 `git worktree list` 查詢實際路徑）
 - **Main touched by A5：** NO
 
-### A5 design（Lead 草稿，待 design agent 確認）
+#### A5 design（Lead 草稿，待 design agent 確認）
 
 - **Depth：** 搜尋位置 = 0，直接子項目 = 1，依此類推（與 `find` 相同）。symlink root（例如 macOS `/tmp`）一樣是 0。
 - **Max-depth 剪枝：** 在 `WalkDir` callback 裡，目錄的 depth >= max 時回傳 `fs.SkipDir`，包括 root 本身（`--max-depth 0` 時 root 目錄不會被讀取）。檔案的 depth 永遠 <= max。深度檢查排在 exclude 比對、`Info()`、開檔之前。
@@ -33,7 +113,7 @@ Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
 - **Help：** 維持 ≤ 70 行：新增一行 `--max-depth N / --min-depth N`，並把 `-h, --help` 與 `--version` 合併成一行。
 - **剪枝證明：** 在 boundary 以下放 `chmod 000` 的目錄，以及無法讀取的檔案當作 sentinel。如果被讀取，stderr 會出現權限警告，而測試要求 stderr 必須是空的。另外做 mutation 檢查。
 
-### A5 design review 採納的修改（定稿）
+#### A5 design review 採納的修改（定稿）
 
 - **C1：** 有 exclude 時，`--explain` 不使用 `-mindepth`，改用 `-type f -path '<root>/*/*'`。原因：BSD 與 GNU find 的 `-mindepth` 都不會在較淺的層級套用任何測試，包括 `-prune`，所以較淺的排除目錄仍會被走訪；nlf 則在任何深度都 prune 排除目錄。BSD 實測：`find r -mindepth 2 -type d \( -iname vendor \) -prune -o -type f -print` 印出了 `r/vendor/v.txt`。沒有 exclude 時才用 `-mindepth N`；`-maxdepth N` 一律放在起點後面。
 - **C2：** 深度上限 4096（任何可開啟的路徑都不會更深，也限制 `-path` 呈現的長度）；只接受十進位數字，允許前導 0。
@@ -53,7 +133,7 @@ Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
   - 深度上限 4096，而 find 接受任意整數。
   - 未排序的 `top N` 搭配深度時，選到的檔案可能不同（沿用 O3）。
 
-### A5 Current phase
+#### A5 Current phase
 
 - **A5 已 merge 到 main。** 人類確認 GitHub Actions run `36381666722` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
 - merge 前：A5 branch ahead 2 / **behind 1**，merge base `0833f52`。落後的一個 commit 是 `f51fc8a`（chore: remove initial Claude git test scripts，人類另外要求並授權推到 main），和 A5 沒有共同修改的檔案。因為無法 fast-forward，改用一般 merge commit **`1a764abdf80a1fcd6ab60ea9bc28a3d777d5b489`**（沒有 rebase、沒有 force push、沒有改寫已發布的 history）。`origin/main` 包含 `a829ed6`、`28682d8` 與 `f51fc8a`。
@@ -61,7 +141,7 @@ Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
 - GNU 的 stderr 檢查（包括以 `/` 結尾的 root guard `-path`）在 ubuntu CI 上通過，沒有警告。
 - A5 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE；報告：`reports/nlf/2026-09-28-depth-control.md`。
 
-### A5 Completed work
+#### A5 Completed work
 
 1. Design review／audit：DONE（APPROVE WITH CHANGES，全部採納）
 2. 先寫測試：DONE（在 stub 上因正確原因失敗）
@@ -72,11 +152,11 @@ Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
 7. commit `a829ed6`（nlf: add --max-depth and --min-depth (A5)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
 8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a5-depth-control-20260928`
 
-### A5 Exact next action
+#### A5 Exact next action
 
 無（A5 已 merge）。下一個項目：A6（top-N heap），在 `feat/nlf-roadmap-a6-topn-heap-20260928` 進行。
 
-### A5 Git state
+#### A5 Git state
 
 - **Committed（A5）：** YES
 - **A5 branch pushed：** YES（`origin/feat/nlf-roadmap-a5-depth-control-20260928`）
