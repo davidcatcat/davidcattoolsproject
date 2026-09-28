@@ -46,6 +46,7 @@ payload = {
     "model": model,
     "temperature": 0,
     "max_tokens": int(max_tokens),
+    "chat_template_kwargs": {"enable_thinking": False},
     "messages": [{"role": "user", "content": prompt}],
 }
 with open(out_path, "w", encoding="utf-8") as f:
@@ -170,7 +171,7 @@ cat > "$REPORT" <<EOF
 - Context sizes (approximate tokens): $CONTEXT_SIZES
 - Script: scripts/llm-benchmark.sh
 
-This benchmark intentionally uses the OpenAI Chat Completions endpoint because the earlier gateway probe showed it is the most reliable exposed interface. Raw JSON responses are saved next to this report. The report extracts final content and usage while recording, but not replaying, the model's reasoning text.
+This benchmark uses the OpenAI Chat Completions endpoint with chat_template_kwargs.enable_thinking=false, which the reasoning-control probe verified suppresses Qwen reasoning on this gateway. Raw JSON responses are saved next to this report.
 
 EOF
 
@@ -224,9 +225,13 @@ PY
 )
   append ""
   append "Expected marker: $marker"
+  normalized=$(printf '%s' "$actual" | sed 's/^MARKER=//')
   if [ "$actual" = "$marker" ]; then
     append ""
-    append "**Automatic result: PASS**"
+    append "**Automatic result: PASS (exact format)**"
+  elif [ "$normalized" = "$marker" ]; then
+    append ""
+    append "**Automatic result: PASS (retrieval), FORMAT_FAIL**"
   else
     append ""
     append "**Automatic result: FAIL**"
@@ -427,6 +432,7 @@ append "- [ ] DevOps diagnosis: root cause stays evidence-bound."
 append "- [ ] Git diff: finds the three seeded defects without invented findings."
 append "- [ ] Multi-file diagnosis: connects Secret key mismatch to DB_PASSWORD failure."
 append "- [ ] Compression: preserves 8/8 FACT markers and removes filler."
+append "- [ ] Verify reasoning_chars=0 for every successful case."
 append "- [ ] Record any HTTP errors, max-token stops, or suspicious hallucinations."
 append ""
 append "Raw JSON directory: $RAW_DIR"
