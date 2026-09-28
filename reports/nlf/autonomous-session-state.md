@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，A5 QA PASS、Review APPROVE（NIT 已修正）；A5 報告已寫；準備 commit
+Status: COMPLETE
+Last updated: 2026-09-28，A5 完成並 push 到 feature branch；等待 GitHub Actions 與人類 review
 
 ## Session：A5（`--max-depth` / `--min-depth`）
 
@@ -55,30 +55,30 @@ Last updated: 2026-09-28，A5 QA PASS、Review APPROVE（NIT 已修正）；A5 �
 
 ### A5 Current phase
 
-- Git Safety → commit → push
-- QA：PASS（約 900 組 BSD parity、26 個 mutant 全抓到、與 HEAD 比對 300 組 byte-identical）；Review：APPROVE；NIT 已修正。A5 報告 `reports/nlf/2026-09-28-depth-control.md` 已寫。
-- Implementation 完成。先寫測試：在只有欄位的 stub 上，新測試因正確原因失敗（只有 empty tree 案例本來就會通過）。接著修改 production：`search.go` 的 `depthFunc` 與 callback、`main.go`、`explain.go`、`query.go`、help、README、smoke（42 checks）。Implementation agent 做了 14 個 mutant，全部被抓到。Lead 驗證：gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0，0 SKIP；parser 與 workflow 沒有修改。
+- A5 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE；報告：`reports/nlf/2026-09-28-depth-control.md`。
 
-### A5 Remaining work
+### A5 Completed work
 
-1. ~~Design review / audit~~ DONE（APPROVE WITH CHANGES）
-2. ~~先寫測試（確認在舊程式上失敗）~~ DONE
-3. ~~Implementation~~ DONE
-4. ~~QA + Review（分開）+ mutation~~ DONE
-5. Git Safety
-6. ~~A5 report `reports/nlf/2026-09-28-depth-control.md`~~ DONE
-7. commit + push A5 branch（不 merge main）
-8. checkpoint COMPLETE
+1. Design review／audit：DONE（APPROVE WITH CHANGES，全部採納）
+2. 先寫測試：DONE（在 stub 上因正確原因失敗）
+3. Implementation：DONE
+4. QA + Review（分開）+ mutation：DONE（14 + 26 個 mutant 全部被抓到）
+5. Git Safety（Lead 檢查）：OK
+6. A5 報告：DONE
+7. commit `a829ed6`（nlf: add --max-depth and --min-depth (A5)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a5-depth-control-20260928`
 
 ### A5 Exact next action
 
-等 QA、Review 回報 → 修正（分開）+ mutation → Git Safety → report → commit → push。
+無。等待 GitHub Actions（ubuntu-latest 會用 GNU find 實際跑 `TestExplainParity`；需要特別注意既有的 root guard 案例是否讓 GNU find 在 stderr 輸出以 `/` 結尾的 `-path` 警告，見 A5 報告的「未解問題」）與人類 review。**不要 merge A5 到 main；不要開始 A6。**
 
 ### A5 Git state
 
-- **Committed（A5）：** NO
-- **A5 branch pushed：** NO
-- **Merge A5 to main：** NOT PERFORMED
+- **Committed（A5）：** YES
+- **A5 branch pushed：** YES（`origin/feat/nlf-roadmap-a5-depth-control-20260928`）
+- **Main touched by this task：** A4 fast-forward merge 到 main（`76085f8`）與 checkpoint commit（`0833f52`），都是人類明確要求；A5 沒有碰 main。
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認並提供 run ID。
+- **Merge to main：** NOT PERFORMED（A5）
 
 ## 先前的 session：A4 explain parity（已 merge 到 main，`76085f8`）
 
