@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A5 完成並 push 到 feature branch；等待 GitHub Actions 與人類 review
+Last updated: 2026-09-28，A5 已 merge 到 main（`1a764ab`）
 
 ## Session：A5（`--max-depth` / `--min-depth`）
 
@@ -55,6 +55,10 @@ Last updated: 2026-09-28，A5 完成並 push 到 feature branch；等待 GitHub 
 
 ### A5 Current phase
 
+- **A5 已 merge 到 main。** 人類確認 GitHub Actions run `36381666722` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
+- merge 前：A5 branch ahead 2 / **behind 1**，merge base `0833f52`。落後的一個 commit 是 `f51fc8a`（chore: remove initial Claude git test scripts，人類另外要求並授權推到 main），和 A5 沒有共同修改的檔案。因為無法 fast-forward，改用一般 merge commit **`1a764abdf80a1fcd6ab60ea9bc28a3d777d5b489`**（沒有 rebase、沒有 force push、沒有改寫已發布的 history）。`origin/main` 包含 `a829ed6`、`28682d8` 與 `f51fc8a`。
+- merge 後 final validation（在 merge 結果上）：`make check` PASS、`go test -race ./...` PASS、working tree clean。
+- GNU 的 stderr 檢查（包括以 `/` 結尾的 root guard `-path`）在 ubuntu CI 上通過，沒有警告。
 - A5 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE；報告：`reports/nlf/2026-09-28-depth-control.md`。
 
 ### A5 Completed work
@@ -70,15 +74,15 @@ Last updated: 2026-09-28，A5 完成並 push 到 feature branch；等待 GitHub 
 
 ### A5 Exact next action
 
-無。等待 GitHub Actions（ubuntu-latest 會用 GNU find 實際跑 `TestExplainParity`；需要特別注意既有的 root guard 案例是否讓 GNU find 在 stderr 輸出以 `/` 結尾的 `-path` 警告，見 A5 報告的「未解問題」）與人類 review。**不要 merge A5 到 main；不要開始 A6。**
+無（A5 已 merge）。下一個項目：A6（top-N heap），在 `feat/nlf-roadmap-a6-topn-heap-20260928` 進行。
 
 ### A5 Git state
 
 - **Committed（A5）：** YES
 - **A5 branch pushed：** YES（`origin/feat/nlf-roadmap-a5-depth-control-20260928`）
 - **Main touched by this task：** A4 fast-forward merge 到 main（`76085f8`）與 checkpoint commit（`0833f52`），都是人類明確要求；A5 沒有碰 main。
-- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認並提供 run ID。
-- **Merge to main：** NOT PERFORMED（A5）
+- **GitHub Actions 結果：** run `36381666722`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認並回報）。
+- **Merge to main：** PERFORMED（A5，merge commit `1a764ab`，人類明確授權）
 
 ## 先前的 session：A4 explain parity（已 merge 到 main，`76085f8`）
 
