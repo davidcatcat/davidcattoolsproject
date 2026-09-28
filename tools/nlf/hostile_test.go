@@ -214,6 +214,35 @@ func TestHostileFilenameMatrix(t *testing.T) {
 	}
 }
 
+// isMissingRootError reports whether stderr starts with the missing search
+// location error for root. The message follows the query's language, so a
+// test must accept both instead of assuming English.
+func isMissingRootError(stderr, root string) bool {
+	return strings.HasPrefix(stderr, "nlf：找不到搜尋位置「"+root+"」\n") ||
+		strings.HasPrefix(stderr, fmt.Sprintf("nlf: search location %q does not exist\n", root))
+}
+
+// TestMissingDirFollowsQueryLanguage pins the missing --dir error in both
+// languages on every platform, so a cross-platform test cannot again accept
+// only the English message.
+func TestMissingDirFollowsQueryLanguage(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	for _, c := range []struct{ q, want string }{
+		{"找 txt 檔", "nlf：找不到搜尋位置「" + missing + "」\n"},
+		{"find txt files", fmt.Sprintf("nlf: search location %q does not exist\n", missing)},
+	} {
+		out, errOut, code := nlf(t, "--dir", missing, c.q)
+		if code != 2 || out != "" || errOut != c.want || !isMissingRootError(errOut, missing) {
+			t.Errorf("%q: exit %d, stdout %q, stderr %q; want exit 2, empty stdout, stderr %q", c.q, code, out, errOut, c.want)
+		}
+	}
+	for _, s := range []string{"", "nlf: permission denied reading \"" + missing + "\"\n", "nlf：找不到搜尋位置「" + missing + "/x」\n"} {
+		if isMissingRootError(s, missing) {
+			t.Errorf("isMissingRootError(%q) = true; want false", s)
+		}
+	}
+}
+
 // TestUnicodeNormalizationMatrix pins byte semantics for NFC and NFD
 // spellings (L2): nlf never normalizes. Only what the file system itself
 // does differs by platform, and both sides are asserted.
@@ -321,8 +350,8 @@ func TestUnicodeNormalizationMatrix(t *testing.T) {
 			t.Errorf("darwin: co: exit %d, got %q, want %q\n%s", coCode, coOut, want, coErr)
 		}
 	default:
-		if code != 2 || out != "" || !strings.Contains(errOut, "does not exist") {
-			t.Errorf("%s: --dir in NFD: exit %d, stdout %q, stderr %q; want exit 2 does not exist", runtime.GOOS, code, out, errOut)
+		if code != 2 || out != "" || !isMissingRootError(errOut, other) {
+			t.Errorf("%s: --dir in NFD: exit %d, stdout %q, stderr %q; want exit 2 and a missing search location error", runtime.GOOS, code, out, errOut)
 		}
 		if len(entries) != 2 {
 			t.Errorf("%s: both spellings should coexist, got %q", runtime.GOOS, entries)
