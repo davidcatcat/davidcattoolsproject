@@ -61,7 +61,7 @@ def main(argv=None):
             init_config(user_config_path(), args.force)
             print("llmtool: user config initialized", file=sys.stderr)
             return 0
-        config = resolve_config(vars(args))
+        config = resolve_config(vars(args), require_configured=args.command != "config")
         if args.command == "config":
             print(show_config(config), end="")
             return 0

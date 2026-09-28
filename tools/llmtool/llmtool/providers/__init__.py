@@ -15,4 +15,6 @@ def client_type(name):
 
 def create_client(config, key=None) -> Provider:
     provider = config["providers"][config["active_provider"]]
-    return client_type(provider["type"])(provider, config["generation"], key)
+    implementation = client_type(provider["type"])
+    implementation.validate_ready(provider)
+    return implementation(provider, config["generation"], key)

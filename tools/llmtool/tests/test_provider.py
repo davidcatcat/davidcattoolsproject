@@ -2,11 +2,13 @@ import copy
 import io
 import json
 import socket
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 from urllib.error import HTTPError, URLError
 
-from llmtool.config import DEFAULTS
+from llmtool.config import DEFAULTS, resolve_config, user_config_path
 from llmtool.errors import LLMToolError
 from llmtool.prompts import TEMPLATES, messages_for
 from llmtool.providers import create_client
@@ -29,7 +31,12 @@ class FakeResponse(io.BytesIO):
 
 class ProviderTests(unittest.TestCase):
     def setUp(self):
-        self.client = create_client(copy.deepcopy(DEFAULTS))
+        config = copy.deepcopy(DEFAULTS)
+        config["providers"]["default"].update({
+            "base_url": "http://127.0.0.1:1234", "model": "test-model",
+            "provider_options": {"enable_thinking": False},
+        })
+        self.client = create_client(config)
         self.open = Mock()
         self.client.opener.open = self.open
 
@@ -55,12 +62,12 @@ class ProviderTests(unittest.TestCase):
                 self.client.complete(messages)
                 req = self.open.call_args.args[0]
                 payload = json.loads(req.data)
-                self.assertEqual(req.full_url, "http://10.29.7.58:4000/v1/chat/completions")
+                self.assertEqual(req.full_url, "http://127.0.0.1:1234/v1/chat/completions")
                 self.assertEqual(req.method, "POST")
                 self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
                 self.assertEqual(payload["temperature"], 0)
                 self.assertEqual(payload["max_tokens"], 2000)
-                self.assertEqual(payload["model"], "gw")
+                self.assertEqual(payload["model"], "test-model")
                 self.assertEqual(payload["messages"], messages)
                 self.assertEqual(messages[1], {"role": "user", "content": "evidence-text"})
                 self.assertNotIn("tools", payload)
@@ -181,3 +188,41 @@ class ProviderTests(unittest.TestCase):
         config["providers"]["default"]["type"] = "codex-cli"
         with self.assertRaises(LLMToolError):
             create_client(config)
+
+    def test_factory_rejects_unconfigured_provider(self):
+        for fields, missing in (({}, "base_url"), ({"model": "test"}, "base_url"),
+                                ({"base_url": "http://localhost:1234"}, "model")):
+            with self.subTest(fields=fields):
+                config = copy.deepcopy(DEFAULTS)
+                config["providers"]["default"].update(fields)
+                with self.assertRaisesRegex(LLMToolError, "provider " + missing + " is not configured"):
+                    create_client(config)
+
+    def test_client_rejects_missing_settings_before_http(self):
+        for field in ("base_url", "model"):
+            with self.subTest(field=field):
+                original = self.client.provider[field]
+                self.client.provider[field] = None
+                with self.assertRaisesRegex(LLMToolError, "provider " + field + " is not configured"):
+                    self.client.complete([])
+                self.open.assert_not_called()
+                self.client.provider[field] = original
+
+    def test_explicit_company_example_user_config_and_no_thinking_payload(self):
+        example = Path(__file__).resolve().parents[1] / "config.example.company-qwen.yaml"
+        with tempfile.TemporaryDirectory() as directory:
+            user = user_config_path(directory)
+            user.parent.mkdir(parents=True)
+            user.write_bytes(example.read_bytes())
+            config = resolve_config(environ={}, cwd=directory, home=directory, require_configured=True)
+            self.assertIsNone(config["providers"]["default"]["api_key"])
+            self.assertIsNone(config["providers"]["default"]["api_key_env"])
+            client = create_client(config)
+            client.opener.open = Mock(return_value=FakeResponse(json.dumps(success()).encode()))
+            reply = client.complete(messages_for("ask", "test"))
+            req = client.opener.open.call_args.args[0]
+            self.assertEqual(req.full_url, "http://10.29.7.58:4000/v1/chat/completions")
+            payload = json.loads(req.data)
+            self.assertEqual(payload["model"], "gw")
+            self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+            self.assertEqual(reply.content, "final answer")

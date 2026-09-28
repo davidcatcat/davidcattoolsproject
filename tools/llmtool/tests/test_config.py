@@ -40,12 +40,16 @@ class ConfigTests(unittest.TestCase):
         self.user.parent.mkdir(parents=True)
         self.project = self.cwd / ".llmtool.yaml"
 
-    def resolve(self, cli=None, env=None):
-        return resolve_config(cli, {} if env is None else env, self.cwd, self.home)
+    def resolve(self, cli=None, env=None, require_configured=False):
+        return resolve_config(cli, {} if env is None else env, self.cwd, self.home,
+                              require_configured=require_configured)
 
     def test_defaults_and_independent_instances(self):
         config = self.resolve()
         self.assertEqual(config, DEFAULTS)
+        self.assertIsNone(config["providers"]["default"]["base_url"])
+        self.assertIsNone(config["providers"]["default"]["model"])
+        self.assertEqual(config["providers"]["default"]["provider_options"], {})
         config["generation"]["max_tokens"] = 1
         self.assertEqual(self.resolve()["generation"]["max_tokens"], 2000)
 
@@ -151,6 +155,9 @@ class ConfigTests(unittest.TestCase):
     def test_init_permissions_no_overwrite_and_force(self):
         init_config(self.user)
         self.assertEqual(self.resolve(), DEFAULTS)
+        self.assertEqual(yaml.safe_load(self.user.read_text()), DEFAULTS)
+        self.assertNotIn("10.29.7.58", self.user.read_text())
+        self.assertNotIn("gw", self.user.read_text())
         self.assertEqual(self.user.stat().st_mode & 0o777, 0o600)
         self.user.write_text("generation: {max_tokens: 42}")
         with self.assertRaises(LLMToolError):
@@ -225,7 +232,7 @@ class ConfigTests(unittest.TestCase):
             self.resolve(env=env)
         # Verify CLI ordering as well: no auth resolution, client, or request.
         stdout, stderr = StringIO(), StringIO()
-        with patch("llmtool.cli.resolve_config", side_effect=lambda *_: self.resolve(env=env)), \
+        with patch("llmtool.cli.resolve_config", side_effect=lambda *_, **__: self.resolve(env=env)), \
                 patch("llmtool.cli.api_key") as credentials, \
                 patch("llmtool.cli.create_client") as factory, \
                 redirect_stdout(stdout), redirect_stderr(stderr):
@@ -332,7 +339,6 @@ active_provider: local
         for fragment in (
             {"active_provider": "missing"}, {"active_provider": []},
             {"providers": {"../name": {}}}, {"providers": []},
-            {"providers": {"new": {"model": "missing-endpoint"}}},
             {"providers": {"default": {"type": "anthropic"}}},
             {"providers": {"default": {"provider_options": {"enable_thinking": "false"}}}},
             {"generation": {"enable_thinking": False}},
@@ -347,3 +353,44 @@ active_provider: local
             with self.subTest(options=options):
                 self.user.write_text(yaml.safe_dump({"providers": {"default": {"provider_options": options}}}))
                 self.assertEqual(self.resolve()["providers"]["default"]["provider_options"], options)
+
+    def test_missing_endpoint_or_model_fails_request_readiness(self):
+        for fields, field in (({}, "base_url"), ({"model": "test-model"}, "base_url"),
+                              ({"base_url": "http://localhost:1234"}, "model")):
+            with self.subTest(fields=fields):
+                self.user.write_text(yaml.safe_dump({"providers": {"default": fields}}))
+                # Partial configuration remains inspectable without making requests.
+                self.assertIsNone(self.resolve()["providers"]["default"][field])
+                with self.assertRaisesRegex(LLMToolError, "provider " + field + " is not configured"):
+                    self.resolve(require_configured=True)
+
+    def test_ready_named_provider_does_not_require_unused_default(self):
+        self.configure_profiles()
+        config = self.resolve(require_configured=True)
+        self.assertEqual(config["active_provider"], "local")
+        self.assertIsNone(config["providers"]["default"]["base_url"])
+        self.assertIsNone(config["providers"]["default"]["model"])
+
+    def test_missing_config_cli_fails_before_credentials_client_or_http(self):
+        # Real resolution against an empty HOME; fail the test on any HTTP attempt.
+        stdout, stderr = StringIO(), StringIO()
+        def resolve(args, **kwargs):
+            return self.resolve(cli=args, **kwargs)
+        with patch("llmtool.cli.resolve_config", side_effect=resolve), \
+                patch("llmtool.cli.api_key") as credentials, \
+                patch("llmtool.cli.create_client") as factory, \
+                patch("urllib.request.OpenerDirector.open") as http, \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            self.assertEqual(main(["ask", "private-input"]), 1)
+        credentials.assert_not_called()
+        factory.assert_not_called()
+        http.assert_not_called()
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "llmtool: provider base_url is not configured\n")
+
+    def test_explicit_cli_or_environment_can_configure_provider(self):
+        for cli, env in (({"base_url": "http://localhost:1234", "model": "test-model"}, {}),
+                         ({}, {"LLMTOOL_BASE_URL": "http://localhost:1234", "LLMTOOL_MODEL": "test-model"})):
+            with self.subTest(cli=cli, env=env):
+                config = self.resolve(cli=cli, env=env, require_configured=True)
+                self.assertEqual(config["providers"]["default"]["model"], "test-model")

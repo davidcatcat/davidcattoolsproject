@@ -21,16 +21,8 @@ PROVIDER_DEFAULTS = {
     "api_key_env": None,
     "provider_options": {},
 }
-# This is a deployment profile, not the identity of the provider abstraction.
 DEFAULTS = {
-    "providers": {
-        "default": {
-            **PROVIDER_DEFAULTS,
-            "base_url": "http://10.29.7.58:4000",
-            "model": "gw",
-            "provider_options": {"enable_thinking": False},
-        }
-    },
+    "providers": {"default": copy.deepcopy(PROVIDER_DEFAULTS)},
     "generation": {"temperature": 0, "max_tokens": 2000},
     "active_provider": "default",
 }
@@ -190,21 +182,23 @@ def _validate_provider(provider):
     implementation = client_type(provider["type"])
     implementation.validate_options(provider["provider_options"])
     url = provider["base_url"]
-    try:
-        if not isinstance(url, str) or any(c.isspace() or ord(c) < 32 for c in url):
-            raise ValueError
-        parsed = urlsplit(url)
-        if (parsed.scheme not in ("http", "https") or not parsed.hostname
-                or parsed.username is not None or parsed.password is not None
-                or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
-            raise ValueError
-        if parsed.port is not None and parsed.port < 1:
-            raise ValueError
-    except ValueError:
-        raise LLMToolError("base_url must be an HTTP(S) origin without credentials, path, query, or fragment") from None
-    provider["base_url"] = url.rstrip("/")
+    if url is not None:
+        try:
+            if not isinstance(url, str) or any(c.isspace() or ord(c) < 32 for c in url):
+                raise ValueError
+            parsed = urlsplit(url)
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
+                raise ValueError
+            if parsed.port is not None and parsed.port < 1:
+                raise ValueError
+        except ValueError:
+            raise LLMToolError("base_url must be an HTTP(S) origin without credentials, path, query, or fragment") from None
+        provider["base_url"] = url.rstrip("/")
     model = provider["model"]
-    if not isinstance(model, str) or not model.strip() or any(ord(c) < 32 for c in model):
+    if model is not None and (not isinstance(model, str) or not model.strip()
+                              or any(ord(c) < 32 for c in model)):
         raise LLMToolError("model must be a non-empty string without control characters")
     provider["timeout_seconds"] = _number(provider["timeout_seconds"], "timeout_seconds")
     if provider["timeout_seconds"] <= 0:
@@ -233,7 +227,8 @@ def _validate(config):
         raise LLMToolError("temperature must be between 0 and 2")
 
 
-def resolve_config(cli=None, environ=None, cwd=None, home=None):
+def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
+    """Resolve a viewable config; model requests must require readiness as well."""
     env = os.environ if environ is None else environ
     cli = cli or {}
     config = copy.deepcopy(DEFAULTS)
@@ -253,6 +248,9 @@ def resolve_config(cli=None, environ=None, cwd=None, home=None):
         if name in CLI_OPTIONS and value is not None:
             _set(config, CLI_OPTIONS[name], value)
     _validate(config)
+    if require_configured:
+        provider = selected_provider(config)
+        client_type(provider["type"]).validate_ready(provider)
     return config
 
 

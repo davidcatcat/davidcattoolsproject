@@ -22,6 +22,9 @@ Generic CLI、分來源 config schema、provider abstraction、單一 OpenAI-com
 實作、stdin/file/direct input、安全 stdout/stderr contract、error handling、
 read-only security boundary、offline tests。
 
+Core 不含 deployment endpoint/model；generic template 以 null 表示尚未設定。
+使用者須在首次模型請求前明確配置選定 provider，deployment examples 不會自動載入。
+
 具名 profiles 支援不同 endpoint/model；project 只能改 model/timeout 和通用
 generation 設定。只有 user config 或明確 CLI/env 可控制 endpoint/auth/selection。
 任務模板仍內建；沒有 roles engine、agent orchestration 或 Git 操作。

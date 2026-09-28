@@ -24,6 +24,12 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 class OpenAICompatibleClient:
     @staticmethod
+    def validate_ready(provider):
+        for field in ("base_url", "model"):
+            if provider.get(field) is None:
+                raise LLMToolError("provider " + field + " is not configured")
+
+    @staticmethod
     def validate_options(options):
         if not isinstance(options, dict) or set(options) - {"enable_thinking"}:
             raise LLMToolError("unsupported openai-compatible provider_options")
@@ -39,6 +45,7 @@ class OpenAICompatibleClient:
         self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
 
     def complete(self, messages):
+        self.validate_ready(self.provider)
         options = self.provider.get("provider_options", {})
         self.validate_options(options)
         body = {

@@ -7,9 +7,12 @@ llmtool is a read-only, provider-agnostic LLM CLI foundation.
 LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
 不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
 
-預設 `http://10.29.7.58:4000`／`gw` 只是目前的 example/deployment profile，
-可在 user config 或明確 CLI/env 操作中換成其他 OpenAI-compatible endpoint。
-Core 不以公司或模型品牌選擇 task 行為。
+llmtool core has no deployment endpoint/model.
+User must configure a provider before first model request.
+
+內建 `base_url`、`model` 都是 `null`，不會自動連任何部署。
+請先在 user config 手動設定 OpenAI-compatible endpoint 與 model；也可使用明確
+CLI/env 覆寫。公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
 
 | 概念 | 意義 | A1 狀態 |
 |---|---|---|
@@ -54,8 +57,14 @@ llmtool config init                 # 新檔權限 0600，既有檔案不覆蓋
 llmtool config init --force         # 明確要求才取代既有檔案；拒絕 symlink
 llmtool config show                 # resolved YAML，API key 遮罩
 llmtool config show --max-tokens 4000
-llmtool config show --provider home-vllm
+llmtool config show --provider home-vllm  # 先在 user config 建立該 profile
 ```
+
+`config init` 只產生 generic template。請開啟 `config path` 顯示的檔案，手動填入
+provider 的 `base_url` 與 `model`，再執行 `ask` 等模型命令。
+`config show` 可以顯示尚未填妥的 null 設定；模型命令則在讀取 credential／發出 HTTP
+之前失敗，訊息為 `provider base_url is not configured` 或 `provider model is not configured`。
+未選用的 profile 可保持 null，不影響已完整設定的 active provider。
 
 User config 固定是 `~/.config/llmtool/config.yaml`（依 HOME；不使用 XDG_CONFIG_HOME）。
 Project config 為**目前工作目錄**的 `.llmtool.yaml`；不搜尋父目錄、不讀 Git metadata。
@@ -65,26 +74,30 @@ Project config 為**目前工作目錄**的 `.llmtool.yaml`；不搜尋父目錄
 CLI option > environment > project config > user config > built-in defaults
 ```
 
-完整 **user config** 範例見 [config.example.yaml](config.example.yaml)：
+Generic **user config template** 見 [config.example.yaml](config.example.yaml)，
+內容與 built-in defaults 一致：
 
 ```yaml
 providers:
   default:
     type: openai-compatible
-    base_url: "http://10.29.7.58:4000"
-    model: "gw"
+    base_url: null
+    model: null
     timeout_seconds: 120
     api_key: null
     api_key_env: null
-    provider_options:
-      enable_thinking: false
+    provider_options: {}
 generation:
   temperature: 0
   max_tokens: 2000
 active_provider: default
 ```
 
-User config 可以增加其他具名 profile：
+### 手動配置的 deployment examples
+
+公司部署範例見 [config.example.company-qwen.yaml](config.example.company-qwen.yaml)。
+只有確認要使用該 endpoint 時，才手動把相關欄位填入 user config；程式不會搜尋或讀取
+這個範例檔。以下 IP／model 也只是範例，並非 generic 預設值：
 
 ```yaml
 providers:
@@ -101,7 +114,7 @@ providers:
 active_provider: office-qwen
 ```
 
-新 profile 必須定義 endpoint、model；其他欄位使用中立預設（type 為
+新 profile 在發出模型請求前必須定義 endpoint、model；其他欄位使用中立預設（type 為
 `openai-compatible`、timeout 120、無 auth、空 provider_options），**不繼承**
 `default` 的 endpoint、credentials 或 thinking 選項。Provider 名稱長 1–64 字元，
 以英數字開頭，可包含英數字、`-`、`_`。選擇不存在的 profile 會報錯。
@@ -120,7 +133,6 @@ active_provider: office-qwen
 ```yaml
 providers:
   default:
-    model: gw
     timeout_seconds: 180
 generation:
   max_tokens: 4000
@@ -153,7 +165,7 @@ credentials、query 或 fragment。工具固定附加 `/v1/chat/completions`。
 覆寫套到這一組；不更動其他 profile。A1 只接受 type `openai-compatible`，
 尚未接受未來的 roles／command／agent routing 設定。
 
-預設 example profile 不需 auth。未設定 key 時不送 Authorization；需要時可擇一設定
+預設無 auth。未設定 key 時不送 Authorization；需要時可擇一設定
 `api_key` 或 `api_key_env`。後者只查明確命名的環境變數，缺值時請求失敗。
 不讀 `.env`、credential store、keychain 或 SSH 檔案。不要把 key 寫進命令列。
 合併後兩個 auth 欄位不能同時有值；覆蓋 auth 方式時將另一個明確設為 `null`。
@@ -177,6 +189,8 @@ Project 雖不能改 endpoint/auth，仍可在同一 endpoint 選 model；不適
 `provider_options.enable_thinking`；舊的通用欄位會報錯，不默默忽略。
 將 project config 的 endpoint、auth、type 和 active selection 移至 user config。
 不會自動改寫既有設定檔。
+先前若依賴內建 endpoint/model 而沒有寫入 user config，現在需明確填入兩者；
+`config init --force` 也只會重建 null template，不會恢復任何部署預設值。
 
 ## 四個命令
 
@@ -216,8 +230,9 @@ llmtool context-pack --file incident.txt --verbose
 ## No-thinking 與輸出契約
 
 `enable_thinking` 是 OpenAI-compatible 實作的**可選 provider-specific 行為**，
-不是 generic generation 的共同能力。目前 default/example profile 設定
-`provider_options.enable_thinking: false`，所以其 request 仍包含已驗證有效的：
+不是 generic generation 的共同能力。Generic template 的 `provider_options` 是空的。
+公司 Qwen deployment example 明確設定 `provider_options.enable_thinking: false`，
+手動採用該設定後，其 request 仍包含已驗證有效的：
 
 ```json
 "chat_template_kwargs": {"enable_thinking": false}
@@ -252,6 +267,8 @@ HTTP 非 2xx、API error body、malformed JSON、missing choices、空 content�
 ## Troubleshooting 與已知限制
 
 - `PyYAML is required`：確認啟用安裝 llmtool 的 virtualenv。
+- `provider base_url/model is not configured`：編輯 `config path` 所指的 user config，
+  填入 active provider 的真實 endpoint/model；`config init` 本身不完成部署設定。
 - `cannot connect to gateway`：檢查伺服器連線和 `config show` 的 active profile/base URL。
   A1 不支援 proxy，HTTPS 使用系統 Python 的信任憑證，不略過 TLS 驗證。
 - `HTTP 401/403`：gateway 若開始要求認證，設定明確的 `api_key_env`。

@@ -64,6 +64,7 @@ class CLITests(unittest.TestCase):
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
             "LLMTOOL_BASE_URL": self.base_url,
+            "LLMTOOL_MODEL": "test-model",
         }
         self.server.requests = []
         self.server.reply = (200, success(), 0, {})
@@ -104,7 +105,7 @@ class CLITests(unittest.TestCase):
                 path, headers, payload = self.server.requests[-1]
                 self.assertEqual(path, "/v1/chat/completions")
                 self.assertEqual(payload["messages"][1]["content"], "測試 evidence\n")
-                self.assertFalse(payload["chat_template_kwargs"]["enable_thinking"])
+                self.assertNotIn("chat_template_kwargs", payload)
                 self.assertEqual(headers["Content-Type"], "application/json")
 
     def test_file(self):
@@ -205,6 +206,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, b"")
         self.assertEqual(user.stat().st_mode & 0o777, 0o600)
+        created = yaml.safe_load(user.read_text())
+        self.assertIsNone(created["providers"]["default"]["base_url"])
+        self.assertIsNone(created["providers"]["default"]["model"])
+        self.assertNotIn("10.29.7.58", user.read_text())
+        self.assertNotIn("gw", user.read_text())
         user.write_text("generation: {max_tokens: 42}")
         self.assert_failure(self.run_cli("config", "init"))
         self.assertIn("42", user.read_text())
@@ -284,6 +290,7 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(self.server.requests, [])
 
     def test_safe_project_overrides_still_reach_selected_endpoint(self):
+        self.env.pop("LLMTOOL_MODEL")
         (self.cwd / ".llmtool.yaml").write_text("""providers:
   default:
     model: project-model
@@ -301,6 +308,7 @@ generation:
 
     def test_named_profile_cli_selection_and_optional_thinking_payload(self):
         self.env.pop("LLMTOOL_BASE_URL")
+        self.env.pop("LLMTOOL_MODEL")
         user = self.home / ".config/llmtool/config.yaml"
         user.parent.mkdir(parents=True)
         user.write_text(yaml.safe_dump({"providers": {
@@ -320,6 +328,50 @@ generation:
         self.assertEqual(yaml.safe_load(shown.stdout)["active_provider"], "local")
         self.assertNotIn(b"fake-other-key", shown.stdout)
         self.assertNotIn(b"fake-selected-key", shown.stdout)
+
+    def test_no_user_config_ask_fails_and_show_remains_available(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        self.env.pop("LLMTOOL_MODEL")
+        result = self.run_cli("ask", "test")
+        self.assert_failure(result)
+        self.assertEqual(result.stderr, b"llmtool: provider base_url is not configured\n")
+        shown = self.run_cli("config", "show")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        provider = yaml.safe_load(shown.stdout)["providers"]["default"]
+        self.assertIsNone(provider["base_url"])
+        self.assertIsNone(provider["model"])
+        self.assertEqual(self.server.requests, [])
+
+    def test_missing_selected_field_fails_without_leaking_key(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        self.env.pop("LLMTOOL_MODEL")
+        user = self.home / ".config/llmtool/config.yaml"
+        user.parent.mkdir(parents=True)
+        for fields, missing in (({"model": "test"}, "base_url"),
+                                ({"base_url": self.base_url}, "model")):
+            with self.subTest(fields=fields):
+                user.write_text(yaml.safe_dump({"providers": {"default": {
+                    **fields, "api_key": "FAKE_PRIVATE_KEY",
+                }}}))
+                result = self.run_cli("ask", "private-input", "--verbose")
+                self.assert_failure(result)
+                self.assertEqual(result.stderr.decode(), "llmtool: provider " + missing + " is not configured\n")
+                self.assertEqual(self.server.requests, [])
+
+    def test_explicit_user_config_thinking_false_still_sent(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        self.env.pop("LLMTOOL_MODEL")
+        user = self.home / ".config/llmtool/config.yaml"
+        user.parent.mkdir(parents=True)
+        user.write_text(yaml.safe_dump({"providers": {"default": {
+            "base_url": self.base_url, "model": "explicit-model",
+            "provider_options": {"enable_thinking": False},
+        }}}))
+        result = self.run_cli("ask", "test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = self.server.requests[0][2]
+        self.assertEqual(payload["model"], "explicit-model")
+        self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
 
 
 if __name__ == "__main__":
