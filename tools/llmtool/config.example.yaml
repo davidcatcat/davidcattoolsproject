@@ -1,0 +1,15 @@
+providers:
+  default:
+    type: openai-compatible
+    # Configure both values before the first model request.
+    base_url: null
+    model: null
+    timeout_seconds: 120
+    # Optional; prefer an explicitly named environment variable to a literal key.
+    api_key: null
+    api_key_env: null
+    provider_options: {}
+generation:
+  temperature: 0
+  max_tokens: 2000
+active_provider: default

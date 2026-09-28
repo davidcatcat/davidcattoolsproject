@@ -1,0 +1,16 @@
+# Optional deployment example only; never loaded automatically by llmtool.
+# Copy relevant fields into user config only if this is your intended endpoint.
+providers:
+  default:
+    type: openai-compatible
+    base_url: "http://10.29.7.58:4000"
+    model: "gw"
+    timeout_seconds: 120
+    api_key: null
+    api_key_env: null
+    provider_options:
+      enable_thinking: false
+generation:
+  temperature: 0
+  max_tokens: 2000
+active_provider: default
