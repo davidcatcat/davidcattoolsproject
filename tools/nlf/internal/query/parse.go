@@ -3,6 +3,7 @@ package query
 import (
 	"fmt"
 	"math"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -15,13 +16,19 @@ func Parse(input string, now time.Time) (*Query, error) {
 	if err != nil {
 		return nil, err
 	}
+	empty := &Error{zh: "查詢是空的", en: "empty query",
+		hintZh: "例如：nlf \"最近 7 天修改的 go 檔\"", hintEn: `example: nlf "go files modified in the last 7 days"`}
 	if len(toks) == 0 {
-		return nil, &Error{zh: "查詢是空的", en: "empty query",
-			hintZh: "例如：nlf \"最近 7 天修改的 go 檔\"", hintEn: `example: nlf "go files modified in the last 7 days"`}
+		return nil, empty
 	}
 	p := &parser{toks: toks, q: &Query{Lang: DetectLang(input), Now: now}}
 	if err := p.parseAll(); err != nil {
 		return nil, err
+	}
+	// Punctuation alone ("?", "。") is as empty as no input at all; reserved
+	// punctuation ("!", "(") has already been reported by parseAll.
+	if !slices.ContainsFunc(toks, func(t token) bool { return t.kind != tPunct }) {
+		return nil, empty
 	}
 	q := p.q
 	contradiction := &Error{zh: "修改時間條件互相矛盾，不可能有檔案符合", en: "modification time conditions contradict each other"}
@@ -143,21 +150,120 @@ func (p *parser) step() error {
 	if t.kind == tNum {
 		return p.bareNumber()
 	}
-	if p.extension() {
-		return nil
+	if ok, err := p.extension(); ok || err != nil {
+		return err
 	}
 	if _, ok := p.accept(notPhrases); ok {
-		return &Error{Token: t.raw, zh: "v0.1 還不支援否定條件", en: "negative conditions are not supported in v0.1",
+		return &Error{Token: t.raw, zh: "目前還不支援否定條件", en: "negative conditions are not supported yet",
 			hintZh: "提示：要排除目錄請用「排除 目錄名」。", hintEn: `hint: to skip a directory use "exclude <dir>".`}
 	}
 	if _, ok := p.accept(fillers); ok {
 		return nil
 	}
 	if t.kind == tPunct {
+		if err := reservedPunct(t, p.pos == len(p.toks)-1); err != nil {
+			return err
+		}
 		p.pos++
 		return nil
 	}
 	return errUnknown(t.raw)
+}
+
+// reservedPunct rejects punctuation that could change the meaning of a
+// query if it were skipped: parentheses would group conditions and "!"
+// could mean NOT. "?" is only accepted as the very last token ("find go
+// files?"). Separators such as "," "。" and a sentence-ending "." are fine.
+func reservedPunct(t token, last bool) error {
+	switch t.text {
+	case "(", ")", "（", "）":
+		return &Error{Token: t.raw, zh: "目前不支援括號（括號會改變條件的分組）",
+			en:     "parentheses are not supported (they would change how conditions are grouped)",
+			hintZh: "提示：請拿掉它；要搜尋的文字請加引號，例如 包含 \"(x)\"",
+			hintEn: `hint: remove it, or put literal text in quotes, e.g. containing "(x)"`}
+	case "!", "！":
+		return &Error{Token: t.raw, zh: "「!」可能表示否定（NOT），目前不支援", en: `"!" may mean NOT, which is not supported`,
+			hintZh: "提示：請拿掉它；要搜尋的文字請加引號，例如 包含 \"!important\"",
+			hintEn: `hint: remove it, or put literal text in quotes, e.g. containing "!important"`}
+	case "?", "？":
+		if last {
+			return nil
+		}
+		return &Error{Token: t.raw, zh: "「?」只能放在查詢的最後", en: `"?" is only allowed at the end of the query`,
+			hintZh: "提示：「?」只能放在查詢的最後；如果它是值的一部分，請加引號，例如 檔名符合 \"core.?\"",
+			hintEn: `hint: "?" is only allowed at the end of the query; if it is part of a value, quote it, e.g. filename matches "core.?"`}
+	}
+	return nil
+}
+
+// gluedPunct is punctuation that, typed right after an unquoted value
+// ("core.", "TODO?", "app-?.log"), may belong to the value or to the
+// sentence. Separators such as "," "、" "。" are not in the set.
+const gluedPunct = ".?!()？！（）"
+
+// rejectGluedPunct reports an error when the token at the current position
+// is punctuation from gluedPunct written directly after the unquoted value
+// just read. zhOp and enOp are the operator shown in the hint (for example
+// 包含 / containing), so the hint can offer both readings of the value.
+// wrapped marks a "以 … 開頭/結尾" value, whose closing word the hint keeps.
+func (p *parser) rejectGluedPunct(value, zhOp, enOp string, wrapped bool) error {
+	punct, i, ok := p.gluedPunctRun()
+	if !ok {
+		return nil
+	}
+	// The other reading keeps whatever is still glued on ("app-?.log"),
+	// up to a keyword ("檔名以 app.開頭").
+	rest := ""
+	for ; i < len(p.toks) && !p.toks[i].spaceBefore && p.toks[i].kind != tQuoted && p.toks[i].kind != tCJK; i++ {
+		rest += p.toks[i].raw
+	}
+	closing := ""
+	if wrapped && i < len(p.toks) {
+		if _, ok := nameClosing[p.toks[i].text]; ok {
+			closing = " " + p.toks[i].raw
+		}
+	}
+	both := func(op string) (string, string) {
+		if op != "" {
+			op += " "
+		}
+		return fmt.Sprintf(`%s"%s"%s`, op, value, closing), fmt.Sprintf(`%s"%s%s%s"%s`, op, value, punct, rest, closing)
+	}
+	zhA, zhB := both(zhOp)
+	enA, enB := both(enOp)
+	return &Error{Token: value + punct, zh: "標點緊接在沒有引號的值後面，無法確定是否屬於這個值",
+		en:     "punctuation right after an unquoted value is ambiguous",
+		hintZh: "提示：請加引號，例如 " + zhA + " 或 " + zhB,
+		hintEn: "hint: quote the value, e.g. " + enA + " or " + enB}
+}
+
+// gluedPunctRun returns the run of punctuation at the current position when
+// it starts with a mark from gluedPunct with no space before it, and the
+// index just past the run.
+func (p *parser) gluedPunctRun() (string, int, bool) {
+	t, ok := p.cur()
+	if !ok || t.kind != tPunct || t.spaceBefore || !strings.Contains(gluedPunct, t.text) {
+		return "", p.pos, false
+	}
+	punct, i := "", p.pos
+	for ; i < len(p.toks) && p.toks[i].kind == tPunct && !p.toks[i].spaceBefore; i++ {
+		punct += p.toks[i].raw
+	}
+	return punct, i, true
+}
+
+// rejectDotSuffix rejects an unquoted content or filename value ending in a
+// "/." or "/.." path component ("包含 ./a/."): the tokenizer keeps such dots
+// for paths, but in a value they may just end the sentence.
+func rejectDotSuffix(value, zhOp, enOp string) error {
+	trimmed := strings.TrimRight(value, ".")
+	if !strings.HasSuffix(value, "/.") && !strings.HasSuffix(value, "/..") {
+		return nil
+	}
+	return &Error{Token: value, zh: "標點緊接在沒有引號的值後面，無法確定是否屬於這個值",
+		en:     "punctuation right after an unquoted value is ambiguous",
+		hintZh: fmt.Sprintf(`提示：請加引號，例如 %s "%s" 或 %s "%s"`, zhOp, trimmed, zhOp, value),
+		hintEn: fmt.Sprintf(`hint: quote the value, e.g. %s "%s" or %s "%s"`, enOp, trimmed, enOp, value)}
 }
 
 func (p *parser) contentTerm() error {
@@ -194,6 +300,12 @@ func (p *parser) contentTerm() error {
 			hintZh: fmt.Sprintf("提示：請用引號標出要搜尋的文字，例如 包含 \"%s\" 或 包含 \"%s\"", term, term+nt.raw),
 			hintEn: fmt.Sprintf(`hint: quote the text to search for, e.g. containing "%s"`, term+nt.raw)}
 	}
+	if err := p.rejectGluedPunct(term, "包含", "containing", false); err != nil {
+		return err
+	}
+	if err := rejectDotSuffix(term, "包含", "containing"); err != nil {
+		return err
+	}
 	p.q.Contents = append(p.q.Contents, term)
 	return nil
 }
@@ -228,17 +340,25 @@ func (p *parser) excludeNames(weak bool, phrase string) error {
 		if t.kind == tQuoted {
 			name = t.text
 		}
+		if err := checkExcludeName(name, phrase+" "+t.raw); err != nil {
+			return err
+		}
 		p.pos++
+		if t.kind != tQuoted {
+			if err := p.rejectGluedPunct(t.raw, phrase, phrase, false); err != nil {
+				return err
+			}
+		}
 		_, tail := p.accept(excludeTail)
 		sawTail = sawTail || tail
 		if _, n := p.matchAt(p.pos, fileNouns); n > 0 && !tail && t.kind != tQuoted {
 			// "exclude go files", "exclude test files": files, not a directory.
-			return &Error{Token: phrase + " " + t.raw, zh: "v0.1 只能排除目錄，不能排除某種檔案類型", en: "v0.1 can only exclude directories, not file types",
+			return &Error{Token: phrase + " " + t.raw, zh: "目前只能排除目錄，還不能排除某種檔案類型", en: "can only exclude directories, not file types yet",
 				hintZh: "提示：要排除目錄請寫「排除 名稱 目錄」。", hintEn: `hint: to skip a directory write "exclude <name> dir".`}
 		}
 		if t.kind != tQuoted && !tail && looksLikeFileType(t) {
 			// "排除 .go", "exclude *.log", "exclude images": a file type, not a directory.
-			return &Error{Token: t.raw, zh: "這看起來是檔案類型；v0.1 只能排除目錄", en: "this looks like a file type; v0.1 can only exclude directories",
+			return &Error{Token: t.raw, zh: "這看起來是檔案類型；目前只能排除目錄", en: "this looks like a file type; only directories can be excluded for now",
 				hintZh: "提示：如果真的是目錄名稱，請加上「目錄」或引號，例如 排除 \"" + name + "\" 目錄。",
 				hintEn: `hint: if it really is a directory, add "dir" or quotes, e.g. exclude "` + name + `" dir.`}
 		}
@@ -262,11 +382,25 @@ func (p *parser) excludeNames(weak bool, phrase string) error {
 			hintZh: "例如：排除 node_modules 和 .git", hintEn: "example: exclude node_modules and .git"}
 	}
 	if weak && !sawTail {
-		return &Error{Token: phrase, zh: "無法確定是要排除目錄還是否定條件（v0.1 不支援否定條件）", en: "unclear whether this excludes a directory or negates a condition (negation is not supported in v0.1)",
+		return &Error{Token: phrase, zh: "無法確定是要排除目錄還是否定條件（目前還不支援否定條件）", en: "unclear whether this excludes a directory or negates a condition (negation is not supported yet)",
 			hintZh: "提示：要排除目錄請寫「排除 " + names[0] + "」或「除了 " + names[0] + " 目錄以外」。",
 			hintEn: `hint: to skip a directory write "exclude ` + names[0] + `" or "except ` + names[0] + ` dir".`}
 	}
 	p.q.ExcludeDirs = append(p.q.ExcludeDirs, names...)
+	return nil
+}
+
+// checkExcludeName rejects exclude names that would silently exclude
+// nothing or the whole search: "", "/", ".", "./", "..", "../".
+func checkExcludeName(name, tok string) error {
+	hintZh, hintEn := "提示：請寫要排除的目錄名稱，例如 排除 vendor", "hint: name the directory to skip, e.g. exclude vendor"
+	trimmed := strings.TrimRight(name, "/")
+	if trimmed == "" {
+		return &Error{Token: tok, zh: "排除名稱不能是空的", en: "an exclude name must not be empty", hintZh: hintZh, hintEn: hintEn}
+	}
+	if c := path.Clean(trimmed); c == "." || c == ".." {
+		return &Error{Token: tok, zh: "不能排除「.」或「..」", en: `cannot exclude "." or ".."`, hintZh: hintZh, hintEn: hintEn}
+	}
 	return nil
 }
 
@@ -508,7 +642,7 @@ func (p *parser) before(t time.Time) {
 
 // extension handles ".go", "*.md", "go files", "pdf 和 docx 檔", "圖片",
 // "extension heic".
-func (p *parser) extension() bool {
+func (p *parser) extension() (bool, error) {
 	save := p.pos
 	_, trig := p.accept(extTriggers)
 	if trig {
@@ -525,12 +659,19 @@ func (p *parser) extension() bool {
 	}
 	if len(cands) == 0 {
 		p.pos = save
-		return false
+		return false, nil
 	}
 	for _, c := range cands {
 		if c.kind == tWord && aliasNeedsNoun[c.text] && !noun && !trig {
 			p.pos = save
-			return false
+			return false, nil
+		}
+	}
+	if !noun {
+		// "*.log?": the list ends at the punctuation, which may belong to
+		// the extension (a glob) or to the sentence.
+		if err := p.rejectGluedExtPunct(cands[len(cands)-1]); err != nil {
+			return true, err
 		}
 	}
 	for _, c := range cands {
@@ -543,7 +684,25 @@ func (p *parser) extension() bool {
 			p.q.Extensions = append(p.q.Extensions, strings.TrimPrefix(c.text, "."))
 		}
 	}
-	return true
+	return true, nil
+}
+
+// rejectGluedExtPunct reports an error when punctuation from gluedPunct is
+// written directly after the extension c ("*.log?", "副檔名 heic?").
+func (p *parser) rejectGluedExtPunct(c token) error {
+	punct, _, ok := p.gluedPunctRun()
+	if !ok {
+		return nil
+	}
+	e := &Error{Token: c.raw + punct, zh: "標點緊接在副檔名後面，無法確定是否屬於副檔名",
+		en:     "punctuation right after an extension is ambiguous",
+		hintZh: "提示：請拿掉標點", hintEn: "hint: remove the punctuation"}
+	if c.kind != tCJK { // "圖片" names a group of extensions, not a glob
+		glob := "*." + strings.TrimPrefix(strings.TrimPrefix(c.text, "*"), ".") + punct
+		e.hintZh = "提示：如果是 glob，請寫 檔名符合 \"" + glob + "\"；否則請拿掉標點"
+		e.hintEn = `hint: for a glob write filename matches "` + glob + `"; otherwise remove the punctuation`
+	}
+	return e
 }
 
 // isFreeWord reports whether t is an ASCII word with no meaning to the parser.

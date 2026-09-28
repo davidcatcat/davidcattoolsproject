@@ -1010,3 +1010,81 @@ func TestAbsoluteComparatorsEndToEnd(t *testing.T) {
 		t.Errorf("explain/confirm bounds:\n%s\n%s", ex, plan)
 	}
 }
+
+// TestPunctuationSafetyEndToEnd checks that punctuation which could change
+// the meaning of a query is rejected before anything runs.
+func TestPunctuationSafetyEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	mkfiles(t, dir, map[string]string{"app/error.log": "ERROR: disk full", "app/ok.log": "all good"})
+	rejected := map[string]string{
+		`log files !containing "ERROR"`:                            `"!" may mean NOT`,
+		"larger than 1GB or (smaller than 1KB and modified today)": "parentheses are not supported",
+		"filename matches core.?":                                  "punctuation right after an unquoted value is ambiguous",
+		"包含 錯誤？":                                                   "標點緊接在沒有引號的值後面",
+		"find ? log files":                                         `"?" is only allowed at the end of the query`,
+		"exclude .":                                                `cannot exclude "." or ".."`,
+	}
+	for q, want := range rejected {
+		out, errOut, code := nlf(t, "--dir", dir, q)
+		if code != 2 || out != "" || !strings.Contains(errOut, want) {
+			t.Errorf("%s: code=%d out=%q err=%q, want exit 2 with %q", q, code, out, errOut, want)
+		}
+	}
+	// --explain and --confirm show no plan and never prompt for a rejected query.
+	q := `log files !containing "ERROR"`
+	for _, flag := range []string{"--explain", "--confirm"} {
+		out, errOut, code := nlfInput(t, "y\n", flag, "--dir", dir, q)
+		if code != 2 || out != "" || strings.Contains(errOut, "[y/N]") || strings.Contains(errOut, "find ") ||
+			!strings.Contains(errOut, `"!" may mean NOT`) {
+			t.Errorf("%s: code=%d out=%q err=%q", flag, code, out, errOut)
+		}
+	}
+	// Allowed punctuation still searches as before.
+	out, errOut, code := nlf(t, "--dir", dir, "find log files?")
+	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"app/error.log", "app/ok.log"}) {
+		t.Errorf("find log files?: code=%d got=%v err=%q", code, got, errOut)
+	}
+	out, errOut, code = nlf(t, "--dir", dir, `log files containing "ERROR".`)
+	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"app/error.log"}) {
+		t.Errorf(`containing "ERROR".: code=%d got=%v err=%q`, code, got, errOut)
+	}
+}
+
+// TestPunctuationQARegressionsEndToEnd covers the QA findings through the CLI.
+func TestPunctuationQARegressionsEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	mkfiles(t, dir, map[string]string{"parent.go": "", "src/a.go": "", "src/a.log": "", "src/a.log1": ""})
+	sub := filepath.Join(dir, "src")
+	// "檔.." used to set the root to "..": with --dir that was a location
+	// conflict, and without it the parent directory was searched.
+	out, errOut, code := nlf(t, "--dir", sub, "找 go 檔..")
+	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"src/a.go"}) {
+		t.Errorf("找 go 檔..: code=%d got=%v err=%q, want only src/a.go", code, got, errOut)
+	}
+	// A spaced ".." is still the parent directory.
+	if _, errOut, code := nlf(t, "--dir", sub, "go files in .."); code != 2 || !strings.Contains(errOut, "already names a location") {
+		t.Errorf("go files in ..: code=%d err=%q, want the --dir conflict", code, errOut)
+	}
+	// "*.log?" used to drop the "?" and match a.log.
+	for _, q := range []string{"*.log?", "?", "。", ",", "exclude ./", "exclude /", "包含 錯誤.."} {
+		if out, errOut, code := nlf(t, "--dir", sub, q); code != 2 || out != "" || errOut == "" {
+			t.Errorf("%s: code=%d out=%q err=%q, want exit 2 with a message", q, code, out, errOut)
+		}
+	}
+	out, errOut, code = nlf(t, "--dir", sub, `filename matches "*.log?"`)
+	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"src/a.log1"}) {
+		t.Errorf("quoted glob: code=%d got=%v err=%q", code, got, errOut)
+	}
+}
+
+// TestParentPathRoot: a location ending in ".." in the query searches that
+// directory, two levels up here, not one.
+func TestParentPathRoot(t *testing.T) {
+	dir := t.TempDir()
+	mkfiles(t, dir, map[string]string{"up.go": "", "b/mid.go": "", "b/src/x.go": ""})
+	out, errOut, code := nlf(t, "go files in "+filepath.Join(dir, "b", "src")+"/../..")
+	got := strings.Join(paths(filepath.Join(dir, "b", "src", "..", ".."), out), ",")
+	if code != 0 || got != "b/mid.go,b/src/x.go,up.go" {
+		t.Errorf("code=%d got %s\n%s", code, got, errOut)
+	}
+}

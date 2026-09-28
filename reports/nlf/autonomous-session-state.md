@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: IN PROGRESS
-Last updated: 2026-09-28，A1 design 定稿（Architecture APPROVE WITH CHANGES）
+Last updated: 2026-09-28，Git Safety 結論為 GO；A1 commit 已建立，接著 push feature branch
 
 ## Session
 
@@ -13,8 +13,8 @@ Last updated: 2026-09-28，A1 design 定稿（Architecture APPROVE WITH CHANGES�
 - **Baseline version：** 0.4.0
 - **Baseline test count：** 759 PASS / 0 FAIL / 0 SKIP
 - **Feature branch：** `feat/nlf-roadmap-a1-20260928`，從 origin/main 建立。為避免誤 push 到 main，已執行 `git branch --unset-upstream`。
-- **Current branch HEAD：** `91ee959`（尚未 commit）
-- **Worktree path：** `<session scratchpad>/nlf-a1-worktree`（Lead 的 session scratchpad 目錄；請用 `git worktree list` 查詢實際路徑）`
+- **Current branch HEAD：** `a1030cc`（docs：roadmap 與 checkpoint；尚未 push）
+- **Worktree path：** `<session scratchpad>/nlf-a1-worktree`（Lead 的 session scratchpad 目錄；請用 `git worktree list` 查詢實際路徑）
 - **Main checkout：** `~/git/davidcataiporject/davidcattoolsproject`，停在 main，乾淨，**沒有碰過**。
 - **Isolation：** git worktree
 - **Agent orchestration：** SUBAGENTS USED
@@ -22,7 +22,7 @@ Last updated: 2026-09-28，A1 design 定稿（Architecture APPROVE WITH CHANGES�
 
 ## Phase / Milestone
 
-- **Current phase：** A1 implementation（Implementation Agent）
+- **Current phase：** Release / Git Safety → commit → push
 - **Current milestone：** A1 = Punctuation safety hardening，建議版本 0.4.1（patch）
 
 ## Completed work
@@ -112,7 +112,19 @@ Last updated: 2026-09-28，A1 design 定稿（Architecture APPROVE WITH CHANGES�
 
 ## In-progress work
 
-- A1 design 已定稿。下一步：啟動 Implementation Agent。
+- **Implementation 完成（尚未 commit，在 worktree 中）。** Implementation Agent 回報、Lead 也獨立驗證過：
+  - 修改的檔案：`internal/query/{tokenize,parse,filename}.go`、`README.md`、`main_test.go`，以及新增的 `internal/query/punctuation_test.go`。
+  - 沒有動到的檔案：`query.go`、`explain.go`、`internal/search/`。
+  - 新增的 helper：`reservedPunct`（規則 1、2，在 `step()` 裡）、`rejectGluedPunct` 與 `gluedPunct`（規則 3，在 `nameValue`、`contentTerm`、`excludeNames` 裡）、`rawBetween`（產生提示文字）。
+  - tokenizer 的修改：黏在前一個 token 的單獨 `.` 變成 tPunct。
+  - 其他：exclude `.` / `..` 會報錯；v0.1 字樣已移除，英文改成 "... not supported yet"。
+  - 與 design 的差異：錯誤訊息沿用既有的 `Error.Token` 格式，也就是「message：「core.?」」。
+  - 已知的小瑕疵：
+    - `檔名以 app? 開頭` 的提示缺少「開頭」。
+    - `包含 錯誤。？` 會解析成內容 `錯誤`，因為 `。` 不在 glued 的字元集合裡，而 `？` 是最後一個 token。沒有測試固定這個結果。
+  - 測試：863 PASS（759 個既有 + 104 個新增），0 FAIL，0 SKIP。既有測試檔被移除的行數是 0。
+  - 驗證：gofmt、vet、test、race、build 都乾淨，由 Implementation Agent 執行，Lead 也重跑過 vet 與 test。
+- **QA Agent 已啟動**（背景執行）。
 
 ## Remaining work
 
@@ -139,34 +151,108 @@ Last updated: 2026-09-28，A1 design 定稿（Architecture APPROVE WITH CHANGES�
 
 ## Latest test results
 
-- Baseline：759 PASS（見上）。A1 還沒有開始寫程式。
+- Baseline：759 PASS。A1 實作完成後 863 PASS；QA 修正完成後 933 PASS；加上 Lead 的路徑修正後，全部 PASS（final count 在 full validation 時記錄）。0 FAIL，0 SKIP。
 
 ## Latest QA results
 
-- 還沒開始。
+QA 第一輪完成。結論：**PASS WITH ISSUES**。與 HEAD 對照 1,415 個查詢字串，除了刻意新增的 reject 之外，沒有其他 regression。
 
-## Validation status（A1）
+**QA completed：**
 
-| 項目 | 狀態 |
+- 規則 1 到 5 的所有位置與組合，包括引號、日期、OR、路徑、大小與數量、全形字元，以及 100k 字元的輸入。
+- `--explain` 與 `--confirm` 遇到被拒絕的查詢時：exit 2，沒有 stdout，不印 plan 也不詢問。
+- 以真實搜尋抽查既有功能：結果與 HEAD 相同。
+
+**Bugs found → Lead 的決定：**
+
+1. **HIGH：** 黏在前面的 `..`（`找 go 檔..`、`"x"..`）會變成 root `..`，改去搜尋上層目錄，屬於 silent widening。HEAD 就已經存在。→ **本輪修正**：tokenizer 把前面沒有空白、而且全部由點組成的一段字元，當成標點。
+2. **MEDIUM：** `包含 錯誤..`、`檔名是 設定..` 繞過規則 3。→ 修正第 1 項時一併解決。
+3. **MEDIUM：** `exclude ./`、`"./"`、`../`、`排除 ./`、`exclude /` 被接受，但實際上什麼都沒排除。原因是 `TrimSuffix` 在 `.` / `..` 檢查之後才執行。→ **修正**：對 trim 之後的名稱做檢查，空名稱也報錯。
+4. **MEDIUM：** `*.log?`、`.log?`、`副檔名 heic?`、`.go or .md?` 的 `?` 被默默丟掉，像 glob 的副檔名因此比對出不同的結果。→ **修正**：副檔名值後面緊接 glued punctuation 時報錯，並提示改用 `filename matches "*.log?"`。
+5. **LOW：** 外觀相似的標點（`﹖ ﹗ ‼ ⁇ ⁉ ﹙ ﹚ …`）會被默默併進沒有引號的值。→ **本輪不修**，寫進 Known Limitations。
+6. **LOW：**
+   - 6a：wrapped 形式的檔名提示會給出不合法的查詢（`檔名以 "app"` 少了「開頭」；`rest` 會吞掉 boundary word）。→ **修正**：`rest` 遇到 boundary 就停，並補上結尾詞。
+   - 6b：OR 沿用比對方式時，提示裡沒有比對方式。→ 本輪不修，寫進文件。
+7. **LOW：** 提示文字不精確。`!` 的提示用了括號的例子；位於中間的 `?` 一律給 glob 的提示。→ **修正文字。**
+8. **LOW：**
+   - 8a：只有標點的查詢（`?`、`？`、`,`、`。`、`.?`）會搜尋全部檔案，但空查詢會報錯。→ **修正**：全部都是標點的輸入，視為空查詢。
+   - 8b：`exclude src, vendor, go files` 會把後面的名稱變成副檔名。這是既有的 parser 問題，與標點無關。→ 留給 roadmap（defer）。
+   - 8c：含換行的檔名直接輸出。→ 屬於 roadmap A3（`-0`）。
+
+**Bugs fixed（Implementation Agent，Lead 已用 binary 逐一 re-verify）：** 第 1、2、3、4、6a、7、8a 項。
+
+- 第 1 項：tokenizer 把前面沒有空白、全部由點組成的一段字元，當成多個 `.` 標點。
+- 第 3 項：新增 `checkExcludeName`，對 trim 之後的名稱做 `path.Clean` 檢查，空名稱也報錯。
+- 第 4 項：`extension()` 改為回傳 `(bool, error)`，並新增 `rejectGluedExtPunct`。
+- 第 8a 項：在 `Parse` 中，全部都是標點的輸入視為空查詢。filler-only 的查詢（`find`、`and`）維持原本行為：exit 0、列出全部檔案，測試已固定這個結果。
+- 第 6a 項：`rejectGluedPunct` 新增 wrapped 參數，提示會附上結尾詞。
+- 第 7 項：提示文字已修正。
+
+**Lead 追加修正（Implementation Agent 回報的既有 bug）：** `classifyASCII` 會把路徑結尾的 `.` 剝掉，因此 `in ../..` 變成 root `../.`，少了一層；`in ~/..` 則變成 home。
+
+- 修正：路徑以 `/.` 或 `/..` 結尾時，不剝結尾的點。
+- 以真實搜尋驗證：從 `a/b/src` 搜尋 `../..`，找到 `a/up.go`。
+- 新增測試：`TestPathDotComponents`、`TestParentPathRoot`。
+- 副作用：`exclude src/..` 現在會報錯（Clean 之後就是搜尋位置本身），不再被默默接受。
+
+**Regression tests added：**
+
+- QA 修正（Implementation Agent 加入）：`TestGluedDotRuns`、`TestExcludeNothing`、`TestGluedExtensionPunctuation`、`TestPunctuationOnlyQuery`、`TestWrappedFilenameHints`、`TestReservedPunctuationHints`、`TestPunctuationQARegressionsEndToEnd`，共 70 個 PASS 項目。
+- Lead 追加修正：`TestPathDotComponents`、`TestParentPathRoot`。
+
+**Deferred（寫進 A1 report 的 Known Limitations）：**
+
+- 外觀相似的標點。
+- OR 沿用比對方式時，提示裡沒有比對方式。
+- `exclude a, b, go files` 會把後面的名稱變成副檔名。
+- 含換行的檔名直接輸出（roadmap A3）。
+- `containing TODO..` 的提示只剝掉一個點。
+
+**Next QA action：** 無，除非 Review 發現新的問題。
+
+## Review results
+
+**APPROVE WITH CHANGES**（Review Agent，重新執行的那一次；第一次因 usage limit 中斷）：
+
+- **S1：** 保留 `/.` 與 `/..` 的規則套用到所有字，導致 `包含 a/.` 保留了句號。→ **Lead 已修正**：只有路徑保留，並新增 `rejectDotSuffix`。
+- **S2：** `exclude vendor/.` 的意思默默改變。→ 現在是規則 3 的錯誤，並有測試固定。
+- **Nits 已處理：** 把重複的 loop 抽成共用的 `gluedPunctRun` helper；更新 tPunct 的註解；修正 `TestParentPathRoot` 的註解；roadmap 第 5 行與行數（約 3,000 行）。
+- **沒有處理的 nits**（在 A1 report 中列為限制或 cosmetic）：
+  - `?` 的提示重複了主訊息。
+  - 路徑中的 `?` 提示寫成 glob 的例子。
+  - `app-?.log` 的提示提供了 `"app-"`。
+  - `exclude /` 的訊息寫成「不能是空的」。
+- 新增測試：`TestDotComponentOnlyForPaths`。
+
+## Validation status（A1，final）
+
+| 項目 | 結果 |
 |---|---|
-| go fmt ./... | NOT RUN |
-| go vet ./... | NOT RUN |
-| go test ./... | NOT RUN |
-| go test -race ./... | NOT RUN |
-| go test ./... -count=10 | NOT RUN |
-| go build ./... | NOT RUN |
-| make check | NOT RUN |
-| make dist | NOT RUN |
-| Linux build | NOT RUN |
-| Linux runtime | NOT RUN（沒有 Linux 環境） |
+| go fmt ./... | PASS |
+| go vet ./... | PASS |
+| go test ./... | PASS（936，0 FAIL，0 SKIP） |
+| go test -race ./... | PASS |
+| go test ./... -count=10 | PASS |
+| go build ./... | PASS |
+| make check | PASS |
+| make dist | PASS（nlf-0.4.0-*，SHA256SUMS OK，Linux 版本為靜態 ELF） |
+| Linux build | PASS（另外 vet 與 test -c 也通過） |
+| Linux runtime | NOT RUN |
+| macOS runtime | PASS |
+
+A1 report：`reports/nlf/2026-09-28-punctuation-safety.md`（其中引用的錯誤與提示文字都已用 binary 核對過）。
 
 ## Known failures / blockers
 
-- 無。
+- 無。紀錄：第一次 review 因 usage limit 中斷。恢復後重新確認：HEAD `a1030cc`，A1 變更仍未 commit，go test PASS，`origin/main` 仍是 `91ee959`，main checkout 乾淨。
 
 ## Exact next action
 
-在 worktree 中啟動 Implementation Agent，依照上方已定稿的 design 實作 A1，並加入測試與 README 修改；不可有 git 寫入。完成後交給 QA Agent。
+1. Git Safety Agent（read-only）確認 staging 清單、secrets、binaries、本機路徑、main 狀態。
+2. commit A1：`nlf: harden punctuation handling (A1)`，明確列出要 stage 的檔案。
+3. `git push -u origin feat/nlf-roadmap-a1-20260928`（**絕不 push main**）。
+4. 建立 PR，目標為 main；不 merge、不開 auto-merge。
+5. 把 checkpoint 更新成 COMPLETE。
 
 ## Commands to run next
 
@@ -192,7 +278,7 @@ make dist
 
 ## Git state
 
-- **Committed：** NO
+- **Committed：** YES。A1 commit `nlf: harden punctuation handling (A1)` 已建立（hash 見 git log）；roadmap 的 commit 在更早之前。`a1030cc docs: add nlf product roadmap and session checkpoint`（local、未 push；commit 前已把本機路徑換成 placeholder，所以 amend 過一次，這個 commit 從未 push）
 - **Branch pushed：** NO
 - **PR URL：** none
 - **Merge to main：** NOT PERFORMED

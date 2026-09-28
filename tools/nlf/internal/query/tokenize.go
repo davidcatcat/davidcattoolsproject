@@ -18,7 +18,7 @@ const (
 	tQuoted             // quoted literal, text keeps original case
 	tCJK                // known Chinese keyword from the dictionary
 	tHan                // run of unknown Chinese (or other non-ASCII) characters
-	tPunct              // separator punctuation
+	tPunct              // punctuation: separators, sentence marks and reserved ( ) ! ?
 	tOp                 // comparison operator: > >= < <=
 )
 
@@ -110,7 +110,16 @@ func tokenize(s string) ([]token, error) {
 					j++
 				}
 			}
-			emit(classifyASCII(string(rs[i:j]))...)
+			if w := string(rs[i:j]); !spaced && strings.Trim(w, ".") == "" {
+				// Dots glued to the previous token ("x".", 錯誤., 檔..) are
+				// sentence periods, never the path "." or ".."; only a
+				// spaced "." or ".." ("in ..") names a directory.
+				for range w {
+					emit(token{kind: tPunct, text: ".", raw: "."})
+				}
+			} else {
+				emit(classifyASCII(string(rs[i:j]))...)
+			}
 			i = j
 		default:
 			if w := longestCJK(rs[i:]); w != "" {
@@ -171,8 +180,11 @@ func isPathRune(r rune) bool {
 
 func classifyASCII(raw string) []token {
 	var trailing []token
-	// A sentence-ending period is punctuation, not part of the word.
-	if len(raw) > 1 && strings.HasSuffix(raw, ".") && strings.Trim(raw, ".") != "" {
+	// A sentence-ending period is punctuation, not part of the word. A path
+	// ("/", "~/", "./", "../" prefix) that ends in a "." or ".." component
+	// ("../..", "~/..", "./src/.") keeps it: that dot names a directory.
+	if len(raw) > 1 && strings.HasSuffix(raw, ".") && strings.Trim(raw, ".") != "" &&
+		!(hasPathPrefix(raw) && (strings.HasSuffix(raw, "/.") || strings.HasSuffix(raw, "/.."))) {
 		raw = raw[:len(raw)-1]
 		trailing = append(trailing, token{kind: tPunct, text: ".", raw: "."})
 	}

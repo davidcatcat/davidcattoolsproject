@@ -3,6 +3,7 @@ package query
 import (
 	"path"
 	"slices"
+	"strings"
 )
 
 // Filename conditions.
@@ -138,6 +139,7 @@ func (p *parser) nameValue(from int) (string, error) {
 			hintZh: "例如：檔名是 nginx.conf；含中文或空白的檔名請加引號，例如 檔名是 \"中文設定檔.yml\"、檔名包含 \"foo bar\"",
 			hintEn: `example: filename is nginx.conf; quote names with spaces or non-ASCII text, e.g. name contains "foo bar"`}
 	}
+	valueAt := p.pos
 	p.pos++
 	if t.kind == tQuoted {
 		if t.text == "" {
@@ -148,7 +150,16 @@ func (p *parser) nameValue(from int) (string, error) {
 	v := t.raw
 	for {
 		nt, ok := p.cur()
-		if !ok || nt.spaceBefore || nt.kind == tPunct || nt.kind == tOp || nt.kind == tQuoted {
+		if !ok || nt.spaceBefore || nt.kind == tPunct || nt.kind == tOp || nt.kind == tQuoted ||
+			(nt.kind == tCJK && slices.Contains(nameBoundaries, nt.text)) {
+			op := p.rawBetween(from, valueAt)
+			wrapped := valueAt > 0 && slices.Contains(nameOpen, p.toks[valueAt-1].text)
+			if err := p.rejectGluedPunct(v, op, op, wrapped); err != nil {
+				return "", err
+			}
+			if err := rejectDotSuffix(v, op, op); err != nil {
+				return "", err
+			}
 			return v, nil
 		}
 		if nt.kind == tHan || nt.kind == tNum || nt.kind == tExt || nt.kind == tWord {
@@ -156,13 +167,23 @@ func (p *parser) nameValue(from int) (string, error) {
 			p.pos++
 			continue
 		}
-		if nt.kind == tCJK && slices.Contains(nameBoundaries, nt.text) {
-			return v, nil
-		}
 		return "", &Error{Token: v + nt.raw, zh: "檔名與關鍵字連在一起，無法確定範圍", en: "the filename runs into a keyword; its extent is ambiguous",
 			hintZh: "提示：請用引號標出檔名，例如 檔名是 \"" + v + nt.raw + "\"",
 			hintEn: `hint: quote the filename, e.g. filename is "` + v + nt.raw + `"`}
 	}
+}
+
+// rawBetween returns the raw text of tokens [i, j) as typed, e.g. the
+// operator before a filename value ("檔名是", "filename is").
+func (p *parser) rawBetween(i, j int) string {
+	var b strings.Builder
+	for k := i; k < j && k < len(p.toks); k++ {
+		if k > i && p.toks[k].spaceBefore {
+			b.WriteByte(' ')
+		}
+		b.WriteString(p.toks[k].raw)
+	}
+	return b.String()
 }
 
 // addName validates c and adds it to the query.
