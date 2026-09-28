@@ -284,16 +284,84 @@ func TestFindCommand(t *testing.T) {
 
 		// BSD stat on macOS, GNU stat on Linux; everything else is shared.
 		{"largest on macOS", MacOS, Query{Sort: SortLargest, Limit: 5},
-			`find . -type f -exec stat -f '%z %N' {} + | sort -rn | cut -d' ' -f2- | head -n 5`},
+			`find . -type f -exec stat -f '%z %N' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2- | head -n 5`},
 		{"newest on macOS", MacOS, Query{Sort: SortNewest},
-			`find . -type f -exec stat -f '%m %N' {} + | sort -rn | cut -d' ' -f2-`},
+			`find . -type f -exec stat -f '%Fm %N' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2-`},
 		{"largest on Linux", Linux, Query{Sort: SortLargest, Limit: 5},
-			`find . -type f -exec stat -c '%s %n' {} + | sort -rn | cut -d' ' -f2- | head -n 5`},
+			`find . -type f -exec stat -c '%s %n' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2- | head -n 5`},
 		{"newest on Linux", Linux, Query{Sort: SortNewest},
-			`find . -type f -exec stat -c '%Y %n' {} + | sort -rn | cut -d' ' -f2-`},
+			`find . -type f -exec stat -c '%.9Y %n' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2-`},
 		{"unsorted is identical on Linux", Linux, Query{Root: "/var/log", Extensions: []string{"log"}, Contents: []string{"x"},
 			ExcludeDirs: []string{"old"}, Sizes: []SizeCond{{">", 1024}}, Limit: 3},
-			`find /var/log -type d \( -iname old \) -prune -o -type f -iname '*.log' -size +1024c -exec grep -qIF -- x {} \; -print | head -n 3`},
+			`find /var/log -type d \( -iname old \) -prune -o -type f -iname '?*.log' -size +1024c -exec grep -qIF -- x {} \; -print | head -n 3`},
+
+		// Glob characters in exclude names, exclude paths and the root are literal.
+		{"exclude name with brackets", MacOS, Query{ExcludeDirs: []string{"a[1]"}},
+			`find . -type d \( -iname 'a\[1]' \) -prune -o -type f -print`},
+		{"exclude name with a star", MacOS, Query{ExcludeDirs: []string{"star*"}},
+			`find . -type d \( -iname 'star\*' \) -prune -o -type f -print`},
+		{"exclude name with a question mark", Linux, Query{ExcludeDirs: []string{"q?"}},
+			`find . -type d \( -iname 'q\?' \) -prune -o -type f -print`},
+		{"exclude name that is a star", MacOS, Query{ExcludeDirs: []string{"*"}},
+			`find . -type d \( -iname '\*' \) -prune -o -type f -print`},
+		{"exclude name with a backslash", MacOS, Query{ExcludeDirs: []string{`a\b`}},
+			`find . -type d \( -iname 'a\\b' \) -prune -o -type f -print`},
+		{"exclude path with brackets", MacOS, Query{ExcludeDirs: []string{"./x/a[1]"}},
+			`find . -type d \( -path './x/a\[1]' \) -prune -o -type f -print`},
+		{"root with brackets", Linux, Query{Root: "r[1]", ExcludeDirs: []string{"./src/gen"}},
+			`find 'r[1]' -type d \( -path 'r\[1]/src/gen' \) -prune -o -type f -print`},
+		{"symlink root with a star", MacOS, Query{Root: "/t/s*", RootSymlink: true, ExcludeDirs: []string{"./g"}},
+			`find '/t/s*/' -type d \( -path '/t/s\*/g' \) -prune -o -type f -print`},
+
+		// A root whose name is excluded is kept: find must not prune its start point.
+		{"root named like an excluded dir", MacOS, Query{Root: "vendor", ExcludeDirs: []string{"vendor"}},
+			`find vendor -type d ! -path vendor \( -iname vendor \) -prune -o -type f -print`},
+		{"root with a trailing slash", Linux, Query{Root: "vendor/", ExcludeDirs: []string{"node_modules", "vendor"}},
+			`find vendor/ -type d ! -path vendor/ \( -iname node_modules -o -iname vendor \) -prune -o -type f -print`},
+		{"root name differs in case", MacOS, Query{Root: "/x/Vendor", RootSymlink: true, ExcludeDirs: []string{"VENDOR"}},
+			`find /x/Vendor/ -type d ! -path /x/Vendor/ \( -iname VENDOR \) -prune -o -type f -print`},
+		{"root with brackets named like an excluded dir", MacOS, Query{Root: "r[1]/vendor", ExcludeDirs: []string{"vendor"}},
+			`find 'r[1]/vendor' -type d ! -path 'r\[1]/vendor' \( -iname vendor \) -prune -o -type f -print`},
+		{"root starting with a dash named like an excluded dir", MacOS, Query{Root: "-x/vendor", ExcludeDirs: []string{"vendor"}},
+			`find ./-x/vendor -type d ! -path ./-x/vendor \( -iname vendor \) -prune -o -type f -print`},
+		{"dot root is never guarded", MacOS, Query{Root: ".", ExcludeDirs: []string{"vendor"}},
+			`find . -type d \( -iname vendor \) -prune -o -type f -print`},
+		{"a path exclude does not guard the root", MacOS, Query{Root: "vendor", ExcludeDirs: []string{"./vendor"}},
+			`find vendor -type d \( -path vendor/vendor \) -prune -o -type f -print`},
+
+		// Sizes: at least 0 bytes is every file.
+		{"at least 0 bytes", Linux, Query{Sizes: []SizeCond{{">=", 0}}},
+			`find . -type f ! -size -0c -print`},
+		{"at least 0 bytes in an OR group", MacOS, Query{AnyOf: []OrGroup{{Kind: KindSize, Sizes: []SizeCond{{">=", 0}, {"<", 10}}}}},
+			`find . -type f \( \( ! -size -0c \) -o -size -10c \) -print`},
+		{"at least 1 byte", MacOS, Query{Sizes: []SizeCond{{">=", 1}}},
+			`find . -type f -size +0c -print`},
+
+		// after <= mtime < before; -newermt is a strict mtime > X.
+		{"a day on macOS", MacOS, Query{ModifiedAfter: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC),
+			ModifiedBefore: time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)},
+			`find . -type f -newermt '2026-09-27 23:59:59' ! -newermt '2026-09-28 23:59:59' -print`},
+		{"a day on Linux", Linux, Query{ModifiedAfter: time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC),
+			ModifiedBefore: time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)},
+			`find . -type f -newermt '2026-09-27 23:59:59.999999999' ! -newermt '2026-09-28 23:59:59.999999999' -print`},
+		{"days OR on Linux", Linux, Query{AnyOf: []OrGroup{{Kind: KindTime, Times: []TimeRange{
+			{time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 29, 0, 0, 0, 0, time.UTC)},
+			{time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC), time.Time{}}}}}},
+			`find . -type f \( \( -newermt '2026-09-27 23:59:59.999999999' ! -newermt '2026-09-28 23:59:59.999999999' \) -o -newermt '2026-09-29 23:59:59.999999999' \) -print`},
+		{"sub-second bound on Linux", Linux, Query{ModifiedBefore: time.Date(2026, 9, 28, 1, 2, 3, 500, time.UTC)},
+			`find . -type f ! -newermt '2026-09-28 01:02:03.000000499' -print`},
+
+		// Sorted pipelines break ties by path, like nlf.
+		{"newest with a limit on macOS", MacOS, Query{Extensions: []string{"go"}, Sort: SortNewest, Limit: 2},
+			`find . -type f -iname '?*.go' -exec stat -f '%Fm %N' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2- | head -n 2`},
+		{"newest with a limit on Linux", Linux, Query{Extensions: []string{"go"}, Sort: SortNewest, Limit: 2},
+			`find . -type f -iname '?*.go' -exec stat -c '%.9Y %n' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2- | head -n 2`},
+
+		// A name that is only ".go" has no extension.
+		{"extension needs a name before it", MacOS, Query{Extensions: []string{"go"}},
+			`find . -type f -iname '?*.go' -print`},
+		{"several extensions", Linux, Query{Extensions: []string{"go", "tar.gz"}},
+			`find . -type f \( -iname '?*.go' -o -iname '?*.tar.gz' \) -print`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

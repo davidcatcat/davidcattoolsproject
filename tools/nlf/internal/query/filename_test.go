@@ -258,7 +258,7 @@ func TestExplainShowsFilename(t *testing.T) {
 	}
 	out := Explain(q, MacOS)
 	for _, want := range []string{"副檔名         .yaml 或 .yml", `檔名           包含 "config" (區分大小寫)`,
-		`\( -iname '*.yaml' -o -iname '*.yml' \) -name '*config*'`} {
+		`\( -iname '?*.yaml' -o -iname '?*.yml' \) -name '*config*'`} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Explain missing %q:\n%s", want, out)
 		}

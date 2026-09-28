@@ -111,7 +111,7 @@ nlf --confirm --dir /home "排除 .cache、node_modules 目錄，找最大的 10
 - 搜尋 `/` 時，請排除虛擬檔案系統，或把範圍縮小：`nlf --dir / "exclude /proc and /sys, larger than 100MB"`。含 `/` 的排除路徑是相對於搜尋位置解析的，所以只會排除 `/proc` 本身，不會排除其他名叫 proc 的目錄。
 - 常見的 Linux 檔案系統（ext4、xfs）區分大小寫。排除路徑依檔案系統判斷，大小寫必須寫對；排除「名稱」（不含 `/`）仍然不分大小寫。
 - 沒有權限的目錄會略過並列在 stderr。nlf 不會自動使用 sudo。在 Linux 上，權限提示會建議用 `ls -ld` 檢查擁有者與權限、改用有權限的帳號執行，並提醒 SELinux / AppArmor 也可能拒絕存取；macOS 才會提到「完整磁碟取用權限」。
-- 在 Linux 上，`--explain` 與 `--confirm` 顯示的是 GNU/Linux 語法的近似指令（標示為「近似的 GNU/Linux 指令」）。和 macOS 版唯一的差別是排序用的 stat：GNU coreutils 用 `stat -c '%s %n'` / `stat -c '%Y %n'`，macOS 用 `stat -f '%z %N'` / `stat -f '%m %N'`；find、grep、sort、cut、head 的部分兩邊相同。nlf 本身不會執行這些指令。
+- 在 Linux 上，`--explain` 與 `--confirm` 顯示的是 GNU/Linux 語法的近似指令（標示為「近似的 GNU/Linux 指令」）。和 macOS 版有兩個差別：排序用的 stat 格式（GNU coreutils 用 `stat -c '%s %n'` / `stat -c '%.9Y %n'`，macOS 用 `stat -f '%z %N'` / `stat -f '%Fm %N'`，修改時間都含奈秒），以及 `-newermt` 的時間格式（GNU find 以奈秒比較，所以寫成 `'2026-09-27 23:59:59.999999999'`；BSD find 以整秒比較，寫成 `'2026-09-27 23:59:59'`；因此在 macOS 上，邊界不是整秒時（例如「最近 7 天」這類相對時間）可能差不到 1 秒）。find 的其他部分與 grep、sort、cut、head 兩邊相同。nlf 本身不會執行這些指令。
 - 完整測試會在 macOS 與 Linux 上執行：GitHub Actions 的 `ubuntu-latest` 已實際跑過 unit test、race detector 與 runtime smoke test（見下方 CI 小節）。
 
 ### 解除安裝
@@ -146,6 +146,13 @@ nlf -0 "找最近 7 天修改的 go 檔" | xargs -0 -r wc -l
 - `-0` 不能和 `-l`、`--explain`、`--help`、`--version` 同時使用（exit 2）。
 - `-0` 可以和 `--confirm` 一起用：執行計畫與提示寫到 stderr，stdout 仍然只有以 NUL 結尾的路徑。
 
+不能一起用的 flag 會直接報錯（exit 2），不會默默忽略其中一個：
+
+- `--explain` 不能和 `--confirm`、`-l`、`-0` 同時使用：`--explain` 不搜尋，沒有檔案可以列出。
+- `--help`、`--version` 只印文字、不搜尋，所以不能和其他 flag（`--explain`、`--confirm`、`-l`、`-0`、`-d/--dir`）一起用，兩者也不能同時使用。查詢文字（在 flag 前面或後面都一樣）不算 flag，仍然允許，但會被忽略、也不會檢查（`nlf --help go files` 照樣印出說明，exit 0）。
+- `-d/--dir` 只能給一次，值不能是空字串：`--dir ""`、`-d ""`、`--dir=` 會報 `--dir needs a directory`（`-d ""` 是 `-d needs a directory`），`--dir a --dir b` 會報 `-d/--dir can be given only once`。
+- 可以一起用的組合：`--confirm` 搭配 `-l`、`-0` 或 `--dir`；`--explain`、`-l`、`-0` 搭配 `--dir`。
+
 提示訊息都寫到 stderr，語言會跟著查詢語言（有中文字就用中文）。
 
 Exit status：`0` 有找到，或 `--confirm` 被使用者取消；`1` 查詢有效但沒找到；`2` 錯誤（看不懂查詢、flag 錯誤、目錄不存在、根目錄沒有權限）。
@@ -175,7 +182,8 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 - 執行計畫與提示都寫到 stderr，所以 stdout 仍然只有結果路徑，可以接 pipe。
 - 安全性摘要（Read / Modify / Create / Delete / Execute shell / sudo、Risk）描述 nlf 自己的搜尋：目前一律是 `READ-ONLY`（只讀取目錄與檔案）。這個宣告由測試檢查原始碼維持（不得使用 `os/exec` 或任何會建立、修改、刪除檔案的 `os` 函式）。
 - 計畫裡的指令與 `--explain` 一樣只是近似、供理解用，並依作業系統顯示 macOS 或 GNU/Linux 語法；nlf 不會執行它。
-- `--explain` 與 `--confirm` 不能同時使用（exit 2）。
+- `--explain` 與 `--confirm` 不能同時使用（exit 2）；`--explain` 也不能和 `-l`、`-0` 一起用（見上方 Usage）。
+- `--explain` 不檢查搜尋位置是否存在：位置不存在時照樣顯示理解結果與近似指令（exit 0），實際搜尋時才會報錯（exit 2）。
 
 ### 支援的條件
 
@@ -358,13 +366,14 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 解析結果：
   搜尋位置       .
   副檔名         .go
-  修改時間       晚於 2026-09-20 22:39:05
+  修改時間       晚於 2026-09-20 22:39:05 (mtime >= 2026-09-20 22:39:05)
+  時區           CST (+08:00)，本機時間
   檔案大小       > 1 MB
   排除目錄       vendor
   數量上限       10
 
 近似的 macOS 指令（僅供參考，nlf 不會執行它）：
-  find . -type d \( -iname vendor \) -prune -o -type f -iname '*.go' -size +1048576c -newermt '2026-09-20 22:39:05' -print | head -n 10
+  find . -type d \( -iname vendor \) -prune -o -type f -iname '?*.go' -size +1048576c -newermt '2026-09-20 22:39:05' -print | head -n 10
 ```
 
 ## Behavior details
@@ -372,9 +381,9 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 大小用二進位單位：1 KB = 1024 bytes，`m` / `mb` 都是 MB（不是分鐘；分鐘請寫 `min` 或 `分鐘`）。
 - 相對時間中，「月」= 30 天、「年」= 365 天；「7 天」是從現在往前推 7×24 小時（`最近 3 月`、`3 月前`、`3 個月前`、`3 年前` 都是相對時間；`3 月以前` 則是日曆比較，見「絕對日期比較」）。日曆日期（`今天`、`9 月`、`2026 年`）則以本機時區的日曆為界，見「日期與時間」。
 - 「3 天前」「30 days ago」表示「修改時間早於 3 天前」。
-- 內容搜尋是逐字比對（不是正規表示式），預設區分大小寫；前 64 KB 含 NUL 位元組的檔案視為二進位並略過（類似 `grep -I`；macOS 的 grep 會檢查更多內容，NUL 出現在 64 KB 之後的檔案結果可能不同）。
-- 副檔名比對不分大小寫。任何英數字詞後面接「檔／檔案／files」等名詞就視為副檔名（`找 ovpn 檔` = `*.ovpn`）；沒有名詞時只認得內建別名（`go`、`python`、`圖片`…）或 `.ext`、`*.ext`、`副檔名 xxx`。常見英文形容詞（`large files`、`old files`）會報錯，不會被當成副檔名。
-- 排除目錄以名稱比對（不分大小寫）。含 `/` 時是相對於搜尋位置的路徑：`src/gen`、`./src/gen`、`src/gen/`、搜尋位置底下的絕對路徑或 `~/…` 都可以；路徑在搜尋位置之外會報錯。路徑的大小寫依檔案系統判斷：大小寫不同的寫法，只有在檔案系統把它解析成同一個目錄時（例如 macOS 預設的 APFS）才會排除。
+- 內容搜尋是逐字比對（不是正規表示式），預設區分大小寫；第一次讀到的內容（最多 64 KB）含 NUL 位元組的檔案視為二進位並略過（類似 `grep -I`）。近似指令裡的 grep 判斷方式不同：macOS 的 BSD grep 只檢查前 32 KB，所以 NUL 出現在 32 KB 到 64 KB 之間時，grep 會當成文字、nlf 會略過；GNU grep 的判斷方式又不一樣。不是合法 UTF-8 的內容，在 UTF-8 locale 下可能被 grep（例如 GNU grep）當成二進位，nlf 則照樣比對。
+- 副檔名比對不分大小寫。檔名必須在副檔名前面還有字：只叫 `.go` 或 `.bashrc` 的檔案沒有副檔名（`.bashrc` 不算 `bashrc` 檔，`.go` 不算 go 檔），近似指令因此寫成 `-iname '?*.go'`。任何英數字詞後面接「檔／檔案／files」等名詞就視為副檔名（`找 ovpn 檔` = `*.ovpn`）；沒有名詞時只認得內建別名（`go`、`python`、`圖片`…）或 `.ext`、`*.ext`、`副檔名 xxx`。常見英文形容詞（`large files`、`old files`）會報錯，不會被當成副檔名。
+- 排除目錄以名稱比對（不分大小寫）。含 `/` 時是相對於搜尋位置的路徑：`src/gen`、`./src/gen`、`src/gen/`、搜尋位置底下的絕對路徑或 `~/…` 都可以；路徑在搜尋位置之外會報錯。排除的名稱與路徑都是字面比對：`* ? [ \` 沒有萬用字元的意思（`排除 "a[1]"` 只排除名叫 `a[1]` 的目錄，不會排除 `a1`），近似指令會先跳脫它們。搜尋位置本身永遠不會被排除，即使它的名稱就是要排除的名稱（`--dir vendor "exclude vendor"` 仍搜尋 vendor 裡面，只排除更深層的 vendor）。路徑的大小寫依檔案系統判斷：大小寫不同的寫法，只有在檔案系統把它解析成同一個目錄時（例如 macOS 預設的 APFS）才會排除。
 - 只能排除目錄。`排除 .go`、`exclude *.log`、`exclude go files` 這類看起來是檔案類型的寫法會報錯；如果真的是目錄名稱，請加「目錄」／`dir` 或引號。
 - `exclude`、`excluding`、`排除`、`skip`、`跳過`、`ignore`、`忽略` 直接表示排除目錄；`except`、`除了`、`不要` 後面要有「目錄／以外／dir」等字才算排除，否則報錯。`without`、`不包括`、`不包含` 是否定條件，目前會報錯。
 - 標點符號（引號外）：
@@ -389,7 +398,13 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 只回傳一般檔案，不回傳目錄；不跟隨目錄內的 symlink（搜尋位置本身是 symlink 時會跟隨，例如 `/tmp`）。
 - 隱藏檔與 `.git` 會被搜尋，需要時請加 `排除 .git`。
 - 沒有排序時依名稱順序輸出，達到數量上限就停止；有「最大/最新」時會先走完整棵樹再排序。
-- `--explain` 顯示的 find 指令是近似的，僅供參考：未排序時的輸出順序（nlf 依名稱順序，find 依目錄讀取順序）、同分時的排序、binary 判斷與大小寫比對可能不同。nlf 本身用 Go 走訪檔案，不會執行任何 shell 指令。
+- `--explain` 顯示的 find 指令是近似的，僅供參考。時間區間的邊界（`-newermt` 取邊界前 1 奈秒；GNU/Linux 完全相同，macOS 的 BSD find 以整秒比較，只有整秒邊界完全相同，相對時間的邊界可能差不到 1 秒）、最大／最新排序的同分與次秒精度（`LC_ALL=C sort -k1,1nr -k2`，同分時和 nlf 一樣依路徑的位元組順序）都和 nlf 相同。仍然可能不同的地方：
+  - 未排序時的輸出順序：nlf 依名稱順序，find 依目錄讀取順序；因此沒有排序的 `top N`（`head -n N`）可能選到不同的檔案。
+  - 檔名 glob 的 `[!…]`：find 當成否定，nlf（Go `path.Match`）不是，否定請寫 `[^…]`。
+  - 大小寫：非 ASCII 字元的大小寫轉換（副檔名、排除名稱、`ignore case`）可能和 find、grep 不同。
+  - binary 判斷與不是合法 UTF-8 的內容（見上方內容搜尋）。
+  - `--explain` 不檢查搜尋位置是否存在，find 則會對不存在的位置報錯。
+- nlf 本身用 Go 走訪檔案，不會執行任何 shell 指令，也不會執行上面的近似指令。
 - 沒有權限讀取的目錄會略過；檔案只有在需要讀取內容（內容搜尋）時才會因權限不足而略過，否則仍會列出（與 `find` 相同）。略過的位置在結束時列在 stderr；nlf 不會提權。
 
 ## Known limitations
@@ -398,7 +413,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 未加引號的搜尋文字會一直延伸到空白或標點（`包含 API連線失敗`）。如果後面緊接著 nlf 認得的詞（例如 `包含 設定檔`，「檔」是關鍵字），因為無法確定範圍，會報錯要求加引號；只有「的」「且」「和」這類連接詞可以直接接在後面（`包含TODO且大於1MB`）。空字串 `""` 會報錯。
 - 未加引號的路徑會一直延伸到空白或標點，可以包含中文（`在 ~/文件 找 pdf 檔`）。路徑後面請加空白，不要直接接其他字；路徑中有空白時要加引號，例如 `在 "~/My Docs"`。
 - 數量上限最多 2147483647；時間最多約 292 年；超過會報錯。
-- 主要在 macOS 上開發。Linux 由 GitHub Actions 的 `ubuntu-latest` 實際執行 unit test、race detector 與 runtime smoke test（`make dist` 產出的靜態執行檔也會在 runner 上實際執行）。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 實際執行驗證過。
+- 主要在 macOS 上開發。Linux 由 GitHub Actions 的 `ubuntu-latest` 實際執行 unit test、race detector 與 runtime smoke test（`make dist` 產出的靜態執行檔也會在 runner 上實際執行）。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 與 `gsort` 實際執行驗證過；整個近似指令（含 GNU find 與 grep）則由 CI 的 `ubuntu-latest` 實際執行比對。
 - 未支援的說法會回報「看不懂這個詞」；詞彙表在 `internal/query/lexicon.go`，擴充時請一併加測試。
 
 ## Development

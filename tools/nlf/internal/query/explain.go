@@ -132,14 +132,7 @@ func nameText(c NameCond, pick func(c, e string) string) string {
 func namePattern(c NameCond) string {
 	lit := c.Pattern
 	if c.Kind != NameGlob {
-		var b strings.Builder
-		for _, r := range lit {
-			if strings.ContainsRune(`*?[\`, r) {
-				b.WriteByte('\\')
-			}
-			b.WriteRune(r)
-		}
-		lit = b.String()
+		lit = globEscape(lit)
 	}
 	switch c.Kind {
 	case NameContains:
@@ -150,6 +143,19 @@ func namePattern(c NameCond) string {
 		return "*" + lit
 	}
 	return lit
+}
+
+// globEscape escapes the find glob characters \ * ? [ so that s matches
+// only itself in a -name, -iname or -path pattern.
+func globEscape(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(`*?[\`, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // rangeText renders after <= mtime < before; a zero bound is unbounded.
@@ -180,7 +186,8 @@ func FormatConditions(cs []Condition) string {
 
 // Platform selects the dialect of the approximate shell command: BSD tools
 // on macOS or GNU findutils/coreutils on Linux. The find, grep, sort, cut
-// and head parts are the same; only stat differs.
+// and head parts are the same; the stat format and the -newermt time
+// format differ.
 type Platform int
 
 const (
@@ -225,30 +232,42 @@ func Explain(q *Query, p Platform) string {
 }
 
 // FindCommand renders q as an approximate find pipeline for platform p. It
-// is for reference only: ordering, tie-breaking and some edge cases (binary
+// is for reference only: unsorted output order and some edge cases (binary
 // detection, case folding) can differ from nlf's own search.
 func FindCommand(q *Query, p Platform) string {
 	root := findRoot(q)
 	parts := []string{"find", shellQuote(root)}
 	if len(q.ExcludeDirs) > 0 {
 		var ex []string
+		guard := false
+		base := path.Base(path.Clean(rootOrDot(q.Root)))
 		for _, d := range q.ExcludeDirs {
 			if strings.Contains(d, "/") {
 				// find prints paths as root + "/" + rel, so match that form.
+				// Glob characters in either part are literal.
 				rel := strings.TrimPrefix(path.Clean(d), "./")
-				ex = append(ex, "-path", shellQuote(strings.TrimSuffix(root, "/")+"/"+rel))
+				ex = append(ex, "-path", shellQuote(globEscape(strings.TrimSuffix(root, "/"))+"/"+globEscape(rel)))
 			} else {
-				ex = append(ex, "-iname", shellQuote(d))
+				ex = append(ex, "-iname", shellQuote(globEscape(d)))
+				guard = guard || strings.EqualFold(base, d)
 			}
 		}
 		// Only directories are pruned, like nlf; a file named "vendor" is kept.
-		parts = append(parts, "-type", "d", `\(`, strings.Join(joinOr(ex, 2), " "), `\)`, "-prune", "-o")
+		parts = append(parts, "-type", "d")
+		if guard {
+			// nlf never excludes the search location itself, even when its
+			// name is excluded, so find must not prune its start point.
+			parts = append(parts, "!", "-path", shellQuote(globEscape(root)))
+		}
+		parts = append(parts, `\(`, strings.Join(joinOr(ex, 2), " "), `\)`, "-prune", "-o")
 	}
 	parts = append(parts, "-type", "f")
 	if len(q.Extensions) > 0 {
 		var ex []string
 		for _, e := range q.Extensions {
-			ex = append(ex, "-iname", shellQuote("*."+e))
+			// "?" keeps a name that is only ".go" from having the extension
+			// go, as in nlf.
+			ex = append(ex, "-iname", shellQuote("?*."+globEscape(e)))
 		}
 		if len(q.Extensions) == 1 {
 			parts = append(parts, ex...)
@@ -272,7 +291,7 @@ func FindCommand(q *Query, p Platform) string {
 	for _, s := range q.Sizes {
 		parts = append(parts, sizeArgs(s)...)
 	}
-	parts = append(parts, timeArgs(q.ModifiedAfter, q.ModifiedBefore)...)
+	parts = append(parts, timeArgs(q.ModifiedAfter, q.ModifiedBefore, p)...)
 	// OR groups: \( alt1 -o alt2 ... \)
 	for _, g := range q.AnyOf {
 		var alts [][]string
@@ -283,7 +302,7 @@ func FindCommand(q *Query, p Platform) string {
 			}
 		case KindTime:
 			for _, r := range g.Times {
-				alts = append(alts, timeArgs(r.After, r.Before))
+				alts = append(alts, timeArgs(r.After, r.Before, p))
 			}
 		}
 		if len(alts) > 0 {
@@ -309,17 +328,18 @@ func FindCommand(q *Query, p Platform) string {
 	cmd := strings.Join(parts, " ")
 	switch q.Sort {
 	case SortLargest, SortNewest:
-		// "<size or mtime> <path>" per file: BSD stat -f '%z'/'%m' '%N',
-		// GNU stat -c '%s'/'%Y' '%n'.
+		// "<size or mtime> <path>" per file: BSD stat -f '%z'/'%Fm' '%N',
+		// GNU stat -c '%s'/'%.9Y' '%n'; mtimes keep their nanoseconds.
+		// Like nlf, ties are ordered by path, byte by byte (LC_ALL=C).
 		format := map[Platform]map[SortOrder]string{
-			MacOS: {SortLargest: "%z %N", SortNewest: "%m %N"},
-			Linux: {SortLargest: "%s %n", SortNewest: "%Y %n"},
+			MacOS: {SortLargest: "%z %N", SortNewest: "%Fm %N"},
+			Linux: {SortLargest: "%s %n", SortNewest: "%.9Y %n"},
 		}[p][q.Sort]
 		flag := "-f"
 		if p == Linux {
 			flag = "-c"
 		}
-		cmd += " -exec stat " + flag + " '" + format + "' {} + | sort -rn | cut -d' ' -f2-"
+		cmd += " -exec stat " + flag + " '" + format + "' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2-"
 	default:
 		cmd += " -print"
 	}
@@ -351,6 +371,9 @@ func sizeArgs(s SizeCond) []string {
 	case ">":
 		return []string{"-size", fmt.Sprintf("+%dc", s.Bytes)}
 	case ">=":
+		if s.Bytes == 0 { // every file; "+-1c" is not a valid size
+			return []string{"!", "-size", "-0c"}
+		}
 		return []string{"-size", fmt.Sprintf("+%dc", s.Bytes-1)}
 	case "<":
 		return []string{"-size", fmt.Sprintf("-%dc", s.Bytes)}
@@ -360,13 +383,23 @@ func sizeArgs(s SizeCond) []string {
 	return nil
 }
 
-func timeArgs(after, before time.Time) []string {
+// timeArgs renders after <= mtime < before for find. -newermt X is the
+// strict mtime > X, so both bounds are moved back by 1ns: after <= mtime is
+// mtime > after-1ns, and mtime < before is ! mtime > before-1ns. GNU find
+// compares nanoseconds and accepts them in the date; BSD find compares
+// whole seconds, where the truncated after-1ns and before-1ns are exact for
+// whole-second bounds.
+func timeArgs(after, before time.Time, p Platform) []string {
+	layout := timeLayout
+	if p == Linux {
+		layout += ".000000000"
+	}
 	var args []string
 	if !after.IsZero() {
-		args = append(args, "-newermt", shellQuote(after.Format(timeLayout)))
+		args = append(args, "-newermt", shellQuote(after.Add(-time.Nanosecond).Format(layout)))
 	}
 	if !before.IsZero() {
-		args = append(args, "!", "-newermt", shellQuote(before.Format(timeLayout)))
+		args = append(args, "!", "-newermt", shellQuote(before.Add(-time.Nanosecond).Format(layout)))
 	}
 	return args
 }

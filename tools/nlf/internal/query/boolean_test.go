@@ -193,7 +193,7 @@ func TestExplainShowsOr(t *testing.T) {
 		"檔案大小       > 1 GB 或 < 1 KB (符合任一個即可)",
 		`-exec grep -qIF -e ERROR -e FATAL {} \;`,
 		`\( -size +1073741824c -o -size -1024c \)`,
-		`\( \( -newermt '2026-09-28 00:00:00' ! -newermt '2026-09-29 00:00:00' \) -o \( -newermt '2026-09-27 00:00:00' ! -newermt '2026-09-28 00:00:00' \) \)`,
+		`\( \( -newermt '2026-09-27 23:59:59' ! -newermt '2026-09-28 23:59:59' \) -o \( -newermt '2026-09-26 23:59:59' ! -newermt '2026-09-27 23:59:59' \) \)`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("Explain missing %q:\n%s", want, out)

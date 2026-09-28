@@ -3,10 +3,76 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: COMPLETE
-Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
+Status: IN PROGRESS
+Last updated: 2026-09-28，A4 QA PASS WITH CHANGES、Review APPROVE WITH CHANGES（修正已套用）；A4 報告已寫；準備 commit
 
-## Session：A3（`-0` / `--null`）
+## Session：A4（`--explain` / output behavior consistency hardening）
+
+- **Purpose：** 盤點 `--explain` 與實際搜尋行為的差異，以及默默忽略 flag 的 UX 問題；分類為 bug（修）／intentional approximation（文件化）／UX inconsistency（加 conflict/error）；最小修改 + regression tests；commit 並 push A4 branch，停下來等人類 review。**A4 絕不 merge 到 main。**
+- **注意：** 使用者把 A4 重新定義為 explain parity hardening（roadmap 原本的 A4 是 `--count` / `-q`，不在本輪範圍）。
+- **Baseline main SHA：** `c891fcb4405a6890c2d3d9bbdbbcabae27296228`（包含 A1、A2、A3 與 A3 merge 紀錄）
+- **Baseline version：** 0.4.0
+- **Feature branch：** `feat/nlf-roadmap-a4-explain-parity-20260928`，從 origin/main（`c891fcb`）建立，沒有 upstream。
+- **Worktree path：** `<session scratchpad>/nlf-a4-worktree`（請用 `git worktree list` 查詢實際路徑）
+- **Main touched by A4：** NO
+- **原則：** read-only、deterministic、不執行 shell、不提權、看不懂就報錯；不為 parity 改搜尋核心語義（除非確定是 bug）；不碰 A5/A6。
+
+### A4 Current phase
+
+- Git Safety → commit → push
+- QA：PASS WITH CHANGES；Review：APPROVE WITH CHANGES；README 的 macOS 時間邊界限定、`--help` 前後查詢文字說明、註解已修正。A4 報告 `reports/nlf/2026-09-28-explain-parity.md` 已寫。
+- Implementation 完成：`explain.go`（globEscape、root guard、`! -size -0c`、半開區間時間邊界、次秒排序、`?*.ext`）、`main.go`（10 個新互斥、`--dir` 驗證）、測試、README。`internal/search`、parser、workflow、help 都沒有修改。Lead 驗證：gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0，0 SKIP。
+
+### A4 Audit 結果與 Lead 決定
+
+分類：(a) bug → 修；(b) intentional approximation → 文件化；(c) 默默忽略 flag → 明確 error。**不改 production search 語義**；修改只在 `internal/query/explain.go`（find 指令的呈現）、`main.go`（flag 解析與互斥）與文件。
+
+- **修（explain 呈現錯誤，a）：**
+  - X1／X2：exclude 名稱、exclude 路徑與搜尋位置裡的 `* ? [ \` 沒有跳脫（例如 `exclude "a[1]"` 的指令會 prune `a1`；`exclude "*"` 會 prune 搜尋位置本身）。
+  - X3：搜尋位置的名稱等於排除名稱時（`--dir vendor "exclude vendor"`），find 會 prune 起點本身。
+  - Z1：`at least 0 bytes` 顯示 `-size +-1c`（GNU find 不接受）。只修 N=0。
+  - T1：時間邊界與文件的半開區間 `[a, b)` 不一致（`-newermt` 是嚴格大於；BSD 以整秒比較）。
+- **修（近似改為精確，成本低）：**
+  - O1：同分排序改成 `LC_ALL=C sort -k1,1nr -k2`。
+  - O2：用次秒精度的 stat（macOS `%Fm`、GNU `%.9Y`）。
+  - E1：`-iname '?*.ext'`，因為 nlf 不把 `.go` 這種檔名當成有副檔名。
+- **明確 error（c）：**
+  - F1：`--explain -l`
+  - F2／F3：`--help`、`--version` 搭配 `--explain`、`--confirm`、`-l`、`--dir`，或兩者同時使用
+  - F4：`--dir ""`、`--dir=`
+  - F5：重複 `--dir`
+- **只文件化（b）：**
+  - O3：未排序的 `top N` 可能選到不同的檔案。
+  - G1：`[!…]` 在 nlf 不是否定，要用 `[^…]`。
+  - C1：BSD grep 只檢查前 32 KB 判斷 binary，nlf 檢查前 64 KB。
+  - C2：invalid UTF-8。
+  - C3：Unicode case fold。
+  - F6：`--explain` 不檢查搜尋位置是否存在。
+  - `--help` / `--version` 後面接查詢字仍允許並文件化（不是 flag）。
+- **GNU 相關的假設本機無法驗證**（本機只有 `gstat`、`gsort`，沒有 GNU find／grep）：GNU find 拒絕 `-size +-1c`、`-newermt` 接受小數秒、`%.9Y`。由 ubuntu CI 上的 `TestExplainParity` 驗證。
+
+### A4 Remaining work
+
+1. ~~Audit：列出可重現差異並分類~~ DONE
+2. ~~Lead 決定修改範圍~~ DONE
+3. ~~Implementation~~ DONE
+4. ~~QA + Review~~ DONE
+5. Git Safety
+6. ~~A4 report `reports/nlf/2026-09-28-explain-parity.md`~~ DONE
+7. commit + push A4 branch（不 merge main）
+8. checkpoint COMPLETE
+
+### A4 Exact next action
+
+Git Safety → 明確 staging 9 個檔案 commit → `git push -u origin feat/nlf-roadmap-a4-explain-parity-20260928` → checkpoint COMPLETE 並 push。
+
+### A4 Git state
+
+- **Committed（A4）：** NO
+- **A4 branch pushed：** NO
+- **Merge A4 to main：** NOT PERFORMED
+
+## 先前的 session：A3 `-0` / `--null`（已 merge 到 main，`4f51340`）
 
 - **Purpose：** 依 roadmap A3 實作 `-0` / `--null`，多 agent 流程，完成後 commit 並 push A3 feature branch，停下來等人類 review。**A3 絕不 merge 到 main。**
 - **A2 merge：** 人類確認 GitHub Actions run `36366144449` 在 ubuntu-latest 與 macos-latest 都 success 後授權。main 從 `4db4ec0` fast-forward 到 **`c932fad`**，一般 push，沒有 force，也沒有改寫 history；merge 前 `make check` 與 `go test -race` 都通過。
@@ -17,7 +83,7 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - **Main touched by A3：** NO
 - **範圍：** 只讀 roadmap、A2 report、checkpoint 與 A3 相關的 CLI／output／search 檔案；不重新 audit roadmap。
 
-### A3 design（Lead 草稿）
+#### A3 design（Lead 草稿）
 
 - `-0` 與 `--null` 完全等價；每個結果路徑後面接一個 NUL（`\0`），不加換行；stdout 只有結果。
 - stderr 內容、exit code（0 / 1 / 2）、read-only contract 都不變。
@@ -34,7 +100,7 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - CI skip guard：Linux 不允許 skip，macOS 只允許 `TestGNUSortPipeline`，新測試不可使用 `t.Skip`。
 - 版本：維持 0.4.0（roadmap 建議 A3–A5 合併為 0.5.0，由人類決定）。
 
-### A3 design review 採納的修改（定稿）
+#### A3 design review 採納的修改（定稿）
 
 - 互斥改成 `main.go` 的 `flagConflicts` 表格 + `checkConflicts`，依表格順序第一個符合的生效；訊息：
   1. explain+confirm：沿用既有訊息（byte-identical）
@@ -51,13 +117,13 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - 既有測試只加強：`docExamples` regex 納入 `-0|--null`；`TestDocExamplesRun` 強制 `--explain` 時一併移除 `-0/--null`。
 - 後續（非 A3）：`--explain -l`、`--help -l` 目前仍默默忽略 `-l`。
 
-### A3 Current phase
+#### A3 Current phase
 
 - **A3 已 merge 到 main。** 人類確認 GitHub Actions run `36368244400` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
 - main 從 `c932fad` fast-forward 到 **`4f513401c53b5304426c759a3266534573ecd21b`**，一般 push，沒有 force，也沒有改寫 history；`origin/main` 包含 `5efb081` 與 `4f51340`。
 - merge 後 final validation（在 main `4f51340` 上）：`make check` PASS、`go test -race ./...` PASS、working tree clean。
 
-### A3 Completed work
+#### A3 Completed work
 
 1. Design review：APPROVE WITH CHANGES（全部採納）
 2. Implementation：`-0/--null`、`flagConflicts`、`displayPath`、9 個新測試、help、`ci-smoke.sh`（19 → 34 checks）、README
@@ -68,11 +134,11 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 7. commit `5efb081`（nlf: add -0/--null NUL-separated output (A3)）並 push；commit 前以 exit code 確認 make check 與 race 通過
 8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a3-null-output-20260928`
 
-### A3 Exact next action
+#### A3 Exact next action
 
 無（A3 已 merge）。下一個項目：A4（`--explain` / output behavior consistency hardening），在 `feat/nlf-roadmap-a4-explain-parity-20260928` 進行。
 
-### A3 Git state
+#### A3 Git state
 
 - **Committed（A3）：** YES
 - **A3 branch pushed：** YES（`origin/feat/nlf-roadmap-a3-null-output-20260928`）
@@ -92,7 +158,7 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - **Agent orchestration：** SUBAGENTS USED
 - **Main touched by A2：** NO
 
-### A2 Decisions already made
+#### A2 Decisions already made
 
 - **Workflow 檔案：** `.github/workflows/nlf-ci.yml`（放在 repo 根目錄；目前 repo 還沒有 `.github/`）。
 - **Pin 第三方 action 到 commit SHA：** 以 `git ls-remote` 查證，兩個都是 lightweight tag，所以列出的 SHA 就是 commit：
@@ -102,7 +168,7 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - **Repo 是 private：** 沒有驗證的情況下，GitHub API 回傳 404，本機也沒有 `gh`。因此 **Lead 無法讀取 Actions 的執行結果**。push 之後 workflow 會在 GitHub 上跑，但 Lead 能提供的 CI 結果只有「本機模擬」與「已觸發但未驗證」。不會去讀 keychain 裡的憑證。
 - **Linux runtime：** 本機 Docker daemon 沒有啟動，所以 Linux 的實機驗證交給 CI 的 ubuntu job。
 
-### A2 CI design（已定稿；CI design agent 回覆 APPROVE WITH CHANGES，Lead 採納全部修改）
+#### A2 CI design（已定稿；CI design agent 回覆 APPROVE WITH CHANGES，Lead 採納全部修改）
 
 - **Workflow：** `.github/workflows/nlf-ci.yml`
   - Triggers：
@@ -151,11 +217,11 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 - **已知的後續事項（本輪不修）：** 在 `TZ=Pacific/Auckland` 下，`TestExplainDoesNotSearch` 與 `TestLongOutput` 會失敗，因為 `testNow` 剛好落在 DST 開始日，而字串是寫死的。CI 使用 UTC，不受影響。**不放寬 assertion。**
 - **不做：** `ubuntu-24.04-arm`（repo 是 private）；在 macOS 上 `brew install coreutils`（改為接受 skip）。
 
-### A2 Current phase
+#### A2 Current phase
 
 - A2 完成，等待人類 review。
 
-### A2 Completed work
+#### A2 Completed work
 
 1. CI design review：APPROVE WITH CHANGES（全部採納）
 2. Implementation：workflow（14 steps）、`scripts/ci-smoke.sh`（19 checks）、README CI 小節、roadmap 修正
@@ -167,11 +233,11 @@ Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 8. 依 run `36365761225` 結果更新 README（Linux 已由 CI 實際執行）與 A2 報告；沒有改 workflow 與 production code，沒有做 A3。
 9. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a2-ci-20260928`
 
-### A2 Exact next action
+#### A2 Exact next action
 
 無。等待人類 review A2 branch 與 GitHub Actions 結果。**不要 merge A2 到 main**，除非人類明確要求。
 
-### A2 Git state
+#### A2 Git state
 
 - **Committed（A2）：** YES
 - **A2 branch pushed：** YES（`origin/feat/nlf-roadmap-a2-ci-20260928`）

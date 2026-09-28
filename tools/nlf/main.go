@@ -292,14 +292,21 @@ func parseArgs(args []string) (*options, error) {
 			o.long = true
 		case a == "-0" || a == "--null":
 			o.null = true
-		case a == "-d" || a == "--dir":
-			if i+1 >= len(args) {
-				return nil, fmt.Errorf("%s needs a directory", a)
+		case a == "-d" || a == "--dir" || strings.HasPrefix(a, "--dir="):
+			name, dir := a, ""
+			if v, ok := strings.CutPrefix(a, "--dir="); ok {
+				name, dir = "--dir", v
+			} else if i+1 < len(args) {
+				i++
+				dir = args[i]
 			}
-			i++
-			o.dir = args[i]
-		case strings.HasPrefix(a, "--dir="):
-			o.dir = strings.TrimPrefix(a, "--dir=")
+			if dir == "" {
+				return nil, fmt.Errorf("%s needs a directory", name)
+			}
+			if o.dir != "" {
+				return nil, errors.New("-d/--dir can be given only once")
+			}
+			o.dir = dir
 		case len(a) > 1 && strings.HasPrefix(a, "-") && !strings.ContainsAny(a, " \t"):
 			return nil, fmt.Errorf("unknown flag %s", a)
 		default:
@@ -311,7 +318,8 @@ func parseArgs(args []string) (*options, error) {
 
 // flagConflicts lists flag pairs that cannot be used together. The first
 // matching row, in table order, is reported. Future output flags add their
-// rows here.
+// rows here. Query words next to --help or --version are not flags and stay
+// allowed.
 var flagConflicts = []struct {
 	both func(*options) bool
 	msg  string
@@ -321,6 +329,16 @@ var flagConflicts = []struct {
 	{func(o *options) bool { return o.null && o.explain }, "--explain never searches, so -0/--null has no paths to print; use one of them"},
 	{func(o *options) bool { return o.null && o.help }, "-h/--help prints text, not NUL-separated paths; use it without -0/--null"},
 	{func(o *options) bool { return o.null && o.version }, "--version prints text, not NUL-separated paths; use it without -0/--null"},
+	{func(o *options) bool { return o.explain && o.long }, "--explain never searches, so -l/--long has no files to list; use one of them"},
+	{func(o *options) bool { return o.help && o.version }, "-h/--help and --version both print text; use one of them"},
+	{func(o *options) bool { return o.help && o.explain }, "-h/--help prints text, not a query explanation; use it without --explain"},
+	{func(o *options) bool { return o.help && o.confirm }, "-h/--help prints text and never searches; use it without --confirm"},
+	{func(o *options) bool { return o.help && o.long }, "-h/--help prints text, not a file list; use it without -l/--long"},
+	{func(o *options) bool { return o.help && o.dir != "" }, "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir"},
+	{func(o *options) bool { return o.version && o.explain }, "--version prints text, not a query explanation; use it without --explain"},
+	{func(o *options) bool { return o.version && o.confirm }, "--version prints text and never searches; use it without --confirm"},
+	{func(o *options) bool { return o.version && o.long }, "--version prints text, not a file list; use it without -l/--long"},
+	{func(o *options) bool { return o.version && o.dir != "" }, "--version never searches, so -d/--dir has no effect; use it without -d/--dir"},
 }
 
 // checkConflicts reports the first conflicting flag pair in o, if any.

@@ -139,8 +139,11 @@ func TestExplainDoesNotSearch(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d", code)
 	}
+	// after <= mtime is rendered as mtime > after-1ns: whole seconds for
+	// BSD find, nanoseconds for GNU find.
+	after := map[query.Platform]string{query.MacOS: "'2026-09-24 11:59:59'", query.Linux: "'2026-09-24 11:59:59.999999999'"}[query.PlatformFor(runtime.GOOS)]
 	for _, want := range []string{"解析結果", ".go", "> 1 MB", "vendor", "5",
-		"find /definitely/missing -type d \\( -iname vendor \\) -prune -o -type f -iname '*.go' -size +1048576c -newermt '2026-09-24 12:00:00' -print | head -n 5"} {
+		"find /definitely/missing -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1048576c -newermt " + after + " -print | head -n 5"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("explain output missing %q:\n%s", want, out)
 		}
@@ -291,14 +294,17 @@ func TestExplainSymlinkRootAndRelativeExclude(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _, code := nlf(t, "--explain", "--dir", link, "txt files exclude ./src//gen/ and vendor")
-	want := "find " + link + "/ -type d \\( -path " + link + "/src/gen -o -iname vendor \\) -prune -o -type f -iname '*.txt' -print"
+	want := "find " + link + "/ -type d \\( -path " + link + "/src/gen -o -iname vendor \\) -prune -o -type f -iname '?*.txt' -print"
 	if code != 0 || !strings.Contains(out, want) || !strings.Contains(out, "Approximate") {
 		t.Errorf("code=%d\n got %s\nwant %s", code, out, want)
 	}
 }
 
 // TestExplainParity runs the printed find command (read-only) and checks it
-// finds the same files as nlf for the cases --explain is meant to cover.
+// finds the same files as nlf for the cases --explain is meant to cover:
+// literal glob characters in excludes, a root named like an excluded
+// directory, size and time boundaries, and sorted output including ties
+// and sub-second mtimes (compared in order).
 func TestExplainParity(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("--explain targets BSD tools on macOS and GNU tools on Linux")
@@ -306,34 +312,108 @@ func TestExplainParity(t *testing.T) {
 	dir := t.TempDir()
 	mkfiles(t, dir, map[string]string{"real/a.txt": "TODO", "real/big.txt": strings.Repeat("x", 2048),
 		"real/vendor/v.txt": "TODO", "real/d/vendor": "TODO", "real/src/gen/g.txt": "", "real/src/keep/k.txt": "",
-		"real/sp ace/s.txt": "TODO", "real/it's.txt": ""})
+		"real/sp ace/s.txt": "TODO", "real/it's.txt": "",
+		"real/.hid/h.txt": "", "real/.git/g.txt": "", "real/.txt": "", "real/zero.bin": "",
+		"real/a[1]/b.txt": "", "real/a1/b.txt": "", "real/star*/b.txt": "", "real/starX/b.txt": "",
+		"real/x/a[1]/c.txt": "", "real/x/a1/c.txt": "", "real/zh.txt": "發生錯誤",
+		"real/k1023.bin": strings.Repeat("x", 1023), "real/k1024.bin": strings.Repeat("x", 1024),
+		"real/k1025.bin": strings.Repeat("x", 1025),
+		// Equal sizes: the tie is broken by path.
+		"real/zz-big.bin": strings.Repeat("x", 4096), "real/aa-big.bin": strings.Repeat("x", 4096),
+		"real/mm-big.bin": strings.Repeat("x", 4096), "real/vendor/sub/u.txt": "", "real/vendor/vendor/w.txt": ""})
+	// Every mtime is fixed. The day 2026-09-28 is not a DST transition in
+	// common time zones; CI runs in UTC.
+	loc := time.Local
+	day := time.Date(2026, 9, 28, 0, 0, 0, 0, loc)
+	next := time.Date(2026, 9, 29, 0, 0, 0, 0, loc)
+	top := time.Date(2026, 10, 2, 0, 0, 0, 0, loc)
+	mtimes := map[string]time.Time{
+		"t-before.txt": day.Add(-500 * time.Millisecond), "t-start.txt": day, "t-start5.txt": day.Add(500 * time.Millisecond),
+		"t-end5.txt": next.Add(-500 * time.Millisecond), "t-end1ns.txt": next.Add(-time.Nanosecond), "t-next.txt": next,
+		"t-next5.txt": next.Add(500 * time.Millisecond), "t-0930.txt": time.Date(2026, 9, 30, 12, 0, 0, 0, loc),
+		"t-1001.txt": time.Date(2026, 10, 1, 0, 0, 0, 0, loc),
+		// Equal mtimes (broken by path) and a later mtime in the same second.
+		"tie-b.txt": top.Add(250 * time.Millisecond), "tie-a.txt": top.Add(250 * time.Millisecond),
+		"zz-sub.txt": top.Add(750 * time.Millisecond), // after the ties by path, before them by mtime
+	}
+	for n := range mtimes {
+		mkfiles(t, filepath.Join(dir, "real"), map[string]string{n: ""})
+	}
+	base := time.Date(2026, 9, 20, 12, 0, 0, 0, loc)
+	if err := filepath.WalkDir(filepath.Join(dir, "real"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		mt, ok := mtimes[d.Name()]
+		if !ok {
+			mt = base
+		}
+		return os.Chtimes(p, mt, mt)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for n, want := range mtimes {
+		fi, err := os.Stat(filepath.Join(dir, "real", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.ModTime().Equal(want) {
+			t.Fatalf("%s: mtime %v, want %v; the file system must keep nanosecond mtimes", n, fi.ModTime(), want)
+		}
+	}
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(filepath.Join(dir, "real"), link); err != nil {
 		t.Fatal(err)
 	}
-	set := func(s string) string {
+	// A symlinked root whose own name is excluded.
+	if err := os.MkdirAll(filepath.Join(dir, "sym"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "real", "vendor"), filepath.Join(dir, "sym", "vendor")); err != nil {
+		t.Fatal(err)
+	}
+	list := func(root, s string, sorted bool) string {
 		var ps []string
 		for _, l := range strings.Split(strings.TrimSpace(s), "\n") {
 			if l != "" {
-				ps = append(ps, strings.TrimPrefix(strings.TrimPrefix(l, link), "/"))
+				ps = append(ps, strings.TrimPrefix(strings.TrimPrefix(l, root), "/"))
 			}
 		}
-		slices.Sort(ps)
+		if !sorted {
+			slices.Sort(ps)
+		}
 		return strings.Join(ps, ",")
 	}
-	for _, q := range []string{"txt files", "exclude vendor", "exclude ./src/gen", "exclude src/gen/",
-		"larger than 1KB", "at most 1KB", `containing "TODO"`, "largest 1"} { // largest ties are ordered differently by design
-		out, _, _ := nlf(t, "--dir", link, q)
-		ex, _, _ := nlf(t, "--explain", "--dir", link, q)
+	check := func(root, q string, sorted bool) {
+		t.Helper()
+		out, errOut, code := nlf(t, "--dir", root, q)
+		if code != 0 {
+			t.Errorf("%s in %s: nlf exit %d: %s", q, root, code, errOut)
+		}
+		ex, _, _ := nlf(t, "--explain", "--dir", root, q)
 		lines := strings.Split(strings.TrimSpace(ex), "\n")
 		cmd := strings.TrimSpace(lines[len(lines)-1])
 		findOut, err := exec.Command("sh", "-c", cmd).Output()
 		if err != nil {
 			t.Fatalf("%s: %s: %v", q, cmd, err)
 		}
-		if a, b := set(out), set(string(findOut)); a != b {
-			t.Errorf("%s:\n cmd  %s\n nlf  %s\n find %s", q, cmd, a, b)
+		if a, b := list(root, out, sorted), list(root, string(findOut), sorted); a != b {
+			t.Errorf("%s in %s:\n cmd  %s\n nlf  %s\n find %s", q, root, cmd, a, b)
 		}
+	}
+	for _, q := range []string{"txt files", "exclude vendor", "exclude ./src/gen", "exclude src/gen/",
+		"larger than 1KB", "at most 1KB", `containing "TODO"`,
+		`exclude "a[1]"`, `exclude "star*"`, `exclude "x/a[1]"`, "at least 0 bytes", "smaller than 1KB", "at least 1KB",
+		"modified on 2026-09-28", "2026-09-28 或 2026-09-30", `包含 "錯誤"`} {
+		check(link, q, false)
+	}
+	for _, q := range []string{"largest 1", "largest 2", "newest 2", "newest 3", "largest txt files"} {
+		check(link, q, true)
+	}
+	for _, root := range []string{filepath.Join(dir, "real", "vendor"), filepath.Join(dir, "real", "vendor") + "/",
+		filepath.Join(dir, "sym", "vendor")} {
+		check(root, "exclude vendor", false)
+		check(root, "txt files exclude VENDOR", false)
 	}
 }
 
@@ -619,7 +699,7 @@ func TestConfirmPlan(t *testing.T) {
 		"NLF execution plan", "Search root:\n  " + dir, "Conditions:", "extension:", ".go", "size:", "> 1 KB",
 		"exclude dirs:", "vendor", "limit:", "3",
 		"Approximate " + query.PlatformFor(runtime.GOOS).Name() + " command", "nlf does not execute it",
-		"find " + dir + " -type d \\( -iname vendor \\) -prune -o -type f -iname '*.go' -size +1024c -print | head -n 3",
+		"find " + dir + " -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1024c -print | head -n 3",
 		"Read files:        YES", "Modify files:      NO", "Create files:      NO", "Delete files:      NO",
 		"Execute shell:     NO", "sudo required:     NO", "Risk:\n  READ-ONLY", "Execute this search? [y/N]: ",
 	} {
@@ -750,27 +830,49 @@ func TestExplainAndConfirmUseHostPlatform(t *testing.T) {
 }
 
 // TestGNUSortPipeline runs the Linux sort pipeline with real GNU stat (stat on
-// Linux, gstat from coreutils on macOS) and checks it orders like nlf.
+// Linux, gstat from coreutils on macOS, with gsort when it is installed) and
+// checks it orders like nlf, including equal sizes, equal mtimes and mtimes
+// that differ by less than a second.
 func TestGNUSortPipeline(t *testing.T) {
-	stat := "stat"
+	stat, sortCmd := "stat", ""
 	if runtime.GOOS != "linux" {
 		if _, err := exec.LookPath("gstat"); err != nil {
 			t.Skip("GNU stat not available (install coreutils for gstat)")
 		}
 		stat = "gstat"
+		if _, err := exec.LookPath("gsort"); err == nil {
+			sortCmd = "gsort"
+		}
 	}
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i, n := range []string{"a.txt", "b b.txt", "c.txt", "d.txt"} {
-		p := filepath.Join(dir, n)
-		mkfiles(t, dir, map[string]string{n: strings.Repeat("x", 100*(i%3+1)+i)})
-		mt := base.Add(time.Duration(i) * time.Hour)
+	for i, f := range []struct {
+		name string
+		size int
+		mt   time.Duration
+	}{
+		{"a.txt", 100, 0}, {"b b.txt", 201, time.Hour}, {"c.txt", 302, 2 * time.Hour}, {"d.txt", 103, 3 * time.Hour},
+		// Equal sizes and equal mtimes are ordered by path.
+		{"z-tie.txt", 302, 3 * time.Hour}, {"e-tie.txt", 302, 3 * time.Hour},
+		// Later than the ties by less than a second.
+		{"y-sub.txt", 5, 3*time.Hour + 400*time.Millisecond}, {"x-sub.txt", 5, 3*time.Hour + 399*time.Millisecond},
+	} {
+		p := filepath.Join(dir, f.name)
+		mkfiles(t, dir, map[string]string{f.name: strings.Repeat("x", f.size)})
+		mt := base.Add(f.mt)
 		if err := os.Chtimes(p, mt, mt); err != nil {
 			t.Fatal(err)
 		}
+		if fi, err := os.Stat(p); err != nil || !fi.ModTime().Equal(mt) {
+			t.Fatalf("file %d: the file system must keep nanosecond mtimes (err %v)", i, err)
+		}
 	}
-	for _, in := range []string{"largest 3", "newest 3"} {
-		q, err := query.Parse(in, testNow)
+	for _, c := range []struct{ in, want string }{
+		{"largest 4", "c.txt,e-tie.txt,z-tie.txt,b b.txt"},
+		{"newest 5", "y-sub.txt,x-sub.txt,d.txt,e-tie.txt,z-tie.txt"},
+		{"newest 8", "y-sub.txt,x-sub.txt,d.txt,e-tie.txt,z-tie.txt,c.txt,b b.txt,a.txt"},
+	} {
+		q, err := query.Parse(c.in, testNow)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -780,13 +882,19 @@ func TestGNUSortPipeline(t *testing.T) {
 			t.Fatalf("not a GNU command: %s", cmd)
 		}
 		cmd = strings.Replace(cmd, "-exec stat ", "-exec "+stat+" ", 1)
+		if sortCmd != "" {
+			cmd = strings.Replace(cmd, "| LC_ALL=C sort ", "| LC_ALL=C "+sortCmd+" ", 1)
+		}
 		got, err := exec.Command("sh", "-c", cmd).Output()
 		if err != nil {
 			t.Fatalf("%s: %v", cmd, err)
 		}
-		want, _, _ := nlf(t, "--dir", dir, in)
+		want, _, _ := nlf(t, "--dir", dir, c.in)
 		if string(got) != want {
-			t.Errorf("%s:\n cmd  %s\n find %q\n nlf  %q", in, cmd, got, want)
+			t.Errorf("%s:\n cmd  %s\n find %q\n nlf  %q", c.in, cmd, got, want)
+		}
+		if p := strings.Join(paths(dir, want), ","); p != c.want {
+			t.Errorf("%s: nlf order %s, want %s", c.in, p, c.want)
 		}
 	}
 }
@@ -1130,6 +1238,7 @@ func TestFlagConflicts(t *testing.T) {
 		"null":    func(o *options) { o.null = true },
 		"help":    func(o *options) { o.help = true },
 		"version": func(o *options) { o.version = true },
+		"dir":     func(o *options) { o.dir = "x" },
 	}
 	want := map[[2]string]string{
 		{"explain", "confirm"}: "--explain only shows the plan and --confirm asks before searching; use one of them",
@@ -1137,8 +1246,18 @@ func TestFlagConflicts(t *testing.T) {
 		{"explain", "null"}:    "--explain never searches, so -0/--null has no paths to print; use one of them",
 		{"null", "help"}:       "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
 		{"null", "version"}:    "--version prints text, not NUL-separated paths; use it without -0/--null",
+		{"explain", "long"}:    "--explain never searches, so -l/--long has no files to list; use one of them",
+		{"help", "version"}:    "-h/--help and --version both print text; use one of them",
+		{"explain", "help"}:    "-h/--help prints text, not a query explanation; use it without --explain",
+		{"confirm", "help"}:    "-h/--help prints text and never searches; use it without --confirm",
+		{"long", "help"}:       "-h/--help prints text, not a file list; use it without -l/--long",
+		{"help", "dir"}:        "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "version"}: "--version prints text, not a query explanation; use it without --explain",
+		{"confirm", "version"}: "--version prints text and never searches; use it without --confirm",
+		{"long", "version"}:    "--version prints text, not a file list; use it without -l/--long",
+		{"version", "dir"}:     "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
 	}
-	names := []string{"explain", "confirm", "long", "null", "help", "version"}
+	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir"}
 	matched := 0
 	for i, a := range names {
 		for _, b := range names[i+1:] {
@@ -1171,6 +1290,113 @@ func TestFlagConflicts(t *testing.T) {
 	}
 	if err := checkConflicts(o); err == nil || err.Error() != want[[2]string{"explain", "confirm"}] {
 		t.Errorf("--explain --confirm -0: err=%v", err)
+	}
+}
+
+// TestFlagConflictMatrixCLI runs every pair of flags through run():
+// conflicting pairs exit 2 with the exact message and no stdout, and the
+// other pairs work.
+func TestFlagConflictMatrixCLI(t *testing.T) {
+	dir := fixture(t)
+	flags := map[string][]string{"explain": {"--explain"}, "confirm": {"--confirm"}, "long": {"-l"}, "null": {"-0"},
+		"help": {"--help"}, "version": {"--version"}, "dir": {"--dir", dir}}
+	conflict := map[[2]string]string{
+		{"explain", "confirm"}: "--explain only shows the plan and --confirm asks before searching; use one of them",
+		{"long", "null"}:       "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
+		{"explain", "null"}:    "--explain never searches, so -0/--null has no paths to print; use one of them",
+		{"null", "help"}:       "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
+		{"null", "version"}:    "--version prints text, not NUL-separated paths; use it without -0/--null",
+		{"explain", "long"}:    "--explain never searches, so -l/--long has no files to list; use one of them",
+		{"help", "version"}:    "-h/--help and --version both print text; use one of them",
+		{"explain", "help"}:    "-h/--help prints text, not a query explanation; use it without --explain",
+		{"confirm", "help"}:    "-h/--help prints text and never searches; use it without --confirm",
+		{"long", "help"}:       "-h/--help prints text, not a file list; use it without -l/--long",
+		{"help", "dir"}:        "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "version"}: "--version prints text, not a query explanation; use it without --explain",
+		{"confirm", "version"}: "--version prints text and never searches; use it without --confirm",
+		{"long", "version"}:    "--version prints text, not a file list; use it without -l/--long",
+		{"version", "dir"}:     "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
+	}
+	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir"}
+	pairs := 0
+	for i, a := range names {
+		for _, b := range names[i+1:] {
+			msg, bad := conflict[[2]string{a, b}]
+			if !bad {
+				msg, bad = conflict[[2]string{b, a}]
+			}
+			for _, order := range [][2]string{{a, b}, {b, a}} {
+				args := append(append([]string{}, flags[order[0]]...), flags[order[1]]...)
+				// A search needs a location; -d/--dir itself is one of the pair.
+				if a != "dir" && b != "dir" && a != "help" && b != "help" && a != "version" && b != "version" {
+					args = append(args, "--dir", dir)
+				}
+				args = append(args, "go files")
+				out, errOut, code := nlfInput(t, "n\n", args...)
+				switch {
+				case bad:
+					if code != 2 || out != "" || errOut != "nlf: "+msg+"\nRun 'nlf --help' for usage.\n" {
+						t.Errorf("%v: code=%d out=%q err=%q, want %q", args, code, out, errOut, msg)
+					}
+				case code != 0 || strings.Contains(errOut, "use one of them") || strings.Contains(errOut, "use it without"):
+					t.Errorf("%v: code=%d out=%q err=%q, want allowed", args, code, out, errOut)
+				case a == "confirm" || b == "confirm":
+					if out != "" || !strings.HasSuffix(errOut, "Cancelled.\n") {
+						t.Errorf("%v: out=%q err=%q, want Cancelled.", args, out, errOut)
+					}
+				case out == "":
+					t.Errorf("%v: no output", args)
+				}
+			}
+			if bad {
+				pairs++
+			}
+		}
+	}
+	if pairs != len(conflict) {
+		t.Errorf("matched %d conflict pairs, want %d", pairs, len(conflict))
+	}
+	// Words after --help or --version are allowed and not checked.
+	for _, args := range [][]string{{"--help", "go", "files"}, {"--version", "banana"}, {"-h", "files without TODO"}} {
+		out, errOut, code := nlf(t, args...)
+		if code != 0 || out == "" || errOut != "" {
+			t.Errorf("%v: code=%d out=%q err=%q", args, code, out, errOut)
+		}
+	}
+}
+
+// TestDirFlagValidation: an empty or repeated -d/--dir is an error, not a
+// silent default or a silent override.
+func TestDirFlagValidation(t *testing.T) {
+	dir := fixture(t)
+	for _, c := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"-d", "", "go files"}, "-d needs a directory"},
+		{[]string{"--dir", "", "go files"}, "--dir needs a directory"},
+		{[]string{"--dir=", "go files"}, "--dir needs a directory"},
+		{[]string{"go files", "-d"}, "-d needs a directory"},
+		{[]string{"go files", "--dir"}, "--dir needs a directory"},
+		{[]string{"--dir", dir, "--dir", dir, "go files"}, "-d/--dir can be given only once"},
+		{[]string{"--dir=" + dir, "-d", dir, "go files"}, "-d/--dir can be given only once"},
+		{[]string{"-d", dir, "--dir=/tmp", "go files"}, "-d/--dir can be given only once"},
+		{[]string{"-d", dir, "--dir", "", "go files"}, "--dir needs a directory"},
+		{[]string{"--explain", "--dir", dir, "-d", dir, "go files"}, "-d/--dir can be given only once"},
+	} {
+		out, errOut, code := nlf(t, c.args...)
+		if code != 2 || out != "" || errOut != "nlf: "+c.msg+"\nRun 'nlf --help' for usage.\n" {
+			t.Errorf("%q: code=%d out=%q err=%q, want %q", c.args, code, out, errOut, c.msg)
+		}
+	}
+	for _, args := range [][]string{{"--dir=" + dir, "go files"}, {"-d", dir, "go files"}, {"--dir", dir, "go files"}} {
+		if out, errOut, code := nlf(t, args...); code != 0 || len(paths(dir, out)) != 3 {
+			t.Errorf("%q: code=%d out=%q err=%q", args, code, out, errOut)
+		}
+	}
+	// "--" ends the flags: a later --dir is a query word.
+	if o, err := parseArgs([]string{"-d", dir, "--", "--dir", dir}); err != nil || o.dir != dir || len(o.words) != 2 {
+		t.Errorf("-- --dir: opts=%+v err=%v", o, err)
 	}
 }
 
