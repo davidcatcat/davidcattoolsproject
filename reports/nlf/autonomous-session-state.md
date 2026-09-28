@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，Git Safety 結論為 GO；A1 commit 已建立，接著 push feature branch
+Status: COMPLETE
+Last updated: 2026-09-28，session 完成，等待人類 review
 
 ## Session
 
@@ -13,7 +13,7 @@ Last updated: 2026-09-28，Git Safety 結論為 GO；A1 commit 已建立，接�
 - **Baseline version：** 0.4.0
 - **Baseline test count：** 759 PASS / 0 FAIL / 0 SKIP
 - **Feature branch：** `feat/nlf-roadmap-a1-20260928`，從 origin/main 建立。為避免誤 push 到 main，已執行 `git branch --unset-upstream`。
-- **Current branch HEAD：** `a1030cc`（docs：roadmap 與 checkpoint；尚未 push）
+- **Current branch HEAD：** `10521a1`（A1）。本 checkpoint 的 COMPLETE 更新會再多一個 docs commit，確切 SHA 以 `git log` 為準
 - **Worktree path：** `<session scratchpad>/nlf-a1-worktree`（Lead 的 session scratchpad 目錄；請用 `git worktree list` 查詢實際路徑）
 - **Main checkout：** `~/git/davidcataiporject/davidcattoolsproject`，停在 main，乾淨，**沒有碰過**。
 - **Isolation：** git worktree
@@ -22,7 +22,7 @@ Last updated: 2026-09-28，Git Safety 結論為 GO；A1 commit 已建立，接�
 
 ## Phase / Milestone
 
-- **Current phase：** Release / Git Safety → commit → push
+- **Current phase：** COMPLETE。等待人類 review；A2 及後續項目不在本輪範圍，未開始
 - **Current milestone：** A1 = Punctuation safety hardening，建議版本 0.4.1（patch）
 
 ## Completed work
@@ -248,11 +248,13 @@ A1 report：`reports/nlf/2026-09-28-punctuation-safety.md`（其中引用的錯�
 
 ## Exact next action
 
-1. Git Safety Agent（read-only）確認 staging 清單、secrets、binaries、本機路徑、main 狀態。
-2. commit A1：`nlf: harden punctuation handling (A1)`，明確列出要 stage 的檔案。
-3. `git push -u origin feat/nlf-roadmap-a1-20260928`（**絕不 push main**）。
-4. 建立 PR，目標為 main；不 merge、不開 auto-merge。
-5. 把 checkpoint 更新成 COMPLETE。
+**本輪沒有下一步。** 請人類 review：
+
+1. 在 GitHub 開 PR（`gh` 沒有安裝，所以沒有自動建立）：https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a1-20260928 ，source 是 `feat/nlf-roadmap-a1-20260928`，target 是 `main`。
+2. Review roadmap 與 A1。
+3. 決定是否 merge，以及是否 release 0.4.1（建議版本）。
+
+若要繼續做下一個 milestone，建議是 A2（CI），並且要從新的 origin/main 另外開 branch。
 
 ## Commands to run next
 
@@ -278,7 +280,16 @@ make dist
 
 ## Git state
 
-- **Committed：** YES。A1 commit `nlf: harden punctuation handling (A1)` 已建立（hash 見 git log）；roadmap 的 commit 在更早之前。`a1030cc docs: add nlf product roadmap and session checkpoint`（local、未 push；commit 前已把本機路徑換成 placeholder，所以 amend 過一次，這個 commit 從未 push）
-- **Branch pushed：** NO
-- **PR URL：** none
+- **Committed：** YES。
+  - `a1030cc docs: add nlf product roadmap and session checkpoint`
+  - `10521a1 nlf: harden punctuation handling (A1)`
+  - 另有一個把本 checkpoint 標為 COMPLETE 的 docs commit。
+- **Branch pushed：** YES（`origin/feat/nlf-roadmap-a1-20260928`；`-u` 只追蹤 feature branch 自己）。
+- **PR URL：** NOT CREATED（`gh` 未安裝）。Compare 連結：https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a1-20260928
+- **QA status：** PASS WITH ISSUES → 所有接受的問題都已修正並加上 regression test；deferred 的項目列在 A1 report。
+- **Review status：** APPROVE WITH CHANGES → S1、S2 已修正。
+- **Final test results：** 936 PASS，0 FAIL，0 SKIP；race、count=10、make check、make dist 都 PASS；Linux build PASS；Linux runtime NOT RUN；macOS runtime PASS。
+- **origin/main：** push 前後都是 `91ee959537230b60e253fa52d34dd6dc290bd85a`。
+- **Tags：** 沒有新增或移動（v0.2.0、v0.3.0、v0.4.0）。
+- **Main touched by this task：** NO
 - **Merge to main：** NOT PERFORMED
