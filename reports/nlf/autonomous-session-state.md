@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，A4 QA PASS WITH CHANGES、Review APPROVE WITH CHANGES（修正已套用）；A4 報告已寫；準備 commit
+Status: COMPLETE
+Last updated: 2026-09-28，A4 完成並 push 到 feature branch；等待人類 review
 
 ## Session：A4（`--explain` / output behavior consistency hardening）
 
@@ -19,9 +19,7 @@ Last updated: 2026-09-28，A4 QA PASS WITH CHANGES、Review APPROVE WITH CHANGES
 
 ### A4 Current phase
 
-- Git Safety → commit → push
-- QA：PASS WITH CHANGES；Review：APPROVE WITH CHANGES；README 的 macOS 時間邊界限定、`--help` 前後查詢文字說明、註解已修正。A4 報告 `reports/nlf/2026-09-28-explain-parity.md` 已寫。
-- Implementation 完成：`explain.go`（globEscape、root guard、`! -size -0c`、半開區間時間邊界、次秒排序、`?*.ext`）、`main.go`（10 個新互斥、`--dir` 驗證）、測試、README。`internal/search`、parser、workflow、help 都沒有修改。Lead 驗證：gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0，0 SKIP。
+- A4 完成，等待人類 review。QA：PASS WITH CHANGES；Review：APPROVE WITH CHANGES；修正已套用。報告：`reports/nlf/2026-09-28-explain-parity.md`。
 
 ### A4 Audit 結果與 Lead 決定
 
@@ -51,26 +49,28 @@ Last updated: 2026-09-28，A4 QA PASS WITH CHANGES、Review APPROVE WITH CHANGES
   - `--help` / `--version` 後面接查詢字仍允許並文件化（不是 flag）。
 - **GNU 相關的假設本機無法驗證**（本機只有 `gstat`、`gsort`，沒有 GNU find／grep）：GNU find 拒絕 `-size +-1c`、`-newermt` 接受小數秒、`%.9Y`。由 ubuntu CI 上的 `TestExplainParity` 驗證。
 
-### A4 Remaining work
+### A4 Completed work
 
-1. ~~Audit：列出可重現差異並分類~~ DONE
-2. ~~Lead 決定修改範圍~~ DONE
-3. ~~Implementation~~ DONE
-4. ~~QA + Review~~ DONE
-5. Git Safety
-6. ~~A4 report `reports/nlf/2026-09-28-explain-parity.md`~~ DONE
-7. commit + push A4 branch（不 merge main）
-8. checkpoint COMPLETE
+1. Audit：DONE
+2. Lead 決定範圍：DONE
+3. Implementation：DONE
+4. QA + Review：DONE
+5. Git Safety（Lead 檢查）：OK
+6. A4 報告：DONE
+7. commit `62f1672`（nlf: harden --explain parity and reject ignored flags (A4)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a4-explain-parity-20260928`
 
 ### A4 Exact next action
 
-Git Safety → 明確 staging 9 個檔案 commit → `git push -u origin feat/nlf-roadmap-a4-explain-parity-20260928` → checkpoint COMPLETE 並 push。
+無。等待人類 review A4 branch 與 GitHub Actions 結果；GNU 相關的假設（`-newermt` 小數秒、`! -size -0c`、root guard、`%.9Y`）要看 ubuntu-latest 上的 `TestExplainParity` / `TestGNUSortPipeline`。**不要 merge A4 到 main**，除非人類明確要求。
 
 ### A4 Git state
 
-- **Committed（A4）：** NO
-- **A4 branch pushed：** NO
-- **Merge A4 to main：** NOT PERFORMED
+- **Committed（A4）：** YES
+- **A4 branch pushed：** YES（`origin/feat/nlf-roadmap-a4-explain-parity-20260928`）
+- **Main touched by this task：** A3 fast-forward merge 到 main（`4f51340`）與 checkpoint commit（`c891fcb`），都是人類明確要求；A4 沒有碰 main。
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認。
+- **Merge to main：** NOT PERFORMED（A4）
 
 ## 先前的 session：A3 `-0` / `--null`（已 merge 到 main，`4f51340`）
 
