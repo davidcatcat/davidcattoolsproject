@@ -1,0 +1,191 @@
+name: nlf CI
+
+on:
+  pull_request:
+    paths:
+      - 'tools/nlf/**'
+      - '.github/workflows/nlf-ci.yml'
+  push:
+    branches:
+      - main
+      - 'feat/**'
+    paths:
+      - 'tools/nlf/**'
+      - '.github/workflows/nlf-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tools/nlf
+        shell: bash
+    env:
+      # Use exactly the Go version from go.mod and never download modules or
+      # toolchains (nlf is stdlib-only). CGO_ENABLED is left at its default so
+      # that -race works; make dist sets CGO_ENABLED=0 itself.
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Intentionally tests the minimum Go version declared in go.mod.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: tools/nlf/go.mod
+          cache: false
+
+      - name: Show toolchain
+        run: |
+          go version
+          go env GOOS GOARCH GOHOSTOS GOHOSTARCH GOTOOLCHAIN GOPROXY
+          uname -a
+
+      - name: gofmt
+        run: make fmt-check
+
+      - name: go vet
+        run: make vet
+
+      - name: Tests (verbose, skip guard)
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/nlf-test.log"
+          go test -count=1 -v ./... 2>&1 | tee "$log"
+          skips=$(grep -E -- '--- SKIP' "$log" || true)
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            if [ -n "$skips" ]; then
+              echo "::error::tests were skipped on Linux:"
+              printf '%s\n' "$skips"
+              exit 1
+            fi
+          else
+            if command -v gstat >/dev/null 2>&1; then
+              echo "gstat on PATH: yes ($(command -v gstat))"
+            else
+              echo "gstat on PATH: no (TestGNUSortPipeline may skip)"
+            fi
+            unexpected=$(printf '%s\n' "$skips" | grep -E -- '--- SKIP' | grep -v -E -- '--- SKIP: TestGNUSortPipeline( |$)' || true)
+            if [ -n "$unexpected" ]; then
+              echo "::error::unexpected skipped tests on $RUNNER_OS:"
+              printf '%s\n' "$unexpected"
+              exit 1
+            fi
+          fi
+          echo "skip guard passed"
+
+      - name: Race detector
+        run: go test -race ./...
+
+      - name: Repeated shuffled tests
+        run: go test -count=10 -shuffle=on ./...
+
+      - name: Build
+        run: make build
+
+      - name: Dist
+        run: make dist
+
+      - name: Verify checksums
+        run: |
+          version=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
+          if [ -z "$version" ] || [ "$(printf '%s\n' "$version" | wc -l | tr -d ' ')" != 1 ]; then
+            echo "::error::could not read a single version from main.go: [$version]"
+            exit 1
+          fi
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::version does not look like semver: $version"
+            exit 1
+          fi
+          echo "NLF_VERSION=$version" >> "$GITHUB_ENV"
+          cd bin
+          cat SHA256SUMS
+          want=$(printf 'nlf-%s-%s\n' "$version" darwin-amd64 "$version" darwin-arm64 "$version" linux-amd64 "$version" linux-arm64 | LC_ALL=C sort)
+          got=$(awk '{print $2}' SHA256SUMS | sed 's/^\*//' | LC_ALL=C sort)
+          if [ "$(wc -l < SHA256SUMS | tr -d ' ')" != 4 ] || [ "$got" != "$want" ]; then
+            echo "::error::SHA256SUMS does not list exactly the 4 expected binaries"
+            printf 'want:\n%s\ngot:\n%s\n' "$want" "$got"
+            exit 1
+          fi
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c SHA256SUMS
+          else
+            shasum -a 256 -c SHA256SUMS
+          fi
+
+      - name: Verify static binaries
+        run: |
+          cd bin
+          if command -v file >/dev/null 2>&1; then
+            for b in "nlf-$NLF_VERSION-linux-amd64" "nlf-$NLF_VERSION-linux-arm64"; do
+              file "$b"
+              if ! file "$b" | grep -q 'statically linked'; then
+                echo "::error::$b is not statically linked"
+                exit 1
+              fi
+            done
+          elif [ "$RUNNER_OS" = Linux ]; then
+            echo "::error::file not found; cannot check ELF static linking"
+            exit 1
+          else
+            echo "file not available; skipping ELF static-link check"
+          fi
+          for b in "nlf-$NLF_VERSION-darwin-amd64" "nlf-$NLF_VERSION-darwin-arm64" "nlf-$NLF_VERSION-linux-amd64" "nlf-$NLF_VERSION-linux-arm64"; do
+            if ! go version -m "$b" | grep -q 'CGO_ENABLED=0'; then
+              echo "::error::$b was not built with CGO_ENABLED=0"
+              go version -m "$b"
+              exit 1
+            fi
+            echo "$b: CGO_ENABLED=0"
+          done
+
+      - name: Runtime smoke test
+        run: |
+          case "$(uname -s)" in
+            Linux) os=linux ;;
+            Darwin) os=darwin ;;
+            *) echo "::error::unsupported OS $(uname -s)"; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64|arm64) arch=arm64 ;;
+            *) echo "::error::unsupported architecture $(uname -m)"; exit 1 ;;
+          esac
+          goos=$(go env GOHOSTOS)
+          goarch=$(go env GOHOSTARCH)
+          if [ "$os/$arch" != "$goos/$goarch" ]; then
+            echo "::error::uname says $os/$arch but go env says $goos/$goarch"
+            exit 1
+          fi
+          bash scripts/ci-smoke.sh bin/nlf "$NLF_VERSION"
+          bash scripts/ci-smoke.sh "bin/nlf-$NLF_VERSION-$os-$arch" "$NLF_VERSION"
+
+      - name: Working tree is clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"

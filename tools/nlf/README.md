@@ -401,3 +401,20 @@ internal/search/search.go   唯讀走訪與比對
 ```
 
 `make check` 是完成標準：格式、vet、測試、build 全過。`make dist` 產生各平台的靜態執行檔與 `SHA256SUMS`（放在 `bin/`，不納入版本控制）。
+
+### CI
+
+`.github/workflows/nlf-ci.yml` 在 `ubuntu-latest` 與 `macos-latest` 上各跑一次：`make fmt-check`、`make vet`、`go test -count=1 -v`（Linux 不允許任何測試被略過；macOS 只允許沒有 `gstat` 時略過 `TestGNUSortPipeline`）、`go test -race`、`go test -count=10 -shuffle=on`、`make build`、`make dist`、驗證 `SHA256SUMS` 正好列出 4 個執行檔且雜湊正確、確認 Linux 執行檔是靜態連結且所有 dist 執行檔都是 `CGO_ENABLED=0`，再用 `scripts/ci-smoke.sh` 實際執行 `bin/nlf` 與本機平台的 dist 執行檔，最後確認工作目錄沒有被改動。
+
+- 觸發條件：`pull_request`，以及推到 `main` 或 `feat/**` 的 `push`，且只在 `tools/nlf/**` 或 workflow 本身有變更時執行；也可以手動觸發（`workflow_dispatch`）。
+- 最小權限：`permissions: contents: read`，checkout 不保留 credentials；不使用 secrets，不發布、不上傳任何東西。
+- Go 版本取自 `go.mod`，並設定 `GOTOOLCHAIN=local`、`GOPROXY=off`，不下載任何模組或 toolchain。
+- 第三方 action 只有 `actions/checkout` 與 `actions/setup-go`，都固定在 commit SHA（註解標明版本）。
+
+在本機跑同樣的 smoke test（fixture 建在暫存目錄，不會刪除，結束時印出路徑）：
+
+```
+make build
+v=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
+bash scripts/ci-smoke.sh bin/nlf "$v"
+```
