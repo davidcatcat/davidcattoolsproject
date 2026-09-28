@@ -4,9 +4,83 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
+Last updated: 2026-09-28，A5 完成並 push 到 feature branch；等待 GitHub Actions 與人類 review
 
-## Session：A4（`--explain` / output behavior consistency hardening）
+## Session：A5（`--max-depth` / `--min-depth`）
+
+- **Purpose：** 依 roadmap A5 實作 depth control：在走訪時真正剪枝，而不是走完再過濾。多 agent 流程；先寫測試再改 production；commit 並 push A5 branch，停下來等 review。**A5 絕不 merge 到 main；不做 A6。**
+- **A4 merge：** 人類確認 run `36371257304` 雙平台 SUCCESS 並 APPROVE 後授權。main 從 `c891fcb` fast-forward 到 `76085f8`，checkpoint 記錄為 `0833f52`；merge 後 `make check`、`go test -race` 通過，working tree clean。
+- **Baseline main SHA：** `0833f52054e528f75f39e8cff1e38d37a78b3026`
+- **Baseline version：** 0.4.0
+- **Feature branch：** `feat/nlf-roadmap-a5-depth-control-20260928`，從 origin/main（`0833f52`）建立，沒有 upstream。
+- **Worktree path：** `<session scratchpad>/nlf-a5-worktree`（請用 `git worktree list` 查詢實際路徑）
+- **Main touched by A5：** NO
+
+### A5 design（Lead 草稿，待 design agent 確認）
+
+- **Depth：** 搜尋位置 = 0，直接子項目 = 1，依此類推（與 `find` 相同）。symlink root（例如 macOS `/tmp`）一樣是 0。
+- **Max-depth 剪枝：** 在 `WalkDir` callback 裡，目錄的 depth >= max 時回傳 `fs.SkipDir`，包括 root 本身（`--max-depth 0` 時 root 目錄不會被讀取）。檔案的 depth 永遠 <= max。深度檢查排在 exclude 比對、`Info()`、開檔之前。
+- **Min-depth：** 檔案的 depth < min 時，在 `Info()` 之前就略過；目錄照常走訪。
+- **Root 是檔案：** 維持既有行為（root 檔案本身就是 depth 0 的候選結果）。`--max-depth 0` 會輸出它；`--min-depth 1` 不會。和 `find <file> -maxdepth 0 -type f` / `-mindepth 1` 相同。
+- **Grammar：** 採用 `--dir` 的風格：`--max-depth N` 與 `--max-depth=N`，不提供短旗標。
+  - N 只接受十進位數字。
+  - 空值、缺值、負數、非整數、overflow → exit 2。
+  - 同一個 flag 重複 → exit 2。
+  - `min > max` → 搜尋前 exit 2，不自動交換。
+- **Flag interaction：** 可以搭配 `--dir`、`--explain`、`--confirm`、`-l`、`-0`；搭配 `--help` / `--version` 時為 conflict（依 A4 policy）。
+- **Query：** 新增 depth 欄位，zero value 必須代表「沒有限制」。parser 不新增自然語言語法。
+- **`--explain`：** Conditions 顯示深度；find 指令在 root 之後立刻放 `-mindepth N` / `-maxdepth N`（GNU find 在其他條件後面放 global option 會警告）。BSD 與 GNU 都支援，需實測確認。
+- **Help：** 維持 ≤ 70 行：新增一行 `--max-depth N / --min-depth N`，並把 `-h, --help` 與 `--version` 合併成一行。
+- **剪枝證明：** 在 boundary 以下放 `chmod 000` 的目錄，以及無法讀取的檔案當作 sentinel。如果被讀取，stderr 會出現權限警告，而測試要求 stderr 必須是空的。另外做 mutation 檢查。
+
+### A5 design review 採納的修改（定稿）
+
+- **C1：** 有 exclude 時，`--explain` 不使用 `-mindepth`，改用 `-type f -path '<root>/*/*'`。原因：BSD 與 GNU find 的 `-mindepth` 都不會在較淺的層級套用任何測試，包括 `-prune`，所以較淺的排除目錄仍會被走訪；nlf 則在任何深度都 prune 排除目錄。BSD 實測：`find r -mindepth 2 -type d \( -iname vendor \) -prune -o -type f -print` 印出了 `r/vendor/v.txt`。沒有 exclude 時才用 `-mindepth N`；`-maxdepth N` 一律放在起點後面。
+- **C2：** 深度上限 4096（任何可開啟的路徑都不會更深，也限制 `-path` 呈現的長度）；只接受十進位數字，允許前導 0。
+- **C3：** permission trap 放在 depth == max（同時抓 max off-by-one）；另用 0o444 目錄證明 min-depth 在 `d.Info()` 之前檢查。
+- **C4：** flag matrix 變成 9 個 flag、36 組、19 個 conflict。
+- **C5：** `TestExplainParity` 允許空結果時 exit 1、接受額外 flag，並要求 find 的 stderr 為空（抓 GNU 的 global option 警告）。
+- **C6：** `min > max` 檢查放在 `checkConflicts` 之後的 `checkDepthRange`，早於 help、version、explain、confirm 與搜尋。
+- **Query：** `MinDepth int`、`MaxDepth int`、`HasMaxDepth bool`，zero value 代表沒有限制。
+- **錯誤訊息：**
+  - `--max-depth needs a number`
+  - `--max-depth needs a whole number from 0 to 4096, got "-1"`
+  - `--max-depth can be given only once`
+  - `--min-depth 3 is greater than --max-depth 1, so no file can match`
+- **Help：** 新增 `--max-depth N    files at most N levels deep; --min-depth N  at least N (1 = directly inside)`，並把 `-h, --help` 與 `--version` 合併成一行，維持 70 行。
+- **刻意的差異（文件化）：**
+  - `--max-depth 0` 搭配無法讀取的目錄 root 時，nlf 不開啟它（exit 1），BSD find 仍會回報 Permission denied。
+  - 深度上限 4096，而 find 接受任意整數。
+  - 未排序的 `top N` 搭配深度時，選到的檔案可能不同（沿用 O3）。
+
+### A5 Current phase
+
+- A5 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE；報告：`reports/nlf/2026-09-28-depth-control.md`。
+
+### A5 Completed work
+
+1. Design review／audit：DONE（APPROVE WITH CHANGES，全部採納）
+2. 先寫測試：DONE（在 stub 上因正確原因失敗）
+3. Implementation：DONE
+4. QA + Review（分開）+ mutation：DONE（14 + 26 個 mutant 全部被抓到）
+5. Git Safety（Lead 檢查）：OK
+6. A5 報告：DONE
+7. commit `a829ed6`（nlf: add --max-depth and --min-depth (A5)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a5-depth-control-20260928`
+
+### A5 Exact next action
+
+無。等待 GitHub Actions（ubuntu-latest 會用 GNU find 實際跑 `TestExplainParity`；需要特別注意既有的 root guard 案例是否讓 GNU find 在 stderr 輸出以 `/` 結尾的 `-path` 警告，見 A5 報告的「未解問題」）與人類 review。**不要 merge A5 到 main；不要開始 A6。**
+
+### A5 Git state
+
+- **Committed（A5）：** YES
+- **A5 branch pushed：** YES（`origin/feat/nlf-roadmap-a5-depth-control-20260928`）
+- **Main touched by this task：** A4 fast-forward merge 到 main（`76085f8`）與 checkpoint commit（`0833f52`），都是人類明確要求；A5 沒有碰 main。
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認並提供 run ID。
+- **Merge to main：** NOT PERFORMED（A5）
+
+## 先前的 session：A4 explain parity（已 merge 到 main，`76085f8`）
 
 - **Purpose：** 盤點 `--explain` 與實際搜尋行為的差異，以及默默忽略 flag 的 UX 問題；分類為 bug（修）／intentional approximation（文件化）／UX inconsistency（加 conflict/error）；最小修改 + regression tests；commit 並 push A4 branch，停下來等人類 review。**A4 絕不 merge 到 main。**
 - **注意：** 使用者把 A4 重新定義為 explain parity hardening（roadmap 原本的 A4 是 `--count` / `-q`，不在本輪範圍）。
@@ -17,7 +91,7 @@ Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
 - **Main touched by A4：** NO
 - **原則：** read-only、deterministic、不執行 shell、不提權、看不懂就報錯；不為 parity 改搜尋核心語義（除非確定是 bug）；不碰 A5/A6。
 
-### A4 Current phase
+#### A4 Current phase
 
 - **A4 已 merge 到 main。** 人類確認 GitHub Actions run `36371257304` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
 - merge 前：`origin/main` = merge base = `c891fcb`，A4 branch ahead 2 / behind 0。
@@ -26,7 +100,7 @@ Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
 - GNU 相關的假設（`-newermt` 小數秒、`! -size -0c`、root guard、`%.9Y`）已由 ubuntu-latest 上的 `TestExplainParity` / `TestGNUSortPipeline` 實際驗證通過。
 - A4 完成，等待人類 review。QA：PASS WITH CHANGES；Review：APPROVE WITH CHANGES；修正已套用。報告：`reports/nlf/2026-09-28-explain-parity.md`。
 
-### A4 Audit 結果與 Lead 決定
+#### A4 Audit 結果與 Lead 決定
 
 分類：(a) bug → 修；(b) intentional approximation → 文件化；(c) 默默忽略 flag → 明確 error。**不改 production search 語義**；修改只在 `internal/query/explain.go`（find 指令的呈現）、`main.go`（flag 解析與互斥）與文件。
 
@@ -54,7 +128,7 @@ Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
   - `--help` / `--version` 後面接查詢字仍允許並文件化（不是 flag）。
 - **GNU 相關的假設本機無法驗證**（本機只有 `gstat`、`gsort`，沒有 GNU find／grep）：GNU find 拒絕 `-size +-1c`、`-newermt` 接受小數秒、`%.9Y`。由 ubuntu CI 上的 `TestExplainParity` 驗證。
 
-### A4 Completed work
+#### A4 Completed work
 
 1. Audit：DONE
 2. Lead 決定範圍：DONE
@@ -65,11 +139,11 @@ Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
 7. commit `62f1672`（nlf: harden --explain parity and reject ignored flags (A4)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
 8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a4-explain-parity-20260928`
 
-### A4 Exact next action
+#### A4 Exact next action
 
 無（A4 已 merge）。下一個項目：A5（`--max-depth` / `--min-depth`），在 `feat/nlf-roadmap-a5-depth-control-20260928` 進行。
 
-### A4 Git state
+#### A4 Git state
 
 - **Committed（A4）：** YES
 - **A4 branch pushed：** YES（`origin/feat/nlf-roadmap-a4-explain-parity-20260928`）

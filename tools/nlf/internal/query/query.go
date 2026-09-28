@@ -144,6 +144,14 @@ type Query struct {
 	Sort  SortOrder
 	Limit int // 0 means no limit
 
+	// MinDepth and MaxDepth limit how far below Root a file may be, as in
+	// find: Root itself is depth 0 and the entries directly in it depth 1.
+	// MinDepth 0 is no lower limit. MaxDepth applies only when HasMaxDepth
+	// is set, so the zero Query has no depth limit (MaxDepth 0 is a real limit).
+	MinDepth    int
+	MaxDepth    int
+	HasMaxDepth bool
+
 	Lang Lang // language of the original request
 	Now  time.Time
 

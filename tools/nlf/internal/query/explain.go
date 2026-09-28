@@ -106,6 +106,9 @@ func Conditions(q *Query, lang Lang) []Condition {
 	if len(q.ExcludeDirs) > 0 {
 		add(pick("排除目錄", "exclude dirs:"), strings.Join(q.ExcludeDirs, ", "))
 	}
+	if q.MinDepth > 0 || q.HasMaxDepth {
+		add(pick("搜尋深度", "depth:"), depthText(q, pick))
+	}
 	switch q.Sort {
 	case SortLargest:
 		add(pick("排序", "order:"), pick("檔案由大到小", "largest first"))
@@ -116,6 +119,29 @@ func Conditions(q *Query, lang Lang) []Condition {
 		add(pick("數量上限", "limit:"), fmt.Sprint(q.Limit))
 	}
 	return cs
+}
+
+// depthText renders the depth limits of q, e.g. "at most 2 levels (...)".
+func depthText(q *Query, pick func(c, e string) string) string {
+	levels := func(n int) string {
+		if n == 1 {
+			return "level"
+		}
+		return "levels"
+	}
+	var s string
+	switch {
+	case !q.HasMaxDepth:
+		s = pick(fmt.Sprintf("至少 %d 層", q.MinDepth), fmt.Sprintf("at least %d %s", q.MinDepth, levels(q.MinDepth)))
+	case q.MinDepth == 0:
+		s = pick(fmt.Sprintf("最多 %d 層", q.MaxDepth), fmt.Sprintf("at most %d %s", q.MaxDepth, levels(q.MaxDepth)))
+	case q.MinDepth < q.MaxDepth:
+		s = pick(fmt.Sprintf("%d 到 %d 層", q.MinDepth, q.MaxDepth), fmt.Sprintf("%d to %d %s", q.MinDepth, q.MaxDepth, levels(q.MaxDepth)))
+	default:
+		s = pick(fmt.Sprintf("剛好 %d 層", q.MinDepth), fmt.Sprintf("exactly %d %s", q.MinDepth, levels(q.MinDepth)))
+	}
+	return s + pick(" (搜尋位置本身是第 0 層，直接在裡面的是第 1 層)",
+		" (the search location is level 0; files directly inside it are level 1)")
 }
 
 // nameText renders a filename condition, e.g. contains "config".
@@ -237,6 +263,17 @@ func Explain(q *Query, p Platform) string {
 func FindCommand(q *Query, p Platform) string {
 	root := findRoot(q)
 	parts := []string{"find", shellQuote(root)}
+	// Right after the start point: GNU find warns about global options placed later.
+	// -mindepth would also stop find from pruning excluded directories above
+	// that depth, which nlf prunes at any depth, so with excludes the minimum
+	// is a -path test on files instead.
+	minPath := q.MinDepth > 0 && len(q.ExcludeDirs) > 0
+	if q.MinDepth > 0 && !minPath {
+		parts = append(parts, "-mindepth", fmt.Sprint(q.MinDepth))
+	}
+	if q.HasMaxDepth {
+		parts = append(parts, "-maxdepth", fmt.Sprint(q.MaxDepth))
+	}
 	if len(q.ExcludeDirs) > 0 {
 		var ex []string
 		guard := false
@@ -262,6 +299,10 @@ func FindCommand(q *Query, p Platform) string {
 		parts = append(parts, `\(`, strings.Join(joinOr(ex, 2), " "), `\)`, "-prune", "-o")
 	}
 	parts = append(parts, "-type", "f")
+	if minPath {
+		// find prints paths as root + "/" + rel; each "/*" is one more level.
+		parts = append(parts, "-path", shellQuote(globEscape(strings.TrimSuffix(root, "/"))+strings.Repeat("/*", q.MinDepth)))
+	}
 	if len(q.Extensions) > 0 {
 		var ex []string
 		for _, e := range q.Extensions {

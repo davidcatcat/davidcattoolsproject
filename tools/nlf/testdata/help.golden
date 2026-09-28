@@ -31,8 +31,8 @@ Flags:
   -l, --long       print size and modification time before each path
   -0, --null       end each path with a NUL byte, not a newline (for xargs -0)
   -d, --dir PATH   directory to search (default: current directory)
-  -h, --help       show this help
-  --version        print version
+  --max-depth N    files at most N levels deep; --min-depth N  at least N (1 = directly inside)
+  -h, --help       show this help;  --version  print version
 
 --explain   nlf --explain "找 ovpn 檔"   Nothing is searched, and nlf never runs the command.
   Prints the parsed conditions and an approximate find command for this OS (macOS or GNU/Linux).

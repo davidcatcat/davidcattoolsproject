@@ -54,8 +54,8 @@ Flags:
   -l, --long       print size and modification time before each path
   -0, --null       end each path with a NUL byte, not a newline (for xargs -0)
   -d, --dir PATH   directory to search (default: current directory)
-  -h, --help       show this help
-  --version        print version
+  --max-depth N    files at most N levels deep; --min-depth N  at least N (1 = directly inside)
+  -h, --help       show this help;  --version  print version
 
 --explain   nlf --explain "找 ovpn 檔"   Nothing is searched, and nlf never runs the command.
   Prints the parsed conditions and an approximate find command for this OS (macOS or GNU/Linux).
@@ -103,12 +103,18 @@ type options struct {
 	confirm, null bool
 	dir           string
 	words         []string
+
+	maxDepth, minDepth       int
+	maxDepthSet, minDepthSet bool
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time) int {
 	opts, err := parseArgs(args)
 	if err == nil {
 		err = checkConflicts(opts)
+	}
+	if err == nil {
+		err = checkDepthRange(opts)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "nlf: %v\nRun 'nlf --help' for usage.\n", err)
@@ -154,6 +160,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 		}
 		q.Root = opts.dir
 	}
+	q.MinDepth, q.MaxDepth, q.HasMaxDepth = opts.minDepth, opts.maxDepth, opts.maxDepthSet
 	q.Root = expandHome(q.Root)
 	for i, d := range q.ExcludeDirs {
 		q.ExcludeDirs[i] = expandHome(d)
@@ -307,6 +314,24 @@ func parseArgs(args []string) (*options, error) {
 				return nil, errors.New("-d/--dir can be given only once")
 			}
 			o.dir = dir
+		case a == "--max-depth" || a == "--min-depth" || strings.HasPrefix(a, "--max-depth=") || strings.HasPrefix(a, "--min-depth="):
+			name, v, eq := strings.Cut(a, "=")
+			if !eq && i+1 < len(args) {
+				i++
+				v = args[i] // taken even if it starts with "-": "-1" is rejected as a value
+			}
+			n, err := parseDepth(name, v)
+			if err != nil {
+				return nil, err
+			}
+			val, set := &o.maxDepth, &o.maxDepthSet
+			if name == "--min-depth" {
+				val, set = &o.minDepth, &o.minDepthSet
+			}
+			if *set {
+				return nil, fmt.Errorf("%s can be given only once", name)
+			}
+			*val, *set = n, true
 		case len(a) > 1 && strings.HasPrefix(a, "-") && !strings.ContainsAny(a, " \t"):
 			return nil, fmt.Errorf("unknown flag %s", a)
 		default:
@@ -314,6 +339,35 @@ func parseArgs(args []string) (*options, error) {
 		}
 	}
 	return o, nil
+}
+
+const maxDepthLimit = 4096 // deeper than any path the OS can open
+
+// parseDepth reads the value of --max-depth or --min-depth: decimal digits
+// only (leading zeros are fine), from 0 to maxDepthLimit.
+func parseDepth(name, v string) (int, error) {
+	if v == "" {
+		return 0, fmt.Errorf("%s needs a number", name)
+	}
+	n := 0
+	for _, c := range []byte(v) {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("%s needs a whole number from 0 to %d, got %q", name, maxDepthLimit, v)
+		}
+		if n = n*10 + int(c-'0'); n > maxDepthLimit {
+			return 0, fmt.Errorf("%s needs a whole number from 0 to %d, got %q", name, maxDepthLimit, v)
+		}
+	}
+	return n, nil
+}
+
+// checkDepthRange rejects a minimum depth above the maximum, which could
+// never match; the values are not swapped.
+func checkDepthRange(o *options) error {
+	if o.minDepthSet && o.maxDepthSet && o.minDepth > o.maxDepth {
+		return fmt.Errorf("--min-depth %d is greater than --max-depth %d, so no file can match", o.minDepth, o.maxDepth)
+	}
+	return nil
 }
 
 // flagConflicts lists flag pairs that cannot be used together. The first
@@ -339,6 +393,10 @@ var flagConflicts = []struct {
 	{func(o *options) bool { return o.version && o.confirm }, "--version prints text and never searches; use it without --confirm"},
 	{func(o *options) bool { return o.version && o.long }, "--version prints text, not a file list; use it without -l/--long"},
 	{func(o *options) bool { return o.version && o.dir != "" }, "--version never searches, so -d/--dir has no effect; use it without -d/--dir"},
+	{func(o *options) bool { return o.help && o.maxDepthSet }, "-h/--help never searches, so --max-depth has no effect; use it without --max-depth"},
+	{func(o *options) bool { return o.help && o.minDepthSet }, "-h/--help never searches, so --min-depth has no effect; use it without --min-depth"},
+	{func(o *options) bool { return o.version && o.maxDepthSet }, "--version never searches, so --max-depth has no effect; use it without --max-depth"},
+	{func(o *options) bool { return o.version && o.minDepthSet }, "--version never searches, so --min-depth has no effect; use it without --min-depth"},
 }
 
 // checkConflicts reports the first conflicting flag pair in o, if any.
