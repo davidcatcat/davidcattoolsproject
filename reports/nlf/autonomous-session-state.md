@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A7 已 commit 並 push 到 feature branch；等待人類 review 與 GitHub Actions 結果
+Last updated: 2026-09-28，A7 雙平台 CI SUCCESS（run `36428841505`）；READY FOR FINAL REVIEW，等待 human／external final review
 
 ## Session：A7（fuzz / hostile-input hardening）
 
@@ -12,7 +12,7 @@ Last updated: 2026-09-28，A7 已 commit 並 push 到 feature branch；等待人
 - **A6 merge：** 人類確認 run `36408168119` 雙平台 SUCCESS 並 APPROVE 後授權。main 從 `5cdd567` fast-forward 到 `ebad6a7`，checkpoint 記錄為 `97b6bd3`；merge 後 `make check`、`go test -race` 通過，working tree clean。
 - **Baseline main SHA：** `97b6bd35f2801e712f2d2e119b025045b492ba05`
 - **Baseline version：** 0.4.0
-- **Feature branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`，從 origin/main（`97b6bd3`）建立，沒有 upstream。
+- **Feature branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`，從 origin/main（`97b6bd3`）建立，已 push，upstream 是 `origin/feat/nlf-roadmap-a7-fuzz-hardening-20260928`。
 - **Worktree path：** `<session scratchpad>/nlf-a7-worktree`（請用 `git worktree list` 查詢實際路徑）
 - **Main touched by A7：** NO
 
@@ -43,6 +43,25 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 
 ### A7 Current phase
 
+- **A7 完成，雙平台 CI SUCCESS，等待 human／external final review。不 merge，也不開始 Phase B。**
+- **A7 branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`
+- **Commit：**
+  - `4592861`：A7 功能（B1–B8、fuzz、hostile／property 測試、CI Fuzz smoke、README、報告）
+  - `06b668c`：checkpoint
+  - `8945e4b`：Linux test fix
+  - 本次：docs-only checkpoint commit，接在 `8945e4b` 之後
+- 最後一個 production／test commit 是 `8945e4b13ec17878957a1a13b5b9b3fa49e075a9`。
+- **CI：** run `36428841505`，**ubuntu-latest SUCCESS**、**macos-latest SUCCESS**，全部步驟成功，由人類／external review 確認。
+  - 之前的 run `36427929510` 在 ubuntu 失敗。原因是 `TestUnicodeNormalizationMatrix` 的 Linux 分支只接受英文的 missing-root 訊息，但查詢是中文，production 正確地印出中文訊息。
+  - external review 要求的 Linux fix 已經在 `8945e4b` 完成：新增 `isMissingRootError` helper 與 `TestMissingDirFollowsQueryLanguage`。只改測試，沒有改 production 與 darwin assertion。
+- **本機完整 validation 全綠**（在 `8945e4b` 上）：gofmt、make check、race、`-count=10 -shuffle=on`、`-v`（1546 PASS、0 SKIP）、Fuzz smoke、make dist、SHA256SUMS、兩個 binary 的 smoke。
+- **QA：PASS。** 它找到的 EOF flush 測試漏洞已經補上。
+- **Review：APPROVE。**
+- **origin/main：** `f2c5a99021413a4e11deab584468da8dd41d6185`。從 `97b6bd3` 以來只改了 `README.md` 與 `scripts/llm-*.sh`，沒有動到 `tools/nlf`、`.github/workflows/nlf-ci.yml`、`reports/nlf`。沒有 rebase，沒有 force push。
+- **本機 junk：** main repo 根目錄仍有 QA agent 誤產生的未追蹤 `hostile_test.go` 與 `internal/`，需要使用者自行確認與清理。Lead 不刪除它們。
+
+#### 先前紀錄（A7 第一次 commit 前）
+
 - **A7 完成，等待人類 review A7 branch 與 GitHub Actions 結果。** 報告：`reports/nlf/2026-09-28-fuzz-hardening.md`。
 - 原本的 session 在等 Review／QA 時中斷；由新的 session 接手，先確認 worktree 的 `make check` 仍然是綠的，再重新派出 Review 與 QA（分開、唯讀）。
 - Implementation：B1–B8 已修正（B7、B8 是 implementation 時新找到的二次方 bug）；4 個 fuzz target、hostile filename matrix、NFC／NFD、strictness、AND-monotonic、determinism、pathological／growth 測試；CI Fuzz smoke；README。
@@ -66,14 +85,16 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 
 ### A7 Exact next action
 
-無。等待人類 review A7 branch 與 GitHub Actions 結果。**不要 merge A7 到 main，也不要開始 Phase B**，除非人類明確要求。
+無。等待 human／external final review。**不要 merge A7 到 main，也不要開始 Phase B**，除非人類明確要求。
 
 ### A7 Git state
 
 - **Committed（A7）：** YES（`4592861`，nlf: harden parser and content scan against hostile input (A7)）
 - **A7 branch pushed：** YES（`origin/feat/nlf-roadmap-a7-fuzz-hardening-20260928`）
 - **PR URL：** 未建立（沒有 `gh`）；compare 連結：`https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a7-fuzz-hardening-20260928`
-- **GitHub Actions 結果：** 需要人類確認 run ID 與結果。
+- **Linux test fix：** YES（`8945e4b`）
+- **GitHub Actions 結果：** run `36428841505`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認）。先前的 run `36427929510`：ubuntu FAILURE（測試 assertion 語系問題，已修正）。
+- **Phase B：** NOT STARTED
 - **Merge A7 to main：** NOT PERFORMED
 
 ## 先前的 session：A6 top-N heap（已 merge 到 main，`ebad6a7`）

@@ -3,6 +3,9 @@
 日期：2026-09-28
 分支：`feat/nlf-roadmap-a7-fuzz-hardening-20260928`（從 main `97b6bd3` 建立；**未 merge 到 main**）
 版本：維持 0.4.0（沒有 bump、沒有 tag）
+Commit：`4592861`（A7 功能）、`06b668c`（checkpoint）、`8945e4b`（Linux test fix）
+最終 CI：run `36428841505`，ubuntu-latest **SUCCESS**、macos-latest **SUCCESS**
+External review 狀態：**READY FOR FINAL REVIEW**。A7 **未 merge** 到 main，Phase B **未開始**。
 
 A7 不新增功能。它用 Go fuzz、hostile filename matrix、NFC／NFD、parser strictness、AND monotonic、determinism 與 pathological input，系統性檢查 robustness。找到的 bug 都先找出 root cause，再做最小修正，並附上 regression test。**沒有用 recover 掩蓋錯誤，沒有放寬 parser，也不會自動修正輸入。**
 
@@ -92,7 +95,7 @@ QA 對 base（`97b6bd3`）與 A7 的 binary 各跑 110 組指令：94 組完全�
 
 ## 驗證
 
-Lead（macOS，Go 1.27.1）在最後一次修改後重跑，每一項都以 exit code 確認為 0：
+Lead（macOS，Go 1.27.1）在最後一次修改後重跑，也就是 Linux test fix `8945e4b` 之後。每一項都以 exit code 確認為 0：
 
 | 步驟 | 結果 |
 |------|------|
@@ -100,7 +103,7 @@ Lead（macOS，Go 1.27.1）在最後一次修改後重跑，每一項都以 exit
 | `make check` | 0 |
 | `go test -race ./...` | 0 |
 | `go test -count=10 -shuffle=on ./...` | 0 |
-| `go test -count=1 -v ./...` | 0；1545 個 PASS、0 個 SKIP |
+| `go test -count=1 -v ./...` | 0；1546 個 PASS、0 個 SKIP |
 | CI Fuzz smoke（4 × 5 秒） | 0 |
 | `make dist` | 0 |
 | `SHA256SUMS` | 4 行，`shasum -c` 全部 OK |
@@ -122,11 +125,36 @@ Review Agent：**APPROVE**，只有 4 個 nit，都不需要改程式：
 1. `tokenize.go` 裡接到前一個 Han token 的分支，看起來已經不會執行到。保留它是為了和舊 tokenizer 完全等價。
 2. glued-* 的 growth 比例是 2.24–2.50 倍，上限是 3.0。如果之後 flaky，可以改成比較 4096 與 16384，上限約 6。
 3. darwin 上 hostile test 預期 invalid UTF-8 的 `mkdir` 回傳 EILSEQ。TMPDIR 如果不在 APFS 上，會直接失敗而不是 skip。
-4. CI job timeout 是 15 分鐘，新測試讓每個 `go test` 步驟多了幾秒。本機估算仍在上限內，但還沒有實際的 GitHub Actions 數字。
+4. CI job timeout 是 15 分鐘，新測試讓每個 `go test` 步驟多了幾秒。最終 run `36428841505` 兩個平台都在上限內完成。
 
 QA Agent：**PASS**。它找到的測試漏洞已經補上，見「Mutation 結果」。
 
-**GitHub Actions：** push 之後會在 ubuntu-latest 與 macos-latest 執行。Lead 無法讀取 private repo 的 Actions 結果（沒有 `gh`），**run ID 與結果需要人類確認後補上**。
+## GitHub Actions
+
+Lead 沒有 `gh`，無法讀取 private repo 的 Actions。以下 run ID 與結果由人類／external review 確認。
+
+### 第一次 run：`36427929510`（ubuntu-latest FAILURE）
+
+- **失敗位置：** ubuntu-latest，job `108946413737`，步驟 `Tests (verbose, skip guard)`，測試 `TestUnicodeNormalizationMatrix`。
+- **原因是測試寫錯，production 沒有問題。**
+  - 在 Linux 上，NFC 與 NFD 是不同的路徑，所以用 NFD 拼法的 `--dir` 不存在。nlf 正確地 exit 2，stdout 是空的。
+  - 這個 case 的查詢是中文（`找 txt 檔`），所以 stderr 依查詢語言印出 `nlf：找不到搜尋位置「…」`，這也是正確的。
+  - 但 assertion 只接受英文的 `does not exist`。macOS 走的是 darwin 分支，所以本機驗證時沒有執行到這一行。
+
+### 修正：`8945e4b`（只改測試）
+
+- 新增 helper `isMissingRootError(stderr, root)`，接受中文或英文 missing search location 錯誤的完整第一行，而且必須帶有確切的 root。
+- Linux 分支改用這個 helper，仍然檢查 exit 2 與空的 stdout。
+- 新增 regression test `TestMissingDirFollowsQueryLanguage`，每個平台都會跑：
+  - 中文查詢與英文查詢各自加上不存在的 `--dir`，stderr 必須完全等於該語言的訊息。
+  - 確認 helper 對空字串、permission denied 訊息、路徑不同的訊息都回傳 false。
+- **沒有修改的部分：** production code（包括語言選擇）與 darwin 分支的 NFC／NFD assertion。
+
+### 最終 run：`36428841505`（兩個平台 SUCCESS）
+
+- ubuntu-latest 與 macos-latest 都是 **SUCCESS**。
+- 以下步驟全部成功：gofmt、go vet、verbose tests 與 skip guard、race detector、repeated shuffled tests、Fuzz smoke、build、dist、SHA256 驗證、靜態 binary 檢查、runtime smoke、working tree clean。
+- Linux 的 NFC／NFD regression 已經在 ubuntu runner 上實際通過。這包括 NFD 拼法的 `--dir` 不存在、兩種拼法可以並存，以及 raw-byte（無效 UTF-8）的 `--dir`。
 
 ## 使用者可見的變更
 
@@ -137,10 +165,11 @@ QA Agent：**PASS**。它找到的測試漏洞已經補上，見「Mutation 結�
 
 ## 剩下的風險
 
-- APFS 不允許無效 UTF-8 的檔名，所以 raw-byte `--dir` 只能在 Linux 上實際測試。本機 macOS 沒有 Linux 環境（Docker 沒有執行），這部分要靠 CI 的 ubuntu runner。
-- Review 提到的 growth 比例餘裕與 CI 15 分鐘 timeout，要看第一次 GitHub Actions run 才能確認。
+- APFS 不允許無效 UTF-8 的檔名，所以 raw-byte `--dir` 只能在 Linux 上實際測試。本機沒有 Linux 環境，這部分由 CI 的 ubuntu runner 驗證，已經在 run `36428841505` 通過。
+- Review 提到的 growth 比例餘裕在 run `36428841505` 兩個平台都通過。它是以 allocation 比例計算，之後如果 Go 版本改變 growth 行為，可能需要調整（見 Review nit 2）。
 - **事故紀錄：**
   - audit agent 曾對自己剛建立、repo 外的 `/tmp/x` 執行一次 `rm -f`，違反 no-rm 規則，沒有影響任何既有檔案。
-  - QA agent 因為 `cd` 失敗，在 **main repo 根目錄**產生了未追蹤的 `hostile_test.go` 與 `internal/`（22 個 fuzz corpus 檔案的複本）。這些檔案不屬於 A7 commit，已經回報給人類處理，Lead 沒有移動也沒有刪除。
-- **沒有做：** Phase B、新功能、版本 bump、merge 到 main。
+  - QA agent 因為 `cd` 失敗，在 **main repo 根目錄**產生了未追蹤的 `hostile_test.go` 與 `internal/`（22 個 fuzz corpus 檔案的複本）。這些檔案不屬於 A7 commit，**仍需使用者自行確認與清理**；Lead 沒有移動也沒有刪除。
+  - Lead 第一次驗證只在 macOS 上執行，沒有抓到 Linux 分支裡只接受英文訊息的 assertion。這個問題由 CI 抓到，已經在 `8945e4b` 修正。
+- **沒有做：** Phase B（未開始）、新功能、版本 bump、merge 到 main（A7 未 merge）。
 - 產品原則不變：read-only、deterministic、production 不執行 shell、不 import `os/exec`、不連網路、不用 LLM、不用 sudo、沒有新增第三方依賴、macOS／Linux 語義相同。
