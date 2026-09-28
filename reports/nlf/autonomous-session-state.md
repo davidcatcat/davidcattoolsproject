@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A7 雙平台 CI SUCCESS（run `36428841505`）；READY FOR FINAL REVIEW，等待 human／external final review
+Last updated: 2026-09-28，A7 已 merge 到 main（`738e553`）
 
 ## Session：A7（fuzz / hostile-input hardening）
 
@@ -43,7 +43,17 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 
 ### A7 Current phase
 
-- **A7 完成，雙平台 CI SUCCESS，等待 human／external final review。不 merge，也不開始 Phase B。**
+- **A7 已 merge 到 main。** 人類確認 run `36428841505` 雙平台 SUCCESS 後明確授權 merge。
+  - main 從 `f2c5a99` 以 merge commit **`738e553ea0cb285c18e7399d5e1f9e34aad9b1d9`**（`--no-ff`）合併 A7 HEAD `a8f9d97`。用 merge commit 是因為 main 已經有無關的 LLM benchmark commit，無法 fast-forward。
+  - 一般 push，沒有 force，也沒有改寫 history。
+  - merge 在另一個 main worktree 進行，沒有動到使用者 main repo checkout（目前在 `feat/a1-llmtool`，有未 commit 的修改）。
+  - merge 後 validation（在 `738e553` 上）：`make check`、`go test -race ./...`、`go test -count=3 -shuffle=on ./...` 都 PASS。`tools/nlf` 與 `.github` 的內容和 CI 驗證過的 `8945e4b` 完全相同。
+  - main push 會觸發新的 nlf CI，run ID 與結果需要人類確認。
+- **Phase B：** NOT STARTED。
+
+#### merge 前的狀態
+
+- **A7 完成，雙平台 CI SUCCESS，等待 human／external final review。**
 - **A7 branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`
 - **Commit：**
   - `4592861`：A7 功能（B1–B8、fuzz、hostile／property 測試、CI Fuzz smoke、README、報告）
@@ -85,7 +95,7 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 
 ### A7 Exact next action
 
-無。等待 human／external final review。**不要 merge A7 到 main，也不要開始 Phase B**，除非人類明確要求。
+無。請人類確認 main push 觸發的 GitHub Actions 結果。**不要開始 Phase B**，除非人類明確要求。**不要 merge A7 到 main，也不要開始 Phase B**，除非人類明確要求。
 
 ### A7 Git state
 
@@ -95,7 +105,7 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 - **Linux test fix：** YES（`8945e4b`）
 - **GitHub Actions 結果：** run `36428841505`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認）。先前的 run `36427929510`：ubuntu FAILURE（測試 assertion 語系問題，已修正）。
 - **Phase B：** NOT STARTED
-- **Merge A7 to main：** NOT PERFORMED
+- **Merge A7 to main：** DONE（`738e553`，`--no-ff`，一般 push）
 
 ## 先前的 session：A6 top-N heap（已 merge 到 main，`ebad6a7`）
 
