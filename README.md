@@ -86,3 +86,27 @@ Keep the skill focused, define a clear process, and end with checkable completio
 ## Tools
 
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
+
+
+## Company LLM benchmark
+
+Run the internal LLM benchmark from the repository root:
+
+```bash
+sh scripts/llm-benchmark.sh
+```
+
+Defaults:
+
+- Gateway: `http://10.29.7.58:4000`
+- Route: `gw`
+- Long-context probes: approximately 8k, 16k, 32k, and 64k tokens
+- Output: a Markdown report plus raw JSON responses under `reports/`
+
+Override settings when needed:
+
+```bash
+BASE_URL=http://10.29.7.58:4000 MODEL=gw CONTEXT_SIZES="8000 16000 32000 64000" sh scripts/llm-benchmark.sh
+```
+
+The benchmark covers long-context retention, evidence-disciplined Kubernetes log diagnosis, Git diff review, cross-file root-cause analysis, and context compression/evidence preservation.
