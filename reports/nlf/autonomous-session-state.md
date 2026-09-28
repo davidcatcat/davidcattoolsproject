@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A3 完成並 push 到 feature branch；等待人類 review
+Last updated: 2026-09-28，A3 已 merge 到 main（`4f51340`）
 
 ## Session：A3（`-0` / `--null`）
 
@@ -53,7 +53,9 @@ Last updated: 2026-09-28，A3 完成並 push 到 feature branch；等待人類 r
 
 ### A3 Current phase
 
-- A3 完成，等待人類 review。
+- **A3 已 merge 到 main。** 人類確認 GitHub Actions run `36368244400` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
+- main 從 `c932fad` fast-forward 到 **`4f513401c53b5304426c759a3266534573ecd21b`**，一般 push，沒有 force，也沒有改寫 history；`origin/main` 包含 `5efb081` 與 `4f51340`。
+- merge 後 final validation（在 main `4f51340` 上）：`make check` PASS、`go test -race ./...` PASS、working tree clean。
 
 ### A3 Completed work
 
@@ -68,15 +70,15 @@ Last updated: 2026-09-28，A3 完成並 push 到 feature branch；等待人類 r
 
 ### A3 Exact next action
 
-無。等待人類 review A3 branch 與 GitHub Actions 結果（ubuntu-latest / macos-latest）。**不要 merge A3 到 main**，除非人類明確要求。
+無（A3 已 merge）。下一個項目：A4（`--explain` / output behavior consistency hardening），在 `feat/nlf-roadmap-a4-explain-parity-20260928` 進行。
 
 ### A3 Git state
 
 - **Committed（A3）：** YES
 - **A3 branch pushed：** YES（`origin/feat/nlf-roadmap-a3-null-output-20260928`）
 - **Main touched by this task：** A2 fast-forward merge 到 main（`c932fad`），由人類在確認 CI run `36366144449` 通過後明確授權；A3 沒有碰 main。
-- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認。
-- **Merge to main：** NOT PERFORMED（A3）
+- **GitHub Actions 結果：** run `36368244400`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認並回報）。
+- **Merge to main：** PERFORMED（A3，fast-forward 到 `4f51340`，人類明確授權）
 
 ## 先前的 session：A2（已 merge 到 main，`c932fad`）
 
