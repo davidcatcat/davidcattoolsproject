@@ -5,10 +5,10 @@ import json
 import re
 import socket
 import time
-from dataclasses import dataclass
 from urllib import error, request
 
 from ..errors import LLMToolError
+from .base import Reply
 
 RESPONSE_LIMIT = 16 * 1024 * 1024
 
@@ -22,30 +22,33 @@ class NoRedirect(request.HTTPRedirectHandler):
         return None
 
 
-@dataclass(frozen=True)
-class Reply:
-    content: str
-    metadata: dict
-
-
 class OpenAICompatibleClient:
+    @staticmethod
+    def validate_options(options):
+        if not isinstance(options, dict) or set(options) - {"enable_thinking"}:
+            raise LLMToolError("unsupported openai-compatible provider_options")
+        value = options.get("enable_thinking")
+        if value is not None and type(value) is not bool:
+            raise LLMToolError("enable_thinking must be a boolean or null")
+
     def __init__(self, provider, generation, key=None):
         self.provider = provider
         self.generation = generation
         self.key = key
-        # Do not forward internal prompts/keys through ambient proxy settings.
+        # Do not forward prompts/keys through ambient proxy settings.
         self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
 
     def complete(self, messages):
-        if self.generation["enable_thinking"] is not False:
-            raise LLMToolError("A1 requires enable_thinking: false")
+        options = self.provider.get("provider_options", {})
+        self.validate_options(options)
         body = {
             "model": self.provider["model"],
             "temperature": self.generation["temperature"],
             "max_tokens": self.generation["max_tokens"],
-            "chat_template_kwargs": {"enable_thinking": False},
             "messages": messages,
         }
+        if options.get("enable_thinking") is not None:
+            body["chat_template_kwargs"] = {"enable_thinking": options["enable_thinking"]}
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key

@@ -1,8 +1,25 @@
-# llmtool — A1 LLMTool MVP
+# llmtool — A1 Generic LLMTool Core
 
-本機唯讀 CLI，將明確提供的文字交給公司 Qwen gateway，輸出最終答案。
-不連接 OpenAI 服務，不呼叫 Claude/Codex CLI，不執行 shell、Git 或模型回傳的指令。
-`openai-compatible` 只是 gateway 的 HTTP 協定名稱。
+llmtool is a read-only, provider-agnostic LLM CLI foundation.
+
+這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。A1 只實作 generic core
+與一種 provider：`openai-compatible`。它可連 self-hosted Qwen、vLLM、相容 gateway、
+LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
+不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
+
+預設 `http://10.29.7.58:4000`／`gw` 只是目前的 example/deployment profile，
+可在 user config 或明確 CLI/env 操作中換成其他 OpenAI-compatible endpoint。
+Core 不以公司或模型品牌選擇 task 行為。
+
+| 概念 | 意義 | A1 狀態 |
+|---|---|---|
+| Provider | 如何連模型：transport、endpoint、model、auth | 僅 `openai-compatible` |
+| Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
+| Role | 模型在 workflow 中的職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
+| Agent | 可執行工具或修改 code 的 runtime | 未實作；llmtool A1 不是執行 agent |
+
+OpenAI API、Anthropic API、Claude CLI、Codex CLI 的專用 provider 都在未來 roadmap，
+A1 沒有這些整合，也不執行 shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
 ## 安裝與直接執行
 
@@ -37,48 +54,93 @@ llmtool config init                 # 新檔權限 0600，既有檔案不覆蓋
 llmtool config init --force         # 明確要求才取代既有檔案；拒絕 symlink
 llmtool config show                 # resolved YAML，API key 遮罩
 llmtool config show --max-tokens 4000
+llmtool config show --provider home-vllm
 ```
 
 User config 固定是 `~/.config/llmtool/config.yaml`（依 HOME；不使用 XDG_CONFIG_HOME）。
 Project config 為**目前工作目錄**的 `.llmtool.yaml`；不搜尋父目錄、不讀 Git metadata。
-兩者皆非必需。欄位逐層合併，優先順序：
+兩者皆非必需。各來源只對允許的欄位套用優先順序：
 
 ```text
 CLI option > environment > project config > user config > built-in defaults
 ```
 
-範例見 [config.example.yaml](config.example.yaml)：
+完整 **user config** 範例見 [config.example.yaml](config.example.yaml)：
 
 ```yaml
 providers:
-  company:
+  default:
     type: openai-compatible
     base_url: "http://10.29.7.58:4000"
     model: "gw"
     timeout_seconds: 120
-    # api_key: null
-    # api_key_env: "COMPANY_LLM_API_KEY"
+    api_key: null
+    api_key_env: null
+    provider_options:
+      enable_thinking: false
 generation:
   temperature: 0
   max_tokens: 2000
-  enable_thinking: false
+active_provider: default
 ```
 
-Project config 可以只寫：
+User config 可以增加其他具名 profile：
 
 ```yaml
 providers:
-  company:
+  office-qwen:
+    type: openai-compatible
+    base_url: "http://10.29.7.58:4000"
+    model: "gw"
+    provider_options:
+      enable_thinking: false
+  home-vllm:
+    type: openai-compatible
+    base_url: "http://192.168.1.20:8000"
+    model: "qwen"
+active_provider: office-qwen
+```
+
+新 profile 必須定義 endpoint、model；其他欄位使用中立預設（type 為
+`openai-compatible`、timeout 120、無 auth、空 provider_options），**不繼承**
+`default` 的 endpoint、credentials 或 thinking 選項。Provider 名稱長 1–64 字元，
+以英數字開頭，可包含英數字、`-`、`_`。選擇不存在的 profile 會報錯。
+
+### Project config 的低信任邊界
+
+`.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、
+`timeout_seconds`，以及 `generation.temperature`、`generation.max_tokens`。
+不能新增 provider、切換 `active_provider`、指定 type、base_url、api_key、api_key_env
+或 provider_options。禁止欄位即使值為 null、等於目前值、或被 CLI/env 覆蓋，也直接報錯。
+完整 project schema 在讀取 credential 環境變數／建立 HTTP client 之前檢查，
+錯誤不回顯 secret、原始值或攻擊者指定的欄位名稱。
+
+合法 project config：
+
+```yaml
+providers:
+  default:
+    model: gw
     timeout_seconds: 180
 generation:
   max_tokens: 4000
 ```
 
+不要把完整 `config.example.yaml` 複製為 project config，它包含被禁止的欄位。
+
+| Source | 可控制欄位 |
+|---|---|
+| User config | Named providers、endpoint、auth、type、provider_options、active_provider、generation |
+| Project config | 既有 profile 的 model/timeout，以及通用 temperature/max_tokens |
+| Environment | 下表列出的明確變數，套用到選定 profile |
+| CLI | 下表列出的明確 flags，套用到選定 profile |
+
 | CLI（放在子命令之後） | Environment | YAML |
 |---|---|---|
-| `--base-url` | `LLMTOOL_BASE_URL` | `providers.company.base_url` |
-| `--model` | `LLMTOOL_MODEL` | `providers.company.model` |
-| `--timeout` | `LLMTOOL_TIMEOUT` | `providers.company.timeout_seconds` |
+| `--provider` | `LLMTOOL_PROVIDER` | `active_provider` |
+| `--base-url` | `LLMTOOL_BASE_URL` | `providers.<selected>.base_url` |
+| `--model` | `LLMTOOL_MODEL` | `providers.<selected>.model` |
+| `--timeout` | `LLMTOOL_TIMEOUT` | `providers.<selected>.timeout_seconds` |
 | `--max-tokens` | `LLMTOOL_MAX_TOKENS` | `generation.max_tokens` |
 | `--temperature` | — | `generation.temperature` |
 
@@ -87,20 +149,41 @@ credentials、query 或 fragment。工具固定附加 `/v1/chat/completions`。
 `timeout_seconds` 為正數 socket timeout；`max_tokens` 為正整數；temperature 為 0–2。
 未知欄位、重複 key、YAML aliases、錯誤型別與 malformed YAML 均報錯。
 
-公司 gateway 預設不需 auth。未設定 key 時不送 Authorization；需要時可擇一設定
+先以 CLI > env > user > default 決定 active profile，再把 CLI/env 的 endpoint/model
+覆寫套到這一組；不更動其他 profile。A1 只接受 type `openai-compatible`，
+尚未接受未來的 roles／command／agent routing 設定。
+
+預設 example profile 不需 auth。未設定 key 時不送 Authorization；需要時可擇一設定
 `api_key` 或 `api_key_env`。後者只查明確命名的環境變數，缺值時請求失敗。
 不讀 `.env`、credential store、keychain 或 SSH 檔案。不要把 key 寫進命令列。
 合併後兩個 auth 欄位不能同時有值；覆蓋 auth 方式時將另一個明確設為 `null`。
 
-`.gitignore` 排除 `.llmtool.yaml`、`config.yaml`、`config.yml`；repo 只追蹤無 secret
-的 example。設定檔屬於信任邊界：project config 可改目的地或 key env 名稱，
-不要在未信任的 project config 下傳送敏感輸入／key。
+`config show` 遮罩**所有** profile 的 key，並不解析 api_key_env 的值；模型請求
+只解析選定 profile 明確指定的 key env。未選定 profile 的環境 secret 不會讀取。
+User config、環境變數與明確 CLI 是信任來源：`--base-url`／`LLMTOOL_BASE_URL`
+會將選定 profile 的 key 傳到使用者指定的目的地，請只使用信任的 endpoint。
+Project 雖不能改 endpoint/auth，仍可在同一 endpoint 選 model；不適合當作 model ACL。
+
+`.gitignore` 保留 `.llmtool.yaml`、Python cache，其他 artifact 僅忽略
+`tools/llmtool/` 的 `.venv/`、`build/`、`dist/`、`*.egg-info/`。
+不再全 repo 忽略 `config.yaml`／`config.yml`；真實 user config 位於 repo 外，
+不要將其複製進 repo。Repo 只追蹤無 secret 的 example。
+
+### 從最初 A1 config 遷移
+
+舊 `providers.company` 現在只是一般 profile 名稱，不再隱含選用。
+可改名為 `default`，或明確設定 `active_provider: company`。
+把 `generation.enable_thinking` 移到對應 profile 的
+`provider_options.enable_thinking`；舊的通用欄位會報錯，不默默忽略。
+將 project config 的 endpoint、auth、type 和 active selection 移至 user config。
+不會自動改寫既有設定檔。
 
 ## 四個命令
 
 ```sh
 llmtool ask "why did this fail?"
 llmtool ask "解釋這個錯誤" --max-tokens 3000 --timeout 180
+llmtool ask "why did this fail?" --provider home-vllm
 
 llmtool analyze-log --file app.log
 cat app.log | llmtool analyze-log
@@ -128,18 +211,23 @@ llmtool context-pack --file incident.txt --verbose
 | `context-pack` | `OBSERVATIONS`、`HYPOTHESES`、`UNKNOWN`、`NEXT_EVIDENCE_TO_COLLECT`；保留明確事實、移除重複雜訊 |
 
 這些是 prompt 約束，A1 不驗證 section 結構、指令數量或模型推論的正確性；
-不提供 A3 的 structured JSON Context Packet。
+不提供 A4 的 structured JSON Context Packet。
 
 ## No-thinking 與輸出契約
 
-每次 request 固定含：
+`enable_thinking` 是 OpenAI-compatible 實作的**可選 provider-specific 行為**，
+不是 generic generation 的共同能力。目前 default/example profile 設定
+`provider_options.enable_thinking: false`，所以其 request 仍包含已驗證有效的：
 
 ```json
 "chat_template_kwargs": {"enable_thinking": false}
 ```
 
-A1 拒絕將 `enable_thinking` 改為 true。Route 預設 `gw`；目前已知 backend
-是 `qwen3.6-35b-a3b`，程式不將 backend 名稱寫死為路由。
+一般相容伺服器若不支援此擴充，在 user profile 設 `provider_options: {}`，
+或 `enable_thinking: null`，即可完全省略 `chat_template_kwargs`。
+新 profile 預設省略。此選項只接受 boolean 或 null；true 會要求相應伺服器啟用 thinking，
+但 reasoning 欄位仍不輸出，也可能更快用完 completion budget。
+Core／CLI 不生成此 wire 欄位，未來 provider 不必實作它。
 
 模型命令成功時 stdout **只有** `choices[0].message.content.strip()` 加一個換行。
 `message.reasoning` / `reasoning_content` 永遠不輸出。
@@ -164,7 +252,7 @@ HTTP 非 2xx、API error body、malformed JSON、missing choices、空 content�
 ## Troubleshooting 與已知限制
 
 - `PyYAML is required`：確認啟用安裝 llmtool 的 virtualenv。
-- `cannot connect to gateway`：檢查 VPN／內網連線和 `config show` 的 base URL。
+- `cannot connect to gateway`：檢查伺服器連線和 `config show` 的 active profile/base URL。
   A1 不支援 proxy，HTTPS 使用系統 Python 的信任憑證，不略過 TLS 驗證。
 - `HTTP 401/403`：gateway 若開始要求認證，設定明確的 `api_key_env`。
 - `timed out`：以 `--timeout 180` 調整。這是 socket 操作 timeout，**不是整體 wall-clock deadline**。
@@ -172,6 +260,8 @@ HTTP 非 2xx、API error body、malformed JSON、missing choices、空 content�
 - `malformed YAML`：檢查縮排、型別與重複 key；不會在錯誤訊息中回顯 YAML 原文。
 - `only one ...`：不要同時 pipe 並給 `--file`／文字 argument。
 - `config already exists`：保留現有設定，或明確以 `--force` 重建。
+- `project ... forbidden or unsupported field`：將 endpoint/auth/selection 等設定移到 user config。
+- `active provider is not defined`：先在 user config 建立該 profile；project 不能建立它。
 
 沒有 tokenizer／context window 自動切分；gateway 決定可接受的 token 數。
 HTTP response 上限 16 MiB、config 上限 64 KiB。非串流模式會在記憶體保留完整輸入與答案。
@@ -202,10 +292,13 @@ llmtool/cli.py                         CLI 與輸出
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
 llmtool/inputs.py                      明確輸入來源、文字驗證
 llmtool/prompts.py                     四個內建模板
-llmtool/providers/__init__.py          provider factory
+llmtool/providers/base.py              Provider.complete() / Reply 共用介面
+llmtool/providers/__init__.py          provider type registry 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
 tests/                                config/provider/CLI 測試
 ```
 
-A2 可擴充模板來源而不改 transport；A8 可增加獨立 provider。A1 不實作 Skill engine、
-orchestration、retrieval、Git intelligence、validator 或外部模型整合。
+執行路徑為 task → prompt template → selected provider → `complete()` → final output。
+未來實作可遵循 `Provider.complete()`／`Reply` contract，加入 type registry 及對應
+config validation，無須改 task CLI 流程。A2 擴充 provider，A3 建立外部 Skill Framework；
+其餘階段及 provider/role 分離方向見 [Roadmap](ROADMAP.md)。

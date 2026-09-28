@@ -1,11 +1,18 @@
 """Provider selection stays outside the CLI and prompt layer."""
 
 from .openai_compatible import OpenAICompatibleClient
+from .base import Provider
 from ..errors import LLMToolError
 
+CLIENT_TYPES = {"openai-compatible": OpenAICompatibleClient}
 
-def create_client(config, key=None):
-    provider = config["providers"]["company"]
-    if provider["type"] != "openai-compatible":
-        raise LLMToolError("unsupported provider type")
-    return OpenAICompatibleClient(provider, config["generation"], key)
+
+def client_type(name):
+    if not isinstance(name, str) or name not in CLIENT_TYPES:
+        raise LLMToolError("unsupported provider type; A1 supports openai-compatible")
+    return CLIENT_TYPES[name]
+
+
+def create_client(config, key=None) -> Provider:
+    provider = config["providers"][config["active_provider"]]
+    return client_type(provider["type"])(provider, config["generation"], key)

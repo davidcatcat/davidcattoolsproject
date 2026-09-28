@@ -1,12 +1,17 @@
 providers:
-  company:
+  default:
     type: openai-compatible
+    # Example deployment only: replace with your OpenAI-compatible server.
     base_url: "http://10.29.7.58:4000"
     model: "gw"
     timeout_seconds: 120
     # Optional; prefer an explicitly named environment variable to a literal key.
-    # api_key_env: "COMPANY_LLM_API_KEY"
+    api_key: null
+    api_key_env: null
+    # Optional extension for this validated Qwen/vLLM profile; {} omits it.
+    provider_options:
+      enable_thinking: false
 generation:
   temperature: 0
   max_tokens: 2000
-  enable_thinking: false
+active_provider: default

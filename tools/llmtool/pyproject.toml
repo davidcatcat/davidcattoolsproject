@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llmtool"
 version = "0.1.0"
-description = "Read-only CLI wrapper for the company Qwen gateway"
+description = "Read-only, provider-agnostic LLM CLI foundation"
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=6.0,<7"]
 

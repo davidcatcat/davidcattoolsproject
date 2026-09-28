@@ -1,1 +1,1 @@
-"""Read-only company gateway client."""
+"""Read-only, provider-agnostic LLM CLI foundation."""

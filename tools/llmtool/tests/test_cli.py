@@ -215,8 +215,9 @@ class CLITests(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
     def test_config_show_redacts_key_and_auth_is_sent_only_when_configured(self):
-        project = self.cwd / ".llmtool.yaml"
-        project.write_text("providers:\n  company:\n    api_key_env: TEST_KEY\n")
+        user = self.home / ".config/llmtool/config.yaml"
+        user.parent.mkdir(parents=True)
+        user.write_text("providers:\n  default:\n    api_key_env: TEST_KEY\n")
         self.env["TEST_KEY"] = "fake-private-key"
         result = self.run_cli("config", "show")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -255,6 +256,70 @@ class CLITests(unittest.TestCase):
         self.env.update({"http_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1", "no_proxy": ""})
         result = self.run_cli("ask", "test")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_malicious_project_fails_before_any_http_or_secret_output(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        user = self.home / ".config/llmtool/config.yaml"
+        user.parent.mkdir(parents=True)
+        user.write_text(yaml.safe_dump({"providers": {"default": {
+            "base_url": "http://127.0.0.1:1", "api_key": "FAKE_TEST_SECRET",
+        }}}))
+        self.env["AWS_SECRET_ACCESS_KEY"] = "FAKE_ENV_SECRET"
+        project = self.cwd / ".llmtool.yaml"
+        for fragment in (
+            {"providers": {"default": {"base_url": self.base_url}}},
+            {"providers": {"default": {"api_key": "FAKE_PROJECT_SECRET"}}},
+            {"providers": {"default": {"api_key_env": "AWS_SECRET_ACCESS_KEY"}}},
+            {"providers": {"default": {"type": "openai-compatible"}}},
+            {"active_provider": "default"},
+        ):
+            with self.subTest(fragment=fragment):
+                project.write_text(yaml.safe_dump(fragment))
+                result = self.run_cli("ask", "private-prompt", "--verbose")
+                self.assert_failure(result)
+                self.assertIn(b"project", result.stderr)
+                for secret in (b"FAKE_TEST_SECRET", b"FAKE_ENV_SECRET", b"FAKE_PROJECT_SECRET",
+                               b"AWS_SECRET_ACCESS_KEY", b"private-prompt", self.base_url.encode()):
+                    self.assertNotIn(secret, result.stdout + result.stderr)
+                self.assertEqual(self.server.requests, [])
+
+    def test_safe_project_overrides_still_reach_selected_endpoint(self):
+        (self.cwd / ".llmtool.yaml").write_text("""providers:
+  default:
+    model: project-model
+    timeout_seconds: 3
+generation:
+  max_tokens: 39
+  temperature: 0.4
+""")
+        result = self.run_cli("ask", "test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = self.server.requests[0][2]
+        self.assertEqual(payload["model"], "project-model")
+        self.assertEqual(payload["max_tokens"], 39)
+        self.assertEqual(payload["temperature"], 0.4)
+
+    def test_named_profile_cli_selection_and_optional_thinking_payload(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        user = self.home / ".config/llmtool/config.yaml"
+        user.parent.mkdir(parents=True)
+        user.write_text(yaml.safe_dump({"providers": {
+            "default": {"base_url": "http://127.0.0.1:1", "api_key": "fake-other-key"},
+            "local": {"base_url": self.base_url, "model": "local-model", "api_key_env": "LOCAL_TEST_KEY"},
+        }}))
+        self.env["LOCAL_TEST_KEY"] = "fake-selected-key"
+        self.env["LLMTOOL_PROVIDER"] = "default"
+        result = self.run_cli("ask", "test", "--provider", "local")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path, headers, payload = self.server.requests[0]
+        self.assertEqual(headers["Authorization"], "Bearer fake-selected-key")
+        self.assertEqual(payload["model"], "local-model")
+        self.assertNotIn("chat_template_kwargs", payload)
+        shown = self.run_cli("config", "show", "--provider", "local")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(yaml.safe_load(shown.stdout)["active_provider"], "local")
+        self.assertNotIn(b"fake-other-key", shown.stdout)
+        self.assertNotIn(b"fake-selected-key", shown.stdout)
 
 
 if __name__ == "__main__":

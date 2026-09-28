@@ -1,10 +1,8 @@
-# Local llmtool configuration may contain credentials.
+# Project-local llmtool overrides.
 .llmtool.yaml
-config.yaml
-config.yml
-.venv/
 __pycache__/
 *.py[cod]
-*.egg-info/
-build/
-dist/
+/tools/llmtool/.venv/
+/tools/llmtool/build/
+/tools/llmtool/dist/
+/tools/llmtool/*.egg-info/

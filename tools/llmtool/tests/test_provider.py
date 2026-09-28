@@ -147,8 +147,37 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, "exceeds"):
             self.answer(b" " * (16 * 1024 * 1024 + 1))
 
-    def test_thinking_cannot_be_enabled_by_direct_client_use(self):
-        self.client.generation["enable_thinking"] = True
+    def test_invalid_provider_options_fail_before_request(self):
+        self.client.provider["provider_options"] = {"enable_thinking": "false"}
         with self.assertRaises(LLMToolError):
             self.client.complete([])
         self.open.assert_not_called()
+
+    def test_generic_profile_omits_thinking_extension(self):
+        for options in ({}, {"enable_thinking": None}):
+            with self.subTest(options=options):
+                self.client.provider["provider_options"] = options
+                self.answer(success())
+                self.assertNotIn("chat_template_kwargs", json.loads(self.open.call_args.args[0].data))
+
+    def test_factory_selects_named_profile_without_default_credentials(self):
+        config = copy.deepcopy(DEFAULTS)
+        config["providers"]["local"] = {
+            "type": "openai-compatible", "base_url": "http://localhost:1234",
+            "model": "local-model", "timeout_seconds": 2, "provider_options": {},
+        }
+        config["active_provider"] = "local"
+        client = create_client(config, key="fake-local-key")
+        client.opener.open = Mock(return_value=FakeResponse(json.dumps(success()).encode()))
+        client.complete(messages_for("ask", "test"))
+        req = client.opener.open.call_args.args[0]
+        self.assertEqual(req.full_url, "http://localhost:1234/v1/chat/completions")
+        self.assertEqual(json.loads(req.data)["model"], "local-model")
+        self.assertNotIn("chat_template_kwargs", json.loads(req.data))
+        self.assertEqual(req.get_header("Authorization"), "Bearer fake-local-key")
+
+    def test_factory_rejects_unimplemented_provider_type(self):
+        config = copy.deepcopy(DEFAULTS)
+        config["providers"]["default"]["type"] = "codex-cli"
+        with self.assertRaises(LLMToolError):
+            create_client(config)

@@ -17,15 +17,16 @@ class SafeParser(argparse.ArgumentParser):
 
 
 def add_options(parser):
-    parser.add_argument("--base-url", help="gateway origin (without /v1)")
-    parser.add_argument("--model", help="gateway route/model")
+    parser.add_argument("--provider", help="named provider profile from user config")
+    parser.add_argument("--base-url", help="provider origin (without /v1)")
+    parser.add_argument("--model", help="provider route/model")
     parser.add_argument("--timeout", help="positive socket timeout in seconds")
     parser.add_argument("--max-tokens", help="positive completion token limit")
     parser.add_argument("--temperature", help="generation temperature, 0 through 2")
 
 
 def parser_for_cli():
-    parser = SafeParser(description="Read-only company LLM gateway wrapper (A1).")
+    parser = SafeParser(description="Read-only, provider-agnostic LLM CLI foundation (A1).")
     parser.add_argument("--version", action="version", version="llmtool 0.1.0")
     sub = parser.add_subparsers(dest="command", required=True)
     descriptions = {
