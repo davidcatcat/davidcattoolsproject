@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，QA PASS、Review APPROVE WITH CHANGES（已修正）；Git Safety 後 commit
+Status: COMPLETE
+Last updated: 2026-09-28，A2 完成並 push 到 feature branch；等待人類 review
 
 ## 先前完成的 session：A1（已 merge）
 
@@ -90,29 +90,28 @@ Last updated: 2026-09-28，QA PASS、Review APPROVE WITH CHANGES（已修正）�
 
 ## Current phase
 
-- A2 Git Safety → commit
-- QA：PASS；Review：APPROVE WITH CHANGES，修正已套用；A2 報告 `reports/nlf/2026-09-28-ci.md` 已寫
-- Implementation 已完成：workflow（14 steps）、`scripts/ci-smoke.sh`（19 checks）、README CI 小節、roadmap 檔名與 `-count=10 -shuffle=on` 用語修正。Lead 本機驗證：smoke 19/19 PASS、go test PASS、make check PASS、YAML 可解析。
+- A2 完成，等待人類 review。
 
-## Remaining work
+## Completed work
 
-1. ~~CI design review~~ DONE
-2. ~~Implementation：workflow 與 smoke script~~ DONE
-3. ~~QA~~ DONE
-4. ~~Review~~ DONE
-5. Git Safety
-6. commit
-7. push A2 branch
-8. 可選：PR（沒有 `gh`，所以提供 compare 連結）
-9. 把 checkpoint 標成 COMPLETE
+1. CI design review：APPROVE WITH CHANGES（全部採納）
+2. Implementation：workflow（14 steps）、`scripts/ci-smoke.sh`（19 checks）、README CI 小節、roadmap 修正
+3. QA：PASS
+4. Review：APPROVE WITH CHANGES（修正已套用）
+5. Git Safety：GO
+6. commit `e5cb8b5`（ci: add nlf GitHub Actions workflow）並 push
+7. **事故紀錄：** Lead 的 pre-commit 指令用了 `| tail`，吃掉了失敗的 exit code，所以 `e5cb8b5` 在測試失敗的狀態下被 commit 與 push。失敗原因：README 的 `bin/nlf "$v"` 被 `TestDocsMatchBehavior`／`TestDocExamplesRun` 當成 nlf 查詢範例。下一個 commit 已把 `$v` 改回不加引號，沒有放寬測試；go test、race、make check、`-count=10 -shuffle=on`、make dist、smoke 全部重新以 exit code 驗證為 0。`e5cb8b5` 的 CI 預期會失敗，之後的 commit 預期會通過。沒有 amend，也沒有 force push。
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a2-ci-20260928`
 
 ## Exact next action
 
-Git Safety 檢查 → 明確 staging 6 個檔案 commit 到 A2 branch → `git push -u origin feat/nlf-roadmap-a2-ci-20260928` → checkpoint 標 COMPLETE 並 push。
+無。等待人類 review A2 branch 與 GitHub Actions 結果。**不要 merge A2 到 main**，除非人類明確要求。
 
 ## Git state
 
-- **Committed（A2）：** NO
-- **A2 branch pushed：** NO
-- **PR URL：** none
-- **Merge A2 to main：** NOT PERFORMED
+- **Committed（A2）：** YES
+- **A2 branch pushed：** YES（`origin/feat/nlf-roadmap-a2-ci-20260928`）
+- **Main touched by this task：** NO（A2 只在 feature branch；A1 的 merge 是先前人類明確要求的）
+- **PR URL：** 未建立（沒有 `gh`）；compare 連結見上
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain）
+- **Merge to main：** NOT PERFORMED

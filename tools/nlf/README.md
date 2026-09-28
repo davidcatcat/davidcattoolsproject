@@ -416,5 +416,5 @@ internal/search/search.go   唯讀走訪與比對
 ```
 make build
 v=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
-bash scripts/ci-smoke.sh bin/nlf "$v"
+bash scripts/ci-smoke.sh bin/nlf $v
 ```
