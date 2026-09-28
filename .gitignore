@@ -1,0 +1,10 @@
+# Local llmtool configuration may contain credentials.
+.llmtool.yaml
+config.yaml
+config.yml
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/

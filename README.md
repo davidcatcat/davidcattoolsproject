@@ -85,6 +85,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
+- [`tools/llmtool`](tools/llmtool/README.md) — LLMTool A1: read-only company Qwen gateway CLI (`ask`, `analyze-log`, `review-diff`, `context-pack`), layered YAML config, and offline tests.
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 

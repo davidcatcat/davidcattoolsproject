@@ -1,0 +1,261 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import yaml
+
+from test_provider import success
+
+ENTRYPOINT = Path(__file__).resolve().parents[1] / "llmtool.py"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        self.server.requests.append((self.path, dict(self.headers), json.loads(body)))
+        status, payload, delay, headers = self.server.reply
+        if delay:
+            time.sleep(delay)
+        raw = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        for name, value in headers.items():
+            self.send_header(name, value)
+        self.end_headers()
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+class CLITests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+        cls.base_url = "http://127.0.0.1:" + str(cls.server.server_port)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.cwd = Path(self.temp.name)
+        self.home = self.cwd / "home"
+        self.home.mkdir()
+        # Do not inherit user config, provider overrides, credentials or proxies.
+        self.env = {
+            "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
+            "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
+            "LLMTOOL_BASE_URL": self.base_url,
+        }
+        self.server.requests = []
+        self.server.reply = (200, success(), 0, {})
+
+    def run_cli(self, *args, data=b""):
+        return subprocess.run(
+            [sys.executable, str(ENTRYPOINT), *args], input=data,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=self.cwd, env=self.env, timeout=10, check=False,
+        )
+
+    def assert_failure(self, result):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertTrue(result.stderr.startswith(b"llmtool:"), result.stderr)
+        self.assertNotIn(b"Traceback", result.stderr)
+
+    def test_help_and_version_without_config(self):
+        for args in (("--help",), ("ask", "--help"), ("config", "--help"), ("--version",)):
+            with self.subTest(args=args):
+                result = self.run_cli(*args)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn(b"llmtool", result.stdout)
+        self.assertEqual(self.server.requests, [])
+
+    def test_direct_argument(self):
+        result = self.run_cli("ask", "why did this fail?")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"final answer\n")
+        self.assertEqual(result.stderr, b"")
+        self.assertEqual(self.server.requests[0][2]["messages"][1]["content"], "why did this fail?")
+
+    def test_stdin_all_commands_and_unicode(self):
+        for command in ("ask", "analyze-log", "review-diff", "context-pack"):
+            with self.subTest(command=command):
+                result = self.run_cli(command, data="測試 evidence\n".encode())
+                self.assertEqual(result.returncode, 0, result.stderr)
+                path, headers, payload = self.server.requests[-1]
+                self.assertEqual(path, "/v1/chat/completions")
+                self.assertEqual(payload["messages"][1]["content"], "測試 evidence\n")
+                self.assertFalse(payload["chat_template_kwargs"]["enable_thinking"])
+                self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_file(self):
+        path = self.cwd / "app.log"
+        path.write_text("ERROR evidence\n")
+        result = self.run_cli("analyze-log", "--file", str(path))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests[0][2]["messages"][1]["content"], "ERROR evidence\n")
+
+    def test_ambiguous_inputs_never_send_request(self):
+        path = self.cwd / "app.log"
+        path.write_text("private log")
+        for args, stdin in (
+            (("ask", "private-text", "--file", str(path)), b""),
+            (("ask", "private-text"), b"private-pipe"),
+            (("analyze-log", "--file", str(path)), b"private-pipe"),
+        ):
+            with self.subTest(args=args):
+                result = self.run_cli(*args, data=stdin)
+                self.assert_failure(result)
+                self.assertIn(b"only one", result.stderr)
+                self.assertNotIn(b"private", result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_binary_and_empty_input(self):
+        for data in (b"", b" \n\t", b"text\x00binary", b"\xff\xfe", b"\x01"):
+            with self.subTest(data=data):
+                self.assert_failure(self.run_cli("ask", data=data))
+        path = self.cwd / "binary"
+        path.write_bytes(b"\x00data")
+        self.assert_failure(self.run_cli("ask", "--file", str(path)))
+        self.assertEqual(self.server.requests, [])
+
+    def test_missing_file_directory_and_fifo(self):
+        fifo = self.cwd / "fifo"
+        os.mkfifo(fifo)
+        for path in (self.cwd / "secret-filename", self.cwd, fifo):
+            with self.subTest(path=path):
+                result = self.run_cli("ask", "--file", str(path))
+                self.assert_failure(result)
+                self.assertNotIn(b"secret-filename", result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_verbose_stdout_stderr_separation(self):
+        result = self.run_cli("ask", "evidence", "--verbose")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"final answer\n")
+        for text in (b"model=qwen3.6-35b-a3b", b"prompt_tokens=20", b"completion_tokens=5", b"elapsed_seconds="):
+            self.assertIn(text, result.stderr)
+            self.assertNotIn(text, result.stdout)
+        self.assertNotIn(b"private-reasoning", result.stdout + result.stderr)
+
+    def test_provider_failures_never_emit_partial_content(self):
+        truncated = success("partial-private-content")
+        truncated["choices"][0]["finish_reason"] = "length"
+        for status, body in (
+            (500, {"error": "private-input-and-key"}),
+            (200, b"private-malformed-json"), (200, {}),
+            (200, success("")), (200, truncated),
+            (200, {"error": {"message": "private-input-and-key"}}),
+            (204, b""),
+        ):
+            with self.subTest(status=status, body=body):
+                self.server.reply = (status, body, 0, {})
+                result = self.run_cli("ask", "private-input", "--verbose")
+                self.assert_failure(result)
+                self.assertNotIn(b"private", result.stderr)
+
+    def test_socket_timeout(self):
+        self.server.reply = (200, success(), 0.2, {})
+        result = self.run_cli("ask", "test", "--timeout", "0.03")
+        self.assert_failure(result)
+        self.assertIn(b"timed out", result.stderr)
+
+    def test_redirect_does_not_forward_prompt_or_key(self):
+        self.server.reply = (307, b"private-redirect", 0, {"Location": self.base_url + "/other"})
+        result = self.run_cli("ask", "test")
+        self.assert_failure(result)
+        self.assertIn(b"307", result.stderr)
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_no_execution_or_automatic_file_read(self):
+        sentinel = self.cwd / "must-not-exist"
+        output = f"touch {sentinel}; git reset --hard; cat ~/.ssh/id_rsa"
+        self.server.reply = (200, success(output), 0, {})
+        result = self.run_cli("review-diff", data=b"diff evidence only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.decode().strip(), output)
+        self.assertFalse(sentinel.exists())
+        self.assertEqual(self.server.requests[0][2]["messages"][1]["content"], "diff evidence only")
+
+    def test_config_commands_use_temporary_home_and_no_network(self):
+        user = self.home / ".config/llmtool/config.yaml"
+        result = self.run_cli("config", "path")
+        self.assertEqual(result.stdout.decode().strip(), str(user))
+        self.assertEqual(result.returncode, 0)
+        result = self.run_cli("config", "init")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(user.stat().st_mode & 0o777, 0o600)
+        user.write_text("generation: {max_tokens: 42}")
+        self.assert_failure(self.run_cli("config", "init"))
+        self.assertIn("42", user.read_text())
+        self.assertEqual(self.run_cli("config", "init", "--force").returncode, 0)
+        shown = self.run_cli("config", "show", "--max-tokens", "17")
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertEqual(yaml.safe_load(shown.stdout)["generation"]["max_tokens"], 17)
+        self.assertEqual(self.server.requests, [])
+
+    def test_config_show_redacts_key_and_auth_is_sent_only_when_configured(self):
+        project = self.cwd / ".llmtool.yaml"
+        project.write_text("providers:\n  company:\n    api_key_env: TEST_KEY\n")
+        self.env["TEST_KEY"] = "fake-private-key"
+        result = self.run_cli("config", "show")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(b"fake-private-key", result.stdout + result.stderr)
+        self.assertIn(b"REDACTED", result.stdout)
+        result = self.run_cli("ask", "test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.server.requests[0][1]["Authorization"], "Bearer fake-private-key")
+
+    def test_cli_overrides_reach_wire(self):
+        self.env["LLMTOOL_MODEL"] = "env-route"
+        result = self.run_cli("ask", "test", "--model", "cli-route", "--max-tokens", "37", "--temperature", "0.2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = self.server.requests[0][2]
+        self.assertEqual(payload["model"], "cli-route")
+        self.assertEqual(payload["max_tokens"], 37)
+        self.assertEqual(payload["temperature"], 0.2)
+
+    def test_invalid_arguments_and_yaml_do_not_echo_sensitive_input(self):
+        result = self.run_cli("ask", "--unknown-secret-flag", "sensitive-input")
+        self.assertEqual(result.returncode, 2)
+        self.assertNotIn(b"sensitive", result.stderr)
+        self.assertNotIn(b"secret", result.stderr)
+        (self.cwd / ".llmtool.yaml").write_text("generation: [private-secret")
+        result = self.run_cli("ask", "test")
+        self.assert_failure(result)
+        self.assertNotIn(b"private-secret", result.stderr)
+
+    def test_input_limit(self):
+        result = self.run_cli("context-pack", data=b"a" * (16 * 1024 * 1024 + 1))
+        self.assert_failure(result)
+        self.assertIn(b"16 MiB", result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_ambient_proxy_is_ignored(self):
+        self.env.update({"http_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1", "no_proxy": ""})
+        result = self.run_cli("ask", "test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

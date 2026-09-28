@@ -1,0 +1,12 @@
+providers:
+  company:
+    type: openai-compatible
+    base_url: "http://10.29.7.58:4000"
+    model: "gw"
+    timeout_seconds: 120
+    # Optional; prefer an explicitly named environment variable to a literal key.
+    # api_key_env: "COMPANY_LLM_API_KEY"
+generation:
+  temperature: 0
+  max_tokens: 2000
+  enable_thinking: false
