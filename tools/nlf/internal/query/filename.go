@@ -147,8 +147,10 @@ func (p *parser) nameValue(from int) (string, error) {
 		}
 		return t.text, nil
 	}
-	v := t.raw
+	var b strings.Builder // grows once per token; += would copy the whole value each time
+	b.WriteString(t.raw)
 	for {
+		v := b.String()
 		nt, ok := p.cur()
 		if !ok || nt.spaceBefore || nt.kind == tPunct || nt.kind == tOp || nt.kind == tQuoted ||
 			(nt.kind == tCJK && slices.Contains(nameBoundaries, nt.text)) {
@@ -163,7 +165,7 @@ func (p *parser) nameValue(from int) (string, error) {
 			return v, nil
 		}
 		if nt.kind == tHan || nt.kind == tNum || nt.kind == tExt || nt.kind == tWord {
-			v += nt.raw
+			b.WriteString(nt.raw)
 			p.pos++
 			continue
 		}

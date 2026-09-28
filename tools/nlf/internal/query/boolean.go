@@ -1,6 +1,9 @@
 package query
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Boolean OR.
 //
@@ -262,29 +265,58 @@ func (p *parser) merge(it *item) error {
 //
 //	[After, Before) ∩ (g1 r1 ∪ g1 r2 ∪ …) ∩ (g2 r1 ∪ …) ∩ …
 //
-// is non-empty. Unions are kept as lists of ranges and intersected pairwise,
-// never flattened, so "January or September" does not become January to
-// September. This is validation only; search evaluates the groups directly.
+// is non-empty. Unions are kept as lists of ranges, never flattened, so
+// "January or September" does not become January to September. This is
+// validation only; search evaluates the groups directly.
+//
+// A non-empty intersection of half-open ranges contains its start: the
+// latest After among the chosen ranges and the global bounds, or minus
+// infinity when all of them are unbounded below. So instead of building
+// every combination of alternatives (exponential in the number of groups),
+// each candidate start is tested against the global bounds and against
+// "some range of every group": O(R²) for R ranges in all.
 func timeSatisfiable(q *Query) bool {
-	cur := []TimeRange{{After: q.ModifiedAfter, Before: q.ModifiedBefore}}
+	var groups [][]TimeRange
 	for _, g := range q.AnyOf {
-		if g.Kind != KindTime {
-			continue
+		if g.Kind == KindTime {
+			groups = append(groups, g.Times)
 		}
-		var next []TimeRange
-		for _, a := range cur {
-			for _, b := range g.Times {
-				if r, ok := a.intersect(b); ok {
-					next = append(next, r)
-				}
+	}
+	if len(groups) == 0 {
+		return true // the global bounds alone are checked by Parse
+	}
+	global := TimeRange{After: q.ModifiedAfter, Before: q.ModifiedBefore}
+	// holds reports whether every group has a range containing t, and t is
+	// within the global bounds; a zero t stands for minus infinity, which
+	// only ranges without a lower bound contain.
+	holds := func(t time.Time) bool {
+		in := func(r TimeRange) bool {
+			if t.IsZero() {
+				return r.After.IsZero()
 			}
+			return r.Match(t)
 		}
-		if len(next) == 0 {
+		if !in(global) {
 			return false
 		}
-		cur = next
+		for _, rs := range groups {
+			if !slices.ContainsFunc(rs, in) {
+				return false
+			}
+		}
+		return true
 	}
-	return true
+	if holds(time.Time{}) || !global.After.IsZero() && holds(global.After) {
+		return true
+	}
+	for _, rs := range groups {
+		for _, r := range rs {
+			if !r.After.IsZero() && holds(r.After) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // intersect returns r ∩ o and whether it is non-empty; zero bounds are unbounded.

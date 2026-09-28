@@ -1,0 +1,2 @@
+go test fuzz v1
+string("\u627e e\u0301 \u6a94")

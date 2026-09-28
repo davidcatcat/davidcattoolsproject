@@ -1,0 +1,7 @@
+go test fuzz v1
+[]byte("K0")
+string("00")
+string("\xd9")
+uint32(65533)
+byte('K')
+bool(true)

@@ -4,9 +4,100 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
+Last updated: 2026-09-28，A7 雙平台 CI SUCCESS（run `36428841505`）；READY FOR FINAL REVIEW，等待 human／external final review
 
-## Session：A6（top-N heap / sorted-limit memory optimization）
+## Session：A7（fuzz / hostile-input hardening）
+
+- **Purpose：** 不新增功能。用 Go fuzz、hostile filename matrix、NFC／NFD、parser strictness、AND monotonic、determinism、pathological input 系統性驗證 robustness。找到的真正 bug 要先找 root cause，再做最小修正並附 regression test；**不用 recover 掩蓋，不放寬 parser，不自動修正輸入**。完成後 commit 並 push A7 branch，停下來等 review。**A7 絕不 merge 到 main；不做 Phase B。**
+- **A6 merge：** 人類確認 run `36408168119` 雙平台 SUCCESS 並 APPROVE 後授權。main 從 `5cdd567` fast-forward 到 `ebad6a7`，checkpoint 記錄為 `97b6bd3`；merge 後 `make check`、`go test -race` 通過，working tree clean。
+- **Baseline main SHA：** `97b6bd35f2801e712f2d2e119b025045b492ba05`
+- **Baseline version：** 0.4.0
+- **Feature branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`，從 origin/main（`97b6bd3`）建立，已 push，upstream 是 `origin/feat/nlf-roadmap-a7-fuzz-hardening-20260928`。
+- **Worktree path：** `<session scratchpad>/nlf-a7-worktree`（請用 `git worktree list` 查詢實際路徑）
+- **Main touched by A7：** NO
+
+### A7 Audit 結果與 Lead 決定
+
+探索性 fuzz：FuzzTokenize 81 萬次、FuzzParse 43 萬次、FuzzShellQuote 620 萬次，皆 clean；FuzzScanTerms 1.45 秒內失敗。另跑了 strictness insertion 約 4.5 萬組，沒有任何一組變成原本的 Query；AND-monotonic 400 組，沒有擴大；pathological input 的成長曲線也量了。
+
+找到 6 個既有 bug，全部要修，各附 regression test：
+
+- **B1（silent rewrite／widening）：** tokenizer 用 `[]rune(s)`，把 invalid UTF-8 位元組變成 U+FFFD。例如 `exclude "\xff"` 實際排除的是 `"\uFFFD"`，使用者想排除的目錄不會被排除。自 v0.1 就存在。修正：`Parse` 一開始就拒絕 invalid UTF-8，exit 2（**唯一的行為變更**，只影響原本就無效的輸入；`--dir` 仍接受原始位元組）。
+- **B2／B3（ignore-case 在 64 KiB 讀取邊界漏找或誤判）：** 小寫後長度會改變的字元（K U+212A、İ、Ω、Å、ẞ）加上 rune 在邊界被切開。自 v0.1 就存在。修正：對整個串流做 lower-case，並把不完整的 UTF-8 尾巴帶到下一次讀取。
+- **B4（指數時間）：** `timeSatisfiable` 對重疊的時間 OR 群組建立完整笛卡兒積，747 bytes 的查詢要 54 秒。自 v0.2.0 就存在。修正：改用 candidate-start 演算法，O(R²)。
+- **B5（二次方）：** tokenizer 對未知的非 ASCII 字元逐一 `+=`，64K 個字元配置 12.7 GB。自 v0.1 就存在。
+- **B6（二次方）：** `extNounAhead` 對排除清單裡的每個名稱都重新掃描整條鏈，64 KB 要 85 秒、23 GB。自 v0.2.0 就存在。修正：依 token 位置 memoize。
+
+文件化的限制（不修）：
+
+- L1：檔名含換行時，預設與 `-l` 輸出會被拆開
+- L2：NFC／NFD 依位元組比對，不做 normalization
+- L3：外觀相似的標點會併入值
+- L4：`--explain` 裡含換行的內容會被 grep 當成兩個 pattern
+- L5：大量 `，` 的配置是線性的
+- L6：空字串 term 無法從 parser 產生
+
+**事故：** audit agent 曾對自己剛建立、repo 外的 `/tmp/x` 執行一次 `rm -f`，違反 no-rm 規則；沒有影響 repo 或既有檔案，已向人類報告。
+
+CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45–75 秒）；seed corpus 在每個 `go test` 步驟都會自動執行。
+
+### A7 Current phase
+
+- **A7 完成，雙平台 CI SUCCESS，等待 human／external final review。不 merge，也不開始 Phase B。**
+- **A7 branch：** `feat/nlf-roadmap-a7-fuzz-hardening-20260928`
+- **Commit：**
+  - `4592861`：A7 功能（B1–B8、fuzz、hostile／property 測試、CI Fuzz smoke、README、報告）
+  - `06b668c`：checkpoint
+  - `8945e4b`：Linux test fix
+  - 本次：docs-only checkpoint commit，接在 `8945e4b` 之後
+- 最後一個 production／test commit 是 `8945e4b13ec17878957a1a13b5b9b3fa49e075a9`。
+- **CI：** run `36428841505`，**ubuntu-latest SUCCESS**、**macos-latest SUCCESS**，全部步驟成功，由人類／external review 確認。
+  - 之前的 run `36427929510` 在 ubuntu 失敗。原因是 `TestUnicodeNormalizationMatrix` 的 Linux 分支只接受英文的 missing-root 訊息，但查詢是中文，production 正確地印出中文訊息。
+  - external review 要求的 Linux fix 已經在 `8945e4b` 完成：新增 `isMissingRootError` helper 與 `TestMissingDirFollowsQueryLanguage`。只改測試，沒有改 production 與 darwin assertion。
+- **本機完整 validation 全綠**（在 `8945e4b` 上）：gofmt、make check、race、`-count=10 -shuffle=on`、`-v`（1546 PASS、0 SKIP）、Fuzz smoke、make dist、SHA256SUMS、兩個 binary 的 smoke。
+- **QA：PASS。** 它找到的 EOF flush 測試漏洞已經補上。
+- **Review：APPROVE。**
+- **origin/main：** `f2c5a99021413a4e11deab584468da8dd41d6185`。從 `97b6bd3` 以來只改了 `README.md` 與 `scripts/llm-*.sh`，沒有動到 `tools/nlf`、`.github/workflows/nlf-ci.yml`、`reports/nlf`。沒有 rebase，沒有 force push。
+- **本機 junk：** main repo 根目錄仍有 QA agent 誤產生的未追蹤 `hostile_test.go` 與 `internal/`，需要使用者自行確認與清理。Lead 不刪除它們。
+
+#### 先前紀錄（A7 第一次 commit 前）
+
+- **A7 完成，等待人類 review A7 branch 與 GitHub Actions 結果。** 報告：`reports/nlf/2026-09-28-fuzz-hardening.md`。
+- 原本的 session 在等 Review／QA 時中斷；由新的 session 接手，先確認 worktree 的 `make check` 仍然是綠的，再重新派出 Review 與 QA（分開、唯讀）。
+- Implementation：B1–B8 已修正（B7、B8 是 implementation 時新找到的二次方 bug）；4 個 fuzz target、hostile filename matrix、NFC／NFD、strictness、AND-monotonic、determinism、pathological／growth 測試；CI Fuzz smoke；README。
+- **Review：APPROVE**。4 個 nit，都不需要改程式（見報告）。
+- **QA：PASS**。16 個 mutant 中 `carry-eof-flush` 存活（檔尾是不完整 UTF-8 時沒有 flush），已補 4 個 `TestScanTermsBoundaryCases` 案例與 2 個 FuzzScanTerms seed，並在複本上確認這個 mutant 會被抓到。110 組 base／A7 對照：16 組不同，全部是預期的（12 組 invalid UTF-8 → exit 2、4 組 B2 修正）。
+- **最終驗證（Lead，最後一次修改後）：** gofmt、make check、race、`-count=10 -shuffle=on`、`-v`（1545 PASS、0 SKIP）、CI Fuzz smoke、make dist、SHA256SUMS、兩個 binary 的 smoke，全部 exit 0；`main.go`、help、`explain.go` 沒有修改。
+- **事故：** QA agent 的 `cd` 失敗後，在 **main repo 根目錄**產生了未追蹤的 `hostile_test.go` 與 `internal/`（fuzz corpus 複本）。不屬於 A7，沒有 commit；Lead 沒有移動或刪除，已回報給人類處理。
+- **origin/main 已前進到 `f2c5a99`**（LLM benchmark 的 commit，沒有動到 `tools/nlf`）。A7 branch 仍然以 `97b6bd3` 為 base，沒有 rebase。
+
+### A7 Remaining work
+
+1. ~~Design／audit~~ DONE
+2. ~~測試與 fuzz target（先寫）~~ DONE
+3. ~~修正真正的 bug（B1–B8）~~ DONE
+4. ~~Review agent 與 QA agent（分開）~~ DONE
+5. ~~Mutation／regression 驗證~~ DONE（補上 EOF flush 的測試）
+6. ~~完整驗證~~ DONE
+7. ~~A7 report~~ DONE
+8. ~~commit + push A7 branch（不 merge main）~~ DONE
+9. ~~checkpoint COMPLETE~~ DONE
+
+### A7 Exact next action
+
+無。等待 human／external final review。**不要 merge A7 到 main，也不要開始 Phase B**，除非人類明確要求。
+
+### A7 Git state
+
+- **Committed（A7）：** YES（`4592861`，nlf: harden parser and content scan against hostile input (A7)）
+- **A7 branch pushed：** YES（`origin/feat/nlf-roadmap-a7-fuzz-hardening-20260928`）
+- **PR URL：** 未建立（沒有 `gh`）；compare 連結：`https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a7-fuzz-hardening-20260928`
+- **Linux test fix：** YES（`8945e4b`）
+- **GitHub Actions 結果：** run `36428841505`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認）。先前的 run `36427929510`：ubuntu FAILURE（測試 assertion 語系問題，已修正）。
+- **Phase B：** NOT STARTED
+- **Merge A7 to main：** NOT PERFORMED
+
+## 先前的 session：A6 top-N heap（已 merge 到 main，`ebad6a7`）
 
 - **Purpose：** `largest` / `newest` 搭配數量上限時，用 bounded top-N heap，只保留最多 N 筆；**不得改變任何使用者可見結果**。多 agent 流程；commit 並 push A6 branch，停下來等 review。**A6 絕不 merge 到 main；不做 A7。**
 - **A5 merge：** 人類確認 run `36381666722` 雙平台 SUCCESS 並 APPROVE 後授權。main 已經有 `f51fc8a`（刪除測試腳本），所以改用 merge commit `1a764ab`；checkpoint 記錄為 `5cdd567`；merge 後 `make check`、`go test -race` 通過，working tree clean。
@@ -16,7 +107,7 @@ Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
 - **Worktree path：** `<session scratchpad>/nlf-a6-worktree`（請用 `git worktree list` 查詢實際路徑）
 - **Main touched by A6：** NO
 
-### A6 design（Lead 草稿，待 design review）
+#### A6 design（Lead 草稿，待 design review）
 
 - **既有演算法：** 收集所有符合的 `Result` → `sortResults`（`sort.SliceStable`：主鍵 size 或 mtime 由大到小，同分時 `Path` 字串遞增）→ 截前 N。每個路徑只會被走訪一次，所以 `Path` 唯一，這是一個嚴格的全序。stable 與否不影響結果。
 - **共用 comparator：** `better(a, b Result, order query.SortOrder) bool`，就是 `sortResults` 現在的 less 邏輯。`sortResults` 與 heap 都用它，不會有兩套定義。
@@ -36,7 +127,7 @@ Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
   - baseline binary 與 A6 binary 的對照。
   - mutation 檢查。
 
-### A6 design review 採納的修改（定稿）
+#### A6 design review 採納的修改（定稿）
 
 - **Heap 初始容量 `min(N, 1024)`，不直接配置 N。** parser 允許的 Limit 上限是 `MaxInt32`；一個 `Result` 是 48 bytes，直接配置 N 時 `top 2147483647 largest` 會嘗試配置約 103 GB 而 crash，舊版則只會隨符合數成長。
 - **分支集中在 `newTopNFor(q)`**：只有 sort 不是 none 且 Limit > 0 才回傳 heap，其他情況回傳 nil，可以直接測試。
@@ -46,7 +137,7 @@ Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
 - **走訪順序不等於路徑順序：** WalkDir 先走 `a/x` 再走 `a-b/x`，但 `"a-b/x" < "a/x"`（`-` 是 0x2d，小於 `/` 的 0x2f）。這個例子用來測 tie-break。
 - version、help、`explain.go` 都不改。
 
-### A6 Current phase
+#### A6 Current phase
 
 - **A6 已 merge 到 main。** 人類確認 GitHub Actions run `36408168119` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
 - merge 前：`origin/main` = merge base = `5cdd567`，A6 branch ahead 2 / behind 0。
@@ -55,7 +146,7 @@ Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
 - A6 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE WITH CHANGES（已套用）；報告：`reports/nlf/2026-09-28-topn-heap.md`。
 - 20 萬檔案 `largest 5` 的 RSS：66 MiB → 約 10 MiB（接近未排序的完整走訪）；baseline 與 A6 的輸出在 184 + 8997 組對照中全部 byte-identical。
 
-### A6 Completed work
+#### A6 Completed work
 
 1. Design review：DONE（APPROVE WITH CHANGES，全部採納）
 2. Implementation（先寫測試）：DONE
@@ -66,11 +157,11 @@ Last updated: 2026-09-28，A6 已 merge 到 main（`ebad6a7`）
 7. commit `b7c4af1`（nlf: keep only the best N results for sorted limits (A6)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
 8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a6-topn-heap-20260928`
 
-### A6 Exact next action
+#### A6 Exact next action
 
 無（A6 已 merge）。下一個項目：A7（fuzz / hostile-input hardening），在 `feat/nlf-roadmap-a7-fuzz-hardening-20260928` 進行。
 
-### A6 Git state
+#### A6 Git state
 
 - **Committed（A6）：** YES
 - **A6 branch pushed：** YES（`origin/feat/nlf-roadmap-a6-topn-heap-20260928`）

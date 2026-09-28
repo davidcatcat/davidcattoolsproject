@@ -1,0 +1,2 @@
+go test fuzz v1
+string("\u946b\u96f6\u96f6\u96f6\u5341\u96f6\u96f6 \u4e00\u96f6 \u96f6 \u3007\u3007")

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/query"
 )
@@ -440,7 +441,8 @@ const chunkSize = 64 << 10
 
 // scanTerms streams the file once and reports which terms occur in it,
 // stopping as soon as satisfied(found) holds. Binary files (a NUL byte in the
-// first chunk) are skipped like grep -I: found is nil.
+// first chunk) are skipped like grep -I: found is nil. With ignoreCase the
+// result is that of bytes.ToLower applied to the whole file and each term.
 func scanTerms(path string, terms []string, ignoreCase bool, satisfied func(found []bool) bool) ([]bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -460,23 +462,41 @@ func scanTerms(path string, terms []string, ignoreCase bool, satisfied func(foun
 	found := make([]bool, len(terms))
 
 	buf := make([]byte, chunkSize)
-	var window []byte
+	var window []byte // the bytes searched; already lower-cased with ignoreCase
+	var carry []byte  // ignoreCase: an incomplete UTF-8 sequence ending the last read
 	first := true
 	for {
 		n, err := f.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			if first && bytes.IndexByte(chunk, 0) >= 0 {
+		if n > 0 && first {
+			if bytes.IndexByte(buf[:n], 0) >= 0 {
 				return nil, nil
 			}
 			first = false
-			window = append(window, chunk...)
-			hay := window
+		}
+		if n > 0 || len(carry) > 0 && err != nil {
+			chunk := buf[:n]
 			if ignoreCase {
-				hay = bytes.ToLower(window)
+				// Lower-case the stream, not the window: lowering can change
+				// the length (K U+212A is 3 bytes, k is 1), so the tail kept
+				// below must be measured after lowering. A rune split between
+				// reads is carried over whole instead of becoming U+FFFD.
+				data := chunk
+				if len(carry) > 0 {
+					data = append(carry, chunk...)
+					carry = nil
+				}
+				if err == nil {
+					if k := incompleteTail(data); k > 0 {
+						carry = bytes.Clone(data[len(data)-k:])
+						data = data[:len(data)-k]
+					}
+				}
+				window = append(window, bytes.ToLower(data)...)
+			} else {
+				window = append(window, chunk...)
 			}
 			for i, nd := range needles {
-				if !found[i] && bytes.Contains(hay, nd) {
+				if !found[i] && bytes.Contains(window, nd) {
 					found[i] = true
 				}
 			}
@@ -495,6 +515,21 @@ func scanTerms(path string, terms []string, ignoreCase bool, satisfied func(foun
 			return nil, err
 		}
 	}
+}
+
+// incompleteTail returns the length of the incomplete UTF-8 sequence that
+// ends b, or 0 when b ends with a whole rune or with bytes that are invalid
+// whatever follows them.
+func incompleteTail(b []byte) int {
+	for k := 1; k < utf8.UTFMax && k <= len(b); k++ {
+		if utf8.RuneStart(b[len(b)-k]) {
+			if utf8.FullRune(b[len(b)-k:]) {
+				return 0
+			}
+			return k
+		}
+	}
+	return 0
 }
 
 // better reports whether a sorts before b: larger size or newer mtime first,
