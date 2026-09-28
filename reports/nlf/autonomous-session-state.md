@@ -70,7 +70,7 @@ CI：新增「Fuzz smoke」步驟（4 個 target 各 5 秒，預估每個 OS 45�
 
 ### A7 Git state
 
-- **Committed（A7）：** YES
+- **Committed（A7）：** YES（`4592861`，nlf: harden parser and content scan against hostile input (A7)）
 - **A7 branch pushed：** YES（`origin/feat/nlf-roadmap-a7-fuzz-hardening-20260928`）
 - **PR URL：** 未建立（沒有 `gh`）；compare 連結：`https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a7-fuzz-hardening-20260928`
 - **GitHub Actions 結果：** 需要人類確認 run ID 與結果。
