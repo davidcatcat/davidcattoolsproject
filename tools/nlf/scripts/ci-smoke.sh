@@ -5,7 +5,8 @@
 #
 # Builds a small fixture tree in a fresh temporary directory, runs the binary
 # against it, and checks exit codes, exact output path sets, --explain,
-# --confirm, and that nothing in the fixture was modified. Portable across
+# --confirm, -0 / --null with hostile file names piped into xargs -0, and
+# that nothing in either fixture was modified. Portable across
 # GNU/Linux and macOS (bash 3.2+). Temporary directories are left in place
 # and printed at the end; nothing is deleted.
 set -euo pipefail
@@ -231,10 +232,144 @@ else
 	fail "nothing in fixture modified after marker" "$(printf '%s' "$newer" | tr '\n' ' ')"
 fi
 
+# --- -0 / --null with hostile file names -----------------------------------
+#
+# A separate directory of names that break newline-separated output or look
+# like options. Each file holds one byte, "x". NUL-separated output is only
+# ever written to files, never captured with $(...), which drops NUL bytes.
+
+hx=$(mktemp -d "${TMPDIR:-/tmp}/nlf-smoke-hostile.XXXXXX")
+hx=$(cd "$hx" && pwd -P)
+tab=$(printf '\t')
+for name in 'a b.txt' "a${tab}b.txt" "a${nl}b.txt" '-rf.txt' '--help.txt' '-n' ' lead.txt' 'trail.txt ' \
+	"it's \"q\".txt" 'back\slash.txt' '中文 檔名.txt'; do
+	printf 'x' >"$hx/$name"
+done
+hx_snapshot() {
+	(cd "$hx" && find . -type f -exec cksum {} + | LC_ALL=C sort)
+}
+hx_before=$(hx_snapshot)
+
+# nlf's default order: names sorted byte-wise, as filepath.WalkDir reads them.
+want0="$work/hx-want"
+printf '%s\0' ' lead.txt' './--help.txt' './-n' './-rf.txt' "a${tab}b.txt" "a${nl}b.txt" 'a b.txt' \
+	'back\slash.txt' "it's \"q\".txt" 'trail.txt ' '中文 檔名.txt' >"$want0"
+
+# run_file <stdin> <stdout file> <args...>: runs nlf inside $hx; sets code, err.
+run_file() {
+	printf '%s' "$1" >"$inf"
+	local outf=$2
+	shift 2
+	code=0
+	(cd "$hx" && "$bin" "$@" <"$inf" >"$outf" 2>"$errf") || code=$?
+	err=$(cat "$errf")
+}
+
+out0="$work/hx-0.out"
+run_file "" "$out0" -0 files
+if [ "$code" -ne 0 ]; then
+	fail "-0 files (hostile names)" "exit $code, want 0 (stderr: $err)"
+elif ! cmp -s "$out0" "$want0"; then
+	fail "-0 files (hostile names)" "output differs from the expected NUL-separated list"
+else
+	pass "-0 files (hostile names)"
+fi
+
+outnull="$work/hx-null.out"
+run_file "" "$outnull" --null files
+if [ "$code" -eq 0 ] && cmp -s "$outnull" "$out0"; then
+	pass "--null is identical to -0"
+else
+	fail "--null is identical to -0" "exit $code or bytes differ"
+fi
+
+last=$(tail -c 1 "$out0" | od -An -tx1 | tr -d ' \n')
+if [ "$last" = "00" ]; then
+	pass "-0 output ends with a NUL byte"
+else
+	fail "-0 output ends with a NUL byte" "last byte is [$last]"
+fi
+
+newlines=$(tr -cd '\n' <"$out0" | wc -c | tr -d ' ')
+if [ "$newlines" = "1" ]; then
+	pass "-0 output has only the newline from a file name"
+else
+	fail "-0 output has only the newline from a file name" "$newlines newline bytes, want 1"
+fi
+
+if [ -s "$out0" ]; then
+	xcode=0
+	(cd "$hx" && xargs -0 printf '%s\0' <"$out0" >"$work/hx-printf.out" 2>"$errf") || xcode=$?
+	if [ "$xcode" -eq 0 ] && cmp -s "$work/hx-printf.out" "$want0"; then
+		pass "xargs -0 printf round-trips every path"
+	else
+		fail "xargs -0 printf round-trips every path" "exit $xcode or bytes differ"
+	fi
+
+	xcode=0
+	(cd "$hx" && xargs -0 cat <"$out0" >"$work/hx-cat.out" 2>"$errf") || xcode=$?
+	catout=$(cat "$work/hx-cat.out")
+	if [ "$xcode" -eq 0 ] && [ "$catout" = "xxxxxxxxxxx" ]; then
+		pass "xargs -0 cat reads every file (no name taken as an option)"
+	else
+		fail "xargs -0 cat reads every file (no name taken as an option)" "exit $xcode, output [$catout] (stderr: $(cat "$errf"))"
+	fi
+else
+	fail "xargs -0 checks" "-0 output is empty; not piping empty input into xargs"
+fi
+
+outnl="$work/hx-nl.out"
+run_file "" "$outnl" files
+if [ "$code" -eq 0 ] && grep -Fqx -- './-rf.txt' "$outnl" && ! grep -Fqx -- '-rf.txt' "$outnl"; then
+	pass "newline output prints ./-rf.txt"
+else
+	fail "newline output prints ./-rf.txt" "exit $code or line missing"
+fi
+
+# check_file_empty <name> <want code> <args...>: runs in $hx, stdout must be empty.
+check_file_empty() {
+	local name=$1 want=$2
+	shift 2
+	run_file "" "$work/hx-empty.out" "$@"
+	if [ "$code" -ne "$want" ]; then
+		fail "$name" "exit $code, want $want (stderr: $err)"
+	elif [ -s "$work/hx-empty.out" ]; then
+		fail "$name" "stdout not empty"
+	else
+		pass "$name"
+	fi
+}
+check_file_empty "-0 -l (conflict)" 2 -0 -l files
+check_file_empty "-0 --explain (conflict)" 2 -0 --explain files
+check_file_empty "-0 --help (conflict)" 2 -0 --help
+check_file_empty "-0 --version (conflict)" 2 -0 --version
+check_file_empty "-0 pem files (no match)" 1 -0 pem files
+
+run_file "n$nl" "$work/hx-confirm-n.out" -0 --confirm files
+if [ "$code" -eq 0 ] && [ ! -s "$work/hx-confirm-n.out" ] && contains "$err" "Cancelled."; then
+	pass "-0 --confirm answered n"
+else
+	fail "-0 --confirm answered n" "exit $code, stdout not empty or stderr lacks Cancelled."
+fi
+
+run_file "y$nl" "$work/hx-confirm-y.out" -0 --confirm files
+if [ "$code" -eq 0 ] && cmp -s "$work/hx-confirm-y.out" "$out0"; then
+	pass "-0 --confirm answered y"
+else
+	fail "-0 --confirm answered y" "exit $code or stdout differs from the direct -0 run"
+fi
+
+if [ "$hx_before" = "$(hx_snapshot)" ]; then
+	pass "hostile-name fixture checksums unchanged"
+else
+	fail "hostile-name fixture checksums unchanged" "checksum snapshot differs"
+fi
+
 # --- summary -----------------------------------------------------------------
 
 printf 'fixture: %s\n' "$fx"
 printf 'work:    %s\n' "$work"
+printf 'hostile: %s\n' "$hx"
 if [ "$nfail" -ne 0 ]; then
 	printf '\n%d check(s) failed for %s:\n%s' "$nfail" "$bin" "$failures"
 	exit 1

@@ -52,13 +52,13 @@ Flags:
   --explain        show how the query is understood; never searches
   --confirm        show the execution plan first; search only if you answer y or Y
   -l, --long       print size and modification time before each path
+  -0, --null       end each path with a NUL byte, not a newline (for xargs -0)
   -d, --dir PATH   directory to search (default: current directory)
   -h, --help       show this help
   --version        print version
 
---explain   nlf --explain "找 ovpn 檔"
-  Prints the parsed conditions and an approximate find command for this OS (macOS
-  or GNU/Linux syntax; reference only, nlf never runs it). Nothing is searched.
+--explain   nlf --explain "找 ovpn 檔"   Nothing is searched, and nlf never runs the command.
+  Prints the parsed conditions and an approximate find command for this OS (macOS or GNU/Linux).
 
 --confirm   nlf --confirm "找 ovpn 檔"
   Prints the execution plan and a safety summary, then asks "Execute this search? [y/N]".
@@ -100,15 +100,15 @@ func main() {
 type options struct {
 	help, version bool
 	explain, long bool
-	confirm       bool
+	confirm, null bool
 	dir           string
 	words         []string
 }
 
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time) int {
 	opts, err := parseArgs(args)
-	if err == nil && opts.explain && opts.confirm {
-		err = errors.New("--explain only shows the plan and --confirm asks before searching; use one of them")
+	if err == nil {
+		err = checkConflicts(opts)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "nlf: %v\nRun 'nlf --help' for usage.\n", err)
@@ -197,10 +197,14 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 	found := 0
 	rep, err := search.Run(q, func(r search.Result) {
 		found++
-		if opts.long {
-			fmt.Fprintf(stdout, "%10s  %s  %s\n", query.HumanBytes(r.Size), query.FormatTime(r.ModTime), r.Path)
-		} else {
-			fmt.Fprintln(stdout, r.Path)
+		p := displayPath(r.Path)
+		switch {
+		case opts.long:
+			fmt.Fprintf(stdout, "%10s  %s  %s\n", query.HumanBytes(r.Size), query.FormatTime(r.ModTime), p)
+		case opts.null:
+			io.WriteString(stdout, p+"\x00")
+		default:
+			fmt.Fprintln(stdout, p)
 		}
 	})
 	root := rootOrDot(q.Root)
@@ -286,6 +290,8 @@ func parseArgs(args []string) (*options, error) {
 			o.confirm = true
 		case a == "-l" || a == "--long":
 			o.long = true
+		case a == "-0" || a == "--null":
+			o.null = true
 		case a == "-d" || a == "--dir":
 			if i+1 >= len(args) {
 				return nil, fmt.Errorf("%s needs a directory", a)
@@ -301,6 +307,38 @@ func parseArgs(args []string) (*options, error) {
 		}
 	}
 	return o, nil
+}
+
+// flagConflicts lists flag pairs that cannot be used together. The first
+// matching row, in table order, is reported. Future output flags add their
+// rows here.
+var flagConflicts = []struct {
+	both func(*options) bool
+	msg  string
+}{
+	{func(o *options) bool { return o.explain && o.confirm }, "--explain only shows the plan and --confirm asks before searching; use one of them"},
+	{func(o *options) bool { return o.null && o.long }, "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them"},
+	{func(o *options) bool { return o.null && o.explain }, "--explain never searches, so -0/--null has no paths to print; use one of them"},
+	{func(o *options) bool { return o.null && o.help }, "-h/--help prints text, not NUL-separated paths; use it without -0/--null"},
+	{func(o *options) bool { return o.null && o.version }, "--version prints text, not NUL-separated paths; use it without -0/--null"},
+}
+
+// checkConflicts reports the first conflicting flag pair in o, if any.
+func checkConflicts(o *options) error {
+	for _, c := range flagConflicts {
+		if c.both(o) {
+			return errors.New(c.msg)
+		}
+	}
+	return nil
+}
+
+// displayPath keeps a relative path that starts with "-" from being read as an option.
+func displayPath(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
+	}
+	return p
 }
 
 // executionPlan describes what a search will do before it runs. The find

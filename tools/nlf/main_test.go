@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"flag"
 	"go/ast"
 	"go/parser"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode"
@@ -343,7 +345,7 @@ type docExample struct {
 
 // docExamples extracts every nlf invocation with a double- or single-quoted query.
 func docExamples(doc string) []docExample {
-	re := regexp.MustCompile(`nlf((?: (?:--explain|--confirm|-l|--long|(?:-d|--dir) [^\s"']+))*) (?:"((?:[^"\\]|\\.)*)"|'([^']*)')`)
+	re := regexp.MustCompile(`nlf((?: (?:--explain|--confirm|-l|--long|-0|--null|(?:-d|--dir) [^\s"']+))*) (?:"((?:[^"\\]|\\.)*)"|'([^']*)')`)
 	var out []docExample
 	for _, m := range re.FindAllStringSubmatch(doc, -1) {
 		q := strings.ReplaceAll(m[2], `\"`, `"`)
@@ -424,7 +426,7 @@ func TestDocsMatchBehavior(t *testing.T) {
 		if strings.Contains(doc, "等效") || strings.Contains(strings.ToLower(doc), "equivalent") {
 			t.Errorf("%s still calls the --explain command equivalent", name)
 		}
-		for _, flag := range []string{"--explain", "--confirm", "--long", "--dir", "--help", "--version"} {
+		for _, flag := range []string{"--explain", "--confirm", "--long", "--null", "--dir", "--help", "--version"} {
 			if !strings.Contains(doc, flag) {
 				t.Errorf("%s does not document %s", name, flag)
 			}
@@ -481,7 +483,9 @@ func TestDocExamplesRun(t *testing.T) {
 		case root == "":
 			args = append(args, "--dir", filepath.Join(home, "work"))
 		case !strings.HasPrefix(root, "~"):
-			args = slices.DeleteFunc(args, func(a string) bool { return a == "--explain" || a == "--confirm" })
+			args = slices.DeleteFunc(args, func(a string) bool {
+				return a == "--explain" || a == "--confirm" || a == "-0" || a == "--null"
+			})
 			args = append([]string{"--explain"}, args...)
 		}
 		args = append(args, ex.query)
@@ -531,7 +535,7 @@ func TestHelpContent(t *testing.T) {
 		`nlf --confirm "找 ovpn 檔"`, `nlf --explain "找 ovpn 檔"`,
 		"Examples (中文):", "Examples (English):",
 		// sections
-		"Flags:", "--explain", "--confirm", "Safety:", "Supported conditions", "Search root", "Exit status:", "Tips:",
+		"Flags:", "--explain", "--confirm", "-0, --null", "for xargs -0", "Safety:", "Supported conditions", "Search root", "Exit status:", "Tips:",
 		// --explain and --confirm
 		"never searches", "Nothing is searched", "execution plan", "safety summary", "Only y or Y", `"Cancelled."`,
 		// safety
@@ -1086,5 +1090,304 @@ func TestParentPathRoot(t *testing.T) {
 	got := strings.Join(paths(filepath.Join(dir, "b", "src", "..", ".."), out), ",")
 	if code != 0 || got != "b/mid.go,b/src/x.go,up.go" {
 		t.Errorf("code=%d got %s\n%s", code, got, errOut)
+	}
+}
+
+// TestMain lets subprocess tests run the real nlf main() from the test
+// binary: they set NLF_TEST_RUN_MAIN=1 in the child's environment only
+// (exporting it in your own shell makes every test run main() and fail).
+func TestMain(m *testing.M) {
+	if os.Getenv("NLF_TEST_RUN_MAIN") == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func TestParseArgsNull(t *testing.T) {
+	for _, a := range []string{"-0", "--null"} {
+		o, err := parseArgs([]string{a, "go", "files"})
+		if err != nil || !o.null || strings.Join(o.words, " ") != "go files" {
+			t.Errorf("%s: opts=%+v err=%v", a, o, err)
+		}
+	}
+	for _, a := range []string{"-l0", "-0l", "-00", "--null=1", "--nul"} {
+		if _, err := parseArgs([]string{a, "go", "files"}); err == nil || err.Error() != "unknown flag "+a {
+			t.Errorf("%s: err=%v, want unknown flag %s", a, err, a)
+		}
+	}
+	o, err := parseArgs([]string{"--", "-0"})
+	if err != nil || o.null || !slices.Equal(o.words, []string{"-0"}) {
+		t.Errorf("-- -0: opts=%+v err=%v, want -0 as a word", o, err)
+	}
+}
+
+func TestFlagConflicts(t *testing.T) {
+	set := map[string]func(*options){
+		"explain": func(o *options) { o.explain = true },
+		"confirm": func(o *options) { o.confirm = true },
+		"long":    func(o *options) { o.long = true },
+		"null":    func(o *options) { o.null = true },
+		"help":    func(o *options) { o.help = true },
+		"version": func(o *options) { o.version = true },
+	}
+	want := map[[2]string]string{
+		{"explain", "confirm"}: "--explain only shows the plan and --confirm asks before searching; use one of them",
+		{"long", "null"}:       "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
+		{"explain", "null"}:    "--explain never searches, so -0/--null has no paths to print; use one of them",
+		{"null", "help"}:       "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
+		{"null", "version"}:    "--version prints text, not NUL-separated paths; use it without -0/--null",
+	}
+	names := []string{"explain", "confirm", "long", "null", "help", "version"}
+	matched := 0
+	for i, a := range names {
+		for _, b := range names[i+1:] {
+			o := &options{}
+			set[a](o)
+			set[b](o)
+			msg, ok := want[[2]string{a, b}]
+			if !ok {
+				msg, ok = want[[2]string{b, a}]
+			}
+			err := checkConflicts(o)
+			switch {
+			case ok && (err == nil || err.Error() != msg):
+				t.Errorf("%s+%s: err=%v, want %q", a, b, err, msg)
+			case !ok && err != nil:
+				t.Errorf("%s+%s: err=%v, want nil", a, b, err)
+			}
+			if ok {
+				matched++
+			}
+		}
+	}
+	if matched != len(want) {
+		t.Errorf("matched %d conflict pairs, want %d", matched, len(want))
+	}
+	// The first matching row wins.
+	o, err := parseArgs([]string{"--explain", "--confirm", "-0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkConflicts(o); err == nil || err.Error() != want[[2]string{"explain", "confirm"}] {
+		t.Errorf("--explain --confirm -0: err=%v", err)
+	}
+}
+
+func TestNullOutput(t *testing.T) {
+	dir := fixture(t)
+	want := filepath.Join(dir, "main.go") + "\x00" + filepath.Join(dir, "util.go") + "\x00" + filepath.Join(dir, "vendor", "lib.go") + "\x00"
+	for _, flag := range []string{"-0", "--null"} {
+		out, errOut, code := nlf(t, flag, "--dir", dir, "go files")
+		if code != 0 || out != want || errOut != "" {
+			t.Errorf("%s: code=%d out=%q err=%q, want %q", flag, code, out, errOut, want)
+		}
+	}
+	out, _, code := nlf(t, "-0", "--dir", dir, "最大的 2 個檔案")
+	if w := filepath.Join(dir, "big.log") + "\x00" + filepath.Join(dir, "main.go") + "\x00"; code != 0 || out != w {
+		t.Errorf("最大的 2 個檔案: code=%d out=%q want %q", code, out, w)
+	}
+	for _, q := range []string{"go files", "最大的 2 個檔案", "files"} {
+		lines, _, _ := nlf(t, "--dir", dir, q)
+		nul, _, _ := nlf(t, "-0", "--dir", dir, q)
+		if strings.Contains(nul, "\n") || !strings.HasSuffix(nul, "\x00") || strings.ReplaceAll(nul, "\x00", "\n") != lines {
+			t.Errorf("%s: -0 output %q does not match newline output %q", q, nul, lines)
+		}
+	}
+}
+
+func TestNullConflictsCLI(t *testing.T) {
+	long := "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them"
+	explain := "--explain never searches, so -0/--null has no paths to print; use one of them"
+	help := "-h/--help prints text, not NUL-separated paths; use it without -0/--null"
+	version := "--version prints text, not NUL-separated paths; use it without -0/--null"
+	for _, c := range []struct {
+		args []string
+		msg  string
+	}{
+		{[]string{"-0", "-l", "go files"}, long},
+		{[]string{"-l", "-0", "go files"}, long},
+		{[]string{"--null", "--long", "go files"}, long},
+		{[]string{"-0", "--explain", "go files"}, explain},
+		{[]string{"--explain", "-0", "go files"}, explain},
+		{[]string{"-0", "--help"}, help},
+		{[]string{"-h", "-0"}, help},
+		{[]string{"-0", "--version"}, version},
+		{[]string{"--null", "--json", "go files"}, "unknown flag --json"},
+	} {
+		out, errOut, code := nlfInput(t, "y\n", c.args...)
+		if code != 2 || out != "" || errOut != "nlf: "+c.msg+"\nRun 'nlf --help' for usage.\n" {
+			t.Errorf("%v: code=%d out=%q err=%q, want %q", c.args, code, out, errOut, c.msg)
+		}
+	}
+	dir := fixture(t)
+	if out, errOut, code := nlfInput(t, "y\n", "-0", "--confirm", "--dir", dir, "go files"); code != 0 || out == "" || strings.Contains(errOut, "use one of them") {
+		t.Errorf("-0 --confirm: code=%d out=%q err=%q", code, out, errOut)
+	}
+}
+
+func TestNullKeepsStderrAndExit(t *testing.T) {
+	dir := fixture(t)
+	for _, c := range []struct {
+		args []string
+		code int
+	}{
+		{[]string{"--dir", dir, "pdf files"}, 1},
+		{[]string{"find files banana"}, 2},
+		{[]string{"--dir", filepath.Join(dir, "does-not-exist"), "go files"}, 2},
+		{[]string{"--dir"}, 2},
+		{[]string{"--dir", dir, "in ./src go files"}, 2},
+		{[]string{}, 2},
+		{[]string{"--dir", dir, "exclude ../elsewhere"}, 2},
+	} {
+		out, errOut, code := nlf(t, c.args...)
+		nout, nerr, ncode := nlf(t, append([]string{"-0"}, c.args...)...)
+		if code != c.code || ncode != c.code || out != "" || nout != "" || errOut == "" || nerr != errOut {
+			t.Errorf("%v: code=%d/-0 %d (want %d) out=%q/%q\n err  %q\n -0   %q", c.args, code, ncode, c.code, out, nout, errOut, nerr)
+		}
+	}
+	if out, errOut, code := nlf(t, "--", "-0"); code != 2 || out != "" || !strings.Contains(errOut, "cannot understand") {
+		t.Errorf("-- -0: code=%d out=%q err=%q", code, out, errOut)
+	}
+}
+
+func TestNullWithConfirm(t *testing.T) {
+	dir := fixture(t)
+	direct, _, _ := nlf(t, "-0", "--dir", dir, "go files")
+	out, errOut, code := nlfInput(t, "y\n", "-0", "--confirm", "--dir", dir, "go files")
+	if code != 0 || out != direct || !strings.Contains(errOut, "NLF execution plan") || !strings.Contains(errOut, "[y/N]") {
+		t.Errorf("y: code=%d out=%q err=%q, want %q", code, out, errOut, direct)
+	}
+	for _, in := range []string{"n\n", ""} {
+		out, errOut, code := nlfInput(t, in, "-0", "--confirm", "--dir", dir, "go files")
+		if code != 0 || out != "" || !strings.HasSuffix(errOut, "Cancelled.\n") {
+			t.Errorf("input %q: code=%d out=%q err=%q", in, code, out, errOut)
+		}
+	}
+}
+
+func TestDisplayPath(t *testing.T) {
+	for in, want := range map[string]string{"-x": "./-x", "-foo/a": "./-foo/a", "--help": "./--help", "-": "./-",
+		"a/-x": "a/-x", "./-x": "./-x", "/abs/-x": "/abs/-x", "": ""} {
+		if got := displayPath(in); got != want {
+			t.Errorf("displayPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestHostileFilenamesNullXargs runs the real nlf main() in a subprocess
+// against file names that break newline-separated output or look like
+// options, and pipes -0 output into xargs -0.
+func TestHostileFilenamesNullXargs(t *testing.T) {
+	xargs, err := exec.LookPath("xargs")
+	if err != nil {
+		t.Fatalf("xargs not found: %v", err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	names := []string{"a b.txt", "a\tb.txt", "a\nb.txt", "-rf.txt", "--help.txt", "-n", " lead.txt", "trail.txt ",
+		`it's "q".txt`, `back\slash.txt`, "中文 檔名.txt", "-sub/a.txt"}
+	content := map[string]string{}
+	var files, created []string
+	add := func(name string) error {
+		data := string(rune('A' + len(files)))
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			return err
+		}
+		content[displayPath(name)] = data
+		files = append(files, displayPath(name))
+		created = append(created, name)
+		return nil
+	}
+	for _, n := range names {
+		if err := add(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bad := "bad\xffname.txt"
+	switch err := add(bad); {
+	case err == nil:
+	case runtime.GOOS == "darwin" && errors.Is(err, syscall.EILSEQ):
+		t.Logf("file system rejects invalid UTF-8 names (%v); testing without %q", err, bad)
+	default:
+		t.Fatalf("create %q: %v", bad, err)
+	}
+
+	nlfRun := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(self, args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "NLF_TEST_RUN_MAIN=1")
+		var errb bytes.Buffer
+		cmd.Stderr = &errb
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("nlf %q: %v\n%s", args, err, errb.String())
+		}
+		return out
+	}
+	out := nlfRun("-0", "files")
+	got := strings.Split(string(out), "\x00")
+	if got[len(got)-1] != "" {
+		t.Fatalf("-0 output does not end with NUL: %q", out)
+	}
+	got = got[:len(got)-1]
+	sortedGot, sortedWant := slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(files))
+	if !slices.Equal(sortedGot, sortedWant) {
+		t.Errorf("-0 files:\n got  %q\n want %q", sortedGot, sortedWant)
+	}
+	// The default order is the walk order: byte order of the original names
+	// (no name here shares a prefix with -sub/), before ./ is added.
+	var wantOrder []string
+	for _, n := range slices.Sorted(slices.Values(created)) {
+		wantOrder = append(wantOrder, displayPath(n))
+	}
+	if !slices.Equal(got, wantOrder) {
+		t.Errorf("-0 files order:\n got  %q\n want %q", got, wantOrder)
+	}
+
+	xrun := func(args ...string) []byte {
+		t.Helper()
+		cmd := exec.Command(xargs, args...)
+		cmd.Dir = dir
+		cmd.Stdin = bytes.NewReader(out)
+		var errb bytes.Buffer
+		cmd.Stderr = &errb
+		res, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("xargs %q: %v\n%s", args, err, errb.String())
+		}
+		return res
+	}
+	if res := xrun("-0", "printf", "%s\\0"); !bytes.Equal(res, out) {
+		t.Errorf("xargs -0 printf:\n got  %q\n want %q", res, out)
+	}
+	var wantCat strings.Builder
+	for _, p := range got {
+		wantCat.WriteString(content[p])
+	}
+	if res := xrun("-0", "cat"); string(res) != wantCat.String() {
+		t.Errorf("xargs -0 cat = %q, want %q", res, wantCat.String())
+	}
+
+	for _, d := range []string{"-sub", "./-sub"} {
+		if res := nlfRun("--dir", d, "-0", "files"); string(res) != "./-sub/a.txt\x00" {
+			t.Errorf("--dir %s -0 files = %q", d, res)
+		}
+	}
+	lines := strings.Split(string(nlfRun("files")), "\n")
+	if !slices.Contains(lines, "./-rf.txt") || slices.Contains(lines, "-rf.txt") {
+		t.Errorf("newline output should show ./-rf.txt: %q", lines)
+	}
+	long := strings.Split(string(nlfRun("-l", "files")), "\n")
+	if !slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  ./-rf.txt") }) ||
+		slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  -rf.txt") }) {
+		t.Errorf("-l output should show ./-rf.txt: %q", long)
 	}
 }

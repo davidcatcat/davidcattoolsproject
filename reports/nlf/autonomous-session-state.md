@@ -3,21 +3,83 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: COMPLETE
-Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新 README Linux 說明；等待人類 review
+Status: IN PROGRESS
+Last updated: 2026-09-28，A3 design 定稿（APPROVE WITH CHANGES，全部採納）；QA PASS WITH CHANGES、Review APPROVE（修正已套用）；Git Safety 後 commit
 
-## 先前完成的 session：A1（已 merge）
+## Session：A3（`-0` / `--null`）
 
-- A1 = 標點安全，報告見 `reports/nlf/2026-09-28-punctuation-safety.md`；roadmap 見 `reports/nlf/2026-09-28-roadmap.md`。
-- 人類 review 通過後才 merge 到 main：從 `91ee959` fast-forward 到 **`4db4ec0`**，一般 push，沒有 force，也沒有改寫 history。
-- 合併前的 final validation（在 `4db4ec0` 上）：
-  - go test：PASS（936）
-  - race：PASS
-  - make check：PASS
-- 版本號仍是 0.4.0。建議版本 0.4.1，但沒有 bump、沒有打 tag，等人類決定。
-- 已 push 的 tags 維持 v0.2.0、v0.3.0、v0.4.0，沒有變動。
+- **Purpose：** 依 roadmap A3 實作 `-0` / `--null`，多 agent 流程，完成後 commit 並 push A3 feature branch，停下來等人類 review。**A3 絕不 merge 到 main。**
+- **A2 merge：** 人類確認 GitHub Actions run `36366144449` 在 ubuntu-latest 與 macos-latest 都 success 後授權。main 從 `4db4ec0` fast-forward 到 **`c932fad`**，一般 push，沒有 force，也沒有改寫 history；merge 前 `make check` 與 `go test -race` 都通過。
+- **Baseline main SHA：** `c932fad8b746d939f3dd8966ae61732234324b6e`（包含 A1、A2）
+- **Baseline version：** 0.4.0
+- **Feature branch：** `feat/nlf-roadmap-a3-null-output-20260928`，從 origin/main（`c932fad`）建立，沒有 upstream。
+- **Worktree path：** `<session scratchpad>/nlf-a3-worktree`（請用 `git worktree list` 查詢實際路徑）
+- **Main touched by A3：** NO
+- **範圍：** 只讀 roadmap、A2 report、checkpoint 與 A3 相關的 CLI／output／search 檔案；不重新 audit roadmap。
 
-## Session：A2
+### A3 design（Lead 草稿）
+
+- `-0` 與 `--null` 完全等價；每個結果路徑後面接一個 NUL（`\0`），不加換行；stdout 只有結果。
+- stderr 內容、exit code（0 / 1 / 2）、read-only contract 都不變。
+- 互斥（exit 2，錯誤訊息明確，不默默忽略）：
+  - `-0` + `-l/--long`（`-l` 是給人看的）
+  - `-0` + `--explain`（`--explain` 不搜尋，沒有結果可以輸出）
+  - `-0` + `--help`、`-0` + `--version`（它們輸出的是文字，不是結果）
+  - 未來 `--json`（B3）也與 `-0` 互斥；目前 `--json` 仍是 unknown flag。
+- `-0` + `--confirm`：允許。計畫與提示照舊寫 stderr；確認後結果以 NUL 分隔寫 stdout；取消時 stdout 為空、exit 0。
+- flag 互斥改成表格驅動（roadmap 的建議），既有的 `--explain` + `--confirm` 訊息保持不變。
+- **Leading dash：** 目前搜尋位置是 `.` 時，`-rf` 這種檔名會原樣輸出成 `-rf`，交給 `xargs` 時會被當成選項。改成：相對路徑若以 `-` 開頭，一律輸出成 `./-rf`（所有輸出模式都一樣；指的仍是同一個檔案，和 `find .` 的慣例一致）。
+- `--help` 必須維持 ≤ 70 行、≤ 100 欄：新增 `-0, --null` 說明時用精簡既有文字的方式騰出空間，不修改測試。
+- 測試：unit（parseArgs、互斥表）、CLI（`run` 的 stdout bytes、stderr、exit code）、hostile filenames（空白、tab、newline、leading dash、`--help` 當檔名、引號、反斜線、CJK、尾端空白）、`nlf -0 … | xargs -0` 的 runtime 測試（在 `ci-smoke.sh` 與 Go 測試中；Go 測試不能 `os/exec` 於 production code，但測試檔可以）。
+- CI skip guard：Linux 不允許 skip，macOS 只允許 `TestGNUSortPipeline`，新測試不可使用 `t.Skip`。
+- 版本：維持 0.4.0（roadmap 建議 A3–A5 合併為 0.5.0，由人類決定）。
+
+### A3 design review 採納的修改（定稿）
+
+- 互斥改成 `main.go` 的 `flagConflicts` 表格 + `checkConflicts`，依表格順序第一個符合的生效；訊息：
+  1. explain+confirm：沿用既有訊息（byte-identical）
+  2. null+long：`-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them`
+  3. null+explain：`--explain never searches, so -0/--null has no paths to print; use one of them`
+  4. null+help：`-h/--help prints text, not NUL-separated paths; use it without -0/--null`
+  5. null+version：`--version prints text, not NUL-separated paths; use it without -0/--null`
+- `-l0`、`-0l`、`-00`、`--null=1`、`--json` 仍是 unknown flag；`--` 之後的 `-0` 是查詢字。
+- leading dash：在 `main.go` 輸出時用 `displayPath` 加 `./`（所有模式），不改 `search.go`，排序與 stderr 列表不變。
+- `-0` 每筆結果用一次 `io.WriteString(stdout, path+"\x00")`，不加 bufio。
+- help：新增 `-0, --null` 一行，`--explain` 說明由 3 行縮成 2 行，維持 70 行。
+- 測試：`TestMain` 以環境變數重新執行 `main()` 做子行程測試；`xargs -0 printf` 與 `xargs -0 cat` 的 runtime 測試；invalid UTF-8 在 darwin 允許 `EILSEQ`（`t.Logf`，不 skip），linux 必須建立成功。
+- `ci-smoke.sh`：新增 hostile filename fixture，NUL 資料只經過檔案與 `cmp`，不經過 `$(...)`；不把空輸入送進 `xargs`。workflow 不需要修改。
+- 既有測試只加強：`docExamples` regex 納入 `-0|--null`；`TestDocExamplesRun` 強制 `--explain` 時一併移除 `-0/--null`。
+- 後續（非 A3）：`--explain -l`、`--help -l` 目前仍默默忽略 `-l`。
+
+### A3 Current phase
+
+- Git Safety → commit → push
+- QA：PASS WITH CHANGES；Review：APPROVE；修正已套用（`-l` leading-dash 測試、`add` 錯誤處理、預設順序斷言、註解）；A3 報告已寫。
+- Implementation 完成：`main.go`（`-0/--null`、`flagConflicts`、`displayPath`）、`main_test.go`（9 個新測試）、help golden、`ci-smoke.sh`（19 → 34 checks）、README。Lead 驗證：gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0；`-0 | xargs -0` 對 leading dash、空白、換行檔名正確。
+
+### A3 Remaining work
+
+1. ~~Design review~~ DONE（APPROVE WITH CHANGES）
+2. ~~Implementation~~ DONE
+3. ~~QA~~ DONE
+4. ~~Review~~ DONE
+5. Git Safety
+6. ~~A3 report `reports/nlf/2026-09-28-null-output.md`~~ DONE
+7. commit + push A3 branch（不 merge main）
+8. 觀察 CI（Lead 無法讀取 private repo 的 Actions 結果，需要人類確認）
+9. checkpoint 標 COMPLETE
+
+### A3 Exact next action
+
+Git Safety → 明確 staging 7 個檔案 commit → `git push -u origin feat/nlf-roadmap-a3-null-output-20260928` → checkpoint COMPLETE 並 push。
+
+### A3 Git state
+
+- **Committed（A3）：** NO
+- **A3 branch pushed：** NO
+- **Merge A3 to main：** NOT PERFORMED
+
+## 先前的 session：A2（已 merge 到 main，`c932fad`）
 
 - **Purpose：** 依 roadmap A2 建立 GitHub Actions CI 基礎，採用多 agent 流程，完成後 commit 並 push A2 feature branch，然後停下來等人類 review。**A2 絕不 merge 到 main。**
 - **Baseline main SHA：** `4db4ec0cf596403dc44c27d9a1540e6cc5082135`（包含 A1）
@@ -29,7 +91,7 @@ Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新
 - **Agent orchestration：** SUBAGENTS USED
 - **Main touched by A2：** NO
 
-## Decisions already made
+### A2 Decisions already made
 
 - **Workflow 檔案：** `.github/workflows/nlf-ci.yml`（放在 repo 根目錄；目前 repo 還沒有 `.github/`）。
 - **Pin 第三方 action 到 commit SHA：** 以 `git ls-remote` 查證，兩個都是 lightweight tag，所以列出的 SHA 就是 commit：
@@ -39,7 +101,7 @@ Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新
 - **Repo 是 private：** 沒有驗證的情況下，GitHub API 回傳 404，本機也沒有 `gh`。因此 **Lead 無法讀取 Actions 的執行結果**。push 之後 workflow 會在 GitHub 上跑，但 Lead 能提供的 CI 結果只有「本機模擬」與「已觸發但未驗證」。不會去讀 keychain 裡的憑證。
 - **Linux runtime：** 本機 Docker daemon 沒有啟動，所以 Linux 的實機驗證交給 CI 的 ubuntu job。
 
-## A2 CI design（已定稿；CI design agent 回覆 APPROVE WITH CHANGES，Lead 採納全部修改）
+### A2 CI design（已定稿；CI design agent 回覆 APPROVE WITH CHANGES，Lead 採納全部修改）
 
 - **Workflow：** `.github/workflows/nlf-ci.yml`
   - Triggers：
@@ -88,11 +150,11 @@ Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新
 - **已知的後續事項（本輪不修）：** 在 `TZ=Pacific/Auckland` 下，`TestExplainDoesNotSearch` 與 `TestLongOutput` 會失敗，因為 `testNow` 剛好落在 DST 開始日，而字串是寫死的。CI 使用 UTC，不受影響。**不放寬 assertion。**
 - **不做：** `ubuntu-24.04-arm`（repo 是 private）；在 macOS 上 `brew install coreutils`（改為接受 skip）。
 
-## Current phase
+### A2 Current phase
 
 - A2 完成，等待人類 review。
 
-## Completed work
+### A2 Completed work
 
 1. CI design review：APPROVE WITH CHANGES（全部採納）
 2. Implementation：workflow（14 steps）、`scripts/ci-smoke.sh`（19 checks）、README CI 小節、roadmap 修正
@@ -104,11 +166,11 @@ Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新
 8. 依 run `36365761225` 結果更新 README（Linux 已由 CI 實際執行）與 A2 報告；沒有改 workflow 與 production code，沒有做 A3。
 9. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a2-ci-20260928`
 
-## Exact next action
+### A2 Exact next action
 
 無。等待人類 review A2 branch 與 GitHub Actions 結果。**不要 merge A2 到 main**，除非人類明確要求。
 
-## Git state
+### A2 Git state
 
 - **Committed（A2）：** YES
 - **A2 branch pushed：** YES（`origin/feat/nlf-roadmap-a2-ci-20260928`）
