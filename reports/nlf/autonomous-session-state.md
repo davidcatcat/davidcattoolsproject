@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A2 完成並 push 到 feature branch；等待人類 review
+Last updated: 2026-09-28，記錄 GitHub Actions run 36365761225 全綠並更新 README Linux 說明；等待人類 review
 
 ## 先前完成的 session：A1（已 merge）
 
@@ -101,7 +101,8 @@ Last updated: 2026-09-28，A2 完成並 push 到 feature branch；等待人類 r
 5. Git Safety：GO
 6. commit `e5cb8b5`（ci: add nlf GitHub Actions workflow）並 push
 7. **事故紀錄：** Lead 的 pre-commit 指令用了 `| tail`，吃掉了失敗的 exit code，所以 `e5cb8b5` 在測試失敗的狀態下被 commit 與 push。失敗原因：README 的 `bin/nlf "$v"` 被 `TestDocsMatchBehavior`／`TestDocExamplesRun` 當成 nlf 查詢範例。下一個 commit 已把 `$v` 改回不加引號，沒有放寬測試；go test、race、make check、`-count=10 -shuffle=on`、make dist、smoke 全部重新以 exit code 驗證為 0。`e5cb8b5` 的 CI 預期會失敗，之後的 commit 預期會通過。沒有 amend，也沒有 force push。
-8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a2-ci-20260928`
+8. 依 run `36365761225` 結果更新 README（Linux 已由 CI 實際執行）與 A2 報告；沒有改 workflow 與 production code，沒有做 A3。
+9. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a2-ci-20260928`
 
 ## Exact next action
 
@@ -113,5 +114,5 @@ Last updated: 2026-09-28，A2 完成並 push 到 feature branch；等待人類 r
 - **A2 branch pushed：** YES（`origin/feat/nlf-roadmap-a2-ci-20260928`）
 - **Main touched by this task：** NO（A2 只在 feature branch；A1 的 merge 是先前人類明確要求的）
 - **PR URL：** 未建立（沒有 `gh`）；compare 連結見上
-- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain）
+- **GitHub Actions 結果：** run `36365761225`：ubuntu-latest PASS、macos-latest PASS、Linux runtime PASS、macOS runtime PASS（人類確認並回報；Lead 無法直接讀取）。之後的 docs-only commit 會觸發新的 CI run，需由人類確認。
 - **Merge to main：** NOT PERFORMED
