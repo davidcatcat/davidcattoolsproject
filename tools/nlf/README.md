@@ -132,6 +132,8 @@ nlf [flags] "<query>"
 -l, --long       每行前面加上大小與修改時間
 -0, --null       每個路徑後面接 NUL（\0）而不是換行，給 xargs -0 使用
 -d, --dir PATH   搜尋位置（預設為目前目錄）
+--max-depth N    最多往下 N 層（搜尋位置裡的檔案是第 1 層）
+--min-depth N    只列出至少 N 層深的檔案
 -h, --help       說明與範例
 --version        版本
 ```
@@ -149,9 +151,29 @@ nlf -0 "找最近 7 天修改的 go 檔" | xargs -0 -r wc -l
 不能一起用的 flag 會直接報錯（exit 2），不會默默忽略其中一個：
 
 - `--explain` 不能和 `--confirm`、`-l`、`-0` 同時使用：`--explain` 不搜尋，沒有檔案可以列出。
-- `--help`、`--version` 只印文字、不搜尋，所以不能和其他 flag（`--explain`、`--confirm`、`-l`、`-0`、`-d/--dir`）一起用，兩者也不能同時使用。查詢文字（在 flag 前面或後面都一樣）不算 flag，仍然允許，但會被忽略、也不會檢查（`nlf --help go files` 照樣印出說明，exit 0）。
+- `--help`、`--version` 只印文字、不搜尋，所以不能和其他 flag（`--explain`、`--confirm`、`-l`、`-0`、`-d/--dir`、`--max-depth`、`--min-depth`）一起用，兩者也不能同時使用。查詢文字（在 flag 前面或後面都一樣）不算 flag，仍然允許，但會被忽略、也不會檢查（`nlf --help go files` 照樣印出說明，exit 0）。
 - `-d/--dir` 只能給一次，值不能是空字串：`--dir ""`、`-d ""`、`--dir=` 會報 `--dir needs a directory`（`-d ""` 是 `-d needs a directory`），`--dir a --dir b` 會報 `-d/--dir can be given only once`。
-- 可以一起用的組合：`--confirm` 搭配 `-l`、`-0` 或 `--dir`；`--explain`、`-l`、`-0` 搭配 `--dir`。
+- 可以一起用的組合：`--confirm` 搭配 `-l`、`-0` 或 `--dir`；`--explain`、`-l`、`-0` 搭配 `--dir`；`--max-depth`、`--min-depth` 可以搭配 `--dir`、`--explain`、`--confirm`、`-l`、`-0`，兩者也可以一起用。
+
+### 搜尋深度（`--max-depth` / `--min-depth`）
+
+```bash
+nlf --max-depth 1 "找 go 檔"          # 只找搜尋位置裡面的 go 檔，不往子目錄找
+nlf --min-depth 2 --dir ~/work "找 md 檔"   # 只找子目錄裡（至少第 2 層）的 md 檔
+```
+
+- **深度的定義（與 `find` 相同）：** 搜尋位置本身是第 0 層，直接在裡面的檔案與目錄是第 1 層，依此類推。搜尋位置是 symlink 時（例如 macOS 的 `/tmp`）一樣從 0 算起；搜尋位置是一個檔案時，那個檔案就是第 0 層（`--max-depth 0` 會列出它，`--min-depth 1` 不會）。
+- **`--max-depth N` 在走訪時就剪枝：** 第 N 層的目錄不會被讀取，所以更深的檔案不會被列出、開啟或檢查，也不會出現更深層的權限錯誤。`--max-depth 0` 連搜尋位置本身的目錄都不讀取。
+- **`--min-depth N` 只過濾檔案：** 比第 N 層淺的檔案在讀取檔案資訊與內容之前就略過；目錄仍然照常走訪，排除的目錄在任何深度都一樣會被剪掉。
+- **值的規則：** 0 到 4096 的十進位整數，只接受數字（`007` = 7），`--max-depth 2` 與 `--max-depth=2` 都可以；每個 flag 只能給一次。flag 後面的下一個參數一定當成值，即使它以 `-` 開頭（`--max-depth -1` 是不合法的值，不是另一個 flag）。
+- **錯誤（exit 2，搜尋之前就報錯）：**
+  - 沒有值或空值：`--max-depth needs a number`
+  - 不是 0–4096 的整數（`-1`、`1.5`、`abc`、`+1`、`4097`…）：`--max-depth needs a whole number from 0 to 4096, got "-1"`
+  - 重複：`--max-depth can be given only once`
+  - 最小大於最大：`--min-depth 3 is greater than --max-depth 1, so no file can match`（不會自動對調）
+
+  `--min-depth` 的訊息相同，只是換成 `--min-depth`。
+- **沒有自然語言寫法：** 深度只能用 flag 指定。查詢裡的 `最多 N 個`、`top N` 仍然是數量上限，不是深度。
 
 提示訊息都寫到 stderr，語言會跟著查詢語言（有中文字就用中文）。
 
@@ -181,6 +203,7 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 - `--confirm` 只接受一整行剛好是 `y` 或 `Y`；`n`、直接按 Enter、`yes`、其他文字、EOF 一律取消，顯示 `Cancelled.`，exit 0。只讀第一行。
 - 執行計畫與提示都寫到 stderr，所以 stdout 仍然只有結果路徑，可以接 pipe。
 - 安全性摘要（Read / Modify / Create / Delete / Execute shell / sudo、Risk）描述 nlf 自己的搜尋：目前一律是 `READ-ONLY`（只讀取目錄與檔案）。這個宣告由測試檢查原始碼維持（不得使用 `os/exec` 或任何會建立、修改、刪除檔案的 `os` 函式）。
+- 執行計畫的條件會列出搜尋深度（例如 `depth:  at most 1 level (…)`），近似指令也會帶上 `-maxdepth` / `-mindepth`。
 - 計畫裡的指令與 `--explain` 一樣只是近似、供理解用，並依作業系統顯示 macOS 或 GNU/Linux 語法；nlf 不會執行它。
 - `--explain` 與 `--confirm` 不能同時使用（exit 2）；`--explain` 也不能和 `-l`、`-0` 一起用（見上方 Usage）。
 - `--explain` 不檢查搜尋位置是否存在：位置不存在時照樣顯示理解結果與近似指令（exit 0），實際搜尋時才會報錯（exit 2）。
@@ -404,6 +427,8 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
   - 大小寫：非 ASCII 字元的大小寫轉換（副檔名、排除名稱、`ignore case`）可能和 find、grep 不同。
   - binary 判斷與不是合法 UTF-8 的內容（見上方內容搜尋）。
   - `--explain` 不檢查搜尋位置是否存在，find 則會對不存在的位置報錯。
+  - 深度：`-mindepth N` / `-maxdepth N` 緊接在起點後面（GNU find 對放在其他條件後面的 global option 會警告）。有排除目錄時，最小深度改寫成 `-type f -path '<搜尋位置>/*/*'`（每一層一個 `/*`），不用 `-mindepth`：BSD 與 GNU find 的 `-mindepth` 在較淺的層級不套用任何條件，包括 `-prune`，所以較淺的排除目錄仍會被走訪；nlf 則在任何深度都會剪掉排除的目錄。
+  - `--max-depth 0` 搭配沒有權限讀取的目錄時，nlf 完全不開啟它（沒有結果，exit 1），BSD find 仍會回報 Permission denied。
 - nlf 本身用 Go 走訪檔案，不會執行任何 shell 指令，也不會執行上面的近似指令。
 - 沒有權限讀取的目錄會略過；檔案只有在需要讀取內容（內容搜尋）時才會因權限不足而略過，否則仍會列出（與 `find` 相同）。略過的位置在結束時列在 stderr；nlf 不會提權。
 
@@ -412,7 +437,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 不支援不同類條件之間的 OR（`大於 1GB 或今天`）、括號、否定（「不包含 X」「without X」）、正規表示式（包括檔名的正規表示式；檔名請用 glob）、以時刻為對象的單邊比較（`before 14:00`、`下午 3 點以前`）。
 - 未加引號的搜尋文字會一直延伸到空白或標點（`包含 API連線失敗`）。如果後面緊接著 nlf 認得的詞（例如 `包含 設定檔`，「檔」是關鍵字），因為無法確定範圍，會報錯要求加引號；只有「的」「且」「和」這類連接詞可以直接接在後面（`包含TODO且大於1MB`）。空字串 `""` 會報錯。
 - 未加引號的路徑會一直延伸到空白或標點，可以包含中文（`在 ~/文件 找 pdf 檔`）。路徑後面請加空白，不要直接接其他字；路徑中有空白時要加引號，例如 `在 "~/My Docs"`。
-- 數量上限最多 2147483647；時間最多約 292 年；超過會報錯。
+- 數量上限最多 2147483647；時間最多約 292 年；搜尋深度最多 4096（`find` 接受任意整數）；超過會報錯。
 - 主要在 macOS 上開發。Linux 由 GitHub Actions 的 `ubuntu-latest` 實際執行 unit test、race detector 與 runtime smoke test（`make dist` 產出的靜態執行檔也會在 runner 上實際執行）。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 與 `gsort` 實際執行驗證過；整個近似指令（含 GNU find 與 grep）則由 CI 的 `ubuntu-latest` 實際執行比對。
 - 未支援的說法會回報「看不懂這個詞」；詞彙表在 `internal/query/lexicon.go`，擴充時請一併加測試。
 

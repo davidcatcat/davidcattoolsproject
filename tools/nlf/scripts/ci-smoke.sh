@@ -179,6 +179,45 @@ check_exit_empty "--bogus go files (invalid flag)" 2 --bogus go files
 check_exit_empty "--dir missing (invalid)" 2 --dir "$fx/does-not-exist" "go files"
 check_exit_empty 'log files !containing "TODO" (invalid)' 2 --dir "$fx" 'log files !containing "TODO"'
 
+check_found "--max-depth 1 go files" \
+	"$fx/main.go$nl$fx/util.go$nl$fx/old.go" \
+	--max-depth 1 --dir "$fx" "go files"
+check_found "--min-depth=2 go files" \
+	"$fx/vendor/lib.go" \
+	--min-depth=2 --dir "$fx" "go files"
+check_found "--min-depth 2 md files excluding vendor" \
+	"$fx/docs/readme.md$nl$fx/中文 目錄/說明.md" \
+	--min-depth 2 --dir "$fx" "md files excluding vendor"
+check_exit_empty "--max-depth 0 on a directory (no match)" 1 --max-depth 0 --dir "$fx" "go files"
+check_exit_empty "--max-depth -1 (invalid)" 2 --max-depth -1 --dir "$fx" "go files"
+check_exit_empty "--min-depth 2 --max-depth 1 (invalid)" 2 --min-depth 2 --max-depth 1 --dir "$fx" "go files"
+check_exit_empty "--help --max-depth 1 (conflict)" 2 --help --max-depth 1
+
+# The --explain command for a minimum depth with excludes uses a -path test
+# (not -mindepth) and finds the same files as nlf when run read-only.
+run "" --min-depth 2 --dir "$fx" "md files excluding vendor"
+depth_nlf=$out
+depth_nlf_code=$code
+run "" --explain --min-depth 2 --dir "$fx" "md files excluding vendor"
+depth_cmd=$(printf '%s\n' "$out" | tail -n 1 | sed 's/^ *//')
+if [ "$depth_nlf_code" -ne 0 ]; then
+	fail "--explain --min-depth 2 with excludes" "nlf search exit $depth_nlf_code, want 0"
+elif [ "$code" -ne 0 ]; then
+	fail "--explain --min-depth 2 with excludes" "exit $code, want 0 (stderr: $err)"
+elif ! contains "$depth_cmd" " -path " || ! contains "$depth_cmd" "/*/*'" || contains "$depth_cmd" "-mindepth"; then
+	fail "--explain --min-depth 2 with excludes" "command lacks -path or uses -mindepth: $depth_cmd"
+else
+	fcode=0
+	depth_find=$(sh -c "$depth_cmd" 2>"$errf") || fcode=$?
+	if [ "$fcode" -ne 0 ] || [ -s "$errf" ]; then
+		fail "--explain --min-depth 2 with excludes" "find exit $fcode (stderr: $(cat "$errf"))"
+	elif [ -z "$depth_nlf" ] || [ "$(sorted "$depth_find")" != "$(sorted "$depth_nlf")" ]; then
+		fail "--explain --min-depth 2 with excludes" "find [$(sorted "$depth_find" | tr '\n' ' ')] nlf [$(sorted "$depth_nlf" | tr '\n' ' ')]"
+	else
+		pass "--explain --min-depth 2 with excludes matches nlf"
+	fi
+fi
+
 run "" --explain --dir "$fx" "go files"
 if [ "$code" -ne 0 ]; then
 	fail "--explain" "exit $code, want 0 (stderr: $err)"

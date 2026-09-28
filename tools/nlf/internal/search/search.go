@@ -69,6 +69,7 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 	if li, err := os.Lstat(root); err == nil && li.Mode()&fs.ModeSymlink != 0 && info.IsDir() {
 		root += string(filepath.Separator)
 	}
+	depthOf := depthFunc(root)
 
 	ex, err := newExcluder(root, q.ExcludeDirs)
 	if err != nil {
@@ -88,10 +89,23 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 			}
 			return nil
 		}
+		depth := depthOf(path)
 		if d.IsDir() {
+			// Returning SkipDir here comes before WalkDir reads the directory, so
+			// nothing below the maximum depth is listed, opened or reported
+			// (like find -maxdepth). This includes the root itself for --max-depth 0.
+			if q.HasMaxDepth && depth >= q.MaxDepth {
+				return fs.SkipDir
+			}
 			if path != root && ex.match(root, path, d) {
 				return fs.SkipDir
 			}
+			return nil
+		}
+		// Directories at the maximum depth were not read, so depth <= MaxDepth
+		// here. Files above the minimum depth are skipped before any Stat or read;
+		// shallower directories are still walked, and excluded ones still pruned.
+		if depth < q.MinDepth {
 			return nil
 		}
 		// Cheapest checks first: extension and base name need no Stat and no read.
@@ -144,6 +158,29 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 		}
 	}
 	return rep, nil
+}
+
+// depthFunc returns a function giving the depth of a path WalkDir passes
+// for root: root itself is 0, its entries 1. WalkDir builds child paths
+// with filepath.Join, so they start with filepath.Clean(root) + separator,
+// except that Clean(".") children have no prefix and "/" is its own prefix.
+func depthFunc(root string) func(path string) int {
+	sep := string(filepath.Separator)
+	base := filepath.Clean(root)
+	prefix := base + sep
+	switch {
+	case base == ".":
+		prefix = ""
+	case strings.HasSuffix(base, sep):
+		prefix = base
+	}
+	n := strings.Count(prefix, sep)
+	return func(path string) int {
+		if path == root {
+			return 0
+		}
+		return strings.Count(path, sep) - n + 1
+	}
 }
 
 func (r *Report) record(path string, err error) {

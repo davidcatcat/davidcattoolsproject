@@ -384,36 +384,96 @@ func TestExplainParity(t *testing.T) {
 		}
 		return strings.Join(ps, ",")
 	}
-	check := func(root, q string, sorted bool) {
+	// runFind runs the command --explain prints for flags and q, through
+	// sh -c (read-only); find must not warn, e.g. about option placement.
+	runFind := func(root, q string, flags []string) (cmd, out string) {
 		t.Helper()
-		out, errOut, code := nlf(t, "--dir", root, q)
-		if code != 0 {
-			t.Errorf("%s in %s: nlf exit %d: %s", q, root, code, errOut)
-		}
-		ex, _, _ := nlf(t, "--explain", "--dir", root, q)
+		ex, _, _ := nlf(t, append(append(append([]string{"--explain"}, flags...), "--dir", root), q)...)
 		lines := strings.Split(strings.TrimSpace(ex), "\n")
-		cmd := strings.TrimSpace(lines[len(lines)-1])
-		findOut, err := exec.Command("sh", "-c", cmd).Output()
+		cmd = strings.TrimSpace(lines[len(lines)-1])
+		var stderr bytes.Buffer
+		c := exec.Command("sh", "-c", cmd)
+		c.Stderr = &stderr
+		findOut, err := c.Output()
 		if err != nil {
-			t.Fatalf("%s: %s: %v", q, cmd, err)
+			t.Fatalf("%s %v: %s: %v\n%s", q, flags, cmd, err, stderr.String())
 		}
-		if a, b := list(root, out, sorted), list(root, string(findOut), sorted); a != b {
-			t.Errorf("%s in %s:\n cmd  %s\n nlf  %s\n find %s", q, root, cmd, a, b)
+		if stderr.Len() > 0 {
+			t.Errorf("%s %v: %s: find wrote to stderr:\n%s", q, flags, cmd, stderr.String())
+		}
+		return cmd, string(findOut)
+	}
+	// check compares nlf and find; nlf may exit 1 only when it found nothing.
+	// With mustFind, nlf must find something, so the comparison is not vacuous.
+	check := func(root, q string, sorted, mustFind bool, flags ...string) {
+		t.Helper()
+		out, errOut, code := nlf(t, append(append(append([]string{}, flags...), "--dir", root), q)...)
+		if code != 0 && (code != 1 || out != "") {
+			t.Errorf("%s %v in %s: nlf exit %d: %s", q, flags, root, code, errOut)
+		}
+		if mustFind && out == "" {
+			t.Errorf("%s %v in %s: nlf found nothing", q, flags, root)
+		}
+		cmd, findOut := runFind(root, q, flags)
+		if a, b := list(root, out, sorted), list(root, findOut, sorted); a != b {
+			t.Errorf("%s %v in %s:\n cmd  %s\n nlf  %s\n find %s", q, flags, root, cmd, a, b)
 		}
 	}
 	for _, q := range []string{"txt files", "exclude vendor", "exclude ./src/gen", "exclude src/gen/",
 		"larger than 1KB", "at most 1KB", `containing "TODO"`,
 		`exclude "a[1]"`, `exclude "star*"`, `exclude "x/a[1]"`, "at least 0 bytes", "smaller than 1KB", "at least 1KB",
 		"modified on 2026-09-28", "2026-09-28 或 2026-09-30", `包含 "錯誤"`} {
-		check(link, q, false)
+		check(link, q, false, true)
 	}
 	for _, q := range []string{"largest 1", "largest 2", "newest 2", "newest 3", "largest txt files"} {
-		check(link, q, true)
+		check(link, q, true, true)
 	}
 	for _, root := range []string{filepath.Join(dir, "real", "vendor"), filepath.Join(dir, "real", "vendor") + "/",
 		filepath.Join(dir, "sym", "vendor")} {
-		check(root, "exclude vendor", false)
-		check(root, "txt files exclude VENDOR", false)
+		check(root, "exclude vendor", false, true)
+		check(root, "txt files exclude VENDOR", false, true)
+	}
+
+	// Depth: -mindepth / -maxdepth, or a -path test for the minimum when
+	// directories are excluded.
+	check(link, "txt files", false, false, "--max-depth", "0")
+	for _, c := range []struct {
+		q     string
+		flags []string
+	}{
+		{"txt files", []string{"--max-depth", "1"}},
+		{"exclude vendor", []string{"--max-depth", "2"}},
+		{`containing "TODO"`, []string{"--max-depth", "1"}},
+		{"txt files", []string{"--min-depth", "2"}},
+		{"exclude vendor", []string{"--min-depth", "2"}},
+		{"exclude vendor", []string{"--min-depth", "3"}},
+		{`exclude "x/a[1]"`, []string{"--min-depth", "3", "--max-depth", "3"}},
+		{"at least 1KB", []string{"--min-depth", "1", "--max-depth", "1"}},
+	} {
+		check(link, c.q, false, true, c.flags...)
+	}
+	check(link, "largest 2", true, true, "--max-depth", "1")
+	check(link, "newest 3", true, true, "--max-depth", "1")
+	check(link, "largest 2", true, true, "--min-depth", "2")
+	for _, root := range []string{filepath.Join(dir, "real", "vendor"), filepath.Join(dir, "real", "vendor") + "/",
+		filepath.Join(dir, "sym", "vendor")} {
+		check(root, "exclude vendor", false, true, "--min-depth", "2")
+		check(root, "exclude vendor", false, true, "--max-depth", "1")
+	}
+	// A file as the root is depth 0: --max-depth 0 keeps it, --min-depth 1 does not.
+	file := filepath.Join(dir, "real", "a.txt")
+	for _, c := range []struct {
+		flags []string
+		want  string
+	}{{[]string{"--max-depth", "0"}, file}, {[]string{"--min-depth", "1"}, ""}} {
+		out, errOut, code := nlf(t, append(append([]string{}, c.flags...), "--dir", file, "txt files")...)
+		if strings.TrimSpace(out) != c.want || (c.want == "" && code != 1) || (c.want != "" && code != 0) {
+			t.Errorf("file root %v: nlf code=%d out=%q err=%q, want %q", c.flags, code, out, errOut, c.want)
+		}
+		cmd, findOut := runFind(file, "txt files", c.flags)
+		if strings.TrimSpace(findOut) != c.want {
+			t.Errorf("file root %v: %s printed %q, want %q", c.flags, cmd, findOut, c.want)
+		}
 	}
 }
 
@@ -425,7 +485,7 @@ type docExample struct {
 
 // docExamples extracts every nlf invocation with a double- or single-quoted query.
 func docExamples(doc string) []docExample {
-	re := regexp.MustCompile(`nlf((?: (?:--explain|--confirm|-l|--long|-0|--null|(?:-d|--dir) [^\s"']+))*) (?:"((?:[^"\\]|\\.)*)"|'([^']*)')`)
+	re := regexp.MustCompile(`nlf((?: (?:--explain|--confirm|-l|--long|-0|--null|(?:-d|--dir) [^\s"']+|--(?:max|min)-depth[ =]\d+))*) (?:"((?:[^"\\]|\\.)*)"|'([^']*)')`)
 	var out []docExample
 	for _, m := range re.FindAllStringSubmatch(doc, -1) {
 		q := strings.ReplaceAll(m[2], `\"`, `"`)
@@ -506,7 +566,7 @@ func TestDocsMatchBehavior(t *testing.T) {
 		if strings.Contains(doc, "等效") || strings.Contains(strings.ToLower(doc), "equivalent") {
 			t.Errorf("%s still calls the --explain command equivalent", name)
 		}
-		for _, flag := range []string{"--explain", "--confirm", "--long", "--null", "--dir", "--help", "--version"} {
+		for _, flag := range []string{"--explain", "--confirm", "--long", "--null", "--dir", "--help", "--version", "--max-depth", "--min-depth"} {
 			if !strings.Contains(doc, flag) {
 				t.Errorf("%s does not document %s", name, flag)
 			}
@@ -636,6 +696,8 @@ func TestHelpContent(t *testing.T) {
 		"nlf '找 9 月 1 日到 9 月 15 日修改的 log'", "nlf '找最近 6 小時修改的 conf'", "nlf '找昨天 23:00 到今天 02:00 修改的 log'",
 		"nlf '找本月修改的 yaml'", "nlf 'files modified on 2026-09-28'", "nlf 'log files modified from Sep 1 to Sep 15'",
 		"nlf 'conf files modified in the last 6 hours'",
+		// depth
+		"--max-depth N", "--min-depth N", "(1 = directly inside)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("--help is missing %q", want)
@@ -710,6 +772,16 @@ func TestConfirmPlan(t *testing.T) {
 	for _, bad := range []string{"WRITE", "DESTRUCTIVE", ": YES\n  Modify"} {
 		if strings.Contains(plan, bad) {
 			t.Errorf("plan contains %q:\n%s", bad, plan)
+		}
+	}
+	// The plan shows the depth limit and the find command applies it.
+	out, plan, code = nlfInput(t, "", "--confirm", "--max-depth", "1", "--dir", dir, "go files")
+	if code != 0 || out != "" {
+		t.Fatalf("--max-depth 1: code=%d stdout=%q", code, out)
+	}
+	for _, want := range []string{"depth:", "at most 1 level (", "find " + dir + " -maxdepth 1 -type f -iname '?*.go' -print"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("--max-depth 1 plan missing %q:\n%s", want, plan)
 		}
 	}
 }
@@ -1232,35 +1304,42 @@ func TestParseArgsNull(t *testing.T) {
 
 func TestFlagConflicts(t *testing.T) {
 	set := map[string]func(*options){
-		"explain": func(o *options) { o.explain = true },
-		"confirm": func(o *options) { o.confirm = true },
-		"long":    func(o *options) { o.long = true },
-		"null":    func(o *options) { o.null = true },
-		"help":    func(o *options) { o.help = true },
-		"version": func(o *options) { o.version = true },
-		"dir":     func(o *options) { o.dir = "x" },
+		"explain":  func(o *options) { o.explain = true },
+		"confirm":  func(o *options) { o.confirm = true },
+		"long":     func(o *options) { o.long = true },
+		"null":     func(o *options) { o.null = true },
+		"help":     func(o *options) { o.help = true },
+		"version":  func(o *options) { o.version = true },
+		"dir":      func(o *options) { o.dir = "x" },
+		"maxdepth": func(o *options) { o.maxDepth, o.maxDepthSet = 1, true },
+		"mindepth": func(o *options) { o.minDepth, o.minDepthSet = 1, true },
 	}
 	want := map[[2]string]string{
-		{"explain", "confirm"}: "--explain only shows the plan and --confirm asks before searching; use one of them",
-		{"long", "null"}:       "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
-		{"explain", "null"}:    "--explain never searches, so -0/--null has no paths to print; use one of them",
-		{"null", "help"}:       "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
-		{"null", "version"}:    "--version prints text, not NUL-separated paths; use it without -0/--null",
-		{"explain", "long"}:    "--explain never searches, so -l/--long has no files to list; use one of them",
-		{"help", "version"}:    "-h/--help and --version both print text; use one of them",
-		{"explain", "help"}:    "-h/--help prints text, not a query explanation; use it without --explain",
-		{"confirm", "help"}:    "-h/--help prints text and never searches; use it without --confirm",
-		{"long", "help"}:       "-h/--help prints text, not a file list; use it without -l/--long",
-		{"help", "dir"}:        "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
-		{"explain", "version"}: "--version prints text, not a query explanation; use it without --explain",
-		{"confirm", "version"}: "--version prints text and never searches; use it without --confirm",
-		{"long", "version"}:    "--version prints text, not a file list; use it without -l/--long",
-		{"version", "dir"}:     "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "confirm"}:  "--explain only shows the plan and --confirm asks before searching; use one of them",
+		{"long", "null"}:        "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
+		{"explain", "null"}:     "--explain never searches, so -0/--null has no paths to print; use one of them",
+		{"null", "help"}:        "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
+		{"null", "version"}:     "--version prints text, not NUL-separated paths; use it without -0/--null",
+		{"explain", "long"}:     "--explain never searches, so -l/--long has no files to list; use one of them",
+		{"help", "version"}:     "-h/--help and --version both print text; use one of them",
+		{"explain", "help"}:     "-h/--help prints text, not a query explanation; use it without --explain",
+		{"confirm", "help"}:     "-h/--help prints text and never searches; use it without --confirm",
+		{"long", "help"}:        "-h/--help prints text, not a file list; use it without -l/--long",
+		{"help", "dir"}:         "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "version"}:  "--version prints text, not a query explanation; use it without --explain",
+		{"confirm", "version"}:  "--version prints text and never searches; use it without --confirm",
+		{"long", "version"}:     "--version prints text, not a file list; use it without -l/--long",
+		{"version", "dir"}:      "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"help", "maxdepth"}:    "-h/--help never searches, so --max-depth has no effect; use it without --max-depth",
+		{"help", "mindepth"}:    "-h/--help never searches, so --min-depth has no effect; use it without --min-depth",
+		{"version", "maxdepth"}: "--version never searches, so --max-depth has no effect; use it without --max-depth",
+		{"version", "mindepth"}: "--version never searches, so --min-depth has no effect; use it without --min-depth",
 	}
-	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir"}
-	matched := 0
+	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir", "maxdepth", "mindepth"}
+	matched, total := 0, 0
 	for i, a := range names {
 		for _, b := range names[i+1:] {
+			total++
 			o := &options{}
 			set[a](o)
 			set[b](o)
@@ -1280,8 +1359,8 @@ func TestFlagConflicts(t *testing.T) {
 			}
 		}
 	}
-	if matched != len(want) {
-		t.Errorf("matched %d conflict pairs, want %d", matched, len(want))
+	if matched != len(want) || matched != 19 || total != 36 {
+		t.Errorf("matched %d conflict pairs of %d, want %d (19) of 36", matched, total, len(want))
 	}
 	// The first matching row wins.
 	o, err := parseArgs([]string{"--explain", "--confirm", "-0"})
@@ -1299,28 +1378,34 @@ func TestFlagConflicts(t *testing.T) {
 func TestFlagConflictMatrixCLI(t *testing.T) {
 	dir := fixture(t)
 	flags := map[string][]string{"explain": {"--explain"}, "confirm": {"--confirm"}, "long": {"-l"}, "null": {"-0"},
-		"help": {"--help"}, "version": {"--version"}, "dir": {"--dir", dir}}
+		"help": {"--help"}, "version": {"--version"}, "dir": {"--dir", dir},
+		"maxdepth": {"--max-depth", "1"}, "mindepth": {"--min-depth", "1"}}
 	conflict := map[[2]string]string{
-		{"explain", "confirm"}: "--explain only shows the plan and --confirm asks before searching; use one of them",
-		{"long", "null"}:       "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
-		{"explain", "null"}:    "--explain never searches, so -0/--null has no paths to print; use one of them",
-		{"null", "help"}:       "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
-		{"null", "version"}:    "--version prints text, not NUL-separated paths; use it without -0/--null",
-		{"explain", "long"}:    "--explain never searches, so -l/--long has no files to list; use one of them",
-		{"help", "version"}:    "-h/--help and --version both print text; use one of them",
-		{"explain", "help"}:    "-h/--help prints text, not a query explanation; use it without --explain",
-		{"confirm", "help"}:    "-h/--help prints text and never searches; use it without --confirm",
-		{"long", "help"}:       "-h/--help prints text, not a file list; use it without -l/--long",
-		{"help", "dir"}:        "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
-		{"explain", "version"}: "--version prints text, not a query explanation; use it without --explain",
-		{"confirm", "version"}: "--version prints text and never searches; use it without --confirm",
-		{"long", "version"}:    "--version prints text, not a file list; use it without -l/--long",
-		{"version", "dir"}:     "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "confirm"}:  "--explain only shows the plan and --confirm asks before searching; use one of them",
+		{"long", "null"}:        "-0/--null prints paths for programs and -l/--long adds size and time for people; use one of them",
+		{"explain", "null"}:     "--explain never searches, so -0/--null has no paths to print; use one of them",
+		{"null", "help"}:        "-h/--help prints text, not NUL-separated paths; use it without -0/--null",
+		{"null", "version"}:     "--version prints text, not NUL-separated paths; use it without -0/--null",
+		{"explain", "long"}:     "--explain never searches, so -l/--long has no files to list; use one of them",
+		{"help", "version"}:     "-h/--help and --version both print text; use one of them",
+		{"explain", "help"}:     "-h/--help prints text, not a query explanation; use it without --explain",
+		{"confirm", "help"}:     "-h/--help prints text and never searches; use it without --confirm",
+		{"long", "help"}:        "-h/--help prints text, not a file list; use it without -l/--long",
+		{"help", "dir"}:         "-h/--help never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"explain", "version"}:  "--version prints text, not a query explanation; use it without --explain",
+		{"confirm", "version"}:  "--version prints text and never searches; use it without --confirm",
+		{"long", "version"}:     "--version prints text, not a file list; use it without -l/--long",
+		{"version", "dir"}:      "--version never searches, so -d/--dir has no effect; use it without -d/--dir",
+		{"help", "maxdepth"}:    "-h/--help never searches, so --max-depth has no effect; use it without --max-depth",
+		{"help", "mindepth"}:    "-h/--help never searches, so --min-depth has no effect; use it without --min-depth",
+		{"version", "maxdepth"}: "--version never searches, so --max-depth has no effect; use it without --max-depth",
+		{"version", "mindepth"}: "--version never searches, so --min-depth has no effect; use it without --min-depth",
 	}
-	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir"}
-	pairs := 0
+	names := []string{"explain", "confirm", "long", "null", "help", "version", "dir", "maxdepth", "mindepth"}
+	pairs, total := 0, 0
 	for i, a := range names {
 		for _, b := range names[i+1:] {
+			total++
 			msg, bad := conflict[[2]string{a, b}]
 			if !bad {
 				msg, bad = conflict[[2]string{b, a}]
@@ -1353,8 +1438,8 @@ func TestFlagConflictMatrixCLI(t *testing.T) {
 			}
 		}
 	}
-	if pairs != len(conflict) {
-		t.Errorf("matched %d conflict pairs, want %d", pairs, len(conflict))
+	if pairs != len(conflict) || pairs != 19 || total != 36 {
+		t.Errorf("matched %d conflict pairs of %d, want %d (19) of 36", pairs, total, len(conflict))
 	}
 	// Words after --help or --version are allowed and not checked.
 	for _, args := range [][]string{{"--help", "go", "files"}, {"--version", "banana"}, {"-h", "files without TODO"}} {

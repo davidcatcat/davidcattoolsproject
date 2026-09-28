@@ -362,6 +362,32 @@ func TestFindCommand(t *testing.T) {
 			`find . -type f -iname '?*.go' -print`},
 		{"several extensions", Linux, Query{Extensions: []string{"go", "tar.gz"}},
 			`find . -type f \( -iname '?*.go' -o -iname '?*.tar.gz' \) -print`},
+
+		// Depth: -mindepth / -maxdepth right after the start point; with
+		// excludes the minimum is a -path test so excluded directories above
+		// it are still pruned.
+		{"max depth", MacOS, Query{MaxDepth: 1, HasMaxDepth: true},
+			`find . -maxdepth 1 -type f -print`},
+		{"max depth 0 on Linux", Linux, Query{HasMaxDepth: true},
+			`find . -maxdepth 0 -type f -print`},
+		{"min depth", Linux, Query{MinDepth: 2},
+			`find . -mindepth 2 -type f -print`},
+		{"min and max depth right after the root", Linux, Query{Root: "/var/log", MinDepth: 1, MaxDepth: 2, HasMaxDepth: true,
+			Extensions: []string{"log"}, Sort: SortLargest, Limit: 3},
+			`find /var/log -mindepth 1 -maxdepth 2 -type f -iname '?*.log' -exec stat -c '%s %n' {} + | LC_ALL=C sort -k1,1nr -k2 | cut -d' ' -f2- | head -n 3`},
+		{"max depth with excludes", MacOS, Query{MaxDepth: 2, HasMaxDepth: true, ExcludeDirs: []string{"vendor"}},
+			`find . -maxdepth 2 -type d \( -iname vendor \) -prune -o -type f -print`},
+		{"min depth with excludes is a -path test", MacOS, Query{MinDepth: 2, ExcludeDirs: []string{"vendor"}},
+			`find . -type d \( -iname vendor \) -prune -o -type f -path './*/*' -print`},
+		{"min depth with excludes under a symlink root", Linux, Query{Root: "/tmp", RootSymlink: true, MinDepth: 1, MaxDepth: 3,
+			HasMaxDepth: true, ExcludeDirs: []string{"./a b"}},
+			`find /tmp/ -maxdepth 3 -type d \( -path '/tmp/a b' \) -prune -o -type f -path '/tmp/*' -print`},
+		{"min depth with a guarded root", MacOS, Query{Root: "r[1]/vendor", MinDepth: 2, ExcludeDirs: []string{"vendor"}},
+			`find 'r[1]/vendor' -type d ! -path 'r\[1]/vendor' \( -iname vendor \) -prune -o -type f -path 'r\[1]/vendor/*/*' -print`},
+		{"min depth under / with excludes", Linux, Query{Root: "/", MinDepth: 1, ExcludeDirs: []string{"./proc"}},
+			`find / -type d \( -path /proc \) -prune -o -type f -path '/*' -print`},
+		{"min depth with excludes under a root starting with a dash", MacOS, Query{Root: "-x", MinDepth: 1, ExcludeDirs: []string{"vendor"}},
+			`find ./-x -type d \( -iname vendor \) -prune -o -type f -path './-x/*' -print`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
