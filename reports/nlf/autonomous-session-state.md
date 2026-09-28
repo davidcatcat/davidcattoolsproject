@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，A3 design 定稿（APPROVE WITH CHANGES，全部採納）；QA PASS WITH CHANGES、Review APPROVE（修正已套用）；Git Safety 後 commit
+Status: COMPLETE
+Last updated: 2026-09-28，A3 完成並 push 到 feature branch；等待人類 review
 
 ## Session：A3（`-0` / `--null`）
 
@@ -53,31 +53,30 @@ Last updated: 2026-09-28，A3 design 定稿（APPROVE WITH CHANGES，全部採�
 
 ### A3 Current phase
 
-- Git Safety → commit → push
-- QA：PASS WITH CHANGES；Review：APPROVE；修正已套用（`-l` leading-dash 測試、`add` 錯誤處理、預設順序斷言、註解）；A3 報告已寫。
-- Implementation 完成：`main.go`（`-0/--null`、`flagConflicts`、`displayPath`）、`main_test.go`（9 個新測試）、help golden、`ci-smoke.sh`（19 → 34 checks）、README。Lead 驗證：gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0；`-0 | xargs -0` 對 leading dash、空白、換行檔名正確。
+- A3 完成，等待人類 review。
 
-### A3 Remaining work
+### A3 Completed work
 
-1. ~~Design review~~ DONE（APPROVE WITH CHANGES）
-2. ~~Implementation~~ DONE
-3. ~~QA~~ DONE
-4. ~~Review~~ DONE
-5. Git Safety
-6. ~~A3 report `reports/nlf/2026-09-28-null-output.md`~~ DONE
-7. commit + push A3 branch（不 merge main）
-8. 觀察 CI（Lead 無法讀取 private repo 的 Actions 結果，需要人類確認）
-9. checkpoint 標 COMPLETE
+1. Design review：APPROVE WITH CHANGES（全部採納）
+2. Implementation：`-0/--null`、`flagConflicts`、`displayPath`、9 個新測試、help、`ci-smoke.sh`（19 → 34 checks）、README
+3. QA：PASS WITH CHANGES（修正已套用）
+4. Review：APPROVE（MINOR 與 NIT 已採納）
+5. Git Safety：GO
+6. A3 報告：`reports/nlf/2026-09-28-null-output.md`
+7. commit `5efb081`（nlf: add -0/--null NUL-separated output (A3)）並 push；commit 前以 exit code 確認 make check 與 race 通過
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a3-null-output-20260928`
 
 ### A3 Exact next action
 
-Git Safety → 明確 staging 7 個檔案 commit → `git push -u origin feat/nlf-roadmap-a3-null-output-20260928` → checkpoint COMPLETE 並 push。
+無。等待人類 review A3 branch 與 GitHub Actions 結果（ubuntu-latest / macos-latest）。**不要 merge A3 到 main**，除非人類明確要求。
 
 ### A3 Git state
 
-- **Committed（A3）：** NO
-- **A3 branch pushed：** NO
-- **Merge A3 to main：** NOT PERFORMED
+- **Committed（A3）：** YES
+- **A3 branch pushed：** YES（`origin/feat/nlf-roadmap-a3-null-output-20260928`）
+- **Main touched by this task：** A2 fast-forward merge 到 main（`c932fad`），由人類在確認 CI run `36366144449` 通過後明確授權；A3 沒有碰 main。
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認。
+- **Merge to main：** NOT PERFORMED（A3）
 
 ## 先前的 session：A2（已 merge 到 main，`c932fad`）
 
