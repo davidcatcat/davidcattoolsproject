@@ -139,17 +139,70 @@ func tokenize(s string) ([]token, error) {
 				}
 			}
 			// Unknown non-ASCII character: merge into a run, but never
-			// across whitespace ("系統 錯誤" is two words).
+			// across whitespace ("系統 錯誤" is two words). The run is found
+			// first and added once, so a long run costs linear time.
+			j := hanRunEnd(rs, i+1)
 			if n := len(toks); n > 0 && toks[n-1].kind == tHan && !spaced {
-				toks[n-1].text += string(r)
-				toks[n-1].raw += string(r)
+				toks[n-1].text += string(rs[i:j])
+				toks[n-1].raw += string(rs[i:j])
 			} else {
-				emit(token{kind: tHan, text: string(r), raw: string(r)})
+				emit(token{kind: tHan, text: string(rs[i:j]), raw: string(rs[i:j])})
 			}
-			i++
+			i = j
 		}
 	}
 	return toks, nil
+}
+
+// hanRunEnd returns where a run of unknown non-ASCII characters that
+// continues at rs[j] ends: at the first rune the default case of tokenize
+// would not merge into it (anything handled by an earlier case, a
+// dictionary word, or Chinese digits that form a number up to the end of
+// their run). Each run of digits is analyzed once, so the scan is linear.
+func hanRunEnd(rs []rune, j int) int {
+	digitsAt, numberAt := -1, []bool(nil) // numberAt[k]: rs[digitsAt+k:] up to the run end is a number
+	for ; j < len(rs); j++ {
+		r := rs[j]
+		if r < utf8.RuneSelf || unicode.IsSpace(r) || quotePairs[r] != 0 || strings.ContainsRune("<>≥≤＞＜", r) ||
+			strings.ContainsRune(punctChars, r) || longestCJK(rs[j:]) != "" {
+			return j
+		}
+		if strings.ContainsRune(cnDigits, r) {
+			if digitsAt < 0 || j >= digitsAt+len(numberAt) {
+				end := j
+				for end < len(rs) && strings.ContainsRune(cnDigits, rs[end]) {
+					end++
+				}
+				digitsAt, numberAt = j, chineseNumberSuffixes(rs[j:end])
+			}
+			if numberAt[j-digitsAt] {
+				return j
+			}
+		}
+	}
+	return j
+}
+
+// chineseNumberSuffixes reports, for each i, whether
+// parseChineseNumber(string(run[i:])) succeeds, for a run of Chinese digits,
+// in one pass from the right. parseChineseNumber's total is positive exactly
+// when the value starts with a unit (十 == 一十), a unit follows a unit or a
+// non-zero digit, or the value ends with a non-zero digit; a lone 零 or 〇
+// succeeds too.
+func chineseNumberSuffixes(run []rune) []bool {
+	zero := func(r rune) bool { return r == '零' || r == '〇' }
+	unit := func(r rune) bool { return r == '十' || r == '百' || r == '千' }
+	ok := make([]bool, len(run))
+	last := len(run) - 1
+	endsNonZero := !unit(run[last]) && !zero(run[last])
+	unitAfter := false // a unit at some m > i follows a unit or a non-zero digit
+	for i := last; i >= 0; i-- {
+		ok[i] = unit(run[i]) || unitAfter || endsNonZero || i == last && zero(run[i])
+		if i > 0 && unit(run[i]) && !zero(run[i-1]) {
+			unitAfter = true
+		}
+	}
+	return ok
 }
 
 func isWordRune(r rune) bool {

@@ -1,0 +1,2 @@
+go test fuzz v1
+string("$(id)\n`x` ; rm -rf ~ *")

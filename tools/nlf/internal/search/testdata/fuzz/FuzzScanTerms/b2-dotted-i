@@ -1,0 +1,7 @@
+go test fuzz v1
+[]byte("\u0130i")
+string("ii")
+string("")
+uint32(65534)
+byte('a')
+bool(true)

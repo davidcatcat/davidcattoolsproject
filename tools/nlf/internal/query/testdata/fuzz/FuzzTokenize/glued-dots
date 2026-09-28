@@ -1,0 +1,2 @@
+go test fuzz v1
+string("\u5305\u542b \u932f\u8aa4.. \"x\". \u5728 .. \u627e")

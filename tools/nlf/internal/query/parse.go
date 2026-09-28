@@ -7,11 +7,17 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Parse converts a natural-language request into a Query. now anchors all
 // relative times so the result is deterministic.
 func Parse(input string, now time.Time) (*Query, error) {
+	// Invalid bytes would become U+FFFD in the tokenizer and silently change
+	// what is searched or excluded; --dir is the way to name such a path.
+	if !utf8.ValidString(input) {
+		return nil, &Error{zh: "查詢含有無效的 UTF-8 位元組", en: "the query contains bytes that are not valid UTF-8"}
+	}
 	toks, err := tokenize(input)
 	if err != nil {
 		return nil, err
@@ -62,6 +68,8 @@ type parser struct {
 	// can be rejected.
 	clockBase time.Time
 	clockOnly bool
+	// nounAhead memoizes extNounAhead(true) by token position.
+	nounAhead map[int]bool
 }
 
 func (p *parser) cur() (token, bool) {
@@ -213,10 +221,11 @@ func (p *parser) rejectGluedPunct(value, zhOp, enOp string, wrapped bool) error 
 	}
 	// The other reading keeps whatever is still glued on ("app-?.log"),
 	// up to a keyword ("檔名以 app.開頭").
-	rest := ""
+	var b strings.Builder
 	for ; i < len(p.toks) && !p.toks[i].spaceBefore && p.toks[i].kind != tQuoted && p.toks[i].kind != tCJK; i++ {
-		rest += p.toks[i].raw
+		b.WriteString(p.toks[i].raw)
 	}
+	rest := b.String()
 	closing := ""
 	if wrapped && i < len(p.toks) {
 		if _, ok := nameClosing[p.toks[i].text]; ok {
@@ -245,11 +254,12 @@ func (p *parser) gluedPunctRun() (string, int, bool) {
 	if !ok || t.kind != tPunct || t.spaceBefore || !strings.Contains(gluedPunct, t.text) {
 		return "", p.pos, false
 	}
-	punct, i := "", p.pos
+	var b strings.Builder
+	i := p.pos
 	for ; i < len(p.toks) && p.toks[i].kind == tPunct && !p.toks[i].spaceBefore; i++ {
-		punct += p.toks[i].raw
+		b.WriteString(p.toks[i].raw)
 	}
-	return punct, i, true
+	return b.String(), i, true
 }
 
 // rejectDotSuffix rejects an unquoted content or filename value ending in a
@@ -282,14 +292,16 @@ func (p *parser) contentTerm() error {
 	}
 	// Unquoted text runs until whitespace or punctuation, so "API連線失敗"
 	// stays whole. A known word glued to it is ambiguous and must be quoted.
-	term := t.raw
+	var b strings.Builder // grows once per token; += would copy the whole term each time
+	b.WriteString(t.raw)
 	for {
+		term := b.String()
 		nt, ok := p.cur()
 		if !ok || nt.spaceBefore || nt.kind == tPunct || nt.kind == tOp || nt.kind == tQuoted {
 			break
 		}
 		if nt.kind == tHan || nt.kind == tNum || nt.kind == tExt || (nt.kind == tWord && !reserved[nt.text]) {
-			term += nt.raw
+			b.WriteString(nt.raw)
 			p.pos++
 			continue
 		}
@@ -300,6 +312,7 @@ func (p *parser) contentTerm() error {
 			hintZh: fmt.Sprintf("提示：請用引號標出要搜尋的文字，例如 包含 \"%s\" 或 包含 \"%s\"", term, term+nt.raw),
 			hintEn: fmt.Sprintf(`hint: quote the text to search for, e.g. containing "%s"`, term+nt.raw)}
 	}
+	term := b.String()
 	if err := p.rejectGluedPunct(term, "包含", "containing", false); err != nil {
 		return err
 	}
@@ -406,20 +419,37 @@ func checkExcludeName(name, tok string) error {
 
 // extNounAhead reports whether the tokens at the current position form an
 // extension followed by a file noun ("go files"). With list, a separated
-// list counts too ("go 和 md 檔").
+// list counts too ("go 和 md 檔"). A list answer is memoized for every
+// candidate on the chain, since each of them reaches the same end: an
+// exclude list asks at every name, and rescanning made it quadratic.
 func (p *parser) extNounAhead(list bool) bool {
+	if v, ok := p.nounAhead[p.pos]; list && ok {
+		return v
+	}
+	var chain []int
+	found := false
 	for i := p.pos; i < len(p.toks) && isExtCandidate(p.toks[i], true, false); {
+		chain = append(chain, i)
 		i++
 		if _, n := p.matchAt(i, fileNouns); n > 0 {
-			return true
+			found = true
+			break
 		}
 		_, n := p.matchAt(i, listSeps)
 		if n == 0 || !list {
-			return false
+			break
 		}
 		i += n
 	}
-	return false
+	if list {
+		if p.nounAhead == nil {
+			p.nounAhead = map[int]bool{}
+		}
+		for _, i := range chain {
+			p.nounAhead[i] = found
+		}
+	}
+	return found
 }
 
 // looksLikeFileType reports whether an exclude name is really a file

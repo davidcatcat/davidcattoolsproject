@@ -418,6 +418,8 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
   - 只有標點（`?`、`。`）的查詢視為空查詢，會報錯。
 - 相對路徑的結果如果以 `-` 開頭，一律印成 `./-…`（例如 `./-rf.txt`），所有輸出模式都一樣（和 `find .` 相同），避免被其他程式當成選項。
 - 檔名不可能包含 NUL，所以 `-0` 的輸出一定能正確切開。不是合法 UTF-8 的檔名位元組會原樣輸出，不會轉換；macOS 的 APFS 本身不允許這種檔名。
+- 查詢本身必須是合法的 UTF-8。含有無效位元組的查詢一律報錯（`查詢含有無效的 UTF-8 位元組`／`the query contains bytes that are not valid UTF-8`，exit 2），不會先換成 U+FFFD 再繼續搜尋（那樣 `排除 "…"` 會排除錯的目錄）。要搜尋名稱含有這種位元組的目錄，請用 `--dir`：`--dir` 的路徑原樣使用，不做任何轉換。
+- Unicode 正規化：檔名、內容、排除名稱與路徑一律依位元組比對，不做 NFC／NFD 正規化。NFC 的 `café`（`é` 是一個字元 U+00E9）和 NFD 的 `cafe` + U+0301（`e` 加上組合重音符）看起來一樣，卻是不同的字串：`檔名包含 "café"` 只找到同一種拼法的檔名，內容搜尋也一樣，`排除 "café" 目錄` 只跳過同一種拼法的目錄。檔案系統本身的行為則不同：macOS 的 APFS 把兩種拼法當成同一個名稱，所以 `--dir` 用任一種拼法都找得到目錄，結果路徑沿用你輸入的拼法（目錄底下的名稱則是檔案系統儲存的拼法）；Linux 上兩種拼法是不同的名稱，可以同時存在，`--dir` 必須用儲存的那一種拼法。
 - 只回傳一般檔案，不回傳目錄；不跟隨目錄內的 symlink（搜尋位置本身是 symlink 時會跟隨，例如 `/tmp`）。
 - 隱藏檔與 `.git` 會被搜尋，需要時請加 `排除 .git`。
 - 沒有排序時依名稱順序輸出，達到數量上限就停止；有「最大/最新」時會先走完整棵樹再排序。有數量上限時，走訪過程只保留最好的 N 筆（記憶體 O(min(N, 符合數))）；沒有上限時會保留全部符合的檔案（記憶體 O(符合數)）。
@@ -426,6 +428,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
   - 檔名 glob 的 `[!…]`：find 當成否定，nlf（Go `path.Match`）不是，否定請寫 `[^…]`。
   - 大小寫：非 ASCII 字元的大小寫轉換（副檔名、排除名稱、`ignore case`）可能和 find、grep 不同。
   - binary 判斷與不是合法 UTF-8 的內容（見上方內容搜尋）。
+  - 含換行的搜尋文字：`包含 "a⏎b"`（引號裡有換行）在 nlf 是一段跨兩行的文字；近似指令的 `grep -F` 會把每一行當成一個 pattern（`a` 或 `b`），所以可能多列出檔案。
   - `--explain` 不檢查搜尋位置是否存在，find 則會對不存在的位置報錯。
   - 深度：`-mindepth N` / `-maxdepth N` 緊接在起點後面（GNU find 對放在其他條件後面的 global option 會警告）。有排除目錄時，最小深度改寫成 `-type f -path '<搜尋位置>/*/*'`（每一層一個 `/*`），不用 `-mindepth`：BSD 與 GNU find 的 `-mindepth` 在較淺的層級不套用任何條件，包括 `-prune`，所以較淺的排除目錄仍會被走訪；nlf 則在任何深度都會剪掉排除的目錄。
   - `--max-depth 0` 搭配沒有權限讀取的目錄時，nlf 完全不開啟它（沒有結果，exit 1），BSD find 仍會回報 Permission denied。
@@ -454,9 +457,23 @@ internal/search/search.go   唯讀走訪與比對
 
 `make check` 是完成標準：格式、vet、測試、build 全過。`make dist` 產生各平台的靜態執行檔與 `SHA256SUMS`（放在 `bin/`，不納入版本控制）。
 
+### Fuzzing
+
+`internal/query` 有 `FuzzParse`、`FuzzTokenize`、`FuzzShellQuote`，`internal/search` 有 `FuzzScanTerms`。一般的 `go test` 會跑它們的 seed corpus（`f.Add` 與 `testdata/fuzz/<target>/` 裡的檔案，包括已修正 bug 的重現輸入）。要長時間 fuzz：
+
+```
+cd tools/nlf
+go test -run '^$' -fuzz='^FuzzParse$'      -fuzztime=10m ./internal/query
+go test -run '^$' -fuzz='^FuzzTokenize$'   -fuzztime=10m ./internal/query
+go test -run '^$' -fuzz='^FuzzShellQuote$' -fuzztime=5m  ./internal/query
+go test -run '^$' -fuzz='^FuzzScanTerms$'  -fuzztime=10m ./internal/search
+```
+
+新產生的輸入存在 `$GOCACHE/fuzz`，不會寫進 repo；只有找到失敗時，Go 才會把重現輸入寫到 `testdata/fuzz/<target>/`。修正後請保留該檔案，並另外補一個確定性的 regression test。CI 每個平台對每個 target 各跑 5 秒（「Fuzz smoke」步驟）。
+
 ### CI
 
-`.github/workflows/nlf-ci.yml` 在 `ubuntu-latest` 與 `macos-latest` 上各跑一次：`make fmt-check`、`make vet`、`go test -count=1 -v`（Linux 不允許任何測試被略過；macOS 只允許沒有 `gstat` 時略過 `TestGNUSortPipeline`）、`go test -race`、`go test -count=10 -shuffle=on`、`make build`、`make dist`、驗證 `SHA256SUMS` 正好列出 4 個執行檔且雜湊正確、確認 Linux 執行檔是靜態連結且所有 dist 執行檔都是 `CGO_ENABLED=0`，再用 `scripts/ci-smoke.sh` 實際執行 `bin/nlf` 與本機平台的 dist 執行檔，最後確認工作目錄沒有被改動。
+`.github/workflows/nlf-ci.yml` 在 `ubuntu-latest` 與 `macos-latest` 上各跑一次：`make fmt-check`、`make vet`、`go test -count=1 -v`（Linux 不允許任何測試被略過；macOS 只允許沒有 `gstat` 時略過 `TestGNUSortPipeline`）、`go test -race`、`go test -count=10 -shuffle=on`、每個 fuzz target 各 5 秒的 fuzz smoke、`make build`、`make dist`、驗證 `SHA256SUMS` 正好列出 4 個執行檔且雜湊正確、確認 Linux 執行檔是靜態連結且所有 dist 執行檔都是 `CGO_ENABLED=0`，再用 `scripts/ci-smoke.sh` 實際執行 `bin/nlf` 與本機平台的 dist 執行檔，最後確認工作目錄沒有被改動。
 
 - 觸發條件：`pull_request`，以及推到 `main` 或 `feat/**` 的 `push`，且只在 `tools/nlf/**` 或 workflow 本身有變更時執行；也可以手動觸發（`workflow_dispatch`）。
 - 最小權限：`permissions: contents: read`，checkout 不保留 credentials；不使用 secrets，不發布、不上傳任何東西。

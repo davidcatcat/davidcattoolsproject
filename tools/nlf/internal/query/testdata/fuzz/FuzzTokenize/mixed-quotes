@@ -1,0 +1,2 @@
+go test fuzz v1
+string("\u300c\u932f\u8aa4\u300d \u201cx\u201d \u2018y\u2019 \u300ez\u300f 'it''s'")

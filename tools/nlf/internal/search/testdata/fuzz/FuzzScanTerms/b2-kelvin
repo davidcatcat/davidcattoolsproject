@@ -1,0 +1,7 @@
+go test fuzz v1
+[]byte("\u212ak")
+string("kk")
+string("")
+uint32(65533)
+byte('a')
+bool(true)
