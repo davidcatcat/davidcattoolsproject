@@ -3,8 +3,8 @@
 > 本次 autonomous session 唯一的正式 checkpoint。恢復工作時請先讀這份檔案，再確認 git 的實際狀態。
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
-Status: IN PROGRESS
-Last updated: 2026-09-28，A6 QA PASS、Review APPROVE WITH CHANGES（已套用）；A6 報告已寫；準備 commit
+Status: COMPLETE
+Last updated: 2026-09-28，A6 完成並 push 到 feature branch；等待 GitHub Actions 與人類 review
 
 ## Session：A6（top-N heap / sorted-limit memory optimization）
 
@@ -48,43 +48,31 @@ Last updated: 2026-09-28，A6 QA PASS、Review APPROVE WITH CHANGES（已套用�
 
 ### A6 Current phase
 
-- Git Safety → commit → push
-- QA：PASS（binary 對照 8997 組、oracle 8530 組全部相同，18 個 mutant 全部被抓到）；Review：APPROVE WITH CHANGES。已套用：`TestTopNMatchesFullSort` 在 `-race` 下從 16.6 秒降到約 6.5 秒；移除不會執行的 slice；README 改成 O(min(N, 符合數))。A6 報告 `reports/nlf/2026-09-28-topn-heap.md` 已寫。
-- Implementation 完成：`search.go`（`better`、`topN`、`newTopNFor`）、README 一句、`topn_test.go`、`sortlimit_test.go`。
-  - **20 萬檔案 RSS（中位數）：**
+- A6 完成，等待人類／external review 與 GitHub Actions 結果。QA：PASS；Review：APPROVE WITH CHANGES（已套用）；報告：`reports/nlf/2026-09-28-topn-heap.md`。
+- 20 萬檔案 `largest 5` 的 RSS：66 MiB → 約 10 MiB（接近未排序的完整走訪）；baseline 與 A6 的輸出在 184 + 8997 組對照中全部 byte-identical。
 
-    | 查詢 | baseline | A6 |
-    |------|---------|----|
-    | `largest 5` | 66.3 MiB | **9.8 MiB** |
-    | `newest 5` | 66.4 MiB | **9.6 MiB** |
-    | 未排序完整走訪 | 10.1 MiB | 9.6 MiB |
-    | 沒有上限的 `largest` | 66.1 MiB | 66.1 MiB |
+### A6 Completed work
 
-  - **Benchmark：** 20 萬筆時 TopN/largest-5 為 648 B/op、10 allocs；FullSort 為 55 MB/op。
-  - **Baseline 與 A6 binary 對照：** 184 組，stdout、stderr、exit code 全部 byte-identical（含 `-l`、`--null`、`--explain`，以及 `top 2147483647 largest`）。
-  - **Mutation：** 14 個全部被抓到。
-  - **Lead 驗證：** gofmt、make check、race、`-count=10 -shuffle=on`、make dist、smoke 全部 exit 0，0 SKIP；query、main、help、workflow、smoke 都沒有修改。
-
-### A6 Remaining work
-
-1. ~~Design review~~ DONE（APPROVE WITH CHANGES）
-2. ~~Implementation（先寫 oracle／tie 測試）~~ DONE
-3. ~~Benchmark + 20 萬檔案 RSS 量測 + baseline 對照~~ DONE
-4. ~~QA + Review（分開）+ mutation~~ DONE
-5. Git Safety
-6. ~~A6 report `reports/nlf/2026-09-28-topn-heap.md`~~ DONE
-7. commit + push A6 branch（不 merge main）
-8. checkpoint COMPLETE
+1. Design review：DONE（APPROVE WITH CHANGES，全部採納）
+2. Implementation（先寫測試）：DONE
+3. Benchmark、RSS 量測、baseline 對照：DONE
+4. QA + Review（分開）+ mutation：DONE（14 + 18 個 mutant 全部被抓到）
+5. Git Safety（Lead 檢查）：OK
+6. A6 報告：DONE
+7. commit `b7c4af1`（nlf: keep only the best N results for sorted limits (A6)）並 push；commit 前以 exit code 確認 gofmt、make check、race 通過
+8. PR：沒有 `gh`，請使用 compare 連結 `https://github.com/davidcatcat/davidcattoolsproject/pull/new/feat/nlf-roadmap-a6-topn-heap-20260928`
 
 ### A6 Exact next action
 
-Git Safety → 明確 staging commit → `git push -u origin feat/nlf-roadmap-a6-topn-heap-20260928` → checkpoint COMPLETE 並 push。
+無。等待 GitHub Actions（ubuntu-latest / macos-latest）與人類 review。**不要 merge A6 到 main；不要開始 A7。**
 
 ### A6 Git state
 
-- **Committed（A6）：** NO
-- **A6 branch pushed：** NO
-- **Merge A6 to main：** NOT PERFORMED
+- **Committed（A6）：** YES
+- **A6 branch pushed：** YES（`origin/feat/nlf-roadmap-a6-topn-heap-20260928`）
+- **Main touched by this task：** A5 merge commit（`1a764ab`）與 checkpoint commit（`5cdd567`），都是人類明確要求；另有人類要求的 `f51fc8a`（刪除初始測試腳本）。A6 沒有碰 main。
+- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認並提供 run ID。
+- **Merge to main：** NOT PERFORMED（A6）
 
 ## 先前的 session：A5 depth control（已 merge 到 main，`1a764ab`）
 
