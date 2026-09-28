@@ -4,7 +4,7 @@
 > 若 checkpoint 與 repo 不一致，以 repo 實際狀態為準，先更新這份檔案再繼續。
 
 Status: COMPLETE
-Last updated: 2026-09-28，A4 完成並 push 到 feature branch；等待人類 review
+Last updated: 2026-09-28，A4 已 merge 到 main（`76085f8`）
 
 ## Session：A4（`--explain` / output behavior consistency hardening）
 
@@ -19,6 +19,11 @@ Last updated: 2026-09-28，A4 完成並 push 到 feature branch；等待人類 r
 
 ### A4 Current phase
 
+- **A4 已 merge 到 main。** 人類確認 GitHub Actions run `36371257304` 在 `ubuntu-latest` 與 `macos-latest` 都 SUCCESS，external review 結論 APPROVE 後授權。
+- merge 前：`origin/main` = merge base = `c891fcb`，A4 branch ahead 2 / behind 0。
+- main 從 `c891fcb` fast-forward 到 **`76085f83a567bb43349c51269d187c32337c67b5`**，一般 push，沒有 force，也沒有改寫 history；`origin/main` 包含 `62f1672` 與 `76085f8`。
+- merge 後 final validation（在 main `76085f8` 上）：`make check` PASS、`go test -race ./...` PASS、working tree clean。
+- GNU 相關的假設（`-newermt` 小數秒、`! -size -0c`、root guard、`%.9Y`）已由 ubuntu-latest 上的 `TestExplainParity` / `TestGNUSortPipeline` 實際驗證通過。
 - A4 完成，等待人類 review。QA：PASS WITH CHANGES；Review：APPROVE WITH CHANGES；修正已套用。報告：`reports/nlf/2026-09-28-explain-parity.md`。
 
 ### A4 Audit 結果與 Lead 決定
@@ -62,15 +67,15 @@ Last updated: 2026-09-28，A4 完成並 push 到 feature branch；等待人類 r
 
 ### A4 Exact next action
 
-無。等待人類 review A4 branch 與 GitHub Actions 結果；GNU 相關的假設（`-newermt` 小數秒、`! -size -0c`、root guard、`%.9Y`）要看 ubuntu-latest 上的 `TestExplainParity` / `TestGNUSortPipeline`。**不要 merge A4 到 main**，除非人類明確要求。
+無（A4 已 merge）。下一個項目：A5（`--max-depth` / `--min-depth`），在 `feat/nlf-roadmap-a5-depth-control-20260928` 進行。
 
 ### A4 Git state
 
 - **Committed（A4）：** YES
 - **A4 branch pushed：** YES（`origin/feat/nlf-roadmap-a4-explain-parity-20260928`）
 - **Main touched by this task：** A3 fast-forward merge 到 main（`4f51340`）與 checkpoint commit（`c891fcb`），都是人類明確要求；A4 沒有碰 main。
-- **GitHub Actions 結果：** Lead 無法讀取（private repo，沒有 `gh`，不讀 keychain），需要人類確認。
-- **Merge to main：** NOT PERFORMED（A4）
+- **GitHub Actions 結果：** run `36371257304`：ubuntu-latest SUCCESS、macos-latest SUCCESS（人類確認並回報）。
+- **Merge to main：** PERFORMED（A4，fast-forward 到 `76085f8`，人類明確授權）
 
 ## 先前的 session：A3 `-0` / `--null`（已 merge 到 main，`4f51340`）
 
