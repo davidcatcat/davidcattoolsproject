@@ -1,4 +1,4 @@
-# llmtool — A1 Generic LLMTool Core
+# llmtool — A1 / A1.1 Generic LLMTool Core
 
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
@@ -16,13 +16,28 @@ CLI/env 覆寫。公司 Qwen 設定僅保留為獨立 deployment example，不�
 
 | 概念 | 意義 | A1 狀態 |
 |---|---|---|
-| Provider | 如何連模型：transport、endpoint、model、auth | 僅 `openai-compatible` |
+| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | 僅 `openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
-| Role | 模型在 workflow 中的職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
-| Agent | 可執行工具或修改 code 的 runtime | 未實作；llmtool A1 不是執行 agent |
+| Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
+| Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
 OpenAI API、Anthropic API、Claude CLI、Codex CLI 的專用 provider 都在未來 roadmap，
 A1 沒有這些整合，也不執行 shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
+
+## Roadmap status
+
+- **A0 — Model Validation:** DONE
+- **A1 — Generic LLMTool Core:** DONE and merged to `main`
+- **A1.1 — Configure Wizard + Live Smoke:** DONE on `feat/a1-configure-wizard`; merge to
+  `main` is pending
+- **A2 — Provider Expansion:** NEXT; provider implementations and capability metadata only
+
+A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
+automatic user config path handling, hidden API
+key input, `api_key`／`api_key_env` support, saving incomplete settings as null, atomic writes,
+0600 permissions, existing-config protection, profile preservation, and no automatic provider
+request during configuration. The live gateway result is recorded in the
+[A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
 ## 安裝與直接執行
 
@@ -52,6 +67,7 @@ setuptools 僅用於打包。離線環境需事先備妥套件 wheel／內部套
 ## 設定
 
 ```sh
+llmtool configure                  # 互動式設定精靈，不需要手動找 config path
 llmtool config path                 # ~/.config/llmtool/config.yaml
 llmtool config init                 # 新檔權限 0600，既有檔案不覆蓋
 llmtool config init --force         # 明確要求才取代既有檔案；拒絕 symlink
@@ -60,7 +76,14 @@ llmtool config show --max-tokens 4000
 llmtool config show --provider home-vllm  # 先在 user config 建立該 profile
 ```
 
-`config init` 只產生 generic template。請開啟 `config path` 顯示的檔案，手動填入
+`configure` 會互動詢問 provider、endpoint、model 與 generation 設定，驗證後直接寫入
+user config，不會連線測試 provider。API key 使用不回顯的終端輸入；也可只填 API key
+環境變數名稱，兩者不可同時設定。留空的 optional 欄位會保持 unset；`enable_thinking`
+留空時不會送出 provider-specific 參數。新檔自動建立目錄並以 `0600` 權限原子寫入。
+若設定檔已存在，精靈先詢問是否更新，預設為 No；確認更新會保留其他 provider profiles。
+精靈需要互動終端，確保 API key 不會退回可回顯輸入。
+
+`config init` 仍只產生 generic template。你也可以開啟 `config path` 顯示的檔案，手動填入
 provider 的 `base_url` 與 `model`，再執行 `ask` 等模型命令。
 `config show` 可以顯示尚未填妥的 null 設定；模型命令則在讀取 credential／發出 HTTP
 之前失敗，訊息為 `provider base_url is not configured` 或 `provider model is not configured`。
@@ -226,6 +249,11 @@ llmtool context-pack --file incident.txt --verbose
 
 這些是 prompt 約束，A1 不驗證 section 結構、指令數量或模型推論的正確性；
 不提供 A4 的 structured JSON Context Packet。
+
+Live smoke test 曾發現 `analyze-log` 建議 `cat /etc/company/app/config.yaml`；該命令沒有
+執行。**READ-ONLY != SAFE-TO-DISPLAY**：唯讀命令仍可能輸出 credentials 或 private
+configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 command safety validator
+及 A8 regression；A1 目前不會自動執行建議命令，也沒有 command validator。
 
 ## No-thinking 與輸出契約
 

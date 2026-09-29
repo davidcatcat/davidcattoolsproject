@@ -83,11 +83,20 @@ class CLITests(unittest.TestCase):
         self.assertNotIn(b"Traceback", result.stderr)
 
     def test_help_and_version_without_config(self):
-        for args in (("--help",), ("ask", "--help"), ("config", "--help"), ("--version",)):
+        for args in (("--help",), ("ask", "--help"), ("config", "--help"),
+                     ("configure", "--help"), ("--version",)):
             with self.subTest(args=args):
                 result = self.run_cli(*args)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(b"llmtool", result.stdout)
+        self.assertEqual(self.server.requests, [])
+
+    def test_configure_noninteractive_fails_without_touching_real_home_or_network(self):
+        result = self.run_cli("configure")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"input ended", result.stderr)
+        self.assertNotIn(b"API key", result.stdout + result.stderr)
+        self.assertFalse((self.home / ".config/llmtool/config.yaml").exists())
         self.assertEqual(self.server.requests, [])
 
     def test_direct_argument(self):
