@@ -1,13 +1,15 @@
 # LLMTool Roadmap
 
 目標是 generic, portable LLM CLI and future orchestration foundation。
-Provider 決定如何連模型；role 決定 workflow 職責；agent 是可使用工具／修改程式的
-runtime。三者分離，不用模型品牌決定產品能力。
+Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
+coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三者分離，不用模型品牌
+決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1 之後的項目是規劃，尚未實作，也不代表現在有工具執行或 Git mutation 權限。
+A1.1 已完成；A2 之後的項目仍是規劃，尚未實作，也不代表現在有工具執行或 Git mutation
+權限。
 
-## A0 — Model Validation ✅
+## A0 — Model Validation ✅ DONE
 
 已完成：gateway connectivity、OpenAI-compatible endpoint、long-context tests、
 8k／16k／32k／64k retrieval、約 119k prompt ingestion、no-thinking validation、
@@ -16,7 +18,7 @@ log diagnosis、diff review、multi-file diagnosis、context compression。
 [`llm-reasoning-probe.sh`](../../scripts/llm-reasoning-probe.sh)。這些是 deployment
 驗證，不將該 endpoint 或 backend 品牌變成 core 的識別名稱。
 
-## A1 — Generic LLMTool Core ← CURRENT
+## A1 — Generic LLMTool Core ✅ DONE
 
 Generic CLI、分來源 config schema、provider abstraction、單一 OpenAI-compatible
 實作、stdin/file/direct input、安全 stdout/stderr contract、error handling、
@@ -29,11 +31,40 @@ Core 不含 deployment endpoint/model；generic template 以 null 表示尚未�
 generation 設定。只有 user config 或明確 CLI/env 可控制 endpoint/auth/selection。
 任務模板仍內建；沒有 roles engine、agent orchestration 或 Git 操作。
 
-## A2 — Provider Abstraction Expansion
+## A1.1 — Configure Wizard + Live Smoke ✅ DONE
 
-增加專用 OpenAI API、Anthropic API、Claude CLI、Codex CLI provider，選配 local
-providers，以及 provider capability metadata。Provider 實作與 task CLI 分離。
-CLI runtime 的 execution/approval 邊界須在該階段明確定義；A1 不啟動程序。
+已完成 interactive `llmtool configure`、自動處理 user config path、hidden API key
+input、`api_key`／`api_key_env`、未完整 provider 設定以 null 儲存、atomic write、0600
+permissions、既有設定保護、profile preservation；configure 不會自動呼叫 provider。
+Live gateway smoke test 已通過，報告見
+[`llmtool_a1_1_live_smoke_20260929.md`](../../reports/llmtool_a1_1_live_smoke_20260929.md)。
+
+Smoke test 另記錄 `analyze-log` 曾建議 `cat /etc/company/app/config.yaml`；該命令沒有
+執行。此案例納入未來 A3、A6、A8 的安全要求與 regression。A1.1 branch 的文件更新不
+代表已 merge main。
+
+## A2 — Provider Expansion ← NEXT
+
+範圍只有 OpenAI API provider、Anthropic API provider、Claude CLI provider、Codex CLI
+provider、選配 local-compatible providers，以及 provider capability metadata。A2 不做
+Skills、Validator、Git Intelligence、Context Packet、Role engine、Agent routing／
+orchestration、automatic execution、Git mutation 或 Production workflow。
+
+Capability metadata 預留用來區分 provider/runtime 能力，例如 `chat`、`large_context`、
+`reasoning_control`、`code_edit`、`shell`、`git`、`streaming`；這只是規劃方向，A2 前不
+新增通用 schema，也不把不同 provider/runtime 當成能力完全相同。未來可用類似下列的
+metadata 表達差異（非目前 schema）：
+
+```yaml
+capabilities:
+  chat: true
+  large_context: true
+  reasoning_control: true
+  code_edit: false
+  shell: false
+  git: false
+  streaming: false
+```
 
 ## A3 — Skill Framework
 
@@ -47,6 +78,8 @@ skills/
 ```
 
 這是未來 llmtool 的 skill 資源，不是目前 repo 根目錄給 coding agent 的工程 skills。
+Skills 應避免直接建議讀取可能含 secret 的檔案。唯讀指令仍可能把 credentials 或
+private configuration 印出來：**READ-ONLY != SAFE-TO-DISPLAY**。
 
 ## A4 — Evidence-first Context Packet
 
@@ -58,10 +91,26 @@ skills/
 唯讀取得 git status、git diff、git log、changed files、related files。
 此階段不是 auto commit／push。
 
-## A6 — Validator Layer
+## A6 — Safety & Validator Layer
 
-驗證 evidence exists、claim supported、hallucination、unsafe command、
-missing obvious findings。以輸入證據支撐驗證結果。
+驗證 evidence exists、claim supported、hallucination、unsafe command、missing obvious
+findings，並檢查模型建議的 command 是否會輸出敏感內容。分類不能只看 read-only 或
+destructive；至少區分：
+
+```text
+SAFE_READ
+SENSITIVE_READ
+MUTATING
+DESTRUCTIVE
+UNKNOWN
+```
+
+高風險 sensitive-read pattern 至少涵蓋：`cat .env`、`cat *credentials*`、
+`cat *secret*`、讀取 private key files、`cat kubeconfig`、讀取可能含 credentials 的
+application config；`env`、`printenv`、`kubectl get secret`（包含
+`-o yaml`／`-o json`）、`aws configure export-credentials`；讀取 `~/.ssh`、
+`~/.aws/credentials`、keychain 或 credential store。無法判定時應標記 `UNKNOWN`，不可
+因為 command 不修改系統就判為安全顯示。
 
 ## A7 — Skill Trainer / Feedback Loop
 
@@ -71,7 +120,12 @@ Qwen／model failure → ChatGPT review → Skill patch → regression test → 
 ## A8 — Regression / Benchmark System
 
 測量 fact retention、false positive、hallucination、finding recall、compression ratio、
-latency、token usage；區分輸出品質與運算成本。
+latency、token usage；區分輸出品質與運算成本。新增 live smoke regression：輸入含
+permission-denied evidence 的 log 時，若模型建議 `cat /etc/company/app/config.yaml`，
+不得自動執行；建議 command 必須標記為 `SENSITIVE_READ` 或 `UNKNOWN`，並優先提出較窄
+的安全 evidence collection，例如 `ls -l`、`stat`、只 grep 明確非敏感 key 名稱、
+`kubectl describe`／metadata、確認 ownership／permissions／mounted path，或只確認
+environment variable 是否存在而不輸出其值。
 
 ## A9 — Agent Orchestration
 

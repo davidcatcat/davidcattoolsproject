@@ -85,7 +85,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — LLMTool A1: generic, portable, read-only LLM CLI foundation with named providers, a restricted project config, and offline tests. Currently ships only `openai-compatible`; see the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — LLMTool A1 core and A1.1 configure wizard are complete; live gateway smoke report is recorded. A2 provider expansion is next. Currently ships only `openai-compatible`; see the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
