@@ -27,6 +27,7 @@ Deliver a working change, not just code generation.
 - Do not add speculative features.
 - Do not weaken tests to obtain a green build.
 - Preserve unrelated work.
+- Provider or agent integration must not treat technical capability as permission to execute actions.
 
 ## Completion criteria
 
