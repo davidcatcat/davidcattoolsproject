@@ -86,7 +86,8 @@ generation:
 
 Do not set `base_url` for `type: openai`; alternate endpoints are rejected. OpenAI API live usage
 requires separately configured OpenAI API credentials and billing. ChatGPT subscriptions and API
-billing are separate; tests do not require live usage, billing setup, or credits.
+billing are separate; tests do not require live usage, billing setup, or credits. The OpenAI
+provider has not been validated against the live API; provider tests use a local mock server.
 
 ## 安裝與直接執行
 
