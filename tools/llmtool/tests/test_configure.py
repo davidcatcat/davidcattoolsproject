@@ -1,4 +1,7 @@
 import io
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,6 +11,8 @@ import yaml
 
 from llmtool.configure import run_configure
 from llmtool.errors import LLMToolError
+
+ENTRYPOINT = Path(__file__).resolve().parents[1] / "llmtool.py"
 
 
 class InteractiveInput:
@@ -67,6 +72,40 @@ class ConfigureTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("API key (leave blank to unset): ", answers.prompts)
 
+    def test_blank_base_url_and_model_are_saved_as_null(self):
+        result, out, err = self.run_wizard(self.answers(url="", model=""))
+        self.assertTrue(result)
+        saved = yaml.safe_load(self.path.read_text())
+        self.assertIsNone(saved["providers"]["default"]["base_url"])
+        self.assertIsNone(saved["providers"]["default"]["model"])
+        self.assertIn("Base URL: <not configured>", out)
+        self.assertIn("Model: <not configured>", out)
+        self.assertEqual(err, "")
+        self.assertTrue(self.path.is_file())
+
+    def test_partial_base_url_with_blank_model_is_saved(self):
+        result, out, _ = self.run_wizard(self.answers(url="https://llm.example", model=""))
+        self.assertTrue(result)
+        saved = yaml.safe_load(self.path.read_text())
+        self.assertEqual(saved["providers"]["default"]["base_url"], "https://llm.example")
+        self.assertIsNone(saved["providers"]["default"]["model"])
+        self.assertIn("Model: <not configured>", out)
+
+    def test_model_command_rejects_saved_unconfigured_profile_before_http(self):
+        self.run_wizard(self.answers(url="", model=""))
+        env = {
+            "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
+            "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        result = subprocess.run(
+            [sys.executable, str(ENTRYPOINT), "ask", "test input"],
+            cwd=self.temp.name, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=10, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, b"")
+        self.assertEqual(result.stderr, b"llmtool: provider base_url is not configured\n")
+
     def test_hidden_api_key_is_never_emitted(self):
         secret = "fake-private-api-token"
         result, out, err = self.run_wizard(self.answers(), secret=secret)
@@ -121,7 +160,8 @@ class ConfigureTests(unittest.TestCase):
         self.assertIn("Active provider: new", out)
 
     def test_invalid_endpoint_or_model_rejected_before_write(self):
-        for url, model in (("file:///etc/passwd", "model"), ("https://llm.example", "")):
+        for url, model in (("file:///etc/passwd", "model"),
+                           ("https://llm.example", "invalid\x01model")):
             with self.subTest(url=url, model=model):
                 with self.assertRaises(LLMToolError):
                     self.run_wizard(self.answers(url=url, model=model))

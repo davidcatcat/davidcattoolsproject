@@ -10,7 +10,6 @@ from .config import (
     user_config_path,
 )
 from .errors import LLMToolError
-from .providers import client_type
 
 
 def _answer(input_fn, label, default=None, optional=False):
@@ -111,12 +110,11 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     config["generation"] = {"temperature": temperature, "max_tokens": max_tokens}
     _validate(config)
     provider = selected_provider(config)
-    client_type(provider["type"]).validate_ready(provider)
     save_config(path, config, replace=exists)
 
     print("Configuration saved: " + str(path), file=stdout)
     print("Active provider: " + active_provider, file=stdout)
     print("Type: " + provider["type"], file=stdout)
-    print("Base URL: " + provider["base_url"], file=stdout)
-    print("Model: " + provider["model"], file=stdout)
+    print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
+    print("Model: " + (provider["model"] or "<not configured>"), file=stdout)
     return True
