@@ -6,8 +6,9 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1 已完成；A2 之後的項目仍是規劃，尚未實作，也不代表現在有工具執行或 Git mutation
-權限。
+A1.1 已完成並合併至 main；A2.1 是目前工作，A2.2 之後仍是規劃。Capability 描述
+implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
+已授予任何工具執行或 Git mutation 權限。
 
 ## A0 — Model Validation ✅ DONE
 
@@ -40,31 +41,48 @@ Live gateway smoke test 已通過，報告見
 [`llmtool_a1_1_live_smoke_20260929.md`](../../reports/llmtool_a1_1_live_smoke_20260929.md)。
 
 Smoke test 另記錄 `analyze-log` 曾建議 `cat /etc/company/app/config.yaml`；該命令沒有
-執行。此案例納入未來 A3、A6、A8 的安全要求與 regression。A1.1 branch 的文件更新不
-代表已 merge main。
+執行。此案例納入未來 A3、A6、A8 的安全要求與 regression。
 
-## A2 — Provider Expansion ← NEXT
+## A2 — Provider Expansion
 
-範圍只有 OpenAI API provider、Anthropic API provider、Claude CLI provider、Codex CLI
-provider、選配 local-compatible providers，以及 provider capability metadata。A2 不做
-Skills、Validator、Git Intelligence、Context Packet、Role engine、Agent routing／
-orchestration、automatic execution、Git mutation 或 Production workflow。
+只擴充 Provider implementation 與其技術能力描述，不做 Skills、Validator、Git
+Intelligence、Context Packet、Role engine、Agent routing／orchestration、automatic
+execution、Git mutation 或 Production workflow。
 
-Capability metadata 預留用來區分 provider/runtime 能力，例如 `chat`、`large_context`、
-`reasoning_control`、`code_edit`、`shell`、`git`、`streaming`；這只是規劃方向，A2 前不
-新增通用 schema，也不把不同 provider/runtime 當成能力完全相同。未來可用類似下列的
-metadata 表達差異（非目前 schema）：
+### A2.1 — Provider Capability Foundation ← CURRENT
 
-```yaml
-capabilities:
-  chat: true
-  large_context: true
-  reasoning_control: true
-  code_edit: false
-  shell: false
-  git: false
-  streaming: false
-```
+建立 typed、immutable、固定 capability 欄位，以及明確靜態 provider registry、純 metadata
+lookup API 和離線 `llmtool providers`／`llmtool providers --json`。Production registry
+目前只有 `openai-compatible`。Capability 包含 `chat`、`large_context`、
+`reasoning_control`、`streaming`、`code_edit`、`shell`、`git`；它描述 implementation/runtime
+技術能力，不是 authorization、policy 或 approval。不得把 capability 寫入 deployment
+config，也不得據此執行 shell、修改檔案或操作 Git。
+
+`openai-compatible` 宣告 chat、large-context workflow、reasoning control 為 true，streaming、
+code edit、shell、git 為 false。`large_context` 不代表固定 context window；實際限制取決於
+model/deployment。`reasoning_control` 只代表此實作可使用可選的
+`provider_options.enable_thinking` 擴充，並映射到 `chat_template_kwargs.enable_thinking`；
+它不是 OpenAI-compatible 通用標準，endpoint 是否支援仍需確認。
+
+### A2.2 — OpenAI API Provider
+
+未實作。增加獨立 OpenAI API implementation，並由 implementation 宣告 capabilities。
+
+### A2.3 — Anthropic API Provider
+
+未實作。增加獨立 Anthropic API implementation，並由 implementation 宣告 capabilities。
+
+### A2.4 — Claude CLI Provider
+
+未實作。先明確定義 CLI runtime 的程序執行與 approval 邊界，再增加 provider。
+
+### A2.5 — Codex CLI Provider
+
+未實作。先明確定義 CLI runtime 的程序執行與 approval 邊界，再增加 provider。
+
+### A2.6 — Provider Integration / Smoke Tests
+
+未實作。整合已完成的 providers，依各自明確定義的安全邊界執行測試與 smoke checks。
 
 ## A3 — Skill Framework
 

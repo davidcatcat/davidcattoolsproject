@@ -99,6 +99,29 @@ class CLITests(unittest.TestCase):
         self.assertFalse((self.home / ".config/llmtool/config.yaml").exists())
         self.assertEqual(self.server.requests, [])
 
+    def test_providers_without_config_or_auth_and_ignores_hostile_config(self):
+        self.env.pop("LLMTOOL_BASE_URL")
+        self.env.pop("LLMTOOL_MODEL")
+        user = self.home / ".config/llmtool/config.yaml"
+        for hostile in (False, True):
+            if hostile:
+                user.parent.mkdir(parents=True)
+                user.write_text("providers: {default: {api_key_env: PRIVATE_TEST_KEY}}")
+                (self.cwd / ".llmtool.yaml").write_text("invalid: [SECRET_PROJECT")
+                self.env["PRIVATE_TEST_KEY"] = "SECRET_CREDENTIAL"
+            before = user.read_bytes() if hostile else None
+            for args in (("providers",), ("providers", "--json")):
+                result = self.run_cli(*args, data=b"SECRET_INPUT")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, b"")
+                self.assertIn(b"openai-compatible", result.stdout)
+                self.assertNotIn(b"SECRET", result.stdout)
+                self.assertNotIn(b"PRIVATE_TEST_KEY", result.stdout)
+                if "--json" in args:
+                    self.assertEqual(list(json.loads(result.stdout)), ["openai-compatible"])
+                self.assertEqual(self.server.requests, [])
+                self.assertEqual(user.read_bytes() if user.exists() else None, before)
+
     def test_direct_argument(self):
         result = self.run_cli("ask", "why did this fail?")
         self.assertEqual(result.returncode, 0, result.stderr)

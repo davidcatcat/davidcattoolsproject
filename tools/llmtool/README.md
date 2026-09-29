@@ -1,9 +1,9 @@
-# llmtool — A1 / A1.1 Generic LLMTool Core
+# llmtool — Generic LLMTool Core
 
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
-這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。A1 只實作 generic core
-與一種 provider：`openai-compatible`。它可連 self-hosted Qwen、vLLM、相容 gateway、
+這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production provider
+只有 `openai-compatible`。它可連 self-hosted Qwen、vLLM、相容 gateway、
 LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
 不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
 
@@ -14,23 +14,24 @@ User must configure a provider before first model request.
 請先在 user config 手動設定 OpenAI-compatible endpoint 與 model；也可使用明確
 CLI/env 覆寫。公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
 
-| 概念 | 意義 | A1 狀態 |
+| 概念 | 意義 | 狀態 |
 |---|---|---|
 | Provider | 如何連模型或 runtime：transport、endpoint、model、auth | 僅 `openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
-OpenAI API、Anthropic API、Claude CLI、Codex CLI 的專用 provider 都在未來 roadmap，
-A1 沒有這些整合，也不執行 shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
+目前尚未支援 OpenAI dedicated API provider、Anthropic provider、Claude CLI provider、
+Codex CLI provider。llmtool 不執行 shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
 ## Roadmap status
 
 - **A0 — Model Validation:** DONE
 - **A1 — Generic LLMTool Core:** DONE and merged to `main`
-- **A1.1 — Configure Wizard + Live Smoke:** DONE on `feat/a1-configure-wizard`; merge to
-  `main` is pending
-- **A2 — Provider Expansion:** NEXT; provider implementations and capability metadata only
+- **A1.1 — Configure Wizard + Live Smoke:** DONE and merged to `main`
+- **A2.1 — Provider Capability Foundation:** CURRENT
+- **A2.2–A2.6:** planned; dedicated OpenAI/Anthropic API and Claude/Codex CLI providers are not
+  implemented
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -38,6 +39,26 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 0600 permissions, existing-config protection, profile preservation, and no automatic provider
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
+
+## Provider capabilities
+
+`llmtool providers` lists the capabilities declared by each production provider implementation;
+`llmtool providers --json` prints the same metadata as deterministic JSON. Both commands are
+offline introspection: they do not read user/project config or credentials, create a config file,
+or connect to a provider.
+
+Capabilities describe technical implementation/runtime ability. **Capability is not authorization,
+policy, or approval.** In particular, `code_edit`, `shell`, or `git` metadata does not grant
+permission or cause llmtool to modify files, execute commands, or operate Git. Capability metadata
+is implementation-owned and is not stored in user/project config.
+
+The current `openai-compatible` values are `chat: yes`, `large_context: yes`,
+`reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+`large_context` describes support for large-context workflows, not a fixed context window;
+deployment/model limits vary. `reasoning_control` describes this implementation's optional
+`provider_options.enable_thinking` extension, sent as `chat_template_kwargs.enable_thinking`.
+That field is not a universal OpenAI-compatible standard, and endpoint support varies.
+OpenAI dedicated API, Anthropic, Claude CLI, and Codex CLI providers are not implemented.
 
 ## 安裝與直接執行
 
@@ -337,13 +358,13 @@ llmtool/cli.py                         CLI 與輸出
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
 llmtool/inputs.py                      明確輸入來源、文字驗證
 llmtool/prompts.py                     四個內建模板
-llmtool/providers/base.py              Provider.complete() / Reply 共用介面
-llmtool/providers/__init__.py          provider type registry 與 factory
+llmtool/providers/base.py              capability model 與 Provider.complete() / Reply contract
+llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
 tests/                                config/provider/CLI 測試
 ```
 
 執行路徑為 task → prompt template → selected provider → `complete()` → final output。
-未來實作可遵循 `Provider.complete()`／`Reply` contract，加入 type registry 及對應
-config validation，無須改 task CLI 流程。A2 擴充 provider，A3 建立外部 Skill Framework；
-其餘階段及 provider/role 分離方向見 [Roadmap](ROADMAP.md)。
+Provider implementations 透過靜態 registry 宣告 type、capabilities、option/readiness
+validation 與 `complete()`；A2.2 之後擴充 provider，A3 建立外部 Skill Framework。其餘
+階段及 provider/role 分離方向見 [Roadmap](ROADMAP.md)。
