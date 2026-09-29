@@ -82,9 +82,12 @@ mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不
 已確認本機 CLI 的非互動 print、text output、safe mode、no-session-persistence 與停用 tools
 參數。第一個 implementation candidate 只做純文字 request/response，以 argv/stdin 啟動 CLI，
 不宣告 large-context、reasoning-control、streaming、code-edit、shell 或 Git capability。
-Fake executable tests PASS，涵蓋 subprocess contract。Real CLI smoke 曾執行但 CLI exit status
-為 1；stderr 已安全隱去，原因未能從此結果確定，因此不記為 live inference PASS。A2.4
-保持 CURRENT，等待 external review 與 runtime/authentication follow-up。
+Fake executable tests 與 canonical suite PASS。正常 authenticated user shell 的 direct CLI marker
+smoke PASS（使用者提供的執行證據）；Codex isolated runtime 無法取得相同 authenticated session。
+llmtool isolated-HOME live smoke 曾以 `LLMTOOL_CLAUDE_CLI_HOME` 嘗試一次，未取得 marker，依
+execution-environment 限制記為 SKIPPED-ENVIRONMENT，不視為 inference FAIL 或 PASS。驗證細節見
+[`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。
+A2.4 保持 CURRENT，等待 external review。
 
 ### A2.5 — Codex CLI Provider
 
