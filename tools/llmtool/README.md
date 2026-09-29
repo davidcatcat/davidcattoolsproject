@@ -52,6 +52,7 @@ setuptools 僅用於打包。離線環境需事先備妥套件 wheel／內部套
 ## 設定
 
 ```sh
+llmtool configure                  # 互動式設定精靈，不需要手動找 config path
 llmtool config path                 # ~/.config/llmtool/config.yaml
 llmtool config init                 # 新檔權限 0600，既有檔案不覆蓋
 llmtool config init --force         # 明確要求才取代既有檔案；拒絕 symlink
@@ -60,7 +61,14 @@ llmtool config show --max-tokens 4000
 llmtool config show --provider home-vllm  # 先在 user config 建立該 profile
 ```
 
-`config init` 只產生 generic template。請開啟 `config path` 顯示的檔案，手動填入
+`configure` 會互動詢問 provider、endpoint、model 與 generation 設定，驗證後直接寫入
+user config，不會連線測試 provider。API key 使用不回顯的終端輸入；也可只填 API key
+環境變數名稱，兩者不可同時設定。留空的 optional 欄位會保持 unset；`enable_thinking`
+留空時不會送出 provider-specific 參數。新檔自動建立目錄並以 `0600` 權限原子寫入。
+若設定檔已存在，精靈先詢問是否更新，預設為 No；確認更新會保留其他 provider profiles。
+精靈需要互動終端，確保 API key 不會退回可回顯輸入。
+
+`config init` 仍只產生 generic template。你也可以開啟 `config path` 顯示的檔案，手動填入
 provider 的 `base_url` 與 `model`，再執行 `ask` 等模型命令。
 `config show` 可以顯示尚未填妥的 null 設定；模型命令則在讀取 credential／發出 HTTP
 之前失敗，訊息為 `provider base_url is not configured` 或 `provider model is not configured`。

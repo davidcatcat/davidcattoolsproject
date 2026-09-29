@@ -277,19 +277,24 @@ def show_config(config):
 
 def init_config(path, force=False):
     """Create privately; refuse symlinks and replace atomically only with --force."""
+    save_config(path, DEFAULTS, replace=force)
+
+
+def save_config(path, config, replace=False):
+    """Atomically write a validated config with owner-only permissions."""
     path = Path(path)
     temporary = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if path.is_symlink():
             raise LLMToolError("refusing to replace a config symlink")
-        if path.exists() and not force:
+        if path.exists() and not replace:
             raise LLMToolError("user config already exists; use --force to replace it")
-        content = yaml_module().safe_dump(DEFAULTS, sort_keys=False)
+        content = yaml_module().safe_dump(config, sort_keys=False)
         descriptor, temporary = tempfile.mkstemp(prefix=".llmtool-", dir=path.parent)
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(content)
-        if force:
+        if replace:
             os.replace(temporary, path)
         else:
             os.link(temporary, path)  # Atomic no-clobber, including concurrent init.

@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
+from .configure import run_configure
 from .errors import LLMToolError
 from .inputs import read_input
 from .prompts import TEMPLATES, messages_for
@@ -41,6 +42,7 @@ def parser_for_cli():
         child.add_argument("--file", help="read one UTF-8 regular file")
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
         add_options(child)
+    sub.add_parser("configure", help="Interactively configure a provider profile")
     config = sub.add_parser("config", help="Initialize or inspect configuration")
     actions = config.add_subparsers(dest="action", required=True)
     init = actions.add_parser("init", help="Create private user config")
@@ -54,6 +56,9 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "configure":
+            run_configure()
+            return 0
         if args.command == "config" and args.action == "path":
             print(user_config_path())
             return 0
@@ -78,6 +83,9 @@ def main(argv=None):
         return 1
     except (OSError, UnicodeError):
         print("llmtool: local I/O failed; details omitted", file=sys.stderr)
+        return 1
+    except EOFError:
+        print("llmtool: input ended before configuration was complete", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("llmtool: interrupted", file=sys.stderr)
