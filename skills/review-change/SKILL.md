@@ -22,6 +22,22 @@ Review the actual diff against the requested behavior and repository rules.
 
 If no material issue is found, say so directly and identify any testing or environment gaps that remain.
 
+## Provider and runtime reviews
+
+- Distinguish implementation capability from upstream API capability, authorization, permission,
+  policy, and approval. Upstream support does not count as an implementation capability unless
+  this implementation enables and safely supports it; upstream tool support alone cannot justify
+  `shell=true`, `git=true`, or `code_edit=true`.
+- For provider/model transports, check that credentials, Authorization headers, raw HTTP error
+  bodies, raw responses, prompts, and internal reasoning cannot leak through stdout, stderr,
+  exceptions, or final replies. Include provider fields such as `reasoning_content` in that check.
+- State validation evidence precisely: source review, unit test, mock integration, network
+  reachability, authentication, real inference, backend session, repository access, and live
+  provider test are separate results. Reachability is not inference; mock success is not live
+  success; one backend session says nothing about another backend.
+- Check that branch, merge, roadmap, and report wording matches the actual tested revision and
+  validation state. Keep CURRENT, DONE, merged, and unmerged claims accurate.
+
 ## Completion criteria
 
 - Entire intended diff was reviewed.
