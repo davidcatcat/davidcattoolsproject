@@ -6,6 +6,7 @@ from typing import Iterable
 
 from .openai_compatible import OpenAICompatibleClient
 from .openai import OpenAIProvider
+from .claude_cli import ClaudeCLIProvider
 from .base import Provider, ProviderCapabilities
 from ..errors import LLMToolError
 
@@ -38,7 +39,7 @@ class ProviderRegistry:
         return self.client_type(name).CAPABILITIES
 
 
-PROVIDER_REGISTRY = ProviderRegistry((OpenAIProvider, OpenAICompatibleClient))
+PROVIDER_REGISTRY = ProviderRegistry((OpenAIProvider, OpenAICompatibleClient, ClaudeCLIProvider))
 
 
 def client_type(name: str) -> type[Provider]:

@@ -3,26 +3,31 @@
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
 這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production providers
-為 `openai` 與 `openai-compatible`。後者可連 self-hosted Qwen、vLLM、相容 gateway、
+為 `claude-cli`、`openai` 與 `openai-compatible`。`claude-cli` 使用本機 Claude CLI runtime，
+不是 Anthropic HTTP API provider。`openai-compatible` 可連 self-hosted Qwen、vLLM、相容 gateway、
 LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
 不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
 
 llmtool has no built-in model or deployment endpoint defaults. `openai` uses its fixed official
-origin; users configure a model and explicit credentials before the first request.
+origin and requires a configured model and explicit API credentials. `claude-cli` requires the
+user's local Claude CLI to be installed and authenticated; llmtool does not inspect or manage its
+authentication.
 
 通用 template 的 `base_url`、`model` 都是 `null`，不會自動連任何部署。
 `openai-compatible` 使用者須設定 endpoint 與 model；`openai` endpoint 固定，使用者設定
-model 與明確 credentials。公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
+model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 model，或選擇性指定 model。
+公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
 
 | 概念 | 意義 | 狀態 |
 |---|---|---|
-| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `openai`、`openai-compatible` |
+| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
-目前尚未支援 Anthropic provider、Claude CLI provider、Codex CLI provider。llmtool 不執行
-shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
+目前尚未支援 Anthropic API provider 或 Codex CLI provider。Claude CLI integration 只作
+純文字 runtime request，不使用 CLI tools，不提供 shell、Git 或 code-edit capability。
+llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
 ## Roadmap status
 
@@ -30,8 +35,10 @@ shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A1 — Generic LLMTool Core:** DONE and merged to `main`
 - **A1.1 — Configure Wizard + Live Smoke:** DONE and merged to `main`
 - **A2.1 — Provider Capability Foundation:** DONE
-- **A2.2 — OpenAI API Provider:** CURRENT; Responses API, pure text
-- **A2.3–A2.6:** planned; Anthropic API and Claude/Codex CLI providers are not implemented
+- **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
+- **A2.3 — Anthropic API Provider:** planned
+- **A2.4 — Claude CLI Provider:** CURRENT; local CLI, pure text
+- **A2.5–A2.6:** planned; Codex CLI provider and provider integration checks are not implemented
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -52,8 +59,10 @@ policy, or approval.** In particular, `code_edit`, `shell`, or `git` metadata do
 permission or cause llmtool to modify files, execute commands, or operate Git. Capability metadata
 is implementation-owned and is not stored in user/project config.
 
-Both production providers declare `chat: yes`, `large_context: yes`, `reasoning_control: yes`,
-`streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+The `openai` and `openai-compatible` providers declare `chat: yes`, `large_context: yes`,
+`reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+`claude-cli` declares only `chat: yes`; its `large_context`, `reasoning_control`, `streaming`,
+`code_edit`, `shell`, and `git` capabilities are false.
 `large_context` describes support for large-context workflows, not a fixed context window;
 deployment/model limits vary. `reasoning_control` describes this implementation's optional
 `provider_options.enable_thinking` extension, sent as `chat_template_kwargs.enable_thinking`.
@@ -88,6 +97,35 @@ Do not set `base_url` for `type: openai`; alternate endpoints are rejected. Open
 requires separately configured OpenAI API credentials and billing. ChatGPT subscriptions and API
 billing are separate; tests do not require live usage, billing setup, or credits. The OpenAI
 provider has not been validated against the live API; provider tests use a local mock server.
+
+## Claude CLI provider
+
+The `claude-cli` provider invokes the user's installed `claude` executable as a local runtime; it
+does not call the Anthropic HTTP API. It sends the llmtool conversation over stdin using the CLI's
+non-interactive print mode with text output, safe mode, no session persistence, and all tools
+disabled. The subprocess uses an argv list, bounded output, and a timeout; raw CLI stderr is never
+forwarded. It does not edit files, execute shell commands, operate Git, stream, or expose reasoning
+controls. The CLI's default model is used unless a model is configured. Generic temperature and
+max_tokens settings are retained in config but are not sent or enforced by Claude CLI.
+
+Claude CLI must already be installed and authenticated by the user. llmtool does not discover,
+read, or manage Claude credentials and does not configure CLI authentication. `llmtool configure`
+does not ask for a Base URL or API key and does not start Claude CLI. This runtime provider is
+separate from the Anthropic API provider, which remains planned.
+For isolated llmtool configuration tests, `LLMTOOL_CLAUDE_CLI_HOME` can point the child process
+at the user's existing Claude CLI home while llmtool itself uses a temporary `HOME`; it is a
+runtime environment setting and cannot be set in project config.
+
+Example user config (the model is optional; the CLI default is used when omitted):
+
+```yaml
+providers:
+  local-claude:
+    type: claude-cli
+    model: sonnet
+    timeout_seconds: 120
+active_provider: local-claude
+```
 
 ## 安裝與直接執行
 
@@ -136,7 +174,8 @@ config 欄位建議值，不會在 configure 時讀取環境變數。新檔自�
 
 `config init` 仍只產生 generic template。`openai-compatible` 需設定 `base_url` 與 `model`；
 `openai` 使用固定官方 endpoint，不接受自訂 `base_url`，需設定 model 和明確的 API key 或
-key 環境變數名稱，再執行 `ask` 等模型命令。
+key 環境變數名稱；`claude-cli` 使用已安裝並由使用者登入的本機 Claude CLI，不設定 HTTP
+endpoint 或 llmtool API credential。之後再執行 `ask` 等模型命令。
 `config show` 可以顯示尚未填妥的 null 設定；模型命令則在讀取 credential／發出 HTTP
 之前失敗，訊息指出所選 provider 缺少必要的 endpoint、model 或 authentication 設定。
 未選用的 profile 可保持 null，不影響已完整設定的 active provider。
@@ -373,8 +412,10 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 
 ## Safety boundary
 
-模型命令唯讀本機資料並向設定的 provider 發出 HTTPS/HTTP request；不執行任何程序、shell
-或 Git 操作，不修改 production。唯一內建檔案寫入是明確的 `config init`。
+模型命令唯讀本機資料並向設定的 API provider 發出 HTTPS/HTTP request；`claude-cli` 會以
+固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
+及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
+唯一由 llmtool 直接進行的檔案寫入是明確的 config 操作。
 不自動讀取 SSH、keychain 或任意 secret file；明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。
 工具不寫 prompt／response log、cache 或 benchmark report。
@@ -386,10 +427,11 @@ make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"
 ```
 
 `check` 跑 compileall syntax check 與 unittest。測試使用暫存 HOME/project、mock
-transport 和 `127.0.0.1` ephemeral port 的假 gateway；不使用真實 user config、
-credentials，也不連公司 gateway 或 OpenAI API。OpenAI provider tests 將 official origin
-替換為 loopback mock HTTP server，驗證 Responses request/response、timeout、redirect 與
-sanitized errors；沒有 live API call。CLI tests 亦涵蓋輸入、config、redirect 與輸出分離。
+transport、fake Claude executable 和 `127.0.0.1` ephemeral port 的假 gateway；不使用真實
+user config 或 credentials，也不連公司 gateway、OpenAI API 或真實 Claude CLI。OpenAI
+provider tests 將 official origin 替換為 loopback mock HTTP server；Claude CLI tests 驗證
+argv、stdin、timeout、output limit 與 sanitized errors。Live runtime validation 另行記錄，
+不由 mock/unit test 推定。
 
 ```text
 llmtool/cli.py                         CLI 與輸出
@@ -400,6 +442,7 @@ llmtool/providers/base.py              capability model 與 Provider.complete() 
 llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
 llmtool/providers/openai.py            固定官方 Responses API transport 與 normalization
+llmtool/providers/claude_cli.py        local Claude CLI subprocess 與純文字 Reply normalization
 tests/                                config/provider/CLI 測試
 ```
 

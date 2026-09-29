@@ -79,8 +79,10 @@ mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不
 
 ### A2.4 — Claude CLI Provider ← CURRENT
 
-目前工作。增加 local Claude CLI runtime provider；先確認實際 CLI 介面並明確定義程序執行
-與 approval 邊界，再實作純文字 request/response。
+已確認本機 CLI 的非互動 print、text output、safe mode、no-session-persistence 與停用 tools
+參數。第一個 implementation candidate 只做純文字 request/response，以 argv/stdin 啟動 CLI，
+不宣告 large-context、reasoning-control、streaming、code-edit、shell 或 Git capability。
+Fake executable tests 已涵蓋 subprocess contract；real CLI smoke 與 external review 尚待完成。
 
 ### A2.5 — Codex CLI Provider
 

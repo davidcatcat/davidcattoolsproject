@@ -249,7 +249,7 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(self.server.requests, [])
 
     def test_factory_and_capability_registry_contain_only_real_providers(self):
-        self.assertEqual(PROVIDER_REGISTRY.names(), ("openai", "openai-compatible"))
+        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "openai", "openai-compatible"))
         self.assertEqual(get_provider_capabilities("openai").to_dict(), {
             "chat": True, "large_context": True, "reasoning_control": True,
             "streaming": False, "code_edit": False, "shell": False, "git": False,

@@ -116,6 +116,31 @@ class ConfigureTests(unittest.TestCase):
             run_configure(self.home, answers, lambda prompt, stream=None: "")
         self.assertFalse(self.path.exists())
 
+    def test_claude_cli_wizard_skips_endpoint_and_credentials(self):
+        answers = InteractiveInput(["", "claude-cli", "sonnet", "", "", "", ""])
+
+        def no_secret_prompt(*args, **kwargs):
+            self.fail("Claude CLI configure must not prompt for an API key")
+
+        out, err = io.StringIO(), io.StringIO()
+        with patch("sys.stdin", TTY()):
+            result = run_configure(self.home, answers, no_secret_prompt, out, err)
+        out, err = out.getvalue(), err.getvalue()
+        self.assertTrue(result)
+        provider = yaml.safe_load(self.path.read_text())["providers"]["default"]
+        self.assertEqual(provider["type"], "claude-cli")
+        self.assertIsNone(provider["base_url"])
+        self.assertEqual(provider["model"], "sonnet")
+        self.assertIsNone(provider["api_key"])
+        self.assertIsNone(provider["api_key_env"])
+        self.assertEqual(provider["provider_options"], {})
+        self.assertTrue(all(not any(secret in prompt for secret in ("Base URL", "API key"))
+                            for prompt in answers.prompts))
+        self.assertIn("not sent by Claude CLI", " ".join(answers.prompts))
+        self.assertIn("not enforced by Claude CLI", " ".join(answers.prompts))
+        self.assertNotIn("Base URL:", out)
+        self.assertEqual(err, "")
+
     def test_partial_base_url_with_blank_model_is_saved(self):
         result, out, _ = self.run_wizard(self.answers(url="https://llm.example", model=""))
         self.assertTrue(result)
