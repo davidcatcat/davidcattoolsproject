@@ -10,6 +10,7 @@ from .config import (
     user_config_path,
 )
 from .errors import LLMToolError
+from .providers import client_type
 
 
 def _answer(input_fn, label, default=None, optional=False):
@@ -64,6 +65,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
 
     provider_name = _answer(input_fn, "Provider name", "default")
     provider_type = _answer(input_fn, "Provider type", "openai-compatible")
+    client_type(provider_type)
     base_url = _answer(input_fn, "Base URL", optional=True)
     model = _answer(input_fn, "Model", optional=True)
     timeout = _number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds")

@@ -8,7 +8,7 @@ import time
 from urllib import error, request
 
 from ..errors import LLMToolError
-from .base import Reply
+from .base import ProviderCapabilities, Reply
 
 RESPONSE_LIMIT = 16 * 1024 * 1024
 
@@ -23,6 +23,14 @@ class NoRedirect(request.HTTPRedirectHandler):
 
 
 class OpenAICompatibleClient:
+    TYPE = "openai-compatible"
+    # Reasoning control is the optional enable_thinking extension, not a
+    # universal OpenAI-compatible feature. Context limits remain model-specific.
+    CAPABILITIES = ProviderCapabilities(
+        chat=True, large_context=True, reasoning_control=True,
+        streaming=False, code_edit=False, shell=False, git=False,
+    )
+
     @staticmethod
     def validate_ready(provider):
         for field in ("base_url", "model"):

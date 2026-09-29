@@ -185,6 +185,22 @@ class ConfigureTests(unittest.TestCase):
                 run_configure(self.home, answers, lambda *a, **k: self.fail("secret read"), io.StringIO(), io.StringIO())
         self.assertFalse(self.path.exists())
 
+    def test_unsupported_type_rejected_before_secret_prompt(self):
+        answers = InteractiveInput(["", "future-secret-type"])
+        with self.assertRaisesRegex(LLMToolError, "unsupported provider type"):
+            run_configure(self.home, answers, lambda *a, **k: self.fail("secret read"))
+        self.assertEqual(len(answers.prompts), 2)
+        self.assertFalse(self.path.exists())
+
+    def test_capabilities_are_not_prompted_or_saved(self):
+        answers = self.answers()
+        self.run_wizard(answers)
+        saved = yaml.safe_load(self.path.read_text())
+        self.assertNotIn("capabilities", saved["providers"]["default"])
+        for prompt in answers.prompts:
+            for capability in ("Supports git", "Supports shell", "Supports code edit", "capabilities"):
+                self.assertNotIn(capability, prompt)
+
     def test_no_provider_network_call(self):
         answers = self.answers()
         with patch("sys.stdin", TTY()), patch("llmtool.providers.create_client") as create_client:

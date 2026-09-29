@@ -1,6 +1,7 @@
 """CLI wiring only: parse, resolve, read, request, and print."""
 
 import argparse
+import json
 import sys
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
@@ -8,7 +9,7 @@ from .configure import run_configure
 from .errors import LLMToolError
 from .inputs import read_input
 from .prompts import TEMPLATES, messages_for
-from .providers import create_client
+from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
 
 
 class SafeParser(argparse.ArgumentParser):
@@ -27,7 +28,7 @@ def add_options(parser):
 
 
 def parser_for_cli():
-    parser = SafeParser(description="Read-only, provider-agnostic LLM CLI foundation (A1).")
+    parser = SafeParser(description="Read-only, provider-agnostic LLM CLI foundation.")
     parser.add_argument("--version", action="version", version="llmtool 0.1.0")
     sub = parser.add_subparsers(dest="command", required=True)
     descriptions = {
@@ -43,6 +44,8 @@ def parser_for_cli():
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
         add_options(child)
     sub.add_parser("configure", help="Interactively configure a provider profile")
+    providers = sub.add_parser("providers", help="List supported provider capabilities offline")
+    providers.add_argument("--json", action="store_true", help="output metadata as JSON")
     config = sub.add_parser("config", help="Initialize or inspect configuration")
     actions = config.add_subparsers(dest="action", required=True)
     init = actions.add_parser("init", help="Create private user config")
@@ -56,6 +59,19 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "providers":
+            metadata = {
+                name: get_provider_capabilities(name).to_dict()
+                for name in PROVIDER_REGISTRY.names()
+            }
+            if args.json:
+                print(json.dumps(metadata, indent=2))
+            else:
+                for name, capabilities in metadata.items():
+                    print("Provider: " + name)
+                    for capability, supported in capabilities.items():
+                        print("  " + capability + ": " + ("yes" if supported else "no"))
+            return 0
         if args.command == "configure":
             run_configure()
             return 0

@@ -1,16 +1,52 @@
-"""Provider selection stays outside the CLI and prompt layer."""
+"""Static provider registry; metadata lookup never constructs a client."""
+
+import re
+from types import MappingProxyType
+from typing import Iterable
 
 from .openai_compatible import OpenAICompatibleClient
-from .base import Provider
+from .base import Provider, ProviderCapabilities
 from ..errors import LLMToolError
 
-CLIENT_TYPES = {"openai-compatible": OpenAICompatibleClient}
+
+class ProviderRegistry:
+    """Build once from explicit implementation classes; no plugin discovery."""
+
+    def __init__(self, implementations: Iterable[type[Provider]]):
+        registered = {}
+        for implementation in implementations:
+            name = implementation.TYPE
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+                raise LLMToolError("invalid provider type metadata")
+            if name in registered:
+                raise LLMToolError("duplicate provider type")
+            if type(implementation.CAPABILITIES) is not ProviderCapabilities:
+                raise LLMToolError("invalid provider capability metadata")
+            registered[name] = implementation
+        self._types = MappingProxyType(registered)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._types))
+
+    def client_type(self, name: str) -> type[Provider]:
+        if not isinstance(name, str) or name not in self._types:
+            raise LLMToolError("unsupported provider type; use llmtool providers")
+        return self._types[name]
+
+    def capabilities(self, name: str) -> ProviderCapabilities:
+        return self.client_type(name).CAPABILITIES
 
 
-def client_type(name):
-    if not isinstance(name, str) or name not in CLIENT_TYPES:
-        raise LLMToolError("unsupported provider type; A1 supports openai-compatible")
-    return CLIENT_TYPES[name]
+PROVIDER_REGISTRY = ProviderRegistry((OpenAICompatibleClient,))
+
+
+def client_type(name: str) -> type[Provider]:
+    return PROVIDER_REGISTRY.client_type(name)
+
+
+def get_provider_capabilities(type_name: str) -> ProviderCapabilities:
+    """Pure metadata lookup: no config, credentials, client or I/O required."""
+    return PROVIDER_REGISTRY.capabilities(type_name)
 
 
 def create_client(config, key=None) -> Provider:
