@@ -163,9 +163,10 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標；目前 A1 只發送明確提供的文字並回傳內容，沒有 production change。
+此為完整流程目標；目前完成至 A2.2。現階段仍只發送明確提供的文字並回傳內容，沒有
+Role engine、Agent orchestration 或 production mutation。
 
-## 未來 config 方向（A1 不接受此完整 schema）
+## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
 ```yaml
 providers:
