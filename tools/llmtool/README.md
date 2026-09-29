@@ -2,36 +2,36 @@
 
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
-這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production provider
-只有 `openai-compatible`。它可連 self-hosted Qwen、vLLM、相容 gateway、
+這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production providers
+為 `openai` 與 `openai-compatible`。後者可連 self-hosted Qwen、vLLM、相容 gateway、
 LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
 不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
 
-llmtool core has no deployment endpoint/model.
-User must configure a provider before first model request.
+llmtool has no built-in model or deployment endpoint defaults. `openai` uses its fixed official
+origin; users configure a model and explicit credentials before the first request.
 
-內建 `base_url`、`model` 都是 `null`，不會自動連任何部署。
-請先在 user config 手動設定 OpenAI-compatible endpoint 與 model；也可使用明確
-CLI/env 覆寫。公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
+通用 template 的 `base_url`、`model` 都是 `null`，不會自動連任何部署。
+`openai-compatible` 使用者須設定 endpoint 與 model；`openai` endpoint 固定，使用者設定
+model 與明確 credentials。公司 Qwen 設定僅保留為獨立 deployment example，不會自動載入。
 
 | 概念 | 意義 | 狀態 |
 |---|---|---|
-| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | 僅 `openai-compatible` |
+| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
-目前尚未支援 OpenAI dedicated API provider、Anthropic provider、Claude CLI provider、
-Codex CLI provider。llmtool 不執行 shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
+目前尚未支援 Anthropic provider、Claude CLI provider、Codex CLI provider。llmtool 不執行
+shell、Git 或模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
 ## Roadmap status
 
 - **A0 — Model Validation:** DONE
 - **A1 — Generic LLMTool Core:** DONE and merged to `main`
 - **A1.1 — Configure Wizard + Live Smoke:** DONE and merged to `main`
-- **A2.1 — Provider Capability Foundation:** CURRENT
-- **A2.2–A2.6:** planned; dedicated OpenAI/Anthropic API and Claude/Codex CLI providers are not
-  implemented
+- **A2.1 — Provider Capability Foundation:** DONE
+- **A2.2 — OpenAI API Provider:** CURRENT; Responses API, pure text
+- **A2.3–A2.6:** planned; Anthropic API and Claude/Codex CLI providers are not implemented
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -52,13 +52,41 @@ policy, or approval.** In particular, `code_edit`, `shell`, or `git` metadata do
 permission or cause llmtool to modify files, execute commands, or operate Git. Capability metadata
 is implementation-owned and is not stored in user/project config.
 
-The current `openai-compatible` values are `chat: yes`, `large_context: yes`,
-`reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+Both production providers declare `chat: yes`, `large_context: yes`, `reasoning_control: yes`,
+`streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
 `large_context` describes support for large-context workflows, not a fixed context window;
 deployment/model limits vary. `reasoning_control` describes this implementation's optional
 `provider_options.enable_thinking` extension, sent as `chat_template_kwargs.enable_thinking`.
 That field is not a universal OpenAI-compatible standard, and endpoint support varies.
-OpenAI dedicated API, Anthropic, Claude CLI, and Codex CLI providers are not implemented.
+The dedicated `openai` provider instead maps `provider_options.reasoning_effort` to Responses API
+`reasoning.effort`; supported values can vary by model.
+
+## OpenAI API provider
+
+The `openai` provider uses the fixed official HTTPS origin `https://api.openai.com` and sends
+plain-text conversations to `POST /v1/responses`. It sends `max_output_tokens`, never sends
+`temperature`, and does not enable streaming, tools, code editing, shell, or Git. Optional
+`reasoning_effort` values are `none`, `low`, `medium`, and `high`; model support varies. The
+provider returns only final assistant text and safe response metadata, never reasoning items.
+
+Example user config (set the environment variable yourself; llmtool does not discover credentials):
+
+```yaml
+providers:
+  openai-main:
+    type: openai
+    model: "your-model"
+    api_key_env: OPENAI_API_KEY
+    provider_options:
+      reasoning_effort: medium
+active_provider: openai-main
+generation:
+  max_tokens: 2000
+```
+
+Do not set `base_url` for `type: openai`; alternate endpoints are rejected. OpenAI API live usage
+requires separately configured OpenAI API credentials and billing. ChatGPT subscriptions and API
+billing are separate; tests do not require live usage, billing setup, or credits.
 
 ## 安裝與直接執行
 
@@ -97,17 +125,19 @@ llmtool config show --max-tokens 4000
 llmtool config show --provider home-vllm  # 先在 user config 建立該 profile
 ```
 
-`configure` 會互動詢問 provider、endpoint、model 與 generation 設定，驗證後直接寫入
+`configure` 會依 provider 詢問設定；OpenAI 使用官方 endpoint，不詢問 base URL，驗證後寫入
 user config，不會連線測試 provider。API key 使用不回顯的終端輸入；也可只填 API key
-環境變數名稱，兩者不可同時設定。留空的 optional 欄位會保持 unset；`enable_thinking`
-留空時不會送出 provider-specific 參數。新檔自動建立目錄並以 `0600` 權限原子寫入。
+環境變數名稱，兩者不可同時設定。留空的 optional 欄位會保持 unset；provider-specific
+reasoning 設定留空時不會送出該參數。OpenAI API key env 預設提示 `OPENAI_API_KEY`，只是
+config 欄位建議值，不會在 configure 時讀取環境變數。新檔自動建立目錄並以 `0600` 權限原子寫入。
 若設定檔已存在，精靈先詢問是否更新，預設為 No；確認更新會保留其他 provider profiles。
 精靈需要互動終端，確保 API key 不會退回可回顯輸入。
 
-`config init` 仍只產生 generic template。你也可以開啟 `config path` 顯示的檔案，手動填入
-provider 的 `base_url` 與 `model`，再執行 `ask` 等模型命令。
+`config init` 仍只產生 generic template。`openai-compatible` 需設定 `base_url` 與 `model`；
+`openai` 使用固定官方 endpoint，不接受自訂 `base_url`，需設定 model 和明確的 API key 或
+key 環境變數名稱，再執行 `ask` 等模型命令。
 `config show` 可以顯示尚未填妥的 null 設定；模型命令則在讀取 credential／發出 HTTP
-之前失敗，訊息為 `provider base_url is not configured` 或 `provider model is not configured`。
+之前失敗，訊息指出所選 provider 缺少必要的 endpoint、model 或 authentication 設定。
 未選用的 profile 可保持 null，不影響已完整設定的 active provider。
 
 User config 固定是 `~/.config/llmtool/config.yaml`（依 HOME；不使用 XDG_CONFIG_HOME）。
@@ -163,6 +193,9 @@ active_provider: office-qwen
 `default` 的 endpoint、credentials 或 thinking 選項。Provider 名稱長 1–64 字元，
 以英數字開頭，可包含英數字、`-`、`_`。選擇不存在的 profile 會報錯。
 
+`openai` profile 不使用 `base_url`，並在模型請求時要求 model 和明確設定的 API key 或
+`api_key_env`。`OPENAI_API_KEY` 只會在使用者將它指定為 `api_key_env` 後讀取。
+
 ### Project config 的低信任邊界
 
 `.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、
@@ -186,7 +219,7 @@ generation:
 
 | Source | 可控制欄位 |
 |---|---|
-| User config | Named providers、endpoint、auth、type、provider_options、active_provider、generation |
+| User config | Named providers、provider-allowed endpoint、auth、type、provider_options、active_provider、generation |
 | Project config | 既有 profile 的 model/timeout，以及通用 temperature/max_tokens |
 | Environment | 下表列出的明確變數，套用到選定 profile |
 | CLI | 下表列出的明確 flags，套用到選定 profile |
@@ -200,14 +233,15 @@ generation:
 | `--max-tokens` | `LLMTOOL_MAX_TOKENS` | `generation.max_tokens` |
 | `--temperature` | — | `generation.temperature` |
 
-`base_url` 只接受 HTTP(S) origin，例如 `http://host:4000`，不包含 `/v1`、
-credentials、query 或 fragment。工具固定附加 `/v1/chat/completions`。
+`openai-compatible` 的 `base_url` 只接受 HTTP(S) origin，例如 `http://host:4000`，不包含
+`/v1`、credentials、query 或 fragment；工具固定附加 `/v1/chat/completions`。`openai` 不接受
+user/project/CLI/env 提供的 `base_url`，固定使用官方 HTTPS origin 與 `/v1/responses`。
 `timeout_seconds` 為正數 socket timeout；`max_tokens` 為正整數；temperature 為 0–2。
 未知欄位、重複 key、YAML aliases、錯誤型別與 malformed YAML 均報錯。
 
-先以 CLI > env > user > default 決定 active profile，再把 CLI/env 的 endpoint/model
-覆寫套到這一組；不更動其他 profile。A1 只接受 type `openai-compatible`，
-尚未接受未來的 roles／command／agent routing 設定。
+先以 CLI > env > user > default 決定 active profile，再把 CLI/env 的 model 等允許覆寫套到
+這一組；不更動其他 profile。`openai` 會拒絕 endpoint override。尚未接受 roles／command／
+agent routing 設定。
 
 預設無 auth。未設定 key 時不送 Authorization；需要時可擇一設定
 `api_key` 或 `api_key_env`。後者只查明確命名的環境變數，缺值時請求失敗。
@@ -276,7 +310,7 @@ Live smoke test 曾發現 `analyze-log` 建議 `cat /etc/company/app/config.yaml
 configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 command safety validator
 及 A8 regression；A1 目前不會自動執行建議命令，也沒有 command validator。
 
-## No-thinking 與輸出契約
+## OpenAI-compatible no-thinking 與共用輸出契約
 
 `enable_thinking` 是 OpenAI-compatible 實作的**可選 provider-specific 行為**，
 不是 generic generation 的共同能力。Generic template 的 `provider_options` 是空的。
@@ -293,8 +327,9 @@ configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 comman
 但 reasoning 欄位仍不輸出，也可能更快用完 completion budget。
 Core／CLI 不生成此 wire 欄位，未來 provider 不必實作它。
 
-模型命令成功時 stdout **只有** `choices[0].message.content.strip()` 加一個換行。
-`message.reasoning` / `reasoning_content` 永遠不輸出。
+模型命令成功時 stdout **只有** normalized final assistant text 加一個換行。
+`openai-compatible` 使用 `choices[0].message.content`；`openai` 只取 Responses API
+assistant `output_text`/text item。兩者都不輸出 reasoning、raw response 或 tool payload。
 預設成功時 stderr 為空；`--verbose` 額外印安全的 model、token usage 與 elapsed metadata。
 Help/version/config show/path 是管理命令，stdout 分別是說明／版本／設定／路徑；
 config init 的完成訊息在 stderr。
@@ -308,35 +343,36 @@ config init 的完成訊息在 stderr。
 | `2` | 無效 CLI 語法 |
 | `130` | 使用者中斷 |
 
-HTTP 非 2xx、API error body、malformed JSON、missing choices、空 content、
-`finish_reason=length`、非 `stop` finish reason、tool-call response 都失敗。
+HTTP 非 2xx、API error body、malformed JSON、missing/empty final text、Responses 未完成、
+`openai-compatible` 的 `finish_reason=length` 或非 `stop`、以及不支援的 tool output 都失敗。
 錯誤只給分類／HTTP status，不印 raw response、輸入、URL credentials 或 exception body。
 不自動 retry、不跟隨 HTTP redirect，不讀環境 proxy 設定，避免意外轉送內網資料。
 
 ## Troubleshooting 與已知限制
 
 - `PyYAML is required`：確認啟用安裝 llmtool 的 virtualenv。
-- `provider base_url/model is not configured`：編輯 `config path` 所指的 user config，
-  填入 active provider 的真實 endpoint/model；`config init` 本身不完成部署設定。
-- `cannot connect to gateway`：檢查伺服器連線和 `config show` 的 active profile/base URL。
-  A1 不支援 proxy，HTTPS 使用系統 Python 的信任憑證，不略過 TLS 驗證。
-- `HTTP 401/403`：gateway 若開始要求認證，設定明確的 `api_key_env`。
+- `provider ... is not configured`：依 active provider 設定 model、相容 provider 的 endpoint，
+  以及明確的 API key 或 `api_key_env`；`config init` 本身不完成部署設定。
+- `cannot connect`：檢查設定中的 provider destination 和網路。OpenAI 固定使用官方 HTTPS
+  origin；compatible provider 使用自訂 origin。HTTP transport 不採用 ambient proxy。
+- `HTTP 401/403`：確認明確設定的 API key 或 `api_key_env`；OpenAI API billing 與 ChatGPT
+  subscription 分開。
 - `timed out`：以 `--timeout 180` 調整。這是 socket 操作 timeout，**不是整體 wall-clock deadline**。
-- `finish_reason=length`：提高 `--max-tokens` 或縮小問題；截斷內容不會落到輸出檔。
+- `finish_reason=length` / incomplete Responses：提高 `--max-tokens` 或縮小問題；截斷內容不會輸出。
 - `malformed YAML`：檢查縮排、型別與重複 key；不會在錯誤訊息中回顯 YAML 原文。
 - `only one ...`：不要同時 pipe 並給 `--file`／文字 argument。
 - `config already exists`：保留現有設定，或明確以 `--force` 重建。
 - `project ... forbidden or unsupported field`：將 endpoint/auth/selection 等設定移到 user config。
 - `active provider is not defined`：先在 user config 建立該 profile；project 不能建立它。
 
-沒有 tokenizer／context window 自動切分；gateway 決定可接受的 token 數。
+沒有 tokenizer／context window 自動切分；所選 model/service 決定可接受的 token 數。
 HTTP response 上限 16 MiB、config 上限 64 KiB。非串流模式會在記憶體保留完整輸入與答案。
-A1 信任 gateway 將 reasoning 放在獨立欄位；不會修改／剝除 content 內的文字或標籤。
+A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／剝除 content 內的文字或標籤。
 模型可能忽略 prompt 或產生錯誤建議，請 review 輸出；工具不會執行它。
 
 ## Safety boundary
 
-模型命令唯讀本機資料並向設定的 gateway 發出 HTTP request；不執行任何程序、shell
+模型命令唯讀本機資料並向設定的 provider 發出 HTTPS/HTTP request；不執行任何程序、shell
 或 Git 操作，不修改 production。唯一內建檔案寫入是明確的 `config init`。
 不自動讀取 SSH、keychain 或任意 secret file；明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。
@@ -350,8 +386,9 @@ make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"
 
 `check` 跑 compileall syntax check 與 unittest。測試使用暫存 HOME/project、mock
 transport 和 `127.0.0.1` ephemeral port 的假 gateway；不使用真實 user config、
-credentials，也不連公司 gateway。CLI 整合測試包含 `--help`、config init 防覆寫、
-實際 HTTP payload、輸入來源、timeout、redirect、錯誤及 stdout/stderr 分離。
+credentials，也不連公司 gateway 或 OpenAI API。OpenAI provider tests 將 official origin
+替換為 loopback mock HTTP server，驗證 Responses request/response、timeout、redirect 與
+sanitized errors；沒有 live API call。CLI tests 亦涵蓋輸入、config、redirect 與輸出分離。
 
 ```text
 llmtool/cli.py                         CLI 與輸出
@@ -361,6 +398,7 @@ llmtool/prompts.py                     四個內建模板
 llmtool/providers/base.py              capability model 與 Provider.complete() / Reply contract
 llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
+llmtool/providers/openai.py            固定官方 Responses API transport 與 normalization
 tests/                                config/provider/CLI 測試
 ```
 

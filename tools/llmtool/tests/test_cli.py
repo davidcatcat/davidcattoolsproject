@@ -118,7 +118,7 @@ class CLITests(unittest.TestCase):
                 self.assertNotIn(b"SECRET", result.stdout)
                 self.assertNotIn(b"PRIVATE_TEST_KEY", result.stdout)
                 if "--json" in args:
-                    self.assertEqual(list(json.loads(result.stdout)), ["openai-compatible"])
+                    self.assertEqual(list(json.loads(result.stdout)), ["openai", "openai-compatible"])
                 self.assertEqual(self.server.requests, [])
                 self.assertEqual(user.read_bytes() if user.exists() else None, before)
 

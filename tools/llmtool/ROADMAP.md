@@ -6,7 +6,7 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1 已完成並合併至 main；A2.1 是目前工作，A2.2 之後仍是規劃。Capability 描述
+A1.1、A2.1 已完成並合併至 main；A2.2 是目前工作，A2.3 之後仍是規劃。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -49,11 +49,11 @@ Smoke test 另記錄 `analyze-log` 曾建議 `cat /etc/company/app/config.yaml`�
 Intelligence、Context Packet、Role engine、Agent routing／orchestration、automatic
 execution、Git mutation 或 Production workflow。
 
-### A2.1 — Provider Capability Foundation ← CURRENT
+### A2.1 — Provider Capability Foundation ✅ DONE
 
 建立 typed、immutable、固定 capability 欄位，以及明確靜態 provider registry、純 metadata
-lookup API 和離線 `llmtool providers`／`llmtool providers --json`。Production registry
-目前只有 `openai-compatible`。Capability 包含 `chat`、`large_context`、
+lookup API 和離線 `llmtool providers`／`llmtool providers --json`。A2.1 完成時的 production
+registry 只有 `openai-compatible`；A2.2 新增官方 `openai` provider。Capability 包含 `chat`、`large_context`、
 `reasoning_control`、`streaming`、`code_edit`、`shell`、`git`；它描述 implementation/runtime
 技術能力，不是 authorization、policy 或 approval。不得把 capability 寫入 deployment
 config，也不得據此執行 shell、修改檔案或操作 Git。
@@ -64,9 +64,12 @@ model/deployment。`reasoning_control` 只代表此實作可使用可選的
 `provider_options.enable_thinking` 擴充，並映射到 `chat_template_kwargs.enable_thinking`；
 它不是 OpenAI-compatible 通用標準，endpoint 是否支援仍需確認。
 
-### A2.2 — OpenAI API Provider
+### A2.2 — OpenAI API Provider ← CURRENT
 
-未實作。增加獨立 OpenAI API implementation，並由 implementation 宣告 capabilities。
+目前工作。增加獨立 `openai` provider，使用固定官方 HTTPS endpoint 與 Responses API；
+純文字請求、reasoning effort mapping、output-token mapping 與安全 response normalization。
+不引入 OpenAI SDK，不啟用 tools、streaming、code edit、shell 或 Git。使用 mock/local HTTP
+server 驗證，不執行 live OpenAI API call。完成後等待 external review。
 
 ### A2.3 — Anthropic API Provider
 

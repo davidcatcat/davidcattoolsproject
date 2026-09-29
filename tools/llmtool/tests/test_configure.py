@@ -83,6 +83,39 @@ class ConfigureTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertTrue(self.path.is_file())
 
+    def test_openai_wizard_skips_endpoint_and_configures_reasoning_and_key_env(self):
+        answers = InteractiveInput(["", "openai", "test-model", "", "", "medium", "", "", ""])
+        result, out, err = self.run_wizard(answers)
+        self.assertTrue(result)
+        provider = yaml.safe_load(self.path.read_text())["providers"]["default"]
+        self.assertEqual(provider["type"], "openai")
+        self.assertIsNone(provider["base_url"])
+        self.assertEqual(provider["model"], "test-model")
+        self.assertEqual(provider["api_key_env"], "OPENAI_API_KEY")
+        self.assertIsNone(provider["api_key"])
+        self.assertEqual(provider["provider_options"], {"reasoning_effort": "medium"})
+        self.assertTrue(all("Base URL" not in prompt for prompt in answers.prompts))
+        self.assertTrue(any("OPENAI_API_KEY" in prompt for prompt in answers.prompts))
+        self.assertTrue(any("reasoning_effort" in prompt for prompt in answers.prompts))
+        self.assertIn("not sent by OpenAI", " ".join(answers.prompts))
+        self.assertNotIn("Base URL:", out)
+        self.assertEqual(err, "")
+
+    def test_openai_wizard_allows_incomplete_model_and_reasoning(self):
+        answers = InteractiveInput(["", "openai", "", "", "", "", "", "", ""])
+        result, _, _ = self.run_wizard(answers)
+        self.assertTrue(result)
+        provider = yaml.safe_load(self.path.read_text())["providers"]["default"]
+        self.assertIsNone(provider["model"])
+        self.assertEqual(provider["api_key_env"], "OPENAI_API_KEY")
+        self.assertEqual(provider["provider_options"], {})
+
+    def test_openai_wizard_rejects_unsupported_reasoning_effort(self):
+        answers = InteractiveInput(["", "openai", "model", "", "", "xhigh"])
+        with patch("sys.stdin", TTY()), self.assertRaisesRegex(LLMToolError, "reasoning_effort"):
+            run_configure(self.home, answers, lambda prompt, stream=None: "")
+        self.assertFalse(self.path.exists())
+
     def test_partial_base_url_with_blank_model_is_saved(self):
         result, out, _ = self.run_wizard(self.answers(url="https://llm.example", model=""))
         self.assertTrue(result)

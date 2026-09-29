@@ -32,6 +32,10 @@ class OpenAICompatibleClient:
     )
 
     @staticmethod
+    def validate_config(provider):
+        return None
+
+    @staticmethod
     def validate_ready(provider):
         for field in ("base_url", "model"):
             if provider.get(field) is None:

@@ -181,6 +181,7 @@ def _number(value, field, integer=False):
 def _validate_provider(provider):
     implementation = client_type(provider["type"])
     implementation.validate_options(provider["provider_options"])
+    implementation.validate_config(provider)
     url = provider["base_url"]
     if url is not None:
         try:

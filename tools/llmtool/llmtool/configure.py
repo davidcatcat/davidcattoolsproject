@@ -48,6 +48,14 @@ def _boolean_or_none(value):
     raise LLMToolError("enable_thinking must be true, false, or blank")
 
 
+def _choice_or_none(value, field, choices):
+    if value is None:
+        return None
+    if value not in choices:
+        raise LLMToolError(field + " must be one of the supported choices or blank")
+    return value
+
+
 def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr=None):
     """Prompt for a profile and atomically save validated settings under HOME."""
     import sys
@@ -66,7 +74,8 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     provider_name = _answer(input_fn, "Provider name", "default")
     provider_type = _answer(input_fn, "Provider type", "openai-compatible")
     client_type(provider_type)
-    base_url = _answer(input_fn, "Base URL", optional=True)
+    is_openai = provider_type == "openai"
+    base_url = None if is_openai else _answer(input_fn, "Base URL", optional=True)
     model = _answer(input_fn, "Model", optional=True)
     timeout = _number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds")
 
@@ -82,13 +91,22 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
         raise LLMToolError("cannot read API key without echo; configuration was not saved") from None
     if literal_key == "":
         literal_key = None
-    api_key_env = _answer(input_fn, "API key env", optional=True)
+    api_key_env_default = "OPENAI_API_KEY" if is_openai and not literal_key else None
+    api_key_env = _answer(input_fn, "API key env", api_key_env_default, optional=True)
     if literal_key and api_key_env:
         raise LLMToolError("choose either API key or API key env, not both")
 
-    thinking_raw = _answer(input_fn, "Provider-specific enable_thinking (true/false; blank to unset)", optional=True)
-    thinking = _boolean_or_none(thinking_raw)
-    temperature = _number(_answer(input_fn, "Temperature", "0"), "temperature")
+    if is_openai:
+        effort_raw = _answer(input_fn, "OpenAI reasoning_effort (none/low/medium/high; blank to unset)", optional=True)
+        effort = _choice_or_none(effort_raw, "reasoning_effort", ("none", "low", "medium", "high"))
+        provider_options = {} if effort is None else {"reasoning_effort": effort}
+    else:
+        thinking_raw = _answer(input_fn, "Provider-specific enable_thinking (true/false; blank to unset)", optional=True)
+        thinking = _boolean_or_none(thinking_raw)
+        provider_options = {} if thinking is None else {"enable_thinking": thinking}
+
+    temperature_prompt = "Temperature (stored, not sent by OpenAI)" if is_openai else "Temperature"
+    temperature = _number(_answer(input_fn, temperature_prompt, "0"), "temperature")
     max_tokens = _integer(_answer(input_fn, "Max tokens", "2000"), "max_tokens")
 
     active_provider = _answer(input_fn, "Active provider", provider_name)
@@ -98,7 +116,6 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     config = copy.deepcopy(DEFAULTS)
     if exists:
         _apply_user(config, _read_yaml(path, "user config"))
-    provider_options = {} if thinking is None else {"enable_thinking": thinking}
     config["providers"][provider_name] = {
         "type": provider_type,
         "base_url": base_url,
@@ -117,6 +134,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     print("Configuration saved: " + str(path), file=stdout)
     print("Active provider: " + active_provider, file=stdout)
     print("Type: " + provider["type"], file=stdout)
-    print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
+    if not is_openai:
+        print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
     print("Model: " + (provider["model"] or "<not configured>"), file=stdout)
     return True

@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Iterable
 
 from .openai_compatible import OpenAICompatibleClient
+from .openai import OpenAIProvider
 from .base import Provider, ProviderCapabilities
 from ..errors import LLMToolError
 
@@ -37,7 +38,7 @@ class ProviderRegistry:
         return self.client_type(name).CAPABILITIES
 
 
-PROVIDER_REGISTRY = ProviderRegistry((OpenAICompatibleClient,))
+PROVIDER_REGISTRY = ProviderRegistry((OpenAIProvider, OpenAICompatibleClient))
 
 
 def client_type(name: str) -> type[Provider]:
