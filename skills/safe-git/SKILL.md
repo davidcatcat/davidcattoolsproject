@@ -27,6 +27,14 @@ Identify unrelated working-tree changes before staging anything.
 4. If histories diverge or a conflict appears, stop and report the exact state unless the user has explicitly asked you to resolve it.
 5. Never discard uncommitted work to make synchronization easier.
 
+## Validation and report provenance
+
+Before merging or cherry-picking a feature branch, validation report, or smoke-test artifact,
+check its merge base, ahead/behind counts, graph, and the revision/version actually tested. Confirm
+whether the branch was based on an older main and whether the target already contains an equivalent
+artifact. Preserve newer target history and avoid duplicate or stale evidence. Prefer safe normal
+integration; choose the appropriate method for the branch state without rewriting published history.
+
 ## Commit
 
 1. Run the project's required tests/checks first.
