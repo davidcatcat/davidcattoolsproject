@@ -54,6 +54,11 @@ class Provider(Protocol):
         ...
 
     @staticmethod
+    def validate_config(provider: dict) -> None:
+        """Reject provider-specific config fields unsupported by this implementation."""
+        ...
+
+    @staticmethod
     def validate_options(options: dict) -> None:
         """Reject unsupported implementation-specific options with LLMToolError."""
         ...

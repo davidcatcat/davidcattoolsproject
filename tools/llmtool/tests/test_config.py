@@ -57,6 +57,39 @@ class ConfigTests(unittest.TestCase):
         self.user.write_text("generation:\n  max_tokens: 321\n", encoding="utf-8")
         self.assertEqual(self.resolve()["generation"]["max_tokens"], 321)
 
+    def test_openai_provider_config_uses_fixed_endpoint_and_explicit_auth(self):
+        self.user.write_text("""providers:
+  openai-main:
+    type: openai
+    model: test-model
+    api_key_env: OPENAI_API_KEY
+active_provider: openai-main
+""")
+        config = self.resolve(require_configured=True)
+        provider = config["providers"]["openai-main"]
+        self.assertIsNone(provider["base_url"])
+        self.assertEqual(provider["type"], "openai")
+        self.assertEqual(api_key(config, {"OPENAI_API_KEY": "sk-test-example"}), "sk-test-example")
+
+    def test_openai_rejects_user_cli_and_environment_endpoint_overrides(self):
+        base = {"providers": {"default": {
+            "type": "openai", "model": "test-model", "api_key": "sk-test-example",
+        }}}
+        user_endpoint = {"providers": {"default": {
+            "type": "openai", "model": "test-model", "api_key": "sk-test-example",
+            "base_url": "https://alt.example",
+        }}}
+        cases = (
+            ("user", {}, {}, user_endpoint),
+            ("cli", {"base_url": "https://alt.example"}, {}, base),
+            ("environment", {}, {"LLMTOOL_BASE_URL": "https://alt.example"}, base),
+        )
+        for source, cli, env, fragment in cases:
+            with self.subTest(source=source):
+                self.user.write_text(yaml.safe_dump(fragment))
+                with self.assertRaises(LLMToolError):
+                    self.resolve(cli=cli, env=env)
+
     def test_project_partial_override_and_user_inheritance(self):
         self.user.write_text("providers:\n  default:\n    model: user-route\n    timeout_seconds: 30\n")
         self.project.write_text("providers:\n  default:\n    model: project-route\n")
