@@ -82,7 +82,9 @@ mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不
 已確認本機 CLI 的非互動 print、text output、safe mode、no-session-persistence 與停用 tools
 參數。第一個 implementation candidate 只做純文字 request/response，以 argv/stdin 啟動 CLI，
 不宣告 large-context、reasoning-control、streaming、code-edit、shell 或 Git capability。
-Fake executable tests 已涵蓋 subprocess contract；real CLI smoke 與 external review 尚待完成。
+Fake executable tests PASS，涵蓋 subprocess contract。Real CLI smoke 曾執行但 CLI exit status
+為 1；stderr 已安全隱去，原因未能從此結果確定，因此不記為 live inference PASS。A2.4
+保持 CURRENT，等待 external review 與 runtime/authentication follow-up。
 
 ### A2.5 — Codex CLI Provider
 
