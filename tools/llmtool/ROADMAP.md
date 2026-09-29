@@ -6,7 +6,8 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1、A2.1 已完成並合併至 main；A2.2 是目前工作，A2.3 之後仍是規劃。Capability 描述
+A1.1、A2.1、A2.2 已完成並合併至 main；下一個實作 milestone 優先安排 A2.4，A2.3
+Anthropic API 仍規劃中且尚未實作。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -64,20 +65,22 @@ model/deployment。`reasoning_control` 只代表此實作可使用可選的
 `provider_options.enable_thinking` 擴充，並映射到 `chat_template_kwargs.enable_thinking`；
 它不是 OpenAI-compatible 通用標準，endpoint 是否支援仍需確認。
 
-### A2.2 — OpenAI API Provider ← CURRENT
+### A2.2 — OpenAI API Provider ✅ DONE
 
-目前工作。增加獨立 `openai` provider，使用固定官方 HTTPS endpoint 與 Responses API；
+增加獨立 `openai` provider，使用固定官方 HTTPS endpoint 與 Responses API；
 純文字請求、reasoning effort mapping、output-token mapping 與安全 response normalization。
-不引入 OpenAI SDK，不啟用 tools、streaming、code edit、shell 或 Git。使用 mock/local HTTP
-server 驗證，不執行 live OpenAI API call。完成後等待 external review。
+不引入 OpenAI SDK，不啟用 tools、streaming、code edit、shell 或 Git。Source review 與
+mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不是 A2.2 的
+必要驗收條件，也不影響此 milestone 完成。
 
 ### A2.3 — Anthropic API Provider
 
 未實作。增加獨立 Anthropic API implementation，並由 implementation 宣告 capabilities。
 
-### A2.4 — Claude CLI Provider
+### A2.4 — Claude CLI Provider ← CURRENT
 
-未實作。先明確定義 CLI runtime 的程序執行與 approval 邊界，再增加 provider。
+目前工作。增加 local Claude CLI runtime provider；先確認實際 CLI 介面並明確定義程序執行
+與 approval 邊界，再實作純文字 request/response。
 
 ### A2.5 — Codex CLI Provider
 
