@@ -6,33 +6,42 @@ Date: 2026-09-29
 
 - Repository: `davidcatcat/davidcattoolsproject`
 - Validation branch: `validate/a24-runtime-diagnosis-20260929`
-- Tested implementation HEAD: `adf5a53a442162b7d6aa3b15df671497ab0fd1d9`
+- Tested HEAD before this documentation update: `2aedbe933783c296dd67ad1b8a22b50f865fef4c`
 - `origin/main`: `7653a80c4462b10099ac944d3e2ed65068de6541`
-- A2.4 feature branch at test time: `adf5a53a442162b7d6aa3b15df671497ab0fd1d9`
-- Feature branch relative to main: ahead 3, behind 0
+- A2.4 feature branch at test time: `2aedbe933783c296dd67ad1b8a22b50f865fef4c`
+- Feature branch relative to main: ahead 4, behind 0
 - Worktree: clean before and after runtime smoke and tests
 
 ## CLI interface and direct smoke
 
-- Executable: `/usr/local/bin/claude`
-- Version: `2.1.206 (Claude Code)`
+- Normal authenticated user shell: `/Users/davidsun/.nvm/versions/node/v24.20.0/bin/claude`,
+  version `2.1.284 (Claude Code)`.
+- Codex isolated runtime: `/usr/local/bin/claude`, version `2.1.206 (Claude Code)`.
 - Help confirms support for `--print`, `--output-format text`,
   `--no-session-persistence`, `--safe-mode`, `--tools`, and `--model`.
 - **Direct Claude CLI live smoke: PASS — normal authenticated user shell.**
   User-provided evidence: the confirmed safe flags and stdin request returned
   exit code 0 and stdout exactly `CLAUDE_DIRECT_OK`.
-- A direct attempt from the Codex isolated runtime previously exited 1 and
-  requested `/login`. This is classified as
-  **SKIPPED-ENVIRONMENT / authenticated session unavailable**, not as a CLI
-  flag failure or inference failure.
+- A direct attempt from the Codex isolated runtime resolved the older, different
+  executable, exited 1, and requested `/login`. This is classified as
+  **SKIPPED-ENVIRONMENT / different runtime and unauthenticated session**, not as
+  a CLI flag failure or inference failure.
 
 ## Diagnosis
 
-The normal user shell has a working Claude CLI session. The Codex isolated
-runtime cannot access that authenticated session. The tested flags are
-supported by the installed CLI, and normal-shell direct evidence confirms the
-invocation works; no provider argv or auth-logic change is indicated. No
-credentials, auth files, keychain contents, or environment dump were inspected.
+The normal shell and Codex isolated runtime resolve different Claude CLI
+executables and versions. This is a concrete runtime provenance difference;
+the evidence does not prove that the version difference alone caused `/login`,
+because the isolated runtime also lacked the authenticated session. The normal
+shell direct PASS confirms the invocation flags work there; no provider argv
+or auth-logic change is indicated. No credentials, auth files, keychain
+contents, or environment dump were inspected.
+
+`claude_cli.py` resolves the executable with `shutil.which("claude")`, so the
+llmtool process `PATH` selects the first matching executable and therefore the
+CLI version. `LLMTOOL_CLAUDE_CLI_HOME` changes child `HOME`, not `PATH`. Project
+config cannot choose an executable; no configurable executable path was added.
+PATH selection is a documented runtime dependency and minor follow-up.
 
 One llmtool smoke attempt used a temporary llmtool `HOME` and config with
 `LLMTOOL_CLAUDE_CLI_HOME` pointing to the existing user home; no credentials
@@ -59,7 +68,7 @@ FAIL. No repeated request was made. The fake executable test confirms the child
 - Code changes and regression tests: none; no code defect was demonstrated.
 - Original dirty checkout: untouched.
 
-README review: accurate; it describes the local CLI dependency and does not
-claim a live llmtool inference PASS. ROADMAP remains A2.4 CURRENT pending
-external review. The normal-shell direct PASS does not establish that llmtool
-inference completed in the Codex isolated runtime.
+README and ROADMAP now document PATH-based executable resolution and the
+different runtime provenance. A2.4 remains CURRENT pending external review.
+The normal-shell direct PASS does not establish that llmtool inference
+completed in the Codex isolated runtime.

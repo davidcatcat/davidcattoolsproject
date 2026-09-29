@@ -84,6 +84,10 @@ mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不
 不宣告 large-context、reasoning-control、streaming、code-edit、shell 或 Git capability。
 Fake executable tests 與 canonical suite PASS。正常 authenticated user shell 的 direct CLI marker
 smoke PASS（使用者提供的執行證據）；Codex isolated runtime 無法取得相同 authenticated session。
+兩種 runtime 解析到不同 executable/version：normal shell 使用 nvm 安裝的 Claude CLI 2.1.284，
+Codex isolated runtime 使用 `/usr/local/bin/claude` 2.1.206。`claude-cli` 透過 process `PATH`
+解析 executable，PATH 順序決定實際 CLI；project config 不可覆寫 executable。這是已記錄的
+runtime dependency/minor follow-up，不代表 provider argv failure。
 llmtool isolated-HOME live smoke 曾以 `LLMTOOL_CLAUDE_CLI_HOME` 嘗試一次，未取得 marker，依
 execution-environment 限制記為 SKIPPED-ENVIRONMENT，不視為 inference FAIL 或 PASS。驗證細節見
 [`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。

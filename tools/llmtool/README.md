@@ -112,6 +112,8 @@ Claude CLI must already be installed and authenticated by the user. llmtool does
 read, or manage Claude credentials and does not configure CLI authentication. `llmtool configure`
 does not ask for a Base URL or API key and does not start Claude CLI. This runtime provider is
 separate from the Anthropic API provider, which remains planned.
+The provider resolves `claude` from the llmtool process `PATH`; PATH order determines which
+installed executable and version are used. Project config cannot select or override the executable.
 For isolated llmtool configuration tests, `LLMTOOL_CLAUDE_CLI_HOME` can point the child process
 at the user's existing Claude CLI home while llmtool itself uses a temporary `HOME`; it is a
 runtime environment setting and cannot be set in project config.
