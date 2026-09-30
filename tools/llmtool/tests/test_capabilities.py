@@ -64,7 +64,7 @@ class CapabilityTests(unittest.TestCase):
                 ProviderCapabilities(**{**EXPECTED, "chat": value})
 
     def test_production_registry_matches_implementation(self):
-        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "openai", "openai-compatible"))
+        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "codex-cli", "openai", "openai-compatible"))
         self.assertIs(client_type("openai-compatible"), OpenAICompatibleClient)
         self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
         self.assertEqual(get_provider_capabilities("openai").to_dict(), EXPECTED)
@@ -77,7 +77,7 @@ class CapabilityTests(unittest.TestCase):
             self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
 
     def test_unsupported_types_fail_safely(self):
-        for value in ("anthropic", "codex-cli", "secret-value", None, []):
+        for value in ("anthropic", "future-cli", "secret-value", None, []):
             with self.subTest(value=value):
                 for lookup in (client_type, get_provider_capabilities):
                     with self.assertRaisesRegex(LLMToolError, "^unsupported provider type; use llmtool providers$"):
@@ -135,7 +135,7 @@ class CapabilityTests(unittest.TestCase):
             config["providers"]["test"]["ready"] = False
             with self.assertRaisesRegex(LLMToolError, "not ready"):
                 create_client(config)
-        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "openai", "openai-compatible"))
+        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "codex-cli", "openai", "openai-compatible"))
 
 
 class ProvidersSafetyTests(unittest.TestCase):
@@ -174,7 +174,8 @@ class ProvidersSafetyTests(unittest.TestCase):
                 for key, value in values.items()
             )
             for name, values in (
-                ("claude-cli", CLAUDE_EXPECTED), ("openai", EXPECTED),
+                ("claude-cli", CLAUDE_EXPECTED), ("codex-cli", CLAUDE_EXPECTED),
+                ("openai", EXPECTED),
                 ("openai-compatible", EXPECTED),
             )
         )
@@ -187,6 +188,7 @@ class ProvidersSafetyTests(unittest.TestCase):
         parsed = json.loads(output)
         expected = {
             "claude-cli": CLAUDE_EXPECTED,
+            "codex-cli": CLAUDE_EXPECTED,
             "openai": EXPECTED,
             "openai-compatible": EXPECTED,
         }

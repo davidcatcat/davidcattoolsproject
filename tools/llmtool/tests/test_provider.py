@@ -185,7 +185,7 @@ class ProviderTests(unittest.TestCase):
 
     def test_factory_rejects_unimplemented_provider_type(self):
         config = copy.deepcopy(DEFAULTS)
-        config["providers"]["default"]["type"] = "codex-cli"
+        config["providers"]["default"]["type"] = "future-cli"
         with self.assertRaises(LLMToolError):
             create_client(config)
 

@@ -75,14 +75,15 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     provider_type = _answer(input_fn, "Provider type", "openai-compatible")
     client_type(provider_type)
     is_openai = provider_type == "openai"
-    is_claude_cli = provider_type == "claude-cli"
-    base_url = None if is_openai or is_claude_cli else _answer(input_fn, "Base URL", optional=True)
+    is_cli = provider_type in ("claude-cli", "codex-cli")
+    cli_label = "Codex CLI" if provider_type == "codex-cli" else "Claude CLI"
+    base_url = None if is_openai or is_cli else _answer(input_fn, "Base URL", optional=True)
     model = _answer(input_fn, "Model", optional=True)
     timeout = _number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds")
 
     literal_key = None
     api_key_env = None
-    if not is_claude_cli:
+    if not is_cli:
         # getpass may fall back to an echoing stdin on systems without a TTY.
         # Treat warnings as errors so a credential is never read in that mode.
         if not getattr(sys.stdin, "isatty", lambda: False)():
@@ -104,7 +105,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
         effort_raw = _answer(input_fn, "OpenAI reasoning_effort (none/low/medium/high; blank to unset)", optional=True)
         effort = _choice_or_none(effort_raw, "reasoning_effort", ("none", "low", "medium", "high"))
         provider_options = {} if effort is None else {"reasoning_effort": effort}
-    elif is_claude_cli:
+    elif is_cli:
         provider_options = {}
     else:
         thinking_raw = _answer(input_fn, "Provider-specific enable_thinking (true/false; blank to unset)", optional=True)
@@ -113,12 +114,12 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
 
     if is_openai:
         temperature_prompt = "Temperature (stored, not sent by OpenAI)"
-    elif is_claude_cli:
-        temperature_prompt = "Temperature (stored, not sent by Claude CLI)"
+    elif is_cli:
+        temperature_prompt = "Temperature (stored, not sent by " + cli_label + ")"
     else:
         temperature_prompt = "Temperature"
     temperature = _number(_answer(input_fn, temperature_prompt, "0"), "temperature")
-    max_label = "Max tokens (stored, not enforced by Claude CLI)" if is_claude_cli else "Max tokens"
+    max_label = "Max tokens (stored, not enforced by " + cli_label + ")" if is_cli else "Max tokens"
     max_tokens = _integer(_answer(input_fn, max_label, "2000"), "max_tokens")
 
     active_provider = _answer(input_fn, "Active provider", provider_name)
@@ -146,7 +147,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     print("Configuration saved: " + str(path), file=stdout)
     print("Active provider: " + active_provider, file=stdout)
     print("Type: " + provider["type"], file=stdout)
-    if not is_openai and not is_claude_cli:
+    if not is_openai and not is_cli:
         print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
     print("Model: " + (provider["model"] or "<not configured>"), file=stdout)
     return True

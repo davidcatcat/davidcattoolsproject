@@ -6,10 +6,30 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，下一個實作 milestone 為 A2.5。
+A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，A2.5 implementation 與 external host-terminal validation 已完成，等待 external ChatGPT review。
 A2.3 Anthropic API 仍規劃中且尚未實作。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
+
+## Canonical repository workflow
+
+All project development, tests, validation, documentation, and Git operations
+must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Do not create or use worktrees, independent or milestone clones, sibling or nested
+repositories, or alternate project checkouts. The previous isolated project
+checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AGENTS.md).
+
+If sandbox permissions block `.git` writes, leave changes in the canonical
+repository and report exact host-terminal staging/commit/push commands; do not
+create another checkout. Preserve unrelated user work. Stop for external review
+when required; do not automatically start A2.6 or merge main.
+
+All unit, targeted, canonical, smoke, provider integration, regression, Git, and
+documentation validation must be launched from the canonical repository.
+Test-generated temporary files are allowed only when required by the test/runtime.
+The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
+runtime security mechanism, not a project checkout. It must contain no Git clone,
+worktree, or copy of this repository. This policy does not change provider behavior.
 
 ## A0 — Model Validation ✅ DONE
 
@@ -94,9 +114,18 @@ runtime dependency/minor follow-up，不代表 provider argv failure。
 驗證細節見
 [`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。
 
-### A2.5 — Codex CLI Provider ← CURRENT
+### A2.5 — Codex CLI Provider — IMPLEMENTED; external host validation PASS; external review pending
 
-未實作。先明確定義 CLI runtime 的程序執行與 approval 邊界，再增加 provider。
+新增 `codex-cli` pure-text provider、registry/config validation、configure wizard 與 fake CLI tests。
+Codex CLI 0.159.2；PATH resolution、stdin、bounded subprocess、isolated temporary cwd、approval never。
+使用 restricted read-only permission profile，禁止一般 filesystem read 與 tool network access；
+不宣告 shell、Git、code-edit、streaming、reasoning-control 或 large-context capability。
+不宣稱全部 tools 已停用；isolation + sandbox 是 execution boundary。
+External host-terminal validation PASS：macOS sandbox probe、caller file/Git/AGENTS.md read denial、
+limited HOME contamination probe、direct/E2E exact markers 與 cleanup。PATH executable 與 existing
+Codex auth/runtime 仍為 trusted dependencies；不保證 arbitrary global state 或 future CLI versions isolation。
+Provider != Role != Agent；等待 external ChatGPT review。完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
+A2.6 尚未開始，這個 feature branch 不合併 main。
 
 ### A2.6 — Provider Integration / Smoke Tests
 
