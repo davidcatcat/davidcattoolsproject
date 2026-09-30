@@ -7,7 +7,7 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
 A1.1、A2.1、A2.2、A2.4、A2.5、A2.6 已完成並合併至 main。A2.3 Anthropic API 仍規劃中且尚未實作。
-A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Chat Shell 已實作並完成驗證，等待 external review，尚未合併。Capability 描述
+A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Chat Shell 已實作、完成 canonical validation 與 external review，尚未合併。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -170,7 +170,7 @@ samples warn against exposing credentials/private configuration.
 [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
 Merged to main in `c9159f2`; external ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
 
-## A3.5 — Interactive Chat Shell — IMPLEMENTED; external review pending
+## A3.5 — Interactive Chat Shell — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
 `llmtool chat` provides a line-oriented, provider-agnostic interactive shell.
 Explicit `ChatSession` state owns a resolved config snapshot, selected provider,
@@ -197,7 +197,7 @@ multiline editor, or persisted history. Live smoke NOT-TESTED.
 Implemented on `feat/a3-5-interactive-chat`, not merged to main. Validation counts,
 manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
-Stop for external ChatGPT review. Do not start A4 or merge main.
+External ChatGPT review PASS. Do not start A4 before A3.5 is merged to main.
 
 ## A4 — Evidence-first Context Packet
 
@@ -260,8 +260,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A2.6 已完成並合併至 `main`，A3 Skill Framework 已實作並等待 external review，
-A3.5 Interactive Chat Shell 已排入 roadmap。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A3 已完成並合併至 `main`；A3.5 Interactive Chat Shell 已實作、完成 canonical validation 與 external review，尚未合併。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
 ## A12 — Remote Frontends / Telegram Agent
 
