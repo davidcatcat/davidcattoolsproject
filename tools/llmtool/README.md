@@ -657,7 +657,7 @@ orchestration, retrieval, an A4 context schema, A5 Git collection, or A6 validat
 
 `llmtool chat` starts a persistent interactive process with memory-only conversation
 history. Provider != Role != Agent != Skill. A3.5 is implemented and validated on
-`feat/a3-5-interactive-chat`, awaiting external ChatGPT review; not merged to main.
+`feat/a3-5-interactive-chat`; canonical validation and external ChatGPT review PASS; not merged to main.
 
 ```sh
 llmtool chat
