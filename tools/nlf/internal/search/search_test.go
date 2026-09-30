@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,12 +24,26 @@ func write(t *testing.T, path string, data []byte) {
 	}
 }
 
+// mtimeTick is the smallest mtime step the test file system keeps: 1ns, or
+// 100ns on Windows, where NTFS stores times in 100ns units. Boundary tests
+// place files one tick before or after a bound.
+var mtimeTick = time.Nanosecond
+
+func init() {
+	if runtime.GOOS == "windows" {
+		mtimeTick = 100 * time.Nanosecond
+	}
+}
+
+// lastTick is the last representable instant of a second, as nanoseconds.
+func lastTick() int { return int(time.Second - mtimeTick) }
+
 func run(t *testing.T, q *query.Query) ([]string, Report) {
 	t.Helper()
 	var got []string
 	rep, err := Run(q, func(r Result) {
 		rel, _ := filepath.Rel(q.Root, r.Path)
-		got = append(got, rel)
+		got = append(got, filepath.ToSlash(rel)) // expectations use "/" on every OS
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -135,12 +150,8 @@ func TestPermissionDeniedIsSkippedAndReported(t *testing.T) {
 	write(t, filepath.Join(dir, "secret.txt"), []byte("TODO"))
 	locked := filepath.Join(dir, "locked")
 	secret := filepath.Join(dir, "secret.txt")
-	for _, p := range []string{locked, secret} {
-		if err := os.Chmod(p, 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() { os.Chmod(locked, 0o755); os.Chmod(secret, 0o644) })
+	denyAccess(t, locked)
+	denyAccess(t, secret)
 
 	got, rep := run(t, &query.Query{Root: dir, Contents: []string{"TODO"}})
 	if want := []string{"ok.txt"}; !reflect.DeepEqual(got, want) {
@@ -266,7 +277,7 @@ func TestDateRangeBoundaries(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]time.Time{
 		"0831-235959":      at(8, 31, 23, 59, 59, 0),
-		"0831-last-ns":     at(8, 31, 23, 59, 59, 999_999_999),
+		"0831-last-ns":     at(8, 31, 23, 59, 59, lastTick()),
 		"0901-000000":      at(9, 1, 0, 0, 0, 0),
 		"0915-120000":      at(9, 15, 12, 0, 0, 0),
 		"0915-235959":      at(9, 15, 23, 59, 59, 0),
@@ -276,9 +287,9 @@ func TestDateRangeBoundaries(t *testing.T) {
 		"0928-045959":      at(9, 28, 4, 59, 59, 0),
 		"0928-050000":      at(9, 28, 5, 0, 0, 0),
 		"0930-235959":      at(9, 30, 23, 59, 59, 0),
-		"0930-last-ns":     at(9, 30, 23, 59, 59, 999_999_999),
+		"0930-last-ns":     at(9, 30, 23, 59, 59, lastTick()),
 		"1001-000000":      at(10, 1, 0, 0, 0, 0),
-		"1001-000000-plus": at(10, 1, 0, 0, 0, 1),
+		"1001-000000-plus": at(10, 1, 0, 0, 0, int(mtimeTick)),
 	}
 	for n, mt := range files {
 		p := filepath.Join(dir, n)
@@ -322,11 +333,11 @@ func TestToNowBoundary(t *testing.T) {
 	now := time.Date(2026, 9, 28, 10, 30, 0, 500, loc)
 	dir := t.TempDir()
 	files := map[string]time.Time{
-		"a-before-start": time.Date(2026, 8, 31, 23, 59, 59, 999_999_999, loc),
+		"a-before-start": time.Date(2026, 8, 31, 23, 59, 59, lastTick(), loc),
 		"b-start":        time.Date(2026, 9, 1, 0, 0, 0, 0, loc),
-		"c-now-minus-1":  now.Add(-time.Nanosecond),
+		"c-now-minus-1":  now.Add(-mtimeTick),
 		"d-now":          now,
-		"e-now-plus-1":   now.Add(time.Nanosecond),
+		"e-now-plus-1":   now.Add(mtimeTick),
 	}
 	for n, mt := range files {
 		p := filepath.Join(dir, n)
@@ -577,10 +588,7 @@ func TestFilenameBeforeContent(t *testing.T) {
 	write(t, filepath.Join(dir, "nginx.conf"), []byte("listen 443"))
 	locked := filepath.Join(dir, "other.conf")
 	write(t, locked, []byte("listen 443"))
-	if err := os.Chmod(locked, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(locked, 0o644) })
+	denyAccess(t, locked)
 	q, _ := query.Parse(`檔名是 nginx.conf，內容包含 "listen 443"`, time.Now())
 	q.Root = dir
 	got, rep := run(t, q)
@@ -596,7 +604,7 @@ func TestAbsoluteComparatorBoundaries(t *testing.T) {
 	loc := time.FixedZone("CST", 8*3600)
 	now := time.Date(2026, 9, 28, 10, 30, 0, 0, loc)
 	at := func(y int, mo time.Month, d int) time.Time { return time.Date(y, mo, d, 0, 0, 0, 0, loc) }
-	justBefore := func(t time.Time) time.Time { return t.Add(-time.Nanosecond) }
+	justBefore := func(t time.Time) time.Time { return t.Add(-mtimeTick) }
 	dir := t.TempDir()
 	files := map[string]time.Time{
 		"2024-12-31-last": justBefore(at(2025, 1, 1)),

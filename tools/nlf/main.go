@@ -58,7 +58,7 @@ Flags:
   -h, --help       show this help;  --version  print version
 
 --explain   nlf --explain "找 ovpn 檔"   Nothing is searched, and nlf never runs the command.
-  Prints the parsed conditions and an approximate find command for this OS (macOS or GNU/Linux).
+  Prints the parsed conditions and an approximate find command (macOS, GNU/Linux; not on Windows).
 
 --confirm   nlf --confirm "找 ovpn 檔"
   Prints the execution plan and a safety summary, then asks "Execute this search? [y/N]".
@@ -181,11 +181,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 	if opts.explain || opts.confirm {
 		// Let the displayed find command follow a symlinked root (e.g. /tmp)
 		// the same way the search does.
-		if li, err := os.Lstat(rootOrDot(q.Root)); err == nil && li.Mode()&fs.ModeSymlink != 0 {
-			if fi, err := os.Stat(rootOrDot(q.Root)); err == nil && fi.IsDir() {
-				q.RootSymlink = true
-			}
-		}
+		q.RootSymlink = search.RootIsLink(rootOrDot(q.Root))
 	}
 	if opts.explain {
 		fmt.Fprint(stdout, query.Explain(q, query.PlatformFor(runtime.GOOS)))
@@ -257,10 +253,17 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, now time.Time
 
 // permissionHint suggests what to do after permission errors. goos picks
 // the platform-specific advice: macOS privacy protection (TCC / Full Disk
-// Access) or Linux file permissions and security modules.
+// Access), Windows ACLs, or Linux file permissions and security modules.
 func permissionHint(lang query.Lang, goos string) string {
 	zh := lang == query.Chinese
 	switch {
+	case goos == "windows" && zh:
+		return "提示：可縮小搜尋範圍（例如 --dir ~\\Documents）或用「排除」跳過這些目錄。" +
+			"可在資料夾的「內容 › 安全性」或用 icacls 檢查權限；需要時請改用有權限的帳號執行（nlf 不會自動以系統管理員身分執行）。\n"
+	case goos == "windows":
+		return "hint: narrow the search (e.g. --dir ~\\Documents) or exclude those directories. " +
+			"Check the folder's permissions in Properties › Security or with icacls; if needed, run nlf as an account " +
+			"that has access (nlf never elevates itself or runs as administrator).\n"
 	case goos == "darwin" && zh:
 		return "提示：可縮小搜尋範圍（例如 --dir ~/Documents）或用「排除」跳過這些目錄。" +
 			"macOS 受保護的資料夾（如 ~/Library 的部分內容）需要在「系統設定 › 隱私權與安全性 › 完整磁碟取用權限」授權終端機。\n"
@@ -409,16 +412,18 @@ func checkConflicts(o *options) error {
 	return nil
 }
 
-// displayPath keeps a relative path that starts with "-" from being read as an option.
+// displayPath keeps a relative path that starts with "-" from being read as
+// an option: "./-x" (".\-x" on Windows).
 func displayPath(p string) string {
 	if strings.HasPrefix(p, "-") {
-		return "./" + p
+		return "." + string(filepath.Separator) + p
 	}
 	return p
 }
 
 // executionPlan describes what a search will do before it runs. The find
-// command is shown for understanding only; nlf never executes it.
+// command is shown for understanding only; nlf never executes it. Windows
+// has no find, so there the plan says that the conditions are the search.
 func executionPlan(q *query.Query, e search.Effects, p query.Platform) string {
 	yn := func(b bool) string {
 		if b {
@@ -435,8 +440,13 @@ func executionPlan(q *query.Query, e search.Effects, p query.Platform) string {
 	} else {
 		b.WriteString("  (none: every regular file)\n")
 	}
-	b.WriteString("\nApproximate " + p.Name() + " command (for reference only; nlf does not execute it):\n")
-	b.WriteString("  " + query.FindCommand(q, p) + "\n\n")
+	if p.HasFindCommand() {
+		b.WriteString("\nApproximate " + p.Name() + " command (for reference only; nlf does not execute it):\n")
+		b.WriteString("  " + query.FindCommand(q, p) + "\n\n")
+	} else {
+		// Never called an equivalent: there is no command at all.
+		b.WriteString("\n" + query.NoCommandNote(query.English) + "\n\n")
+	}
 	fmt.Fprintf(&b, `Safety:
   Read files:        %s
   Modify files:      %s
@@ -470,8 +480,12 @@ func rootOrDot(r string) string {
 	return r
 }
 
+// expandHome replaces a leading "~" followed by a separator ("~/", and
+// "~\" on Windows) with the home directory. Only nlf expands it: cmd.exe
+// and PowerShell pass "~" to programs unchanged.
 func expandHome(p string) string {
-	if p != "~" && !strings.HasPrefix(p, "~/") {
+	rest, ok := strings.CutPrefix(p, "~")
+	if !ok || rest != "" && !os.IsPathSeparator(rest[0]) {
 		return p
 	}
 	home, err := os.UserHomeDir()

@@ -213,33 +213,47 @@ func FormatConditions(cs []Condition) string {
 // Platform selects the dialect of the approximate shell command: BSD tools
 // on macOS or GNU findutils/coreutils on Linux. The find, grep, sort, cut
 // and head parts are the same; the stat format and the -newermt time
-// format differ.
+// format differ. Windows has no find, grep or stat, so no command is shown
+// there (see HasFindCommand).
 type Platform int
 
 const (
 	MacOS Platform = iota
 	Linux
+	Windows
 )
 
-// PlatformFor maps a GOOS value to the command dialect: GNU on Linux, BSD
-// (macOS) everywhere else.
+// PlatformFor maps a GOOS value to the command dialect: GNU on Linux, none
+// on Windows, BSD (macOS) everywhere else.
 func PlatformFor(goos string) Platform {
-	if goos == "linux" {
+	switch goos {
+	case "linux":
 		return Linux
+	case "windows":
+		return Windows
 	}
 	return MacOS
 }
 
 // Name is the platform as shown to users.
 func (p Platform) Name() string {
-	if p == Linux {
+	switch p {
+	case Linux:
 		return "GNU/Linux"
+	case Windows:
+		return "Windows"
 	}
 	return "macOS"
 }
 
+// HasFindCommand reports whether p has the Unix tools FindCommand renders.
+// On Windows nlf shows only its own conditions, never a command that would
+// not exist or would mean something else there (find.exe searches text).
+func (p Platform) HasFindCommand() bool { return p != Windows }
+
 // Explain describes how the query was understood, followed by an approximate
-// find command for platform p.
+// find command for platform p, or on Windows by a note that the conditions
+// are the whole search.
 func Explain(q *Query, p Platform) string {
 	zh := q.Lang == Chinese
 	pick := func(c, e string) string {
@@ -251,15 +265,31 @@ func Explain(q *Query, p Platform) string {
 	var b strings.Builder
 	b.WriteString(pick("解析結果：\n", "Understood as:\n"))
 	b.WriteString(FormatConditions(append([]Condition{{pick("搜尋位置", "root:"), rootOrDot(q.Root)}}, Conditions(q, q.Lang)...)))
+	if !p.HasFindCommand() {
+		b.WriteString(pick("\n"+NoCommandNote(Chinese)+"\n", "\n"+NoCommandNote(English)+"\n"))
+		return b.String()
+	}
 	b.WriteString(pick("\n近似的 "+p.Name()+" 指令（僅供參考，nlf 不會執行它）：\n",
 		"\nApproximate "+p.Name()+" command for reference; nlf does not execute it:\n"))
 	b.WriteString("  " + FindCommand(q, p) + "\n")
 	return b.String()
 }
 
-// FindCommand renders q as an approximate find pipeline for platform p. It
-// is for reference only: unsorted output order and some edge cases (binary
-// detection, case folding) can differ from nlf's own search.
+// NoCommandNote explains, on a platform without find, why no command is
+// shown and that the listed conditions are the complete search.
+func NoCommandNote(lang Lang) string {
+	if lang == Chinese {
+		return "Windows 上不顯示近似指令：find、grep、stat 是 Unix 工具（Windows 的 find.exe 是搜尋文字的另一個程式）。" +
+			"上面列出的條件就是 nlf 實際搜尋的全部內容；nlf 不會執行任何指令。"
+	}
+	return "No approximate command on Windows: find, grep and stat are Unix tools (Windows find.exe is a different, text-search program). " +
+		"The conditions above are the complete search; nlf never runs a command."
+}
+
+// FindCommand renders q as an approximate find pipeline for platform p,
+// which must have HasFindCommand. It is for reference only: unsorted
+// output order and some edge cases (binary detection, case folding) can
+// differ from nlf's own search.
 func FindCommand(q *Query, p Platform) string {
 	root := findRoot(q)
 	parts := []string{"find", shellQuote(root)}

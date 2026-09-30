@@ -65,12 +65,13 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 		root = "."
 	}
 	var rep Report
-	info, err := os.Stat(root)
-	if err != nil {
+	if _, err := os.Stat(root); err != nil {
 		return rep, err
 	}
-	// Follow a symlinked root such as macOS /tmp; links below it are not followed.
-	if li, err := os.Lstat(root); err == nil && li.Mode()&fs.ModeSymlink != 0 && info.IsDir() {
+	// Follow a linked root such as macOS /tmp or a Windows junction; links
+	// below it are not followed. A trailing separator makes WalkDir's Lstat
+	// resolve the link on every platform.
+	if RootIsLink(root) {
 		root += string(filepath.Separator)
 	}
 	depthOf := depthFunc(root)
@@ -170,17 +171,32 @@ func Run(q *query.Query, emit func(Result)) (Report, error) {
 	return rep, nil
 }
 
+// RootIsLink reports whether root is a link to a directory: a symlink, or
+// on Windows also a junction (mount point), which Lstat reports as neither
+// a directory nor a symlink. Stat follows either kind, so a root that is a
+// directory for Stat but not for Lstat is a link.
+func RootIsLink(root string) bool {
+	li, err := os.Lstat(root)
+	if err != nil || li.IsDir() {
+		return false
+	}
+	fi, err := os.Stat(root)
+	return err == nil && fi.IsDir()
+}
+
 // depthFunc returns a function giving the depth of a path WalkDir passes
 // for root: root itself is 0, its entries 1. WalkDir builds child paths
 // with filepath.Join, so they start with filepath.Clean(root) + separator,
-// except that Clean(".") children have no prefix and "/" is its own prefix.
+// except that Clean(".") children have no prefix, "/" is its own prefix,
+// and on Windows a drive-relative root "C:" (Clean gives "C:.") has
+// children "C:name".
 func depthFunc(root string) func(path string) int {
 	sep := string(filepath.Separator)
 	base := filepath.Clean(root)
 	prefix := base + sep
-	switch {
-	case base == ".":
-		prefix = ""
+	switch vol := filepath.VolumeName(base); {
+	case base == vol+".":
+		prefix = vol
 	case strings.HasSuffix(base, sep):
 		prefix = base
 	}
@@ -230,8 +246,12 @@ func NormalizeExcludes(root string, dirs []string) ([]string, error) {
 			continue
 		}
 		p := filepath.FromSlash(d)
-		if filepath.IsAbs(p) {
-			rel, ok := relUnder(root, p)
+		if isRooted(p) {
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				return nil, &ExcludeError{Path: d}
+			}
+			rel, ok := relUnder(root, abs)
 			if !ok {
 				return nil, &ExcludeError{Path: d}
 			}
@@ -247,6 +267,14 @@ func NormalizeExcludes(root string, dirs []string) ([]string, error) {
 		out = append(out, "./"+filepath.ToSlash(p))
 	}
 	return out, nil
+}
+
+// isRooted reports whether p names a location independent of the current
+// directory within its drive: an absolute path, or on Windows also a path
+// with a drive letter ("C:x") or starting with a separator ("\\tmp"), which
+// filepath.IsAbs does not count as absolute. On Unix it equals IsAbs.
+func isRooted(p string) bool {
+	return filepath.IsAbs(p) || filepath.VolumeName(p) != "" || p != "" && os.IsPathSeparator(p[0])
 }
 
 // relUnder returns abs relative to root when abs lies inside root, trying

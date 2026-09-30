@@ -77,7 +77,7 @@ func paths(dir, stdout string) []string {
 	for _, l := range strings.Split(strings.TrimSpace(stdout), "\n") {
 		if l != "" {
 			rel, _ := filepath.Rel(dir, l)
-			got = append(got, rel)
+			got = append(got, filepath.ToSlash(rel)) // expectations use "/" on every OS
 		}
 	}
 	return got
@@ -141,13 +141,14 @@ func TestExplainDoesNotSearch(t *testing.T) {
 	}
 	// after <= mtime is rendered as mtime > after-1ns: whole seconds for
 	// BSD find, nanoseconds for GNU find.
-	after := map[query.Platform]string{query.MacOS: "'2026-09-24 11:59:59'", query.Linux: "'2026-09-24 11:59:59.999999999'"}[query.PlatformFor(runtime.GOOS)]
-	for _, want := range []string{"解析結果", ".go", "> 1 MB", "vendor", "5",
-		"find /definitely/missing -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1048576c -newermt " + after + " -print | head -n 5"} {
+	after := map[query.Platform]string{query.MacOS: "'2026-09-24 11:59:59'", query.Linux: "'2026-09-24 11:59:59.999999999'"}[hostPlatform]
+	for _, want := range []string{"解析結果", ".go", "> 1 MB", "vendor", "5"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("explain output missing %q:\n%s", want, out)
 		}
 	}
+	checkCommand(t, "explain", out, query.Chinese,
+		"find /definitely/missing -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1048576c -newermt "+after+" -print | head -n 5")
 }
 
 func TestLongOutput(t *testing.T) {
@@ -164,10 +165,7 @@ func TestPermissionDeniedMessage(t *testing.T) {
 	}
 	dir := fixture(t)
 	locked := filepath.Join(dir, "docs")
-	if err := os.Chmod(locked, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(locked, 0o755) })
+	denyAccess(t, locked)
 
 	out, errOut, code := nlf(t, "--dir", dir, "找 go 檔")
 	if code != 0 || len(paths(dir, out)) != 3 {
@@ -225,7 +223,7 @@ func mkfiles(t *testing.T, dir string, files map[string]string) {
 
 func TestChinesePathIsNeverCutShort(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	mkfiles(t, home, map[string]string{"文件/doc.go": "", "other/secret.go": "", "圖片/p.png": "", "other/o.png": "",
 		"中文 目錄/a.md": "", "other/b.md": ""})
 
@@ -254,8 +252,15 @@ func TestChinesePathIsNeverCutShort(t *testing.T) {
 func TestPathWithSpaces(t *testing.T) {
 	dir := t.TempDir()
 	mkfiles(t, dir, map[string]string{"my docs/a.txt": "", "b.txt": ""})
-	out, _, code := nlf(t, `in "`+filepath.Join(dir, "my docs")+`" txt files`)
-	if got := paths(dir, out); code != 0 || strings.Join(got, ",") != "my docs/a.txt" {
+	q, base := `in "`+filepath.Join(dir, "my docs")+`" txt files`, dir
+	if runtime.GOOS == "windows" {
+		// A Windows path cannot be written inside the query (it goes in
+		// --dir), so use the "/" form relative to the working directory.
+		chdir(t, dir)
+		q, base = `in "./my docs" txt files`, "."
+	}
+	out, _, code := nlf(t, q)
+	if got := paths(base, out); code != 0 || strings.Join(got, ",") != "my docs/a.txt" {
 		t.Errorf("code=%d got %v", code, got)
 	}
 }
@@ -278,7 +283,7 @@ func TestExcludePathErrors(t *testing.T) {
 		}
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	mkfiles(t, home, map[string]string{"proj/vendor/x.go": "", "proj/a.go": ""})
 	out, errOut, code := nlf(t, "--dir", filepath.Join(home, "proj"), "go files exclude ~/proj/vendor")
 	if got := paths(filepath.Join(home, "proj"), out); code != 0 || strings.Join(got, ",") != "a.go" {
@@ -294,10 +299,11 @@ func TestExplainSymlinkRootAndRelativeExclude(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _, code := nlf(t, "--explain", "--dir", link, "txt files exclude ./src//gen/ and vendor")
-	want := "find " + link + "/ -type d \\( -path " + link + "/src/gen -o -iname vendor \\) -prune -o -type f -iname '?*.txt' -print"
-	if code != 0 || !strings.Contains(out, want) || !strings.Contains(out, "Approximate") {
-		t.Errorf("code=%d\n got %s\nwant %s", code, out, want)
+	if code != 0 || !strings.Contains(out, "exclude dirs:  ./src/gen, vendor") {
+		t.Errorf("code=%d\n%s", code, out)
 	}
+	checkCommand(t, "explain", out, query.English, "Approximate",
+		"find "+link+"/ -type d \\( -path "+link+"/src/gen -o -iname vendor \\) -prune -o -type f -iname '?*.txt' -print")
 }
 
 // TestExplainParity runs the printed find command (read-only) and checks it
@@ -594,7 +600,7 @@ func TestDocsMatchBehavior(t *testing.T) {
 // sandbox: each must be understood (exit 0 or 1, never 2).
 func TestDocExamplesRun(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	mkfiles(t, home, map[string]string{"Downloads/vpn.ovpn": "", "Documents/a.md": "", "My Docs/b.txt": "",
 		"work/main.go": "package main // TODO", "work/vendor/v.go": "", "work/ip.txt": "20.2.250.249",
 		"work/node_modules/x.go": "", "work/src/s.go": ""})
@@ -760,8 +766,6 @@ func TestConfirmPlan(t *testing.T) {
 	for _, want := range []string{
 		"NLF execution plan", "Search root:\n  " + dir, "Conditions:", "extension:", ".go", "size:", "> 1 KB",
 		"exclude dirs:", "vendor", "limit:", "3",
-		"Approximate " + query.PlatformFor(runtime.GOOS).Name() + " command", "nlf does not execute it",
-		"find " + dir + " -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1024c -print | head -n 3",
 		"Read files:        YES", "Modify files:      NO", "Create files:      NO", "Delete files:      NO",
 		"Execute shell:     NO", "sudo required:     NO", "Risk:\n  READ-ONLY", "Execute this search? [y/N]: ",
 	} {
@@ -774,16 +778,19 @@ func TestConfirmPlan(t *testing.T) {
 			t.Errorf("plan contains %q:\n%s", bad, plan)
 		}
 	}
+	checkCommand(t, "plan", plan, query.English, "Approximate "+hostPlatform.Name()+" command", "nlf does not execute it",
+		"find "+dir+" -type d \\( -iname vendor \\) -prune -o -type f -iname '?*.go' -size +1024c -print | head -n 3")
 	// The plan shows the depth limit and the find command applies it.
 	out, plan, code = nlfInput(t, "", "--confirm", "--max-depth", "1", "--dir", dir, "go files")
 	if code != 0 || out != "" {
 		t.Fatalf("--max-depth 1: code=%d stdout=%q", code, out)
 	}
-	for _, want := range []string{"depth:", "at most 1 level (", "find " + dir + " -maxdepth 1 -type f -iname '?*.go' -print"} {
+	for _, want := range []string{"depth:", "at most 1 level ("} {
 		if !strings.Contains(plan, want) {
 			t.Errorf("--max-depth 1 plan missing %q:\n%s", want, plan)
 		}
 	}
+	checkCommand(t, "--max-depth 1 plan", plan, query.English, "find "+dir+" -maxdepth 1 -type f -iname '?*.go' -print")
 }
 
 func TestConfirmAndExplainAreDistinct(t *testing.T) {
@@ -886,13 +893,32 @@ func TestPermissionHintByOS(t *testing.T) {
 	if !strings.Contains(linux[0], "提示") || !strings.Contains(linux[1], "hint:") {
 		t.Errorf("Linux hints are not localized: %q", linux)
 	}
+	windows := []string{permissionHint(query.Chinese, "windows"), permissionHint(query.English, "windows")}
+	for _, h := range windows {
+		for _, bad := range []string{"macOS", "Full Disk Access", "完整磁碟", "ls -ld", "SELinux", "sudo", "/var/log"} {
+			if strings.Contains(h, bad) {
+				t.Errorf("Windows hint mentions %q: %q", bad, h)
+			}
+		}
+		if !strings.Contains(h, "icacls") || !strings.Contains(h, `--dir ~\Documents`) {
+			t.Errorf("Windows hint lacks ACL advice or a Windows path: %q", h)
+		}
+	}
+	if !strings.Contains(windows[0], "提示") || !strings.Contains(windows[0], "系統管理員") || !strings.Contains(windows[1], "administrator") {
+		t.Errorf("Windows hints are not localized: %q", windows)
+	}
 }
 
 func TestExplainAndConfirmUseHostPlatform(t *testing.T) {
-	p := query.PlatformFor(runtime.GOOS)
+	p := hostPlatform
 	dir := fixture(t)
 	out, _, _ := nlf(t, "--explain", "--dir", dir, "largest 2")
 	_, plan, _ := nlfInput(t, "n\n", "--confirm", "--dir", dir, "largest 2")
+	if !p.HasFindCommand() {
+		checkNoCommand(t, "--explain", out, query.English)
+		checkNoCommand(t, "--confirm", plan, query.English)
+		return
+	}
 	wantFlag := map[query.Platform]string{query.MacOS: "stat -f '%z %N'", query.Linux: "stat -c '%s %n'"}[p]
 	for name, text := range map[string]string{"--explain": out, "--confirm": plan} {
 		if !strings.Contains(text, "Approximate "+p.Name()+" command") || !strings.Contains(text, wantFlag) {
@@ -1078,12 +1104,12 @@ func TestOrEndToEnd(t *testing.T) {
 	for name, text := range map[string]string{"--explain": ex, "--confirm": plan} {
 		for _, want := range []string{`content:       "ERROR" OR "panic" (any one matches, case-sensitive)`,
 			"modified:      any of (OR), any one matches:",
-			"- 2026-09-27 00:00:00 <= mtime < 2026-09-28 00:00:00", "- 2026-09-26 00:00:00 <= mtime < 2026-09-27 00:00:00",
-			"-e ERROR -e panic"} {
+			"- 2026-09-27 00:00:00 <= mtime < 2026-09-28 00:00:00", "- 2026-09-26 00:00:00 <= mtime < 2026-09-27 00:00:00"} {
 			if !strings.Contains(text, want) {
 				t.Errorf("%s missing %q:\n%s", name, want, text)
 			}
 		}
+		checkCommand(t, name, text, query.English, "-e ERROR -e panic")
 		if strings.Count(text, "content:") != 1 {
 			t.Errorf("%s shows the OR terms as separate rows:\n%s", name, text)
 		}
@@ -1140,9 +1166,14 @@ func TestFilenameEndToEnd(t *testing.T) {
 		"--explain": {ex, `檔名           包含 "config" (區分大小寫)`, "-name '*config*'"},
 		"--confirm": {plan, `filename:      is "nginx.conf" OR is "httpd.conf" (any one matches, case-sensitive)`, `\( -name nginx.conf -o -name httpd.conf \)`},
 	} {
-		if !strings.Contains(c.text, c.row) || !strings.Contains(c.text, c.find) {
-			t.Errorf("%s missing filename row or -name:\n%s", name, c.text)
+		if !strings.Contains(c.text, c.row) {
+			t.Errorf("%s missing filename row:\n%s", name, c.text)
 		}
+		lang := query.English
+		if name == "--explain" {
+			lang = query.Chinese
+		}
+		checkCommand(t, name, c.text, lang, c.find)
 	}
 	if !strings.Contains(plan, "Risk:\n  READ-ONLY") {
 		t.Errorf("--confirm safety changed:\n%s", plan)
@@ -1266,8 +1297,15 @@ func TestPunctuationQARegressionsEndToEnd(t *testing.T) {
 func TestParentPathRoot(t *testing.T) {
 	dir := t.TempDir()
 	mkfiles(t, dir, map[string]string{"up.go": "", "b/mid.go": "", "b/src/x.go": ""})
-	out, errOut, code := nlf(t, "go files in "+filepath.Join(dir, "b", "src")+"/../..")
-	got := strings.Join(paths(filepath.Join(dir, "b", "src", "..", ".."), out), ",")
+	q, base := "go files in "+filepath.Join(dir, "b", "src")+"/../..", filepath.Join(dir, "b", "src", "..", "..")
+	if runtime.GOOS == "windows" {
+		// A Windows path cannot be written inside the query; use the "/"
+		// form relative to the working directory.
+		chdir(t, filepath.Join(dir, "b", "src"))
+		q, base = "go files in ./../..", filepath.Join("..", "..")
+	}
+	out, errOut, code := nlf(t, q)
+	got := strings.Join(paths(base, out), ",")
 	if code != 0 || got != "b/mid.go,b/src/x.go,up.go" {
 		t.Errorf("code=%d got %s\n%s", code, got, errOut)
 	}
@@ -1578,7 +1616,8 @@ func TestNullWithConfirm(t *testing.T) {
 }
 
 func TestDisplayPath(t *testing.T) {
-	for in, want := range map[string]string{"-x": "./-x", "-foo/a": "./-foo/a", "--help": "./--help", "-": "./-",
+	dot := "." + string(filepath.Separator) // "./" or ".\\"
+	for in, want := range map[string]string{"-x": dot + "-x", "-foo/a": dot + "-foo/a", "--help": dot + "--help", "-": dot + "-",
 		"a/-x": "a/-x", "./-x": "./-x", "/abs/-x": "/abs/-x", "": ""} {
 		if got := displayPath(in); got != want {
 			t.Errorf("displayPath(%q) = %q, want %q", in, got, want)
@@ -1590,39 +1629,57 @@ func TestDisplayPath(t *testing.T) {
 // against file names that break newline-separated output or look like
 // options, and pipes -0 output into xargs -0.
 func TestHostileFilenamesNullXargs(t *testing.T) {
-	xargs, err := exec.LookPath("xargs")
-	if err != nil {
-		t.Fatalf("xargs not found: %v", err)
+	// xargs is a Unix tool (on a Windows runner only Git Bash's MSYS copy
+	// exists, which is not what Windows users have); there the -0 output
+	// itself is still checked byte for byte.
+	xargs, xerr := exec.LookPath("xargs")
+	if xerr != nil && runtime.GOOS != "windows" {
+		t.Fatalf("xargs not found: %v", xerr)
 	}
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
-	names := []string{"a b.txt", "a\tb.txt", "a\nb.txt", "-rf.txt", "--help.txt", "-n", " lead.txt", "trail.txt ",
-		`it's "q".txt`, `back\slash.txt`, "中文 檔名.txt", "-sub/a.txt"}
+	names := []string{"a b.txt", "-rf.txt", "--help.txt", "-n", " lead.txt", "中文 檔名.txt", "-sub/a.txt"}
+	if runtime.GOOS == "windows" {
+		names = append(names, "it's.txt")
+	} else {
+		// Tabs, newlines, trailing spaces, quotes and backslashes cannot be
+		// in Windows file names.
+		names = append(names, "a\tb.txt", "a\nb.txt", "trail.txt ", `it's "q".txt`, `back\slash.txt`)
+	}
 	content := map[string]string{}
 	var files, created []string
-	add := func(name string) error {
+	sep := string(filepath.Separator)
+	// add creates name and records the name the file system lists (stored).
+	add := func(name, stored string) error {
 		data := string(rune('A' + len(files)))
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, name)), 0o755); err != nil {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
 			return err
 		}
-		content[displayPath(name)] = data
-		files = append(files, displayPath(name))
-		created = append(created, name)
+		shown := displayPath(filepath.FromSlash(stored))
+		content[shown] = data
+		files = append(files, shown)
+		created = append(created, stored)
 		return nil
 	}
 	for _, n := range names {
-		if err := add(n); err != nil {
+		if err := add(n, n); err != nil {
 			t.Fatal(err)
 		}
 	}
 	bad := "bad\xffname.txt"
-	switch err := add(bad); {
+	stored := bad
+	if runtime.GOOS == "windows" {
+		// Windows stores names as UTF-16: the invalid byte becomes U+FFFD.
+		stored = "bad\ufffdname.txt"
+	}
+	switch err := add(bad, stored); {
 	case err == nil:
 	case runtime.GOOS == "darwin" && errors.Is(err, syscall.EILSEQ):
 		t.Logf("file system rejects invalid UTF-8 names (%v); testing without %q", err, bad)
@@ -1657,12 +1714,37 @@ func TestHostileFilenamesNullXargs(t *testing.T) {
 	// (no name here shares a prefix with -sub/), before ./ is added.
 	var wantOrder []string
 	for _, n := range slices.Sorted(slices.Values(created)) {
-		wantOrder = append(wantOrder, displayPath(n))
+		wantOrder = append(wantOrder, displayPath(filepath.FromSlash(n)))
 	}
 	if !slices.Equal(got, wantOrder) {
 		t.Errorf("-0 files order:\n got  %q\n want %q", got, wantOrder)
 	}
 
+	if runtime.GOOS == "windows" {
+		t.Log("windows: not piping -0 output into xargs, a Unix tool")
+	} else {
+		checkXargs(t, xargs, dir, out, got, content)
+	}
+
+	for _, d := range []string{"-sub", "./-sub"} {
+		if res := nlfRun("--dir", d, "-0", "files"); string(res) != "."+sep+"-sub"+sep+"a.txt\x00" {
+			t.Errorf("--dir %s -0 files = %q", d, res)
+		}
+	}
+	lines := strings.Split(string(nlfRun("files")), "\n")
+	if !slices.Contains(lines, "."+sep+"-rf.txt") || slices.Contains(lines, "-rf.txt") {
+		t.Errorf("newline output should show .%s-rf.txt: %q", sep, lines)
+	}
+	long := strings.Split(string(nlfRun("-l", "files")), "\n")
+	if !slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  ."+sep+"-rf.txt") }) ||
+		slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  -rf.txt") }) {
+		t.Errorf("-l output should show .%s-rf.txt: %q", sep, long)
+	}
+}
+
+// checkXargs pipes nlf -0 output into xargs -0 printf and cat in dir.
+func checkXargs(t *testing.T, xargs, dir string, out []byte, got []string, content map[string]string) {
+	t.Helper()
 	xrun := func(args ...string) []byte {
 		t.Helper()
 		cmd := exec.Command(xargs, args...)
@@ -1686,19 +1768,56 @@ func TestHostileFilenamesNullXargs(t *testing.T) {
 	if res := xrun("-0", "cat"); string(res) != wantCat.String() {
 		t.Errorf("xargs -0 cat = %q, want %q", res, wantCat.String())
 	}
+}
 
-	for _, d := range []string{"-sub", "./-sub"} {
-		if res := nlfRun("--dir", d, "-0", "files"); string(res) != "./-sub/a.txt\x00" {
-			t.Errorf("--dir %s -0 files = %q", d, res)
+// TestExecutionPlanOnWindows renders the --confirm plan for Windows on any
+// OS: the root, every condition and the safety summary, then the note that
+// no command exists instead of a find command.
+func TestExecutionPlanOnWindows(t *testing.T) {
+	q, err := query.Parse("go files larger than 1KB excluding vendor, top 3", testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.Root = `C:\Users\me\src`
+	plan := executionPlan(q, search.RunEffects(), query.Windows)
+	for _, want := range []string{"NLF execution plan", "Search root:\n  C:\\Users\\me\\src\n", "extension:     .go", "size:          > 1 KB",
+		"exclude dirs:  vendor", "limit:         3", "\n" + query.NoCommandNote(query.English) + "\n\n",
+		"Execute shell:     NO", "Risk:\n  READ-ONLY"} {
+		if !strings.Contains(plan, want) {
+			t.Errorf("Windows plan missing %q:\n%s", want, plan)
 		}
 	}
-	lines := strings.Split(string(nlfRun("files")), "\n")
-	if !slices.Contains(lines, "./-rf.txt") || slices.Contains(lines, "-rf.txt") {
-		t.Errorf("newline output should show ./-rf.txt: %q", lines)
+	for _, bad := range []string{"find ", "-iname", "| head", "Approximate", "Equivalent"} {
+		if strings.Contains(plan, bad) {
+			t.Errorf("Windows plan contains %q:\n%s", bad, plan)
+		}
 	}
-	long := strings.Split(string(nlfRun("-l", "files")), "\n")
-	if !slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  ./-rf.txt") }) ||
-		slices.ContainsFunc(long, func(l string) bool { return strings.HasSuffix(l, "  -rf.txt") }) {
-		t.Errorf("-l output should show ./-rf.txt: %q", long)
+	// The conditions and the safety summary are those of the other platforms.
+	unix := executionPlan(q, search.RunEffects(), query.MacOS)
+	cut := func(s, from, to string) string { return s[strings.Index(s, from):strings.Index(s, to)] }
+	if cut(plan, "Search root:", "\n\n"+query.NoCommandNote(query.English)) != cut(unix, "Search root:", "\n\nApproximate") ||
+		plan[strings.Index(plan, "Safety:"):] != unix[strings.Index(unix, "Safety:"):] {
+		t.Errorf("Windows plan differs from macOS outside the command:\n%s\n---\n%s", plan, unix)
+	}
+}
+
+// TestExpandHome: "~" alone or before a separator is the home directory:
+// "~/" everywhere and also "~\" on Windows, where "\" is the separator.
+// On Unix "\" is an ordinary file name character, so "~\x" stays as is.
+func TestExpandHome(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	cases := map[string]string{"~": home, "~/": home, "~/a/b": filepath.Join(home, "a", "b"),
+		"~x": "~x", "a/~": "a/~", "": "", "/abs": "/abs"}
+	if runtime.GOOS == "windows" {
+		cases[`~\a`] = filepath.Join(home, "a")
+		cases[`~\`] = home
+	} else {
+		cases[`~\a`] = `~\a`
+	}
+	for in, want := range cases {
+		if got := expandHome(in); got != want {
+			t.Errorf("expandHome(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -328,8 +329,8 @@ func TestMaxDepthDoesNotReadBelow(t *testing.T) {
 	write(t, filepath.Join(dir, "d", "z.txt"), []byte("TODO"))
 	write(t, filepath.Join(dir, "d", "lock2", "y.txt"), []byte("TODO"))
 	lock, lock2 := filepath.Join(dir, "lock"), filepath.Join(dir, "d", "lock2")
-	chmod(t, lock, 0, 0o755)
-	chmod(t, lock2, 0, 0o755)
+	denyAccess(t, lock)
+	denyAccess(t, lock2)
 
 	q := maxDepth(dir, 1)
 	q.Contents = []string{"TODO"}
@@ -355,7 +356,7 @@ func TestMaxDepthDoesNotReadBelow(t *testing.T) {
 	// --max-depth 0 on an unreadable root: the root is never read.
 	locked := filepath.Join(t.TempDir(), "locked")
 	write(t, filepath.Join(locked, "f.txt"), nil)
-	chmod(t, locked, 0, 0o755)
+	denyAccess(t, locked)
 	var n int
 	lq := maxDepth(locked, 0)
 	rep, err := Run(&lq, func(Result) { n++ })
@@ -372,7 +373,7 @@ func TestMinDepthSkipsBeforeStatAndOpen(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "top.txt"), []byte("TODO"))
 	write(t, filepath.Join(dir, "d", "deep.txt"), []byte("TODO"))
-	chmod(t, filepath.Join(dir, "top.txt"), 0, 0o644)
+	denyAccess(t, filepath.Join(dir, "top.txt"))
 	got, rep := run(t, &query.Query{Root: dir, Contents: []string{"TODO"}, MinDepth: 2})
 	if !slices.Equal(slash(got), []string{"d/deep.txt"}) || !emptyReport(rep) {
 		t.Errorf("(a) min 2: got %v (%+v), want [d/deep.txt] and nothing reported", got, rep)
@@ -385,6 +386,8 @@ func TestMinDepthSkipsBeforeStatAndOpen(t *testing.T) {
 
 	// (b) In a directory without search permission, names can be listed but
 	// d.Info() fails: a file above the minimum depth is skipped before it.
+	// Windows has no such state (every account may bypass traverse checks
+	// by default), so there only the skip itself is checked.
 	dir = t.TempDir()
 	r := filepath.Join(dir, "r")
 	write(t, filepath.Join(r, "f.txt"), nil)
@@ -394,7 +397,7 @@ func TestMinDepthSkipsBeforeStatAndOpen(t *testing.T) {
 		t.Errorf("(b) min 3: got %v (%+v), want nothing", got, rep)
 	}
 	got, rep = run(t, &query.Query{Root: dir, Extensions: []string{"txt"}, MinDepth: 2})
-	if !root && (len(got) != 0 || !slices.Equal(rep.PermissionDenied, []string{filepath.Join(r, "f.txt")})) {
+	if !root && runtime.GOOS != "windows" && (len(got) != 0 || !slices.Equal(rep.PermissionDenied, []string{filepath.Join(r, "f.txt")})) {
 		t.Errorf("(b) control min 2: got %v, PermissionDenied = %v, want [%s]", got, rep.PermissionDenied, filepath.Join(r, "f.txt"))
 	}
 }

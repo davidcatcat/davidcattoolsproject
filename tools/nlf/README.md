@@ -9,7 +9,7 @@ nlf --explain "最大的 5 個圖片"          # 只顯示解析結果與近似�
 nlf --confirm "go files larger than 1MB"   # 先顯示執行計畫，輸入 y 才搜尋
 ```
 
-- 單一 binary，macOS 優先，只用 Go 標準函式庫
+- 單一 binary，macOS 優先，也支援 Linux；Windows 支援正在驗證（見 [Windows](#windows)），只用 Go 標準函式庫
 - 不呼叫任何 LLM API；解析規則是固定的（deterministic），相同輸入永遠得到相同結果
 - 唯讀：不會修改、建立、刪除或移動任何檔案，不執行 shell 或其他程式，也不會自動使用 `sudo`
 - 看不懂的詞會直接報錯，不會默默忽略而擴大搜尋範圍
@@ -114,6 +114,104 @@ nlf --confirm --dir /home "排除 .cache、node_modules 目錄，找最大的 10
 - 在 Linux 上，`--explain` 與 `--confirm` 顯示的是 GNU/Linux 語法的近似指令（標示為「近似的 GNU/Linux 指令」）。和 macOS 版有兩個差別：排序用的 stat 格式（GNU coreutils 用 `stat -c '%s %n'` / `stat -c '%.9Y %n'`，macOS 用 `stat -f '%z %N'` / `stat -f '%Fm %N'`，修改時間都含奈秒），以及 `-newermt` 的時間格式（GNU find 以奈秒比較，所以寫成 `'2026-09-27 23:59:59.999999999'`；BSD find 以整秒比較，寫成 `'2026-09-27 23:59:59'`；因此在 macOS 上，邊界不是整秒時（例如「最近 7 天」這類相對時間）可能差不到 1 秒）。find 的其他部分與 grep、sort、cut、head 兩邊相同。nlf 本身不會執行這些指令。
 - 完整測試會在 macOS 與 Linux 上執行：GitHub Actions 的 `ubuntu-latest` 已實際跑過 unit test、race detector 與 runtime smoke test（見下方 CI 小節）。
 
+### Windows
+
+> **狀態：驗證中，尚未宣稱為第一級支援平台。** 程式碼的可攜性、`windows/amd64` 與 `windows/arm64` 的 cross-build，以及 GitHub Actions `windows-latest` 的 CI 設定都已完成。只有 CI 在 Windows 上實際通過（完整測試，加上 PowerShell 與 cmd.exe 的 runtime smoke test），並完成下方「尚待人工驗證」的項目之後，才會把 Windows 列為第一級支援平台。
+
+目標機器不需要安裝 Go。支援 Windows 10、Windows 11 與 Windows Server（x64 與 ARM64）。
+
+**1. Build**
+
+在有 Go 的 macOS 或 Linux 上，`make dist` 會一起產生 Windows 執行檔：
+
+```bash
+cd tools/nlf
+make dist
+# 產生（連同 macOS、Linux 的執行檔）：
+#   bin/nlf-<版本>-windows-amd64.exe   x64（大多數 PC 與伺服器）
+#   bin/nlf-<版本>-windows-arm64.exe   ARM64（例如 Snapdragon 筆電）
+#   bin/SHA256SUMS                     6 個執行檔的雜湊
+```
+
+在 Windows 上直接 build（Windows 沒有 `make`，PowerShell）：
+
+```powershell
+cd tools\nlf
+$env:CGO_ENABLED = "0"
+go build -trimpath -ldflags "-s -w" -o bin\nlf.exe .
+```
+
+**2. 選擇架構並驗證**
+
+在 PowerShell 執行 `$env:PROCESSOR_ARCHITECTURE`：`AMD64` 選 `windows-amd64.exe`，`ARM64` 選 `windows-arm64.exe`。把執行檔和 `SHA256SUMS` 一起複製過去，再比對雜湊：
+
+```powershell
+(Get-FileHash .\nlf-0.4.0-windows-amd64.exe -Algorithm SHA256).Hash   # 與 SHA256SUMS 裡同名那一行比對（大小寫不拘）
+```
+
+cmd.exe 可以改用 `certutil -hashfile nlf-0.4.0-windows-amd64.exe SHA256`。
+
+**3. 安裝**
+
+改名為 `nlf.exe`，放到一個自己的目錄，例如 `%LOCALAPPDATA%\Programs\nlf\nlf.exe`，再到「設定 › 系統 › 關於 › 進階系統設定 › 環境變數」把這個目錄加進使用者的 `Path`。不需要系統管理員權限，也不需要安裝程式。解除安裝時刪除 `nlf.exe` 即可；nlf 不寫登錄檔，也不建立任何設定檔。
+
+**4. 使用（PowerShell）**
+
+```powershell
+nlf --version
+nlf "找 go 檔"
+nlf --dir C:\Users\me\Documents "找最近 7 天修改的 docx 檔"
+nlf --dir \\fileserver\share\logs '包含 "timeout" 的 log 檔'
+nlf --explain --dir C:\src "最大的 5 個檔案"
+nlf 'files containing "TODO"'
+'n' | nlf --confirm --dir C:\src "go files"
+```
+
+- 路徑有空白時，`--dir` 的值要加引號，例如 `--dir "D:\My Projects"`。
+- PowerShell 7.3 以上會原樣傳遞查詢裡的雙引號（上面的 `'files containing "TODO"'`）。Windows PowerShell 5.1 會把它們吃掉，要寫成 `\"`，例如 `'files containing \"TODO\"'`。
+- `$LASTEXITCODE` 就是 nlf 的 exit code（0 有找到、1 沒找到、2 錯誤）。
+- 要在 PowerShell 裡擷取或處理含中文的輸出（例如存到變數或接 pipe），請先設定 `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)`，因為 nlf 輸出 UTF-8。直接顯示在終端機上則不需要設定。
+
+**5. 使用（cmd.exe）**
+
+```bat
+nlf --dir C:\Users\me\Downloads "找 ovpn 檔"
+nlf --dir C:\src "files containing \"TODO\""
+echo n| nlf --confirm --dir C:\src "go files"
+nlf --dir C:\src "pem files" & echo exit %ERRORLEVEL%
+```
+
+- cmd.exe 裡，雙引號內的 `\"` 是一個字面的雙引號。
+- 要把含中文的輸出寫進檔案或接給其他程式時，先執行 `chcp 65001`。
+
+**Windows 使用注意事項**
+
+- **路徑分成兩種寫法。** `--dir` 接受 Windows 原生路徑：磁碟代號（`C:\Users\me`、`c:/Users/me`）、反斜線、UNC（`\\server\share\folder`）、含空白與中文的路徑，以及只有磁碟代號的 `C:`（那台磁碟的目前目錄）。查詢文字裡的路徑則在每個作業系統上都用 `/`：`在 ./src`、`在 ~/Documents`、`排除 src/gen`。
+- **查詢文字裡寫 Windows 路徑會報錯，不會被默默誤解。** 例如 `in C:\Users\me` 或 `在 "D:\data"` 會 exit 2，並提示改用 `--dir`；沒有這個檢查的話，加了引號的 `in "D:\data"` 會被當成要搜尋的內容。排除路徑例外：加引號的 Windows 絕對路徑可以用在「排除」，但必須在搜尋位置之內。查詢裡以 `/` 開頭的路徑（`under /tmp`）指的是目前磁碟的根目錄。
+- **`~` 由 nlf 自己展開。** cmd.exe 與 PowerShell 都會把 `~` 原樣傳給程式，nlf 用 `%USERPROFILE%` 展開 `~`、`~/` 與 `~\`，例如 `--dir ~\Documents`。
+- **輸出的路徑使用 `\`。** 以 `-` 開頭的相對路徑印成 `.\-…`。每行以 `\n` 結尾，不是 `\r\n`。`-0` 照樣以 NUL 分隔，但 Windows 沒有內建的 `xargs -0`。
+- **大小寫。** NTFS 不分大小寫，所以和 macOS 一樣，大小寫不同的排除路徑（`排除 ./VENDOR`）也會排除 `vendor`，`--dir` 的大小寫不影響結果（輸出沿用你輸入的寫法）。排除「名稱」一律不分大小寫；檔名條件（`檔名包含`）仍依 nlf 的規則區分大小寫。
+- **Unicode 正規化。** NTFS 不做 NFC／NFD 正規化，行為和 Linux 相同：兩種拼法是不同的名稱。
+- **符號連結與 junction。** 搜尋位置本身是 symlink 或 junction（mount point）時會跟隨；位置以下的 symlink 與 junction 都不跟隨，也不列出，和 Unix 上不跟隨目錄 symlink 相同。
+- **隱藏檔。** 有「隱藏」屬性的檔案與目錄照樣搜尋，就像 Unix 上 `.` 開頭的檔案；需要時請用「排除」。
+- **權限。** 沒有權限的目錄會略過並列在 stderr。權限提示會建議到資料夾的「內容 › 安全性」或用 `icacls` 檢查，並改用有權限的帳號執行；nlf 不會自動以系統管理員身分執行，也不會要求提權。
+- **`--explain` 與 `--confirm`。** Windows 沒有 `find`、`grep`、`stat`，Windows 的 `find.exe` 則是另一個搜尋文字的程式，所以不顯示近似指令，只顯示 nlf 的條件摘要。條件摘要與 macOS、Linux 完全相同，最後附一行說明：`No approximate command on Windows: …`（中文查詢顯示 `Windows 上不顯示近似指令：…`）。stdout／stderr 的分工不變：`--explain` 寫到 stdout，`--confirm` 的計畫與提示寫到 stderr。
+- **檔名與命令列的限制。** Windows 檔名不能含 `\ / : * ? " < > |`、控制字元或結尾的空白與句點。Windows 的命令列是 UTF-16，所以無效的 UTF-8 位元組在傳到 nlf 之前，就已經被換成 U+FFFD；「查詢含有無效的 UTF-8」這個錯誤在 Windows 的命令列上不會出現。
+
+**已由 CI 設定、等待第一次 `windows-latest` 執行結果的項目**
+
+- `gofmt`、`go vet`、`go test -count=1 -v ./...`（只允許略過 3 個需要 Unix 工具的測試：`TestExplainParity`、`TestGNUSortPipeline`、`TestShellQuoteShellRoundTrip`）、`go test -count=10 -shuffle=on`、fuzz smoke。
+- 以 `CGO_ENABLED=0` build `bin\nlf.exe` 與兩個 Windows release 執行檔，驗證 `SHA256SUMS`。
+- `scripts/ci-smoke.ps1` 在 PowerShell 7 與 Windows PowerShell 5.1 上執行，`scripts/ci-smoke.cmd` 在 cmd.exe 上執行。涵蓋搜尋、`--dir`（磁碟代號、正斜線、結尾反斜線、UNC、junction、`~\`、中文與空白）、`--explain`、`--confirm`、exit code、stdout／stderr 分離、`-0`，以及 fixture 沒有被修改。
+- Windows 專屬測試：drive root、`C:`、UNC、junction、隱藏屬性、以 ACL（`icacls` deny）造成的權限錯誤、不分大小寫的排除、Windows 路徑的排除。
+
+**尚待人工驗證**
+
+- Windows 10 與 Windows 11 桌面版。CI 的 runner 是 Windows Server。
+- `windows/arm64`：只有 cross-compile，CI 沒有 ARM64 的 Windows runner。
+- `go test -race`：Windows 上需要 cgo 與 C 編譯器（mingw-w64），CI 不安裝，所以沒有執行。walker、內容掃描與 heap 是跨平台的同一份程式碼，在 ubuntu 與 macOS 上都有跑 race detector。
+- 超過 260 字元的長路徑、網路磁碟機代號（`net use Z:`）、OneDrive 的「檔案隨選」、Defender 等防毒軟體對大量走訪的影響。
+
 ### 解除安裝
 
 ```bash
@@ -204,7 +302,7 @@ nlf --explain "找 ovpn 檔"   # 只看 nlf 怎麼理解查詢，不搜尋
 - 執行計畫與提示都寫到 stderr，所以 stdout 仍然只有結果路徑，可以接 pipe。
 - 安全性摘要（Read / Modify / Create / Delete / Execute shell / sudo、Risk）描述 nlf 自己的搜尋：目前一律是 `READ-ONLY`（只讀取目錄與檔案）。這個宣告由測試檢查原始碼維持（不得使用 `os/exec` 或任何會建立、修改、刪除檔案的 `os` 函式）。
 - 執行計畫的條件會列出搜尋深度（例如 `depth:  at most 1 level (…)`），近似指令也會帶上 `-maxdepth` / `-mindepth`。
-- 計畫裡的指令與 `--explain` 一樣只是近似、供理解用，並依作業系統顯示 macOS 或 GNU/Linux 語法；nlf 不會執行它。
+- 計畫裡的指令與 `--explain` 一樣只是近似、供理解用，並依作業系統顯示 macOS 或 GNU/Linux 語法；nlf 不會執行它。Windows 上不顯示指令，只顯示條件摘要（見 [Windows](#windows)）。
 - `--explain` 與 `--confirm` 不能同時使用（exit 2）；`--explain` 也不能和 `-l`、`-0` 一起用（見上方 Usage）。
 - `--explain` 不檢查搜尋位置是否存在：位置不存在時照樣顯示理解結果與近似指令（exit 0），實際搜尋時才會報錯（exit 2）。
 
@@ -416,11 +514,11 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
   - 分隔用的 `，、。；：` 和 `,` `;` 不受影響：`包含 錯誤。` 仍是搜尋「錯誤」，`包含 錯誤訊息，大於 1KB` 仍是兩個條件；但 `包含 錯誤？` 會報錯，因為 `？` 可能是要搜尋的字。
   - 緊接在前一個字後面、只由 `.` 組成的一串（`包含 "x".`、`找 go 檔..`）只是句點，不會變成搜尋位置；要指定目前或上一層目錄請用空白隔開，例如 `在 . 找 go 檔`、`在 .. 找 go 檔`。`排除 .`、`排除 ./`、`排除 ..`、`排除 /` 會報錯。
   - 只有標點（`?`、`。`）的查詢視為空查詢，會報錯。
-- 相對路徑的結果如果以 `-` 開頭，一律印成 `./-…`（例如 `./-rf.txt`），所有輸出模式都一樣（和 `find .` 相同），避免被其他程式當成選項。
-- 檔名不可能包含 NUL，所以 `-0` 的輸出一定能正確切開。不是合法 UTF-8 的檔名位元組會原樣輸出，不會轉換；macOS 的 APFS 本身不允許這種檔名。
+- 相對路徑的結果如果以 `-` 開頭，一律印成 `./-…`（例如 `./-rf.txt`；Windows 是 `.\-rf.txt`），所有輸出模式都一樣（和 `find .` 相同），避免被其他程式當成選項。
+- 檔名不可能包含 NUL，所以 `-0` 的輸出一定能正確切開。不是合法 UTF-8 的檔名位元組會原樣輸出，不會轉換；macOS 的 APFS 本身不允許這種檔名，Windows 則以 UTF-16 儲存檔名，無效的位元組會變成 U+FFFD。
 - 查詢本身必須是合法的 UTF-8。含有無效位元組的查詢一律報錯（`查詢含有無效的 UTF-8 位元組`／`the query contains bytes that are not valid UTF-8`，exit 2），不會先換成 U+FFFD 再繼續搜尋（那樣 `排除 "…"` 會排除錯的目錄）。要搜尋名稱含有這種位元組的目錄，請用 `--dir`：`--dir` 的路徑原樣使用，不做任何轉換。
 - Unicode 正規化：檔名、內容、排除名稱與路徑一律依位元組比對，不做 NFC／NFD 正規化。NFC 的 `café`（`é` 是一個字元 U+00E9）和 NFD 的 `cafe` + U+0301（`e` 加上組合重音符）看起來一樣，卻是不同的字串：`檔名包含 "café"` 只找到同一種拼法的檔名，內容搜尋也一樣，`排除 "café" 目錄` 只跳過同一種拼法的目錄。檔案系統本身的行為則不同：macOS 的 APFS 把兩種拼法當成同一個名稱，所以 `--dir` 用任一種拼法都找得到目錄，結果路徑沿用你輸入的拼法（目錄底下的名稱則是檔案系統儲存的拼法）；Linux 上兩種拼法是不同的名稱，可以同時存在，`--dir` 必須用儲存的那一種拼法。
-- 只回傳一般檔案，不回傳目錄；不跟隨目錄內的 symlink（搜尋位置本身是 symlink 時會跟隨，例如 `/tmp`）。
+- 只回傳一般檔案，不回傳目錄；不跟隨目錄內的 symlink（搜尋位置本身是 symlink 時會跟隨，例如 `/tmp`）。Windows 的 junction 也一樣：搜尋位置本身是 junction 時會跟隨，位置以下的不跟隨。
 - 隱藏檔與 `.git` 會被搜尋，需要時請加 `排除 .git`。
 - 沒有排序時依名稱順序輸出，達到數量上限就停止；有「最大/最新」時會先走完整棵樹再排序。有數量上限時，走訪過程只保留最好的 N 筆（記憶體 O(min(N, 符合數))）；沒有上限時會保留全部符合的檔案（記憶體 O(符合數)）。
 - `--explain` 顯示的 find 指令是近似的，僅供參考。時間區間的邊界（`-newermt` 取邊界前 1 奈秒；GNU/Linux 完全相同，macOS 的 BSD find 以整秒比較，只有整秒邊界完全相同，相對時間的邊界可能差不到 1 秒）、最大／最新排序的同分與次秒精度（`LC_ALL=C sort -k1,1nr -k2`，同分時和 nlf 一樣依路徑的位元組順序）都和 nlf 相同。仍然可能不同的地方：
@@ -441,7 +539,7 @@ $ nlf --explain "找出最近 7 天修改、大於 1MB 的 go 檔，排除 vendo
 - 未加引號的搜尋文字會一直延伸到空白或標點（`包含 API連線失敗`）。如果後面緊接著 nlf 認得的詞（例如 `包含 設定檔`，「檔」是關鍵字），因為無法確定範圍，會報錯要求加引號；只有「的」「且」「和」這類連接詞可以直接接在後面（`包含TODO且大於1MB`）。空字串 `""` 會報錯。
 - 未加引號的路徑會一直延伸到空白或標點，可以包含中文（`在 ~/文件 找 pdf 檔`）。路徑後面請加空白，不要直接接其他字；路徑中有空白時要加引號，例如 `在 "~/My Docs"`。
 - 數量上限最多 2147483647；時間最多約 292 年；搜尋深度最多 4096（`find` 接受任意整數）；超過會報錯。
-- 主要在 macOS 上開發。Linux 由 GitHub Actions 的 `ubuntu-latest` 實際執行 unit test、race detector 與 runtime smoke test（`make dist` 產出的靜態執行檔也會在 runner 上實際執行）。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 與 `gsort` 實際執行驗證過；整個近似指令（含 GNU find 與 grep）則由 CI 的 `ubuntu-latest` 實際執行比對。
+- 主要在 macOS 上開發。Linux 由 GitHub Actions 的 `ubuntu-latest` 實際執行 unit test、race detector 與 runtime smoke test（`make dist` 產出的靜態執行檔也會在 runner 上實際執行）。`--explain` / `--confirm` 的近似指令會依作業系統使用 macOS（BSD）或 GNU/Linux 語法；GNU 版的排序 pipeline 已經在 macOS 上用 GNU coreutils 的 `gstat` 與 `gsort` 實際執行驗證過；整個近似指令（含 GNU find 與 grep）則由 CI 的 `ubuntu-latest` 實際執行比對。Windows 支援正在驗證中，限制與待驗證項目見 [Windows](#windows)。
 - 未支援的說法會回報「看不懂這個詞」；詞彙表在 `internal/query/lexicon.go`，擴充時請一併加測試。
 
 ## Development
@@ -473,7 +571,9 @@ go test -run '^$' -fuzz='^FuzzScanTerms$'  -fuzztime=10m ./internal/search
 
 ### CI
 
-`.github/workflows/nlf-ci.yml` 在 `ubuntu-latest` 與 `macos-latest` 上各跑一次：`make fmt-check`、`make vet`、`go test -count=1 -v`（Linux 不允許任何測試被略過；macOS 只允許沒有 `gstat` 時略過 `TestGNUSortPipeline`）、`go test -race`、`go test -count=10 -shuffle=on`、每個 fuzz target 各 5 秒的 fuzz smoke、`make build`、`make dist`、驗證 `SHA256SUMS` 正好列出 4 個執行檔且雜湊正確、確認 Linux 執行檔是靜態連結且所有 dist 執行檔都是 `CGO_ENABLED=0`，再用 `scripts/ci-smoke.sh` 實際執行 `bin/nlf` 與本機平台的 dist 執行檔，最後確認工作目錄沒有被改動。
+`.github/workflows/nlf-ci.yml` 在 `ubuntu-latest` 與 `macos-latest` 上各跑一次：`make fmt-check`、`make vet`、`go test -count=1 -v`（Linux 不允許任何測試被略過；macOS 只允許沒有 `gstat` 時略過 `TestGNUSortPipeline`）、`go test -race`、`go test -count=10 -shuffle=on`、每個 fuzz target 各 5 秒的 fuzz smoke、`make build`、`make dist`、驗證 `SHA256SUMS` 正好列出 6 個執行檔（macOS、Linux、Windows 各 2 個）且雜湊正確、確認 Linux 執行檔是靜態連結且所有 dist 執行檔都是 `CGO_ENABLED=0`，再用 `scripts/ci-smoke.sh` 實際執行 `bin/nlf` 與本機平台的 dist 執行檔，最後確認工作目錄沒有被改動。
+
+另一個 job 在 `windows-latest` 上執行（Windows 沒有 GNU make，所以直接執行 Makefile 裡的指令，shell 用 Git Bash）：先確認 checkout 後仍是 LF 換行（`tools/nlf/.gitattributes` 固定 LF，只有 `.cmd` 用 CRLF），再跑 `gofmt`、`go vet`、`go test -count=1 -v`（只允許略過需要 Unix 工具的 `TestExplainParity`、`TestGNUSortPipeline`、`TestShellQuoteShellRoundTrip`）、`go test -count=10 -shuffle=on`、fuzz smoke，以 `CGO_ENABLED=0` build `bin/nlf.exe` 與兩個 Windows release 執行檔並驗證雜湊。接著用 `scripts/ci-smoke.ps1`（PowerShell 7 與 Windows PowerShell 5.1）和 `scripts/ci-smoke.cmd`（cmd.exe）實際執行，最後確認工作目錄沒有被改動。race detector 在 Windows 上不執行：它需要 cgo 與 C 編譯器，這個 CI 不安裝；workflow 裡有一個步驟明確印出這個原因。
 
 - 觸發條件：`pull_request`，以及推到 `main` 或 `feat/**` 的 `push`，且只在 `tools/nlf/**` 或 workflow 本身有變更時執行；也可以手動觸發（`workflow_dispatch`）。
 - 最小權限：`permissions: contents: read`，checkout 不保留 credentials；不使用 secrets，不發布、不上傳任何東西。
@@ -486,4 +586,12 @@ go test -run '^$' -fuzz='^FuzzScanTerms$'  -fuzztime=10m ./internal/search
 make build
 v=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
 bash scripts/ci-smoke.sh bin/nlf $v
+```
+
+在 Windows 上（PowerShell；cmd.exe 版需要先準備 `NLF_SMOKE_UNICODE_DIR` 指向只含一個 `.md` 檔的中文目錄，見 workflow）：
+
+```powershell
+go build -trimpath -o bin\nlf.exe .
+pwsh -NoProfile -File scripts\ci-smoke.ps1 bin\nlf.exe 0.4.0
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ci-smoke.ps1 bin\nlf.exe 0.4.0
 ```

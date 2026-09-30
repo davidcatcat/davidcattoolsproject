@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -308,6 +309,11 @@ func TestShellQuoteNUL(t *testing.T) {
 // TestShellQuoteShellRoundTrip runs the quoted words through a real
 // /bin/sh: printf '%s' <quoted> must print the original bytes exactly.
 func TestShellQuoteShellRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// shellQuote only builds the macOS/Linux command, which Windows never
+		// shows, and Windows has no POSIX /bin/sh to run it with.
+		t.Skip("no /bin/sh on Windows; shellQuote is used only for the Unix find command")
+	}
 	for _, s := range shellQuoteSeeds {
 		out, err := exec.Command("/bin/sh", "-c", "printf '%s' "+shellQuote(s)).Output()
 		if err != nil || string(out) != s {

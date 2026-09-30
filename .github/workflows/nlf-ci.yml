@@ -128,10 +128,11 @@ jobs:
           echo "NLF_VERSION=$version" >> "$GITHUB_ENV"
           cd bin
           cat SHA256SUMS
-          want=$(printf 'nlf-%s-%s\n' "$version" darwin-amd64 "$version" darwin-arm64 "$version" linux-amd64 "$version" linux-arm64 | LC_ALL=C sort)
+          want=$(printf 'nlf-%s-%s\n' "$version" darwin-amd64 "$version" darwin-arm64 "$version" linux-amd64 "$version" linux-arm64 \
+            "$version" windows-amd64.exe "$version" windows-arm64.exe | LC_ALL=C sort)
           got=$(awk '{print $2}' SHA256SUMS | sed 's/^\*//' | LC_ALL=C sort)
-          if [ "$(wc -l < SHA256SUMS | tr -d ' ')" != 4 ] || [ "$got" != "$want" ]; then
-            echo "::error::SHA256SUMS does not list exactly the 4 expected binaries"
+          if [ "$(wc -l < SHA256SUMS | tr -d ' ')" != 6 ] || [ "$got" != "$want" ]; then
+            echo "::error::SHA256SUMS does not list exactly the 6 expected binaries"
             printf 'want:\n%s\ngot:\n%s\n' "$want" "$got"
             exit 1
           fi
@@ -158,7 +159,8 @@ jobs:
           else
             echo "file not available; skipping ELF static-link check"
           fi
-          for b in "nlf-$NLF_VERSION-darwin-amd64" "nlf-$NLF_VERSION-darwin-arm64" "nlf-$NLF_VERSION-linux-amd64" "nlf-$NLF_VERSION-linux-arm64"; do
+          for b in "nlf-$NLF_VERSION-darwin-amd64" "nlf-$NLF_VERSION-darwin-arm64" "nlf-$NLF_VERSION-linux-amd64" "nlf-$NLF_VERSION-linux-arm64" \
+            "nlf-$NLF_VERSION-windows-amd64.exe" "nlf-$NLF_VERSION-windows-arm64.exe"; do
             if ! go version -m "$b" | grep -q 'CGO_ENABLED=0'; then
               echo "::error::$b was not built with CGO_ENABLED=0"
               go version -m "$b"
@@ -187,6 +189,163 @@ jobs:
           fi
           bash scripts/ci-smoke.sh bin/nlf "$NLF_VERSION"
           bash scripts/ci-smoke.sh "bin/nlf-$NLF_VERSION-$os-$arch" "$NLF_VERSION"
+
+      - name: Working tree is clean
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"
+
+  # Windows has no GNU make, so this job runs the Makefile's commands
+  # directly. Shell steps use Git Bash unless they say otherwise; the smoke
+  # tests run under PowerShell 7, Windows PowerShell 5.1 and cmd.exe.
+  test-windows:
+    name: test (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: tools/nlf
+        shell: bash
+    env:
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: tools/nlf/go.mod
+          cache: false
+
+      - name: Show toolchain
+        run: |
+          go version
+          go env GOOS GOARCH GOHOSTOS GOHOSTARCH GOTOOLCHAIN GOPROXY GOEXE
+          echo "core.autocrlf: $(git config --get core.autocrlf || echo unset)"
+          cmd //c ver
+          uname -a
+
+      - name: Line endings
+        run: |
+          # .gitattributes keeps LF even where core.autocrlf is true.
+          if grep -rlI $'\r' --include='*.go' --include='*.golden' --include='*.md' --include='*.ps1' --include='*.sh' .; then
+            echo "::error::files above were checked out with CRLF"
+            exit 1
+          fi
+          if ! grep -q $'\r$' scripts/ci-smoke.cmd; then
+            echo "::error::scripts/ci-smoke.cmd must have CRLF line endings"
+            exit 1
+          fi
+          echo "line endings ok"
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt needed:"
+            printf '%s\n' "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Tests (verbose, skip guard)
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/nlf-test.log"
+          go test -count=1 -v ./... 2>&1 | tee "$log"
+          # Only tests of Unix tools that do not exist on Windows may skip:
+          # TestExplainParity runs BSD/GNU find, TestGNUSortPipeline GNU stat,
+          # TestShellQuoteShellRoundTrip /bin/sh.
+          unexpected=$(grep -E -- '--- SKIP' "$log" | grep -v -E -- '--- SKIP: (TestExplainParity|TestGNUSortPipeline|TestShellQuoteShellRoundTrip)( |$)' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::unexpected skipped tests on Windows:"
+            printf '%s\n' "$unexpected"
+            exit 1
+          fi
+          echo "skip guard passed"
+
+      - name: Race detector (not run on Windows)
+        run: |
+          # -race on windows/amd64 needs cgo and an external C toolchain
+          # (mingw-w64 gcc). This CI never installs or depends on one (nlf is
+          # stdlib-only, GOTOOLCHAIN=local, GOPROXY=off). The walker, scanner
+          # and heap are the same Go code on every OS and run under -race in
+          # the ubuntu-latest and macos-latest jobs.
+          echo "race detector not run on Windows: needs cgo with a C toolchain; covered on Linux and macOS"
+
+      - name: Repeated shuffled tests
+        run: go test -count=10 -shuffle=on ./...
+
+      - name: Fuzz smoke
+        run: |
+          set -euo pipefail
+          for t in FuzzParse FuzzTokenize FuzzShellQuote; do
+            go test -run '^$' -fuzz="^${t}\$" -fuzztime=5s ./internal/query
+          done
+          go test -run '^$' -fuzz='^FuzzScanTerms$' -fuzztime=5s ./internal/search
+
+      - name: Build
+        run: go build -trimpath -o bin/nlf.exe .
+
+      - name: Build Windows release binaries
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^const version = "\(.*\)"$/\1/p' main.go)
+          if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::could not read the version from main.go: [$version]"
+            exit 1
+          fi
+          echo "NLF_VERSION=$version" >> "$GITHUB_ENV"
+          for arch in amd64 arm64; do
+            out="bin/nlf-$version-windows-$arch.exe"
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "$out" .
+            meta=$(go version -m "$out")
+            printf '%s\n' "$meta" | grep -E 'CGO_ENABLED|GOOS|GOARCH'
+            if ! printf '%s\n' "$meta" | grep -q 'CGO_ENABLED=0' || ! printf '%s\n' "$meta" | grep -q "GOARCH=$arch"; then
+              echo "::error::$out is not a CGO_ENABLED=0 windows/$arch build"
+              exit 1
+            fi
+          done
+          (cd bin && sha256sum "nlf-$version-windows-amd64.exe" "nlf-$version-windows-arm64.exe" | tee SHA256SUMS && sha256sum -c SHA256SUMS)
+
+      - name: Runtime smoke (PowerShell 7)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/ci-smoke.ps1 bin/nlf.exe $env:NLF_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File scripts/ci-smoke.ps1 "bin/nlf-$env:NLF_VERSION-windows-amd64.exe" $env:NLF_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Runtime smoke (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ci-smoke.ps1 "bin/nlf-$env:NLF_VERSION-windows-amd64.exe" $env:NLF_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Prepare Unicode fixture for cmd.exe
+        shell: pwsh
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP ('nlf-cmd-unicode\' + [char]0x4E2D + [char]0x6587 + ' dir')
+          New-Item -ItemType Directory -Path $d -Force | Out-Null
+          Set-Content -LiteralPath (Join-Path $d ([string][char]0x8AAA + [char]0x660E + '.md')) -Value 'x' -Encoding utf8
+          "NLF_SMOKE_UNICODE_DIR=$d" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Runtime smoke (cmd.exe)
+        shell: cmd
+        run: |
+          call scripts\ci-smoke.cmd bin\nlf.exe %NLF_VERSION% || exit /b 1
+          call scripts\ci-smoke.cmd bin\nlf-%NLF_VERSION%-windows-amd64.exe %NLF_VERSION% || exit /b 1
 
       - name: Working tree is clean
         run: |

@@ -1,0 +1,7 @@
+# Keep LF line endings in the working tree on every OS. Git for Windows
+# defaults to core.autocrlf=true, which would turn Go sources, the help
+# golden file, the fuzz corpus and README into CRLF and break gofmt and
+# the byte-exact tests.
+* text=auto eol=lf
+# Batch files keep CRLF: cmd.exe misreads labels in LF-only scripts.
+*.cmd text eol=crlf

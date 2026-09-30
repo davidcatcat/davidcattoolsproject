@@ -57,10 +57,14 @@ func walkOrder(ps []string) []string {
 	return out
 }
 
+// shown is how nlf prints the slash-separated relative path p: with the OS
+// separator, and "./" (".\\") before a leading "-".
+func shown(p string) string { return displayPath(filepath.FromSlash(p)) }
+
 func nulJoin(ps []string) []byte {
 	var b bytes.Buffer
 	for _, p := range ps {
-		b.WriteString(displayPath(p) + "\x00")
+		b.WriteString(shown(p) + "\x00")
 	}
 	return b.Bytes()
 }
@@ -75,12 +79,17 @@ func TestHostileFilenameMatrix(t *testing.T) {
 		t.Log("running as root; the matrix does not depend on permissions")
 	}
 	dir := t.TempDir()
-	names := []string{"normal.txt", "a b.txt", " lead.txt", "trail.txt ", "a\tb.txt", "a\nb.txt", "a\rb.txt", "-rf.txt",
-		"--help.txt", "-0", "it's.txt", `q"q.txt`, `back\slash.txt`, "*.txt", "?.txt", "[abc].txt", "semi;.txt", "pipe|.txt",
+	names := []string{"normal.txt", "a b.txt", " lead.txt", "-rf.txt",
+		"--help.txt", "-0", "it's.txt", "[abc].txt", "semi;.txt",
 		"$x.txt", "bq`.txt", "中文 檔名.txt", "😀.txt", "caf\u00e9.txt",
 		strings.Repeat("a", 251) + ".txt", // 255 bytes
 		strings.Repeat("中", 85),           // 255 bytes
 		"目錄 dir/a b.txt", "目錄 dir/-rf.txt", "目錄 dir/子 sub/a b.txt", "目錄 dir/子 sub/中文 檔名.txt"}
+	if runtime.GOOS != "windows" {
+		// Not valid Windows file names: control characters, " * ? | \ and
+		// a trailing space (Win32 strips it).
+		names = append(names, "trail.txt ", "a\tb.txt", "a\nb.txt", "a\rb.txt", `q"q.txt`, `back\slash.txt`, "*.txt", "?.txt", "pipe|.txt")
+	}
 	mtime := time.Date(2026, 9, 27, 10, 0, 0, 0, time.Local)
 	var files []string
 	add := func(name string) error {
@@ -95,6 +104,11 @@ func TestHostileFilenameMatrix(t *testing.T) {
 		}
 		if err := os.Chtimes(p, mtime, mtime); err != nil {
 			return err
+		}
+		if runtime.GOOS == "windows" {
+			// Windows stores names as UTF-16, so an invalid byte is
+			// listed as U+FFFD.
+			name = strings.ToValidUTF8(name, "\ufffd")
 		}
 		files = append(files, name)
 		return nil
@@ -114,6 +128,11 @@ func TestHostileFilenameMatrix(t *testing.T) {
 		if !errors.Is(err, syscall.EILSEQ) {
 			t.Fatalf("darwin: create %q = %v, want EILSEQ", bad, err)
 		}
+	case "windows":
+		// Created as "bad\ufffd.txt" (see add).
+		if err != nil {
+			t.Fatalf("windows: create %q: %v", bad, err)
+		}
 	default:
 		if err != nil {
 			t.Fatalf("%s: create %q: %v", runtime.GOOS, bad, err)
@@ -126,14 +145,18 @@ func TestHostileFilenameMatrix(t *testing.T) {
 	if code != 0 || !bytes.Equal(out, nulJoin(walk)) {
 		t.Fatalf("-0 files: exit %d\n got  %q\n want %q\n%s", code, out, nulJoin(walk), errOut)
 	}
-	xargs, err := exec.LookPath("xargs")
-	if err != nil {
-		t.Fatalf("xargs not found: %v", err)
-	}
-	cmd := exec.Command(xargs, "-0", "printf", `%s\0`)
-	cmd.Dir, cmd.Stdin = dir, bytes.NewReader(out)
-	if echoed, err := cmd.Output(); err != nil || !bytes.Equal(echoed, out) {
-		t.Errorf("xargs -0 printf: %v\n got  %q\n want %q", err, echoed, out)
+	if runtime.GOOS == "windows" {
+		t.Log("windows: not piping -0 output into xargs, a Unix tool")
+	} else {
+		xargs, err := exec.LookPath("xargs")
+		if err != nil {
+			t.Fatalf("xargs not found: %v", err)
+		}
+		cmd := exec.Command(xargs, "-0", "printf", `%s\0`)
+		cmd.Dir, cmd.Stdin = dir, bytes.NewReader(out)
+		if echoed, err := cmd.Output(); err != nil || !bytes.Equal(echoed, out) {
+			t.Errorf("xargs -0 printf: %v\n got  %q\n want %q", err, echoed, out)
+		}
 	}
 
 	// (2) Default output: one path per line. L1 (documented limitation): a
@@ -141,7 +164,7 @@ func TestHostileFilenameMatrix(t *testing.T) {
 	// the unambiguous format. The bytes are pinned anyway.
 	var lines strings.Builder
 	for _, p := range walk {
-		lines.WriteString(displayPath(p) + "\n")
+		lines.WriteString(shown(p) + "\n")
 	}
 	if out, errOut, code := subNLF(t, dir, "files"); code != 0 || string(out) != lines.String() {
 		t.Errorf("files: exit %d\n got  %q\n want %q\n%s", code, out, lines.String(), errOut)
@@ -150,14 +173,17 @@ func TestHostileFilenameMatrix(t *testing.T) {
 	// (3) -l: size, time and the display path, exactly.
 	var long strings.Builder
 	for _, p := range walk {
-		fmt.Fprintf(&long, "%10s  %s  %s\n", query.HumanBytes(1), query.FormatTime(mtime), displayPath(p))
+		fmt.Fprintf(&long, "%10s  %s  %s\n", query.HumanBytes(1), query.FormatTime(mtime), shown(p))
 	}
 	if out, errOut, code := subNLF(t, dir, "-l", "files"); code != 0 || string(out) != long.String() {
 		t.Errorf("-l files: exit %d\n got  %q\n want %q\n%s", code, out, long.String(), errOut)
 	}
 
-	// (4) Equal sizes and equal mtimes: the ties go to the smallest paths.
-	byPath := slices.Sorted(slices.Values(files))
+	// (4) Equal sizes and equal mtimes: the ties go to the smallest paths,
+	// compared as nlf prints them (with "\\" on Windows, which sorts after "/").
+	byPath := slices.SortedFunc(slices.Values(files), func(a, b string) int {
+		return strings.Compare(filepath.FromSlash(a), filepath.FromSlash(b))
+	})
 	for _, q := range []string{"5 largest files", "5 newest files", "最大的 5 個檔案", "最新的 5 個檔案"} {
 		if out, errOut, code := subNLF(t, dir, "-0", q); code != 0 || !bytes.Equal(out, nulJoin(byPath[:5])) {
 			t.Errorf("%s: exit %d\n got  %q\n want %q\n%s", q, code, out, nulJoin(byPath[:5]), errOut)
@@ -192,7 +218,10 @@ func TestHostileFilenameMatrix(t *testing.T) {
 	// excluded literally: only that directory is pruned; the siblings a, b
 	// and c (which [abc] and * would match as globs) are kept.
 	exDir := t.TempDir()
-	hostileDirs := []string{"-rf", "a b", "it's", "[abc]", "*", "中文 目錄", "a\nb"}
+	hostileDirs := []string{"-rf", "a b", "it's", "[abc]", "中文 目錄"}
+	if runtime.GOOS != "windows" {
+		hostileDirs = append(hostileDirs, "*", "a\nb") // not valid Windows names
+	}
 	var exFiles []string
 	for _, d := range append(slices.Clone(hostileDirs), "a", "b", "c") {
 		p := filepath.Join(exDir, d, "f.txt")
@@ -387,7 +416,14 @@ func TestInvalidUTF8QueryCLI(t *testing.T) {
 	// The same through a real argv.
 	dir := t.TempDir()
 	mkfiles(t, dir, map[string]string{"a.txt": "a"})
-	if out, errOut, code := subNLF(t, dir, "exclude \"\xff\" dir"); code != 2 || len(out) != 0 || errOut != en {
+	out, errOut, code := subNLF(t, dir, "exclude \"\xff\" dir")
+	if runtime.GOOS == "windows" {
+		// A Windows command line is UTF-16: the invalid byte reaches nlf as
+		// U+FFFD, a valid query excluding a directory named "\ufffd".
+		if code != 0 || string(out) != "a.txt\n" {
+			t.Errorf("windows subprocess: exit %d, stdout %q, stderr %q; want exit 0 and a.txt", code, out, errOut)
+		}
+	} else if code != 2 || len(out) != 0 || errOut != en {
 		t.Errorf("subprocess: exit %d, stdout %q, stderr %q", code, out, errOut)
 	}
 	if out, errOut, code := nlf(t, "--dir", dir, "files"); code != 0 || out != filepath.Join(dir, "a.txt")+"\n" {
@@ -404,8 +440,15 @@ func TestInvalidUTF8QueryCLI(t *testing.T) {
 			t.Errorf("darwin: --dir %q: exit %d, stdout %q; want exit 2", bad, code, out)
 		}
 	default:
+		// Linux keeps the raw bytes. Windows stores "bad\ufffd" (UTF-16);
+		// --dir with the same bytes names the same directory.
 		if err != nil {
 			t.Fatal(err)
+		}
+		if runtime.GOOS == "windows" {
+			if _, err := os.Stat(filepath.Join(dir, "bad\ufffd")); err != nil {
+				t.Errorf("windows: mkdir %q did not create bad\\ufffd: %v", bad, err)
+			}
 		}
 		mkfiles(t, bad, map[string]string{"b.txt": "b"})
 		if out, errOut, code := nlf(t, "--dir", bad, "files"); code != 0 || out != filepath.Join(bad, "b.txt")+"\n" {
