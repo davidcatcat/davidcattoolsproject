@@ -3,7 +3,7 @@
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
 這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production providers
-為 `claude-cli`、`openai` 與 `openai-compatible`。`claude-cli` 使用本機 Claude CLI runtime，
+為 `claude-cli`、`codex-cli`、`openai` 與 `openai-compatible`。`claude-cli` 使用本機 Claude CLI runtime，
 不是 Anthropic HTTP API provider。`openai-compatible` 可連 self-hosted Qwen、vLLM、相容 gateway、
 LM Studio／Ollama 的相容端點，以及其他符合此 request/response 契約的伺服器。
 不同伺服器的參數支援仍需確認；不要求它們都支援 Qwen 的 thinking 擴充。
@@ -20,12 +20,12 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 
 | 概念 | 意義 | 狀態 |
 |---|---|---|
-| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`openai`、`openai-compatible` |
+| Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`codex-cli`、`openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
-目前尚未支援 Anthropic API provider 或 Codex CLI provider。Claude CLI integration 只作
+目前尚未支援 Anthropic API provider。Claude CLI integration 只作
 純文字 runtime request，不使用 CLI tools，不提供 shell、Git 或 code-edit capability。
 llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
@@ -38,7 +38,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
-- **A2.5 — Codex CLI Provider:** CURRENT; not implemented
+- **A2.5 — Codex CLI Provider:** implemented; live inference and external OS sandbox verification pending
 - **A2.6 — Provider Integration / Smoke Tests:** planned
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -62,7 +62,7 @@ is implementation-owned and is not stored in user/project config.
 
 The `openai` and `openai-compatible` providers declare `chat: yes`, `large_context: yes`,
 `reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
-`claude-cli` declares only `chat: yes`; its `large_context`, `reasoning_control`, `streaming`,
+`claude-cli` and `codex-cli` declare only `chat: yes`; their `large_context`, `reasoning_control`, `streaming`,
 `code_edit`, `shell`, and `git` capabilities are false.
 `large_context` describes support for large-context workflows, not a fixed context window;
 deployment/model limits vary. `reasoning_control` describes this implementation's optional
@@ -132,6 +132,73 @@ providers:
     timeout_seconds: 120
 active_provider: local-claude
 ```
+
+## Codex CLI provider
+
+`codex-cli` is a pure-text runtime transport, separate from roles and agents. It resolves
+`shutil.which("codex")` on every request; PATH determines executable/version. Neither user nor
+project provider config can specify an executable. The inspected installation is Codex CLI
+**0.159.2**. Authentication belongs entirely to the existing Codex CLI login/session: llmtool
+never reads auth files, accesses keychain credentials, manages login, or copies credentials.
+
+```yaml
+providers:
+  local-codex:
+    type: codex-cli
+    # model: your-model  # optional; Codex chooses its default when omitted
+    timeout_seconds: 120
+active_provider: local-codex
+```
+
+Select it with `llmtool ask --provider local-codex 'your question'`, or make it active in user
+config. `llmtool configure` skips HTTP endpoint and API-key prompts for this type. Non-null
+`base_url`, `api_key`, and `api_key_env` are rejected. `provider_options` must be an empty mapping;
+executable, cwd, approval, sandbox, and arbitrary CLI fields are rejected. Model identifiers
+must match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`. Temperature/max_tokens are stored but neither
+sent nor enforced. Only `chat` is true: large-context workflows, reasoning control, streaming,
+code editing, shell, and Git are not exposed. Model window size alone does not establish
+large-context workflow support. This version does not expose a tested reasoning-option mapping.
+
+Each request creates an empty, private temporary cwd under `/tmp` (fallback `/var/tmp`), outside
+the caller's repository. Inherited `TMPDIR` cannot redirect it into the project. Both subprocess
+`cwd` and `--cd` select that directory; nothing from the caller repository is copied or mounted.
+Prompts travel through stdin, never prompt files. `exec` uses `--no-daemon`, approval `never`,
+`--ephemeral`, `--skip-git-repo-check`, `--ignore-user-config`, `--ignore-rules`, and strict config.
+`project_doc_max_bytes=0` suppresses AGENTS.md instructions. The argv fixes a named permissions
+profile, `llmtool-text`, extending `:read-only`, denying root/temp filesystem reads, reopening
+only Codex's minimal system paths and the isolated workspace for reads, and disabling tool
+network access. No `--sandbox` flag is added: it would override the stronger permission profile.
+See [Codex permission profiles](https://learn.chatgpt.com/docs/permissions) for this precedence.
+
+Documented shell/unified-exec, shell snapshots, multi-agent, hooks, apps, memories, remote-plugin,
+and code-mode features are disabled; web search is disabled. These are defense in depth, not a
+claim that every Codex tool is disabled. **Isolation plus the restricted read-only sandbox form
+the execution boundary.** A malicious executable selected by PATH is outside this boundary:
+the installed CLI itself is trusted and handles authentication/model networking outside its
+tool sandbox. System/managed Codex policy and future CLI changes also remain runtime dependencies.
+The profile's effective enforcement must be checked externally on the deployment host.
+
+The child receives an allowlisted environment: PATH, HOME, USER, LOGNAME, locale settings,
+CODEX_HOME, and TLS certificate paths when present; TMPDIR becomes the isolated cwd. Other
+variables, including API keys, Git overrides, Node startup injection, and remote endpoints,
+are not inherited. HOME/CODEX_HOME preserve the user's existing CLI session location; when
+using an isolated llmtool HOME for testing, explicitly set CODEX_HOME to the existing Codex
+state directory without inspecting its contents. User-config-dependent custom gateways/proxies
+are not supported by this first version. Global CLI-managed skill/runtime state may still be
+loaded by Codex; the caller repository is not made available as context.
+
+The POSIX subprocess uses an argv list, `shell=False`, closed extra descriptors, a separate
+process group, nonblocking stdin/stdout/stderr, a deadline, and a separate 1 MiB bound on each
+output stream. Timeout/overflow kills the process group. Errors omit stderr, prompts, secrets,
+and environment values; invalid UTF-8, empty output, nonzero exit, and startup failure are
+normalized. Default text mode returns only final stdout; internal stderr diagnostics are
+captured and discarded, never forwarded. Reasoning summaries are suppressed. Temporary cwd
+cleanup runs on success/failure; CLI-owned authentication/runtime state is not deleted.
+
+Tests and observed live results are in the [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md).
+**OS sandbox validation is pending external host-terminal verification.** The nested Codex
+session refuses macOS `sandbox_apply`; fake CLI tests verify wiring/isolation and repository
+integrity, not the host kernel's enforcement.
 
 ## 安裝與直接執行
 
@@ -449,6 +516,7 @@ llmtool/providers/__init__.py          static provider registry、capability loo
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
 llmtool/providers/openai.py            固定官方 Responses API transport 與 normalization
 llmtool/providers/claude_cli.py        local Claude CLI subprocess 與純文字 Reply normalization
+llmtool/providers/codex_cli.py         isolated Codex CLI subprocess 與純文字 Reply normalization
 tests/                                config/provider/CLI 測試
 ```
 
