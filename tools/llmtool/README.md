@@ -43,7 +43,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
 - **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
 - **A3.5 — Interactive Chat Shell:** DONE and merged to `main` (`021456b`); external review PASS
-- **A4 — Evidence-first Context Packet:** implementation + canonical validation + external review PASS on feature branch; not merged to main
+- **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
+- **A5 — Git Intelligence:** implementation + canonical validation + external review PASS on feature branch; not merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -718,7 +719,7 @@ Replies are display text: no shell/Git execution, code execution, file mutation,
 tools, hooks, auto-approval, or routing is added. Existing provider transports
 retain their established boundaries. Technical capabilities grant no permission.
 Chat adds no orchestration, automatic skill/provider selection, retrieval, or
-automatic A4 packet extraction; A5/A6/A9 remain future milestones.
+automatic A4 packet extraction or A5 Git injection; A6/A9 remain future milestones.
 
 Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
 subcommand-required behavior; automatic interactive entry is a future UX option.
@@ -730,7 +731,7 @@ for exact commands and evidence: 30 targeted tests PASS; canonical syntax check 
 
 ## A4 — Evidence-first Context Packet
 
-A4 is implemented and validated on `feat/a4-context-packet`; external ChatGPT review PASS; not merged to main.
+A4 is DONE and merged to main in `38b1a67`; external ChatGPT review PASS.
 **Provider != Role != Agent != Skill != Context Packet.** Context Packet is data.
 
 | Category | Semantics |
@@ -796,7 +797,7 @@ Explicit --file input remains the existing caller-selected read; A4 gathers no
 new evidence. No automatic chat extraction or /context command was added;
 A3.5 chat remains plain multi-turn text, even if the context-pack skill is
 explicitly selected (then replies follow its prompt but are not parsed by chat).
-A5 may collect Git evidence later; A6 may validate claim support/command safety;
+A5 now collects offline Git evidence separately; A6 may validate claim support/command safety;
 A9/A10 may reuse packets for orchestration/retrieval. None is implemented by A4.
 User-supplied or model-generated sensitive text in supported fields is not
 redacted or truth-checked; do not supply secrets. No hidden-reasoning field exists.
@@ -806,3 +807,82 @@ with approved loopback access. Packaging and manual fake-provider JSON/human/err
 checks PASS. Live model inference NOT-TESTED. Exact commands, times, environment
 limitations and review are in the
 [A4 validation report](../../reports/llmtool_a4_context_packet_validation_20261001.md).
+
+## A5 — Git Intelligence
+
+`llmtool git` collects one read-only snapshot from the current working directory;
+Git resolves its repository root. It is offline and bypasses provider/config/key
+resolution. No evidence is automatically sent to a model or injected into chat.
+
+```sh
+llmtool git
+llmtool git --json
+```
+
+`llmtool/git_intel.py` exposes `collect_git_snapshot(cwd)` and
+`format_git_snapshot(snapshot)`. Frozen typed models are `GitRepositoryInfo`,
+`GitChange`, `GitStatus`, `GitDiff`, `GitCommit`, and `GitSnapshot`.
+`GitSnapshot.to_dict()` / `.to_json()` provide stable field order and JSON arrays.
+The snapshot contains root, branch, HEAD, detached state, staged/unstaged/untracked/
+conflicted paths, changed/staged files, recent commits, both diffs, and related files.
+Unborn repositories have null HEAD; detached HEAD has null branch.
+
+Status uses porcelain v1 NUL records. Rename/copy destinations appear in category
+lists, with their original path preserved in `status.entries`. Conflicts have their
+own category. Lists sort paths and remove duplicates; `changed_files` is the union
+of all four categories, including untracked paths. A path may be both staged and
+unstaged. Spaces, Unicode, tabs and newlines are preserved. UTF-8 surrogateescape
+preserves non-UTF-8 filename bytes where the host filesystem permits; JSON escapes
+those surrogate code points. Human output quotes metadata and escapes terminal
+controls in diffs; JSON/API preserve original diff text.
+
+The runtime runner accepts only fixed argv for:
+
+- `rev-parse --show-toplevel` and `rev-parse --verify --quiet HEAD`;
+- `branch --show-current`;
+- `status --porcelain=v1 -z --untracked-files=all --ignore-submodules=all`;
+- `diff` / `diff --cached`, always with `--no-ext-diff --no-textconv --no-color
+  --ignore-submodules=all --no-renames --src-prefix=a/ --dst-prefix=b/ --unified=3`;
+- `log --max-count=10 --format=%H%x00%s -z --no-decorate --no-show-signature --no-notes`;
+- two fixed read-only `config --null --name-only --get-regexp` queries to identify
+  filter execution keys and partial/promisor configuration;
+- `ls-tree -z HEAD`, `ls-tree -z HEAD:<validated-directory>`, and
+  `ls-tree -z HEAD -- <validated-literal-directory>` for related paths.
+
+No arbitrary Git arguments are accepted. Each command has a 10-second timeout,
+1 MiB metadata stdout limit, and 64 KiB discarded stderr limit. Each diff has a
+2 MiB byte limit: exceeding it fails the entire snapshot before stdout, with a
+sanitized error. Successful diffs are complete (`truncated: false`) and include
+`byte_count`. Log is capped at 10 SHA/subject entries; bodies are omitted.
+Related files are tracked HEAD blob siblings in the first 10 sorted changed
+parent directories, excluding changed paths, sorted and capped at 20. New
+untracked directories have no HEAD siblings. There is no content scan, recursive
+retrieval, semantic matching, or submodule traversal.
+
+Security: argv lists and `shell=False`; explicit cwd; no pager/editor, hooks,
+fsmonitor commands, external diff/textconv, or clean/smudge/process filter
+execution. Filter command keys are blanked and required filters disabled before
+status/diff. Optional index writes, automatic maintenance, inherited Git overrides,
+and system/global Git configuration are disabled. Protocol access is blocked;
+partial/promisor repositories are rejected to prevent lazy fetching. The trusted
+local Git executable comes from PATH. Repository config/includes/attributes are
+assumed stable during inspection; this is not a hostile filesystem sandbox or an
+atomic snapshot. Filter-backed files may appear modified because conversion is
+disabled. Global/system ignore rules are omitted, and diff content is not
+secret-redacted. Git may read tracked file bytes to calculate diffs, but llmtool
+never separately opens changed-file contents.
+See [Git diff controls](https://git-scm.com/docs/git-diff),
+[Git filter configuration](https://git-scm.com/docs/git-config), and
+[Git environment controls](https://git-scm.com/docs/git).
+
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence.
+A4 packets remain supplied/model-structured data; A5 supplies reusable local Git
+observations without generating inferences or hypotheses. No automatic A4
+conversion is introduced. A6/A9/A10 may consume this data later. Model-like text
+in filenames/diffs is data only; no mutations, routing, execution, or chat changes.
+
+A5 is implemented on `feat/a5-git-intelligence`; external ChatGPT review PASS; not merged.
+Targeted: 39 tests (38 passed, 1 host-filesystem skip); canonical syntax + 305 tests
+(304 passed, 1 same skip), exit 0. Wheel and manual fixture checks PASS.
+Validation and host limitations are recorded in the
+[A5 validation report](../../reports/llmtool_a5_git_intelligence_validation_20261001.md).
