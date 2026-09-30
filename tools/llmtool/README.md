@@ -992,8 +992,8 @@ A7 means **failure → human/external review → declarative skill proposal → 
 → manual skill revision/version bump → validation**. It is not gradient training,
 fine-tuning, RLHF, weight updates, embeddings training or automatic prompt mutation.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
-A7 is implemented on `feat/a7-skill-feedback-loop`, pending external review and
-merge. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
+A7 is implemented on `feat/a7-skill-feedback-loop`; external ChatGPT review PASS;
+not merged. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
 
 ### Data models and strict format
 
