@@ -24,6 +24,11 @@ $ErrorActionPreference = 'Stop'
 # nlf writes UTF-8; decode captured native output as UTF-8, not the OEM code page.
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+# Process.StandardInput uses Console.InputEncoding. On .NET Framework
+# (Windows PowerShell 5.1) it writes that encoding's preamble as soon as the
+# process starts, so a UTF-8 console would put a BOM before the --confirm
+# answer ("\ufeffy" is not "y"). A preamble-free encoding keeps stdin exact.
+[Console]::InputEncoding = $utf8
 
 if (-not $Version) { throw 'ci-smoke: version is empty' }
 if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { throw "ci-smoke: binary not found: $Binary" }
@@ -242,7 +247,7 @@ else { Fail '--confirm answered n' "exit $($r.Code), stdout [$($r.Out)]" }
 
 $r = Invoke-Nlf -NlfArgs @('--confirm', '--dir', $fx, 'go files') -Stdin "y`r`n"
 if ($r.Code -ne 0) { Fail '--confirm answered y' "exit $($r.Code) (stderr: $($r.Err))" }
-elseif ($r.Out -eq '' -or $r.Out -cne $direct.Out) { Fail '--confirm answered y' 'stdout differs from the direct run' }
+elseif ($r.Out -eq '' -or $r.Out -cne $direct.Out) { Fail '--confirm answered y' "stdout differs from the direct run (stderr: $($r.Err))" }
 elseif (-not $r.Err.Contains('READ-ONLY') -or -not $r.Err.Contains('No approximate command on Windows')) { Fail '--confirm answered y' "plan lacks READ-ONLY or the Windows note: $($r.Err)" }
 elseif ($r.Err.Contains('find ')) { Fail '--confirm answered y' 'plan shows a Unix command' }
 else { Pass '--confirm answered y' }
@@ -273,7 +278,7 @@ else { Fail 'newline output prints .\-rf.txt' "exit $($r.Code), stdout [$($r.Out
 
 $r = Invoke-Nlf -NlfArgs @('-0', '--confirm', 'files') -Dir $hx -Stdin "y`n"
 if ($r.Code -eq 0 -and [System.Convert]::ToBase64String($r.OutBytes) -ceq [System.Convert]::ToBase64String($r0.OutBytes)) { Pass '-0 --confirm answered y' }
-else { Fail '-0 --confirm answered y' "exit $($r.Code) or stdout differs from the direct -0 run" }
+else { Fail '-0 --confirm answered y' "exit $($r.Code) or stdout differs from the direct -0 run (stderr: $($r.Err))" }
 
 # --- PowerShell's own argument passing ----------------------------------------------
 
