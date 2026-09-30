@@ -278,11 +278,13 @@ jobs:
       - name: Race detector (not run on Windows)
         run: |
           # -race on windows/amd64 needs cgo and an external C toolchain
-          # (mingw-w64 gcc). This CI never installs or depends on one (nlf is
-          # stdlib-only, GOTOOLCHAIN=local, GOPROXY=off). The walker, scanner
-          # and heap are the same Go code on every OS and run under -race in
-          # the ubuntu-latest and macos-latest jobs.
-          echo "race detector not run on Windows: needs cgo with a C toolchain; covered on Linux and macOS"
+          # (mingw-w64 gcc). This job keeps every build cgo-free and does not
+          # rely on whichever C compiler the runner image happens to ship
+          # (nlf is stdlib-only, GOTOOLCHAIN=local, GOPROXY=off), so -race is
+          # not attempted here. The walker, scanner and heap are the same Go
+          # code on every OS and run under -race in the ubuntu-latest and
+          # macos-latest jobs.
+          echo "race detector not attempted on Windows: needs cgo and a C toolchain, which this job does not depend on; covered on Linux and macOS"
 
       - name: Repeated shuffled tests
         run: go test -count=10 -shuffle=on ./...
@@ -296,7 +298,7 @@ jobs:
           go test -run '^$' -fuzz='^FuzzScanTerms$' -fuzztime=5s ./internal/search
 
       - name: Build
-        run: go build -trimpath -o bin/nlf.exe .
+        run: CGO_ENABLED=0 go build -trimpath -o bin/nlf.exe .
 
       - name: Build Windows release binaries
         run: |

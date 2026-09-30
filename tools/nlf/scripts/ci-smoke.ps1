@@ -8,6 +8,8 @@
 # and stderr, --explain, --confirm, -0, drive-letter, UNC, ~\, Unicode and
 # space paths, a junction root, and that nothing in the fixtures changed.
 #
+# String comparisons use -ceq/-cne/-ccontains: PowerShell's -eq ignores case.
+#
 # Most checks start nlf through System.Diagnostics.Process, which gives the
 # exact stdout and stderr bytes and lets the test write stdin. A few checks
 # call nlf the way a PowerShell user does (& $bin ...), to cover PowerShell's
@@ -142,7 +144,7 @@ function Test-Found([string]$name, [string[]]$want, [string[]]$NlfArgs, [string]
 	$exp = (@($want) | Sort-Object) -join '|'
 	if ($r.Code -ne 0) { Fail $name "exit $($r.Code), want 0 (stderr: $($r.Err))" }
 	elseif ($r.Err -ne '') { Fail $name "stderr not empty: $($r.Err)" }
-	elseif ($got -ne $exp) { Fail $name "got [$got] want [$exp]" }
+	elseif ($got -cne $exp) { Fail $name "got [$got] want [$exp]" }
 	else { Pass $name }
 }
 
@@ -159,7 +161,7 @@ function Join-Fx([string]$rel) { return Join-Path $fx $rel }
 # --- basic flags ---------------------------------------------------------------
 
 $r = Invoke-Nlf -NlfArgs @('--version')
-if ($r.Code -eq 0 -and $r.Out -eq "nlf $Version`n" -and $r.Err -eq '') { Pass '--version' }
+if ($r.Code -eq 0 -and $r.Out -ceq "nlf $Version`n" -and $r.Err -eq '') { Pass '--version' }
 else { Fail '--version' "exit $($r.Code), stdout [$($r.Out)]" }
 
 $r = Invoke-Nlf -NlfArgs @('--help')
@@ -186,7 +188,7 @@ Test-Found 'junction as the search root' @((Join-Path $junction 'readme.md')) @(
 # nlf expands ~\ itself (cmd.exe and PowerShell pass it unchanged); USERPROFILE
 # points at the fixture so the check never reads the real profile.
 $r = Invoke-Nlf -NlfArgs @('--dir', '~\proj', 'md files') -Env @{ USERPROFILE = $home_ }
-if ($r.Code -eq 0 -and $r.Out -eq ((Join-Path $home_ 'proj\home.md') + "`n")) { Pass '~\proj with USERPROFILE set' }
+if ($r.Code -eq 0 -and $r.Out -ceq ((Join-Path $home_ 'proj\home.md') + "`n")) { Pass '~\proj with USERPROFILE set' }
 else { Fail '~\proj with USERPROFILE set' "exit $($r.Code), stdout [$($r.Out)] (stderr: $($r.Err))" }
 
 # UNC: the same fixture through the administrative share \\localhost\C$\...
@@ -240,7 +242,7 @@ else { Fail '--confirm answered n' "exit $($r.Code), stdout [$($r.Out)]" }
 
 $r = Invoke-Nlf -NlfArgs @('--confirm', '--dir', $fx, 'go files') -Stdin "y`r`n"
 if ($r.Code -ne 0) { Fail '--confirm answered y' "exit $($r.Code) (stderr: $($r.Err))" }
-elseif ($r.Out -eq '' -or $r.Out -ne $direct.Out) { Fail '--confirm answered y' 'stdout differs from the direct run' }
+elseif ($r.Out -eq '' -or $r.Out -cne $direct.Out) { Fail '--confirm answered y' 'stdout differs from the direct run' }
 elseif (-not $r.Err.Contains('READ-ONLY') -or -not $r.Err.Contains('No approximate command on Windows')) { Fail '--confirm answered y' "plan lacks READ-ONLY or the Windows note: $($r.Err)" }
 elseif ($r.Err.Contains('find ')) { Fail '--confirm answered y' 'plan shows a Unix command' }
 else { Pass '--confirm answered y' }
@@ -256,21 +258,21 @@ $want0 = @(' lead.txt', '.\--help.txt', '.\-n', '.\-rf.txt', 'a b.txt', "it's.tx
 $wantBytes = $utf8.GetBytes((($want0 | ForEach-Object { $_ + [char]0 }) -join ''))
 $r = Invoke-Nlf -NlfArgs @('-0', 'files') -Dir $hx
 if ($r.Code -ne 0) { Fail '-0 files (hostile names)' "exit $($r.Code) (stderr: $($r.Err))" }
-elseif ([System.Convert]::ToBase64String($r.OutBytes) -ne [System.Convert]::ToBase64String($wantBytes)) {
+elseif ([System.Convert]::ToBase64String($r.OutBytes) -cne [System.Convert]::ToBase64String($wantBytes)) {
 	Fail '-0 files (hostile names)' ("got [" + ($r.Out -replace [char]0, '|') + "]")
 } else { Pass '-0 files (hostile names)' }
 
 $r0 = $r
 $r = Invoke-Nlf -NlfArgs @('--null', 'files') -Dir $hx
-if ($r.Code -eq 0 -and [System.Convert]::ToBase64String($r.OutBytes) -eq [System.Convert]::ToBase64String($r0.OutBytes)) { Pass '--null is identical to -0' }
+if ($r.Code -eq 0 -and [System.Convert]::ToBase64String($r.OutBytes) -ceq [System.Convert]::ToBase64String($r0.OutBytes)) { Pass '--null is identical to -0' }
 else { Fail '--null is identical to -0' "exit $($r.Code) or bytes differ" }
 
 $r = Invoke-Nlf -NlfArgs @('files') -Dir $hx
-if ($r.Code -eq 0 -and ($r.Out -split "`n") -contains '.\-rf.txt' -and -not (($r.Out -split "`n") -contains '-rf.txt')) { Pass 'newline output prints .\-rf.txt' }
+if ($r.Code -eq 0 -and ($r.Out -split "`n") -ccontains '.\-rf.txt' -and -not (($r.Out -split "`n") -ccontains '-rf.txt')) { Pass 'newline output prints .\-rf.txt' }
 else { Fail 'newline output prints .\-rf.txt' "exit $($r.Code), stdout [$($r.Out)]" }
 
 $r = Invoke-Nlf -NlfArgs @('-0', '--confirm', 'files') -Dir $hx -Stdin "y`n"
-if ($r.Code -eq 0 -and [System.Convert]::ToBase64String($r.OutBytes) -eq [System.Convert]::ToBase64String($r0.OutBytes)) { Pass '-0 --confirm answered y' }
+if ($r.Code -eq 0 -and [System.Convert]::ToBase64String($r.OutBytes) -ceq [System.Convert]::ToBase64String($r0.OutBytes)) { Pass '-0 --confirm answered y' }
 else { Fail '-0 --confirm answered y' "exit $($r.Code) or stdout differs from the direct -0 run" }
 
 # --- PowerShell's own argument passing ----------------------------------------------
@@ -286,12 +288,12 @@ $out = @(& $bin --dir $fx $q)
 $code = $LASTEXITCODE
 $got = (@($out) | Sort-Object) -join '|'
 $exp = (@((Join-Fx 'main.go'), (Join-Fx 'vendor\lib.go')) | Sort-Object) -join '|'
-if ($code -eq 0 -and $got -eq $exp) { Pass "PowerShell call: $q" }
+if ($code -eq 0 -and $got -ceq $exp) { Pass "PowerShell call: $q" }
 else { Fail "PowerShell call: $q" "exit $code, got [$got] want [$exp]" }
 
 $out = @(& $bin --dir $uni '找 md 檔')
 $code = $LASTEXITCODE
-if ($code -eq 0 -and $out.Count -eq 1 -and $out[0] -eq (Join-Path $uni '說明.md')) { Pass 'PowerShell call: Unicode --dir with a space' }
+if ($code -eq 0 -and $out.Count -eq 1 -and $out[0] -ceq (Join-Path $uni '說明.md')) { Pass 'PowerShell call: Unicode --dir with a space' }
 else { Fail 'PowerShell call: Unicode --dir with a space' "exit $code, got [$($out -join '|')]" }
 
 $out = @(& $bin --dir $fx 'pem files' 2>$null)
@@ -303,9 +305,9 @@ $ErrorActionPreference = 'Stop'
 
 # --- read-only ---------------------------------------------------------------------
 
-if (((Get-Snapshot $fx) -join "`n") -eq $before) { Pass 'fixture unchanged (hash and mtime)' }
+if (((Get-Snapshot $fx) -join "`n") -ceq $before) { Pass 'fixture unchanged (hash and mtime)' }
 else { Fail 'fixture unchanged (hash and mtime)' 'snapshot differs' }
-if (((Get-Snapshot $hx) -join "`n") -eq $hxBefore) { Pass 'hostile-name fixture unchanged' }
+if (((Get-Snapshot $hx) -join "`n") -ceq $hxBefore) { Pass 'hostile-name fixture unchanged' }
 else { Fail 'hostile-name fixture unchanged' 'snapshot differs' }
 
 # --- summary -------------------------------------------------------------------------

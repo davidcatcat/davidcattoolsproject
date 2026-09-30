@@ -118,7 +118,7 @@ nlf --confirm --dir /home "排除 .cache、node_modules 目錄，找最大的 10
 
 > **狀態：驗證中，尚未宣稱為第一級支援平台。** 程式碼的可攜性、`windows/amd64` 與 `windows/arm64` 的 cross-build，以及 GitHub Actions `windows-latest` 的 CI 設定都已完成。只有 CI 在 Windows 上實際通過（完整測試，加上 PowerShell 與 cmd.exe 的 runtime smoke test），並完成下方「尚待人工驗證」的項目之後，才會把 Windows 列為第一級支援平台。
 
-目標機器不需要安裝 Go。支援 Windows 10、Windows 11 與 Windows Server（x64 與 ARM64）。
+目標機器不需要安裝 Go。目標平台是 Windows 10、Windows 11 與 Windows Server（x64 與 ARM64）；目前的驗證狀態見上方說明與本節最後。
 
 **1. Build**
 
@@ -161,7 +161,7 @@ cmd.exe 可以改用 `certutil -hashfile nlf-0.4.0-windows-amd64.exe SHA256`。
 nlf --version
 nlf "找 go 檔"
 nlf --dir C:\Users\me\Documents "找最近 7 天修改的 docx 檔"
-nlf --dir \\fileserver\share\logs '包含 "timeout" 的 log 檔'
+nlf --dir \\localhost\logs '包含 "timeout" 的 log 檔'                # UNC：\\伺服器\共用資料夾
 nlf --explain --dir C:\src "最大的 5 個檔案"
 nlf 'files containing "TODO"'
 'n' | nlf --confirm --dir C:\src "go files"
@@ -188,7 +188,7 @@ nlf --dir C:\src "pem files" & echo exit %ERRORLEVEL%
 
 - **路徑分成兩種寫法。** `--dir` 接受 Windows 原生路徑：磁碟代號（`C:\Users\me`、`c:/Users/me`）、反斜線、UNC（`\\server\share\folder`）、含空白與中文的路徑，以及只有磁碟代號的 `C:`（那台磁碟的目前目錄）。查詢文字裡的路徑則在每個作業系統上都用 `/`：`在 ./src`、`在 ~/Documents`、`排除 src/gen`。
 - **查詢文字裡寫 Windows 路徑會報錯，不會被默默誤解。** 例如 `in C:\Users\me` 或 `在 "D:\data"` 會 exit 2，並提示改用 `--dir`；沒有這個檢查的話，加了引號的 `in "D:\data"` 會被當成要搜尋的內容。排除路徑例外：加引號的 Windows 絕對路徑可以用在「排除」，但必須在搜尋位置之內。查詢裡以 `/` 開頭的路徑（`under /tmp`）指的是目前磁碟的根目錄。
-- **`~` 由 nlf 自己展開。** cmd.exe 與 PowerShell 都會把 `~` 原樣傳給程式，nlf 用 `%USERPROFILE%` 展開 `~`、`~/` 與 `~\`，例如 `--dir ~\Documents`。
+- **`~` 由 nlf 自己展開。** cmd.exe 會把 `~` 原樣傳給程式（部分 PowerShell 版本會先自行展開），nlf 則一律用 `%USERPROFILE%` 展開 `~`、`~/` 與 `~\`，例如 `--dir ~\Documents`，兩種情況結果相同。
 - **輸出的路徑使用 `\`。** 以 `-` 開頭的相對路徑印成 `.\-…`。每行以 `\n` 結尾，不是 `\r\n`。`-0` 照樣以 NUL 分隔，但 Windows 沒有內建的 `xargs -0`。
 - **大小寫。** NTFS 不分大小寫，所以和 macOS 一樣，大小寫不同的排除路徑（`排除 ./VENDOR`）也會排除 `vendor`，`--dir` 的大小寫不影響結果（輸出沿用你輸入的寫法）。排除「名稱」一律不分大小寫；檔名條件（`檔名包含`）仍依 nlf 的規則區分大小寫。
 - **Unicode 正規化。** NTFS 不做 NFC／NFD 正規化，行為和 Linux 相同：兩種拼法是不同的名稱。
@@ -209,7 +209,7 @@ nlf --dir C:\src "pem files" & echo exit %ERRORLEVEL%
 
 - Windows 10 與 Windows 11 桌面版。CI 的 runner 是 Windows Server。
 - `windows/arm64`：只有 cross-compile，CI 沒有 ARM64 的 Windows runner。
-- `go test -race`：Windows 上需要 cgo 與 C 編譯器（mingw-w64），CI 不安裝，所以沒有執行。walker、內容掃描與 heap 是跨平台的同一份程式碼，在 ubuntu 與 macOS 上都有跑 race detector。
+- `go test -race`：Windows 上需要 cgo 與 C 編譯器（mingw-w64）；這個 CI 的 Windows job 刻意不依賴 runner 內建的 C 編譯器，所以沒有嘗試。walker、內容掃描與 heap 是跨平台的同一份程式碼，在 ubuntu 與 macOS 上都有跑 race detector。
 - 超過 260 字元的長路徑、網路磁碟機代號（`net use Z:`）、OneDrive 的「檔案隨選」、Defender 等防毒軟體對大量走訪的影響。
 
 ### 解除安裝

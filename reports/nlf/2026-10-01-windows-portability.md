@@ -115,7 +115,7 @@ A8 讓同一份 Go 原始碼可以在 Windows 10／11 與 Windows Server（amd64
   - 依序執行：換行檢查、gofmt、vet、`go test -count=1 -v` 加上 skip guard、`-count=10 -shuffle=on`、fuzz smoke、native build、兩個 Windows release 執行檔的 `CGO_ENABLED=0` build 與雜湊驗證。
   - smoke test：`scripts/ci-smoke.ps1` 在 PowerShell 7 上跑兩個 binary，在 Windows PowerShell 5.1 上跑 dist binary；`scripts/ci-smoke.cmd` 在 cmd.exe 上跑兩個 binary。
   - 最後確認工作目錄沒有被改動。
-- **race detector 在 Windows 上不執行。** 它需要 cgo 與 C 編譯器（mingw-w64），這個 CI 不安裝也不依賴（`GOTOOLCHAIN=local`、`GOPROXY=off`、只用標準函式庫）。workflow 有一個步驟明確印出這個原因。會被 race 檢查的程式碼（walker、內容掃描、heap）在所有 OS 上是同一份，仍在 ubuntu 與 macos 上執行 `-race`。
+- **race detector 在 Windows 上沒有嘗試。** 它需要 cgo 與 C 編譯器（mingw-w64）。runner 的映像檔可能內建 gcc，但這個 job 刻意維持 cgo-free，不依賴映像檔剛好附帶的 C 編譯器（`GOTOOLCHAIN=local`、`GOPROXY=off`、只用標準函式庫）。workflow 有一個步驟明確印出這個原因。會被 race 檢查的程式碼（walker、內容掃描、heap）在所有 OS 上是同一份，仍在 ubuntu 與 macos 上執行 `-race`。
 
 ## 驗證
 
@@ -145,6 +145,35 @@ A8 讓同一份 Go 原始碼可以在 Windows 10／11 與 Windows Server（amd64
 
 **尚未執行：** 所有 Windows 原生測試與 smoke test（要等 `windows-latest` 的 CI）、Linux 上的完整測試（要等 ubuntu 的 CI；本機的 Docker 沒有執行）。
 
+## Review
+
+獨立的 Review agent：**APPROVE WITH CHANGES**。已經根據 Go 1.23.0 的原始碼確認以下幾點：
+
+- Windows 的 `os.Lstat` 在路徑以分隔符號結尾時，會跟隨 name-surrogate（跟隨 junction 所需）。
+- `go 1.23` 預設的 `winsymlink` 行為會把 junction 回報成 `ModeIrregular`。
+- `depthFunc` 對 `C:`、`C:.`、`C:\`、UNC 都正確。
+- Unix 上的行為與 base 等價。
+- 測試在 Unix 上沒有被放寬。
+- `.gitattributes` 不會改動任何既有檔案。
+
+找到的問題全部已修正（這次的後續 commit）：
+
+1. **major：** `ci-smoke.cmd` 的 `:code` 把名稱放在括號區塊裡。名稱含 `)` 時（例如 `pem files (no match)`），區塊會提早結束，錯誤的 exit code 可能被當成通過。現在改成不用括號區塊。
+2. **README 和 workflow 對不上：** README 說 native build 是 `CGO_ENABLED=0`，但 workflow 沒有設定。現在 workflow 明確設定 `CGO_ENABLED=0`。
+3. **race detector 的原因寫得不精確：** 原本寫「CI 不安裝 C 編譯器」，但 runner 可能內建。現在改成實際的狀況：刻意不依賴它，所以沒有嘗試。
+4. **README 的 UNC 範例：** Windows 上的 `TestDocExamplesRun` 會 Lstat 這個路徑，而原本的主機不存在，會做網路查詢。範例改成 `\\localhost\logs`。
+5. **`ci-smoke.ps1` 的比對不分大小寫：** PowerShell 的 `-eq` 不分大小寫，連 base64 的比對也受影響。現在改用 `-ceq`／`-cne`／`-ccontains`。
+6. **小問題：** `~` 的 PowerShell 說明、「支援」字眼改成「目標平台」、`main.go` 註解裡的 equivalent。
+
+Review 列出第一次 Windows run 可能失敗的地方：
+
+- `\\localhost\C$` 是否可以連線
+- `C:` 的 ReadDir
+- 不加結尾分隔符號的 share root
+- cmd 的 `find /c` 能否正確計算只用 LF 換行的輸出行數
+
+這些如果出問題，都會明確失敗，不會默默通過。
+
 ## 使用者可見的變更
 
 - 新增 Windows 執行檔與安裝說明。
@@ -161,6 +190,6 @@ A8 讓同一份 Go 原始碼可以在 Windows 10／11 與 Windows Server（amd64
   - Windows PowerShell 5.1 的引數傳遞
   - cmd.exe 批次檔的細節
 - **只有 CI 的 Windows Server 會被驗證。** Windows 10／11 桌面版、`windows/arm64` 實機、長路徑（超過 260 字元）、網路磁碟機代號、OneDrive 檔案隨選、防毒軟體的影響都需要人工驗證。
-- **race detector 不在 Windows 上執行**（原因見 CI）。
+- **race detector 沒有在 Windows 上嘗試**（原因見 CI）。之後如果要啟用，需要另外決定是否依賴 runner 的 C 編譯器。
 - **Windows 上沒有 xargs。** `-0` 的輸出本身會逐 byte 驗證，但沒有測試接到其他程式的情況。
 - **查詢裡以 `/` 開頭的路徑**（`under /tmp`）在 Windows 上指的是目前磁碟的根目錄。這是 `path/filepath` 的語意，已寫進 README。

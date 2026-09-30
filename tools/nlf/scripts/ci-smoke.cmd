@@ -115,8 +115,10 @@ exit /b 0
 
 rem --- helpers ------------------------------------------------------------
 
+rem No parenthesized block here: a ")" in a check name would end it early.
 :code
-if "%~3"=="%~2" (echo PASS  %~1) else (call :fail %1 "exit %~3, want %~2")
+if not "%~3"=="%~2" call :fail %1 "exit %~3, want %~2" & exit /b 0
+echo PASS  %~1
 exit /b 0
 
 :lines

@@ -444,7 +444,6 @@ func executionPlan(q *query.Query, e search.Effects, p query.Platform) string {
 		b.WriteString("\nApproximate " + p.Name() + " command (for reference only; nlf does not execute it):\n")
 		b.WriteString("  " + query.FindCommand(q, p) + "\n\n")
 	} else {
-		// Never called an equivalent: there is no command at all.
 		b.WriteString("\n" + query.NoCommandNote(query.English) + "\n\n")
 	}
 	fmt.Fprintf(&b, `Safety:
