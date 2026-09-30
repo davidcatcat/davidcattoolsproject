@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review Change"
+  short_description: "Review correctness, security, tests, and validation"
+  default_prompt: "Use $review-change to review this diff or branch for correctness, regressions, security, maintainability, test coverage, and validation provenance."
