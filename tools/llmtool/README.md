@@ -39,7 +39,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
 - **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
-- **A2.6 — Provider Integration / Smoke Tests:** integration coverage implemented; canonical/live validation pending
+- **A2.6 — Provider Integration / Smoke Tests:** implementation + host canonical validation complete; external ChatGPT review pending; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -83,13 +83,21 @@ The configure summary now uses the selected active profile's type when displayin
 an endpoint, including when a different profile was edited.
 
 Current validation: 11 new integration tests PASS; expanded targeted suite 148 PASS.
-Canonical discovery finds 189 tests, but this sandbox denies loopback server binding:
-148 tests passed and two class setup errors prevented 41 HTTP/CLI tests from running.
-A2.6 is **validation-pending**, awaiting a successful canonical host run and external
-ChatGPT review. Live compatible provider has no configured endpoint; Claude and
-Codex live attempts returned sanitized runtime errors; OpenAI live API was not
-attempted without prior paid API authorization. Historical provider smoke passes
-are not evidence of a new A2.6 pass. See the
+User-reported host canonical result:
+
+```text
+Ran 189 tests in 23.278s
+OK
+```
+
+All 189 canonical tests passed. The previous sandbox loopback-binding limitation
+was environment-specific; host validation resolved the remaining canonical gate.
+No implementation changes were needed after the host run. A2.6 implementation +
+canonical validation are **complete**, awaiting external ChatGPT review; A2.6 is
+not merged to main. A2.7/A3 have not started.
+Live smoke remains: `openai-compatible` NOT-TESTED; `claude-cli` attempted,
+unsuccessful; `codex-cli` attempted, unsuccessful; `openai` NOT-TESTED.
+Historical provider smoke passes are not evidence of a new A2.6 live pass. See the
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md).
 
 ## Provider capabilities
@@ -246,7 +254,7 @@ read denial, direct `CODEX_DIRECT_OK`, and llmtool E2E `CODEX_CLI_OK`; cleanup l
 mutation. The temporary HOME-level AGENTS.md did not contaminate the tested invocation with real
 CODEX_HOME retained. This does not prove arbitrary CODEX_HOME runtime/auth state or every future
 CLI version is isolated. Existing Codex authentication/runtime and the PATH executable remain
-trusted dependencies. External ChatGPT review is pending; A2.6 has not started.
+trusted dependencies. External ChatGPT review is pending; A2.6 implementation and canonical validation are complete (see the A2.6 section).
 
 ## 安裝與直接執行
 

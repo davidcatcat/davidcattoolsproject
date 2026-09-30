@@ -1,18 +1,20 @@
 # llmtool A2.6 provider integration validation — 2026-09-30
 
-Status: **VALIDATION PENDING; not complete.** Implementation and available targeted
-checks passed. Canonical validation requires a host run because the Codex sandbox
-blocks loopback server binding. Stop for external ChatGPT review; no main merge,
-A2.7 or A3 work.
+Status: **IMPLEMENTATION + HOST CANONICAL VALIDATION COMPLETE.** All 189 canonical
+tests passed in the user-reported host run. The previous sandbox loopback-binding
+limitation was environment-specific; host validation resolved the remaining
+canonical gate. No implementation changes were needed after the host run.
+External ChatGPT review pending; A2.6 is not merged to main. No A2.7/A3 work.
+Live smoke outcomes remain unchanged, including unsuccessful CLI attempts.
 
 ## Scope and provenance
 
 Canonical repository: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
 Branch: `feat/a2-provider-integration`.
-Tested base HEAD: `8118ab439767f7799ac63b7bc5650538d4677924`, plus the uncommitted
+Initial sandbox-tested base HEAD: `8118ab439767f7799ac63b7bc5650538d4677924`, plus the uncommitted
 A2.6 changes listed below. Local `origin/main` resolves to the same revision;
 ahead/behind 0/0. No fetch was performed, so this is not a remote synchronization
-claim. Branch has no configured upstream. A2.5 implementation commit `b6bd0ff` is
+claim. At initial sandbox validation, the branch had no configured upstream. A2.5 implementation commit `b6bd0ff` is
 an ancestor (ancestry check exit 0).
 
 Initial root/branch/status/HEAD checks matched the requested checkout. All work,
@@ -91,16 +93,29 @@ make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"
 ```
 
 Syntax compileall PASS. Canonical test discovery: 189 methods.
-Canonical run: 148 tests passed, 2 class setup errors, make exit 2 (unittest exit 1).
+Previous sandbox canonical run: 148 tests passed, 2 class setup errors, make exit 2 (unittest exit 1).
 `test_cli.CLITests` (26 methods) and `test_openai_provider.OpenAIProviderTests`
 (15 methods) failed setup at `ThreadingHTTPServer(("127.0.0.1", 0), Handler)` with
 `PermissionError: [Errno 1] Operation not permitted`. Those 41 tests did not run;
 this is an environment restriction, not evidence of a provider regression or pass.
 No tests were skipped, deleted or weakened to bypass this restriction.
 
+Subsequent host canonical validation, as reported by the user:
+
+```text
+Ran 189 tests in 23.278s
+OK
+```
+
+All 189 canonical tests passed. This successful host result resolves the remaining
+canonical gate and confirms the prior loopback-binding limitation was specific to
+the sandbox environment. No implementation changes were needed after the host run.
+The host-tested revision and shell exit code were not separately supplied; this
+report records the exact user-provided test output without claiming an agent rerun.
+
 `git diff --check`: PASS, exit 0. New untracked files also checked separately for
 whitespace errors. Documentation validation: PASS, exit 0; three documents and
-16 local Markdown links checked, along with validation-pending status and the
+16 local Markdown links checked during initial sandbox validation, along with the then-pending status and the
 Provider != Role != Agent boundary.
 
 ## Live smoke results
@@ -136,41 +151,25 @@ Tests verify returned command text stays output text. This is source/offline evi
 unsuccessful live attempts do not establish new live isolation or inference evidence.
 Existing trusted runtime dependencies and HTTP socket-timeout limitations remain.
 
-Files changed: configure.py, new provider integration tests, README.md, ROADMAP.md,
-and this report. Canonical host validation remains required before any completion
-claim. On the subsequent explicit user request to commit and push, staging succeeded;
-the canonical recheck again ran 148 passing tests with the same two loopback-binding
-setup errors (make exit 2). The user requested publication of this validation-pending
-snapshot. No main merge or next-milestone work.
+The implementation changed configure.py and added provider integration tests, plus
+README.md, ROADMAP.md and this report. This host-validation update changes only the
+three documentation files; provider code and tests are unchanged.
+Implementation + canonical validation are complete. **Provider != Role != Agent.**
 
-## Required host-terminal follow-up
+## Completion and review boundary
 
-Run from the canonical repository. First run the canonical gate and inspect the
-complete task diff including the two new files. If validation passes, update this
-report/README/ROADMAP with the actual host result before staging; do not claim a
-live pass unless a live test succeeds. Commit only the following five A2.6 files.
+The user-reported host run resolved the canonical gate. Live smoke remains:
+openai-compatible NOT-TESTED; claude-cli attempted, unsuccessful; codex-cli
+attempted, unsuccessful; openai NOT-TESTED. No unsuccessful attempt is a PASS.
 
-```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
-pwd
-git rev-parse --show-toplevel
-git branch --show-current
-git status --short --branch
-make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"
-git diff --check
-git diff -- tools/llmtool/README.md tools/llmtool/ROADMAP.md tools/llmtool/llmtool/configure.py
-```
+Documentation validation for this update: `git diff --check`, `git diff --stat`,
+full diff inspection, and confirmation that only README.md, ROADMAP.md and this
+report changed. No application build or test rerun is required for these
+documentation-only changes.
 
-After successful validation and evidence updates:
+Commit message: `docs(llmtool): record A2.6 host validation`.
+Target branch: `feat/a2-provider-integration`. This records the intended Git action;
+commit/push success must be confirmed separately after execution.
 
-```sh
-git add -- tools/llmtool/llmtool/configure.py tools/llmtool/tests/test_provider_integration.py tools/llmtool/README.md tools/llmtool/ROADMAP.md reports/llmtool_a2_6_provider_integration_validation_20260930.md
-git diff --cached --check
-git diff --cached
-git commit -m "feat(llmtool): add A2.6 provider integration coverage"
-git push -u origin feat/a2-provider-integration
-git status --short --branch
-git rev-parse HEAD
-```
-
-Stop for external ChatGPT review. Do not merge main or start another milestone.
+Stop for external ChatGPT review. A2.6 is not merged to main; do not merge main or
+start A2.7/A3.
