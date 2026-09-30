@@ -235,17 +235,38 @@ jobs:
           uname -a
 
       - name: Line endings
+        shell: pwsh
         run: |
-          # .gitattributes keeps LF even where core.autocrlf is true.
-          if grep -rlI $'\r' --include='*.go' --include='*.golden' --include='*.md' --include='*.ps1' --include='*.sh' .; then
-            echo "::error::files above were checked out with CRLF"
+          # tools/nlf/.gitattributes: every tracked file is LF in the working
+          # tree even though core.autocrlf is true here, except *.cmd, which
+          # is CRLF for cmd.exe. Checked on raw bytes: GNU grep in Git Bash
+          # strips CR from files it takes as text, so a grep-based check
+          # can neither see the CRLF in a .cmd file nor a stray CR elsewhere.
+          git ls-files --eol -- .
+          $bad = @()
+          $crlfFiles = 0
+          foreach ($f in @(git ls-files -- .)) {
+            $bytes = [System.IO.File]::ReadAllBytes((Join-Path $PWD.Path $f))
+            $text = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)  # one char per byte
+            $cr = $text.Length - $text.Replace("`r", '').Length
+            $lf = $text.Length - $text.Replace("`n", '').Length
+            $crlf = ($text.Length - $text.Replace("`r`n", '').Length) / 2
+            if ($f -like '*.cmd') {
+              if ($lf -eq 0 -or $crlf -ne $lf -or $cr -ne $crlf) { $bad += "${f}: want CRLF only, got $crlf CRLF, $lf LF, $cr CR" }
+              else { $crlfFiles++ }
+            } elseif ($cr -ne 0) {
+              $bad += "${f}: want LF only, got $cr CR"
+            }
+          }
+          if ($bad.Count -gt 0) {
+            $bad | ForEach-Object { Write-Output "::error::$_" }
             exit 1
-          fi
-          if ! grep -q $'\r$' scripts/ci-smoke.cmd; then
-            echo "::error::scripts/ci-smoke.cmd must have CRLF line endings"
+          }
+          if ($crlfFiles -eq 0) {
+            Write-Output "::error::no .cmd file checked; the CRLF side of the check did not run"
             exit 1
-          fi
-          echo "line endings ok"
+          }
+          Write-Output "line endings ok: $crlfFiles CRLF .cmd file(s), every other tracked file LF only"
 
       - name: gofmt
         run: |
