@@ -43,7 +43,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
 - **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
 - **A3.5 — Interactive Chat Shell:** DONE and merged to `main` (`021456b`); external review PASS
-- **A4 — Evidence-first Context Packet:** implemented and validated on feature branch; external review pending; not merged to main
+- **A4 — Evidence-first Context Packet:** implementation + canonical validation + external review PASS on feature branch; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -730,8 +730,7 @@ for exact commands and evidence: 30 targeted tests PASS; canonical syntax check 
 
 ## A4 — Evidence-first Context Packet
 
-A4 is implemented and validated on `feat/a4-context-packet`, awaiting external
-ChatGPT review; not merged to main.
+A4 is implemented and validated on `feat/a4-context-packet`; external ChatGPT review PASS; not merged to main.
 **Provider != Role != Agent != Skill != Context Packet.** Context Packet is data.
 
 | Category | Semantics |
