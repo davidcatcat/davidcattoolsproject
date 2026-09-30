@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import os
+import stat
 import sys
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
@@ -14,6 +16,21 @@ from .git_intel import collect_git_snapshot, format_git_snapshot
 from .prompts import TEMPLATES, messages_for
 from .skills import discover_skills, load_skill
 from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
+from .validator import (classify_command, validate_context_packet,
+                        format_command_assessment, format_validation_result)
+from .context import PACKET_LIMIT
+
+
+def _validation_packet(filename):
+    """Read only the explicit regular file, with A4's byte bound."""
+    descriptor = os.open(filename, os.O_RDONLY | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise LLMToolError('validation --file requires a regular file')
+        raw = stream.read(PACKET_LIMIT + 1)
+    if len(raw) > PACKET_LIMIT:
+        raise LLMToolError('context packet output exceeds 1 MiB')
+    return parse_context_packet(raw.decode('utf-8'))
 
 
 class SafeParser(argparse.ArgumentParser):
@@ -56,6 +73,14 @@ def parser_for_cli():
     add_options(chat)
     git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
     git.add_argument("--json", action="store_true", help="output snapshot as JSON")
+    validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
+    actions = validate.add_subparsers(dest="action", required=True)
+    command = actions.add_parser("command", help="Classify a suggested command as data")
+    command.add_argument("text")
+    command.add_argument("--json", action="store_true")
+    context = actions.add_parser("context", help="Check structural support, not factual truth")
+    context.add_argument("--file", required=True)
+    context.add_argument("--json", action="store_true")
     sub.add_parser("configure", help="Interactively configure a provider profile")
     providers = sub.add_parser("providers", help="List supported provider capabilities offline")
     providers.add_argument("--json", action="store_true", help="output metadata as JSON")
@@ -78,6 +103,15 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "validate":
+            if args.action == "command":
+                assessment = classify_command(args.text)
+                output = {"risk": assessment.risk.value, "reason": assessment.reason}
+                print(json.dumps(output, indent=2) if args.json else format_command_assessment(assessment))
+                return 0
+            result = validate_context_packet(_validation_packet(args.file))
+            print(result.to_json() if args.json else format_validation_result(result))
+            return 0 if result.valid else 1
         if args.command == "git":
             snapshot = collect_git_snapshot()
             print(snapshot.to_json() if args.json else format_git_snapshot(snapshot))

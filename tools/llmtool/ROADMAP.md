@@ -257,26 +257,49 @@ Targeted 39 tests：38 passed、1 host-filesystem skip；canonical syntax + 305 
 詳細 tests、packaging、manual fixture 與 host limitations 見
 [A5 validation report](../../reports/llmtool_a5_git_intelligence_validation_20261001.md)。
 
-## A6 — Safety & Validator Layer
+## A6 — Safety & Validator Layer — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
-驗證 evidence exists、claim supported、hallucination、unsafe command、missing obvious
-findings，並檢查模型建議的 command 是否會輸出敏感內容。分類不能只看 read-only 或
-destructive；至少區分：
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator.
+READ-ONLY != SAFE-TO-DISPLAY。`llmtool/validator.py` 提供 deterministic local
+classifier、frozen assessments/findings/results；不使用 model、不執行 commands。
+五個 risk classes：SAFE_READ、SENSITIVE_READ、MUTATING、DESTRUCTIVE、UNKNOWN。
+Severity 為 INFO／WARNING／ERROR；不加 confidence score。
 
-```text
-SAFE_READ
-SENSITIVE_READ
-MUTATING
-DESTRUCTIVE
-UNKNOWN
-```
+Sensitive-read 包含 `.env`、credential／secret／token、private keys、~/.ssh、
+~/.aws/credentials、~/.kube/config、credential stores/keychain、application config；
+`env`、`printenv`、`kubectl get secret` YAML/JSON、`aws configure export-credentials`。
+歷史 `cat /etc/company/app/config.yaml` 明確為 SENSITIVE_READ；metadata alternatives
+`ls -l /etc/company/app/config.yaml`／`stat /etc/company/app/config.yaml` 為 SAFE_READ。
+Raw Git diff/full log、pod describe/full output、systemctl status、所有 ps forms 亦保守標記 sensitive。
 
-高風險 sensitive-read pattern 至少涵蓋：`cat .env`、`cat *credentials*`、
-`cat *secret*`、讀取 private key files、`cat kubeconfig`、讀取可能含 credentials 的
-application config；`env`、`printenv`、`kubectl get secret`（包含
-`-o yaml`／`-o json`）、`aws configure export-credentials`；讀取 `~/.ssh`、
-`~/.aws/credentials`、keychain 或 credential store。無法判定時應標記 `UNKNOWN`，不可
-因為 command 不修改系統就判為安全顯示。
+Simple quoted argv／unquoted pipe、&&、||、semicolon 保留 recognized risk floor；
+DESTRUCTIVE > MUTATING > SENSITIVE_READ > UNKNOWN > SAFE_READ。Output redirection
+為 MUTATING；input redirection secret target 為 sensitive，其他 uncertain。
+Substitution、variables、backticks、complex syntax／unsupported options 不展開，標記
+UNKNOWN；不是完整 shell parser，known floor 不保證 unknown components 無額外風險。
+8 KiB UTF-8 command limit；拒絕 unsupported controls。Commands 永遠只是 text。
+
+ContextPacket 沿用 A4 strict structure／1 MiB／depth limit，另限制 total items 1024。
+ERROR：facts/inferences 沒有 evidence、inference 沒有 fact/evidence、exact string
+出現在 facts/inferences/hypotheses/unknowns 的 incompatible categories。
+WARNING：unknowns 缺 verify_next、sensitive/mutating/destructive/UNKNOWN suggestions。
+VERIFY_NEXT 保留原文，prose／unsupported suggestions 為 UNKNOWN；不自動執行。
+STRUCTURAL SUPPORT != FACTUAL TRUTH：presence 不證明 per-claim support 或 provenance，
+不做 paraphrase／truth verification、不升級 hypothesis。VALID 仍可能有 warnings 或錯誤 claims。
+
+Offline CLI：`llmtool validate command '<command>' [--json]`；
+`llmtool validate context --file packet.json [--json]`。No config、credentials、network、
+provider 或 automatic Git。Command exit 0 只表示 assessment 成功；context errors exit 1，
+malformed input stdout empty／stderr sanitized。`requires_approval` helper 只對
+SAFE_READ 回傳 false，其他 true；沒有 executor／approval UI。A5 snapshot validation
+不列入此 MVP；ask/chat/context-pack/git 不自動啟用 validation。
+
+40 targeted tests passed；canonical syntax + 345 tests：344 passed、1 existing A5
+filesystem skip，exit 0；wheel 與 manual offline validation PASS。
+Implemented on `feat/a6-safety-validator`, not merged；external ChatGPT review PASS。
+詳見 [A6 validation report](../../reports/llmtool_a6_safety_validator_validation_20261001.md)。
+A7/A8 可重用 feedback/regression，A9/A11 仍須獨立建立 permissions／approval／execution；
+A6 不開始 trainer、agents、routing、retrieval、autonomous repair 或 production execution。
 
 ## A7 — Skill Trainer / Feedback Loop
 
