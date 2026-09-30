@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug CI"
+  short_description: "Diagnose failing checks and fix the root cause"
+  default_prompt: "Use $debug-ci to identify and reproduce the first meaningful CI, test, build, or validation failure, fix its root cause minimally, and rerun targeted and canonical checks."

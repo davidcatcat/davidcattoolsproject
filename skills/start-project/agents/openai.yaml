@@ -1,0 +1,4 @@
+interface:
+  display_name: "Start Project"
+  short_description: "Turn a software idea into a small, tested v0.1"
+  default_prompt: "Use $start-project to scope a small v0.1 from this idea, inspect before creating files, and implement, test, and review it safely."

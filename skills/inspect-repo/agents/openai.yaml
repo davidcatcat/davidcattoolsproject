@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inspect Repository"
+  short_description: "Inspect guidance, code, tests, history, and revision"
+  default_prompt: "Use $inspect-repo to understand this repository before implementation and verify the exact checkout and revision before runtime validation."

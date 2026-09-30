@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Feature"
+  short_description: "Implement an agreed change with tests and review"
+  default_prompt: "Use $implement-feature to inspect first, implement this agreed feature or bug fix minimally, test public behavior, and review the final diff."

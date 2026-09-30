@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safe Git"
+  short_description: "Inspect, sync, stage, commit, and push safely"
+  default_prompt: "Use $safe-git to perform the requested Git operations under repository guidance, preserving unrelated work, avoiding destructive history changes, and verifying remote state before claiming synchronization."
