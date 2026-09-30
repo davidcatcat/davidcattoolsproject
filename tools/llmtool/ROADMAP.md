@@ -11,15 +11,25 @@ A2.3 Anthropic API 仍規劃中且尚未實作。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
-## Milestone execution workflow
+## Canonical repository workflow
 
-Future milestones use independent full Git clones with their own writable `.git`
-directory under `/Users/davidsun/git/davidcataiporject/tmp/`, not `git worktree`.
-Follow the repository [bootstrap and safety rules](../../README.md#isolated-milestone-execution).
-A2.5 used a worktree: source edits worked, but sandboxed staging/commit was blocked
-because Git metadata lived in the primary checkout's `.git/worktrees/`. This is an
-execution-environment/layout limitation, not a provider implementation failure.
-A2.6 remains unstarted; stop for external ChatGPT review before merging main.
+All project development, tests, validation, documentation, and Git operations
+must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Do not create or use worktrees, independent or milestone clones, sibling or nested
+repositories, or alternate project checkouts. The previous isolated project
+checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AGENTS.md).
+
+If sandbox permissions block `.git` writes, leave changes in the canonical
+repository and report exact host-terminal staging/commit/push commands; do not
+create another checkout. Preserve unrelated user work. Stop for external review
+when required; do not automatically start A2.6 or merge main.
+
+All unit, targeted, canonical, smoke, provider integration, regression, Git, and
+documentation validation must be launched from the canonical repository.
+Test-generated temporary files are allowed only when required by the test/runtime.
+The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
+runtime security mechanism, not a project checkout. It must contain no Git clone,
+worktree, or copy of this repository. This policy does not change provider behavior.
 
 ## A0 — Model Validation ✅ DONE
 

@@ -1,5 +1,11 @@
 # llmtool A2.5 — Codex CLI Provider Validation
 
+> Historical validation evidence: A2.5 used `/private/tmp/davidcattoolsproject-a25`.
+> That project checkout/worktree workflow is historical and deprecated and must
+> not be reused. Retained checkout paths below document what actually happened.
+> Runtime-only temporary directories are separate security mechanisms. No tests
+> or live validation were rerun for this documentation correction.
+
 Date: 2026-09-30. Branch: `feat/a2-codex-cli-provider`.
 Base `origin/main` and starting HEAD: `1e9e69c9947b7e5b466d877b85682aa113e2f9ba`.
 The initial worktree was clean, on the expected branch and base. All work used
@@ -263,7 +269,7 @@ Provider != Role != Agent. `codex-cli` remains pure-text and advertises no shell
 code-edit capabilities. Stop after documentation publication for external ChatGPT review;
 do not merge main or begin A2.6.
 
-## Repository workflow limitation discovered after host validation
+## Historical/deprecated repository workflow limitation
 
 A2.5 used Git worktree `/private/tmp/davidcattoolsproject-a25`. Source/documentation
 modification worked inside the Codex sandbox, but its Git metadata was located at:
@@ -280,10 +286,22 @@ This is an execution-environment/worktree-layout limitation, not a Codex CLI pro
 implementation failure, and does not invalidate the external inference validation.
 No provider behavior or application logic was changed to address it.
 
-Future milestones use independent full clones under
-`/Users/davidsun/git/davidcataiporject/tmp/`, each containing its own writable `.git`
-directory, outside the primary human checkout. See the repository
-[isolated milestone workflow](../README.md#isolated-milestone-execution).
-Do not work around the current worktree metadata boundary; if commit remains blocked,
-complete staging/commit/push from the normal host terminal. A2.6 remains unstarted;
-main is not merged, and external ChatGPT review is still required.
+## Current canonical repository policy
+
+All project development, tests, validation, documentation, and Git operations
+must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Do not create or use worktrees, independent or milestone clones, sibling or nested
+repositories, or alternate project checkouts. The previous isolated project
+checkout workflow is deprecated and must not be reused. See [AGENTS.md](../AGENTS.md).
+
+If sandbox permissions block `.git` writes, leave changes in the canonical
+repository and report exact host-terminal staging/commit/push commands; do not
+create another checkout. Preserve unrelated user work. Stop for external review
+when required; do not automatically start A2.6 or merge main.
+
+All unit, targeted, canonical, smoke, provider integration, regression, Git, and
+documentation validation must be launched from the canonical repository.
+Test-generated temporary files are allowed only when required by the test/runtime.
+The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
+runtime security mechanism, not a project checkout. It must contain no Git clone,
+worktree, or copy of this repository. This policy does not change provider behavior.

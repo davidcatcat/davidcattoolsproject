@@ -48,15 +48,25 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
-## Milestone development workflow
+## Canonical repository workflow
 
-Use independent full clones under `/Users/davidsun/git/davidcataiporject/tmp/`
-for future Codex milestones, with one milestone per clone and a writable local
-`.git` directory. See the repository [bootstrap and safety rules](../../README.md#isolated-milestone-execution).
-A2.5's worktree allowed source edits but blocked staging/commit because its Git
-metadata was outside the sandbox's writable checkout. This layout limitation does
-not change Codex CLI provider behavior. A2.6 has not started; external ChatGPT review
-precedes any main merge.
+All project development, tests, validation, documentation, and Git operations
+must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Do not create or use worktrees, independent or milestone clones, sibling or nested
+repositories, or alternate project checkouts. The previous isolated project
+checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AGENTS.md).
+
+If sandbox permissions block `.git` writes, leave changes in the canonical
+repository and report exact host-terminal staging/commit/push commands; do not
+create another checkout. Preserve unrelated user work. Stop for external review
+when required; do not automatically start A2.6 or merge main.
+
+All unit, targeted, canonical, smoke, provider integration, regression, Git, and
+documentation validation must be launched from the canonical repository.
+Test-generated temporary files are allowed only when required by the test/runtime.
+The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
+runtime security mechanism, not a project checkout. It must contain no Git clone,
+worktree, or copy of this repository. This policy does not change provider behavior.
 
 ## Provider capabilities
 

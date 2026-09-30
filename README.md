@@ -62,50 +62,29 @@ inspect-repo
   -> safe-git
 ```
 
-Skills are guidance for the coding agent, not a replacement for project-specific requirements. A project's own `CLAUDE.md`, tests, schemas, and source code remain the source of truth for that project.
+Skills are guidance for the coding agent, not a replacement for project-specific requirements. A project's own `AGENTS.md`, `CLAUDE.md`, tests, schemas, and source code remain the source of truth for that project.
 
-## Isolated milestone execution
+## Canonical repository workflow
 
-Future Codex milestones use a full independent Git clone under
-`/Users/davidsun/git/davidcataiporject/tmp/`, with one milestone per clone.
-Do not use `git worktree` for milestone execution. Each clone must contain its own
-`.git` directory so Git can update its metadata within the writable checkout.
-The primary human checkout is `/Users/davidsun/git/davidcataiporject/davidcattoolsproject/`;
-do not modify it during milestone implementation or put milestone clones inside it.
+`AGENTS.md` provides Codex-specific guidance; `CLAUDE.md` provides Claude-specific guidance.
 
-For a future A2.6 milestone, bootstrap from a normal host terminal:
+All project development, tests, validation, documentation, and Git operations
+must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Do not create or use worktrees, independent or milestone clones, sibling or nested
+repositories, or alternate project checkouts. The previous isolated project
+checkout workflow is deprecated and must not be reused. See [AGENTS.md](AGENTS.md).
 
-```sh
-mkdir -p /Users/davidsun/git/davidcataiporject/tmp
-cd /Users/davidsun/git/davidcataiporject/tmp
-git clone git@github.com:davidcatcat/davidcattoolsproject.git davidcattoolsproject-a26
-cd davidcattoolsproject-a26
-git fetch origin
-git rev-parse --show-toplevel --git-dir
-git status --short --branch
-git rev-parse origin/main
-git ls-remote origin refs/heads/main
-# Verify origin/main matches the remote main SHA before creating the branch.
-git switch -c feat/a2-provider-integration origin/main
-```
+If sandbox permissions block `.git` writes, leave changes in the canonical
+repository and report exact host-terminal staging/commit/push commands; do not
+create another checkout. Preserve unrelated user work. Stop for external review
+when required; do not automatically start A2.6 or merge main.
 
-This is a future bootstrap example, not authorization to begin A2.6. Launch Codex
-from inside the independent clone, with the clone and its `.git` directory writable.
-Complete implementation, tests, documentation, commit, and push there. Normal
-`git status`, `git add`, `git commit`, and `git push` must not require writes to the
-primary checkout's Git metadata. Start each milestone from the latest verified
-`origin/main`; if verification fails, resolve it before creating the milestone branch.
-
-Preserve unrelated user work: do not use `git reset --hard`, `git clean -fd`, force
-push, published-history rewriting, or stashing of unrelated work. Stop for external
-ChatGPT review before merging main, and do not automatically start the next milestone.
-Provider != Role != Agent.
-
-A2.5 used a worktree whose source files were writable but whose Git metadata lived
-under the primary repository's `.git/worktrees/`. Codex could edit documentation,
-but Git could not create `index.lock` there to stage or commit it. This is an
-execution-environment/worktree-layout limitation, not a Codex CLI provider failure.
-See the [A2.5 validation report](reports/llmtool_a2_5_codex_cli_validation_20260930.md).
+All unit, targeted, canonical, smoke, provider integration, regression, Git, and
+documentation validation must be launched from the canonical repository.
+Test-generated temporary files are allowed only when required by the test/runtime.
+The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
+runtime security mechanism, not a project checkout. It must contain no Git clone,
+worktree, or copy of this repository. This policy does not change provider behavior.
 
 ## Adding a new skill
 
@@ -128,7 +107,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — LLMTool A1 core and A1.1 configure wizard are complete; live gateway smoke report is recorded. A2 provider expansion is next. Currently ships only `openai-compatible`; see the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI. This A2.5 branch implements `openai-compatible`, `openai`, `claude-cli`, and `codex-cli`. Anthropic API remains planned / not implemented. A2.5 awaits external review; this does not claim it is merged to main. See the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
