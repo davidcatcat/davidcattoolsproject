@@ -45,6 +45,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A3.5 — Interactive Chat Shell:** DONE and merged to `main` (`021456b`); external review PASS
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
+- **A6 — Safety & Validator Layer:** implemented and validated on feature branch; external review pending, not merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -719,7 +720,7 @@ Replies are display text: no shell/Git execution, code execution, file mutation,
 tools, hooks, auto-approval, or routing is added. Existing provider transports
 retain their established boundaries. Technical capabilities grant no permission.
 Chat adds no orchestration, automatic skill/provider selection, retrieval, or
-automatic A4 packet extraction or A5 Git injection; A6/A9 remain future milestones.
+automatic A4 packet extraction, A5 Git injection, or A6 validation; A9 remains a future milestone.
 
 Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
 subcommand-required behavior; automatic interactive entry is a future UX option.
@@ -797,7 +798,7 @@ Explicit --file input remains the existing caller-selected read; A4 gathers no
 new evidence. No automatic chat extraction or /context command was added;
 A3.5 chat remains plain multi-turn text, even if the context-pack skill is
 explicitly selected (then replies follow its prompt but are not parsed by chat).
-A5 now collects offline Git evidence separately; A6 may validate claim support/command safety;
+A5 collects offline Git evidence separately; A6 now checks structural support and command risk;
 A9/A10 may reuse packets for orchestration/retrieval. None is implemented by A4.
 User-supplied or model-generated sensitive text in supported fields is not
 redacted or truth-checked; do not supply secrets. No hidden-reasoning field exists.
@@ -886,3 +887,96 @@ Targeted: 39 tests (38 passed, 1 host-filesystem skip); canonical syntax + 305 t
 (304 passed, 1 same skip), exit 0. Wheel and manual fixture checks PASS.
 Validation and host limitations are recorded in the
 [A5 validation report](../../reports/llmtool_a5_git_intelligence_validation_20261001.md).
+
+## A6 — Safety & Validator Layer
+
+A6 adds deterministic, offline assessment in `llmtool/validator.py`.
+**READ-ONLY != SAFE-TO-DISPLAY.**
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator.
+No commands are run; no provider, credentials, Git collection, network, shell
+configuration, alias resolution, or variable expansion is used.
+
+```sh
+llmtool validate command 'cat /etc/company/app/config.yaml'
+llmtool validate command 'git status' --json
+llmtool validate context --file packet.json
+llmtool validate context --file packet.json --json
+```
+
+| Risk | Meaning | Examples |
+|---|---|---|
+| SAFE_READ | Recognized narrow metadata/read operation, without execution authorization | `pwd`, `ls -l`, `stat file`, `git status`, `git diff --stat`, `git show --stat`, `kubectl get pods` |
+| SENSITIVE_READ | May display secrets or sensitive content even though read-only | `cat .env`, `env`, `printenv`, `kubectl get secret -o yaml`, raw `git diff` |
+| MUTATING | Changes files, Git state, or services | `touch file`, `git commit -am test`, `git fetch`, `kubectl rollout restart deployment/api`, `terraform apply` |
+| DESTRUCTIVE | Deletes data or disrupts systems/processes | `rm -rf /`, `git reset --hard`, `git clean -fd`, `git branch -D old`, `kubectl delete namespace production`, `terraform destroy`, `DROP TABLE users`, `kill -9 123` |
+| UNKNOWN | Unsupported syntax/operation; safety has not been established | `find /`, `grep -R /`, `cat arbitrary-config-file`, `sh -c pwd`, substitutions, custom commands |
+
+Sensitive patterns include `.env` files/globs, credential/secret/token names,
+private key files (`.pem`, `.key`, `id_rsa`, `id_ed25519`), `~/.ssh`,
+`~/.aws/credentials`, `~/.kube/config`, kubeconfig, credential stores/keychains,
+`~/.netrc`, `~/.npmrc`, application.yml/yaml/properties and `/etc/.../config.yaml`.
+`aws configure export-credentials` and secret YAML/JSON dumps are SENSITIVE_READ.
+`kubectl describe pod`, full pod/deployment output, `systemctl status`, all `ps`
+forms, and full Git logs are conservatively sensitive because they may expose environment,
+logs, or process arguments. A raw Git diff can contain credentials too.
+
+Historical regression: `cat /etc/company/app/config.yaml` is **SENSITIVE_READ**.
+Metadata alternatives `ls -l /etc/company/app/config.yaml` and
+`stat /etc/company/app/config.yaml` are **SAFE_READ** within the narrow grammar.
+This classification never authorizes execution or guarantees arbitrary file
+contents/configuration are safe.
+
+The classifier accepts at most **8 KiB UTF-8** and rejects unsupported control
+characters (tabs allowed). It tokenizes simple commands and splits unquoted
+`|`, `&&`, `||`, and `;`. Quoted separators remain argument data. Recognized risk
+floors combine as DESTRUCTIVE > MUTATING > SENSITIVE_READ > UNKNOWN > SAFE_READ.
+Unknown components never turn a compound into SAFE_READ. The result is the highest
+recognized floor, not a complete analysis of unknown components. Output redirects
+`>` / `>>` are MUTATING; `<` is sensitive for recognized secret targets, otherwise
+UNKNOWN. Malformed quoting/operators are uncertain; recognized risky components
+remain visible. Substitutions, variables, backticks, scripts, unsupported options,
+and complex shell grammar remain UNKNOWN within that component. No expansion occurs.
+Only conventional absolute binary locations and a plain `sudo <command>` form are
+recognized; other wrapper/global-option forms are unsupported. Glob matches are
+never resolved. These are conservative heuristics, not a full shell parser or
+complete security policy.
+
+Frozen `CommandAssessment`, `ValidationFinding`, and `ValidationResult` provide
+stable JSON dictionaries/arrays. Findings use INFO/WARNING/ERROR, static messages,
+category and optional deterministic index locator. `classify_command()` preserves
+original command text in the API. Command CLI output only includes risk/reason,
+without echoing the command; exit 0 means assessment succeeded, **not** command safety.
+`requires_approval(risk)` returns false only for SAFE_READ, true for everything else.
+It is a separate future-policy helper, with no executor or approval UI attached.
+
+`validate_context_packet(packet)` reuses A4 structure/UTF-8/1 MiB/depth limits and
+adds a 1024-total-item bound before semantic processing. It reports ERROR for facts/
+inferences with no evidence, an inference with neither fact nor evidence, and exact
+statement collisions across facts/inferences/hypotheses/unknowns. Text comparison
+is exact: no whitespace/case normalization, paraphrase matching, embeddings, or
+LLM judgment. Unknowns without VERIFY_NEXT generate WARNING. `assess_verify_next()`
+preserves every suggestion and assesses it; ordinary prose/unsupported/long
+suggestions become UNKNOWN with warnings. Sensitive/mutating/destructive suggestions
+also warn. These suggestions remain text and are never followed.
+
+**STRUCTURAL SUPPORT != FACTUAL TRUTH.** Evidence presence does not prove a claim,
+per-claim evidence linkage, or provenance accuracy. VALID means no ERROR findings;
+warnings can include dangerous suggestions, and a packet may still be factually
+wrong. No hypothesis is promoted into a fact; classification and source text are
+preserved. JSON includes valid/findings/command_assessments in stable order; human
+output starts VALID/INVALID and shows severity/code/message. Context CLI exits 1
+for semantic errors after printing findings; malformed/oversized input exits 1
+with empty stdout and sanitized stderr. Only the explicit regular --file is read,
+bounded to A4's limit; no other evidence is collected.
+
+A5 GitSnapshot validation is not added in this MVP. Existing ask, chat, context-pack,
+and Git snapshot behavior remain unchanged; no automatic model-output validation.
+A7/A8 may reuse results for feedback/regressions; A9/A11 must add their own permission
+and approval enforcement before any future execution. No trainer, agent, routing,
+retrieval, Telegram, repair loop, or production workflow is introduced.
+
+A6 is implemented on `feat/a6-safety-validator`, not merged; external review pending.
+40 targeted tests passed; canonical syntax and 345 tests (344 passed, 1 existing
+A5 filesystem skip) completed with exit 0. Wheel and manual offline checks passed.
+Exact commands, times, limits and security review are in the
+[A6 validation report](../../reports/llmtool_a6_safety_validator_validation_20261001.md).
