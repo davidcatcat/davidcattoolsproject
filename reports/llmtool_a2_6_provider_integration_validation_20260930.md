@@ -137,9 +137,11 @@ unsuccessful live attempts do not establish new live isolation or inference evid
 Existing trusted runtime dependencies and HTTP socket-timeout limitations remain.
 
 Files changed: configure.py, new provider integration tests, README.md, ROADMAP.md,
-and this report. Canonical host validation is required before commit/push and any
-completion claim. Commit/push not attempted while the canonical gate fails; .git
-is read-only in the current sandbox. No main merge or next-milestone work.
+and this report. Canonical host validation remains required before any completion
+claim. On the subsequent explicit user request to commit and push, staging succeeded;
+the canonical recheck again ran 148 passing tests with the same two loopback-binding
+setup errors (make exit 2). The user requested publication of this validation-pending
+snapshot. No main merge or next-milestone work.
 
 ## Required host-terminal follow-up
 
@@ -165,7 +167,7 @@ After successful validation and evidence updates:
 git add -- tools/llmtool/llmtool/configure.py tools/llmtool/tests/test_provider_integration.py tools/llmtool/README.md tools/llmtool/ROADMAP.md reports/llmtool_a2_6_provider_integration_validation_20260930.md
 git diff --cached --check
 git diff --cached
-git commit -m "feat(llmtool): complete A2.6 provider integration"
+git commit -m "feat(llmtool): add A2.6 provider integration coverage"
 git push -u origin feat/a2-provider-integration
 git status --short --branch
 git rev-parse HEAD
