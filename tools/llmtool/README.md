@@ -22,7 +22,7 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 |---|---|---|
 | Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`codex-cli`、`openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
-| Skill | 可版本化的 declarative instructions/context | A3 implemented; external review pending |
+| Skill | 可版本化的 declarative instructions/context | A3 DONE and merged to main |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
@@ -41,7 +41,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
 - **A2.5 — Codex CLI Provider:** DONE and merged to `main`; external host validation and direct/live E2E PASS
 - **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
-- **A3 — Skill Framework:** implementation + canonical validation + external review PASS on feature branch; not merged to main
+- **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
+- **A3.5 — Interactive Chat Shell:** implemented on feature branch; external review pending; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -95,8 +96,7 @@ OK
 All 189 canonical tests passed. The previous sandbox loopback-binding limitation
 was environment-specific; host validation resolved the remaining canonical gate.
 No implementation changes were needed after the host run. A2.6 implementation +
-canonical validation are **complete**, awaiting external ChatGPT review; A2.6 is
-not merged to main. A2.7 remains outside this milestone; A3 status is documented below.
+canonical validation are **complete**; A2.6 is merged to main. A2.7 remains outside this milestone; A3 status is documented below.
 Live smoke remains: `openai-compatible` NOT-TESTED; `claude-cli` attempted,
 unsuccessful; `codex-cli` attempted, unsuccessful; `openai` NOT-TESTED.
 Historical provider smoke passes are not evidence of a new A2.6 live pass. See the
@@ -256,7 +256,7 @@ read denial, direct `CODEX_DIRECT_OK`, and llmtool E2E `CODEX_CLI_OK`; cleanup l
 mutation. The temporary HOME-level AGENTS.md did not contaminate the tested invocation with real
 CODEX_HOME retained. This does not prove arbitrary CODEX_HOME runtime/auth state or every future
 CLI version is isolated. Existing Codex authentication/runtime and the PATH executable remain
-trusted dependencies. External ChatGPT review is pending; A2.6 implementation and canonical validation are complete (see the A2.6 section).
+trusted dependencies. A2.5 is merged to main; A2.6 implementation and canonical validation are complete (see the A2.6 section).
 
 ## 安裝與直接執行
 
@@ -566,6 +566,7 @@ argv、stdin、timeout、output limit 與 sanitized errors。Live runtime valida
 
 ```text
 llmtool/cli.py                         CLI 與輸出
+llmtool/chat.py                        memory-only chat session and REPL
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
 llmtool/inputs.py                      明確輸入來源、文字驗證
 llmtool/prompts.py                     common rules and skill composition
@@ -587,7 +588,7 @@ validation 與 `complete()`；A2.2 之後擴充 provider，A3 提供 declarative
 
 ## A3 — Runtime Skill Framework
 
-A3 is implemented and externally reviewed on `feat/a3-skill-framework`; canonical validation and external review PASS. It is not merged to main. **Provider != Role != Agent != Skill.** A skill is
+A3 is DONE and merged to main in `c9159f2`; canonical validation and external review PASS. **Provider != Role != Agent != Skill.** A skill is
 instruction/context data and grants no execution ability. Repository engineering
 workflows in root `skills/*/SKILL.md` are separate and are never loaded by llmtool.
 
@@ -651,3 +652,74 @@ Validation: 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS
 in the [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md)).
 No live model inference is required or claimed. A3 does not add roles,
 orchestration, retrieval, an A4 context schema, A5 Git collection, or A6 validation.
+
+## A3.5 — Interactive Chat Shell
+
+`llmtool chat` starts a persistent interactive process with memory-only conversation
+history. Provider != Role != Agent != Skill. A3.5 is implemented and validated on
+`feat/a3-5-interactive-chat`, awaiting external ChatGPT review; not merged to main.
+
+```sh
+llmtool chat
+llmtool chat --provider office-qwen --skill analyze-log
+```
+
+Chat accepts the same explicit provider/generation options as ask and optional
+`--skill`. Initial config resolution uses normal user → project → environment → CLI
+precedence. The session copies the resolved config once. Provider-specific startup
+overrides stay attached to that initial profile; switching does not reapply them
+or reload config. Missing deployment settings do not prevent offline session
+controls; requests and provider switches validate readiness normally. Credentials
+are resolved only when sending a user turn, not during slash commands or startup.
+
+| Command | Behavior |
+|---|---|
+| `/help` | Show commands without a request |
+| `/status` | Show profile name, provider type, skill, and message count |
+| `/provider` | Show current profile and sorted configured profiles/types |
+| `/provider <profile>` | Switch for subsequent requests; preserve history |
+| `/skill` | Show selected skill and available runtime names |
+| `/skill <name>` | Select a runtime skill for subsequent requests |
+| `/skill none` | Clear the skill; preserve conversation |
+| `/clear` | Clear conversation only; keep provider and skill |
+| `/history` | Display user and assistant messages, excluding system context/metadata |
+| `/exit`, `/quit` | Exit with status 0 |
+
+**Switching providers sends retained conversation history to the newly selected
+provider on the next user turn.** The switch prints this notice. Use `/clear`
+before the next message if that history should not be sent. Switching itself
+makes no provider request and does not modify saved config. Unknown/incomplete
+profiles and invalid skills leave selection and history intact.
+
+`ChatSession` owns the in-memory config snapshot, active selection, successful
+turns, and active flag. Each request builds one system message from common
+llmtool rules plus the current optional labeled skill, followed by successful
+user/assistant turns and the new user message. There is no repeated skill text
+in historical turns. Changes to skills rebuild only system context; earlier user
+text is unchanged. The conversation turn count counts individual user/assistant
+messages: one completed exchange is two turns.
+
+One input line is one user turn. Leading/trailing spaces and Unicode are preserved;
+the terminal line-ending delimiter is removed by input(). Blank lines make no
+request. Lines whose first non-space character is `/` are command syntax. Malformed
+commands fail safely and the session continues. There is no multiline editor yet.
+EOF or Ctrl-C at input or during a request exits cleanly with status 0 and no
+traceback. Ctrl-C does not resume the shell. A failed request prints a generic
+sanitized error, discards that attempted turn, preserves prior successful history,
+and permits retry or provider switching. Provider stderr and metadata are hidden.
+
+History has no disk persistence, transcript, restore, database, or cloud sync.
+`/history` displays the explicit conversation itself; it does not redact secrets
+users included in their own messages. `/clear` removes in-memory turns only.
+Replies are display text: no shell/Git execution, code execution, file mutation,
+tools, hooks, auto-approval, or routing is added. Existing provider transports
+retain their established boundaries. Technical capabilities grant no permission.
+There is no orchestration, automatic skill/provider selection, retrieval, or A4/A5/A6/A9.
+
+Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
+subcommand-required behavior; automatic interactive entry is a future UX option.
+History grows in memory without token budgeting or automatic truncation; provider
+context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+See the [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md)
+for exact commands and evidence: 30 targeted tests PASS; canonical syntax check and
+237 tests PASS, plus packaging and manual fake-provider UX validation.

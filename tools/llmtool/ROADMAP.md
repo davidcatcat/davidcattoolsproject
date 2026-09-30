@@ -7,7 +7,7 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
 A1.1、A2.1、A2.2、A2.4、A2.5、A2.6 已完成並合併至 main。A2.3 Anthropic API 仍規劃中且尚未實作。
-目前 A3 Skill Framework 已在 `feat/a3-skill-framework` 實作、完成 canonical validation 與 external review，尚未合併至 main；A3.5 Interactive Chat Shell 排入下一個 milestone。Capability 描述
+A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Chat Shell 已實作並完成驗證，等待 external review，尚未合併。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -150,7 +150,7 @@ codex-cli attempted, unsuccessful；openai NOT-TESTED。不將 unsuccessful atte
 Provider != Role != Agent。詳見
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
-## A3 — Skill Framework — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
+## A3 — Skill Framework ✅ DONE and merged to main
 
 Provider != Role != Agent != Skill. Declarative runtime skills are packaged under
 `tools/llmtool/llmtool/skills/*/SKILL.md`, separate from root repository engineering
@@ -168,29 +168,36 @@ samples warn against exposing credentials/private configuration.
 
 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS. Commands and limitations are recorded in the
 [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
-Implementation is on `feat/a3-skill-framework`, not merged to main. External ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
+Merged to main in `c9159f2`; external ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
 
-## A3.5 — Interactive Chat Shell
+## A3.5 — Interactive Chat Shell — IMPLEMENTED; external review pending
 
-提供類似 Codex CLI／Claude CLI 的互動式聊天入口，讓使用者可直接進入長駐 session，
-而不是每次只能使用一次性的 `llmtool ask`。A3.5 是 CLI/UX 層，不做 Agent orchestration。
+`llmtool chat` provides a line-oriented, provider-agnostic interactive shell.
+Explicit `ChatSession` state owns a resolved config snapshot, selected provider,
+optional A3 skill, successful user/assistant history, and active state. History is
+memory-only, without transcripts, restore, files, databases, or cloud sync.
 
-第一版至少包含：
+Supported controls: `/help`, `/status`, `/provider [profile]`, `/skill [name|none]`,
+`/clear`, `/history`, `/exit`, and `/quit`. Controls make no provider request and
+never mutate saved config. Provider switches validate readiness, preserve history,
+and explicitly warn that history goes to the new provider on the next user turn.
+Skill changes replace current system context while preserving exact user messages.
 
-- `llmtool chat` 進入 interactive session；驗證穩定後可評估讓單獨執行 `llmtool` 直接進入 chat。
-- session 內保留多輪 conversation context，預設只存在記憶體，不自動寫入聊天歷史檔案。
-- 顯示目前 provider、skill 與 session 狀態。
-- 支援明確控制命令，例如 `/provider`、`/skill`、`/status`、`/clear`、`/history`、`/help`、`/exit`。
-- provider 可在 session 中切換；skill 可顯式選擇或清除，且不得改寫 saved config。
-- user message 必須保持原文；skill/context composition 維持 provider-agnostic common message contract。
-- `llmtool ask` 保留作為 script、pipeline 與一次性非互動呼叫介面。
+Requests use common rules + current optional skill in one system message, followed
+by prior user/assistant turns and new user text. Failed requests are sanitized,
+commit no attempted turn, and allow recovery. EOF/Ctrl-C exits cleanly. Blank input
+is ignored; one line is one message. Existing ask and bare CLI behavior remain.
 
-A3.5 不包含自動 role routing、agent loop、shell/Git/tool execution、automatic skill selection、
-production mutation 或 conversation cloud sync。後續 A9/A11 再把 interactive shell 接上
-Role/Agent orchestration 與完整 production workflow。
+Provider != Role != Agent != Skill. No automatic routing, roles, agents, tools,
+shell/Git/output execution, filesystem mutation, retrieval, or orchestration.
+Bare `llmtool` interactive entry remains a future UX option. No token budgeting,
+multiline editor, or persisted history. Live smoke NOT-TESTED.
 
-安全原則：interactive chat 仍遵守 **Provider != Role != Agent != Skill**；模型輸出的 command
-預設只是文字，不因進入互動模式而獲得執行權限。
+30 targeted tests PASS; canonical syntax check and 237 tests PASS.
+Implemented on `feat/a3-5-interactive-chat`, not merged to main. Validation counts,
+manual fake-provider UX, and packaging evidence are in the
+[A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
+Stop for external ChatGPT review. Do not start A4 or merge main.
 
 ## A4 — Evidence-first Context Packet
 

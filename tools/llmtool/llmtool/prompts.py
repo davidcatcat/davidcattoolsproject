@@ -17,9 +17,21 @@ def messages_for(command, text, skill=None):
 
     task = ASK if command == "ask" else load_skill(command).instructions
     context = COMMON + "\n" + task
-    if skill is not None:
-        context += "\n\nSelected skill: " + skill.name + " (version " + str(skill.version) + ")\n" + skill.instructions
+    context = skill_context(context, skill)
     return [
         {"role": "system", "content": context},
         {"role": "user", "content": text},
+    ]
+
+
+def skill_context(base, skill=None):
+    """Compose current context once; historical turns contain no skill text."""
+    if skill is None:
+        return base
+    return base + "\n\nSelected skill: " + skill.name + " (version " + str(skill.version) + ")\n" + skill.instructions
+
+
+def chat_messages(turns, skill=None):
+    return [{"role": "system", "content": skill_context(COMMON, skill)}] + [
+        dict(turn) for turn in turns
     ]
