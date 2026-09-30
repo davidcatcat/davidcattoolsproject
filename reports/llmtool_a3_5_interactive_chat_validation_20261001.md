@@ -2,8 +2,7 @@
 
 ## Status and tested revision
 
-A3.5 implementation and canonical validation complete; external ChatGPT review
-pending. Implemented on `feat/a3-5-interactive-chat`, not merged to main.
+A3.5 implementation, canonical validation, and external ChatGPT review are complete. Implemented on `feat/a3-5-interactive-chat`, not merged to main.
 Provider != Role != Agent != Skill. No orchestration or A4/A5/A6/A9 work.
 
 All work and validation launched from the canonical repository:
@@ -156,4 +155,4 @@ or process exit, config snapshot rather than hot reload, generic request errors,
 Ctrl-C exits instead of resuming input, no output validator, and no live model
 claim. The selected provider receives retained history after an explicit switch.
 EOF/Ctrl-C during remote work does not establish upstream inference cancellation.
-Stop for external ChatGPT review; do not merge main or start A4.
+External ChatGPT review: **PASS**. No blocking correctness, security, packaging, or regression issue was found in the A3.5 diff. One stale roadmap status paragraph was corrected during review. No implementation or test files were changed by this review. Do not start A4 before A3.5 is merged to main.
