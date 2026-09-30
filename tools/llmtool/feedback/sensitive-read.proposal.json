@@ -1,0 +1,13 @@
+{
+  "skill": "analyze-log",
+  "from_version": 1,
+  "proposed_version": 2,
+  "rationale": "Preserve READ-ONLY != SAFE-TO-DISPLAY in skill review.",
+  "added_rules": [
+    "Prefer ls -l or stat for permission-denied configuration evidence; do not suggest displaying credentials."
+  ],
+  "changed_rules": [],
+  "linked_feedback_case_ids": [
+    "7d3fb1b8b4c4a2400bb55e37"
+  ]
+}

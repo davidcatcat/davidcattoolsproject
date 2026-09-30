@@ -1,0 +1,22 @@
+{
+  "facts": [
+    "HTTP 500 observed"
+  ],
+  "evidence": [
+    {
+      "statement": "HTTP 500 observed",
+      "source": "supplied incident notes",
+      "locator": "line 1"
+    }
+  ],
+  "inferences": [],
+  "hypotheses": [
+    "Configuration mismatch is possible"
+  ],
+  "unknowns": [
+    "Previous container exception is missing"
+  ],
+  "verify_next": [
+    "Inspect previous container exception evidence"
+  ]
+}

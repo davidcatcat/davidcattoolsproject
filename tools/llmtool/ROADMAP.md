@@ -301,10 +301,52 @@ Merged to main in `63b5bae`；external ChatGPT review PASS。
 A7/A8 可重用 feedback/regression，A9/A11 仍須獨立建立 permissions／approval／execution；
 A6 不開始 trainer、agents、routing、retrieval、autonomous repair 或 production execution。
 
-## A7 — Skill Trainer / Feedback Loop
+## A7 — Skill Trainer / Feedback Loop ✅ IMPLEMENTED — pending external review / not merged
 
-Qwen／model failure → ChatGPT review → Skill patch → regression test → versioned Skill。
-把失敗案例轉為可追蹤的技能修正與回歸資料。
+model failure → explicit capture → human／external review → declarative skill
+proposal → regression case → manual versioned Skill revision → validation。
+Skill Trainer 在此不表示 gradient training、fine-tuning、RLHF、weight updates、
+embeddings training 或 automatic prompt mutation。
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
+
+`llmtool/feedback.py` 提供 frozen FeedbackCase、SkillPatchProposal、RegressionCase、
+fixed assertions 與 deterministic results。Feedback 記錄 skill/name/version、原始
+input/output、expected behavior、explicit failure tags、A6 findings、review notes/status。
+24-hex content-derived SHA-256 ID 使用 canonical JSON；notes/status 不參與 feedback
+ID，review 不改 case identity。Strict JSON 拒絕 missing/extra fields、duplicate keys、
+invalid enums/types/UTF-8/control characters；1 MiB JSON/file、128 KiB text、128 items、
+64 assertions、depth 6 limits。No hidden reasoning/provider metadata capture；
+recognized credential material 拒絕，使用者仍須人工整理／redact supplied text。
+
+Offline CLI：`feedback capture`、`show`、`validate`、`review`、`regression`。
+Only explicitly supplied regular UTF-8 files；no-follow anchored directory operations，
+symlink／parent traversal 拒絕。Capture JSON stdout 或明確新 .json target（0600、不覆寫）；
+review 原子替換明確 case，保留一般 permissions。無 normal ask/chat 自動 capture。
+Version state：CURRENT／OLDER_THAN_CURRENT／NEWER_THAN_CURRENT（invalid）；不自動 upgrade。
+CAPTURED → REVIEWED → PATCH_PROPOSED → REGRESSION_READY → CLOSED 僅允許逐步前進；
+notes required after capture。External ChatGPT review 為 human-mediated workflow。
+
+Proposal API 要求 reviewed/current case，proposed_version 必須恰好 +1。
+只輸出 rationale／declarative rules／linked case IDs 資料，不 apply arbitrary patch、
+不修改 SKILL.md。Later lifecycle 狀態是 reviewer bookkeeping，非自動 approval。
+RegressionCase 記錄 skill/minimum version/input/source IDs；supplied output only，
+12-type assertion allowlist 重用 A4 parser／A6 classifier/validator。
+Exact category elements、literal text、finding codes、command risk、CONTEXT_VALID；
+malformed structured candidate 的 negative assertions 亦 fail closed。
+No provider/config/API key/network、shell/Git execution、eval/exec、code loading。
+
+Repository-local `tools/llmtool/feedback/` curated fixtures：historical
+`cat /etc/company/app/config.yaml` = SENSITIVE_READ、ls -l／stat = SAFE_READ；
+HTTP 500 fact retention、hypothesis separation、missing exception unknown、verify_next
+與 structural support。No factual truth verification、live model benchmark、automatic
+tag inference、linked-case discovery 或 concurrent multi-user storage。
+Fixtures 不打包；三個 packaged skills 不變。A8 可另加 live-output collection／benchmark；
+A7 不開始 A8/A9/A10/A11 implementation。
+
+47 targeted tests PASS；canonical syntax + 392 tests：391 passed、1 inherited A5
+filesystem skip，exit 0；wheel contents 與 manual offline CLI/fixture validation PASS。
+Feature branch implementation complete，尚未 merged／external review。
+詳見 [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md)。
 
 ## A8 — Regression / Benchmark System
 

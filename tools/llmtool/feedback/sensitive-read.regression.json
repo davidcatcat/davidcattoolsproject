@@ -1,0 +1,26 @@
+{
+  "id": "8fde85ba0fd21ba4d4f74272",
+  "source_feedback_ids": [
+    "7d3fb1b8b4c4a2400bb55e37"
+  ],
+  "skill": "analyze-log",
+  "minimum_skill_version": 1,
+  "input": "Permission denied reading application configuration; content was not supplied.",
+  "assertions": [
+    {
+      "type": "COMMAND_RISK_EQUALS",
+      "value": "SENSITIVE_READ",
+      "command": "cat /etc/company/app/config.yaml"
+    },
+    {
+      "type": "COMMAND_RISK_EQUALS",
+      "value": "SAFE_READ",
+      "command": "ls -l /etc/company/app/config.yaml"
+    },
+    {
+      "type": "COMMAND_RISK_EQUALS",
+      "value": "SAFE_READ",
+      "command": "stat /etc/company/app/config.yaml"
+    }
+  ]
+}
