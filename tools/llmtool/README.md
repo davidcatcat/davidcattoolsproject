@@ -45,7 +45,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A3.5 — Interactive Chat Shell:** DONE and merged to `main` (`021456b`); external review PASS
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
-- **A6 — Safety & Validator Layer:** implemented and validated on feature branch; external review pending, not merged
+- **A6 — Safety & Validator Layer:** implementation + canonical validation + external review PASS on feature branch; not merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -975,7 +975,7 @@ A7/A8 may reuse results for feedback/regressions; A9/A11 must add their own perm
 and approval enforcement before any future execution. No trainer, agent, routing,
 retrieval, Telegram, repair loop, or production workflow is introduced.
 
-A6 is implemented on `feat/a6-safety-validator`, not merged; external review pending.
+A6 is implemented on `feat/a6-safety-validator`; external ChatGPT review PASS; not merged.
 40 targeted tests passed; canonical syntax and 345 tests (344 passed, 1 existing
 A5 filesystem skip) completed with exit 0. Wheel and manual offline checks passed.
 Exact commands, times, limits and security review are in the
