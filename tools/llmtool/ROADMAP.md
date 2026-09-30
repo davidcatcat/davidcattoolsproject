@@ -257,7 +257,7 @@ Targeted 39 tests：38 passed、1 host-filesystem skip；canonical syntax + 305 
 詳細 tests、packaging、manual fixture 與 host limitations 見
 [A5 validation report](../../reports/llmtool_a5_git_intelligence_validation_20261001.md)。
 
-## A6 — Safety & Validator Layer — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
+## A6 — Safety & Validator Layer ✅ DONE and merged to main
 
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator.
 READ-ONLY != SAFE-TO-DISPLAY。`llmtool/validator.py` 提供 deterministic local
@@ -296,7 +296,7 @@ SAFE_READ 回傳 false，其他 true；沒有 executor／approval UI。A5 snapsh
 
 40 targeted tests passed；canonical syntax + 345 tests：344 passed、1 existing A5
 filesystem skip，exit 0；wheel 與 manual offline validation PASS。
-Implemented on `feat/a6-safety-validator`, not merged；external ChatGPT review PASS。
+Merged to main in `63b5bae`；external ChatGPT review PASS。
 詳見 [A6 validation report](../../reports/llmtool_a6_safety_validator_validation_20261001.md)。
 A7/A8 可重用 feedback/regression，A9/A11 仍須獨立建立 permissions／approval／execution；
 A6 不開始 trainer、agents、routing、retrieval、autonomous repair 或 production execution。
@@ -331,7 +331,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A5 已完成並合併至 `main`；現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A6 已完成並合併至 `main`；現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
 ## A12 — Remote Frontends / Telegram Agent
 
