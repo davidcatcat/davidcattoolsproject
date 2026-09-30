@@ -6,8 +6,8 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1、A2.1、A2.2 已完成並合併至 main；下一個實作 milestone 優先安排 A2.4，A2.3
-Anthropic API 仍規劃中且尚未實作。Capability 描述
+A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，下一個實作 milestone 為 A2.5。
+A2.3 Anthropic API 仍規劃中且尚未實作。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -77,23 +77,24 @@ mock/local HTTP tests PASS；OpenAI live API NOT-TESTED。Live paid API call 不
 
 未實作。增加獨立 Anthropic API implementation，並由 implementation 宣告 capabilities。
 
-### A2.4 — Claude CLI Provider ← CURRENT
+### A2.4 — Claude CLI Provider ✅ DONE
 
 已確認本機 CLI 的非互動 print、text output、safe mode、no-session-persistence 與停用 tools
 參數。第一個 implementation candidate 只做純文字 request/response，以 argv/stdin 啟動 CLI，
 不宣告 large-context、reasoning-control、streaming、code-edit、shell 或 Git capability。
-Fake executable tests 與 canonical suite PASS。正常 authenticated user shell 的 direct CLI marker
-smoke PASS（使用者提供的執行證據）；Codex isolated runtime 無法取得相同 authenticated session。
+Fake executable tests、canonical suite 與 normal authenticated user shell 的 live E2E PASS。
+人工驗證在 feature HEAD `cd55e88`、Claude CLI 2.1.285 執行：direct CLI marker 與
+llmtool → claude-cli → Claude marker 均符合預期；smoke 後 repository status clean，無 filesystem
+或 Git mutation。Codex isolated runtime 無法使用相同 session，且 PATH 解析到不同 executable/version。
 兩種 runtime 解析到不同 executable/version：normal shell 使用 nvm 安裝的 Claude CLI 2.1.284，
 Codex isolated runtime 使用 `/usr/local/bin/claude` 2.1.206。`claude-cli` 透過 process `PATH`
 解析 executable，PATH 順序決定實際 CLI；project config 不可覆寫 executable。這是已記錄的
 runtime dependency/minor follow-up，不代表 provider argv failure。
-llmtool isolated-HOME live smoke 曾以 `LLMTOOL_CLAUDE_CLI_HOME` 嘗試一次，未取得 marker，依
-execution-environment 限制記為 SKIPPED-ENVIRONMENT，不視為 inference FAIL 或 PASS。驗證細節見
+先前 Codex isolated-HOME 嘗試記為 SKIPPED-ENVIRONMENT；後續正常 shell 的 llmtool live E2E 已 PASS。
+驗證細節見
 [`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。
-A2.4 保持 CURRENT，等待 external review。
 
-### A2.5 — Codex CLI Provider
+### A2.5 — Codex CLI Provider ← CURRENT
 
 未實作。先明確定義 CLI runtime 的程序執行與 approval 邊界，再增加 provider。
 

@@ -37,8 +37,9 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.1 — Provider Capability Foundation:** DONE
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
-- **A2.4 — Claude CLI Provider:** CURRENT; local CLI, pure text
-- **A2.5–A2.6:** planned; Codex CLI provider and provider integration checks are not implemented
+- **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
+- **A2.5 — Codex CLI Provider:** CURRENT; not implemented
+- **A2.6 — Provider Integration / Smoke Tests:** planned
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -114,6 +115,9 @@ does not ask for a Base URL or API key and does not start Claude CLI. This runti
 separate from the Anthropic API provider, which remains planned.
 The provider resolves `claude` from the llmtool process `PATH`; PATH order determines which
 installed executable and version are used. Project config cannot select or override the executable.
+The Claude CLI provider's live end-to-end smoke passed in the normal authenticated user shell;
+the Codex isolated runtime may resolve a different executable and does not establish the same
+authentication state. See the [runtime validation report](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md).
 For isolated llmtool configuration tests, `LLMTOOL_CLAUDE_CLI_HOME` can point the child process
 at the user's existing Claude CLI home while llmtool itself uses a temporary `HOME`; it is a
 runtime environment setting and cannot be set in project config.
