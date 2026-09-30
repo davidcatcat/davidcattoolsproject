@@ -39,7 +39,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
 - **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
-- **A2.6 — Provider Integration / Smoke Tests:** planned
+- **A2.6 — Provider Integration / Smoke Tests:** implementation + host canonical validation complete; external ChatGPT review pending; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -59,7 +59,7 @@ checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AG
 If sandbox permissions block `.git` writes, leave changes in the canonical
 repository and report exact host-terminal staging/commit/push commands; do not
 create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start A2.6 or merge main.
+when required; do not automatically start the next milestone or merge main.
 
 All unit, targeted, canonical, smoke, provider integration, regression, Git, and
 documentation validation must be launched from the canonical repository.
@@ -67,6 +67,38 @@ Test-generated temporary files are allowed only when required by the test/runtim
 The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
 runtime security mechanism, not a project checkout. It must contain no Git clone,
 worktree, or copy of this repository. This policy does not change provider behavior.
+
+## A2.6 integration validation
+
+All four implemented providers coexist as named profiles under the same registry,
+configuration schema, selection, configure flow, CLI commands and plain-text `Reply`
+contract. Provider != Role != Agent. Anthropic API, roles, agents, orchestration and
+automatic command execution remain outside A2.6.
+
+Shared integration tests cover mixed profiles, user → environment → explicit CLI
+selection precedence, selection without saved-config mutation, provider-specific
+field rejection, redacted config display, deterministic capability output, real
+response normalization behind mocked transports, and configure without runtime I/O.
+The configure summary now uses the selected active profile's type when displaying
+an endpoint, including when a different profile was edited.
+
+Current validation: 11 new integration tests PASS; expanded targeted suite 148 PASS.
+User-reported host canonical result:
+
+```text
+Ran 189 tests in 23.278s
+OK
+```
+
+All 189 canonical tests passed. The previous sandbox loopback-binding limitation
+was environment-specific; host validation resolved the remaining canonical gate.
+No implementation changes were needed after the host run. A2.6 implementation +
+canonical validation are **complete**, awaiting external ChatGPT review; A2.6 is
+not merged to main. A2.7/A3 have not started.
+Live smoke remains: `openai-compatible` NOT-TESTED; `claude-cli` attempted,
+unsuccessful; `codex-cli` attempted, unsuccessful; `openai` NOT-TESTED.
+Historical provider smoke passes are not evidence of a new A2.6 live pass. See the
+[A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md).
 
 ## Provider capabilities
 
@@ -222,7 +254,7 @@ read denial, direct `CODEX_DIRECT_OK`, and llmtool E2E `CODEX_CLI_OK`; cleanup l
 mutation. The temporary HOME-level AGENTS.md did not contaminate the tested invocation with real
 CODEX_HOME retained. This does not prove arbitrary CODEX_HOME runtime/auth state or every future
 CLI version is isolated. Existing Codex authentication/runtime and the PATH executable remain
-trusted dependencies. External ChatGPT review is pending; A2.6 has not started.
+trusted dependencies. External ChatGPT review is pending; A2.6 implementation and canonical validation are complete (see the A2.6 section).
 
 ## 安裝與直接執行
 
