@@ -263,6 +263,39 @@ Claude/Codex → patch → tests → human approval where required → Git。
 此為完整流程目標。目前 A0～A2.6 已完成並合併至 `main`，A3 Skill Framework 已實作並等待 external review，
 A3.5 Interactive Chat Shell 已排入 roadmap。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
+## A12 — Remote Frontends / Telegram Agent
+
+未來附加功能：llmtool 執行在使用者的筆電或桌上型電腦，使用者可透過手機
+Telegram Bot 遠端與 llmtool 對話、送出自然語言指令與控制命令，並建立 llmtool task。
+A12 不影響目前 A3 / A3.5 / A4～A11 的主線開發；目前只列入 roadmap，不實作
+Telegram 程式碼、不新增 dependency、不修改 production code。
+
+**Telegram frontend != llmtool core**。
+**CLI、Telegram、未來 Web UI 應共用同一套 llmtool runtime。**
+Telegram 只是 frontend / gateway，不重新建立另一套 Agent、Task 或 workflow 邏輯。
+必須共用 llmtool 原本的 Session、Task、Skill、Provider、Role、Agent、Approval、Event；
+尚未實作的 core 能力由主線 milestone 建立，frontend 不另行複製。
+Provider != Role != Agent != Skill；遠端入口不因 transport 或 provider capability 而
+隱含授予執行權限。
+
+第一版目標：
+
+- 優先採用 Telegram Bot API long polling；不要求 host 開 public port，也不要求 webhook。
+- 支援自然語言 task 建立與控制命令；`/status` 可查看 host、session 與 task 狀態。
+- Bot 透過共用 Event 主動回報 `task.created`、`task.started`、`task.progress`、
+  `task.waiting_approval`、`task.completed`、`task.failed`。
+- 遠端 approval 支援 `/approve <task_id>`、`/reject <task_id>`；Telegram inline button
+  approval 列為目標，並沿用 core Approval 的 task 綁定與權限檢查，不繞過 approval。
+- 必須有 Telegram user/chat allowlist，並將操作權限分為 read-only、approval-required、
+  dangerous；dangerous 操作不得因遠端訊息而自動獲准，須依 core policy 與 approval 處理。
+- Bot token 不得寫進 repository；由 host 的安全設定提供，不在狀態或事件回報中暴露。
+- host 離線或 llmtool 無法連線時，必須呈現清楚的 offline / unreachable 狀態；
+  不把未送達的 task 或 approval 回報為成功。host 離線時的可達性偵測／提示方式需在
+  實作設計中明確定義，不能假設離線 host 上的 Bot 仍能即時主動回報。
+
+Frontend 擴充方向：CLI / Interactive Chat、Telegram、Web UI。各入口共用 runtime
+與相同的 task lifecycle、事件及 approval 語意，不另建獨立的 orchestration。
+
 ## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
 ```yaml
@@ -292,3 +325,6 @@ roles:
 
 A1 保留 named provider 與共用 response contract 作為擴充點，但拒絕未支援 type、
 roles、command 等欄位。此 roadmap 不加入 RAG、vector DB、embeddings 或 fine-tuning。
+整體方向由 A3.5 Interactive Chat Shell 提供互動入口，主線逐步建立至 A11 Production Workflow，
+再以 A12 Remote Frontends / Telegram Agent 擴充遠端入口；A12 是未來附加功能，不改變
+既有 milestone 的完成狀態、驗證紀錄或主線開發順序。
