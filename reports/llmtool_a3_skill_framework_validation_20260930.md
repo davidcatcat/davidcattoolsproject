@@ -2,8 +2,7 @@
 
 ## Status and provenance
 
-A3 implementation and canonical validation complete on `feat/a3-skill-framework`;
-external ChatGPT review pending. Not merged to main. No A4/A5/A6/A9 work or
+A3 implementation, canonical validation, and external ChatGPT review are complete on `feat/a3-skill-framework`. Not merged to main. No A4/A5/A6/A9 work or
 orchestration was added. Provider != Role != Agent != Skill.
 
 Canonical repository and launch directory for all validation:
@@ -125,3 +124,8 @@ configuration. Installed resources must be trusted and stable while read; this
 is not a hostile concurrent filesystem defense. One skill per ask; no skill config,
 global plugins, version negotiation, retrieval, output validation, or orchestration.
 Malformed resources invalidate discovery and exact lookup rather than being skipped.
+
+
+## External review
+
+External ChatGPT review: **PASS**. No blocking correctness, security, packaging, or regression issue was found in the A3 diff. One documentation inconsistency was corrected during review: README roadmap status for already-merged A2.5/A2.6 and A3 review state was stale. No implementation or test files were changed by this review.
