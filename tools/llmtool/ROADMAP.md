@@ -148,23 +148,29 @@ No implementation changes were needed after the host run.
 A2.6 implementation + canonical validation complete；等待 external ChatGPT review，尚未合併 main。
 Live smoke 狀態維持：openai-compatible NOT-TESTED；claude-cli attempted, unsuccessful；
 codex-cli attempted, unsuccessful；openai NOT-TESTED。不將 unsuccessful attempts 改為 PASS。
-Provider != Role != Agent。不開始 A2.7/A3，不合併 main。詳見
+Provider != Role != Agent。A2.6 驗證當時不開始 A2.7/A3，不合併 main；本輪 A3 狀態見下一節。詳見
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
-## A3 — Skill Framework
+## A3 — Skill Framework — IMPLEMENTED; external review pending
 
-將技能移出 hard-coded prompt，建立可版本化的資源，例如：
+Provider != Role != Agent != Skill. Declarative runtime skills are packaged under
+`tools/llmtool/llmtool/skills/*/SKILL.md`, separate from root repository engineering
+skills. Typed immutable skills contain name, description, positive integer version,
+and instruction body. Strict bounded SafeLoader parsing rejects unsupported fields,
+unsafe names/paths, duplicate keys/names, aliases, and symlink resources.
 
-```text
-skills/
-  analyze-log/
-  review-diff/
-  context-pack/
-```
+Offline `skills`, `skills --json`, `skill show <name>` and explicit
+`ask --skill <name>` are implemented. Common system rules → task instructions →
+selected skill → separate unchanged user message, before provider dispatch.
+Existing analyze-log/review-diff/context-pack commands load versioned resources.
+No saved skill config, automatic selection for ask, executable hooks, tools,
+output execution, roles, retrieval, or orchestration. READ-ONLY != SAFE-TO-DISPLAY;
+samples warn against exposing credentials/private configuration.
 
-這是未來 llmtool 的 skill 資源，不是目前 repo 根目錄給 coding agent 的工程 skills。
-Skills 應避免直接建議讀取可能含 secret 的檔案。唯讀指令仍可能把 credentials 或
-private configuration 印出來：**READ-ONLY != SAFE-TO-DISPLAY**。
+18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS. Commands and limitations are recorded in the
+[A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
+Implementation is on `feat/a3-skill-framework`, not merged to main. Stop for external
+ChatGPT review; A4/A5/A6/A9 have not been started by this milestone.
 
 ## A4 — Evidence-first Context Packet
 

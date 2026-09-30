@@ -9,6 +9,7 @@ from .configure import run_configure
 from .errors import LLMToolError
 from .inputs import read_input
 from .prompts import TEMPLATES, messages_for
+from .skills import discover_skills, load_skill
 from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
 
 
@@ -42,10 +43,18 @@ def parser_for_cli():
         child.add_argument("text", nargs="?", help="direct text (quote multiword input)")
         child.add_argument("--file", help="read one UTF-8 regular file")
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
+        if command == "ask":
+            child.add_argument("--skill", help="explicit runtime skill name")
         add_options(child)
     sub.add_parser("configure", help="Interactively configure a provider profile")
     providers = sub.add_parser("providers", help="List supported provider capabilities offline")
     providers.add_argument("--json", action="store_true", help="output metadata as JSON")
+    skills = sub.add_parser("skills", help="List runtime skills offline")
+    skills.add_argument("--json", action="store_true", help="output metadata as JSON")
+    skill = sub.add_parser("skill", help="Inspect a runtime skill offline")
+    actions = skill.add_subparsers(dest="action", required=True)
+    show_skill = actions.add_parser("show", help="Show validated metadata and instructions")
+    show_skill.add_argument("name")
     config = sub.add_parser("config", help="Initialize or inspect configuration")
     actions = config.add_subparsers(dest="action", required=True)
     init = actions.add_parser("init", help="Create private user config")
@@ -59,6 +68,23 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "skills":
+            metadata = [skill.metadata() for skill in discover_skills()]
+            if args.json:
+                print(json.dumps(metadata, indent=2))
+            else:
+                for item in metadata:
+                    print(item["name"] + " (version " + str(item["version"]) + "): " + item["description"])
+            return 0
+        if args.command == "skill":
+            skill = load_skill(args.name)
+            print(json.dumps(skill.metadata(), indent=2))
+            print()
+            sys.stdout.write(skill.instructions)
+            if not skill.instructions.endswith("\n"):
+                print()
+            return 0
+        selected_skill = load_skill(args.skill) if getattr(args, "skill", None) is not None else None
         if args.command == "providers":
             metadata = {
                 name: get_provider_capabilities(name).to_dict()
@@ -87,7 +113,7 @@ def main(argv=None):
             print(show_config(config), end="")
             return 0
         text = read_input(args.text, args.file, sys.stdin)
-        result = create_client(config, api_key(config)).complete(messages_for(args.command, text))
+        result = create_client(config, api_key(config)).complete(messages_for(args.command, text, selected_skill))
         # Validation completes before stdout is touched, including truncation checks.
         sys.stdout.write(result.content + "\n")
         if args.verbose:

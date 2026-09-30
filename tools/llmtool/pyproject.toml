@@ -14,3 +14,7 @@ llmtool = "llmtool.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["llmtool*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+llmtool = ["skills/*/SKILL.md"]

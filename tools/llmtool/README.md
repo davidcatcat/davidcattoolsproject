@@ -22,6 +22,7 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 |---|---|---|
 | Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`codex-cli`、`openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
+| Skill | 可版本化的 declarative instructions/context | A3 implemented; external review pending |
 | Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
 | Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
 
@@ -40,6 +41,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
 - **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
 - **A2.6 — Provider Integration / Smoke Tests:** implementation + host canonical validation complete; external ChatGPT review pending; not merged to main
+- **A3 — Skill Framework:** implemented and validated on feature branch; external ChatGPT review pending; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -94,7 +96,7 @@ All 189 canonical tests passed. The previous sandbox loopback-binding limitation
 was environment-specific; host validation resolved the remaining canonical gate.
 No implementation changes were needed after the host run. A2.6 implementation +
 canonical validation are **complete**, awaiting external ChatGPT review; A2.6 is
-not merged to main. A2.7/A3 have not started.
+not merged to main. A2.7 remains outside this milestone; A3 status is documented below.
 Live smoke remains: `openai-compatible` NOT-TESTED; `claude-cli` attempted,
 unsuccessful; `codex-cli` attempted, unsuccessful; `openai` NOT-TESTED.
 Historical provider smoke passes are not evidence of a new A2.6 live pass. See the
@@ -566,7 +568,9 @@ argv、stdin、timeout、output limit 與 sanitized errors。Live runtime valida
 llmtool/cli.py                         CLI 與輸出
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
 llmtool/inputs.py                      明確輸入來源、文字驗證
-llmtool/prompts.py                     四個內建模板
+llmtool/prompts.py                     common rules and skill composition
+llmtool/skills.py                      typed declarative resource loader
+llmtool/skills/*/SKILL.md               packaged runtime prompt resources
 llmtool/providers/base.py              capability model 與 Provider.complete() / Reply contract
 llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
@@ -578,5 +582,73 @@ tests/                                config/provider/CLI 測試
 
 執行路徑為 task → prompt template → selected provider → `complete()` → final output。
 Provider implementations 透過靜態 registry 宣告 type、capabilities、option/readiness
-validation 與 `complete()`；A2.2 之後擴充 provider，A3 建立外部 Skill Framework。其餘
+validation 與 `complete()`；A2.2 之後擴充 provider，A3 提供 declarative runtime Skill Framework。其餘
 階段及 provider/role 分離方向見 [Roadmap](ROADMAP.md)。
+
+## A3 — Runtime Skill Framework
+
+A3 is implemented on `feat/a3-skill-framework`, awaiting external ChatGPT review;
+it is not merged to main. **Provider != Role != Agent != Skill.** A skill is
+instruction/context data and grants no execution ability. Repository engineering
+workflows in root `skills/*/SKILL.md` are separate and are never loaded by llmtool.
+
+Runtime resources live at `tools/llmtool/llmtool/skills/<directory>/SKILL.md` and
+are included as package data in installations. The fixed package-local root is
+used regardless of cwd. There is no global search, plugin system, configurable
+root, default selection, or saved skill configuration.
+
+```yaml
+---
+name: analyze-log
+version: 1
+description: Analyze supplied logs and identify supported causes.
+---
+Instructions as Markdown text.
+```
+
+Frontmatter requires exactly `name`, `version`, and `description`. Names match
+`[a-z0-9][a-z0-9-]{0,63}`; versions are positive YAML integers (not booleans,
+strings, or semantic-version strings). Description and body must be nonempty
+text without unsafe control characters. Unsupported fields, duplicate YAML keys,
+aliases, unsafe YAML tags, duplicate declared names, symlink entries/files,
+nonregular files, invalid UTF-8, and files over 64 KiB are rejected with sanitized
+errors. Discovery reads immediate skill directories only and sorts by declared
+name. Directory names follow the same safe naming rule; exact selection uses
+the declared name. The installed resource tree is trusted and must not be
+concurrently modified during loading.
+
+```sh
+llmtool skills
+llmtool skills --json
+llmtool skill show analyze-log
+llmtool ask --skill analyze-log "supplied log evidence"
+llmtool ask --skill review-diff --file supplied.diff
+```
+
+Listing/show are offline and bypass config, credentials, and providers. Text and
+JSON listing are deterministic; show prints validated metadata JSON followed by
+the body. Unknown names fail without echoing the supplied name. Selection does
+not mutate config. Only `ask` accepts explicit `--skill`; existing `analyze-log`,
+`review-diff`, and `context-pack` commands load their matching packaged resources.
+
+Composition happens before provider dispatch: one system message contains common
+llmtool rules, then task instructions, then (for explicit `ask --skill`) a labeled
+skill name/version and its body. A separate user message preserves supplied text
+exactly. All providers continue receiving the same list of role/content mappings;
+provider clients contain no skill logic. The generic ask instruction remains in
+code; the three reusable task instructions are now versioned resources.
+
+Skills cannot define command/executable/hooks/pre_run/post_run/shell/Git/tools
+fields. Loading uses strict SafeLoader-based text parsing, never imports skill
+code or evaluates instructions. There is no shell/Git execution, model-directed
+filesystem mutation, automatic tool use, or output execution added by A3. Existing
+provider transports and explicit config writes retain their existing boundaries.
+Model-returned command text remains only text; prompt instructions are not an
+output validator. The samples `analyze-log`, `review-diff`, and `context-pack` use
+only supplied evidence and warn against exposing credentials/private configuration.
+READ-ONLY != SAFE-TO-DISPLAY.
+
+Validation: 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS (exact commands
+in the [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md)).
+No live model inference is required or claimed. A3 does not add roles,
+orchestration, retrieval, an A4 context schema, A5 Git collection, or A6 validation.
