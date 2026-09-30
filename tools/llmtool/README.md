@@ -44,7 +44,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
 - **A3.5 — Interactive Chat Shell:** DONE and merged to `main` (`021456b`); external review PASS
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
-- **A5 — Git Intelligence:** implemented on feature branch; pending external review, not merged
+- **A5 — Git Intelligence:** implementation + canonical validation + external review PASS on feature branch; not merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -881,7 +881,7 @@ observations without generating inferences or hypotheses. No automatic A4
 conversion is introduced. A6/A9/A10 may consume this data later. Model-like text
 in filenames/diffs is data only; no mutations, routing, execution, or chat changes.
 
-A5 is implemented on `feat/a5-git-intelligence`, pending external review; not merged.
+A5 is implemented on `feat/a5-git-intelligence`; external ChatGPT review PASS; not merged.
 Targeted: 39 tests (38 passed, 1 host-filesystem skip); canonical syntax + 305 tests
 (304 passed, 1 same skip), exit 0. Wheel and manual fixture checks PASS.
 Validation and host limitations are recorded in the
