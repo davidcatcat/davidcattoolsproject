@@ -7,7 +7,7 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
 A1.1、A2.1、A2.2、A2.4、A2.5、A2.6 已完成並合併至 main。A2.3 Anthropic API 仍規劃中且尚未實作。
-目前 A3 Skill Framework 已在 `feat/a3-skill-framework` 實作並完成測試，等待 external review；A3.5 Interactive Chat Shell 排入下一個 milestone。Capability 描述
+目前 A3 Skill Framework 已在 `feat/a3-skill-framework` 實作、完成 canonical validation 與 external review，尚未合併至 main；A3.5 Interactive Chat Shell 排入下一個 milestone。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -150,7 +150,7 @@ codex-cli attempted, unsuccessful；openai NOT-TESTED。不將 unsuccessful atte
 Provider != Role != Agent。詳見
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
-## A3 — Skill Framework — IMPLEMENTED; external review pending
+## A3 — Skill Framework — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
 Provider != Role != Agent != Skill. Declarative runtime skills are packaged under
 `tools/llmtool/llmtool/skills/*/SKILL.md`, separate from root repository engineering
@@ -168,8 +168,7 @@ samples warn against exposing credentials/private configuration.
 
 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS. Commands and limitations are recorded in the
 [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
-Implementation is on `feat/a3-skill-framework`, not merged to main. Stop for external
-ChatGPT review; A4/A5/A6/A9 have not been started by this milestone.
+Implementation is on `feat/a3-skill-framework`, not merged to main. External ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
 
 ## A3.5 — Interactive Chat Shell
 
