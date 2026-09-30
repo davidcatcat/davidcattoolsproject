@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from test_provider import success
+from llmtool.context import format_context_packet, parse_context_packet
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "llmtool.py"
 
@@ -133,8 +134,13 @@ class CLITests(unittest.TestCase):
     def test_stdin_all_commands_and_unicode(self):
         for command in ("ask", "analyze-log", "review-diff", "context-pack"):
             with self.subTest(command=command):
+                packet_text = json.dumps({name: [] for name in
+                                          ("facts", "evidence", "inferences", "hypotheses", "unknowns", "verify_next")})
+                self.server.reply = (200, success(packet_text if command == "context-pack" else "final answer"), 0, {})
                 result = self.run_cli(command, data="測試 evidence\n".encode())
                 self.assertEqual(result.returncode, 0, result.stderr)
+                expected = format_context_packet(parse_context_packet(packet_text)) if command == "context-pack" else "final answer"
+                self.assertEqual(result.stdout.decode(), expected + "\n")
                 path, headers, payload = self.server.requests[-1]
                 self.assertEqual(path, "/v1/chat/completions")
                 self.assertEqual(payload["messages"][1]["content"], "測試 evidence\n")
