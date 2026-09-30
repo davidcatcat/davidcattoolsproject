@@ -6,6 +6,7 @@ import sys
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
 from .configure import run_configure
+from .chat import ChatSession, run_chat
 from .errors import LLMToolError
 from .inputs import read_input
 from .prompts import TEMPLATES, messages_for
@@ -46,6 +47,9 @@ def parser_for_cli():
         if command == "ask":
             child.add_argument("--skill", help="explicit runtime skill name")
         add_options(child)
+    chat = sub.add_parser("chat", help="Start a memory-only interactive chat")
+    chat.add_argument("--skill", help="explicit runtime skill name")
+    add_options(chat)
     sub.add_parser("configure", help="Interactively configure a provider profile")
     providers = sub.add_parser("providers", help="List supported provider capabilities offline")
     providers.add_argument("--json", action="store_true", help="output metadata as JSON")
@@ -108,10 +112,12 @@ def main(argv=None):
             init_config(user_config_path(), args.force)
             print("llmtool: user config initialized", file=sys.stderr)
             return 0
-        config = resolve_config(vars(args), require_configured=args.command != "config")
+        config = resolve_config(vars(args), require_configured=args.command not in ("config", "chat"))
         if args.command == "config":
             print(show_config(config), end="")
             return 0
+        if args.command == "chat":
+            return run_chat(ChatSession(config, selected_skill))
         text = read_input(args.text, args.file, sys.stdin)
         result = create_client(config, api_key(config)).complete(messages_for(args.command, text, selected_skill))
         # Validation completes before stdout is touched, including truncation checks.

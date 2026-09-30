@@ -7,7 +7,7 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
 A1.1、A2.1、A2.2、A2.4、A2.5、A2.6 已完成並合併至 main。A2.3 Anthropic API 仍規劃中且尚未實作。
-目前 A3 Skill Framework 已在 `feat/a3-skill-framework` 實作、完成 canonical validation 與 external review，尚未合併至 main；A3.5 Interactive Chat Shell 排入下一個 milestone。Capability 描述
+A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Chat Shell 已實作、完成 canonical validation 與 external review，尚未合併。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -150,7 +150,7 @@ codex-cli attempted, unsuccessful；openai NOT-TESTED。不將 unsuccessful atte
 Provider != Role != Agent。詳見
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
-## A3 — Skill Framework — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
+## A3 — Skill Framework ✅ DONE and merged to main
 
 Provider != Role != Agent != Skill. Declarative runtime skills are packaged under
 `tools/llmtool/llmtool/skills/*/SKILL.md`, separate from root repository engineering
@@ -168,29 +168,36 @@ samples warn against exposing credentials/private configuration.
 
 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS. Commands and limitations are recorded in the
 [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
-Implementation is on `feat/a3-skill-framework`, not merged to main. External ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
+Merged to main in `c9159f2`; external ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
 
-## A3.5 — Interactive Chat Shell
+## A3.5 — Interactive Chat Shell — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
-提供類似 Codex CLI／Claude CLI 的互動式聊天入口，讓使用者可直接進入長駐 session，
-而不是每次只能使用一次性的 `llmtool ask`。A3.5 是 CLI/UX 層，不做 Agent orchestration。
+`llmtool chat` provides a line-oriented, provider-agnostic interactive shell.
+Explicit `ChatSession` state owns a resolved config snapshot, selected provider,
+optional A3 skill, successful user/assistant history, and active state. History is
+memory-only, without transcripts, restore, files, databases, or cloud sync.
 
-第一版至少包含：
+Supported controls: `/help`, `/status`, `/provider [profile]`, `/skill [name|none]`,
+`/clear`, `/history`, `/exit`, and `/quit`. Controls make no provider request and
+never mutate saved config. Provider switches validate readiness, preserve history,
+and explicitly warn that history goes to the new provider on the next user turn.
+Skill changes replace current system context while preserving exact user messages.
 
-- `llmtool chat` 進入 interactive session；驗證穩定後可評估讓單獨執行 `llmtool` 直接進入 chat。
-- session 內保留多輪 conversation context，預設只存在記憶體，不自動寫入聊天歷史檔案。
-- 顯示目前 provider、skill 與 session 狀態。
-- 支援明確控制命令，例如 `/provider`、`/skill`、`/status`、`/clear`、`/history`、`/help`、`/exit`。
-- provider 可在 session 中切換；skill 可顯式選擇或清除，且不得改寫 saved config。
-- user message 必須保持原文；skill/context composition 維持 provider-agnostic common message contract。
-- `llmtool ask` 保留作為 script、pipeline 與一次性非互動呼叫介面。
+Requests use common rules + current optional skill in one system message, followed
+by prior user/assistant turns and new user text. Failed requests are sanitized,
+commit no attempted turn, and allow recovery. EOF/Ctrl-C exits cleanly. Blank input
+is ignored; one line is one message. Existing ask and bare CLI behavior remain.
 
-A3.5 不包含自動 role routing、agent loop、shell/Git/tool execution、automatic skill selection、
-production mutation 或 conversation cloud sync。後續 A9/A11 再把 interactive shell 接上
-Role/Agent orchestration 與完整 production workflow。
+Provider != Role != Agent != Skill. No automatic routing, roles, agents, tools,
+shell/Git/output execution, filesystem mutation, retrieval, or orchestration.
+Bare `llmtool` interactive entry remains a future UX option. No token budgeting,
+multiline editor, or persisted history. Live smoke NOT-TESTED.
 
-安全原則：interactive chat 仍遵守 **Provider != Role != Agent != Skill**；模型輸出的 command
-預設只是文字，不因進入互動模式而獲得執行權限。
+30 targeted tests PASS; canonical syntax check and 237 tests PASS.
+Implemented on `feat/a3-5-interactive-chat`, not merged to main. Validation counts,
+manual fake-provider UX, and packaging evidence are in the
+[A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
+External ChatGPT review PASS. Do not start A4 before A3.5 is merged to main.
 
 ## A4 — Evidence-first Context Packet
 
@@ -253,8 +260,40 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A2.6 已完成並合併至 `main`，A3 Skill Framework 已實作並等待 external review，
-A3.5 Interactive Chat Shell 已排入 roadmap。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A3 已完成並合併至 `main`；A3.5 Interactive Chat Shell 已實作、完成 canonical validation 與 external review，尚未合併。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+
+## A12 — Remote Frontends / Telegram Agent
+
+未來附加功能：llmtool 執行在使用者的筆電或桌上型電腦，使用者可透過手機
+Telegram Bot 遠端與 llmtool 對話、送出自然語言指令與控制命令，並建立 llmtool task。
+A12 不影響目前 A3 / A3.5 / A4～A11 的主線開發；目前只列入 roadmap，不實作
+Telegram 程式碼、不新增 dependency、不修改 production code。
+
+**Telegram frontend != llmtool core**。
+**CLI、Telegram、未來 Web UI 應共用同一套 llmtool runtime。**
+Telegram 只是 frontend / gateway，不重新建立另一套 Agent、Task 或 workflow 邏輯。
+必須共用 llmtool 原本的 Session、Task、Skill、Provider、Role、Agent、Approval、Event；
+尚未實作的 core 能力由主線 milestone 建立，frontend 不另行複製。
+Provider != Role != Agent != Skill；遠端入口不因 transport 或 provider capability 而
+隱含授予執行權限。
+
+第一版目標：
+
+- 優先採用 Telegram Bot API long polling；不要求 host 開 public port，也不要求 webhook。
+- 支援自然語言 task 建立與控制命令；`/status` 可查看 host、session 與 task 狀態。
+- Bot 透過共用 Event 主動回報 `task.created`、`task.started`、`task.progress`、
+  `task.waiting_approval`、`task.completed`、`task.failed`。
+- 遠端 approval 支援 `/approve <task_id>`、`/reject <task_id>`；Telegram inline button
+  approval 列為目標，並沿用 core Approval 的 task 綁定與權限檢查，不繞過 approval。
+- 必須有 Telegram user/chat allowlist，並將操作權限分為 read-only、approval-required、
+  dangerous；dangerous 操作不得因遠端訊息而自動獲准，須依 core policy 與 approval 處理。
+- Bot token 不得寫進 repository；由 host 的安全設定提供，不在狀態或事件回報中暴露。
+- host 離線或 llmtool 無法連線時，必須呈現清楚的 offline / unreachable 狀態；
+  不把未送達的 task 或 approval 回報為成功。host 離線時的可達性偵測／提示方式需在
+  實作設計中明確定義，不能假設離線 host 上的 Bot 仍能即時主動回報。
+
+Frontend 擴充方向：CLI / Interactive Chat、Telegram、Web UI。各入口共用 runtime
+與相同的 task lifecycle、事件及 approval 語意，不另建獨立的 orchestration。
 
 ## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
@@ -285,3 +324,6 @@ roles:
 
 A1 保留 named provider 與共用 response contract 作為擴充點，但拒絕未支援 type、
 roles、command 等欄位。此 roadmap 不加入 RAG、vector DB、embeddings 或 fine-tuning。
+整體方向由 A3.5 Interactive Chat Shell 提供互動入口，主線逐步建立至 A11 Production Workflow，
+再以 A12 Remote Frontends / Telegram Agent 擴充遠端入口；A12 是未來附加功能，不改變
+既有 milestone 的完成狀態、驗證紀錄或主線開發順序。
