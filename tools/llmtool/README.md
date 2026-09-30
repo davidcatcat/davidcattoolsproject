@@ -39,7 +39,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
 - **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
-- **A2.6 — Provider Integration / Smoke Tests:** planned
+- **A2.6 — Provider Integration / Smoke Tests:** integration coverage implemented; canonical/live validation pending
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -59,7 +59,7 @@ checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AG
 If sandbox permissions block `.git` writes, leave changes in the canonical
 repository and report exact host-terminal staging/commit/push commands; do not
 create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start A2.6 or merge main.
+when required; do not automatically start the next milestone or merge main.
 
 All unit, targeted, canonical, smoke, provider integration, regression, Git, and
 documentation validation must be launched from the canonical repository.
@@ -67,6 +67,30 @@ Test-generated temporary files are allowed only when required by the test/runtim
 The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
 runtime security mechanism, not a project checkout. It must contain no Git clone,
 worktree, or copy of this repository. This policy does not change provider behavior.
+
+## A2.6 integration validation
+
+All four implemented providers coexist as named profiles under the same registry,
+configuration schema, selection, configure flow, CLI commands and plain-text `Reply`
+contract. Provider != Role != Agent. Anthropic API, roles, agents, orchestration and
+automatic command execution remain outside A2.6.
+
+Shared integration tests cover mixed profiles, user → environment → explicit CLI
+selection precedence, selection without saved-config mutation, provider-specific
+field rejection, redacted config display, deterministic capability output, real
+response normalization behind mocked transports, and configure without runtime I/O.
+The configure summary now uses the selected active profile's type when displaying
+an endpoint, including when a different profile was edited.
+
+Current validation: 11 new integration tests PASS; expanded targeted suite 148 PASS.
+Canonical discovery finds 189 tests, but this sandbox denies loopback server binding:
+148 tests passed and two class setup errors prevented 41 HTTP/CLI tests from running.
+A2.6 is **validation-pending**, awaiting a successful canonical host run and external
+ChatGPT review. Live compatible provider has no configured endpoint; Claude and
+Codex live attempts returned sanitized runtime errors; OpenAI live API was not
+attempted without prior paid API authorization. Historical provider smoke passes
+are not evidence of a new A2.6 pass. See the
+[A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md).
 
 ## Provider capabilities
 

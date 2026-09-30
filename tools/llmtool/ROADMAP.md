@@ -22,7 +22,7 @@ checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AG
 If sandbox permissions block `.git` writes, leave changes in the canonical
 repository and report exact host-terminal staging/commit/push commands; do not
 create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start A2.6 or merge main.
+when required; do not automatically start the next milestone or merge main.
 
 All unit, targeted, canonical, smoke, provider integration, regression, Git, and
 documentation validation must be launched from the canonical repository.
@@ -125,11 +125,23 @@ External host-terminal validation PASS：macOS sandbox probe、caller file/Git/A
 limited HOME contamination probe、direct/E2E exact markers 與 cleanup。PATH executable 與 existing
 Codex auth/runtime 仍為 trusted dependencies；不保證 arbitrary global state 或 future CLI versions isolation。
 Provider != Role != Agent；等待 external ChatGPT review。完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
-A2.6 尚未開始，這個 feature branch 不合併 main。
+A2.6 validation 狀態見下一節；不自動合併 main。
 
-### A2.6 — Provider Integration / Smoke Tests
+### A2.6 — Provider Integration / Smoke Tests — VALIDATION PENDING
 
-未實作。整合已完成的 providers，依各自明確定義的安全邊界執行測試與 smoke checks。
+四個已實作 providers 的 shared integration coverage 已加入：registry/factory、mixed
+config、selection precedence、explicit override 不修改 saved active profile、field isolation、
+configure、capabilities、Reply normalization 與 CLI output/error contract。
+修正 configure summary 以 active profile type 決定 endpoint 顯示。
+Provider != Role != Agent；Anthropic API 仍 planned，沒有新增 roles/agents/orchestration。
+
+11 integration tests PASS；expanded targeted suite 148 PASS。Canonical suite 共 189 tests，
+此 sandbox 中 148 PASS、2 class setup errors（loopback bind denied），41 tests 未執行。
+Compatible live endpoint 未設定；Claude/Codex live attempts 回傳 sanitized status-1 errors；
+OpenAI paid live API 未獲本 session 先前授權，因此 NOT-TESTED。
+未宣稱完成；需 canonical host validation PASS，再停止等待 external ChatGPT review。
+不開始 A2.7/A3，不合併 main。詳見
+[A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
 ## A3 — Skill Framework
 

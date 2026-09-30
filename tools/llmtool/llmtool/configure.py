@@ -147,7 +147,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     print("Configuration saved: " + str(path), file=stdout)
     print("Active provider: " + active_provider, file=stdout)
     print("Type: " + provider["type"], file=stdout)
-    if not is_openai and not is_cli:
+    if provider["type"] == "openai-compatible":
         print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
     print("Model: " + (provider["model"] or "<not configured>"), file=stdout)
     return True
