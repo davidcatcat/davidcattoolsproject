@@ -2,8 +2,7 @@
 
 ## Status and provenance
 
-A4 implementation and canonical validation complete on `feat/a4-context-packet`;
-external ChatGPT review pending. Not merged to main. No A5/A6/A9/A10 implementation.
+A4 implementation, canonical validation, and external ChatGPT review are complete on `feat/a4-context-packet`. Not merged to main. No A5/A6/A9/A10 implementation.
 Provider != Role != Agent != Skill != Context Packet.
 
 Canonical repository and launch directory for implementation/tests/packaging/Git:
@@ -159,4 +158,4 @@ their semantics. No automatic provenance inference, retrieval, command execution
 chat extraction, confidence scoring or orchestration. Output must fit bounds;
 model prose/fences fail without fallback. Human rendering preserves supplied text
 including multiline content and is not the machine interchange format.
-Stop for external ChatGPT review; do not merge main or start A5.
+External ChatGPT review: **PASS**. No blocking correctness, security, packaging, or regression issue was found in the A4 diff. Branch was observed behind `main` by one unrelated nlf roadmap documentation commit (`3d296a7`); synchronize with current `main` before merge, then re-check the combined diff. Do not start A5 before A4 is merged.
