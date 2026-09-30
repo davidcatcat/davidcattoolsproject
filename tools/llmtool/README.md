@@ -46,7 +46,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
-- **A7 — Skill Trainer / Feedback Loop:** implemented on feature branch; validation recorded below; not merged
+- **A7 — Skill Trainer / Feedback Loop:** implementation + canonical validation + external review PASS on feature branch; not merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
