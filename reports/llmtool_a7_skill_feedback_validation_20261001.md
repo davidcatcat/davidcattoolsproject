@@ -26,7 +26,7 @@ foundation. Skill Trainer does NOT mean gradient training, fine-tuning, RLHF, we
 updates, embeddings training or automatic prompt mutation.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
 Implementation/validation complete on feature branch; **not merged**. External
-ChatGPT review is pending. No A8/A9/A10/A11 implementation or merge is authorized.
+ChatGPT review PASS. No A8/A9/A10/A11 implementation or merge is authorized.
 
 ## Architecture and models
 
@@ -202,7 +202,7 @@ README, ROADMAP and fixture README describe schema, IDs, lifecycle, version rule
 assertions, file/credential boundaries, CLI exits, exact counts and limitations.
 A6 was already DONE/merged; historical completion/validation records remain intact.
 This report is part of the A7 commit; commit/push result and final HEAD are reported
-after Git publication. A7 remains unmerged, awaiting external ChatGPT review.
+after Git publication. A7 remains unmerged; external ChatGPT review PASS.
 
 Limitations: explicit tags only; proposal/later lifecycle via reusable API, no proposal
 CLI or auto-apply; no evidence truth checks, semantic matching, linked-case discovery,
