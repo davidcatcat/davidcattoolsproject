@@ -6,10 +6,20 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，A2.5 implementation 已完成，等待 external review 與 host sandbox verification。
+A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，A2.5 implementation 與 external host-terminal validation 已完成，等待 external ChatGPT review。
 A2.3 Anthropic API 仍規劃中且尚未實作。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
+
+## Milestone execution workflow
+
+Future milestones use independent full Git clones with their own writable `.git`
+directory under `/Users/davidsun/git/davidcataiporject/tmp/`, not `git worktree`.
+Follow the repository [bootstrap and safety rules](../../README.md#isolated-milestone-execution).
+A2.5 used a worktree: source edits worked, but sandboxed staging/commit was blocked
+because Git metadata lived in the primary checkout's `.git/worktrees/`. This is an
+execution-environment/layout limitation, not a provider implementation failure.
+A2.6 remains unstarted; stop for external ChatGPT review before merging main.
 
 ## A0 — Model Validation ✅ DONE
 
@@ -94,15 +104,17 @@ runtime dependency/minor follow-up，不代表 provider argv failure。
 驗證細節見
 [`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。
 
-### A2.5 — Codex CLI Provider — IMPLEMENTED; external sandbox verification pending
+### A2.5 — Codex CLI Provider — IMPLEMENTED; external host validation PASS; external review pending
 
 新增 `codex-cli` pure-text provider、registry/config validation、configure wizard 與 fake CLI tests。
 Codex CLI 0.159.2；PATH resolution、stdin、bounded subprocess、isolated temporary cwd、approval never。
 使用 restricted read-only permission profile，禁止一般 filesystem read 與 tool network access；
 不宣告 shell、Git、code-edit、streaming、reasoning-control 或 large-context capability。
 不宣稱全部 tools 已停用；isolation + sandbox 是 execution boundary。
-依調整後驗證契約，nested Codex session 的 macOS OS sandbox enforcement 待 external host-terminal
-verification；完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
+External host-terminal validation PASS：macOS sandbox probe、caller file/Git/AGENTS.md read denial、
+limited HOME contamination probe、direct/E2E exact markers 與 cleanup。PATH executable 與 existing
+Codex auth/runtime 仍為 trusted dependencies；不保證 arbitrary global state 或 future CLI versions isolation。
+Provider != Role != Agent；等待 external ChatGPT review。完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
 A2.6 尚未開始，這個 feature branch 不合併 main。
 
 ### A2.6 — Provider Integration / Smoke Tests

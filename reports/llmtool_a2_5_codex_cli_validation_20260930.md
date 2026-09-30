@@ -8,9 +8,11 @@ The initial worktree was clean, on the expected branch and base. All work used
 ## Outcome and validation scope
 
 Implementation, documentation, targeted tests and canonical checks are complete.
-Successful live inference and independent macOS sandbox enforcement are **pending external
-host-terminal verification**. The user explicitly adjusted the validation contract to permit
-implementation/commit/push with this pending validation. A2.6 was not started; main was not merged.
+External host-terminal validation completed successfully on 2026-09-30, including macOS
+sandbox startup, caller-context read isolation, and direct/E2E live inference. The results below
+were supplied from the external host validation; they were not rerun for this documentation update.
+Implementation commit: `b6bd0ff6a2e5ea4c5e0a40b9ab387202c39c9ead`.
+A2.6 was not started; main was not merged. External ChatGPT review remains pending.
 
 Actual PATH resolution: `/Users/davidsun/.nvm/versions/node/v24.20.0/bin/codex`.
 `codex --version`: `codex-cli 0.159.2` (accepted actual version, replacing expected 0.158.0).
@@ -121,8 +123,9 @@ existing CLI state directory without inspecting it.
 
 The CLI itself is a trusted runtime and accesses its authentication/model network outside its
 tool sandbox. Global skill/runtime state may still load. System/managed Codex policy and future
-CLI behavior are dependencies: external validation must verify the effective restricted profile,
-including that no older system sandbox setting overrides it. User-config-based custom gateways
+CLI behavior remain runtime dependencies. The external checks below validate the observed
+restricted profile on this host/version; they do not establish isolation for every possible
+global state or future version. User-config-based custom gateways
 and environment proxy/API-key authentication are outside this first provider's supported contract.
 The implementation targets the project's POSIX/macOS/Linux environments.
 
@@ -160,7 +163,7 @@ cwd and too-short fake-process startup deadlines were corrected before the passi
 The ignored `.venv` uses Python 3.13.3 and PyYAML 6.0.3 reused from an existing local validation
 environment. Package-index network access was unavailable; no dependency manifest changed.
 
-## Live attempts and mutation evidence
+## Earlier nested-environment attempts and mutation evidence
 
 Before the smokes, `git status --short` contained only expected A2.5 README/roadmap, wizard,
 registry, test expectation updates, and new Codex provider/tests. These implementation changes
@@ -202,19 +205,85 @@ edits were authored deliberately after those smoke snapshots.
 | git mutation from inference | NO |
 
 These NO results describe the failed startup attempts and fake tests, not successful live-model
-coverage or proven kernel isolation. Successful direct/E2E markers remain pending externally.
+coverage or proven kernel isolation. The subsequent external host results below supersede
+the pending direct/E2E validation status.
 
-## External host-terminal verification required
+## Completed external host-terminal validation
 
-The harmless `codex sandbox -c 'sandbox_mode="read-only"' /usr/bin/true` probe exited 71 with
-`sandbox-exec: sandbox_apply: Operation not permitted` inside this nested Codex environment.
-A named-profile sandbox probe also reached the same kernel refusal. Neither establishes a defect
-in the host-terminal Codex installation or proves enforcement here.
+Verified branch: `feat/a2-codex-cli-provider`.
+Implementation commit: `b6bd0ff6a2e5ea4c5e0a40b9ab387202c39c9ead`.
+Base `origin/main`: `1e9e69c9947b7e5b466d877b85682aa113e2f9ba`.
+Executable: `/Users/davidsun/.nvm/versions/node/v24.20.0/bin/codex`.
+Codex version: **0.159.2**. Observed model: **gpt-6.1-sol**.
 
-On an unrestricted host terminal, verify the same named profile denies reading caller source,
-AGENTS.md and Git files by absolute path, rejects writes and tool network access, and cannot
-escalate with approval never. Verify effective policy despite system/managed configuration.
-Then repeat direct and llmtool exact-marker smokes with the same runtime contract, recording
-before/after filesystem/Git fingerprints and all six checklist results. Keep these pending until
-that external evidence exists. Stop after branch publication for external ChatGPT review; do not
-merge main or begin A2.6.
+| Check | External host result |
+|---|---|
+| macOS sandbox startup | `codex sandbox -c 'sandbox_mode="read-only"' /usr/bin/true` exited **0 — PASS** |
+| Absolute caller-repository file read | `/private/tmp/davidcattoolsproject-a25/.a25-read-test`: **ACCESS_DENIED — PASS** |
+| Caller Git metadata read | `/private/tmp/davidcattoolsproject-a25/.git`: **ACCESS_DENIED — PASS** |
+| Caller AGENTS.md read | Direct absolute-path access to temporary repository AGENTS.md with a unique sentinel: **ACCESS_DENIED — PASS** |
+| HOME context contamination | Temporary HOME-level `~/.codex/AGENTS.md` sentinel did not affect the invocation: **PASS** |
+| Direct Codex CLI smoke | Exact response `CODEX_DIRECT_OK`: **PASS** |
+| llmtool → codex-cli → Codex E2E | Exact stdout `CODEX_CLI_OK`: **PASS** |
+| Cleanup / mutation verification | Temporary probes removed; no inference-caused filesystem or Git mutation remained: **PASS** |
+
+The absolute-path read probes used isolated cwd `/tmp/llmtool-codex-hosttest.AoGNuL`
+and the exact A2.5 restricted permission profile. The temporary repository AGENTS.md
+was removed after validation. The sandbox startup probe alone does not prove the restricted
+read boundary; the caller-file, Git, and AGENTS.md denial results provide that observed evidence.
+These checks do not independently establish every possible write/network denial or escalation scenario.
+
+For the HOME contamination probe, temporary `~/.codex/AGENTS.md` instructed the CLI to return
+`GLOBAL_CONTEXT_LOADED`. Real CODEX_HOME remained `/Users/davidsun/.codex`.
+With `--ignore-user-config --ignore-rules --ephemeral`, the prompt requested
+`GLOBAL_CONTEXT_NOT_LOADED`, and that exact result was returned. This proves the temporary
+HOME-level AGENTS.md did not contaminate this invocation. It does **not** prove that arbitrary
+CODEX_HOME-owned global runtime/auth state can never affect future Codex versions.
+
+The direct smoke used the exact isolated cwd / restricted permission runtime contract and
+prompt `Reply with exactly:\nCODEX_DIRECT_OK`. Observed settings were approval **never**,
+sandbox **read-only**, and reasoning summaries **none**.
+
+The E2E smoke used a temporary llmtool HOME/config with provider `local-codex`, type `codex-cli`,
+`model: null`, and `timeout_seconds: 120`. CODEX_HOME pointed to the existing authenticated
+CLI state. The command requested `Reply with exactly: CODEX_CLI_OK`; stdout was exactly
+`CODEX_CLI_OK`. No Codex banner, reasoning, session ID, token count, or raw stderr appeared
+in llmtool stdout.
+
+Temporary probe files and directories were removed. Final `git status --short --branch` was:
+
+```text
+## feat/a2-codex-cli-provider...origin/main [ahead 1]
+```
+
+The PATH-selected executable and existing Codex authentication/runtime remain trusted
+dependencies. System/managed policy and future CLI behavior/version changes remain runtime
+dependencies; this validation does not prove universal global-state or future-version isolation.
+Provider != Role != Agent. `codex-cli` remains pure-text and advertises no shell, Git, or
+code-edit capabilities. Stop after documentation publication for external ChatGPT review;
+do not merge main or begin A2.6.
+
+## Repository workflow limitation discovered after host validation
+
+A2.5 used Git worktree `/private/tmp/davidcattoolsproject-a25`. Source/documentation
+modification worked inside the Codex sandbox, but its Git metadata was located at:
+
+```text
+/Users/davidsun/git/davidcataiporject/davidcattoolsproject/.git/worktrees/davidcattoolsproject-a25
+```
+
+Staging and committing the host-validation documentation failed because Git could
+not create `index.lock` in that metadata directory (`Operation not permitted`).
+The documentation edits remained intact and uncommitted. The subsequent push returned
+`Everything up-to-date`; it did not publish those documentation edits.
+This is an execution-environment/worktree-layout limitation, not a Codex CLI provider
+implementation failure, and does not invalidate the external inference validation.
+No provider behavior or application logic was changed to address it.
+
+Future milestones use independent full clones under
+`/Users/davidsun/git/davidcataiporject/tmp/`, each containing its own writable `.git`
+directory, outside the primary human checkout. See the repository
+[isolated milestone workflow](../README.md#isolated-milestone-execution).
+Do not work around the current worktree metadata boundary; if commit remains blocked,
+complete staging/commit/push from the normal host terminal. A2.6 remains unstarted;
+main is not merged, and external ChatGPT review is still required.

@@ -64,6 +64,49 @@ inspect-repo
 
 Skills are guidance for the coding agent, not a replacement for project-specific requirements. A project's own `CLAUDE.md`, tests, schemas, and source code remain the source of truth for that project.
 
+## Isolated milestone execution
+
+Future Codex milestones use a full independent Git clone under
+`/Users/davidsun/git/davidcataiporject/tmp/`, with one milestone per clone.
+Do not use `git worktree` for milestone execution. Each clone must contain its own
+`.git` directory so Git can update its metadata within the writable checkout.
+The primary human checkout is `/Users/davidsun/git/davidcataiporject/davidcattoolsproject/`;
+do not modify it during milestone implementation or put milestone clones inside it.
+
+For a future A2.6 milestone, bootstrap from a normal host terminal:
+
+```sh
+mkdir -p /Users/davidsun/git/davidcataiporject/tmp
+cd /Users/davidsun/git/davidcataiporject/tmp
+git clone git@github.com:davidcatcat/davidcattoolsproject.git davidcattoolsproject-a26
+cd davidcattoolsproject-a26
+git fetch origin
+git rev-parse --show-toplevel --git-dir
+git status --short --branch
+git rev-parse origin/main
+git ls-remote origin refs/heads/main
+# Verify origin/main matches the remote main SHA before creating the branch.
+git switch -c feat/a2-provider-integration origin/main
+```
+
+This is a future bootstrap example, not authorization to begin A2.6. Launch Codex
+from inside the independent clone, with the clone and its `.git` directory writable.
+Complete implementation, tests, documentation, commit, and push there. Normal
+`git status`, `git add`, `git commit`, and `git push` must not require writes to the
+primary checkout's Git metadata. Start each milestone from the latest verified
+`origin/main`; if verification fails, resolve it before creating the milestone branch.
+
+Preserve unrelated user work: do not use `git reset --hard`, `git clean -fd`, force
+push, published-history rewriting, or stashing of unrelated work. Stop for external
+ChatGPT review before merging main, and do not automatically start the next milestone.
+Provider != Role != Agent.
+
+A2.5 used a worktree whose source files were writable but whose Git metadata lived
+under the primary repository's `.git/worktrees/`. Codex could edit documentation,
+but Git could not create `index.lock` there to stage or commit it. This is an
+execution-environment/worktree-layout limitation, not a Codex CLI provider failure.
+See the [A2.5 validation report](reports/llmtool_a2_5_codex_cli_validation_20260930.md).
+
 ## Adding a new skill
 
 Create:

@@ -23,6 +23,16 @@ This repository is the user's toolbox and reusable Agent Skills library.
 - Git synchronization and publishing should follow the `safe-git` skill.
 - Force-push and destructive history rewriting require explicit user instruction.
 
+## Milestone checkout boundary
+
+For future Codex milestones in this repository, use one independent full clone per
+milestone under `/Users/davidsun/git/davidcataiporject/tmp/`, containing its own
+writable `.git` directory. Do not use `git worktree` or place clones inside the
+primary human checkout. Follow the bootstrap and preservation rules in
+[Isolated milestone execution](README.md#isolated-milestone-execution).
+Complete tests/docs/commit/push in the clone, then stop for external ChatGPT review;
+do not merge main or automatically begin the next milestone. Provider != Role != Agent.
+
 ## Updating skills
 
 When a recurring workflow is observed, improve the relevant existing skill before creating a new overlapping one.

@@ -38,7 +38,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
-- **A2.5 — Codex CLI Provider:** implemented; live inference and external OS sandbox verification pending
+- **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
 - **A2.6 — Provider Integration / Smoke Tests:** planned
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -47,6 +47,16 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 0600 permissions, existing-config protection, profile preservation, and no automatic provider
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
+
+## Milestone development workflow
+
+Use independent full clones under `/Users/davidsun/git/davidcataiporject/tmp/`
+for future Codex milestones, with one milestone per clone and a writable local
+`.git` directory. See the repository [bootstrap and safety rules](../../README.md#isolated-milestone-execution).
+A2.5's worktree allowed source edits but blocked staging/commit because its Git
+metadata was outside the sandbox's writable checkout. This layout limitation does
+not change Codex CLI provider behavior. A2.6 has not started; external ChatGPT review
+precedes any main merge.
 
 ## Provider capabilities
 
@@ -176,7 +186,8 @@ claim that every Codex tool is disabled. **Isolation plus the restricted read-on
 the execution boundary.** A malicious executable selected by PATH is outside this boundary:
 the installed CLI itself is trusted and handles authentication/model networking outside its
 tool sandbox. System/managed Codex policy and future CLI changes also remain runtime dependencies.
-The profile's effective enforcement must be checked externally on the deployment host.
+The external host validation passed for Codex CLI 0.159.2; deployment hosts and future
+CLI versions still depend on their effective runtime policy.
 
 The child receives an allowlisted environment: PATH, HOME, USER, LOGNAME, locale settings,
 CODEX_HOME, and TLS certificate paths when present; TMPDIR becomes the isolated cwd. Other
@@ -196,9 +207,12 @@ captured and discarded, never forwarded. Reasoning summaries are suppressed. Tem
 cleanup runs on success/failure; CLI-owned authentication/runtime state is not deleted.
 
 Tests and observed live results are in the [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md).
-**OS sandbox validation is pending external host-terminal verification.** The nested Codex
-session refuses macOS `sandbox_apply`; fake CLI tests verify wiring/isolation and repository
-integrity, not the host kernel's enforcement.
+**External host-terminal validation PASS:** macOS sandbox startup, absolute caller file/Git/AGENTS.md
+read denial, direct `CODEX_DIRECT_OK`, and llmtool E2E `CODEX_CLI_OK`; cleanup left no inference-caused
+mutation. The temporary HOME-level AGENTS.md did not contaminate the tested invocation with real
+CODEX_HOME retained. This does not prove arbitrary CODEX_HOME runtime/auth state or every future
+CLI version is isolated. Existing Codex authentication/runtime and the PATH executable remain
+trusted dependencies. External ChatGPT review is pending; A2.6 has not started.
 
 ## 安裝與直接執行
 
