@@ -199,7 +199,7 @@ manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
 External ChatGPT review PASS; A4 status is documented below.
 
-## A4 — Evidence-first Context Packet — IMPLEMENTED; external review pending
+## A4 — Evidence-first Context Packet — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
 Provider != Role != Agent != Skill != Context Packet. Frozen typed ContextPacket
 包含 facts、evidence、inferences、hypotheses、unknowns、verify_next；EvidenceItem
@@ -222,7 +222,7 @@ Malformed output 在寫 stdout 前失敗，exit 1、stdout empty、stderr saniti
 29 targeted A4 tests PASS；canonical syntax check 與 266 tests PASS（approved rerun）；
 packaging 與 manual fake-provider JSON/human/error validation PASS；live NOT-TESTED。
 詳見 [A4 validation report](../../reports/llmtool_a4_context_packet_validation_20261001.md)。
-Implemented on `feat/a4-context-packet`, not merged to main；等待 external ChatGPT review。
+Implemented on `feat/a4-context-packet`, not merged to main；external ChatGPT review PASS。
 不自動取得 Git／filesystem／network evidence，不開始 A5/A6/A9/A10。
 
 ## A5 — Git Intelligence
