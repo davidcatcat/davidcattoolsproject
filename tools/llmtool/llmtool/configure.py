@@ -75,39 +75,51 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     provider_type = _answer(input_fn, "Provider type", "openai-compatible")
     client_type(provider_type)
     is_openai = provider_type == "openai"
-    base_url = None if is_openai else _answer(input_fn, "Base URL", optional=True)
+    is_claude_cli = provider_type == "claude-cli"
+    base_url = None if is_openai or is_claude_cli else _answer(input_fn, "Base URL", optional=True)
     model = _answer(input_fn, "Model", optional=True)
     timeout = _number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds")
 
-    # getpass may fall back to an echoing stdin on systems without a TTY.
-    # Treat warnings as errors so a credential is never read in that mode.
-    if not getattr(sys.stdin, "isatty", lambda: False)():
-        raise LLMToolError("configure requires an interactive terminal for hidden API key input")
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            literal_key = secret_fn("API key (leave blank to unset): ", stream=stderr)
-    except (getpass.GetPassWarning, OSError):
-        raise LLMToolError("cannot read API key without echo; configuration was not saved") from None
-    if literal_key == "":
-        literal_key = None
-    api_key_env_default = "OPENAI_API_KEY" if is_openai and not literal_key else None
-    api_key_env = _answer(input_fn, "API key env", api_key_env_default, optional=True)
-    if literal_key and api_key_env:
-        raise LLMToolError("choose either API key or API key env, not both")
+    literal_key = None
+    api_key_env = None
+    if not is_claude_cli:
+        # getpass may fall back to an echoing stdin on systems without a TTY.
+        # Treat warnings as errors so a credential is never read in that mode.
+        if not getattr(sys.stdin, "isatty", lambda: False)():
+            raise LLMToolError("configure requires an interactive terminal for hidden API key input")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                literal_key = secret_fn("API key (leave blank to unset): ", stream=stderr)
+        except (getpass.GetPassWarning, OSError):
+            raise LLMToolError("cannot read API key without echo; configuration was not saved") from None
+        if literal_key == "":
+            literal_key = None
+        api_key_env_default = "OPENAI_API_KEY" if is_openai and not literal_key else None
+        api_key_env = _answer(input_fn, "API key env", api_key_env_default, optional=True)
+        if literal_key and api_key_env:
+            raise LLMToolError("choose either API key or API key env, not both")
 
     if is_openai:
         effort_raw = _answer(input_fn, "OpenAI reasoning_effort (none/low/medium/high; blank to unset)", optional=True)
         effort = _choice_or_none(effort_raw, "reasoning_effort", ("none", "low", "medium", "high"))
         provider_options = {} if effort is None else {"reasoning_effort": effort}
+    elif is_claude_cli:
+        provider_options = {}
     else:
         thinking_raw = _answer(input_fn, "Provider-specific enable_thinking (true/false; blank to unset)", optional=True)
         thinking = _boolean_or_none(thinking_raw)
         provider_options = {} if thinking is None else {"enable_thinking": thinking}
 
-    temperature_prompt = "Temperature (stored, not sent by OpenAI)" if is_openai else "Temperature"
+    if is_openai:
+        temperature_prompt = "Temperature (stored, not sent by OpenAI)"
+    elif is_claude_cli:
+        temperature_prompt = "Temperature (stored, not sent by Claude CLI)"
+    else:
+        temperature_prompt = "Temperature"
     temperature = _number(_answer(input_fn, temperature_prompt, "0"), "temperature")
-    max_tokens = _integer(_answer(input_fn, "Max tokens", "2000"), "max_tokens")
+    max_label = "Max tokens (stored, not enforced by Claude CLI)" if is_claude_cli else "Max tokens"
+    max_tokens = _integer(_answer(input_fn, max_label, "2000"), "max_tokens")
 
     active_provider = _answer(input_fn, "Active provider", provider_name)
 
@@ -134,7 +146,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     print("Configuration saved: " + str(path), file=stdout)
     print("Active provider: " + active_provider, file=stdout)
     print("Type: " + provider["type"], file=stdout)
-    if not is_openai:
+    if not is_openai and not is_claude_cli:
         print("Base URL: " + (provider["base_url"] or "<not configured>"), file=stdout)
     print("Model: " + (provider["model"] or "<not configured>"), file=stdout)
     return True

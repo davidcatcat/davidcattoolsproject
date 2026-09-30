@@ -27,6 +27,10 @@ EXPECTED = {
     "shell": False,
     "git": False,
 }
+CLAUDE_EXPECTED = {
+    "chat": True, "large_context": False, "reasoning_control": False,
+    "streaming": False, "code_edit": False, "shell": False, "git": False,
+}
 
 
 class CapabilityTests(unittest.TestCase):
@@ -60,10 +64,11 @@ class CapabilityTests(unittest.TestCase):
                 ProviderCapabilities(**{**EXPECTED, "chat": value})
 
     def test_production_registry_matches_implementation(self):
-        self.assertEqual(PROVIDER_REGISTRY.names(), ("openai", "openai-compatible"))
+        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "openai", "openai-compatible"))
         self.assertIs(client_type("openai-compatible"), OpenAICompatibleClient)
         self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
         self.assertEqual(get_provider_capabilities("openai").to_dict(), EXPECTED)
+        self.assertEqual(get_provider_capabilities("claude-cli").to_dict(), CLAUDE_EXPECTED)
 
     def test_lookup_without_instantiation_or_validation(self):
         with patch.object(OpenAICompatibleClient, "__init__", side_effect=AssertionError), \
@@ -72,7 +77,7 @@ class CapabilityTests(unittest.TestCase):
             self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
 
     def test_unsupported_types_fail_safely(self):
-        for value in ("anthropic", "claude-cli", "codex-cli", "secret-value", None, []):
+        for value in ("anthropic", "codex-cli", "secret-value", None, []):
             with self.subTest(value=value):
                 for lookup in (client_type, get_provider_capabilities):
                     with self.assertRaisesRegex(LLMToolError, "^unsupported provider type; use llmtool providers$"):
@@ -130,7 +135,7 @@ class CapabilityTests(unittest.TestCase):
             config["providers"]["test"]["ready"] = False
             with self.assertRaisesRegex(LLMToolError, "not ready"):
                 create_client(config)
-        self.assertEqual(PROVIDER_REGISTRY.names(), ("openai", "openai-compatible"))
+        self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "openai", "openai-compatible"))
 
 
 class ProvidersSafetyTests(unittest.TestCase):
@@ -166,9 +171,12 @@ class ProvidersSafetyTests(unittest.TestCase):
         expected = "".join(
             "Provider: " + name + "\n" + "".join(
                 "  " + key + ": " + ("yes" if value else "no") + "\n"
-                for key, value in EXPECTED.items()
+                for key, value in values.items()
             )
-            for name in ("openai", "openai-compatible")
+            for name, values in (
+                ("claude-cli", CLAUDE_EXPECTED), ("openai", EXPECTED),
+                ("openai-compatible", EXPECTED),
+            )
         )
         self.assertEqual(self.run_offline(["providers"]), expected)
         self.assertEqual(self.run_offline(["providers"]), expected)
@@ -177,8 +185,13 @@ class ProvidersSafetyTests(unittest.TestCase):
         output = self.run_offline(["providers", "--json"])
         self.assertEqual(output, self.run_offline(["providers", "--json"]))
         parsed = json.loads(output)
-        self.assertEqual(parsed, {"openai": EXPECTED, "openai-compatible": EXPECTED})
-        self.assertEqual(list(parsed), ["openai", "openai-compatible"])
-        for values in parsed.values():
-            self.assertEqual(list(values), list(EXPECTED))
+        expected = {
+            "claude-cli": CLAUDE_EXPECTED,
+            "openai": EXPECTED,
+            "openai-compatible": EXPECTED,
+        }
+        self.assertEqual(parsed, expected)
+        self.assertEqual(list(parsed), list(expected))
+        for name, values in parsed.items():
+            self.assertEqual(list(values), list(expected[name]))
             self.assertTrue(all(type(value) is bool for value in values.values()))
