@@ -86,7 +86,7 @@ Fake executable tests、canonical suite 與 normal authenticated user shell 的 
 人工驗證在 feature HEAD `cd55e88`、Claude CLI 2.1.285 執行：direct CLI marker 與
 llmtool → claude-cli → Claude marker 均符合預期；smoke 後 repository status clean，無 filesystem
 或 Git mutation。Codex isolated runtime 無法使用相同 session，且 PATH 解析到不同 executable/version。
-兩種 runtime 解析到不同 executable/version：normal shell 使用 nvm 安裝的 Claude CLI 2.1.284，
+兩種 runtime 解析到不同 executable/version：normal shell 使用 nvm 安裝的 Claude CLI 2.1.285，
 Codex isolated runtime 使用 `/usr/local/bin/claude` 2.1.206。`claude-cli` 透過 process `PATH`
 解析 executable，PATH 順序決定實際 CLI；project config 不可覆寫 executable。這是已記錄的
 runtime dependency/minor follow-up，不代表 provider argv failure。
