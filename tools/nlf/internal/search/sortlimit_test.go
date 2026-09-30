@@ -150,7 +150,7 @@ func TestSortedLimitCombos(t *testing.T) {
 func TestSortedLimitPermissionDenied(t *testing.T) {
 	dir, _ := sortTree(t)
 	locked := filepath.Join(dir, "a-b")
-	chmod(t, locked, 0, 0o755)
+	denyAccess(t, locked)
 	root := isRoot(t)
 	all := checkLimitPrefix(t, "denied+largest", query.Query{Root: dir, Sort: query.SortLargest}, []int{1, 2, math.MaxInt32})
 	_, rep := runResults(t, query.Query{Root: dir, Sort: query.SortLargest, Limit: 1})

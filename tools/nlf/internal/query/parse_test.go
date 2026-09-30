@@ -399,13 +399,96 @@ func TestFindCommand(t *testing.T) {
 }
 
 func TestPlatformFor(t *testing.T) {
-	for goos, want := range map[string]Platform{"darwin": MacOS, "linux": Linux, "freebsd": MacOS, "": MacOS} {
+	for goos, want := range map[string]Platform{"darwin": MacOS, "linux": Linux, "windows": Windows, "freebsd": MacOS, "": MacOS} {
 		if got := PlatformFor(goos); got != want {
 			t.Errorf("PlatformFor(%q) = %v, want %v", goos, got, want)
 		}
 	}
-	if MacOS.Name() != "macOS" || Linux.Name() != "GNU/Linux" {
-		t.Errorf("names: %q %q", MacOS.Name(), Linux.Name())
+	if MacOS.Name() != "macOS" || Linux.Name() != "GNU/Linux" || Windows.Name() != "Windows" {
+		t.Errorf("names: %q %q %q", MacOS.Name(), Linux.Name(), Windows.Name())
+	}
+	if !MacOS.HasFindCommand() || !Linux.HasFindCommand() || Windows.HasFindCommand() {
+		t.Errorf("HasFindCommand: macOS %v, Linux %v, Windows %v", MacOS.HasFindCommand(), Linux.HasFindCommand(), Windows.HasFindCommand())
+	}
+}
+
+// TestExplainOnWindows: Windows has no find, grep or stat, so Explain shows
+// every condition and the root, then a note in the query's language, and
+// never a Unix command (Windows find.exe is an unrelated text search).
+func TestExplainOnWindows(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		lang Lang
+		rows []string
+	}{
+		{`largest 3 go files containing "TODO" modified today, excluding vendor`, English,
+			[]string{"Understood as:", "root:          .", "extension:     .go", `content:       "TODO" (case-sensitive)`,
+				"modified:", "exclude dirs:  vendor", "order:         largest first", "limit:         3"}},
+		{`找最近 7 天修改、大於 1MB 的 log 檔，排除 node_modules`, Chinese,
+			[]string{"解析結果：", "搜尋位置", "副檔名", ".log", "檔案大小", "> 1 MB", "排除目錄", "node_modules", "修改時間"}},
+	} {
+		q, err := Parse(c.in, now)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", c.in, err)
+		}
+		q.MaxDepth, q.HasMaxDepth = 2, true
+		out := Explain(q, Windows)
+		for _, r := range append(c.rows, NoCommandNote(c.lang), pickLang(c.lang, "搜尋深度", "depth:")) {
+			if !strings.Contains(out, r) {
+				t.Errorf("Explain(%q, Windows) lacks %q:\n%s", c.in, r, out)
+			}
+		}
+		for _, bad := range []string{"find ", "-exec", "-iname", "-newermt", "stat -", "| head", "近似的 Windows", "Approximate Windows",
+			"等效", "Equivalent", NoCommandNote(otherLang(c.lang))} {
+			if strings.Contains(out, bad) {
+				t.Errorf("Explain(%q, Windows) contains %q:\n%s", c.in, bad, out)
+			}
+		}
+		// The conditions are exactly those shown on the other platforms.
+		unix := Explain(q, MacOS)
+		if head := unix[:strings.Index(unix, "\n\n")]; !strings.HasPrefix(out, head+"\n\n") {
+			t.Errorf("Windows conditions differ from macOS:\n%s\n---\n%s", out, unix)
+		}
+	}
+}
+
+func pickLang(l Lang, zh, en string) string {
+	if l == Chinese {
+		return zh
+	}
+	return en
+}
+
+func otherLang(l Lang) Lang {
+	if l == Chinese {
+		return English
+	}
+	return Chinese
+}
+
+// TestWindowsPathInQuery: a Windows path inside the query is an error that
+// points to --dir, both as a bare word and as quoted text after a location
+// word, where it would otherwise be read as content. Paths in the query use
+// "/" on every OS, and content that merely contains such text still works.
+func TestWindowsPathInQuery(t *testing.T) {
+	for _, in := range []string{`go files in C:\Users\me`, `在 C:\Users\me 找 go 檔`, `in "D:/data" find go files`,
+		`在 "C:\My Docs" 找 go 檔`, `go files under \\server\share\dir`, `under "\\server\share" txt files`, `c:\x`} {
+		_, err := Parse(in, now)
+		var pe *Error
+		if !errors.As(err, &pe) || !strings.Contains(pe.Message(English), "--dir") || !strings.Contains(pe.Message(Chinese), "--dir") ||
+			!strings.Contains(pe.en, "Windows path") {
+			t.Errorf("Parse(%q) = %v; want the Windows path error pointing to --dir", in, err)
+		}
+	}
+	for _, in := range []string{`files containing "C:\Windows"`, `包含 "\\server\share" 的檔案`, `go files in ./src`, `在 ~/文件 找 go 檔`} {
+		if _, err := Parse(in, now); err != nil {
+			t.Errorf("Parse(%q): %v", in, err)
+		}
+	}
+	for s, want := range map[string]bool{`C:\x`: true, `c:/x`: true, `\\srv\s`: true, `C:`: false, `C:x`: false, `/x`: false, `CC:\x`: false, `1:\x`: false} {
+		if got := looksLikeWindowsPath(s); got != want {
+			t.Errorf("looksLikeWindowsPath(%q) = %v, want %v", s, got, want)
+		}
 	}
 }
 

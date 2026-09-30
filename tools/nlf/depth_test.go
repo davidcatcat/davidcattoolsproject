@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/davidcatcat/davidcattoolsproject/tools/nlf/internal/query"
 )
 
 func TestDepthFlagParsing(t *testing.T) {
@@ -94,17 +97,23 @@ func TestDepthFlagValidation(t *testing.T) {
 
 func TestDepthEndToEnd(t *testing.T) {
 	dir := fixture(t)
-	for _, c := range []struct {
+	cases := []struct {
 		args []string
 		want []string
 	}{
 		{[]string{"--max-depth", "1", "--dir", dir, "go files"}, []string{"main.go", "util.go"}},
 		{[]string{"--min-depth", "2", "--dir", dir, "go files"}, []string{"vendor/lib.go"}},
 		{[]string{"--min-depth=1", "--max-depth=2", "--dir", dir, "go files"}, []string{"main.go", "util.go", "vendor/lib.go"}},
-		{[]string{"--max-depth", "1", "go files in " + dir}, []string{"main.go", "util.go"}},
 		{[]string{"--min-depth", "2", "--dir", dir, "files excluding vendor"}, []string{"docs/readme.md"}},
 		{[]string{"--max-depth", "1", "--dir", dir, "最大的 2 個檔案"}, []string{"big.log", "main.go"}},
-	} {
+	}
+	if runtime.GOOS != "windows" { // a Windows path cannot be written inside the query
+		cases = append(cases, struct {
+			args []string
+			want []string
+		}{[]string{"--max-depth", "1", "go files in " + dir}, []string{"main.go", "util.go"}})
+	}
+	for _, c := range cases {
 		out, errOut, code := nlf(t, c.args...)
 		if got := paths(dir, out); code != 0 || !slices.Equal(got, c.want) || errOut != "" {
 			t.Errorf("%q: code=%d got %v err=%q, want %v", c.args, code, got, errOut, c.want)
@@ -138,15 +147,17 @@ func TestDepthEndToEnd(t *testing.T) {
 	}
 	direct, _, _ := nlf(t, "--max-depth", "1", "--dir", dir, "go files")
 	out, errOut, code := nlfInput(t, "y\n", "--confirm", "--max-depth", "1", "--dir", dir, "go files")
-	if code != 0 || direct == "" || out != direct || !strings.Contains(errOut, "-maxdepth 1") {
+	if code != 0 || direct == "" || out != direct {
 		t.Errorf("--confirm y --max-depth 1: code=%d out=%q (direct %q) err=%q", code, out, direct, errOut)
 	}
+	checkCommand(t, "--confirm y --max-depth 1", errOut, query.English, "-maxdepth 1")
 	// --explain shows the depth and never searches.
 	out, errOut, code = nlf(t, "--explain", "--min-depth", "2", "--dir", filepath.Join(dir, "missing"), "go files excluding vendor")
 	if code != 0 || errOut != "" || !strings.Contains(out, "depth:") || !strings.Contains(out, "at least 2 levels") ||
-		!strings.Contains(out, "-type f -path '"+filepath.Join(dir, "missing")+"/*/*'") || strings.Contains(out, "-mindepth") {
+		strings.Contains(out, "-mindepth") {
 		t.Errorf("--explain --min-depth 2: code=%d out=%q err=%q", code, out, errOut)
 	}
+	checkCommand(t, "--explain --min-depth 2", out, query.English, "-type f -path '"+filepath.Join(dir, "missing")+"/*/*'")
 }
 
 // TestDepthPruningCLI: what lies below the maximum depth, or files above the
@@ -158,10 +169,7 @@ func TestDepthPruningCLI(t *testing.T) {
 	}
 	dir := fixture(t)
 	docs := filepath.Join(dir, "docs")
-	if err := os.Chmod(docs, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(docs, 0o755) })
+	denyAccess(t, docs)
 	q := `files containing "TODO"`
 	out, errOut, code := nlf(t, "--max-depth", "1", "--dir", dir, q)
 	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"main.go"}) || errOut != "" {
@@ -181,14 +189,9 @@ func TestDepthPruningCLI(t *testing.T) {
 	}
 
 	// An unreadable file above the minimum depth is never opened.
-	if err := os.Chmod(docs, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	allowAccess(t, docs)
 	mainGo := filepath.Join(dir, "main.go")
-	if err := os.Chmod(mainGo, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(mainGo, 0o644) })
+	denyAccess(t, mainGo)
 	out, errOut, code = nlf(t, "--min-depth", "2", "--dir", dir, q)
 	if got := paths(dir, out); code != 0 || !slices.Equal(got, []string{"docs/readme.md", "vendor/lib.go"}) || errOut != "" {
 		t.Errorf("--min-depth 2: code=%d got %v err=%q, want [docs/readme.md vendor/lib.go] and empty stderr", code, got, errOut)

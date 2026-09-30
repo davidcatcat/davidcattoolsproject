@@ -140,8 +140,8 @@ func (p *parser) step() error {
 		}
 		p.pos = save
 	}
-	if p.path() {
-		return nil
+	if ok, err := p.path(); ok || err != nil {
+		return err
 	}
 	if _, ok := p.accept(excludePhrases); ok {
 		return p.excludeNames(false, t.raw)
@@ -782,7 +782,7 @@ func isExtCandidate(t token, literalOK, trig bool) bool {
 	return false
 }
 
-func (p *parser) path() bool {
+func (p *parser) path() (bool, error) {
 	save := p.pos
 	_, trig := p.accept(pathTriggers)
 	t, ok := p.cur()
@@ -794,13 +794,18 @@ func (p *parser) path() bool {
 		if looksLikePath(raw) && p.q.Root == "" {
 			p.q.Root = raw
 			p.pos++
-			return true
+			return true, nil
+		}
+		if trig && looksLikeWindowsPath(raw) {
+			// `in "C:\Users\me"` names a location; without this it would be
+			// read as content to search for.
+			return false, errWindowsPath(raw)
 		}
 	}
 	if trig {
 		p.pos = save
 	}
-	return false
+	return false, nil
 }
 
 func looksLikePath(s string) bool {

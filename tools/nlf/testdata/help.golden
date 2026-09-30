@@ -35,7 +35,7 @@ Flags:
   -h, --help       show this help;  --version  print version
 
 --explain   nlf --explain "找 ovpn 檔"   Nothing is searched, and nlf never runs the command.
-  Prints the parsed conditions and an approximate find command for this OS (macOS or GNU/Linux).
+  Prints the parsed conditions and an approximate find command (macOS, GNU/Linux; not on Windows).
 
 --confirm   nlf --confirm "找 ovpn 檔"
   Prints the execution plan and a safety summary, then asks "Execute this search? [y/N]".

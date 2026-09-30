@@ -8,6 +8,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -33,7 +34,10 @@ func propFixture(t *testing.T) (string, map[string]propFile) {
 	t.Helper()
 	dir := t.TempDir()
 	names := []string{"a.go", "b.GO", "caf\u00e9.txt", "R\u00e9sum\u00e9.TXT", "x y.log", "-rf.log", "tar.tar.gz", ".go", "中文.md",
-		"big.bin", "e.txt", "k.txt", "it's.txt", "[abc].txt", "*.txt"}
+		"big.bin", "e.txt", "k.txt", "it's.txt", "[abc].txt"}
+	if runtime.GOOS != "windows" {
+		names = append(names, "*.txt") // "*" cannot be in a Windows file name
+	}
 	// No two names differ only in case or normalization: macOS file systems
 	// would alias them. NFC/NFD is covered by TestUnicodeNormalizationMatrix.
 	dirs := []string{"", "sub/", "sub/deep/", "vendor/", "lib/Vendor/", "中/", "a b/"}
