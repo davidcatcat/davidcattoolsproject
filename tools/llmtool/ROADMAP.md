@@ -199,7 +199,7 @@ manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
 External ChatGPT review PASS; A4 status is documented below.
 
-## A4 — Evidence-first Context Packet — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
+## A4 — Evidence-first Context Packet ✅ DONE and merged to main
 
 Provider != Role != Agent != Skill != Context Packet. Frozen typed ContextPacket
 包含 facts、evidence、inferences、hypotheses、unknowns、verify_next；EvidenceItem
@@ -222,13 +222,40 @@ Malformed output 在寫 stdout 前失敗，exit 1、stdout empty、stderr saniti
 29 targeted A4 tests PASS；canonical syntax check 與 266 tests PASS（approved rerun）；
 packaging 與 manual fake-provider JSON/human/error validation PASS；live NOT-TESTED。
 詳見 [A4 validation report](../../reports/llmtool_a4_context_packet_validation_20261001.md)。
-Implemented on `feat/a4-context-packet`, not merged to main；external ChatGPT review PASS。
+Merged to main in `38b1a67`；external ChatGPT review PASS。
 不自動取得 Git／filesystem／network evidence，不開始 A5/A6/A9/A10。
 
-## A5 — Git Intelligence
+## A5 — Git Intelligence — IMPLEMENTED; EXTERNAL REVIEW PENDING
 
-唯讀取得 git status、git diff、git log、changed files、related files。
-此階段不是 auto commit／push。
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence.
+`llmtool git` / `llmtool git --json` 離線取得 read-only snapshot；不解析 config／
+credentials、不建立 provider、不自動送 model、不注入 chat。Reusable frozen typed
+model 包含 repository root／branch／HEAD／detached、status entries、changed/staged
+files、recent commits、unstaged/staged diff、related paths；提供 stable JSON 與 human summary。
+
+固定 argv allowlist：rev-parse root/HEAD、branch --show-current、porcelain v1 -z
+status、diff/cached diff、10-entry SHA/subject log、兩個 read-only config key queries、
+validated literal ls-tree。無任意 Git arguments、無 Git mutation 或 fetch。
+NUL status 保留 unusual paths、rename/copy original path；conflict 獨立分類；
+paths sorted/deduplicated，staged + unstaged 同一路徑仍分別保留。
+
+shell=False、10 秒 per-command timeout；metadata 1 MiB、stderr 64 KiB（丟棄）、
+每個 diff 2 MiB，超限整個 snapshot sanitized failure／stdout empty，不輸出假完整資料。
+禁用 external diff、textconv、filter command、fsmonitor、hooks、pager、optional
+index writes、maintenance、inherited Git overrides、system/global config；拒絕
+partial/promisor repo，protocol blocked，不跨 submodule。Local Git/PATH 與穩定的
+repository config 是信任前提；多個 read operations 並非 atomic snapshot。
+
+Related files 僅取前 10 個 sorted changed parent directories 的 tracked HEAD blob
+siblings，排除 changed paths、sorted、上限 20；不遞迴讀檔、不做 semantic retrieval。
+A4 不改設計；沒有 automatic packet conversion、inference/hypothesis generation。
+A6/A9/A10 可重用 evidence，A5 不啟動 validator、orchestration 或 dynamic retrieval。
+
+Implemented on `feat/a5-git-intelligence`, not merged；等待 external ChatGPT review。
+Targeted 39 tests：38 passed、1 host-filesystem skip；canonical syntax + 305 tests：
+304 passed、1 同樣 skip，exit 0；wheel 與 manual fixture PASS。
+詳細 tests、packaging、manual fixture 與 host limitations 見
+[A5 validation report](../../reports/llmtool_a5_git_intelligence_validation_20261001.md)。
 
 ## A6 — Safety & Validator Layer
 
