@@ -39,9 +39,9 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
 - **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
-- **A2.5 — Codex CLI Provider:** implemented; external host validation and direct/live E2E PASS; external ChatGPT review pending
-- **A2.6 — Provider Integration / Smoke Tests:** implementation + host canonical validation complete; external ChatGPT review pending; not merged to main
-- **A3 — Skill Framework:** implemented and validated on feature branch; external ChatGPT review pending; not merged to main
+- **A2.5 — Codex CLI Provider:** DONE and merged to `main`; external host validation and direct/live E2E PASS
+- **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
+- **A3 — Skill Framework:** implementation + canonical validation + external review PASS on feature branch; not merged to main
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -587,8 +587,7 @@ validation 與 `complete()`；A2.2 之後擴充 provider，A3 提供 declarative
 
 ## A3 — Runtime Skill Framework
 
-A3 is implemented on `feat/a3-skill-framework`, awaiting external ChatGPT review;
-it is not merged to main. **Provider != Role != Agent != Skill.** A skill is
+A3 is implemented and externally reviewed on `feat/a3-skill-framework`; canonical validation and external review PASS. It is not merged to main. **Provider != Role != Agent != Skill.** A skill is
 instruction/context data and grants no execution ability. Repository engineering
 workflows in root `skills/*/SKILL.md` are separate and are never loaded by llmtool.
 
