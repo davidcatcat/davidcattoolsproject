@@ -7,8 +7,10 @@ import sys
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
 from .configure import run_configure
 from .chat import ChatSession, run_chat
+from .context import parse_context_packet, format_context_packet
 from .errors import LLMToolError
 from .inputs import read_input
+from .git_intel import collect_git_snapshot, format_git_snapshot
 from .prompts import TEMPLATES, messages_for
 from .skills import discover_skills, load_skill
 from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
@@ -46,10 +48,14 @@ def parser_for_cli():
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
         if command == "ask":
             child.add_argument("--skill", help="explicit runtime skill name")
+        if command == "context-pack":
+            child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
     chat = sub.add_parser("chat", help="Start a memory-only interactive chat")
     chat.add_argument("--skill", help="explicit runtime skill name")
     add_options(chat)
+    git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
+    git.add_argument("--json", action="store_true", help="output snapshot as JSON")
     sub.add_parser("configure", help="Interactively configure a provider profile")
     providers = sub.add_parser("providers", help="List supported provider capabilities offline")
     providers.add_argument("--json", action="store_true", help="output metadata as JSON")
@@ -72,6 +78,10 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "git":
+            snapshot = collect_git_snapshot()
+            print(snapshot.to_json() if args.json else format_git_snapshot(snapshot))
+            return 0
         if args.command == "skills":
             metadata = [skill.metadata() for skill in discover_skills()]
             if args.json:
@@ -121,7 +131,11 @@ def main(argv=None):
         text = read_input(args.text, args.file, sys.stdin)
         result = create_client(config, api_key(config)).complete(messages_for(args.command, text, selected_skill))
         # Validation completes before stdout is touched, including truncation checks.
-        sys.stdout.write(result.content + "\n")
+        output = result.content
+        if args.command == "context-pack":
+            packet = parse_context_packet(result.content)
+            output = packet.to_json() if args.json else format_context_packet(packet)
+        sys.stdout.write(output + "\n")
         if args.verbose:
             for key, value in result.metadata.items():
                 print(f"{key}={value}", file=sys.stderr)
