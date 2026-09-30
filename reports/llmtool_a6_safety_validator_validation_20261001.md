@@ -11,7 +11,7 @@ Unrelated untracked benchmark/reasoning reports are preserved and excluded.
 
 A6 implements deterministic classification and ContextPacket validation only.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator.
-READ-ONLY != SAFE-TO-DISPLAY. A6 is not merged; external ChatGPT review PASS.
+READ-ONLY != SAFE-TO-DISPLAY. A6 is merged to main in `63b5baee19d63c0229c573b312e8c29193b6b248`; external ChatGPT review PASS.
 There is no executor, approval UI, trainer, agent, routing, Telegram, automatic
 retrieval, repair loop, or production workflow. A7 has not started.
 
@@ -186,4 +186,4 @@ provide permissions/approval enforcement. No such workflow is introduced here.
 
 README and ROADMAP document exact behavior, examples, bounds and validation counts;
 A5 was already marked merged, so its historical verification record is preserved.
-External ChatGPT review: **PASS**. No blocking correctness, security, packaging, or regression issue was found in the A6 diff. No implementation or test files were changed by this review. Do not start A7 before A6 is merged.
+External ChatGPT review: **PASS**. No blocking correctness, security, packaging, or regression issue was found in the A6 diff. No implementation or test files were changed by this review. A6 is merged to main; A7 may proceed from current origin/main.
