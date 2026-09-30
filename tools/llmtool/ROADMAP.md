@@ -225,7 +225,7 @@ packaging 與 manual fake-provider JSON/human/error validation PASS；live NOT-T
 Merged to main in `38b1a67`；external ChatGPT review PASS。
 不自動取得 Git／filesystem／network evidence，不開始 A5/A6/A9/A10。
 
-## A5 — Git Intelligence — IMPLEMENTED; EXTERNAL REVIEW PENDING
+## A5 — Git Intelligence — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence.
 `llmtool git` / `llmtool git --json` 離線取得 read-only snapshot；不解析 config／
@@ -251,7 +251,7 @@ siblings，排除 changed paths、sorted、上限 20；不遞迴讀檔、不做 
 A4 不改設計；沒有 automatic packet conversion、inference/hypothesis generation。
 A6/A9/A10 可重用 evidence，A5 不啟動 validator、orchestration 或 dynamic retrieval。
 
-Implemented on `feat/a5-git-intelligence`, not merged；等待 external ChatGPT review。
+Implemented on `feat/a5-git-intelligence`, not merged；external ChatGPT review PASS。
 Targeted 39 tests：38 passed、1 host-filesystem skip；canonical syntax + 305 tests：
 304 passed、1 同樣 skip，exit 0；wheel 與 manual fixture PASS。
 詳細 tests、packaging、manual fixture 與 host limitations 見
@@ -308,7 +308,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A3 已完成並合併至 `main`；A3.5 Interactive Chat Shell 已完成並合併至 main (`021456b`)。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A4 已完成並合併至 `main`；A5 Git Intelligence 已實作、完成 canonical validation 與 external review，尚未合併。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
 ## A12 — Remote Frontends / Telegram Agent
 
