@@ -6,8 +6,8 @@ coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三�
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
-A1.1、A2.1、A2.2 已完成並合併至 main；A2.4 已完成，A2.5 implementation 與 external host-terminal validation 已完成，等待 external ChatGPT review。
-A2.3 Anthropic API 仍規劃中且尚未實作。Capability 描述
+A1.1、A2.1、A2.2、A2.4、A2.5、A2.6 已完成並合併至 main。A2.3 Anthropic API 仍規劃中且尚未實作。
+目前 A3 Skill Framework 已在 `feat/a3-skill-framework` 實作、完成 canonical validation 與 external review，尚未合併至 main；A3.5 Interactive Chat Shell 排入下一個 milestone。Capability 描述
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
@@ -114,7 +114,7 @@ runtime dependency/minor follow-up，不代表 provider argv failure。
 驗證細節見
 [`Claude CLI runtime validation report`](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md)。
 
-### A2.5 — Codex CLI Provider — IMPLEMENTED; external host validation PASS; external review pending
+### A2.5 — Codex CLI Provider ✅ DONE
 
 新增 `codex-cli` pure-text provider、registry/config validation、configure wizard 與 fake CLI tests。
 Codex CLI 0.159.2；PATH resolution、stdin、bounded subprocess、isolated temporary cwd、approval never。
@@ -124,10 +124,9 @@ Codex CLI 0.159.2；PATH resolution、stdin、bounded subprocess、isolated temp
 External host-terminal validation PASS：macOS sandbox probe、caller file/Git/AGENTS.md read denial、
 limited HOME contamination probe、direct/E2E exact markers 與 cleanup。PATH executable 與 existing
 Codex auth/runtime 仍為 trusted dependencies；不保證 arbitrary global state 或 future CLI versions isolation。
-Provider != Role != Agent；等待 external ChatGPT review。完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
-A2.6 validation 狀態見下一節；不自動合併 main。
+Provider != Role != Agent；external review 已完成，並已隨 A2.5 合併至 `main`。完整 tests/live evidence 見 [A2.5 validation report](../../reports/llmtool_a2_5_codex_cli_validation_20260930.md)。
 
-### A2.6 — Provider Integration / Smoke Tests — IMPLEMENTATION + CANONICAL VALIDATION COMPLETE
+### A2.6 — Provider Integration / Smoke Tests ✅ DONE
 
 四個已實作 providers 的 shared integration coverage 已加入：registry/factory、mixed
 config、selection precedence、explicit override 不修改 saved active profile、field isolation、
@@ -145,26 +144,53 @@ OK
 All 189 canonical tests passed. Previous sandbox loopback-binding failures were
 environment-specific; host validation resolved the remaining canonical gate.
 No implementation changes were needed after the host run.
-A2.6 implementation + canonical validation complete；等待 external ChatGPT review，尚未合併 main。
+A2.6 implementation、host canonical validation 與 external review 均完成，並已合併至 `main`。
 Live smoke 狀態維持：openai-compatible NOT-TESTED；claude-cli attempted, unsuccessful；
 codex-cli attempted, unsuccessful；openai NOT-TESTED。不將 unsuccessful attempts 改為 PASS。
-Provider != Role != Agent。不開始 A2.7/A3，不合併 main。詳見
+Provider != Role != Agent。詳見
 [A2.6 validation report](../../reports/llmtool_a2_6_provider_integration_validation_20260930.md)。
 
-## A3 — Skill Framework
+## A3 — Skill Framework — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
 
-將技能移出 hard-coded prompt，建立可版本化的資源，例如：
+Provider != Role != Agent != Skill. Declarative runtime skills are packaged under
+`tools/llmtool/llmtool/skills/*/SKILL.md`, separate from root repository engineering
+skills. Typed immutable skills contain name, description, positive integer version,
+and instruction body. Strict bounded SafeLoader parsing rejects unsupported fields,
+unsafe names/paths, duplicate keys/names, aliases, and symlink resources.
 
-```text
-skills/
-  analyze-log/
-  review-diff/
-  context-pack/
-```
+Offline `skills`, `skills --json`, `skill show <name>` and explicit
+`ask --skill <name>` are implemented. Common system rules → task instructions →
+selected skill → separate unchanged user message, before provider dispatch.
+Existing analyze-log/review-diff/context-pack commands load versioned resources.
+No saved skill config, automatic selection for ask, executable hooks, tools,
+output execution, roles, retrieval, or orchestration. READ-ONLY != SAFE-TO-DISPLAY;
+samples warn against exposing credentials/private configuration.
 
-這是未來 llmtool 的 skill 資源，不是目前 repo 根目錄給 coding agent 的工程 skills。
-Skills 應避免直接建議讀取可能含 secret 的檔案。唯讀指令仍可能把 credentials 或
-private configuration 印出來：**READ-ONLY != SAFE-TO-DISPLAY**。
+18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS. Commands and limitations are recorded in the
+[A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md).
+Implementation is on `feat/a3-skill-framework`, not merged to main. External ChatGPT review PASS; A4/A5/A6/A9 have not been started by this milestone.
+
+## A3.5 — Interactive Chat Shell
+
+提供類似 Codex CLI／Claude CLI 的互動式聊天入口，讓使用者可直接進入長駐 session，
+而不是每次只能使用一次性的 `llmtool ask`。A3.5 是 CLI/UX 層，不做 Agent orchestration。
+
+第一版至少包含：
+
+- `llmtool chat` 進入 interactive session；驗證穩定後可評估讓單獨執行 `llmtool` 直接進入 chat。
+- session 內保留多輪 conversation context，預設只存在記憶體，不自動寫入聊天歷史檔案。
+- 顯示目前 provider、skill 與 session 狀態。
+- 支援明確控制命令，例如 `/provider`、`/skill`、`/status`、`/clear`、`/history`、`/help`、`/exit`。
+- provider 可在 session 中切換；skill 可顯式選擇或清除，且不得改寫 saved config。
+- user message 必須保持原文；skill/context composition 維持 provider-agnostic common message contract。
+- `llmtool ask` 保留作為 script、pipeline 與一次性非互動呼叫介面。
+
+A3.5 不包含自動 role routing、agent loop、shell/Git/tool execution、automatic skill selection、
+production mutation 或 conversation cloud sync。後續 A9/A11 再把 interactive shell 接上
+Role/Agent orchestration 與完整 production workflow。
+
+安全原則：interactive chat 仍遵守 **Provider != Role != Agent != Skill**；模型輸出的 command
+預設只是文字，不因進入互動模式而獲得執行權限。
 
 ## A4 — Evidence-first Context Packet
 
@@ -227,8 +253,8 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標；目前完成至 A2.2。現階段仍只發送明確提供的文字並回傳內容，沒有
-Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A2.6 已完成並合併至 `main`，A3 Skill Framework 已實作並等待 external review，
+A3.5 Interactive Chat Shell 已排入 roadmap。現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
 ## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
