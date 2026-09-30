@@ -4,7 +4,7 @@
 分支：`feat/nlf-a8-windows-portability`（從 main `3d296a7` 建立；**未 merge 到 main**）
 版本：維持 0.4.0（沒有 bump、沒有 tag）
 
-**狀態：程式碼、cross-build、CI 設定、測試與文件已完成；Windows 原生 runtime 驗證尚未完成。** 本機沒有 Windows 環境。Windows 上的測試與 smoke test 都要等 GitHub Actions `windows-latest` 第一次執行才有結果。在那之前，以及在下方「尚待人工驗證」完成之前，README 不宣稱 Windows 是第一級支援平台。
+**狀態：A8 在 CI 上完成驗證，等待 final review，尚未 merge。** GitHub Actions run `36759759377`（commit `787653e`）在 `ubuntu-latest`、`macos-latest`、`windows-latest` 上全部 SUCCESS。Windows job 的每一個步驟都通過：原生 `go test`、shuffle、fuzz、build、兩個 release build、PowerShell 7／Windows PowerShell 5.1／cmd.exe smoke、working tree clean。同步 main 之後的 CI 結果見「GitHub Actions」。Windows 10／11 桌面版與 `windows/arm64` 實機仍待人工驗證（見最後一節），完成之前 README 不宣稱 Windows 是第一級支援平台。
 
 ## 範圍
 
@@ -53,7 +53,7 @@ A8 讓同一份 Go 原始碼可以在 Windows 10／11 與 Windows Server（amd64
 | 搜尋位置是 junction 或 symlink | 跟隨 | 與 Unix 上 symlink 的搜尋位置（`/tmp`）一致 | `TestWindowsJunctions`、`TestRootIsLinkWindows` |
 | 位置以下的 junction 或 symlink | 不跟隨、不列出 | 與 Unix 上不跟隨目錄 symlink 一致，並避免循環 | `TestWindowsJunctions` |
 | 隱藏屬性的檔案與目錄 | 照樣搜尋 | 與 Unix 上 `.` 開頭的檔案一致（README 早已寫明隱藏檔會被搜尋） | `TestWindowsHiddenFilesAreSearched` |
-| 權限不足 | 略過並列在 stderr，搜尋位置本身不可讀時 exit 2 | 既有行為；Windows 用 ACL | 既有權限測試改用 `denyAccess`（Windows 上是 `icacls /deny *S-1-1-0:(RD)`） |
+| 權限不足 | 略過並列在 stderr，搜尋位置本身不可讀時 exit 2 | 既有行為；Windows 用 ACL | 既有權限測試改用 `denyAccess`：Windows 上是 `icacls /deny *S-1-1-0:(RD)`，先在測試 process 停用 `SeBackupPrivilege`／`SeRestorePrivilege`，並實際讀取確認存取真的被拒絕（見「GitHub Actions」） |
 | 大小寫 | NTFS 不分大小寫：大小寫不同的排除路徑也會排除（用 `os.SameFile` 判斷） | 既有設計，與 APFS 相同 | `TestWindowsDriveAndUNCPaths`、`TestExcludePathCaseFollowsFileSystem` |
 | NFC／NFD | 不做正規化，兩種拼法是不同名稱 | 與 Linux 相同 | `TestUnicodeNormalizationMatrix`（default 分支） |
 | 磁碟根目錄、`C:`、UNC | 深度與輸出都正確 | `depthFunc` 修正 | `TestWindowsDriveAndUNCPaths`、`TestDepthFuncWindowsPaths` |
@@ -143,7 +143,57 @@ A8 讓同一份 Go 原始碼可以在 Windows 10／11 與 Windows Server（amd64
 
 以下都相同：`--explain`、`--confirm`、`-0`、`-l`、`./-dash`、排除路徑、`~/`、`~\x`（Unix 上不展開）、各種 exit code。
 
-**尚未執行：** 所有 Windows 原生測試與 smoke test（要等 `windows-latest` 的 CI）、Linux 上的完整測試（要等 ubuntu 的 CI；本機的 Docker 沒有執行）。
+**CI 上的原生執行**（Windows 與 Linux），見下一節。
+
+## GitHub Actions
+
+| Run | Commit | ubuntu | macos | windows | 說明 |
+|-----|--------|--------|-------|---------|------|
+| `36755112741` | `274d12e` | SUCCESS | SUCCESS | FAILURE | 停在 `Line endings`，後面的步驟都沒有執行 |
+| `36755846288` | `76b9fd7` | SUCCESS | SUCCESS | FAILURE | 第一次在 Windows 上實際執行 `go test`，6 個權限測試失敗 |
+| `36759140100` | `db3bdc1` | SUCCESS | SUCCESS | FAILURE | 測試全部通過，Windows PowerShell 5.1 smoke 有 2 項失敗 |
+| `36759759377` | `787653e` | SUCCESS | SUCCESS | **SUCCESS** | Windows 每一個步驟都 SUCCESS |
+
+每次失敗都先讀 log 找出確切原因，才做修正。沒有把任何測試加進 skip 清單，也沒有放寬任何 assertion。
+
+**1. `Line endings`（run `36755112741`）：錯在檢查方法，不是換行規則。**
+
+- 這一步用 Git Bash 的 GNU grep 找 `\r`。但在 Windows 上，grep 會先把文字檔的 CR 拿掉再比對。
+- 結果 `grep -q $'\r$' scripts/ci-smoke.cmd` 永遠找不到 CR：checkout 是正確的 CRLF，這一步卻失敗。反過來說，「其他檔案不能有 CR」那一項也永遠抓不到 CR，檢查形同虛設。
+- 確認 `.gitattributes` 沒有問題：67 個 tracked 檔案在 index 裡都是 LF、沒有 CR，checkout 後只有 `.cmd` 是 CRLF。
+- 修正（`76b9fd7`）：改用 PowerShell 的 `[IO.File]::ReadAllBytes` 直接看位元組。`*.cmd` 必須全部是 CRLF，其他 tracked 檔案不能有任何 CR，而且至少要檢查到一個 `.cmd`。同時印出 `git ls-files --eol`。
+- run `36755846288` 的結果：`line endings ok: 1 CRLF .cmd file(s)`。
+
+**2. 權限測試（run `36755846288`）：錯在測試的假設。**
+
+- 失敗的 6 個測試：`TestPermissionDeniedMessage`、`TestDepthPruningCLI`、`TestPermissionDeniedIsSkippedAndReported`、`TestMaxDepthDoesNotReadBelow`、`TestMinDepthSkipsBeforeStatAndOpen`、`TestSortedLimitPermissionDenied`。
+- 預期：被 deny 的目錄與檔案回報為 PermissionDenied；搜尋位置本身被 deny 時 exit 2。
+- 實際：icacls 成功加上 deny entry，但目錄照樣列得出來、檔案照樣讀得到。所以 PermissionDenied 是空的，搜尋位置被 deny 時 exit 1。
+- 原因：Go 在 Windows 上唯讀開啟檔案與目錄時，一律使用 `FILE_FLAG_BACKUP_SEMANTICS`。token 啟用了 `SeBackupPrivilege` 時，系統會略過 ACL 檢查，這就是 Windows 版的「root 不受權限限制」。
+- 證據：run `36759140100` 的 log 印出 `whoami /priv`，runner 的 `SeBackupPrivilege` 與 `SeRestorePrivilege` 都是 **Enabled**。
+- 修正（`db3bdc1`，只改測試）：`denyAccess` 先在測試 process 停用這兩個特權，並實際讀取一次，確認存取真的被拒絕。沒有被拒絕時，會附上 icacls 與特權清單直接失敗，不會默默跳過。nlf 本身從來不調整特權。
+- run `36759140100` 的結果：Windows 上 1553 個 PASS，只有 skip guard 允許的 3 個測試被略過。
+
+**3. Windows PowerShell 5.1 smoke（run `36759140100`）：錯在 smoke script 的 stdin。**
+
+- 只有「回答 `y`」的兩項失敗：`--confirm answered y` 與 `-0 --confirm answered y`。n 與 EOF 的案例原本就會取消，所以看不出問題；PowerShell 7 全部通過。
+- 原因：.NET Framework 的 `Process.StandardInput` 在 process 啟動時，就寫出 `Console.InputEncoding` 的 preamble。所以 nlf 讀到的是 `\ufeffy` 而不是 `y`，照規則取消，這是正確的行為。
+- 修正（`787653e`）：smoke script 改用不帶 BOM 的 UTF-8 作為 `Console.InputEncoding`，失敗時印出 stderr。
+- nlf 不改：`--confirm` 仍然只接受剛好是 `y` 或 `Y` 的一行。使用者在 5.1 用 `'y' | nlf --confirm` 時，PowerShell 用的是 `$OutputEncoding`，不會加 BOM。
+
+**run `36759759377` 的 Windows 結果：**
+
+- `go test -v`：1553 個 PASS，skip 的只有 `TestExplainParity`、`TestGNUSortPipeline`、`TestShellQuoteShellRoundTrip`。
+- PowerShell 7：兩個 binary 共 84 項 PASS。
+- Windows PowerShell 5.1：dist binary 42 項 PASS。
+- cmd.exe：兩個 binary 共 28 項 PASS。
+- line endings、gofmt、vet、`-count=10 -shuffle=on`、fuzz smoke、build、amd64／arm64 release build（`CGO_ENABLED=0`、`SHA256SUMS`）、working tree clean 全部 SUCCESS。
+
+**同步 main：**
+
+- 用 `git merge origin/main` 合併 `0db76b5`，得到 merge commit `b20eef7`。沒有 force push，也沒有 rebase。
+- 沒有 conflict。main 新增的 16 個 commit 只改 `tools/llmtool` 與 `reports/llmtool*`，沒有碰 `tools/nlf`、`.github` 或 `reports/nlf`。merge 前後 A8 的檔案完全相同。
+- 合併後的 CI 用 `workflow_dispatch` 在最新的 HEAD 上重跑。那次 run 的 ID 記在 roadmap 與最後的回報裡：這份報告無法記錄驗證它自己的那一次 run。
 
 ## Review
 
@@ -183,12 +233,7 @@ Review 列出第一次 Windows run 可能失敗的地方：
 
 ## 已知限制與剩下的風險
 
-- **Windows 原生驗證尚未完成**，要看第一次 `windows-latest` run 的結果。第一次執行就失敗、需要修正的機率不低。最不確定的幾項：
-  - `icacls` deny 在 admin runner 上是否真的拒絕存取
-  - `\\localhost\C$` administrative share 在 runner 上是否可用
-  - 255 字元的檔名在相對路徑下的長路徑處理
-  - Windows PowerShell 5.1 的引數傳遞
-  - cmd.exe 批次檔的細節
+- **Windows Server 已在 CI 上原生驗證**（run `36759759377`）。原本最不確定的幾項都已經在 runner 上實際通過：administrative share UNC、255 字元的檔名、PowerShell 5.1 的引數傳遞、cmd.exe 批次檔。icacls deny 需要先停用 backup 特權，才能真的拒絕存取，見上文。
 - **只有 CI 的 Windows Server 會被驗證。** Windows 10／11 桌面版、`windows/arm64` 實機、長路徑（超過 260 字元）、網路磁碟機代號、OneDrive 檔案隨選、防毒軟體的影響都需要人工驗證。
 - **race detector 沒有在 Windows 上嘗試**（原因見 CI）。之後如果要啟用，需要另外決定是否依賴 runner 的 C 編譯器。
 - **Windows 上沒有 xargs。** `-0` 的輸出本身會逐 byte 驗證，但沒有測試接到其他程式的情況。

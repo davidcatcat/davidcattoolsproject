@@ -116,7 +116,7 @@ nlf --confirm --dir /home "排除 .cache、node_modules 目錄，找最大的 10
 
 ### Windows
 
-> **狀態：驗證中，尚未宣稱為第一級支援平台。** 程式碼的可攜性、`windows/amd64` 與 `windows/arm64` 的 cross-build，以及 GitHub Actions `windows-latest` 的 CI 設定都已完成。只有 CI 在 Windows 上實際通過（完整測試，加上 PowerShell 與 cmd.exe 的 runtime smoke test），並完成下方「尚待人工驗證」的項目之後，才會把 Windows 列為第一級支援平台。
+> **狀態：Windows Server 已由 CI 驗證，尚未宣稱為第一級支援平台。** GitHub Actions `windows-latest` 已經實際跑過完整測試，以及 PowerShell 7、Windows PowerShell 5.1、cmd.exe 的 runtime smoke test，全部通過。下方「尚待人工驗證」的項目（Windows 10／11 桌面版、ARM64 實機等）完成之後，才會把 Windows 列為第一級支援平台。
 
 目標機器不需要安裝 Go。目標平台是 Windows 10、Windows 11 與 Windows Server（x64 與 ARM64）；目前的驗證狀態見上方說明與本節最後。
 
@@ -198,12 +198,13 @@ nlf --dir C:\src "pem files" & echo exit %ERRORLEVEL%
 - **`--explain` 與 `--confirm`。** Windows 沒有 `find`、`grep`、`stat`，Windows 的 `find.exe` 則是另一個搜尋文字的程式，所以不顯示近似指令，只顯示 nlf 的條件摘要。條件摘要與 macOS、Linux 完全相同，最後附一行說明：`No approximate command on Windows: …`（中文查詢顯示 `Windows 上不顯示近似指令：…`）。stdout／stderr 的分工不變：`--explain` 寫到 stdout，`--confirm` 的計畫與提示寫到 stderr。
 - **檔名與命令列的限制。** Windows 檔名不能含 `\ / : * ? " < > |`、控制字元或結尾的空白與句點。Windows 的命令列是 UTF-16，所以無效的 UTF-8 位元組在傳到 nlf 之前，就已經被換成 U+FFFD；「查詢含有無效的 UTF-8」這個錯誤在 Windows 的命令列上不會出現。
 
-**已由 CI 設定、等待第一次 `windows-latest` 執行結果的項目**
+**已由 CI（`windows-latest`，Windows Server）實際驗證的項目**
 
 - `gofmt`、`go vet`、`go test -count=1 -v ./...`（只允許略過 3 個需要 Unix 工具的測試：`TestExplainParity`、`TestGNUSortPipeline`、`TestShellQuoteShellRoundTrip`）、`go test -count=10 -shuffle=on`、fuzz smoke。
 - 以 `CGO_ENABLED=0` build `bin\nlf.exe` 與兩個 Windows release 執行檔，驗證 `SHA256SUMS`。
 - `scripts/ci-smoke.ps1` 在 PowerShell 7 與 Windows PowerShell 5.1 上執行，`scripts/ci-smoke.cmd` 在 cmd.exe 上執行。涵蓋搜尋、`--dir`（磁碟代號、正斜線、結尾反斜線、UNC、junction、`~\`、中文與空白）、`--explain`、`--confirm`、exit code、stdout／stderr 分離、`-0`，以及 fixture 沒有被修改。
 - Windows 專屬測試：drive root、`C:`、UNC、junction、隱藏屬性、以 ACL（`icacls` deny）造成的權限錯誤、不分大小寫的排除、Windows 路徑的排除。
+  - 測試 process 會先停用 `SeBackupPrivilege`／`SeRestorePrivilege`。CI runner 預設啟用這兩個特權，會讓 ACL 失效，就像 Unix 上的 root 不受權限限制。
 
 **尚待人工驗證**
 
