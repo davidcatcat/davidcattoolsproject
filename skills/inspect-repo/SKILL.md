@@ -14,7 +14,7 @@ Build a concrete map before proposing changes.
 3. Locate the code, tests, schemas, configs, and workflows relevant to the task.
 4. Find at least one existing analogous implementation when available.
 5. Inspect recent history for the touched area when it can clarify intent.
-6. Identify the public interface, data flow, invariants, and validation gates.
+6. Identify the public interface, data flow, invariants, validation gates, and existing diagnostics/observability paths. For executable workflows, locate error types/codes, log destinations, run/trace identifiers, redaction rules, retry/fallback policy, and approval boundaries before proposing changes.
 7. Before an integration, live, or smoke test, verify the exact tested checkout: branch, HEAD,
    upstream and `origin/main`, ahead/behind counts, required feature-commit ancestry, and working
    tree state. Confirm the installed executable's path and version identify that checkout.
@@ -33,3 +33,4 @@ Do not start implementation merely because a plausible file was found. Finish th
 - Validation commands are known.
 - When runtime validation applies, the tested revision/version is recorded first.
 - Unknowns that could change the implementation are surfaced.
+- For executable/runtime work, the existing error/log/trace and recovery path is known before implementation starts.
