@@ -249,3 +249,20 @@ including Offline canonical checks and Working tree is clean SUCCESS. That evide
 does not cover this production follow-up; updated-head CI pending publication.
 PR #10 remains DRAFT, unmerged. Updated A9-R1 needs external ChatGPT review.
 Anthropic HTTP API remains future A2.3. A10 NOT STARTED.
+
+
+### A9-R1 remote CI checkpoint
+
+Fix and host-validation commit: `4e7b5f35673632b46540845982b0a405e41a49e5`.
+[PR run 36855565474](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36855565474)
+and push run 36855559831 SUCCESS on this exact production/test HEAD.
+PR run: Python 3.9 514/514 PASS (17.903 s); Python 3.14 514/514 PASS
+(18.423 s); compileall PASS; Offline canonical checks SUCCESS and Working tree
+is clean SUCCESS in both jobs. The Linux CI suite has no filesystem skip.
+
+This documentation-only checkpoint records the CI evidence; production/tests retain
+the tested fix bytes and the standalone-wheel verified bytes. Final documentation
+HEAD CI is checked again after publication. A9-R1 FIXED; local functional/security
+validation PASS; real two-step transport/orchestration smoke PASS without claiming
+model quality. Updated external ChatGPT review remains pending. PR #10 DRAFT,
+unmerged. Anthropic API future A2.3; A10 NOT STARTED.

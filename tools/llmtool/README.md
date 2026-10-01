@@ -49,7 +49,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
-- **A9 — Agent Orchestration:** implementation complete on feature branch; prior external ChatGPT review PASS. Output-budget follow-up validated locally; updated-head CI and external review pending. NOT merged. A10 NOT STARTED.
+- **A9 — Agent Orchestration:** implementation complete on feature branch; prior external ChatGPT review PASS. Output-budget follow-up local validation and Python 3.9/3.14 CI PASS; updated external review pending. NOT merged. A10 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API

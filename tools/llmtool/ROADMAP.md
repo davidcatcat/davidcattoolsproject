@@ -399,7 +399,7 @@ Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthr
 未來 provider registry 加入後即可由同一 plan/profile contract 使用。
 
 A9 feature branch implementation complete；prior external ChatGPT review / CI PASS。
-Output-budget follow-up local validation PASS；updated-head CI / external review pending。
+Output-budget follow-up local validation / Python 3.9、3.14 CI PASS；updated external review pending。
 NOT merged。A10 NOT STARTED。
 
 ## A10 — Dynamic Context Retrieval
