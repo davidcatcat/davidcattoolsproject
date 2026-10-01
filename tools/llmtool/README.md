@@ -47,7 +47,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
-- **A7 — Skill Trainer / Feedback Loop:** implementation complete; post-main synchronization validation complete; external ChatGPT review PASS; NOT YET merged
+- **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1015,8 +1015,8 @@ A7 means **failure → human/external review → declarative skill proposal → 
 → manual skill revision/version bump → validation**. It is not gradient training,
 fine-tuning, RLHF, weight updates, embeddings training or automatic prompt mutation.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
-A7 is implemented on `feat/a7-skill-feedback-loop`, synchronized with hardened main;
-external ChatGPT review PASS; NOT YET merged. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
+A7 is DONE and merged to main in `d61ca6a` via PR #6 after synchronization with
+hardened main, complete local validation, external ChatGPT review and CI PASS. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
 
 ### Data models and strict format
 

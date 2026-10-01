@@ -267,3 +267,32 @@ README/ROADMAP now distinguish merged A0–A6 and bugfix hardening from synchron
 validated A7. A7 NOT YET merged at this validation stage. Existing PR #6 will be
 updated and marked ready after these local gates; GitHub CI result is pending push.
 Deferred Git-discard severity and CI-hardening follow-ups remain deferred. A8 excluded.
+
+
+## Final A7 merge — 2026-10-01
+
+A7 DONE and merged to main through [PR #6](https://github.com/davidcatcat/davidcattoolsproject/pull/6),
+normal merge commit `d61ca6a7d22d19b3aa45d321c8775bcd8140801c`,
+at 03:53:52 UTC. Synchronized/reviewed branch HEAD:
+`28e9306fe1e4c0b7ffde3093c3f137779960d1b5`. Immediately before merge,
+main remained `c8c63d2`, branch behind count was 0, diff contained only expected
+A7 files, and GitHub reported MERGEABLE/CLEAN.
+
+GitHub current-head CI: Python 3.9 SUCCESS and Python 3.14 SUCCESS in both
+[PR run 36812481761](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36812481761)
+and [push run 36812478140](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36812478140).
+The local 423-test complete suite evidence, wheel verification and external review
+above apply to the merged implementation; only status documents changed afterward.
+
+Post-merge verification PASS: origin/main contains all three feedback production
+modules, test_feedback.py, repository feedback fixtures and this report. Production,
+tests, fixtures and workflow match the CI-tested branch bytes. Hardened A0–A6 shared
+source remains current; A7 adds only minimal CLI dispatch. Independent review reports
+are unmodified. Canonical main was fast-forwarded without alternate checkouts;
+unrelated benchmark/reasoning files preserved. README/ROADMAP updated to merged status.
+
+Git-discard severity alignment and CI-hardening (SHA pins, persist-credentials,
+dependency pinning/hashes and working-tree-clean checks) remain deferred.
+No A8, Agent orchestration, automatic execution or auto-apply work was introduced.
+Historical NOT YET merged statements above record their original validation stages;
+this section is the current final state.

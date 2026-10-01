@@ -301,7 +301,7 @@ Merged to main in `63b5bae`；external ChatGPT review PASS。
 A7/A8 可重用 feedback/regression，A9/A11 仍須獨立建立 permissions／approval／execution；
 A6 不開始 trainer、agents、routing、retrieval、autonomous repair 或 production execution。
 
-## A7 — Skill Trainer / Feedback Loop — implementation complete, NOT YET merged
+## A7 — Skill Trainer / Feedback Loop ✅ DONE and merged to main
 
 model failure → explicit capture → human／external review → declarative skill
 proposal → regression case → manual versioned Skill revision → validation。
@@ -346,7 +346,8 @@ A7 不開始 A8/A9/A10/A11 implementation。
 Historical pre-sync validation: 47 targeted tests; 392 discovered, 391 passed, one skip.
 A0–A6 DONE and merged; A0–A7 bugfix/hardening merged (`643caa2`).
 A7 synchronized with hardened main; post-sync validation complete (423 discovered, 422 passed, one skip).
-External ChatGPT review PASS; A7 NOT YET merged.
+External ChatGPT review PASS; A7 merged to main in `d61ca6a` via PR #6.
+PR CI Python 3.9 / 3.14 PASS.
 詳見 [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md)。
 
 ## A8 — Regression / Benchmark System
@@ -374,7 +375,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A6 已完成並合併至 `main`；現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A7 已完成並合併至 `main`；現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
 
 ## A12 — Remote Frontends / Telegram Agent
 
