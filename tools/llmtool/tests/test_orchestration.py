@@ -3,10 +3,11 @@
 import ast
 import io
 import json
+import os
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import FrozenInstanceError
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -16,6 +17,7 @@ from llmtool.cli import main
 from llmtool.errors import LLMToolError
 from llmtool.providers.base import Reply
 from llmtool.roles import ROLE_NAMES, role_definition
+from llmtool.providers import client_type
 
 
 def make_plan(*pairs):
@@ -94,6 +96,51 @@ class OrchestrationModelTests(unittest.TestCase):
         self.assertEqual(data["completed_step_count"], 1)
         self.assertEqual(data["final_content"], "answer")
         self.assertFalse(data["steps"][0]["runtime"]["token_usage_available"])
+
+    def test_plan_rejects_empty_malformed_nested_and_invalid_unicode(self):
+        for raw in ('{"steps":[]}', '{', 'Infinity', '{"steps":[{"role":"grinder",'
+                    '"role":"coder","provider":"p"}]}', '[' * 7 + '0' + ']' * 7,
+                    '{"steps":[]} ' + 'x' * o.JSON_LIMIT, '\ud800'):
+            with self.subTest(raw=raw[:60]), self.assertRaises(LLMToolError):
+                o.parse_orchestration_plan(raw)
+
+    def test_models_detach_lists_and_reject_untyped_values(self):
+        bindings = [o.RoleBinding("grinder", "p")]
+        plan = o.OrchestrationPlan(bindings)
+        bindings.clear()
+        self.assertEqual(len(plan.steps), 1)
+        for constructor, value in ((o.OrchestrationPlan, [{}]),
+                                   (o.OrchestrationResult, [{}]),
+                                   (o.OrchestrationResult, [])):
+            with self.assertRaises(LLMToolError):
+                constructor(value)
+        step = o.AgentStepResult("grinder", "p", "answer", o.BenchmarkRuntime())
+        for obj, field, value in ((step, "content", "changed"),
+                                  (plan.steps[0], "provider", "changed"),
+                                  (o.OrchestrationResult([step]), "steps", ())):
+            with self.assertRaises(FrozenInstanceError):
+                setattr(obj, field, value)
+        with self.assertRaises(LLMToolError):
+            replace(step, runtime={})
+
+    def test_utf8_byte_limits_and_json_escaping(self):
+        # Character count alone cannot enforce the byte bound.
+        with self.assertRaises(LLMToolError):
+            o.AgentStepResult("grinder", "p", "日" * (o.MAX_STEP_OUTPUT_BYTES // 3 + 1),
+                             o.BenchmarkRuntime())
+        step = o.AgentStepResult("grinder", "p", "\x00" * o.MAX_STEP_OUTPUT_BYTES,
+                                o.BenchmarkRuntime())
+        with self.assertRaisesRegex(LLMToolError, "JSON exceeds"):
+            o.OrchestrationResult([step])
+
+    def test_aggregate_byte_budget_and_duplicate_results(self):
+        steps = [o.AgentStepResult(role, "p", "x" * 16, o.BenchmarkRuntime())
+                 for role in ROLE_NAMES]
+        with patch.object(o, "MAX_TOTAL_OUTPUT_BYTES", 63):
+            with self.assertRaisesRegex(LLMToolError, "total output"):
+                o.OrchestrationResult(steps)
+        with self.assertRaises(LLMToolError):
+            o.OrchestrationResult([steps[0], steps[0]])
 
 
 class OrchestrationExecutionTests(unittest.TestCase):
@@ -188,13 +235,56 @@ class OrchestrationExecutionTests(unittest.TestCase):
             with self.assertRaises(LLMToolError):
                 o.run_orchestration_plan(make_plan(("grinder", "p")), "task")
 
+    def test_serialized_overflow_stops_before_next_profile(self):
+        clients = self.clients(["\x00" * o.MAX_STEP_OUTPUT_BYTES] * 2)
+        with patch.object(o, "resolve_config", return_value={}) as resolve, \
+                patch.object(o, "api_key", return_value=None) as key, \
+                patch.object(o, "create_client", side_effect=clients) as factory:
+            with self.assertRaisesRegex(LLMToolError, "JSON exceeds"):
+                o.run_orchestration_plan(make_plan(("grinder", "first"),
+                                                   ("reviewer", "later")), "task")
+        self.assertEqual(resolve.call_count, 1)
+        self.assertEqual(key.call_count, 1)
+        self.assertEqual(factory.call_count, 1)
+        clients[0].complete.assert_called_once()
+        clients[1].complete.assert_not_called()
+
+    def test_total_overflow_stops_before_next_profile(self):
+        clients = self.clients(["x" * 16, "y" * 16, "later"])
+        with patch.object(o, "MAX_TOTAL_OUTPUT_BYTES", 31), \
+                patch.object(o, "resolve_config", return_value={}) as resolve, \
+                patch.object(o, "api_key", return_value=None), \
+                patch.object(o, "create_client", side_effect=clients):
+            with self.assertRaisesRegex(LLMToolError, "total output"):
+                o.run_orchestration_plan(make_plan(("grinder", "p"), ("coder", "p"),
+                                                   ("reviewer", "p")), "task")
+        self.assertEqual(resolve.call_count, 2)
+        clients[2].complete.assert_not_called()
+
+    def test_invalid_reply_content_stops_later_steps(self):
+        for content in (None, {}, "", " \n", "\ud800",
+                        "x" * (o.MAX_STEP_OUTPUT_BYTES + 1)):
+            clients = self.clients([content, "later"])
+            with self.subTest(content_type=type(content).__name__), \
+                    patch.object(o, "resolve_config", return_value={}), \
+                    patch.object(o, "api_key", return_value=None), \
+                    patch.object(o, "create_client", side_effect=clients) as factory:
+                with self.assertRaises(LLMToolError):
+                    o.run_orchestration_plan(make_plan(("grinder", "p"),
+                                                       ("reviewer", "p")), "task")
+                self.assertEqual(factory.call_count, 1)
+                clients[1].complete.assert_not_called()
+
     def test_no_execution_mechanisms_in_a9_modules(self):
         forbidden = {"eval", "exec", "system", "Popen", "run", "call", "check_call", "check_output"}
-        for module in (o, oc):
+        import llmtool.roles as roles
+        for module in (o, oc, roles):
             tree = ast.parse(Path(module.__file__).read_text())
             for node in ast.walk(tree):
                 if isinstance(node, (ast.Import, ast.ImportFrom)):
                     self.assertNotEqual(getattr(node, "module", None), "subprocess")
+                    if isinstance(node, ast.Import):
+                        self.assertFalse(any(alias.name == "subprocess" for alias in node.names))
                 if isinstance(node, ast.Call):
                     name = (
                         node.func.id
@@ -293,6 +383,152 @@ class OrchestrationCLITests(unittest.TestCase):
         self.assertEqual((code, raw), (1, ""))
         self.assertNotIn("PRIVATE", error)
         self.assertNotIn("Traceback", error)
+
+    def test_explicit_text_and_file_never_read_stdin(self):
+        class UnreadableStdin:
+            def isatty(self):
+                raise AssertionError("explicit input touched stdin")
+            @property
+            def buffer(self):
+                raise AssertionError("explicit input touched stdin")
+
+        taskfile = self.root / "task.txt"
+        taskfile.write_text("FILE_TASK", encoding="utf-8")
+        result = o.OrchestrationResult([
+            o.AgentStepResult("grinder", "fast", "done", o.BenchmarkRuntime())])
+        for source, expected in ((["DIRECT_TASK"], "DIRECT_TASK"),
+                                 (["--file", str(taskfile)], "FILE_TASK")):
+            with patch("sys.stdin", UnreadableStdin()), \
+                    patch.object(oc, "run_orchestration_plan", return_value=result) as runner:
+                code, raw, error = self.invoke(["--plan", str(self.plan), *source, "--json"])
+            self.assertEqual((code, error), (0, ""))
+            self.assertEqual(runner.call_args.args[1], expected)
+            self.assertEqual(json.loads(raw)["final_content"], "done")
+
+    def test_conflicting_or_empty_input_prevents_providers(self):
+        taskfile = self.root / "task.txt"
+        taskfile.write_text("task")
+        for source in (["task", "--file", str(taskfile)], [""]):
+            with patch.object(oc, "run_orchestration_plan") as runner:
+                code, raw, error = self.invoke(["--plan", str(self.plan), *source])
+            self.assertEqual((code, raw), (1, ""))
+            self.assertTrue(error)
+            runner.assert_not_called()
+
+    def test_second_step_failure_has_no_partial_stdout(self):
+        clients = [Mock(), Mock()]
+        clients[0].complete.return_value = Reply("FIRST_ANSWER", {})
+        clients[1].complete.side_effect = LLMToolError("provider failed")
+        with patch.object(o, "resolve_config", return_value={}), \
+                patch.object(o, "api_key", return_value=None), \
+                patch.object(o, "create_client", side_effect=clients):
+            code, raw, error = self.invoke(["--plan", str(self.plan), "TASK", "--json"])
+        self.assertEqual((code, raw), (1, ""))
+        self.assertNotIn("FIRST_ANSWER", error)
+        for client in clients:
+            client.complete.assert_called_once()
+
+
+class OrchestrationProfileIntegrationTests(unittest.TestCase):
+    """Exercise real resolution/factories/wire normalization, replacing transport I/O."""
+
+    def setUp(self):
+        import yaml
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.config_path = self.root / "config.yaml"
+        self.profiles = {
+            "reasoning": {"type": "openai", "model": "openai-test", "api_key_env": "FAKE_KEY"},
+            "code": {"type": "openai-compatible", "model": "compatible-test",
+                     "base_url": "https://gateway.example"},
+            "local-codex": {"type": "codex-cli"},
+            "local-claude": {"type": "claude-cli"},
+            "unused": {"type": "openai", "model": "unused", "api_key_env": "UNSET_KEY"},
+        }
+        self.config_path.write_text(yaml.safe_dump({"providers": self.profiles,
+                                                    "active_provider": "unused"}))
+        self.stack = ExitStack()
+        self.addCleanup(self.stack.close)
+        self.stack.enter_context(patch.dict(os.environ, {"FAKE_KEY": "SYNTHETIC_KEY",
+                                                        "LLMTOOL_PROVIDER": "unused"}, clear=True))
+        self.stack.enter_context(patch("llmtool.config.user_config_path", return_value=self.config_path))
+        self.stack.enter_context(patch("llmtool.config.Path.cwd", return_value=self.root))
+
+    def test_four_transports_real_resolution_and_normalization(self):
+        plan = make_plan(("grinder", "reasoning"), ("validator", "local-codex"),
+                         ("coder", "code"), ("reviewer", "local-claude"))
+        calls = []
+
+        def http(req, **kwargs):
+            body = json.loads(req.data)
+            calls.append((body["model"], body.get("input", body.get("messages"))))
+            self.assertNotIn("tools", body)
+            if body["model"] == "openai-test":
+                self.assertFalse(body["store"])
+                payload = {"status": "completed", "model": "openai-test", "output": [
+                    {"type": "reasoning", "summary": "PRIVATE_REASONING"},
+                    {"type": "message", "role": "assistant", "content": [
+                        {"type": "output_text", "text": "FIRST_OUTPUT"}]}],
+                    "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}}
+            else:
+                payload = {"model": "compatible-test", "choices": [{"finish_reason": "stop",
+                           "message": {"content": "THIRD_OUTPUT", "reasoning_content": "PRIVATE_REASONING"}}],
+                           "usage": {"prompt_tokens": 4, "completion_tokens": 2, "total_tokens": 6}}
+            response = Mock(status=200)
+            response.read.return_value = json.dumps(payload).encode()
+            context = Mock()
+            context.__enter__ = Mock(return_value=response)
+            context.__exit__ = Mock(return_value=False)
+            return context
+
+        def codex(executable, prompt, runtime):
+            calls.append(("codex", prompt))
+            return "SECOND_OUTPUT", 0.02
+
+        def claude(executable, prompt):
+            calls.append(("claude", prompt))
+            return "FOURTH_OUTPUT", 0.03
+
+        before = self.config_path.read_bytes()
+        with patch("urllib.request.OpenerDirector.open", side_effect=http), \
+                patch("shutil.which", return_value="/fake/runtime"), \
+                patch.object(client_type("codex-cli"), "_invoke", side_effect=codex), \
+                patch.object(client_type("claude-cli"), "_invoke", side_effect=claude):
+            result = o.run_orchestration_plan(plan, "ORIGINAL_TASK")
+        self.assertEqual([call[0] for call in calls],
+                         ["openai-test", "codex", "compatible-test", "claude"])
+        for _, messages in calls:
+            self.assertIn("ORIGINAL_TASK", str(messages))
+        self.assertIn("FIRST_OUTPUT", calls[1][1])
+        self.assertIn("SECOND_OUTPUT", str(calls[2][1]))
+        self.assertNotIn("FIRST_OUTPUT", str(calls[2][1]))
+        self.assertIn("THIRD_OUTPUT", calls[3][1])
+        self.assertNotIn("SECOND_OUTPUT", calls[3][1])
+        self.assertEqual([s.provider for s in result.steps], [s.provider for s in plan.steps])
+        self.assertEqual([s.runtime.total_tokens for s in result.steps], [3, None, 6, None])
+        self.assertEqual(result.final_content, "FOURTH_OUTPUT")
+        self.assertNotIn("PRIVATE_REASONING", result.to_json())
+        self.assertNotIn("SYNTHETIC_KEY", result.to_json())
+        self.assertEqual(self.config_path.read_bytes(), before)
+
+    def test_real_readiness_blocks_key_lookup_and_later_profiles(self):
+        import yaml
+        self.profiles["reasoning"]["model"] = None
+        self.config_path.write_text(yaml.safe_dump({"providers": self.profiles}))
+        with patch.object(o, "api_key") as key, patch.object(o, "create_client") as factory:
+            with self.assertRaisesRegex(LLMToolError, "model is not configured"):
+                o.run_orchestration_plan(make_plan(("grinder", "reasoning"),
+                                                   ("reviewer", "local-claude")), "task")
+        key.assert_not_called()
+        factory.assert_not_called()
+
+    def test_unknown_profile_fails_without_fallback_to_active(self):
+        with patch.object(o, "api_key") as key, patch.object(o, "create_client") as factory:
+            with self.assertRaisesRegex(LLMToolError, "not defined"):
+                o.run_orchestration_plan(make_plan(("grinder", "missing-profile")), "task")
+        key.assert_not_called()
+        factory.assert_not_called()
 
 
 if __name__ == "__main__":

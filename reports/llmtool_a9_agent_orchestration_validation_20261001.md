@@ -144,3 +144,108 @@ CI editable-install/import validation PASS. Live provider smoke remains NOT-TEST
 because the GitHub connector cannot access the user's local authenticated CLI session.
 
 PR #10 remains DRAFT and unmerged by design. A10 NOT STARTED.
+
+
+## Canonical host functional follow-up — 2026-10-01
+
+Reviewed remote A9 HEAD: `17daec7f4e6b7a3ac75f97281d8050782c39fe33`;
+base main: `a4c102732898c3d82b4047516753977f8ba3ce4b`.
+All development, tests, wheel commands and smoke were launched from the canonical
+repository. Only the prior Codex-authored A8 closeout drafts were backed up as
+`/private/tmp/codex-a8-closeout-drafts-before-a9.patch` and reverted before selecting
+the existing A9 remote branch. No alternate project checkout was created or used;
+existing registered worktrees and unrelated untracked files remained untouched.
+
+### Demonstrated defect and fix: A9-R1
+
+The runner checked raw content budgets per step but checked escaped result JSON
+only after all steps. A 128 KiB control-character output can exceed 1 MiB when
+serialized with repeated final_content. The regression initially demonstrated that
+the second profile was reached before detecting overflow. FIXED: construct and
+validate each completed OrchestrationResult prefix before resolving the next profile.
+The test now proves next-profile resolution, API-key lookup, client construction
+and completion never occur after this overflow. No bounds were relaxed or output
+truncated. Every prefix must fit the serialized result budget; escaping may cause
+an output below the raw-content limit to fail. Metrics/provider transports unchanged.
+
+### Functional, architectural and failure-path coverage
+
+13 tests added to the original 19: strict malformed/empty/nested/duplicate-key/UTF-8
+plan handling; detached frozen typed models; UTF-8 byte limits; escaped JSON and
+aggregate byte budgets; invalid reply content; overflow fail-fast; explicit text/file
+input never reading stdin; conflicting/empty input causing no request; second-step
+failure leaving stdout empty; real readiness failure preventing credentials; unknown
+profile never falling back; four registered transports using real config/factory/
+wire normalization with transport I/O mocked.
+
+The four-transport test deliberately maps grinder to OpenAI, validator to Codex,
+coder to compatible HTTP, reviewer to Claude. It proves explicit plan selection wins
+over active/environment profile, an unused missing credential is never resolved,
+original task appears every step, only the immediately previous output is handed
+forward, config bytes are unchanged, hidden reasoning is excluded, HTTP tools are
+not enabled, OpenAI store:false remains, evidenced tokens are preserved and CLI
+usage remains null. The execution AST test now also checks the role module and
+plain `import subprocess` forms. No provider-role inference or dynamic routing.
+
+### Exact local validation
+
+| Gate | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+|---|---:|---:|---:|---:|---:|---:|
+| A9 focused source | 32 | 32 | 0 | 0 | 0 | 0.262 s |
+| Affected shared tests | 278 | 278 | 0 | 0 | 0 | 31.351 s |
+| Canonical Python 3.13.3 syntax + suite | 514 | 513 | 0 | 0 | 1 | 43.032 s |
+| Actual Python 3.9.6 syntax + suite | 514 | 513 | 0 | 0 | 1 | 72.053 s |
+| Installed-wheel A9 focused | 32 | 32 | 0 | 0 | 0 | 0.213 s |
+
+Both make check commands exited 0; compileall PASS. One inherited filesystem skip,
+no A9 skips. Tests remain offline and use fake/mocked transports and local loopback
+servers. Initial A9-R1 regression failed before the fix; all final rows above passed.
+Commands: unittest discover -s tools/llmtool/tests -p test_orchestration.py;
+PYTHONPATH=tools/llmtool/tests unittest test_cli test_config test_provider
+test_openai_provider test_claude_cli_provider test_codex_cli_provider
+test_provider_integration test_terminal test_benchmark test_validator;
+make -C tools/llmtool check with canonical .venv/bin/python and /usr/bin/python3.
+
+### Wheel and user-facing CLI
+
+Standalone wheel build PASS through existing setuptools build isolation; the first
+no-build-isolation attempt could not import setuptools in the local venv. No product
+dependency/build configuration changed. Wheel SHA256:
+`7b03bbe63f1276251c6cc2dfabeb354d9d72476889f5357885bbbc20fc4638a3`.
+All 31 packaged Python/resource files match canonical source bytes. New roles.py,
+orchestration.py and orchestration_cli.py are present. Inherited A0–A8 production
+modules/resources match main except the four additive CLI integration lines; examples,
+benchmarks, feedback datasets and tests are excluded. Installed wheel in a temporary
+artifact directory passed its own A9 focused suite; imports were verified to come
+from that installation. Four-role source JSON dry-run and two-role installed-wheel
+human dry-run both PASS without profile/config/credential access.
+
+### One real two-step smoke
+
+Claude CLI 2.1.286, existing authenticated runtime, exactly one grinder → reviewer
+pipeline / two provider requests. A temporary explicitly supplied config fixture
+selected claude-cli without new credentials or changing user config/HOME/auth.
+Synthetic HTTP 500 task only, no repository context. Hardened existing transport
+kept tools disabled; no model-suggested command was executed. No retry or fallback.
+Transport/orchestration PASS: both ordered roles completed with safe result metadata;
+synthetic marker was present in both results. This marker also appeared in the
+original task, so it alone is not independent proof of handoff; exact shallow
+handoff is independently covered by the transport integration regression.
+Wall/provider latency: grinder 6102/6096 ms; reviewer 10397/10383 ms. Total smoke
+16.525 s. Model identifier and token counts null; token_usage_available=false.
+Raw outputs/stderr/auth data not retained in this report. No model-quality PASS
+claimed; no automatic A8 evaluation. Historical A8 Claude safety FAIL remains intact.
+
+### Security and current status
+
+Complete follow-up diff and AST review PASS. No A9 subprocess/shell/Git/file/code
+mutation, provider-native tool enablement, automatic skill selection, retry/fallback,
+credential logging, raw stderr, hidden context accumulation, retrieval or approval
+engine introduced. Existing runtime subprocess isolation belongs to the unchanged
+provider transports; A9 itself uses Provider.complete only.
+
+Historical CI run 36852015835 verified exact remote HEAD 17daec7 on both Python jobs,
+including Offline canonical checks and Working tree is clean SUCCESS. That evidence
+does not cover this production follow-up; updated-head CI pending publication.
+PR #10 remains DRAFT, unmerged. Updated A9-R1 needs external ChatGPT review.
+Anthropic HTTP API remains future A2.3. A10 NOT STARTED.

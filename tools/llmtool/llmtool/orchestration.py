@@ -196,8 +196,11 @@ def run_orchestration_plan(plan, task):
             raise LLMToolError("orchestration total output exceeds 512 KiB")
         runtime = normalize_runtime(reply.metadata, elapsed)
         results.append(AgentStepResult(binding.role, binding.provider, content, runtime))
+        # Validate every completed prefix, including JSON escaping and the
+        # repeated final_content, before resolving another profile's credentials.
+        result = OrchestrationResult(results)
         previous = content
-    return OrchestrationResult(results)
+    return result
 
 
 def format_plan(plan):
