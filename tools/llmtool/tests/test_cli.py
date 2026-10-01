@@ -175,6 +175,43 @@ class CLITests(unittest.TestCase):
         result = self.run_cli("ask", data=b"")
         self.assert_failure(result)
 
+    @unittest.skipUnless(os.name == 'posix', 'POSIX shell/fd regression')
+    def test_explicit_input_with_closed_stdin_and_regular_file_shell_loops(self):
+        tasks = self.cwd / 'tasks'
+        tasks.write_text('first\nsecond\n')
+        diff = self.cwd / 'proposal.diff'
+        diff.write_text('proposed diff')
+        files = self.cwd / 'files'
+        files.write_text(str(diff) + '\n')
+        scripts = (
+            ('"$1" "$2" ask q <&-', (), ['q']),
+            ('while read q; do "$1" "$2" ask "$q" || exit; done < "$3"', (str(tasks),), ['first', 'second']),
+            ('while read f; do "$1" "$2" review-diff --file "$f" || exit; done < "$3"', (str(files),), ['proposed diff']),
+        )
+        for script, extra, expected in scripts:
+            self.server.requests = []
+            result = subprocess.run(['/bin/sh', '-c', script, 'regression', sys.executable, str(ENTRYPOINT), *extra],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    cwd=self.cwd, env=self.env, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual([r[2]['messages'][1]['content'] for r in self.server.requests], expected)
+
+    @unittest.skipUnless(os.name == 'posix', 'POSIX open-pipe regression')
+    def test_stdin_only_unconfigured_profile_fails_before_open_pipe_eof(self):
+        reader, writer = os.pipe()
+        try:
+            env = dict(self.env)
+            env.pop('LLMTOOL_BASE_URL')
+            env.pop('LLMTOOL_MODEL')
+            result = subprocess.run([sys.executable, str(ENTRYPOINT), 'ask'], stdin=reader,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    cwd=self.cwd, env=env, timeout=5)
+            self.assert_failure(result)
+            self.assertEqual(self.server.requests, [])
+        finally:
+            os.close(reader)
+            os.close(writer)
+
     def test_broken_pipe_is_suppressed_at_cli_boundary(self):
         from llmtool.cli import main
         class Broken:

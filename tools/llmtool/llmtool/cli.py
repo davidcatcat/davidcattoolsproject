@@ -11,7 +11,7 @@ from .configure import run_configure
 from .chat import ChatSession, run_chat
 from .context import parse_context_packet, format_context_packet
 from .errors import LLMToolError
-from .inputs import read_input
+from .inputs import read_input, validate_input_sources
 from .git_intel import collect_git_snapshot, format_git_snapshot
 from .prompts import TEMPLATES, messages_for
 from .skills import discover_skills, load_skill
@@ -169,19 +169,23 @@ def main(argv=None):
             init_config(user_config_path(), args.force)
             print("llmtool: user config initialized", file=sys.stderr)
             return 0
-        text = read_input(args.text, args.file, sys.stdin) if args.command in TEMPLATES else None
+        if args.command in TEMPLATES:
+            validate_input_sources(args.text, args.file, sys.stdin)
         config = resolve_config(vars(args), require_configured=args.command not in ("config", "chat"))
         if args.command == "config":
             print(show_config(config), end="")
             return 0
         if args.command == "chat":
             return run_chat(ChatSession(config, selected_skill))
+        text = read_input(args.text, args.file, sys.stdin)
         result = create_client(config, api_key(config)).complete(messages_for(args.command, text, selected_skill))
         # Validation completes before stdout is touched, including truncation checks.
         output = result.content
         if args.command == "analyze-log" or (selected_skill is not None and selected_skill.name == "analyze-log"):
-            from .log_safety import validate_log_suggestions
-            validate_log_suggestions(output)
+            from .log_safety import filter_log_suggestions
+            output, suppressed = filter_log_suggestions(output)
+            if suppressed:
+                print("llmtool: analyze-log suppressed " + str(suppressed) + " unsafe or unsupported NEXT_COMMANDS suggestion(s)", file=sys.stderr)
         if args.command == "context-pack":
             packet = parse_context_packet(result.content)
             output = packet.to_json() if args.json else format_context_packet(packet)

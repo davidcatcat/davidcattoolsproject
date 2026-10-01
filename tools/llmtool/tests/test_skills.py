@@ -172,8 +172,9 @@ class SkillCLITests(unittest.TestCase):
             text = '  exact 測試\n'
             with patch('pathlib.Path.home', return_value=home), patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.api_key', return_value=None), patch('llmtool.cli.read_input', return_value=text), patch('subprocess.run', side_effect=AssertionError), patch('subprocess.Popen', side_effect=AssertionError), patch('os.system', side_effect=AssertionError):
                 result = self.run_cli(['ask', '--skill', 'analyze-log', text])
-            self.assertEqual(result[0:2], (1, ''))
-            self.assertIn('safety/format validation', result[2])
+            self.assertEqual(result[0], 0)
+            self.assertNotIn(command, result[1])
+            self.assertIn('suppressed 1', result[2])
             client.complete.assert_called_once_with(messages_for('ask', text, load_skill('analyze-log')))
             self.assertEqual(config.read_bytes(), before)
             self.assertFalse((home / 'forbidden').exists())

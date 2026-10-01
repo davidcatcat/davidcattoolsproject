@@ -101,22 +101,19 @@ class InputProbeTests(unittest.TestCase):
         with tempfile.TemporaryFile() as file:
             file.write(b'data')
             file.seek(0)
-            with self.assertRaises(LLMToolError):
-                read_input('task', None, file)
+            self.assertEqual(read_input('task', None, file), 'task')
             file.seek(4)
             self.assertEqual(read_input('task', None, file), 'task')
 
-    def test_memory_stream_and_unsupported_stream_fail_closed(self):
-        with self.assertRaises(LLMToolError):
-            read_input('task', None, io.StringIO('data'))
+    def test_memory_stream_and_unsupported_stream_preserve_explicit_input(self):
+        self.assertEqual(read_input('task', None, io.StringIO('data')), 'task')
         self.assertEqual(read_input('task', None, io.StringIO('')), 'task')
         class Unsupported:
             def isatty(self):
                 return False
             def fileno(self):
                 raise OSError('private detail')
-        with self.assertRaisesRegex(LLMToolError, '^cannot read input as UTF-8 text$'):
-            read_input('task', None, Unsupported())
+        self.assertEqual(read_input('task', None, Unsupported()), 'task')
 
 
 class PersistedConfigTests(unittest.TestCase):
@@ -287,17 +284,18 @@ class AnalyzeLogSafetyTests(unittest.TestCase):
                         'cat /etc/app/config.yaml', 'grep token credentials.txt',
                         'head private.key', 'sudo -u root cat private.key',
                         'sudo -u root grep value credentials.txt', 'env', 'git push', 'rm -rf FILE'):
-            with self.subTest(command=command), self.assertRaisesRegex(LLMToolError, 'output omitted'):
-                validate_log_suggestions('NEXT_COMMANDS:\n- ' + command)
+            with self.subTest(command=command):
+                output, count = validate_log_suggestions('NEXT_COMMANDS:\n- ' + command)
+                self.assertEqual(count, 1)
+                self.assertNotIn(command, output)
 
-    def test_unsupported_format_controls_and_bounds_fail_closed(self):
-        for text in ('prose', 'NEXT_COMMANDS:\n', 'NEXT_COMMANDS:\n- pwd\nNEXT_COMMANDS:\n- pwd',
-                     'NEXT_COMMANDS:\n```sh\npwd\n```', 'NEXT_COMMANDS:\n- pwd\nextra explanation',
-                     'NEXT_COMMANDS:\n- sh -c "kubectl get secrets"',
-                     'NEXT_COMMANDS:\n- $(anything)', 'NEXT_COMMANDS:\n- pwd\x1b',
-                     'NEXT_COMMANDS:\n' + '\n'.join(['- pwd'] * 4), 'x' * (OUTPUT_LIMIT + 1)):
-            with self.subTest(text=text[:80]), self.assertRaises(LLMToolError):
-                validate_log_suggestions(text)
+    def test_transport_bounds_fail_but_bad_suggestions_are_suppressed(self):
+        with self.assertRaises(LLMToolError):
+            validate_log_suggestions('x' * (OUTPUT_LIMIT + 1))
+        for command in ('sh -c "kubectl get secrets"', '$(anything)', 'pwd\x1b'):
+            output, count = validate_log_suggestions('ROOT_CAUSE:\nEvidence\nNEXT_COMMANDS:\n- ' + command)
+            self.assertIn('ROOT_CAUSE:', output)
+            self.assertEqual(count, 1)
 
     def test_unsafe_cli_reply_never_reaches_stdout_metadata_or_execution(self):
         for args in (['analyze-log', 'evidence', '--verbose'],
@@ -311,9 +309,10 @@ class AnalyzeLogSafetyTests(unittest.TestCase):
                     patch('subprocess.run', side_effect=AssertionError('execution')), \
                     patch('os.system', side_effect=AssertionError('execution')), \
                     redirect_stdout(out), redirect_stderr(err):
-                self.assertEqual(main(args), 1)
-            self.assertEqual(out.getvalue(), '')
-            self.assertNotIn('PRIVATE_METADATA', err.getvalue())
+                self.assertEqual(main(args), 0)
+            self.assertIn('(none)', out.getvalue())
+            self.assertNotIn('kubectl', out.getvalue())
+            self.assertIn('suppressed 1', err.getvalue())
             self.assertNotIn('kubectl', err.getvalue())
 
 
