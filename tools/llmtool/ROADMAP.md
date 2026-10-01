@@ -433,9 +433,18 @@ validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_
 ## A11 — Production Workflow & Diagnostics — NOT STARTED / NEXT
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
-能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。因此 diagnostics 是 execution 的
-前置基礎，不是事後附加功能。A11 在 observability / diagnostics foundation 完成之前，
-不得先開啟 autonomous production mutation。
+能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
+基礎，不是事後附加功能；在 observability/diagnostics foundation 完成前，不得開啟
+autonomous production mutation。
+
+A11 拆成三個可獨立 merge / review / validation 的 milestone，避免一次交付過大：
+
+- **A11a — Observability & Diagnostics**
+- **A11b — Execution, Approval & Recovery**
+- **A11c — Integration & Real-world Acceptance**
+
+每個 milestone 都要有自己的 validation report、external review 與 Definition of Done。
+A10 已 DONE and merged；A11a 是下一個 implementation milestone。
 
 Target workflow:
 
@@ -457,45 +466,55 @@ approval where required
 Git / final result
 ```
 
-A10 已完成並合併；A11 從 A0～A10 的既有 read-only、validation、orchestration 與
-retrieval primitives 組成可執行 workflow。A11 不把 provider capability 視為 authorization，
-也不因模型聲稱 success 就判定任務成功。
+A11 從 A0～A10 的 read-only、validation、orchestration 與 retrieval primitives 組成
+可執行 workflow。Provider capability 不等於 authorization；model-reported success
+不等於 task success。
 
 ### A11.0 — Documentation / Roadmap Sync
 
-- 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保持原樣，
-  不回寫當時狀態。
-- A10 = DONE and merged；A11 = NEXT；A12 = future optional frontend。
-- A11 子項完成狀態必須逐項更新，不以「大致完成」取代驗收證據。
+- 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保持原樣。
+- A10 = DONE and merged；A11a = NEXT；A12 = future optional frontend。
+- 不以「大致完成」取代逐 milestone 的 validation evidence。
 
-### A11.1 — Diagnostics Foundation
+## A11a — Observability & Diagnostics
+
+A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
+retrieve-context、orchestrate。A11a 不引入 shell、patch、file mutation 或 Git mutation。
+
+### A11a.1 — Diagnostics Foundation
 
 建立統一 diagnostics contract：
 
-- 每次 workflow 產生唯一 `run_id`；需要巢狀追蹤時使用 `span_id` / `event_id`。
+- 每次可追蹤 workflow 產生唯一 `run_id`；需要巢狀追蹤時使用 `span_id` / `event_id`。
 - 統一 structured error model，不允許 production path 只丟 raw exception/string。
-- Error fields 至少包含：`code`, `message`, `component`, `run_id`, `severity`,
+- Error fields 至少包含 `code`, `message`, `component`, `run_id`, `severity`,
   `retryable`, `recoverable`, `fallback_allowed`, `user_action_required`。
-- 定義穩定 CLI exit-code families，供 shell/Jenkins/未來 frontend 判斷，不靠解析英文訊息。
-- 第一版 error taxonomy 至少包含：
-  `USER_*`, `CONFIG_*`, `ENV_*`, `AUTH_*`, `NETWORK_*`,
-  `PROVIDER_*`, `MODEL_*`, `TOOL_*`, `FILE_*`, `GIT_*`,
+- 第一版 taxonomy 至少涵蓋 `USER_*`, `CONFIG_*`, `ENV_*`, `AUTH_*`,
+  `NETWORK_*`, `PROVIDER_*`, `MODEL_*`, `TOOL_*`, `FILE_*`, `GIT_*`,
   `WORKFLOW_*`, `VALIDATION_*`, `APPROVAL_*`, `SAFETY_*`, `INTERNAL_*`。
-- 第一版只建立實際需要的核心 error codes；不為了數量預先發明大量未驗證錯誤。
+- 只建立實際需要的核心 error codes，不為了數量預先發明大量未驗證錯誤。
 
-Diagnostics output modes:
+Diagnostics modes:
 
-- **normal**：concise CLI output、errors/warnings、run ID、safe metadata。
+- **normal**：concise CLI output、error/warning、run ID、safe metadata。
 - **verbose**：增加 provider/profile routing、retry/fallback、timing/token metadata、
   tool summaries。
-- **debug**：增加 detailed workflow trace、stack traces、sanitized provider diagnostics、
-  tool stdout/stderr、validator internals。
-- Debug mode **不得**停用 redaction、approval 或 safety policy。
+- **debug**：增加 detailed trace、stack trace、sanitized provider diagnostics、
+  bounded tool stdout/stderr、validator internals。
+- Debug mode 不得停用 redaction、approval 或 safety policy。
 
-### A11.2 — Persistent Run Logging
+### A11a.2 — Exit-code Compatibility
 
-預設 runtime log 不寫入 repository。以 platform-appropriate user data directory 作為
-`LLMTOOL_HOME`；macOS/Linux 的 conceptual layout：
+現有 CLI 契約 0=success、1=general error、2=usage、130=interrupt 必須保持相容。
+細分類以 stable error code 與 JSON `code` 欄位表達；除非有明確 compatibility review，
+不得把既有錯誤重新分配到不同 exit code。若新增 exit code，只能使用目前未使用值並在
+README 完整列出。
+
+### A11a.3 — Persistent Run Logging Contract
+
+引入持久化 diagnostics 會改變既有寫檔契約，因此必須先定義資料與預設行為。
+
+Conceptual layout:
 
 ```text
 LLMTOOL_HOME/
@@ -507,60 +526,63 @@ LLMTOOL_HOME/
         └── trace.jsonl
 ```
 
-- `logs/llmtool.log`：application/operational log，例如 startup、config/provider init、
-  unexpected internal errors。
-- `runs/<run_id>/trace.jsonl`：該次 workflow 的 structured events。
-- `summary.json`：bounded summary，供快速列舉 run，不需每次掃完整 trace。
-- 支援 configurable `LLMTOOL_HOME`；Windows 使用 OS user-data convention，不硬編碼
-  POSIX home path。
-- repo 預設不得產生 `logs/`、`traces/`、debug dump 等 untracked runtime files。
+預設政策：
 
-### A11.3 — Unified Workflow Tracing
+- 現有 read-only/text-only commands **不得因 A11a 自動保存 prompt、model response、
+  retrieved file contents 或 raw user data**。
+- normal/verbose 預設只允許 bounded safe metadata；若某 read-only command 預設不需要
+  持久化 run artifact，可只輸出 run ID/ephemeral diagnostics，具體 command-by-command
+  policy 必須在 implementation 前列明。
+- 未來 A11b execution workflow 可預設保存安全 audit metadata，因為 mutation 必須可追溯。
+- 完整 prompt/response/body retention 必須是獨立、明確 opt-in，不能由 `--debug`
+  隱式開啟。
+- user config / CLI 可控制 diagnostics retention；project `.llmtool.yaml` 不得設定
+  `LLMTOOL_HOME` 或放寬 retention/redaction policy。
+- README 必須同步更新新的寫檔契約。
+
+### A11a.4 — LLMTOOL_HOME Security & Retention
+
+- 使用 platform-appropriate user data directory；可由 trusted user-level setting /
+  `LLMTOOL_HOME` 明確覆寫。
+- 目錄預設 0700、檔案 0600（Windows 使用等價 user-private ACL expectation）。
+- 拒絕或 fail closed 處理 symlink 的 `LLMTOOL_HOME`、`runs/`、`<run_id>/`
+  destination；寫入採 atomic create/replace 規則。
+- concurrent runs 的 run ID 不得碰撞；每個 run 只寫自己的 namespace。
+- retention 必須有 bounded default：至少同時定義最大 run 數、總 byte budget、
+  age limit 或等價的 deterministic cleanup policy；不得無限制成長。
+- Windows support 必須明確列出已支援/未支援行為；不得假設 A10 POSIX-only retrieval
+  自動代表 A11 diagnostics 也 POSIX-only。
+
+### A11a.5 — Unified Workflow Tracing
 
 最低事件集合：
 
 `run.start`, `run.end`, `context.retrieve`, `router.select`,
-`provider.request`, `provider.response`, `tool.request`, `tool.exec`,
-`approval.request`, `approval.result`, `validation.start`, `validation.result`,
+`provider.request`, `provider.response`, `validation.start`, `validation.result`,
 `retry`, `fallback`, `warning`, `error`。
 
-Company/OpenAI-compatible、Claude CLI、Codex CLI 的 provider-native diagnostics 應由 adapter
-正規化進同一 run；llmtool 不重做 provider 已有的 telemetry，但必須保留跨 provider 的
-共同 causal chain。Provider 原始錯誤可作為 sanitized cause 保留，外層仍使用 llmtool
-穩定 error code。
+Company/OpenAI-compatible、Claude CLI、Codex CLI 的 provider-native diagnostics 由 adapter
+正規化進同一 run；llmtool 不重做 provider 已有 telemetry，但必須保留跨 provider 的
+causal chain。Provider raw error 只能以 sanitized cause 保存。
 
-### A11.4 — Execution & Approval Engine
+### A11a.6 — Fallback Trust Boundary
 
-只有在 A11.1～A11.3 可可靠記錄執行與失敗後，才接 production execution。
+Fallback 不只是 availability 行為，也是資料治理決策。
 
-- 重用 A6 risk classifier，但 classifier 本身不授權執行。
-- SAFE_READ / SENSITIVE_READ / MUTATING / DESTRUCTIVE / UNKNOWN 必須映射到明確 policy。
-- Shell、file、patch、test、Git mutation 都要經過 executor + policy + audit event。
-- approval 必須綁定 task/run/action；不能只靠模型文字中的「approved」。
-- dirty worktree、conflict、unexpected repository state 預設 fail closed；不得自行清除
-  使用者未提交內容。
-- destructive/unknown action 不得因 provider capability、remote frontend 或 debug mode
-  自動獲准。
+- **預設禁止跨 trust boundary fallback。**
+- fallback 只能發生在 trusted user config 明確宣告的 provider group / policy 內；
+  project config 不得宣告或擴大 fallback trust group。
+- 從 internal/company provider 切到 external provider 不得因 timeout 自動發生，除非
+  user-level policy 明確授權該資料可送往該 provider。
+- 每次 fallback 產生 audit event，至少記錄 from、to、reason、policy decision；
+  不記錄 secret 或 raw content。
+- AUTH/CONFIG/SAFETY 類錯誤永遠不觸發 provider fallback。
+- A9/A10 原有 fail-fast 行為不因 A11a 自動改變；只有明確整合到新 policy 的 flow 才能 fallback。
 
-### A11.5 — Validation & Recovery Policy
+### A11a.7 — Redaction / Retention / Diagnostics CLI
 
-**Model-reported success != task success.**
-
-至少處理：
-
-- model empty/malformed/schema-invalid output；
-- invalid tool call / invalid patch；
-- model incomplete output；
-- repeated identical failing action / bounded loop detection；
-- test/validator failure；
-- expected artifact missing；
-- unexpected Git state。
-
-Recovery policy 依 structured error 決定 `retry`、`fallback`、`bounded repair`,
-`request approval`、`stop` 或 `user action required`。不得對 auth/config/safety 等
-不可恢復錯誤無限 retry。
-
-### A11.6 — Diagnostics CLI
+永不明文持久化：API key、token、password、Authorization header、credential environment
+values。Debug 也必須先 redaction 再輸出/保存。
 
 目標 CLI：
 
@@ -572,69 +594,137 @@ llmtool trace <run_id> --json
 llmtool doctor
 ```
 
-CLI error 的普通模式至少顯示 stable error code、human-readable summary、run ID、
-必要的下一步；例如提示使用 `llmtool trace <run_id> --errors`，而不是只印 traceback。
+normal error 至少顯示 stable error code、human-readable summary、run ID 與下一步。
+`doctor` 檢查 config、provider readiness/auth presence（不顯示 credential value）、
+runtime availability、writable diagnostics directory 與必要 prerequisites。
 
-`llmtool doctor` 檢查 config、provider readiness/auth presence（不曝光 credential value）、
-endpoint/runtime reachability where explicitly requested、Claude/Codex CLI availability、
-required binaries、writable runtime directory 與必要 Git prerequisites。
+### A11a Definition of Done
 
-### A11.7 — Redaction / Retention / Audit
+- 現有 read-only/text-only workflow 至少一條完整接上 structured diagnostics。
+- normal/verbose/debug 契約有測試且不洩漏 secret。
+- exit code 向後相容。
+- persisted metadata 的 path/permission/symlink/concurrency/retention policy 有測試。
+- fallback trust boundary 有 fail-closed tests。
+- 使用 run ID 能定位 provider/component failure layer。
 
-- API key、token、password、Authorization header、credential environment values 永不明文記錄。
-- normal/verbose 預設只保存安全 metadata；完整 prompt/response/body 不因 `--debug`
-  就無條件永久保存。
-- debug 仍必須先 redaction，再寫入 bounded diagnostics。
-- Audit events 至少覆蓋 shell/tool execution、file create/write/delete、patch apply、
-  Git mutation、approval、blocked action、provider fallback。
-- retention / cleanup policy 必須有明確 bounds；不得讓 run artifacts 無限制成長。
+## A11b — Execution, Approval & Recovery
 
-### A11.8 — Failure Injection & Safety Tests
+A11b 才新增有限 executor。A11a 未完成前不得開工 production mutation。
 
-故意覆蓋：401/403/429/5xx、timeout、network unreachable、provider unavailable、
+### A11b.1 — Execution Sandbox & Policy
+
+- shell/file/patch/test/Git mutation 全部經 executor + policy + audit event。
+- working directory 必須限制在 explicit authorized repo/scope。
+- child process environment 使用 allowlist / sanitized environment；不得繼承不必要 secrets。
+- 每個 action 有 timeout；network policy 必須 explicit，預設不得因工具需要而任意開網路。
+- executor 永不使用 sudo、setuid escalation 或其他提權機制。
+- A6 SAFE_READ/SENSITIVE_READ/MUTATING/DESTRUCTIVE/UNKNOWN 只作 classifier input，
+  classifier 本身不授權執行。
+
+### A11b.2 — Git Hardening
+
+任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
+包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
+hooks/optional writes 等防護與 sanitized environment。不得用一般 `git status` /
+`git diff` 路徑繞過 A5 已知風險。
+
+dirty worktree、conflict、unexpected repository state 預設 fail closed；不得自行清除
+使用者未提交內容。
+
+### A11b.3 — Approval Semantics
+
+- approval 綁定 task/run/action，不能靠模型文字中的 "approved"。
+- interactive CLI 可使用明確 TTY prompt。
+- non-interactive / CI / Jenkins / background execution 遇到 required approval 時
+  **預設拒絕或停在 waiting_approval**，不得自動通過。
+- 未來 A12 可提供遠端 approval frontend，但不得繞過同一 core policy。
+- dangerous/unknown action 不得因 provider capability、debug mode 或 frontend transport
+  自動獲准。
+
+### A11b.4 — Patch Safety & Rollback
+
+- patch apply 前先做 non-mutating preflight（例如 `git apply --check` 或等價驗證）。
+- apply 前後記錄 bounded Git state/audit metadata。
+- partial apply / validation failure 必須有 deterministic rollback/abort strategy，
+  不得留下不明半成品狀態。
+- rollback 不得覆寫 run 開始前已存在的 unrelated user changes。
+
+### A11b.5 — Validation, Recovery & Resource Budgets
+
+**Model-reported success != task success.**
+
+至少處理 model malformed/empty output、invalid tool call/patch、incomplete output、
+repeated identical failing action、test/validator failure、expected artifact missing、
+unexpected Git state。
+
+Recovery policy 依 structured error 決定 retry、fallback、bounded repair、request approval、
+stop 或 user action required。
+
+每個 run 必須有 explicit budgets：
+
+- max provider calls；
+- max repair attempts（MVP 必須是小的固定上限，例如 2；實際值在 implementation spec 定案）；
+- wall-clock timeout；
+- input/output token budget where provider reports usage；
+- optional monetary budget 只能在價格資料可信且明確設定時啟用，不可自行估價當作 hard truth；
+- repeated-action detector 必須有 deterministic comparison rule。
+
+AUTH/CONFIG/SAFETY 等不可恢復錯誤不得 blind retry。
+
+### A11b.6 — Failure Injection & Safety Tests
+
+故意覆蓋 401/403/429/5xx、timeout、network unreachable、provider unavailable、
 malformed/empty model response、invalid tool call、tool nonzero exit、permission denied、
-missing executable、dirty worktree、validation/test failure、repeated agent loop，以及
+missing executable、dirty worktree、validation/test failure、repeated loop，以及
 secret-looking data 出現在 stderr/tool output 的 redaction。
 
-每一類 failure 必須驗證：
+每一類 failure 都要驗 stable error code、normal CLI、trace/audit、policy decision、
+STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 
-1. stable error code；
-2. normal CLI 可理解；
-3. run trace 可定位 component/provider/tool；
-4. recovery/STOP 行為符合 policy；
-5. stdout/stderr contract 不破壞；
-6. secret 不外洩。
+### A11b Definition of Done
 
-### A11.9 — Production Workflow Integration
+- 有限 executor 在 sandbox/policy 下可完成一個安全 mutation scenario。
+- Git hardening 沒有退化 A5 boundary。
+- TTY/non-TTY approval 行為可驗證且 fail closed。
+- patch failure 不留下未知 partial state。
+- resource budgets 與 bounded repair 有 deterministic tests。
+- 所有 mutation 都有 audit trail。
 
-將 A0～A10 capabilities 組成 bounded end-to-end workflow：
+## A11c — Integration & Real-world Acceptance
+
+### A11c.1 — Production Workflow Integration
+
+將 A0～A10 + A11a/A11b 組成 bounded end-to-end workflow：
 task → context → plan/router → execution → validation → bounded repair →
 approval where required → Git/final result。
 
-A9 text orchestration、A10 retrieval、A6 validator、A5 Git intelligence 等既有 boundary
-不得被 production integration 偷偷放寬；需要 mutation 的能力必須由 A11 明確新增並測試。
+A9 text orchestration、A10 retrieval、A6 validator、A5 Git intelligence 的既有 boundary
+不得被 integration 偷偷放寬。
 
-### A11.10 — Real-world Agent Acceptance Test
+### A11c.2 — Real-world Agent Acceptance Test
 
-A11 最後 gate 使用真實 repository/task 做黑箱或半黑箱演練，至少覆蓋：
+最後 gate 使用真實 repository/task，至少覆蓋：
 
 - 正常 bugfix + real tests；
-- provider timeout / fallback；
+- provider timeout + policy-allowed fallback；
+- policy-blocked cross-trust fallback；
 - dirty worktree STOP；
 - model 宣稱完成但 tests fail；
 - tool failure + bounded repair；
 - dangerous/unknown action approval/block；
+- non-interactive approval fail closed；
 - long context + retrieval；
-- 使用 run ID / trace 做 root-cause diagnosis。
+- run ID / trace root-cause diagnosis。
 
-產生 dated acceptance report。驗收的一項必要條件：另一個 reviewer/agent 僅使用
-run metadata + trace（不依賴原開發者記憶）即可定位一個失敗 run 的主要 failure layer。
+產生 dated acceptance report。必要驗收條件：另一個 reviewer/agent 僅使用 run metadata +
+trace（不依賴原開發者記憶）即可定位一個失敗 run 的主要 failure layer。
 
-**A11 Definition of Done：**
-任何 production workflow 失敗都必須有 stable error code + unique run ID；普通模式知道
-發生什麼與去哪裡查；trace 能定位 component/provider/tool；可恢復錯誤依 policy
-retry/fallback/repair，不可恢復錯誤 fail closed；AI 的成功聲明必須經實際 validator/test/Git
-state 驗證；diagnostics 不洩漏 secrets。
+### A11c Definition of Done
+
+任何 production workflow 失敗都有 stable error code + unique run ID；normal mode 知道
+發生什麼與去哪查；trace 能定位 component/provider/tool；可恢復錯誤依 policy
+retry/fallback/repair，不可恢復錯誤 fail closed；AI 成功聲明經 deterministic validation；
+diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。
 
 ## A12 — Remote Frontends / Telegram Agent
 
