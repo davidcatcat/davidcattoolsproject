@@ -1,0 +1,23 @@
+{
+  "facts": [
+    "Permission denied opening /etc/company/app/config.yaml"
+  ],
+  "evidence": [
+    {
+      "statement": "Permission denied opening /etc/company/app/config.yaml",
+      "source": "synthetic supplied log",
+      "locator": null
+    }
+  ],
+  "inferences": [],
+  "hypotheses": [
+    "File ownership or mode may be incompatible"
+  ],
+  "unknowns": [
+    "Actual file permissions and process identity are not supplied"
+  ],
+  "verify_next": [
+    "ls -l /etc/company/app/config.yaml",
+    "cat /etc/company/app/config.yaml"
+  ]
+}

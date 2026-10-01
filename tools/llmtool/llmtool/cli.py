@@ -21,6 +21,7 @@ from .validator import (classify_command, validate_context_packet,
 from .terminal import human_output
 from .context import PACKET_LIMIT
 from .feedback_cli import add_feedback_parser, run_feedback
+from .benchmark_cli import add_benchmark_parser, run_benchmark
 
 
 def _validation_packet(filename):
@@ -76,6 +77,7 @@ def parser_for_cli():
     git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
     git.add_argument("--json", action="store_true", help="output snapshot as JSON")
     add_feedback_parser(sub)
+    add_benchmark_parser(sub, add_options)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -106,6 +108,8 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "benchmark":
+            return run_benchmark(args)
         if args.command == "feedback":
             return run_feedback(args)
         if args.command == "validate":

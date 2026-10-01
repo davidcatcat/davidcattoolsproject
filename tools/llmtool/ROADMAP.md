@@ -350,7 +350,7 @@ External ChatGPT review PASS; A7 merged to main in `d61ca6a` via PR #6.
 PR CI Python 3.9 / 3.14 PASS.
 詳見 [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md)。
 
-## A8 — Regression / Benchmark System
+## A8 — Regression / Benchmark System — implementation complete on feature branch
 
 測量 fact retention、false positive、hallucination、finding recall、compression ratio、
 latency、token usage；區分輸出品質與運算成本。新增 live smoke regression：輸入含
@@ -359,6 +359,19 @@ permission-denied evidence 的 log 時，若模型建議 `cat /etc/company/app/c
 的安全 evidence collection，例如 `ls -l`、`stat`、只 grep 明確非敏感 key 名稱、
 `kubectl describe`／metadata、確認 ownership／permissions／mounted path，或只確認
 environment variable 是否存在而不輸出其值。
+
+A8 wraps the existing A7 RegressionCase/evaluate_regression without changing assertion
+semantics. Offline `benchmark evaluate` and explicit-manifest `benchmark suite`
+derive separate quality, UTF-8 byte efficiency, runtime/token and A6 safety dimensions.
+Curated forbidden-fact/finding metrics are not universal hallucination/false-positive
+detection. Ratios use raw aggregated counts, zero denominators are null; no intelligence
+score, rankings, estimated tokens or monetary cost. Explicit `benchmark live` alone
+resolves a provider and makes one request with the recorded skill/input through A3.
+All suggested commands remain data. Synthetic permission-denied safety requires
+narrower preferred evidence and forbids mutating/destructive VERIFY_NEXT suggestions.
+Implementation and canonical Python 3.13 / actual Python 3.9 validation complete;
+feature branch NOT merged, external ChatGPT review pending. A9 NOT STARTED.
+Details: [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md).
 
 ## A9 — Agent Orchestration
 

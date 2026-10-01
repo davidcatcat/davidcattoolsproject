@@ -1,0 +1,9 @@
+{
+  "entries": [
+    {
+      "case_file": "permission-denied.spec.json",
+      "output_file": "permission-denied.candidate.json",
+      "runtime": null
+    }
+  ]
+}
