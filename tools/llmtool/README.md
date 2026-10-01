@@ -23,8 +23,8 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 | Provider | 如何連模型或 runtime：transport、endpoint、model、auth | `claude-cli`、`codex-cli`、`openai`、`openai-compatible` |
 | Profile | 一組具名 provider 設定，例如 `office-qwen`、`home-vllm` | 支援多組及 active selection |
 | Skill | 可版本化的 declarative instructions/context | A3 DONE and merged to main |
-| Role | workflow 職責，例如 grinder、validator、coder、reviewer | 未實作；未來與 provider 分離 |
-| Agent | 可使用工具或修改環境的執行實體 | 未實作；llmtool A1/A1.1 不是執行 agent |
+| Role | workflow 職責，例如 grinder、validator、coder、reviewer | A9 feature branch：declarative role registry，與 provider 分離 |
+| Agent | A9 AgentStep = role + explicit provider profile + bounded text handoff | A9 feature branch；目前無 shell/Git/file/code execution |
 
 目前尚未支援 Anthropic API provider。Claude CLI integration 只作
 純文字 runtime request，不使用 CLI tools，不提供 shell、Git 或 code-edit capability。
@@ -48,7 +48,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
-- **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured. A9 NOT STARTED.
+- **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
+- **A9 — Agent Orchestration:** implementation complete on feature branch; validation/CI/external review pending. A10 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1310,3 +1311,42 @@ allows historical sensitive cat as classified data but requires narrower metadat
 evidence and forbids MUTATING/DESTRUCTIVE suggestions. See the
 [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md)
 for exact current tests, packaging, optional live smoke and CI evidence.
+
+
+## A9 — Agent Orchestration
+
+A9 adds a bounded sequential text orchestration layer. **Role != Provider**: each
+plan step explicitly binds one built-in role (`grinder`, `validator`, `coder`,
+`reviewer`) to one named provider profile. Provider/model names never imply role.
+An AgentStep is role + explicit profile + bounded text handoff; it is not a permission
+grant and does not enable provider-native tools.
+
+```sh
+llmtool orchestrate --plan plan.json --dry-run --json
+llmtool orchestrate --plan plan.json --file task.txt
+llmtool orchestrate --plan plan.json "Review this supplied incident"
+```
+
+The A9 MVP supports 1–8 unique roles in a sequential pipeline only. It is fail-fast:
+no retries, fallback provider, hidden substitution, fan-out, voting, loops, branches,
+or dynamic routing. Every live step resolves its explicit profile with
+`require_configured=True` before credential value resolution.
+
+Handoff is shallow and bounded: every step receives the original task plus only the
+immediately previous role output. Earlier outputs are not accumulated and there is
+no hidden long-term memory. Previous role output is marked as untrusted model text.
+A10 Dynamic Context Retrieval remains future work.
+
+A9 is text-only. It never executes shell/VERIFY_NEXT/Git, edits files or code, applies
+patches, runs tests, or treats model words such as "approved" as authorization. The
+LLM `validator` role is a reasoning/review responsibility and cannot override
+deterministic A6 command-risk results. A8 remains the measurement layer; A9 does not
+automatically run benchmarks or rank providers.
+
+`--dry-run` validates only the explicit plan structure and is offline: it does not
+read task input, config, credentials, instantiate providers, or access network.
+Repository examples live under `orchestration/` and are not packaged.
+
+Anthropic HTTP API remains future A2.3 work. A9 has no Anthropic special case; a
+future registered provider can use the same explicit profile contract. A9 is on its
+feature branch and is not merged. A10 NOT STARTED.

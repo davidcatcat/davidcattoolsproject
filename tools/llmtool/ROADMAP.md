@@ -375,10 +375,31 @@ External ChatGPT review PASS; A8-R1 FIXED; merged to `main` via PR #9 in
 remains FAIL as measured. A9 NOT STARTED.
 Details: [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md).
 
-## A9 — Agent Orchestration
+## A9 — Agent Orchestration — implementation complete on feature branch
 
-串接 Claude CLI、Codex CLI、OpenAI／Anthropic API。Roles 例如 grinder、validator、
-coder、reviewer，與 provider 分離；不因 provider 名稱而隱含指派職責。
+Provider-independent sequential orchestration。內建 declarative roles：
+`grinder`、`validator`、`coder`、`reviewer`，每一步由 plan 明確綁定 named
+provider profile；Role != Provider，不從 provider/model 名稱推論職責。
+
+A9 MVP 僅支援 1–8 個 unique role 的 bounded sequential pipeline。每一步收到 original
+task + immediately previous role output；不累積所有歷史輸出、不做 hidden memory。
+Fail-fast，無 retry、fallback、parallel fan-out、voting、loop、branch 或 dynamic routing。
+Provider readiness 必須先於 credential value resolution。
+
+所有 model output 都是 untrusted TEXT ONLY；不得執行 shell、VERIFY_NEXT、Git、
+file/code edit、patch、tests 或 provider-native tools。A9 validator role 是 LLM review
+responsibility，不能覆寫 deterministic A6 Validator。A8 負責 benchmark/measurement，
+A9 不自動跑 benchmark。A10 Dynamic Context Retrieval 尚未開始。
+
+`llmtool orchestrate --plan ... --dry-run` 僅做 plan structural validation，不讀 task、
+config、credentials，也不建 provider client。Normal mode 才依序 resolve explicit
+profiles 並各呼叫 Provider.complete 一次。
+
+Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthropic，
+未來 provider registry 加入後即可由同一 plan/profile contract 使用。
+
+A9 feature branch implementation complete；validation/CI/external review pending，
+NOT merged。A10 NOT STARTED。
 
 ## A10 — Dynamic Context Retrieval
 
@@ -390,7 +411,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A7 已完成並合併至 `main`；現階段仍沒有 Role engine、Agent orchestration 或 production mutation。
+此為完整流程目標。目前 A0～A8 已完成並合併至 `main`；A9 feature branch 只建立 bounded text orchestration，仍沒有 production mutation／approval execution。
 
 ## A12 — Remote Frontends / Telegram Agent
 
