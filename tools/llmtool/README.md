@@ -46,6 +46,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
+- **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
+- **A7 — Skill Trainer / Feedback Loop:** implementation complete; post-main synchronization validation complete; external ChatGPT review PASS; NOT YET merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -589,6 +591,10 @@ llmtool/inputs.py                      明確輸入來源、文字驗證
 llmtool/prompts.py                     common rules and skill composition
 llmtool/skills.py                      typed declarative resource loader
 llmtool/skills/*/SKILL.md               packaged runtime prompt resources
+llmtool/feedback.py                    immutable feedback/proposal/regression data and offline evaluator
+llmtool/feedback_files.py              explicit bounded reads and atomic case writes
+llmtool/feedback_cli.py                offline capture/show/validate/review/regression adapter
+feedback/                             repository-local curated regression fixtures (not packaged)
 llmtool/providers/base.py              capability model 與 Provider.complete() / Reply contract
 llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
 llmtool/providers/openai_compatible.py HTTP transport 與 response 驗證
@@ -1002,3 +1008,167 @@ A6 is DONE and merged to main in `63b5bae`; external ChatGPT review PASS.
 A5 filesystem skip) completed with exit 0. Wheel and manual offline checks passed.
 Exact commands, times, limits and security review are in the
 [A6 validation report](../../reports/llmtool_a6_safety_validator_validation_20261001.md).
+
+## A7 — Skill Trainer / Feedback Loop
+
+A7 means **failure → human/external review → declarative skill proposal → regression
+→ manual skill revision/version bump → validation**. It is not gradient training,
+fine-tuning, RLHF, weight updates, embeddings training or automatic prompt mutation.
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
+A7 is implemented on `feat/a7-skill-feedback-loop`, synchronized with hardened main;
+external ChatGPT review PASS; NOT YET merged. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
+
+### Data models and strict format
+
+`llmtool/feedback.py` exposes frozen, typed `FeedbackCase`, `SkillPatchProposal`,
+`RegressionAssertion`, `RegressionCase`, `AssertionResult` and `RegressionResult`.
+Lists supplied to models become detached tuples; public JSON uses arrays and
+stable field order. `to_dict()`/`to_json()` return deterministic data; strict
+`parse_feedback_case`, `parse_skill_patch_proposal` and `parse_regression_case`
+reject missing/extra fields, invalid types/enums, duplicate object keys, NaN,
+malformed JSON, unsupported controls and invalid UTF-8. JSON nesting is at most
+6; serialized JSON/files at most 1 MiB; each model text at most 128 KiB UTF-8;
+collections at most 128 items, regression assertions at most 64. Versions are
+positive integers up to 2,147,483,647; skill names use A3's validated naming rule.
+
+FeedbackCase fields are `id`, `skill`, `skill_version`, `input`, `actual_output`,
+`expected_behavior`, `failure_tags`, `validator_findings`, `review_notes`, `status`.
+Input/expected behavior must be nonblank; actual output may be empty to capture
+failed/empty replies. Original text, Unicode and whitespace are preserved.
+Validator findings use A6's code/severity/message/category/nullable locator fields;
+they are supplied explicitly through the reusable API, not inferred by the CLI.
+No hidden reasoning, provider metadata/config, auth state or credentials are read.
+Recognizable private-key headers, AWS access-key IDs, bearer tokens and OpenAI-style
+keys and recognized credential assignments are rejected without echoing them.
+Redacted placeholders (REDACTED, <redacted>, ***, null, none, placeholder) are allowed
+for assignments. This is not comprehensive secret detection:
+users must curate/redact all supplied material, including review notes, before
+capture. `show` and case JSON intentionally display explicitly recorded text.
+
+Explicit failure tags (no automatic inference/mapping):
+
+```text
+HALLUCINATION FACT_DROPPED UNSUPPORTED_CLAIM MISCLASSIFIED_FACT
+MISCLASSIFIED_HYPOTHESIS MISSING_UNKNOWN MISSING_VERIFY_NEXT UNSAFE_COMMAND
+SENSITIVE_READ_NOT_FLAGGED OVERLY_BROAD_COMMAND FORMAT_INVALID OTHER
+```
+
+IDs are the first 24 lowercase hexadecimal characters of SHA-256 over canonical
+JSON (`sort_keys=True`, `ensure_ascii=True`, compact separators, `allow_nan=False`).
+Feedback identifying fields are skill, skill_version, input, actual_output,
+expected_behavior, ordered failure_tags and ordered validator_findings. Review
+notes/status are excluded so review preserves ID; case edits to identifying fields
+require a new ID. Regression IDs hash all fields except id, including ordered
+source_feedback_ids/assertions. Parsed IDs must match content; IDs are never paths.
+
+### Offline CLI and review workflow
+
+```sh
+llmtool feedback capture --skill context-pack \
+  --input-file incident.txt --output-file model-output.txt \
+  --expected-file expected.txt --tag FORMAT_INVALID --case-file case.json
+llmtool feedback show --file case.json
+llmtool feedback show --file case.json --json
+llmtool feedback validate --file case.json --json
+llmtool feedback review --file case.json --notes-file review.txt
+llmtool feedback regression --case regression.json --output-file candidate.json --json
+```
+
+Capture loads the current packaged skill name/version and prints deterministic
+case JSON. Omitting `--case-file` writes only stdout; selecting it creates a new
+`.json` file, never overwriting an existing file. Tags may be repeated with distinct
+values; duplicates are rejected. No automatic ask/chat/context-pack capture or
+hidden storage exists. Repository-local curated fixtures are under `feedback/`,
+separate from runtime skills and engineering skills; the CLI never scans them.
+
+Show/validate require a known packaged skill and report CURRENT, OLDER_THAN_CURRENT
+or NEWER_THAN_CURRENT. Older cases remain inspectable and valid historical data;
+future versions are INVALID (exit 1). Cases are never silently upgraded.
+Review records supplied human notes, advancing CAPTURED → REVIEWED only. External
+ChatGPT review is human-mediated; the CLI does not contact ChatGPT or prove who
+reviewed the case. `transition_feedback` permits exactly one forward step through
+CAPTURED → REVIEWED → PATCH_PROPOSED → REGRESSION_READY → CLOSED, with nonblank notes
+required after capture. Later statuses are explicit reviewer bookkeeping; no
+automatic patch, regression creation or closure is triggered.
+
+Explicit file operations use regular UTF-8 files only, nonblocking/no-follow opens,
+anchored directory descriptors, and reject symlink components and `..` traversal.
+Use physical paths (e.g. `/private/tmp`, not a symlink alias) when selecting temporary
+data. Capture publishes atomically without overwrite and uses 0600 permissions.
+Review atomically replaces only the explicit parsed case, preserving ordinary
+permission bits and ID; content/identity checks detect intervening changes before
+replacement. Concurrent writers are unsupported; this is not a transactional
+multi-user store. Ownership/ACL preservation and cross-platform Windows support
+are not provided by this POSIX file adapter. No directories are created implicitly.
+
+### Proposals and version rule
+
+`SkillPatchProposal` contains skill, from_version, proposed_version, rationale,
+added_rules, changed_rules and linked_feedback_case_ids. A proposal requires at
+least one rule change and unique nonempty case links. The proposed version must
+be exactly from_version + 1; same/jump/downgrade versions are rejected.
+`propose_skill_patch` requires a REVIEWED case matching the current packaged skill.
+Proposal construction/parsing is a reusable API; it returns JSON data only:
+
+```python
+from llmtool.feedback import parse_feedback_case, propose_skill_patch
+
+# case_json is explicitly supplied, already redacted case text.
+reviewed = parse_feedback_case(case_json)
+proposal = propose_skill_patch(reviewed, "Preserve missing evidence", added_rules=[
+    "Keep missing previous exception in unknowns; never invent it."
+])
+print(proposal.to_json())
+```
+
+A7 never applies raw patches or modifies SKILL.md. A human separately edits/reviews
+skills and increments the packaged version, then reruns tests/regressions. Linked
+IDs record provenance; A7 does not search for linked cases or independently verify
+review/approval artifacts. Proposal data alone does not authorize a change.
+
+### Regression assertions and behavior
+
+RegressionCase contains id, source_feedback_ids, skill, minimum_skill_version,
+input and assertions. The recorded input is provenance, not sent to a provider.
+Evaluation fails its precondition if the skill is missing or current version is
+below the recorded minimum. Each assertion object requires exactly `type`, `value`
+and `command` (nullable where unused). Unknown assertion types/fields are rejected.
+
+| Type | Deterministic meaning |
+|---|---|
+| CONTEXT_VALID | value/command null; supplied output must parse as A4 packet and pass A6 without ERROR |
+| FACT_CONTAINS / FACT_NOT_CONTAINS | Exact string element presence/absence in facts |
+| HYPOTHESIS_CONTAINS / HYPOTHESIS_NOT_CONTAINS | Exact string element presence/absence in hypotheses |
+| UNKNOWN_CONTAINS / VERIFY_NEXT_CONTAINS | Exact string element presence in the corresponding category |
+| FINDING_PRESENT / FINDING_ABSENT | A6 finding code presence/absence |
+| TEXT_CONTAINS / TEXT_NOT_CONTAINS | Literal substring presence/absence in supplied output |
+| COMMAND_RISK_EQUALS | A6 risk equality; command null assesses the whole candidate after removing terminal CR/LF; otherwise requires the exact command as a candidate line or packet verify_next element |
+
+Command selectors do not search arbitrary substrings or silently assess an absent
+command. Commands remain data; classification grants no execution permission.
+Malformed/unsupported structured candidates fail every structured assertion,
+including negative assertions, with sanitized messages. Text/command assertions
+can operate on plain output. Results preserve assertion order, index, type, boolean
+and static message; they do not echo malformed output. JSON has case_id, passed,
+results. Human regression output starts PASS/FAIL. Exit 0 means all assertions
+passed; exit 1 means failed assertions or sanitized input/precondition/I/O error;
+argument errors are exit 2. Malformed case/input errors leave stdout empty.
+
+Curated [fixtures](feedback/README.md) cover historical
+`cat /etc/company/app/config.yaml` = SENSITIVE_READ and metadata alternatives
+`ls -l`/`stat` = SAFE_READ, plus HTTP 500 fact retention, configuration mismatch
+remaining a hypothesis, missing previous exception retained as unknown, and
+concrete verify_next/structural support. They reuse A4/A6, not duplicate rules.
+Passing fixtures does not measure a live model or prove factual truth.
+
+A7 has no provider/config/API-key resolution, network, subprocess, shell/Git
+execution, eval/exec, arbitrary executable assertions, code loading, automatic
+patch application or automatic skill writes. No live provider/VPN is needed.
+A8 can later add benchmark/live-output collection separately; A7 adds no A8
+scoring/analytics, A9 orchestration, retrieval or approval/execution engine.
+Exact validation counts, packaging, environment limitations and manual CLI results
+are recorded in the [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md).
+Historical pre-sync validation: 47 targeted tests; 392 discovered, 391 passed and
+1 inherited skip. Current post-hardening synchronization: 47 A7 tests PASS; complete Python 3.13/3.9
+suites each 423 discovered, 422 passed, one skip. Full results are recorded in
+the validation report. No live provider call was made or required.

@@ -1,0 +1,3 @@
+cat /etc/company/app/config.yaml
+ls -l /etc/company/app/config.yaml
+stat /etc/company/app/config.yaml

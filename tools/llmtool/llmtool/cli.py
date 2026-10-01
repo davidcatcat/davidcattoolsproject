@@ -20,6 +20,7 @@ from .validator import (classify_command, validate_context_packet,
                         format_command_assessment, format_validation_result)
 from .terminal import human_output
 from .context import PACKET_LIMIT
+from .feedback_cli import add_feedback_parser, run_feedback
 
 
 def _validation_packet(filename):
@@ -74,6 +75,7 @@ def parser_for_cli():
     add_options(chat)
     git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
     git.add_argument("--json", action="store_true", help="output snapshot as JSON")
+    add_feedback_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -104,6 +106,8 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "feedback":
+            return run_feedback(args)
         if args.command == "validate":
             if args.action == "command":
                 assessment = classify_command(args.text)

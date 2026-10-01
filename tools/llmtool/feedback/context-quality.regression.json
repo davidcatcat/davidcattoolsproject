@@ -1,0 +1,41 @@
+{
+  "id": "60f8a7310c6a0b30a740dc0a",
+  "source_feedback_ids": [
+    "779c880c8cb3cea93c92f69a"
+  ],
+  "skill": "context-pack",
+  "minimum_skill_version": 2,
+  "input": "HTTP 500 observed. Previous container exception is missing. Configuration mismatch is possible.",
+  "assertions": [
+    {
+      "type": "CONTEXT_VALID",
+      "value": null,
+      "command": null
+    },
+    {
+      "type": "FACT_CONTAINS",
+      "value": "HTTP 500 observed",
+      "command": null
+    },
+    {
+      "type": "FACT_NOT_CONTAINS",
+      "value": "Configuration mismatch is possible",
+      "command": null
+    },
+    {
+      "type": "HYPOTHESIS_CONTAINS",
+      "value": "Configuration mismatch is possible",
+      "command": null
+    },
+    {
+      "type": "UNKNOWN_CONTAINS",
+      "value": "Previous container exception is missing",
+      "command": null
+    },
+    {
+      "type": "VERIFY_NEXT_CONTAINS",
+      "value": "Inspect previous container exception evidence",
+      "command": null
+    }
+  ]
+}

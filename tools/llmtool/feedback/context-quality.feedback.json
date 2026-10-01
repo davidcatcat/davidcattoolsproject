@@ -1,0 +1,17 @@
+{
+  "id": "779c880c8cb3cea93c92f69a",
+  "skill": "context-pack",
+  "skill_version": 2,
+  "input": "HTTP 500 observed. Previous container exception is missing. Configuration mismatch is possible.",
+  "actual_output": "{\"facts\":[\"Configuration mismatch is possible\"]}",
+  "expected_behavior": "Retain observed HTTP 500 as fact, configuration mismatch as hypothesis, missing exception as unknown, and concrete verify_next.",
+  "failure_tags": [
+    "MISCLASSIFIED_HYPOTHESIS",
+    "FACT_DROPPED",
+    "MISSING_UNKNOWN",
+    "FORMAT_INVALID"
+  ],
+  "validator_findings": [],
+  "review_notes": "Human-curated quality scenario; preserve uncertainty and use supplied incident-note provenance only.",
+  "status": "REVIEWED"
+}
