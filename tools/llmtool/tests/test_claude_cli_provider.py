@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +29,7 @@ class ClaudeCLIProviderTests(unittest.TestCase):
         self.args_file = self.root / "args.json"
         self.input_file = self.root / "input.txt"
         self.home_file = self.root / "child-home.txt"
+        self.cwd_file = self.root / "child-cwd.txt"
         self.executable = self.root / "fake-claude"
         script = """#!/usr/bin/env python3
 import json, os, sys, time
@@ -37,6 +39,8 @@ with open(%r, "w", encoding="utf-8") as f:
     f.write(sys.stdin.read())
 with open(%r, "w", encoding="utf-8") as f:
     f.write(os.environ.get("HOME", "") + "\\n" + os.environ.get("LLMTOOL_CLAUDE_CLI_HOME", ""))
+with open(%r, "w", encoding="utf-8") as f:
+    f.write(os.getcwd())
 mode = os.environ.get("CLAUDE_TEST_MODE", "success")
 if mode == "timeout":
     time.sleep(5)
@@ -44,6 +48,10 @@ elif mode == "large":
     sys.stdout.write("x" * 4096)
 elif mode == "large-stderr":
     sys.stderr.write("x" * 4096)
+elif mode == "descendant":
+    import subprocess
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    sys.stdout.write("CLAUDE_FINAL\\n")
 elif mode == "empty":
     pass
 elif mode == "failure":
@@ -52,7 +60,7 @@ elif mode == "failure":
 else:
     sys.stderr.write("PRIVATE_CLI_DIAGNOSTIC")
     sys.stdout.write("  CLAUDE_FINAL  \\n")
-""" % (str(self.args_file), str(self.input_file), str(self.home_file))
+""" % (str(self.args_file), str(self.input_file), str(self.home_file), str(self.cwd_file))
         self.executable.write_text(script, encoding="utf-8")
         self.executable.chmod(0o700)
         self.provider_config = {
@@ -68,11 +76,16 @@ else:
         provider = {**self.provider_config, **provider_updates}
         return ClaudeCLIProvider(provider, {"temperature": 0, "max_tokens": 100})
 
+    def complete_mode(self, mode, timeout=5):
+        original = ClaudeCLIProvider._child_environment
+        with patch.object(ClaudeCLIProvider, "_child_environment",
+                          staticmethod(lambda: {**original(), "CLAUDE_TEST_MODE": mode})):
+            return self.client(timeout_seconds=timeout).complete([{"role": "user", "content": "hello"}])
+
     def test_argv_stdin_and_successful_output_use_safe_noninteractive_mode(self):
         prompt = [{"role": "system", "content": "Follow instruction."},
                   {"role": "user", "content": "Reply with marker."}]
-        with patch.dict(os.environ, {"CLAUDE_TEST_MODE": "success"}):
-            reply = self.client().complete(prompt)
+        reply = self.client().complete(prompt)
         argv = json.loads(self.args_file.read_text(encoding="utf-8"))
         self.assertEqual(argv, [
             "--print", "--output-format", "text", "--no-session-persistence",
@@ -107,7 +120,8 @@ else:
                          str(self.root / "claude-auth-home") + "\n")
 
     def test_failure_and_stderr_are_sanitized(self):
-        with patch.dict(os.environ, {"CLAUDE_TEST_MODE": "failure"}):
+        with patch.object(ClaudeCLIProvider, "_child_environment",
+                          return_value={**ClaudeCLIProvider._child_environment(), "CLAUDE_TEST_MODE": "failure"}):
             with self.assertRaises(LLMToolError) as caught:
                 self.client().complete([{"role": "user", "content": "private prompt"}])
         self.assertEqual(str(caught.exception), "Claude CLI exited with status 7")
@@ -115,22 +129,48 @@ else:
         self.assertNotIn("private prompt", str(caught.exception))
 
     def test_timeout_is_normalized(self):
-        with patch.dict(os.environ, {"CLAUDE_TEST_MODE": "timeout"}):
-            with self.assertRaisesRegex(LLMToolError, "^Claude CLI timed out$"):
-                self.client(timeout_seconds=0.1).complete([{"role": "user", "content": "hello"}])
+        with self.assertRaisesRegex(LLMToolError, "^Claude CLI timed out$"):
+            self.complete_mode("timeout", timeout=0.1)
 
     def test_empty_output_is_rejected(self):
-        with patch.dict(os.environ, {"CLAUDE_TEST_MODE": "empty"}):
+        with patch.object(ClaudeCLIProvider, "_child_environment",
+                          return_value={**ClaudeCLIProvider._child_environment(), "CLAUDE_TEST_MODE": "empty"}):
             with self.assertRaisesRegex(LLMToolError, "^Claude CLI returned no final text$"):
                 self.client().complete([{"role": "user", "content": "hello"}])
 
     def test_oversized_output_is_bounded(self):
         for mode in ("large", "large-stderr"):
-            with self.subTest(mode=mode), \
-                    patch.dict(os.environ, {"CLAUDE_TEST_MODE": mode}), \
-                    patch("llmtool.providers.claude_cli.OUTPUT_LIMIT", 128):
+            with self.subTest(mode=mode), patch("llmtool.providers.claude_cli.OUTPUT_LIMIT", 128):
                 with self.assertRaisesRegex(LLMToolError, "^Claude CLI output exceeded 1 MiB$"):
-                    self.client().complete([{"role": "user", "content": "hello"}])
+                    with patch.object(ClaudeCLIProvider, "_child_environment",
+                                      return_value={**ClaudeCLIProvider._child_environment(), "CLAUDE_TEST_MODE": mode}):
+                        self.client().complete([{"role": "user", "content": "hello"}])
+
+    def test_descendant_holding_pipes_is_killed_after_leader_exits(self):
+        with self.assertRaisesRegex(LLMToolError, "^Claude CLI timed out$"):
+            self.complete_mode("descendant", timeout=0.5)
+
+    def test_child_environment_is_allowlisted_and_cwd_is_isolated(self):
+        with patch.dict(os.environ, {"CLAUDE_TEST_MODE": "success", "UNRELATED_API_KEY": "MUST_NOT_LEAK",
+                                     "NODE_OPTIONS": "--require evil", "GIT_DIR": "/tmp/evil"}):
+            env = ClaudeCLIProvider._child_environment()
+            self.assertNotIn("UNRELATED_API_KEY", env)
+            self.assertNotIn("NODE_OPTIONS", env)
+            self.assertNotIn("GIT_DIR", env)
+            self.client().complete([{"role": "user", "content": "hello"}])
+        isolated = Path(self.cwd_file.read_text(encoding="utf-8"))
+        self.assertNotEqual(isolated, Path.cwd())
+        self.assertFalse(isolated.exists(), "temporary Claude cwd should be removed after invocation")
+
+    def test_relative_executable_resolution_is_rejected(self):
+        with patch("llmtool.providers.claude_cli.shutil.which", return_value="./claude"):
+            with self.assertRaisesRegex(LLMToolError, "executable is not available"):
+                self.client().complete([{"role": "user", "content": "hello"}])
+
+    def test_prompt_encoding_fails_before_spawn(self):
+        with patch("llmtool.providers.claude_cli.subprocess.Popen", side_effect=AssertionError("spawned")):
+            with self.assertRaisesRegex(LLMToolError, "invalid conversation input"):
+                self.client().complete([{"role": "user", "content": "\\ud800".encode().decode("unicode_escape")}])
 
     def test_missing_executable_fails_safely(self):
         with patch("llmtool.providers.claude_cli.shutil.which", return_value=None):

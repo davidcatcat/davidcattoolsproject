@@ -102,7 +102,7 @@ class OpenAICompatibleClient:
             raise LLMToolError("gateway returned invalid JSON") from None
         if not isinstance(obj, dict):
             raise LLMToolError("gateway response must be a JSON object")
-        if "error" in obj:
+        if obj.get("error") is not None:
             raise LLMToolError("gateway returned an API error; response body omitted")
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):

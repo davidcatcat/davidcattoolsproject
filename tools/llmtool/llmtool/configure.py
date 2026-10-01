@@ -6,8 +6,8 @@ import warnings
 from pathlib import Path
 
 from .config import (
-    DEFAULTS, _apply_user, _read_yaml, _validate, save_config, selected_provider,
-    user_config_path,
+    DEFAULTS, _apply_user, _provider_name, _read_yaml, _timeout_seconds, _validate,
+    save_config, selected_provider, user_config_path,
 )
 from .errors import LLMToolError
 from .providers import client_type
@@ -15,7 +15,10 @@ from .providers import client_type
 
 def _answer(input_fn, label, default=None, optional=False):
     suffix = " [" + str(default) + "]" if default is not None else ""
-    value = input_fn(label + suffix + ": ").strip()
+    try:
+        value = input_fn(label + suffix + ": ").strip()
+    except (EOFError, OSError, RuntimeError, ValueError):
+        raise LLMToolError("configuration input ended; configuration was not saved") from None
     if not value:
         return default if default is not None else (None if optional else "")
     return value
@@ -66,12 +69,16 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     path = user_config_path(home)
     exists = path.exists() or path.is_symlink()
     if exists:
-        answer = input_fn("User config exists. Update it? [y/N]: ").strip().casefold()
+        try:
+            answer = input_fn("User config exists. Update it? [y/N]: ").strip().casefold()
+        except (EOFError, OSError, RuntimeError, ValueError):
+            raise LLMToolError("configuration input ended; configuration was not saved") from None
         if answer not in ("y", "yes"):
             print("Configuration unchanged.", file=stdout)
             return False
 
     provider_name = _answer(input_fn, "Provider name", "default")
+    _provider_name(provider_name)
     provider_type = _answer(input_fn, "Provider type", "openai-compatible")
     client_type(provider_type)
     is_openai = provider_type == "openai"
@@ -79,7 +86,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     cli_label = "Codex CLI" if provider_type == "codex-cli" else "Claude CLI"
     base_url = None if is_openai or is_cli else _answer(input_fn, "Base URL", optional=True)
     model = _answer(input_fn, "Model", optional=True)
-    timeout = _number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds")
+    timeout = _timeout_seconds(_number(_answer(input_fn, "Timeout seconds", "120"), "timeout_seconds"))
 
     literal_key = None
     api_key_env = None
@@ -92,7 +99,7 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
             with warnings.catch_warnings():
                 warnings.simplefilter("error", getpass.GetPassWarning)
                 literal_key = secret_fn("API key (leave blank to unset): ", stream=stderr)
-        except (getpass.GetPassWarning, OSError):
+        except (getpass.GetPassWarning, EOFError, OSError, RuntimeError, ValueError):
             raise LLMToolError("cannot read API key without echo; configuration was not saved") from None
         if literal_key == "":
             literal_key = None

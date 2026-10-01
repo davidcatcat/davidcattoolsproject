@@ -145,8 +145,11 @@ def _simple(text):
     if any(c in text for c in ('$','`','(',')','{','}')):
         return CommandRisk.UNKNOWN
     name, args = tokens[0], tokens[1:]
-    if name == 'sudo' and args and not args[0].startswith('-'):
-        name, args = args[0], args[1:]
+    if name.rsplit('/', 1)[-1] == 'sudo':
+        if not args or args[0].startswith('-'):
+            return CommandRisk.UNKNOWN
+        inner = _simple(shlex.join(args))
+        return max((CommandRisk.UNKNOWN, inner), key=RISK_ORDER.__getitem__)
     # Only known conventional absolute binary locations; arbitrary aliases stay unknown.
     if name.rsplit('/', 1)[0] in ('/bin', '/usr/bin', '/usr/sbin', '/sbin'):
         name = name.rsplit('/', 1)[-1]
@@ -157,6 +160,16 @@ def _simple(text):
     if name == 'kill':
         return CommandRisk.DESTRUCTIVE if any(a in ('-9', '-KILL', '-SIGKILL') for a in args) and any(not a.startswith('-') for a in args) else CommandRisk.UNKNOWN
     if name in ('touch', 'mkdir', 'cp', 'mv', 'chmod', 'chown', 'chgrp', 'ln', 'install', 'tee', 'ansible-playbook'):
+        return CommandRisk.MUTATING
+    if name in ('rmdir', 'unlink', 'shred'):
+        return CommandRisk.DESTRUCTIVE
+    if name == 'dd':
+        return CommandRisk.DESTRUCTIVE if any(a.startswith('of=') for a in args) else CommandRisk.UNKNOWN
+    if name == 'find':
+        return CommandRisk.DESTRUCTIVE if '-delete' in args else CommandRisk.UNKNOWN
+    if name == 'docker' and args and args[0] == 'rm':
+        return CommandRisk.DESTRUCTIVE
+    if name == 'sed' and any(a == '-i' or a == '--in-place' or a.startswith('--in-place=') or (a.startswith('-') and not a.startswith('--') and 'i' in a[1:]) for a in args):
         return CommandRisk.MUTATING
     if name == 'env' and args:
         return CommandRisk.UNKNOWN
@@ -169,30 +182,47 @@ def _simple(text):
     if name == 'aws' and args[:2] == ['configure', 'export-credentials']:
         return CommandRisk.SENSITIVE_READ
     if name == 'git':
+        # A5's fixed-argv Git Intelligence is hardened separately. Arbitrary
+        # shell-level Git commands remain approval-requiring, including reads.
+        if not args:
+            return CommandRisk.UNKNOWN
+        while args and args[0] in ('-C', '-c'):
+            if len(args) < 2:
+                return CommandRisk.UNKNOWN
+            args = args[2:]
         if not args or args[0].startswith('-'):
             return CommandRisk.UNKNOWN
         operation, options = args[0], args[1:]
         if operation == 'reset':
-            return CommandRisk.DESTRUCTIVE if '--hard' in options else CommandRisk.MUTATING
+            if any(len(a) > 2 and a.startswith('--') and '--hard'.startswith(a) for a in options):
+                return CommandRisk.DESTRUCTIVE
+            return CommandRisk.MUTATING
         if operation == 'clean':
-            return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'f' in a for a in options) or '--force' in options else CommandRisk.UNKNOWN
+            return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'f' in a for a in options) or any(len(a) > 2 and a.startswith('--') and '--force'.startswith(a) for a in options) else CommandRisk.UNKNOWN
         if operation == 'branch':
-            return CommandRisk.DESTRUCTIVE if '-D' in options else CommandRisk.UNKNOWN
+            return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'D' in a[1:] for a in options) else CommandRisk.UNKNOWN
+        if operation == 'checkout' and '--' in options and options.index('--') < len(options) - 1:
+            return CommandRisk.DESTRUCTIVE
         if operation in ('add', 'commit', 'push', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'restore', 'stash', 'tag'):
+            if operation == 'push' and (any(a == '-f' or a.startswith('--force') for a in options) or any(a.startswith(':') or (a.startswith('+') and len(a) > 1) for a in options)):
+                return CommandRisk.DESTRUCTIVE
             return CommandRisk.MUTATING
         if any(a == '--output' or a.startswith('--output=') for a in options):
             return CommandRisk.MUTATING
-        if operation == 'status' and all(a in ('--short', '-s', '--branch', '-b', '--porcelain', '--porcelain=v1') for a in options):
-            return CommandRisk.SAFE_READ
         if operation == 'diff' and all(a in ('--staged', '--cached', '--stat', '--name-only', '--no-ext-diff', '--no-textconv', '--no-color') for a in options):
-            # Content diffs can themselves contain secrets; metadata-only is narrower.
-            return CommandRisk.SAFE_READ if '--stat' in options or '--name-only' in options else CommandRisk.SENSITIVE_READ
+            return CommandRisk.UNKNOWN if '--stat' in options or '--name-only' in options else CommandRisk.SENSITIVE_READ
         if operation == 'log' and all(a in ('--oneline', '--no-decorate') or re.fullmatch(r'-[0-9]+|--max-count=[0-9]+', a) for a in options):
-            return CommandRisk.SAFE_READ if '--oneline' in options else CommandRisk.SENSITIVE_READ
-        if operation == 'show' and options == ['--stat']:
-            return CommandRisk.SAFE_READ
+            return CommandRisk.UNKNOWN if '--oneline' in options else CommandRisk.SENSITIVE_READ
+        if operation == 'show' and (not options or options == ['HEAD']):
+            return CommandRisk.SENSITIVE_READ
         return CommandRisk.UNKNOWN
     if name == 'kubectl':
+        while args and args[0] in ('-n', '--namespace', '-s', '--server', '--context'):
+            if len(args) < 2:
+                return CommandRisk.UNKNOWN
+            args = args[2:]
+        if args and any(args[0].startswith(prefix + '=') for prefix in ('--namespace', '--server', '--context')):
+            args = args[1:]
         if not args:
             return CommandRisk.UNKNOWN
         if args[0] == 'delete':
@@ -246,9 +276,11 @@ def classify_command(command):
         raise LLMToolError('command must be UTF-8 text') from None
     if len(raw) > COMMAND_LIMIT:
         raise LLMToolError('command exceeds 8 KiB')
-    if any(not c.isprintable() and c != '\t' for c in command):
-        raise LLMToolError('command contains unsupported control characters')
-    parts, operators, malformed = _segments(command)
+    # Terminal controls/bidi text can disguise separators. Replace them with a
+    # separator for conservative component analysis and retain UNKNOWN as a floor.
+    unsafe_controls = any((not c.isprintable() and c != '\t') or c in '\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069' for c in command)
+    analysis = ''.join(';' if ((not c.isprintable() and c != '\t') or c in '\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069') else c for c in command)
+    parts, operators, malformed = _segments(analysis)
     risks = []
     for index, part in enumerate(parts):
         if index and operators[index-1] in ('>', '>>', '<'):
@@ -262,6 +294,8 @@ def classify_command(command):
     if operators and (any(not part.strip() for part in parts) or any(op in ('>', '>>', '<') for op in operators)):
         risks.append(CommandRisk.UNKNOWN)
     risk = max(risks, key=RISK_ORDER.__getitem__)
+    if unsafe_controls:
+        risk = max((risk, CommandRisk.UNKNOWN), key=RISK_ORDER.__getitem__)
     return CommandAssessment(command, risk, REASONS[risk])
 
 

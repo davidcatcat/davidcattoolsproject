@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
 
@@ -270,6 +270,19 @@ else:
         with patch("llmtool.providers.codex_cli.shutil.which", return_value=None):
             with self.assertRaisesRegex(LLMToolError, "install codex on PATH"):
                 self.complete()
+
+    def test_relative_executable_resolution_is_rejected(self):
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value="./codex"):
+            with self.assertRaisesRegex(LLMToolError, "install codex on PATH"):
+                self.complete()
+
+    def test_killpg_permission_error_falls_back_without_replacing_timeout(self):
+        process = Mock()
+        process.pid = 1234
+        with patch("llmtool.providers.codex_cli.os.killpg", side_effect=PermissionError):
+            CodexCLIProvider._kill(process)
+        process.kill.assert_called_once_with()
+        process.wait.assert_called_once_with()
 
     def test_start_failures_are_sanitized(self):
         for error in (FileNotFoundError("SECRET_TOKEN"), OSError("SECRET_TOKEN")):

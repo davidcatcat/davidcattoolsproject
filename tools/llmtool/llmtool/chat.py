@@ -9,6 +9,7 @@ from .inputs import INPUT_LIMIT
 from .prompts import chat_messages
 from .providers import client_type, create_client
 from .skills import discover_skills, load_skill
+from .terminal import human_output
 
 HELP = """/help                 Show commands
 /status               Show provider, type, skill and turn count
@@ -69,6 +70,8 @@ class ChatSession:
             reply = create_client(self.config, api_key(self.config)).complete(messages)
             if not isinstance(reply.content, str) or not reply.content.strip():
                 raise LLMToolError("invalid chat reply")
+        except LLMToolError:
+            raise
         except Exception:
             # This boundary also hides unexpected transport/auth exception details.
             # KeyboardInterrupt remains deliberate session termination.
@@ -128,12 +131,15 @@ def run_chat(session, read_line=None, stdout=None, stderr=None):
                     continue
                 output = session.command(line) if line.lstrip().startswith("/") else session.send(line)
                 if output is not None:
-                    print(output, file=stdout)
+                    print(human_output(output, stdout), file=stdout)
             except LLMToolError as exc:
                 print("llmtool: " + str(exc), file=stderr)
             except (OSError, UnicodeError):
                 print("llmtool: chat I/O failed; details omitted", file=stderr)
-                break
+                return 1
+            except (RuntimeError, ValueError):
+                print("llmtool: chat I/O failed; details omitted", file=stderr)
+                return 1
     except (EOFError, KeyboardInterrupt):
         print("\nchat ended", file=stdout)
     finally:
