@@ -157,6 +157,7 @@ class OpenAIProvider:
             "model": self.provider["model"],
             "input": self._input(messages),
             "max_output_tokens": self.generation["max_tokens"],
+            "store": False,
         }
         effort = self.provider.get("provider_options", {}).get("reasoning_effort")
         if effort is not None:

@@ -38,7 +38,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.1 — Provider Capability Foundation:** DONE
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
-- **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
+- **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; historical pre-hardening live E2E PASS; current status below
 - **A2.5 — Codex CLI Provider:** DONE and merged to `main`; external host validation and direct/live E2E PASS
 - **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
 - **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
@@ -133,7 +133,8 @@ The dedicated `openai` provider instead maps `provider_options.reasoning_effort`
 
 The `openai` provider uses the fixed official HTTPS origin `https://api.openai.com` and sends
 plain-text conversations to `POST /v1/responses`. It sends `max_output_tokens`, never sends
-`temperature`, and does not enable streaming, tools, code editing, shell, or Git. Optional
+`temperature`, explicitly sets `store: false`, and does not enable streaming, tools, code editing,
+shell, or Git. Optional
 `reasoning_effort` values are `none`, `low`, `medium`, and `high`; model support varies. The
 provider returns only final assistant text and safe response metadata, never reasoning items.
 
@@ -162,9 +163,11 @@ provider has not been validated against the live API; provider tests use a local
 The `claude-cli` provider invokes the user's installed `claude` executable as a local runtime; it
 does not call the Anthropic HTTP API. It sends the llmtool conversation over stdin using the CLI's
 non-interactive print mode with text output, safe mode, no session persistence, and all tools
-disabled. The subprocess uses an argv list, bounded output, and a timeout; raw CLI stderr is never
-forwarded. It does not edit files, execute shell commands, operate Git, stream, or expose reasoning
-controls. The CLI's default model is used unless a model is configured. Generic temperature and
+disabled. The subprocess uses an argv list, bounded output, a process-group timeout, an allowlisted
+environment, and an empty temporary working directory; raw CLI stderr is never forwarded. Its
+resolved executable must be an absolute path. It does not edit files, execute shell commands,
+operate Git, stream, or expose reasoning controls. The CLI's default model is used unless a model is
+configured. Generic temperature and
 max_tokens settings are retained in config but are not sent or enforced by Claude CLI.
 
 Claude CLI must already be installed and authenticated by the user. llmtool does not discover,
@@ -173,9 +176,13 @@ does not ask for a Base URL or API key and does not start Claude CLI. This runti
 separate from the Anthropic API provider, which remains planned.
 The provider resolves `claude` from the llmtool process `PATH`; PATH order determines which
 installed executable and version are used. Project config cannot select or override the executable.
-The Claude CLI provider's live end-to-end smoke passed in the normal authenticated user shell;
+The historical pre-hardening Claude CLI provider's live end-to-end smoke passed in the normal authenticated user shell;
 the Codex isolated runtime may resolve a different executable and does not establish the same
 authentication state. See the [runtime validation report](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md).
+Current hardened implementation: offline/fake-runtime tests PASS; current marker-only
+live E2E PASS with Claude CLI 2.1.286 (`CLAUDE_HARDENED_OK`, exit 0). This smoke
+exercised executable resolution, the environment allowlist, isolated cwd, process lifecycle,
+and final-text normalization. See the [Round-2 validation report](../../reports/llmtool_a0_a7_bugfix_validation_20261001.md).
 For isolated llmtool configuration tests, `LLMTOOL_CLAUDE_CLI_HOME` can point the child process
 at the user's existing Claude CLI home while llmtool itself uses a temporary `HOME`; it is a
 runtime environment setting and cannot be set in project config.
@@ -411,7 +418,9 @@ generation:
 `openai-compatible` 的 `base_url` 只接受 HTTP(S) origin，例如 `http://host:4000`，不包含
 `/v1`、credentials、query 或 fragment；工具固定附加 `/v1/chat/completions`。`openai` 不接受
 user/project/CLI/env 提供的 `base_url`，固定使用官方 HTTPS origin 與 `/v1/responses`。
-`timeout_seconds` 為正數 socket timeout；`max_tokens` 為正整數；temperature 為 0–2。
+`timeout_seconds` 必須大於 0 且不超過 3600 秒；這是 provider runtime/socket timeout，不是
+保證的端到端牆鐘上限。`api_key` 必須是沒有空白的可列印 ASCII；`max_tokens` 為正整數；
+temperature 為 0–2。
 未知欄位、重複 key、YAML aliases、錯誤型別與 malformed YAML 均報錯。
 
 先以 CLI > env > user > default 決定 active profile，再把 CLI/env 的 model 等允許覆寫套到
@@ -511,6 +520,9 @@ Help/version/config show/path 是管理命令，stdout 分別是說明／版本�
 config init 的完成訊息在 stderr。
 
 結果會完整驗證後才寫 stdout；任何 provider 錯誤不輸出部分答案。
+Ask/analyze-log/review-diff、chat/history 與 context-pack human output 在 stdout 為互動 TTY 時會把 ESC、BEL、C1、
+CR、其他 C0 控制字元及 Unicode bidi formatting controls 顯示為可見跳脫文字；一般 Unicode、
+換行與 tab 保留。JSON 與非 TTY/piped stdout 保持原始機器資料，不因終端顯示安全而改寫。
 
 | Exit code | 意義 |
 |---|---|
@@ -910,29 +922,38 @@ llmtool validate context --file packet.json --json
 
 | Risk | Meaning | Examples |
 |---|---|---|
-| SAFE_READ | Recognized narrow metadata/read operation, without execution authorization | `pwd`, `ls -l`, `stat file`, `git status`, `git diff --stat`, `git show --stat`, `kubectl get pods` |
+| SAFE_READ | Recognized narrow metadata/read operation, without execution authorization | `pwd`, `ls -l`, `stat file`, `kubectl get pods` |
 | SENSITIVE_READ | May display secrets or sensitive content even though read-only | `cat .env`, `env`, `printenv`, `kubectl get secret -o yaml`, raw `git diff` |
 | MUTATING | Changes files, Git state, or services | `touch file`, `git commit -am test`, `git fetch`, `kubectl rollout restart deployment/api`, `terraform apply` |
 | DESTRUCTIVE | Deletes data or disrupts systems/processes | `rm -rf /`, `git reset --hard`, `git clean -fd`, `git branch -D old`, `kubectl delete namespace production`, `terraform destroy`, `DROP TABLE users`, `kill -9 123` |
-| UNKNOWN | Unsupported syntax/operation; safety has not been established | `find /`, `grep -R /`, `cat arbitrary-config-file`, `sh -c pwd`, substitutions, custom commands |
+| UNKNOWN | Unsupported syntax/operation; safety has not been established | raw `git status`, `git log --oneline`, `git diff --stat`, `git show --stat`, `find /`, `grep -R /`, substitutions, custom commands |
 
 Sensitive patterns include `.env` files/globs, credential/secret/token names,
 private key files (`.pem`, `.key`, `id_rsa`, `id_ed25519`), `~/.ssh`,
 `~/.aws/credentials`, `~/.kube/config`, kubeconfig, credential stores/keychains,
 `~/.netrc`, `~/.npmrc`, application.yml/yaml/properties and `/etc/.../config.yaml`.
 `aws configure export-credentials` and secret YAML/JSON dumps are SENSITIVE_READ.
-`kubectl describe pod`, full pod/deployment output, `systemctl status`, all `ps`
-forms, and full Git logs are conservatively sensitive because they may expose environment,
-logs, or process arguments. A raw Git diff can contain credentials too.
+`kubectl describe pod`, full pod/deployment output, `systemctl status`, and all `ps`
+forms are conservatively sensitive because they may expose environment, logs, or process
+arguments. Recognized content-bearing raw Git reads (`git diff`, staged/cached diffs,
+full `git log`, and narrowly recognized `git show`) are SENSITIVE_READ and require approval.
 
 Historical regression: `cat /etc/company/app/config.yaml` is **SENSITIVE_READ**.
 Metadata alternatives `ls -l /etc/company/app/config.yaml` and
 `stat /etc/company/app/config.yaml` are **SAFE_READ** within the narrow grammar.
+Raw Git metadata reads such as `git status`, `git diff --stat`, `git diff --name-only`,
+`git log --oneline`, and `git show --stat` are **UNKNOWN** and require approval because
+repository Git configuration can run helpers even for apparent reads. Recognized
+mutating/destructive Git operations retain MUTATING/DESTRUCTIVE. SENSITIVE_READ
+preserves content-exposure warnings and requires approval; it does not claim execution safety. This differs from `llmtool git`,
+which uses A5's fixed argv and safe Git configuration for explicitly scoped read-only collection.
 This classification never authorizes execution or guarantees arbitrary file
 contents/configuration are safe.
 
-The classifier accepts at most **8 KiB UTF-8** and rejects unsupported control
-characters (tabs allowed). It tokenizes simple commands and splits unquoted
+The classifier accepts at most **8 KiB UTF-8**. Controls and bidirectional formatting
+characters cannot make a command safer: they are conservatively treated as separators with
+an UNKNOWN risk floor, while recognized destructive components retain their higher risk.
+It tokenizes simple commands and splits unquoted
 `|`, `&&`, `||`, and `;`. Quoted separators remain argument data. Recognized risk
 floors combine as DESTRUCTIVE > MUTATING > SENSITIVE_READ > UNKNOWN > SAFE_READ.
 Unknown components never turn a compound into SAFE_READ. The result is the highest
@@ -942,7 +963,8 @@ UNKNOWN. Malformed quoting/operators are uncertain; recognized risky components
 remain visible. Substitutions, variables, backticks, scripts, unsupported options,
 and complex shell grammar remain UNKNOWN within that component. No expansion occurs.
 Only conventional absolute binary locations and a plain `sudo <command>` form are
-recognized; other wrapper/global-option forms are unsupported. Glob matches are
+recognized; sudo applies an UNKNOWN approval floor, while sensitive/mutating/destructive
+inner commands retain their higher risk. Other wrapper/global-option forms are unsupported. Glob matches are
 never resolved. These are conservative heuristics, not a full shell parser or
 complete security policy.
 

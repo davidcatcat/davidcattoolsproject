@@ -137,6 +137,11 @@ class ProviderTests(unittest.TestCase):
             self.answer({"error": {"message": "secret input and key"}})
         self.assertNotIn("secret", str(caught.exception))
 
+    def test_null_error_field_is_not_an_api_error(self):
+        body = success()
+        body["error"] = None
+        self.assertEqual(self.answer(body).content, "final answer")
+
     def test_metadata_does_not_inject_lines_or_emit_non_numeric_usage(self):
         obj = success()
         obj["model"] = "model\nsecret-log-line"

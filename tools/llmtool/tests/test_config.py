@@ -146,6 +146,43 @@ active_provider: openai-main
                 with self.assertRaises(LLMToolError):
                     self.resolve()
 
+    def test_invalid_inactive_provider_name_is_rejected_without_losing_valid_profiles(self):
+        for name in ("bad name", "-leading", "x" * 65):
+            with self.subTest(name=name):
+                self.user.write_text(yaml.safe_dump({"providers": {"default": {}, name: {}}}))
+                with self.assertRaises(LLMToolError):
+                    self.resolve()
+        self.user.write_text("providers:\n  default: {}\n  office-qwen: {}\n")
+        config = self.resolve()
+        self.assertIn("default", config["providers"])
+        self.assertIn("office-qwen", config["providers"])
+
+    def test_api_key_whitespace_rejected_during_config_and_runtime(self):
+        self.user.write_text("providers:\n  default:\n    api_key: valid-printable-key\n")
+        config = self.resolve()
+        self.assertEqual(api_key(config, {}), "valid-printable-key")
+        for key in (" leading", "trailing ", "in ternal", "tab\tkey", "", "control\x01"):
+            with self.subTest(key=repr(key)):
+                self.user.write_text(yaml.safe_dump({"providers": {"default": {"api_key": key}}}))
+                with self.assertRaises(LLMToolError):
+                    self.resolve()
+        self.user.write_text("providers:\n  default: {}\n")
+        config = self.resolve()
+        config["providers"]["default"]["api_key"] = "runtime bad "
+        with self.assertRaisesRegex(LLMToolError, "API key"):
+            api_key(config, {})
+
+    def test_timeout_seconds_finite_upper_bound(self):
+        from llmtool.config import MAX_TIMEOUT_SECONDS
+        for value in (0, -1, float("nan"), float("inf"), 1e10, MAX_TIMEOUT_SECONDS + 1):
+            with self.subTest(value=value):
+                self.project.write_text(yaml.safe_dump({"providers": {"default": {"timeout_seconds": value}}}))
+                with self.assertRaises(LLMToolError):
+                    self.resolve()
+        for value in (120, MAX_TIMEOUT_SECONDS):
+            self.project.write_text(yaml.safe_dump({"providers": {"default": {"timeout_seconds": value}}}))
+            self.assertEqual(self.resolve()["providers"]["default"]["timeout_seconds"], value)
+
     def test_invalid_environment_numbers(self):
         for name in ("LLMTOOL_TIMEOUT", "LLMTOOL_MAX_TOKENS"):
             for value in ("", "secret-value", "nan", "inf", "0", "-1"):

@@ -1,5 +1,7 @@
 import json
+import io
 import os
+import site
 import subprocess
 import sys
 import tempfile
@@ -10,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import yaml
+from unittest.mock import Mock, patch
 
 from test_provider import success
 from llmtool.context import format_context_packet, parse_context_packet
@@ -62,6 +65,7 @@ class CLITests(unittest.TestCase):
         self.home.mkdir()
         # Do not inherit user config, provider overrides, credentials or proxies.
         self.env = {
+            "PYTHONUSERBASE": site.getuserbase(),
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
             "LLMTOOL_BASE_URL": self.base_url,
@@ -154,20 +158,46 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.server.requests[0][2]["messages"][1]["content"], "ERROR evidence\n")
 
-    def test_ambiguous_inputs_never_send_request(self):
+    def test_explicit_input_wins_and_does_not_consume_stdin(self):
         path = self.cwd / "app.log"
         path.write_text("private log")
-        for args, stdin in (
-            (("ask", "private-text", "--file", str(path)), b""),
-            (("ask", "private-text"), b"private-pipe"),
-            (("analyze-log", "--file", str(path)), b"private-pipe"),
-        ):
+        for args, expected in ((('ask', 'private-text'), 'private-text'),
+                               (('ask', '--file', str(path)), 'private log')):
             with self.subTest(args=args):
-                result = self.run_cli(*args, data=stdin)
-                self.assert_failure(result)
-                self.assertIn(b"only one", result.stderr)
-                self.assertNotIn(b"private", result.stderr)
-        self.assertEqual(self.server.requests, [])
+                result = self.run_cli(*args, data=b'pipe must remain unread')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.server.requests[-1][2]['messages'][1]['content'], expected)
+
+    def test_closed_stdin_has_sanitized_cli_error(self):
+        result = self.run_cli("ask", data=b"")
+        self.assert_failure(result)
+
+    def test_broken_pipe_is_suppressed_at_cli_boundary(self):
+        from llmtool.cli import main
+        class Broken:
+            def isatty(self):
+                return False
+            def write(self, value):
+                raise BrokenPipeError()
+        with patch("sys.stdout", Broken()):
+            self.assertEqual(main(["skills"]), 0)
+
+    def test_model_output_escaped_only_for_tty_human_ask(self):
+        from llmtool.cli import main
+        from llmtool.providers.base import Reply
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        reply = Reply("answer\x1b]52;c;secret\x07\rspoof\u202e", {})
+        client = Mock()
+        client.complete.return_value = reply
+        for stream, expected in ((TTY(), "answer\\x1b]52;c;secret\\x07\\x0dspoof\\u202e\n"),
+                                 (io.StringIO(), reply.content + "\n")):
+            with self.subTest(tty=stream.isatty()), patch("llmtool.cli.resolve_config", return_value={}), \
+                    patch("llmtool.cli.api_key", return_value=None), patch("llmtool.cli.create_client", return_value=client), \
+                    patch("llmtool.cli.sys.stdout", stream):
+                self.assertEqual(main(["ask", "prompt"]), 0)
+                self.assertEqual(stream.getvalue(), expected)
 
     def test_binary_and_empty_input(self):
         for data in (b"", b" \n\t", b"text\x00binary", b"\xff\xfe", b"\x01"):

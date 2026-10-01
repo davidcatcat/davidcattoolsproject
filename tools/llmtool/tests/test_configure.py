@@ -1,5 +1,6 @@
 import io
 import os
+import site
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,13 @@ class ConfigureTests(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         self.assertNotIn("API key (leave blank to unset): ", answers.prompts)
+
+    def test_invalid_provider_name_fails_before_secret_prompt_or_config_write(self):
+        answers = InteractiveInput(["bad name"])
+        with patch("sys.stdin", TTY()), self.assertRaises(LLMToolError):
+            run_configure(self.home, answers, lambda *a, **k: self.fail("secret prompt reached"))
+        self.assertEqual(len(answers.prompts), 1)
+        self.assertFalse(self.path.exists())
 
     def test_blank_base_url_and_model_are_saved_as_null(self):
         result, out, err = self.run_wizard(self.answers(url="", model=""))
@@ -152,6 +160,7 @@ class ConfigureTests(unittest.TestCase):
     def test_model_command_rejects_saved_unconfigured_profile_before_http(self):
         self.run_wizard(self.answers(url="", model=""))
         env = {
+            "PYTHONUSERBASE": site.getuserbase(),
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
         }

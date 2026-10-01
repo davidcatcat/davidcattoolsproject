@@ -107,7 +107,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI. This A2.5 branch implements `openai-compatible`, `openai`, `claude-cli`, and `codex-cli`. Anthropic API remains planned / not implemented. A2.5 awaits external review; this does not claim it is merged to main. See the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI with four provider transports. A0–A6 are merged. A7 implementation/review remains on its separate, unmerged feature branch; the A0–A7 review bugfix branch is also unmerged. Anthropic API remains planned. See the [A0–A11 roadmap](tools/llmtool/ROADMAP.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
