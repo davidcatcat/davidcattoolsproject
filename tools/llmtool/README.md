@@ -49,7 +49,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
-- **A9 — Agent Orchestration:** implementation complete on feature branch; validation/CI/external review pending. A10 NOT STARTED.
+- **A9 — Agent Orchestration:** implementation complete on feature branch; external ChatGPT review PASS; GitHub Python 3.9/3.14 CI PASS; NOT merged. A10 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1327,14 +1327,14 @@ llmtool orchestrate --plan plan.json --file task.txt
 llmtool orchestrate --plan plan.json "Review this supplied incident"
 ```
 
-The A9 MVP supports 1–8 unique roles in a sequential pipeline only. It is fail-fast:
+The A9 parser has a hard cap of 8 steps; with the current four built-in unique roles the effective MVP maximum is 4 steps. It is fail-fast:
 no retries, fallback provider, hidden substitution, fan-out, voting, loops, branches,
 or dynamic routing. Every live step resolves its explicit profile with
 `require_configured=True` before credential value resolution.
 
 Handoff is shallow and bounded: every step receives the original task plus only the
 immediately previous role output. Earlier outputs are not accumulated and there is
-no hidden long-term memory. Previous role output is marked as untrusted model text.
+no hidden long-term memory. Previous role output is marked as untrusted model text; delimiters reduce ambiguity but are not claimed to prevent prompt injection.
 A10 Dynamic Context Retrieval remains future work.
 
 A9 is text-only. It never executes shell/VERIFY_NEXT/Git, edits files or code, applies
@@ -1348,5 +1348,4 @@ read task input, config, credentials, instantiate providers, or access network.
 Repository examples live under `orchestration/` and are not packaged.
 
 Anthropic HTTP API remains future A2.3 work. A9 has no Anthropic special case; a
-future registered provider can use the same explicit profile contract. A9 is on its
-feature branch and is not merged. A10 NOT STARTED.
+future registered provider can use the same explicit profile contract. A9 is on its feature branch, external ChatGPT review and GitHub CI PASS, and it is not merged. A10 NOT STARTED.

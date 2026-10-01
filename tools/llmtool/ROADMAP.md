@@ -381,7 +381,7 @@ Provider-independent sequential orchestration。內建 declarative roles：
 `grinder`、`validator`、`coder`、`reviewer`，每一步由 plan 明確綁定 named
 provider profile；Role != Provider，不從 provider/model 名稱推論職責。
 
-A9 MVP 僅支援 1–8 個 unique role 的 bounded sequential pipeline。每一步收到 original
+A9 parser hard cap 為 8 steps；目前只有四個 built-in unique roles，所以 MVP 實際最多 4 steps。每一步收到 original
 task + immediately previous role output；不累積所有歷史輸出、不做 hidden memory。
 Fail-fast，無 retry、fallback、parallel fan-out、voting、loop、branch 或 dynamic routing。
 Provider readiness 必須先於 credential value resolution。
@@ -398,8 +398,7 @@ profiles 並各呼叫 Provider.complete 一次。
 Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthropic，
 未來 provider registry 加入後即可由同一 plan/profile contract 使用。
 
-A9 feature branch implementation complete；validation/CI/external review pending，
-NOT merged。A10 NOT STARTED。
+A9 feature branch implementation complete；external ChatGPT review PASS；GitHub Python 3.9 / 3.14 CI PASS；NOT merged。A10 NOT STARTED。
 
 ## A10 — Dynamic Context Retrieval
 

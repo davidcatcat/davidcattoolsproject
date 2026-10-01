@@ -89,3 +89,39 @@ paid API call is fabricated. Packaging is expected to include the three new
 example plans; CI/package evidence will be appended after verification.
 
 A9 is NOT merged. External ChatGPT review pending. A10 NOT STARTED.
+
+## Remote CI and external review — 2026-10-01
+
+Reviewed branch head before this evidence append:
+`1ada1f359ba925fef6eb3afb27bfd5362b24d007`.
+
+GitHub llmtool CI run `36851457200` PASS:
+- Python 3.9.25: 501 tests, all PASS; compileall PASS; working tree clean PASS.
+- Python 3.14.7: 501 tests, all PASS; compileall PASS; working tree clean PASS.
+- A9-focused `test_orchestration.py`: 19 tests, all PASS on both jobs.
+
+The repository's existing editable-package install succeeded in both CI jobs and the
+new `llmtool.roles`, `llmtool.orchestration`, and `llmtool.orchestration_cli`
+modules were imported by the passing tests. Static packaging review confirms these
+modules are under the existing `llmtool*` package discovery, while
+`tools/llmtool/orchestration/` examples are outside package data. A standalone
+wheel build was NOT-RUN in this connector-driven pass; this limitation is recorded
+rather than inferred as a wheel artifact result.
+
+External ChatGPT code/security review PASS. No material blocker found. Invariants
+verified: explicit role/profile mapping; no provider-role inference; shallow handoff;
+readiness before credential resolution; fail-fast; one completion call per reached
+step; no retry/fallback/parallelism; no shell/Git/file/code mutation; no provider-native
+tool enablement; no A10 retrieval; no Anthropic special case. Existing Claude/Codex
+providers remain hardened text-only runtimes when reached through Provider.complete.
+
+The parser hard cap is 8 steps, but duplicate roles are intentionally rejected and
+the registry currently has four built-in roles, so the effective A9 MVP maximum is
+four steps. Delimiters mark previous output as untrusted but are not claimed to
+eliminate prompt injection.
+
+Live smoke remains NOT-TESTED because this GitHub connector cannot access the user's
+local authenticated CLI sessions. No credential inspection, auth change, VPN
+dependency, or paid API call was introduced merely to make validation green.
+
+PR #10 remains DRAFT and unmerged. A10 NOT STARTED.
