@@ -479,11 +479,13 @@ llmtool context-pack --json --file incident.txt
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
-同時提供 positional 與 --file，或明確輸入加上當下已排入的非空 stdin，會在設定／provider 存取前報錯。
-明確輸入遇到 TTY、空 pipe 或 EOF 不衝突，不等待 writer 產生資料或結束；稍後才送入的資料不等待。
-POSIX pipe/socket 使用 FIONREAD 探測，不讀取、不輪詢、不建立背景 thread。regular stdin 依剩餘 bytes 判斷，
-空 /dev/null 支援；無法安全探測的 stream/platform 會 sanitized failure。此介面針對尚未被其他程式碼讀取的 stdin。
-只有 stdin-only 模式會讀至 EOF（有 16 MiB 上限）。macOS 與 Linux 測試涵蓋真實 pipe/fd。
+同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。
+明確輸入遇到 TTY、closed/None stdin、regular-file stdin、/dev/null、空 pipe 或 EOF 不衝突；
+`while read q; do llmtool ask "$q"; done < qs` 與 regular-file `--file` shell loops 可正常使用。
+macOS/Linux 的 POSIX pipe/socket 使用 FIONREAD 探測，不讀取、不輪詢、不建立背景 thread；
+不等待 writer 稍後產生資料或結束，也不探測已被其他程式碼緩衝的 bytes。
+無法安全探測的 stream／非 POSIX 平台保留明確輸入行為，不因 probe 不可用而失敗。
+stdin-only 模式先檢查 config/readiness，再讀至 EOF（有 16 MiB 上限）；實際測試含真實 pipe/socket/fd 與 shell loops。
 互動終端不主動提示輸入；要用 stdin 可貼入 pipe 或重新導向。
 輸入需為非空 UTF-8 文字，拒絕 NUL／二進位控制字元、非法 UTF-8、目錄與 FIFO 檔案。
 接受一般 log 的 tab、換行、form feed 與 ANSI escape；大小上限 16 MiB。
@@ -497,11 +499,20 @@ POSIX pipe/socket 使用 FIONREAD 探測，不讀取、不輪詢、不建立背�
 | `context-pack` | A4 validated packet：`FACTS`、`EVIDENCE`、`INFERENCES`、`HYPOTHESES`、`UNKNOWNS`、`VERIFY_NEXT`；`--json` 輸出 JSON |
 
 ask/review-diff 不驗證模型推論；analyze-log（包括 ask --skill analyze-log）另有有限的 deterministic NEXT_COMMANDS guard。
-NEXT_COMMANDS 必須是最後一節，使用最多三個 single-line bullet commands（可用 inline backticks），或單獨 `(none)`。
-輸出上限 1 MiB、每個 command 8 KiB；不接受 fences、續行、shell interpreter、expansions 或後接 prose。
-明顯 kubectl get secret/secrets（含 flags、qualified names、pipes）、A6 已知 sensitive/mutating/destructive
-建議與不支援格式會在 stdout／verbose metadata 前失敗，沒有自動改寫。UNKNOWN 仍只是未證明安全的文字。
-此窄 guard 不證明所有 shell 語意或模型推論安全；chat 的 explicit skill 回覆仍未套用此 CLI guard。
+最多顯示三個實際 NEXT_COMMANDS 建議；接受普通／numbered bullets、inline backticks 加括號說明、
+fenced commands、`NEXT_COMMANDS: (none)` 與結尾說明文字。大寫 `<SERVICE_NAME>` 等 placeholders
+只在分類時視為資料名稱，不替換成真實值。輸出上限 1 MiB、每個 command 8 KiB。
+NEXT_COMMANDS 的已知 MUTATING／DESTRUCTIVE、credential/private-data display、connection/auth overrides
+或不支援的 shell interpreter／expansions／控制字元建議，會以可見 suppression marker 取代；
+stderr 只記錄數量，不回顯被抑制的命令。全部建議被抑制時顯示 `(none)`，不產生替代命令。
+ROOT_CAUSE／EVIDENCE／DISTRACTORS／UNKNOWN_OR_UNPROVEN 保留；可用的分析仍 rc=0，不 retry、不換模型。
+A6 SENSITIVE_READ 表示未來執行需 approval，並非此文字建議的執行授權；systemctl status、kubectl describe、
+journalctl 等正常診斷不因 SENSITIVE_READ 自動隱藏。UNKNOWN 仍是未證明安全、未批准的文字。
+analyze-log **從不執行 NEXT_COMMANDS**。窄 guard 偵測 literal Secret/raw API／env／config display 與
+secret-store reads，不解析完整 shell、aliases、動態 expansions 或證明模型推論安全。
+只對 command text 使用嚴格 invisible/control 規則；分析文字仍走既有 human terminal escaping boundary。
+chat 的 explicit skill 回覆仍未套用此 CLI guard。第二輪隔離公司 gateway smoke 見
+[Post-A9 validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md#second-round-independent-review-follow-up--2026-10-02)。
 context-pack 從 A4 起驗證 structured JSON schema，再輸出 human text 或 JSON；不驗證 claim 真實性。
 
 Live smoke test 曾發現 `analyze-log` 建議 `cat /etc/company/app/config.yaml`；該命令沒有

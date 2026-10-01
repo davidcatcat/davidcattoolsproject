@@ -184,3 +184,124 @@ in the Draft PR/checkpoint. Production resources are unchanged by that docs comm
 
 External ChatGPT review: PENDING for this hardening pass. Keep PR DRAFT; do not
 merge. M6 remains DEFERRED. A10 NOT STARTED.
+
+## Second-round independent review follow-up — 2026-10-02
+
+This section supersedes the first-round behavior claims above; historical evidence
+is retained. Source: [independent Claude review](llmtool_post_a9_hardening_review_20261001.md),
+verdict REQUEST CHANGES for `b196bb34c9b2ef6ee3efdfcbb104f3578b73a813`.
+The independent report remains byte-for-byte unchanged.
+
+Repository/branch: canonical repository only, `fix/post-a9-hardening`, existing
+PR #11. Included main: `f5001b54978dc77c40468ddd099c6cbd78d86ce6`, via normal
+merge `41b81c2a1a833e137a0de4ad6915bb4dedba3365`. No rebase or force push.
+Follow-up implementation commit: `a036183d163eb0da3a6404477cff48a0e0616133`.
+
+### R1–R8 disposition
+
+| Item | Disposition | Root cause and production correction | Regression evidence / remaining limitation |
+|---|---|---|---|
+| R1 | FIXED | Whole-answer rejection confused suggestion safety/format with usable analysis. `filter_log_suggestions` now preserves analysis, suppresses only unsupported/unsafe NEXT_COMMANDS with visible markers and a count-only stderr warning; usable answers return rc=0. SENSITIVE_READ and UNKNOWN remain untrusted suggestions rather than automatic suppression. | Four sanitized multi-section fixtures reproduce reported gateway patterns; CLI preserves analysis and calls complete exactly once under execution traps. Accept inline none, arbitrary numbered labels, backticks with parentheses, uppercase angle placeholders, fences and trailing prose. Maximum three detected suggestions; bounded UTF-8 transport violations still fail. |
+| R2 | FIXED | None/closed stdin failed during probing. Treat it as no conflicting stdin when explicit input exists. | Direct/file tests plus real `ask q <&-` subprocess returns rc=0 with one mock request. Closed stdin without explicit input remains an input error. |
+| R3 | FIXED | Regular files used by outer shell loops were misidentified as conflicting sources. Probe only POSIX FIFO/socket queued bytes; TTY, regular file, character fd and unsupported/non-POSIX probing preserve explicit input. | Real positional and --file shell loops against an offline mock provider, real pipe/socket/PTY and empty-writer/EOF tests. Snapshot cannot detect later arrivals or bytes already buffered elsewhere; no blocking/poll/thread/sleep. |
+| R4 | FIXED (narrow literal detection) | Shared credential-display facts cover raw Secret API paths, oc Secret reads, xargs kubectl selection, env/jsonpath/template displays, connection/auth overrides, all requested display tools/names, secret-store reads and git config --list. Gateway-exposed pg_hba.conf display adds conservative .conf handling. | All demonstrated bypasses, 13 display tools × 7 sensitive names, .conf regression, higher-risk preservation and sanitized CLI suppression. No complete shell interpretation, aliases/dynamic expressions or claim of exhaustive secret detection. |
+| R5 | FIXED | Blanket isprintable rejected ordinary Unicode Cf. General text checks now reject C0 except LF/CR/tab, DEL/C1 and explicit bidi controls; ordinary ZWJ/ZWNJ/ZWSP/BOM/soft hyphen survive. Strict Cf/control checks apply only to suggestion command text. | ContextPacket/FeedbackCase roundtrips, joined emoji and unsafe-control/surrogate rejection; analysis with ANSI/emoji survives. Existing field byte caps and terminal display boundary remain. |
+| R6 | FIXED | Guard imported private validator helpers and duplicated exposure rules. Public `sensitive_path`, `secret_resource`, `connection_override`, `credential_display` supply shared detection facts. A6 retains independent risk/approval policy, including higher-risk precedence. | Shared Secret template/od rules and M1 regression suite. Config-name display is conservatively SENSITIVE_READ instead of UNKNOWN; env command wrappers remain UNKNOWN in A6 and are withheld by the suggestion guard. No validator redesign or SAFE_READ expansion. |
+| R7 | FIXED | Full stdin read preceded readiness. CLI now validates combinations/nonblocking explicit-input conflict before config, then readiness, actual source read, credential lookup and provider call. | Both mock read trap and real never-EOF pipe subprocess fail promptly for unconfigured profile; queued explicit-input conflict still prevents config/key/client. |
+| R8 | FIXED | Current docs described destructive filtering and unsupported stdin behavior incompletely. README now matches preservation/suppression, diagnostic risk distinctions, pipe/socket snapshots, regular-file loops, closed stdin and smoke evidence. | README links this round; historical reports unchanged. M6 DEFERRED; A10 NOT STARTED. |
+
+### Newly measured offline validation
+
+All commands launched from the canonical repository. Canonical providers remain
+offline mocks; host permission is required only for their loopback servers and
+inherited provider runtime isolation. Initial sandbox socket denial was rerun with
+host permission. An intermediate suite exposed two A6 expectations: config-name
+display now intentionally upgrades to SENSITIVE_READ, while env wrapper detection
+was corrected to retain UNKNOWN. No tests were weakened to permit execution.
+
+| Check | Python | Discovered | Passed | Failed | Errors | Skipped | Suite elapsed |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Focused follow-up + inherited hardening + real CLI fd cases | 3.13.3 | 34 | 34 | 0 | 0 | 0 | 1.727 s |
+| Affected shared tests | 3.13.3 | 433 | 433 | 0 | 0 | 0 | 35.722 s |
+| Full canonical syntax + suite | 3.13.3 | 549 | 548 | 0 | 0 | 1 | 51.469 s |
+| Full canonical syntax + suite | actual 3.9.6 | 549 | 548 | 0 | 0 | 1 | 75.818 s |
+| Installed final-wheel focused regressions | 3.13.3 | 32 | 32 | 0 | 0 | 0 | 0.247 s |
+
+The inherited A5 non-UTF-8 filename filesystem skip is the sole skip. This round
+adds 11 test methods plus two real subprocess CLI regressions; 536 was not reused
+as final evidence. Affected shared modules are the 16 listed in the first round;
+test_cli now also checks real closed-fd/regular-file loops and an open infinite pipe.
+Static fixtures intentionally contain sanitized reported patterns, not private logs.
+
+Commands/artifacts:
+
+```sh
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-review-tests.py focused
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-review-tests.py shared
+make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"
+make -C tools/llmtool check PYTHON=/usr/bin/python3
+tools/llmtool/.venv/bin/python -m pip wheel --no-deps --wheel-dir /private/tmp/llmtool-review-wheel tools/llmtool
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-review-wheel-check.py
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-review-tests.py installed
+git diff --check
+```
+
+### Final wheel
+
+PASS: standalone wheel, SHA256
+`33c97d35b59e800ef0da5304cb85e1dfba3fa8d57a6ae5dc42a8d5e2b3835e36`.
+All 32 production/resources match canonical bytes (29 Python modules, 3 runtime
+skills); 27 match the pre-follow-up merge HEAD, five intentionally changed:
+cli, inputs, log_safety, terminal, validator. A0–A9 resources remain present;
+runtime skills were not changed in round two. Tests, regression fixtures and
+repository-only example plans are excluded. Installed imports are asserted under
+`/private/tmp/llmtool-review-installed/llmtool`, not the source checkout.
+
+### Required isolated company gateway smoke
+
+Exactly four credential-free requests, using the reviewed company gateway setup
+(`gw`, enable_thinking=false), isolated temporary HOME/config and an empty runtime
+override environment. Real user config, credentials and project config were not
+read. No personal Claude/Codex/OpenAI call, login/VPN change, retry or fallback.
+Every case constructed one provider, called complete once and hit zero execution
+traps (subprocess.run, subprocess.Popen, os.system). All preserved ROOT_CAUSE and
+EVIDENCE with nonempty stdout; safe diagnostics remained visible.
+
+| Synthetic case | rc | Wall time | stdout bytes | Live suppressed suggestions |
+|---|---:|---:|---:|---:|
+| Database authentication failure | 0 | 1.440 s | 1064 | 1 |
+| OOM | 0 | 1.628 s | 1260 | 0 |
+| Kubernetes BackOff / missing Secret | 0 | 1.173 s | 895 | 2 |
+| nginx upstream refusal | 0 | 1.579 s | 1103 | 0 |
+
+Transport/analysis preservation: PASS. This is not a model-quality PASS.
+The database answer also exposed a previously unrecognized pg_hba.conf display.
+That demonstrated gap was fixed afterward with the .conf rule and focused test.
+Final filtering was replayed offline against the four retained live outputs:
+database suppressed one additional suggestion, other cases zero additional; all
+analysis prefixes remained identical. No extra model request was made to chase
+preferred output. The final .conf/section-boundary refinements therefore have
+offline replay/regression evidence, not a second live run claim.
+Synthetic runtime artifacts: `/private/tmp/llmtool-review-gateway-wn961l4n`.
+
+### Final security / Git checkpoint
+
+Complete changed production/tests/docs reviewed. No new production subprocess,
+shell=True, os.system, eval/exec, model-driven Git/filesystem mutation, native tools,
+credential logging, raw stderr, process environment mutation, retry/fallback,
+provider substitution, unbounded accumulation or A10/A11/A12 execution code.
+Suppression is a display transformation only; no suggested command is executed.
+Ordinary analysis stays under the inherited terminal boundary, and general Unicode
+acceptance does not loosen A6 command classification. Readiness-before-credentials
+and deterministic orchestration profiles remain covered by shared tests.
+
+All six known unrelated untracked benchmark paths were preserved without editing,
+staging, reading, moving or deleting them. The remaining scratchpad/main-docs
+worktree was untouched; no new worktree/clone/alternate checkout or further
+worktree diagnostic/cleanup was performed after the user's finished-cleanup checkpoint.
+
+PR #11 is updated by normal branch push only; no gh command, duplicate PR, merge or
+CI-status claim was made for this new head. Final-head GitHub CI and external
+ChatGPT review remain for the reviewer to inspect. M6 remains DEFERRED; historical
+Claude A8 live safety remains FAIL as measured; Anthropic A2.3 remains future.
+A0–A9 DONE and merged; Post-A9 follow-up unmerged; A10 NOT STARTED.
