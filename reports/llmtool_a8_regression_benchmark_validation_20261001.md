@@ -249,3 +249,15 @@ fuzzy matching, altered output or relaxed expectation.
 New-fix remote CI pending commit/push; old-head SUCCESS above is historical only.
 Final-head remote results will be recorded after verification. PR #9 remains DRAFT,
 A8 unmerged, external review pending after the fix. A9 NOT STARTED.
+
+### A8-R1 new-fix remote validation
+
+Fix commit `0c1bc37de76a933d93301424a404dad058d14962` pushed normally.
+Verified its [PR run 36840814680](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36840814680)
+and [push run 36840809871](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36840809871):
+Python 3.9 SUCCESS, Python 3.14 SUCCESS, both clean-tree steps SUCCESS in each run.
+These are new-fix results, separate from historical old-head evidence above.
+This final evidence append changes documentation only; production/tests retain the
+CI-tested fix bytes. Final documentation-head CI is verified after pushing this record
+and reported in the checkpoint/PR body. External review remains pending after A8-R1;
+PR #9 DRAFT and unmerged. Claude model safety FAIL unchanged; no new live invocation.
