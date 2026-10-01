@@ -1431,10 +1431,12 @@ llmtool retrieve-context --root ./synthetic-evidence --scope auth.py --scope db.
 Both profiles must explicitly exist in trusted persisted user configuration.
 Generic LLMTOOL_* request overrides and project .llmtool.yaml cannot rewrite
 either binding. Readiness precedes configured api_key_env value access. The
-synthesizer profile and credential are accessed only after all retrieval succeeds.
+planner and synthesizer profiles are both readiness-validated before any input read
+or provider request. No credentials are read during preflight. Synthesizer credential
+access/client creation remain deferred until all retrieval succeeds.
 Normal ask/config precedence remains unchanged. Explicit-input queued pipe/socket
-conflicts are checked before config; stdin-only reading starts after planner
-readiness. Existing closed-stdin, regular-file shell-loop and empty-pipe behavior applies.
+conflicts are checked before config; stdin-only reading starts after BOTH profiles
+pass readiness. Existing closed-stdin, regular-file shell-loop and empty-pipe behavior applies.
 
 ### Authorization and data sent to providers
 
@@ -1456,10 +1458,14 @@ The only key is files, containing 0..8 unique exact manifest paths. Empty select
 is valid and still proceeds to the synthesizer with the task. Duplicate JSON keys,
 constants, extra fields, malformed/fenced/prose output, duplicate/unknown/noncanonical
 paths and excessive selection fail before any selected content is read or any
-synthesizer profile is resolved. Model output never grants authorization.
+synthesizer credential/client access. Model output never grants authorization.
 
 The synthesizer receives structured JSON with the original task and the selected
-documents' relative paths and exact UTF-8 content. Filenames, task and documents
+documents' relative paths, normalized UTF-8 content and control_escaped flags.
+Ordinary safe UTF-8 text is passed unchanged. Unsafe C0/C1/bidi controls are
+deterministically escaped into visible text (ESC becomes a literal backslash + x1b),
+never removed or interpreted as ANSI. LF/CR/TAB and normal Unicode formatting
+including ZWJ/ZWNJ are preserved. NUL and invalid UTF-8 still fail. Filenames, task and documents
 are untrusted data, not instructions. No absolute root or host paths are included
 by A10. User-supplied task or file content may itself mention host paths.
 
@@ -1475,16 +1481,20 @@ changes, or symlink substitution fail before synthesis. This is not an atomic
 snapshot or protection against every hostile concurrent filesystem change.
 
 .git content is excluded, including a root inside .git. Obvious credential stores
-(.ssh, .password-store, .aws, .kube, .docker, .gnupg, .azure and .config/llmtool)
+(.ssh, .password-store, .aws, .kube, .docker, .gnupg, .azure,
+.config/llmtool, .config/gh and .config/gcloud)
 are excluded, including roots inside them. Credential files excluded even in
 authorized scopes include .env/.env.*, .netrc, .npmrc, .pypirc, .pgpass,
 .git-credentials, .vault-token, id_rsa/id_dsa/id_ecdsa/id_ed25519 and
 .pem/.key/.p12/.pfx files. Known etc/shadow, etc/gshadow and proc/<pid>/environ
-locations are excluded even when root points inside their parent directories. There is no allow-sensitive escape hatch.
+locations are excluded even when root points inside their parent directories.
+Additional narrow exclusions: .cargo/credentials, .cargo/credentials.toml, .htpasswd,
+kubeconfig, credentials.json, *.tfstate and *.tfstate.backup. No broad config/secret/
+credentials substring rule is used. There is no allow-sensitive escape hatch.
 Ordinary source names such as config.py, configuration_test.py and secret_manager.py
 remain candidates. Path text rejects C0/C1/bidi controls and invisible format
 characters; file contents allow ordinary Unicode formatting such as ZWJ/ZWNJ
-while rejecting NUL, unsafe C0/C1/bidi controls and invalid UTF-8.
+while visibly escaping unsafe C0/C1/bidi controls; NUL and invalid UTF-8 are rejected.
 
 | Bound | Maximum |
 |---|---|
@@ -1496,12 +1506,22 @@ while rejecting NUL, unsafe C0/C1/bidi controls and invalid UTF-8.
 | Compact serialized manifest UTF-8 | 256 KiB |
 | Planner response UTF-8 / JSON depth | 64 KiB / 2 |
 | Selected files | 8 |
-| Each selected file / summed evidence UTF-8 | 256 KiB / 512 KiB |
+| Each selected file / summed evidence (original bytes) | 256 KiB / 512 KiB |
+| Normalized content UTF-8 | at most 4x original bytes |
 | Structured provider user payload UTF-8 | 4 MiB including JSON escaping |
 | ContextPacket | existing A4 1 MiB, depth 4; A6 1024 items |
 | Public result JSON UTF-8 | 2 MiB including packet, metadata and escaping |
 
-Manifest construction reads metadata only. Exceeding a scan/count/manifest budget
+Manifest construction reads metadata only; it never reads initial bytes to identify
+binary data. Regular files larger than 256 KiB are excluded, not truncated.
+A narrow suffix exclusion covers .png/.jpg/.jpeg/.gif/.webp/.ico/.pdf/.zip/.gz/
+.bz2/.xz/.7z/.woff/.woff2/.ttf/.otf/.mp3/.mp4/.mov/.sqlite/.sqlite3 (case insensitive).
+Extensionless and ordinary source/data files remain eligible. Unknown/misnamed
+binary files may still be selected and fail bounded UTF-8/NUL validation.
+Planner instructions state at most 8 files, each candidate <=256 KiB, total selected
+byte_count <=512 KiB, intended UTF-8 evidence and exact manifest paths only.
+Selection's declared total is checked before read_selected; read-time checks remain.
+Exceeding a scan/count/manifest budget
 fails clearly and asks for narrower scopes; nothing is silently truncated.
 Selected files are read at most 256 KiB + 1 each. Binary, oversize or changed files
 fail before synthesizer credentials/client access. Message/result caps account for
@@ -1516,8 +1536,10 @@ model output. This checks the supplied source set, not whether each claim is tru
 or properly supported by that source. VERIFY_NEXT remains text only, never executed.
 
 Frozen result data includes planner/synthesizer profile names, scopes, selected
-path/byte_count/SHA-256 metadata, A8 allowlisted runtime metadata and the final
-packet. Hashes are audit/provenance only, not authorization. No raw retrieved
+path/byte_count/SHA-256/control_escaped metadata, A8 allowlisted runtime metadata and the final
+packet. byte_count and SHA-256 always describe ORIGINAL file bytes, even when
+control_escaped=true records that model-facing content was transformed. Public
+result never includes raw document contents. Hashes are audit/provenance only, not authorization. No raw retrieved
 documents or raw provider objects are duplicated in result JSON; the generated
 packet can quote evidence and therefore can contain selected material.
 Unavailable token counts stay null, without estimation or quality/provider ranking.
@@ -1529,13 +1551,18 @@ exit, with no partial result. A10 never executes shell/Git/commands/tools, edits
 files, applies patches, runs tests, searches the web, or discovers credentials.
 
 A10 MVP selects from paths/sizes, not semantic search. It may choose the wrong
-files; there are no embeddings, indexes, grep/ripgrep, AST search, vector DB,
+files (the independent review observed missed log_safety.py selections). Use narrow
+scopes and explicitly name likely relevant files in the task when known. There are
+no embeddings, indexes, grep/ripgrep, AST search, vector DB,
 recursive loops or file watchers. Explicit scope cannot prove that ordinary source
 contains no secret. The narrow deny policy is defense in depth, not comprehensive
 secret detection; it cannot detect secret content or hard-link aliases. Sent task
 and evidence are subject to the selected provider's normal data handling.
 
-A10 is implemented on its feature branch, NOT merged; external review PENDING.
+A10 is implemented on its feature branch, NOT merged; external re-review PENDING.
+There is no --save-output option: A10 remains read-only, with no malformed-output
+file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
+sanitized with no partial stdout. Output retention needs a separate future design.
 A11 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

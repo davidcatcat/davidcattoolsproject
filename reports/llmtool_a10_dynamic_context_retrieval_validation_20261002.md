@@ -5,7 +5,8 @@ Date: 2026-10-02. Canonical repository only:
 Branch: `feat/a10-dynamic-context-retrieval`.
 Fetched base main: `3923f7a5903cf7c370e587de8d9b4d2896239792`.
 A0–A9 and Post-A9 hardening remain DONE and merged. A10 is implemented on this
-feature branch, NOT merged; external ChatGPT review **PENDING**. A11 NOT STARTED;
+feature branch, NOT merged; independent Claude verdict APPROVE WITH CHANGES;
+follow-up fixes below, external final review / Claude re-review **PENDING**. A11 NOT STARTED;
 A12 remains future optional frontend. M6 remains DEFERRED, with A8 exact curated
 matching and historical Claude model safety FAIL unchanged.
 
@@ -19,14 +20,15 @@ Existing `cli.py` receives only an additive parser/import/dispatch integration.
 No A9 role, plan or orchestration behavior is changed.
 
 1. Validate physical root/scopes and task-source conflicts without consuming stdin.
-2. Resolve the explicit persisted planner profile with readiness required.
+2. Resolve BOTH explicit persisted planner and synthesizer profiles with readiness
+   required, before any full task read, credentials or provider request.
 3. Read/bound task and build the sorted metadata-only candidate manifest.
 4. Resolve that profile's configured credential, create its existing text provider,
    and call complete exactly once with task + path/size metadata.
 5. Validate the ENTIRE strict selection before any selected file content read.
 6. Read only selected manifest paths, fully validating all content and bounds.
-7. Resolve the synthesizer profile with readiness required, then its configured
-   credential/client; complete exactly once with task + relative path/exact content.
+7. Use the preflighted synthesizer config, then resolve its configured credential/client;
+   complete exactly once with task + relative path/normalized content/transform flag.
 8. Reuse A4 parse_context_packet and A6 structural validation. Enforce supplied
    evidence-source membership. Build the fully bounded result before stdout.
 
@@ -70,9 +72,12 @@ settings; normal ask/config precedence is unchanged. Configured api_key_env valu
 lookup still occurs after readiness. No credential discovery, real HOME scanning,
 environment mutation, config mutation or new provider is introduced by A10.
 
-Selected evidence is frozen typed relative path/content/UTF-8 byte count/SHA-256.
+Selected evidence is frozen typed relative path/normalized content/original-byte
+byte_count/SHA-256/control_escaped. Safe UTF-8 content is unchanged; unsafe textual
+controls/bidi characters are visible escapes. SHA and size always describe original
+bytes; NUL/invalid UTF-8 fail. No raw terminal controls are forwarded.
 Public frozen result contains scopes, explicit profile names, selected path/size/hash
-metadata, A8 allowlisted runtime metadata and A4 packet. Raw selected documents are
+metadata plus control_escaped, A8 allowlisted runtime metadata and A4 packet. Raw selected documents are
 not repeated in result JSON. The model-produced packet can itself quote evidence.
 Unavailable token counts remain null; no estimation/ranking/quality score.
 Each evidence source must exactly equal `task` or an actual retrieved relative path;
@@ -103,11 +108,12 @@ Failures emit sanitized stderr with nonzero exit and no partial stdout.
 No truncation. Manifest overflow asks for narrower scopes. Scan/depth/scope caps
 bound metadata traversal, including large excluded/empty directory trees; message
 and result caps allow bounded JSON escaping without weakening the A4 packet cap.
-Paths reject all C0, C1, bidi controls and Cf formatting. General task/evidence text
-preserves LF/CR/tab and ordinary Unicode formatting including ZWJ/ZWNJ, while
-rejecting NUL, unsafe controls, bidi formatting and invalid UTF-8.
+Paths reject all C0, C1, bidi controls and Cf formatting. Task text retains general
+unsafe-control rejection. Retrieved evidence preserves LF/CR/tab and ordinary
+Unicode/Cf (including ZWJ/ZWNJ), with unsafe C0/C1/bidi visibly escaped; NUL and
+invalid UTF-8 remain failures.
 
-## Offline validation
+## Initial implementation offline validation (historical, before independent review)
 
 All commands launched from canonical repository. Existing A0–A9 test bytes were
 unchanged; only new test_retrieval.py was added. No CI secrets or live provider
@@ -160,7 +166,7 @@ Unicode text. Review also added root-inside-.git/credential-store protection and
 regressions, including credential-location exclusions after root rebasing. Final
 counts above were measured after those fixes.
 
-## Wheel validation
+## Initial implementation wheel validation (historical)
 
 ```sh
 tools/llmtool/.venv/bin/python -m pip wheel --no-deps \
@@ -182,7 +188,7 @@ resources and inherited production modules remain unchanged apart from additive
 cli.py integration. Installed test runner asserts llmtool and every A10 import
 originates from installed target package bytes, not source checkout; 45/45 PASS.
 
-## One isolated company-gateway smoke
+## Initial implementation company-gateway smoke (historical)
 
 Gateway already reachable without credential/VPN/login changes:
 http://10.29.7.58:4000, route/model gw, enable_thinking=false.
@@ -242,7 +248,7 @@ task validation. Model-facing context/token windows remain provider-dependent.
 Prompt instructions are not a complete injection defense; no execution path is
 provided. JSON/redirected output can include model/user/evidence text.
 
-## Git checkpoint
+## Initial implementation Git checkpoint (historical)
 
 All validation was run on the A10 feature working tree based on the fetched main
 SHA above. No alternate checkout/worktree/clone, gh command or PR creation/merge.
@@ -257,3 +263,137 @@ Documentation validation PASS: UTF-8, relative-link targets, whitespace, balance
 Markdown fences and both README A10 CLI examples parsed successfully. Scoped
 unstaged/staged git diff --check PASS. All eight changed task paths belong to A10.
 External review remains PENDING; do not merge or start A11 automatically.
+
+## Independent review disposition and design differences
+
+Follow-up base branch HEAD: `80660497130f25fe367ae744bed39e2028715def`.
+Freshly fetched origin/main remains `3923f7a5903cf7c370e587de8d9b4d2896239792`;
+no main merge was needed. Existing PR #12 remains the review vehicle; no gh/new PR/
+branch/worktree/clone/merge. The independent historical report
+[Claude A10 review](llmtool_a10_dynamic_context_retrieval_review_20261002.md)
+is unchanged. Claude's findings are valid observations; differences below concern
+the final engineering scope, not a claim that the reviewer was wrong.
+
+| Finding | Claude finding / suggestion | Final disposition | Engineering decision, architectural reason and evidence |
+|---|---|---|---|
+| A | Planner lacks size guidance; oversized/binary candidates cause avoidable post-call failure. Suggested exclusion/marking, including possible initial-byte binary inspection or skipping unreadable selections. | FIXED | Exclude regular st_size >256 KiB and narrow obvious binary suffixes using metadata/name only. Prompt states 8-file, per-file 256 KiB and total 512 KiB limits, intended UTF-8 evidence and exact candidate paths. Validate selected manifest sum <=512 KiB before read_selected. Content sniffing rejected: metadata-only discovery must not read unselected contents. Whole invalid selection still fails; no partial skip/recovery. Metadata/content-open traps, budget-order tests and mixed-directory live case pass. |
+| B | Common colored logs fail on controls; suggested visible escaping with metadata. | FIXED | Accepted. Bounded raw read → original-byte SHA → UTF-8 decode → NUL rejection → deterministic visible C0/C1/bidi escaping. LF/CR/tab and normal Unicode/Cf are unchanged. Typed control_escaped marks normalized model content; original byte_count/SHA retained, no raw-document result dump. No ANSI interpretation/deletion. Plain/ANSI/C1/bidi/Unicode/provenance tests and ANSI live case pass. |
+| C | Late synthesizer readiness wastes planner cost and retrieval work. | FIXED | Fully accepted. BOTH persisted profiles resolve readiness before full input consumption, credentials or provider requests. Planner credential follows task/manifest; synthesizer credential/client stays deferred until valid selection and all reads succeed. Both real-pipe readiness failures, exact event-order tests and broken-synth live zero-request preflight pass. |
+| D | Two live analyze-log questions missed log_safety.py; suggested better guidance and possible previews/required evidence. | DEFERRED | Observation accepted as path-only, single-round selection-quality limitation. README advises narrow scopes and likely filenames in task. No head snippets/content preview/search/index/embeddings/recursive planner/retry/fallback. This preserves the intentional metadata-only A10 MVP; no selection-quality PASS claimed. Static architecture/no-tool checks and live results measure transport/validation only. |
+| E | Malformed synthesizer output loses diagnostic raw data; suggested opt-in --save-output FILE. | REJECTED FOR A10 | Retain sanitized stderr and no partial stdout/raw malformed output. Writing output would add filesystem mutation, path/overwrite/symlink/race authorization and potentially sensitive retention/cleanup contracts to a read-only milestone. Possible future diagnostic design, not implemented. Existing parser/AST and malformed-output tests enforce no writes/dump. |
+| F | Credential exclusions narrow; suggested more locations and sharing A6 sensitive_path. | PARTIALLY ACCEPTED | Add .config/gh, .config/gcloud, .cargo/credentials(.toml), .htpasswd, kubeconfig, exact credentials.json and *.tfstate/*.tfstate.backup. Reject direct A6 list reuse: broad command-risk config/secret/credential matching would exclude legitimate config.py/secret_manager.py/configuration_test.py. Positive/negative path and root-rebasing tests pass. Denylist remains defense in depth, not content-based secret detection. |
+| G | macOS /tmp symlink refusal message unclear; suggested physical-path guidance. | FIXED | Accepted static sanitized physical-directory error with /private/tmp instead of /tmp guidance. No host path echo and no symlink-policy relaxation. Symlink and sanitized-error regressions pass. |
+| H | benchmark.normalize_runtime and private config._provider_name imports are shared-helper debt. | DEFERRED | Technical debt recorded. No broad A8/A9/config helper extraction during A10 safety convergence; A/B/C do not require it. Inherited imports unchanged, affected shared suite and full suites pass. |
+
+### Final eligibility, normalization and ordering contract
+
+Eligible manifest excludes st_size >262144 and these case-insensitive suffixes:
+.png/.jpg/.jpeg/.gif/.webp/.ico/.pdf/.zip/.gz/.bz2/.xz/.7z/.woff/.woff2/.ttf/.otf/
+.mp3/.mp4/.mov/.sqlite/.sqlite3. No content sniffing. Extensionless or misleadingly
+named binary files may still reach bounded retrieval and fail UTF-8/NUL checks;
+this is explicitly not complete binary detection. Eligible exclusions are not
+file truncation; aggregate manifest/scan overflows still fail, asking for narrower scope.
+
+Model-facing controls become visible escapes (ESC → literal backslash+x1b,
+C1 similarly xNN, bidi uNNNN), with semantic text retained. Normalization uses
+the established terminal escape helper but explicitly preserves CR as well as
+LF/tab. Original raw per-file/total budgets remain 256/512 KiB. Escaped UTF-8
+content is bounded to at most 4x original byte_count; existing 4 MiB provider
+payload and 2 MiB result JSON limits still fail closed, without truncation.
+The reader computes original-byte size/hash; frozen models validate field formats,
+untransformed hash equality and normalized content controls/bounds. Hash is audit
+provenance, never an authorization primitive. Public metadata adds the stable
+boolean control_escaped; full raw or normalized documents are not repeated there.
+
+Final order: root/scopes authorization → nonblocking explicit-source validation →
+planner readiness → synthesizer readiness → full task read → metadata-only eligible
+manifest → planner key/client/one call → whole strict plan including total-size
+validation → selected bounded reads/normalization → synthesizer key/client/one call →
+A4/A6/source/result validation → stdout. Preflight snapshots are reused; no generic
+request/project overrides, no process-environment mutation in production.
+
+### Follow-up offline tests, wheel and gateway evidence
+
+Final measured counts and wheel hash are recorded below. Existing A0–A9 tests
+are unchanged. Old A10 tests changed only where A/B/C intentionally alter behavior:
+normalization/metadata schema, eligibility instead of oversized candidates, and
+both readiness checks before planner key/input. Prior size/race/strict-parser/
+source/no-output/no-execution assertions remain; direct read_selected size-limit
+test still checks its defense even though internal manifests now exclude oversize.
+Eight new regression tests cover A/B/C/F/G; no old tests were weakened to hide a failure.
+
+Live follow-up used isolated temporary HOME/config and synthetic files only,
+company http://10.29.7.58:4000 route gw, enable_thinking=false, no credentials or
+VPN/login changes. Three cases, FOUR total model requests (not fourteen), no retries:
+
+| Case | Manifest / selected | Provider calls | rc / stdout bytes | Result |
+|---|---|---|---|---|
+| ANSI-only | color.log, 77 original bytes; selected that file | planner 1, synthesizer 1 | 0 / 2591 | PASS. Synth payload verified visible backslash+x1b, no raw ESC; control_escaped=true. Original SHA a462479ae5a43496f5d53d10b4c7b231862288854bd0e02af20bce99538e4dda. Strict A4/source valid. |
+| Mixed | oversized log (524289 bytes), binary diagram.png, plain.log (67 bytes); manifest/selection only plain.log | planner 1, synthesizer 1 | 0 / 2344 | PASS. No oversized/binary candidate contents opened; plaintext unchanged, control_escaped=false. Strict A4/source valid. |
+| Broken synth | ready company planner + incomplete broken synthesizer | ZERO | 1 / 0 | PASS preflight. No credential/client/request, no retrieval. Sanitized provider base_url is not configured error. |
+
+Both live requests show events ready/ready before key/planner, retrieval before
+synthesizer key. stderr empty for successful cases. All key lookups returned None.
+Execution was trapped; no commands/Git/tools/tests were run by model output. No
+model-quality score or generalized selection-accuracy claim. No MODEL-OUTPUT FAIL
+occurred in these attempts; no repeated request to chase an answer.
+
+Security review: complete final production diff checked for content-before-planner,
+sniffing, unbounded reads, raw unsafe controls, hash mismatch, early credentials/
+providers, retry/fallback, file writes, shell/Git/tools, secret logging, absolute
+path leakage, partial stdout, environment mutation, A9 changes and A11 scope.
+No such execution/mutation mechanisms added. AST and runtime execution traps pass;
+authorization still comes from deterministic explicit scopes and manifest only.
+Known limitations remain misnamed binary/secret content, path-selection quality,
+provider context limits and non-atomic hostile-filesystem races. M6 DEFERRED;
+Anthropic A2.3 unimplemented; A11 NOT STARTED; PR #12 NOT merged.
+
+### Final follow-up measured results
+
+| Check | Python | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Focused A/B/C/F/G | 3.13.3 | 8 | 8 | 0 | 0 | 0 | 0.051 s |
+| Full A10 | 3.13.3 | 53 | 53 | 0 | 0 | 0 | 0.704 s |
+| Affected shared | 3.13.3 | 258 | 258 | 0 | 0 | 0 | 19.166 s |
+| Installed-wheel full A10 | 3.13.3 | 53 | 53 | 0 | 0 | 0 | 0.640 s |
+| Full canonical syntax + suite | 3.13.3 | 605 | 604 | 0 | 0 | 1 | 47.660 s suite |
+| Full canonical syntax + suite | actual 3.9.6 | 605 | 604 | 0 | 0 | 1 | 75.789 s suite |
+
+Both full canonical checks exit 0. The single skip remains the inherited
+non-UTF-8 filename host-filesystem test. Development Python is 3.13.3; /usr/bin/python3
+is actual 3.9.6. No CI status inferred from local tests; external final-head CI review pending.
+
+Follow-up wheel SHA-256: `449686297df8012be2bd7ef643d7e3f6ce5a4d45cc29279be099584aadcacac1`.
+PASS: 32 production modules + 3 unchanged runtime skills, tests/repo examples
+excluded. All wheel/source/installed package bytes match. Installed full A10 tests
+assert import origins under /private/tmp/llmtool-a10-followup-installed, not source.
+
+Commands (all launched from canonical root):
+
+~~~sh
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-tests.py followup
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-tests.py focused
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-tests.py shared
+make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"
+make -C tools/llmtool check PYTHON=/usr/bin/python3
+tools/llmtool/.venv/bin/python -m pip wheel --no-deps --wheel-dir /private/tmp/llmtool-a10-followup-wheel tools/llmtool
+tools/llmtool/.venv/bin/python -m pip install --no-deps --no-index --target /private/tmp/llmtool-a10-followup-installed /private/tmp/llmtool-a10-followup-wheel/llmtool-0.1.0-py3-none-any.whl
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-review-wheel-verify.py
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-tests.py focused /private/tmp/llmtool-a10-followup-installed
+tools/llmtool/.venv/bin/python /private/tmp/llmtool-a10-review-live.py
+git diff --check
+~~~
+
+### Follow-up Git checkpoint
+
+Production/test fix commit: `ae2ddbea0ba2d6726dcaa55f5767e1a99c1ecd1b`.
+Final documentation follows separately; final pushed HEAD is reported in the
+completion checkpoint. Six follow-up task paths: retrieval.py, retrieval_files.py,
+test_retrieval.py, README.md, ROADMAP.md and this validation report.
+Canonical tracked working tree will contain only those committed changes; six
+known unrelated untracked benchmark/reasoning paths were untouched/unread/unstaged.
+Independent Claude review report unchanged (git diff --quiet verified).
+Documentation UTF-8/links/fences/whitespace/README CLI parser checks PASS;
+unstaged and scoped staged git diff --check PASS. No gh, PR creation/merge,
+alternate branch/checkouts/worktree/clone or A11 work. PR #12 final review and
+Claude re-review remain pending; no final-head remote CI result claimed.

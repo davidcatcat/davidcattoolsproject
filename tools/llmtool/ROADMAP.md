@@ -407,7 +407,7 @@ final-head Python 3.9/3.14 CI PASS。A10 feature-branch implementation status �
 
 Task → deterministic path/size manifest → one planner → bounded selected file
 reads → one synthesizer → existing strict A4 ContextPacket。
-Implemented on feat/a10-dynamic-context-retrieval；external ChatGPT review PENDING，
+Implemented on feat/a10-dynamic-context-retrieval；external re-review PENDING，
 NOT merged / NOT marked DONE。Exactly two provider calls on success；fail-fast，
 no retry/fallback/recursive round/parallelism；不整合 A9 roles。
 
@@ -415,8 +415,11 @@ retrieve-context 要求 explicit root、one or more relative scopes、planner pr
 synthesizer profile。Root/scopes 是 authorization；planner 只能選 deterministic
 manifest 裡的 paths。Planner 只看 task + path/size；synthesizer 才看 selected contents。
 Symlinks/.git/obvious credential stores/files excluded；metadata-only sorted manifest，
-bounded UTF-8 no-follow reads、race checks、SHA-256 provenance metadata。
-Explicit profiles use trusted persisted data；readiness before credentials；
+oversize/obvious binary-extension metadata exclusion；bounded UTF-8 no-follow reads、
+race checks、unsafe-control visible escaping、original-byte SHA-256/byte_count
+provenance + control_escaped metadata。No candidate content sniffing。
+Explicit profiles use trusted persisted data；BOTH profiles readiness preflight
+before input/provider calls，credentials deferred to each execution stage；
 generic LLMTOOL_* / project overrides cannot rewrite bindings。
 
 A4 parser + A6 structural validation reused；evidence source 必須為 task 或 actual
