@@ -1,5 +1,6 @@
 import io
 import os
+import site
 import subprocess
 import sys
 import tempfile
@@ -159,6 +160,7 @@ class ConfigureTests(unittest.TestCase):
     def test_model_command_rejects_saved_unconfigured_profile_before_http(self):
         self.run_wizard(self.answers(url="", model=""))
         env = {
+            "PYTHONUSERBASE": site.getuserbase(),
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
         }

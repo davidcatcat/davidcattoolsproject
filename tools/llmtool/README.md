@@ -38,7 +38,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A2.1 — Provider Capability Foundation:** DONE
 - **A2.2 — OpenAI API Provider:** DONE; Responses API, pure text; live API NOT-TESTED
 - **A2.3 — Anthropic API Provider:** planned
-- **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; live E2E validation PASS
+- **A2.4 — Claude CLI Provider:** DONE; local CLI, pure text; historical pre-hardening live E2E PASS; current status below
 - **A2.5 — Codex CLI Provider:** DONE and merged to `main`; external host validation and direct/live E2E PASS
 - **A2.6 — Provider Integration / Smoke Tests:** DONE and merged to `main`; host canonical validation 189/189 PASS
 - **A3 — Skill Framework:** DONE and merged to `main` (`c9159f2`); external review PASS
@@ -175,9 +175,13 @@ does not ask for a Base URL or API key and does not start Claude CLI. This runti
 separate from the Anthropic API provider, which remains planned.
 The provider resolves `claude` from the llmtool process `PATH`; PATH order determines which
 installed executable and version are used. Project config cannot select or override the executable.
-The Claude CLI provider's live end-to-end smoke passed in the normal authenticated user shell;
+The historical pre-hardening Claude CLI provider's live end-to-end smoke passed in the normal authenticated user shell;
 the Codex isolated runtime may resolve a different executable and does not establish the same
 authentication state. See the [runtime validation report](../../reports/llmtool_claude_cli_runtime_diagnosis_20260929.md).
+Current hardened implementation: offline/fake-runtime tests PASS; current marker-only
+live E2E PASS with Claude CLI 2.1.286 (`CLAUDE_HARDENED_OK`, exit 0). This smoke
+exercised executable resolution, the environment allowlist, isolated cwd, process lifecycle,
+and final-text normalization. See the [Round-2 validation report](../../reports/llmtool_a0_a7_bugfix_validation_20261001.md).
 For isolated llmtool configuration tests, `LLMTOOL_CLAUDE_CLI_HOME` can point the child process
 at the user's existing Claude CLI home while llmtool itself uses a temporary `HOME`; it is a
 runtime environment setting and cannot be set in project config.
@@ -926,14 +930,17 @@ private key files (`.pem`, `.key`, `id_rsa`, `id_ed25519`), `~/.ssh`,
 `aws configure export-credentials` and secret YAML/JSON dumps are SENSITIVE_READ.
 `kubectl describe pod`, full pod/deployment output, `systemctl status`, and all `ps`
 forms are conservatively sensitive because they may expose environment, logs, or process
-arguments. Every raw shell-level Git operation remains UNKNOWN due to repository config;
-diff output can contain credentials too.
+arguments. Recognized content-bearing raw Git reads (`git diff`, staged/cached diffs,
+full `git log`, and narrowly recognized `git show`) are SENSITIVE_READ and require approval.
 
 Historical regression: `cat /etc/company/app/config.yaml` is **SENSITIVE_READ**.
 Metadata alternatives `ls -l /etc/company/app/config.yaml` and
 `stat /etc/company/app/config.yaml` are **SAFE_READ** within the narrow grammar.
-Raw shell-level `git ...` is **UNKNOWN** and requires approval because repository Git
-configuration can run helpers even for apparent reads. This differs from `llmtool git`,
+Raw Git metadata reads such as `git status`, `git diff --stat`, `git diff --name-only`,
+`git log --oneline`, and `git show --stat` are **UNKNOWN** and require approval because
+repository Git configuration can run helpers even for apparent reads. Recognized
+mutating/destructive Git operations retain MUTATING/DESTRUCTIVE. SENSITIVE_READ
+preserves content-exposure warnings and requires approval; it does not claim execution safety. This differs from `llmtool git`,
 which uses A5's fixed argv and safe Git configuration for explicitly scoped read-only collection.
 This classification never authorizes execution or guarantees arbitrary file
 contents/configuration are safe.

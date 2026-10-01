@@ -1,6 +1,7 @@
 import json
 import io
 import os
+import site
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,7 @@ class CLITests(unittest.TestCase):
         self.home.mkdir()
         # Do not inherit user config, provider overrides, credentials or proxies.
         self.env = {
+            "PYTHONUSERBASE": site.getuserbase(),
             "HOME": str(self.home), "PATH": os.environ.get("PATH", ""),
             "PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
             "LLMTOOL_BASE_URL": self.base_url,

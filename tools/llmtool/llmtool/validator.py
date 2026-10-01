@@ -169,7 +169,7 @@ def _simple(text):
         return CommandRisk.DESTRUCTIVE if '-delete' in args else CommandRisk.UNKNOWN
     if name == 'docker' and args and args[0] == 'rm':
         return CommandRisk.DESTRUCTIVE
-    if name == 'sed' and any(a == '-i' or (a.startswith('-') and not a.startswith('--') and 'i' in a[1:]) for a in args):
+    if name == 'sed' and any(a == '-i' or a == '--in-place' or a.startswith('--in-place=') or (a.startswith('-') and not a.startswith('--') and 'i' in a[1:]) for a in args):
         return CommandRisk.MUTATING
     if name == 'env' and args:
         return CommandRisk.UNKNOWN
@@ -194,19 +194,27 @@ def _simple(text):
             return CommandRisk.UNKNOWN
         operation, options = args[0], args[1:]
         if operation == 'reset':
-            if any(a.startswith('--') and '--hard'.startswith(a) for a in options):
+            if any(len(a) > 2 and a.startswith('--') and '--hard'.startswith(a) for a in options):
                 return CommandRisk.DESTRUCTIVE
             return CommandRisk.MUTATING
         if operation == 'clean':
-            return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'f' in a for a in options) or any(a.startswith('--') and '--force'.startswith(a) for a in options) else CommandRisk.UNKNOWN
+            return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'f' in a for a in options) or any(len(a) > 2 and a.startswith('--') and '--force'.startswith(a) for a in options) else CommandRisk.UNKNOWN
         if operation == 'branch':
             return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'D' in a[1:] for a in options) else CommandRisk.UNKNOWN
+        if operation == 'checkout' and '--' in options and options.index('--') < len(options) - 1:
+            return CommandRisk.DESTRUCTIVE
         if operation in ('add', 'commit', 'push', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'restore', 'stash', 'tag'):
-            if operation == 'push' and (any(a == '-f' or a.startswith('--force') for a in options) or any(a.startswith(':') for a in options)):
+            if operation == 'push' and (any(a == '-f' or a.startswith('--force') for a in options) or any(a.startswith(':') or (a.startswith('+') and len(a) > 1) for a in options)):
                 return CommandRisk.DESTRUCTIVE
             return CommandRisk.MUTATING
         if any(a == '--output' or a.startswith('--output=') for a in options):
             return CommandRisk.MUTATING
+        if operation == 'diff' and all(a in ('--staged', '--cached', '--stat', '--name-only', '--no-ext-diff', '--no-textconv', '--no-color') for a in options):
+            return CommandRisk.UNKNOWN if '--stat' in options or '--name-only' in options else CommandRisk.SENSITIVE_READ
+        if operation == 'log' and all(a in ('--oneline', '--no-decorate') or re.fullmatch(r'-[0-9]+|--max-count=[0-9]+', a) for a in options):
+            return CommandRisk.UNKNOWN if '--oneline' in options else CommandRisk.SENSITIVE_READ
+        if operation == 'show' and (not options or options == ['HEAD']):
+            return CommandRisk.SENSITIVE_READ
         return CommandRisk.UNKNOWN
     if name == 'kubectl':
         while args and args[0] in ('-n', '--namespace', '-s', '--server', '--context'):

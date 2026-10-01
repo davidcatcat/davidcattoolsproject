@@ -56,7 +56,7 @@ or introduce orchestration. Findings below use the review's original identifiers
 | Uncertain — special `core.worktree` behavior | NOT REPRODUCED | The observed case failed closed; A5 was not modified. |
 | Uncertain — automatic secret redaction | OUT OF SCOPE | The documented product contract does not claim secret redaction; no automatic retrieval or redaction policy was added. |
 
-## Validation
+## Initial author validation (historical)
 
 - Focused regression modules: 290 tests passed across input, terminal, CLI, chat, config,
   configure, context packet, validator, Claude, Codex, OpenAI and compatible-provider tests.
@@ -64,7 +64,7 @@ or introduce orchestration. Findings below use the review's original identifiers
   371 discovered, 370 passed, 0 failed, 0 errors, 1 existing host-filesystem skip for a
   non-UTF-8 filename; test runtime 40.239 seconds. Syntax compile and complete suite passed.
 - `git diff --check` — PASS.
-- Python 3.9 interpreter — unavailable on this host. Python 3.9 grammar validation with
+- Initial author validation: Python 3.9 interpreter was considered unavailable at that time. Python 3.9 grammar validation with
   `ast.parse(feature_version=(3, 9))` passed for all 36 llmtool package and test Python files;
   `pyproject.toml` still declares `requires-python = ">=3.9"`.
 - Wheel build — PASS using isolated setuptools build dependencies. The resulting wheel
@@ -77,3 +77,87 @@ or introduce orchestration. Findings below use the review's original identifiers
 
 The A7 feature branch remains separate and untouched. This report does not claim this fix
 branch or A7 is merged to main.
+
+
+## Round 2 — 2026-10-01
+
+Independent evidence: [Claude bugfix review](llmtool_a0_a7_bugfix_review_20261001.md),
+preserved unchanged. Its actual Python 3.9.6 run completed 371 discovered tests
+(370 passed, 1 skipped), superseding the initial author's grammar-only evidence.
+M1–M7 fixes remain in place. Historical tables above describe the first pass;
+this section corrects the incomplete L1 and overbroad M4 conclusions.
+
+Synchronization: fetched origin, fast-forward pull was already current, then merged
+`origin/main` `5bb8b7ea4576f4a9b24f6b2e8d9f1c1153bf6b5d` into the existing bugfix
+branch without conflicts, rebase or force push. Merge commit:
+`f26cb6f68352032f994d0b4b2fc2b8226932cbdd`.
+
+| Remaining validator item | Status | Resolution |
+|---|---|---|
+| reset bare `--` | FIXED | Prefix matching requires more than two characters; `reset -- file.txt` and `reset -- .` are MUTATING; `--h`/`--ha`/`--har`/`--hard` remain DESTRUCTIVE. |
+| clean bare `--` | FIXED | Same meaningful-prefix guard; `clean -- x` is UNKNOWN; `--forc`, `--force`, `-f` are DESTRUCTIVE. |
+| force push `+refspec` | FIXED | Leading nonempty `+` refspecs are DESTRUCTIVE, including full refs and source:destination forms; ordinary refs and embedded plus characters remain MUTATING. |
+| sed long in-place option | FIXED | `-i`, `-i.bak`, `--in-place`, `--in-place=.bak` are MUTATING. |
+| checkout path restoration | FIXED | `checkout` with `--` followed by paths is DESTRUCTIVE; branch checkout remains MUTATING. |
+
+ChatGPT content-read semantic regression: FIXED. Narrowly recognized full/staged/cached
+`git diff`, full `git log`, and `git show`/`git show HEAD` are SENSITIVE_READ.
+Raw Git metadata reads remain UNKNOWN. Both require approval, explicitly verified
+in tests. Unsupported forms remain UNKNOWN; no complete Git parser was added.
+All full-option `.startswith(user_option)` matches were inspected: only reset/clean
+use this pattern, and both now exclude bare `--`. A5 hardened Git collection is unchanged.
+
+Five new regression methods cover the remaining issues and content reads; the existing
+table helper now checks approval semantics for every classified example. Historical
+sensitive cat, safe metadata ls, unknown sudo ls and destructive sudo rm remain covered.
+
+Root README stale A2.5 status: FIXED. A0–A6 merged; A7 and this bugfix branch unmerged.
+Raw Git wording: FIXED. Historical pre-hardening Claude live PASS is retained and
+explicitly separated from current hardened offline and live evidence.
+
+### Current hardened Claude smoke
+
+PASS: exactly one current live marker request through the canonical checkout's installed
+`tools/llmtool/.venv/bin/llmtool` (version 0.1.0; imported package verified inside
+this repository). Tested branch was `fix/llmtool-a0-a7-review-bugs`, base HEAD
+`f26cb6f68352032f994d0b4b2fc2b8226932cbdd` plus Round-2 working changes;
+`origin/main...HEAD` was 0 behind / 2 ahead. Provider source is unchanged from that HEAD.
+
+- Prompt: `Reply with exactly: CLAUDE_HARDENED_OK` (newline after the colon).
+- llmtool exit status: 0; stdout exactly `CLAUDE_HARDENED_OK` followed by newline.
+- Executable: `/Users/davidsun/.nvm/versions/node/v24.20.0/bin/claude`.
+- Safe version output: `2.1.286 (Claude Code)`.
+- Isolated runtime succeeded through the provider's mandatory empty temporary cwd,
+  executable resolution, allowlisted environment, process lifecycle and normalization.
+- Temporary llmtool configuration selected only claude-cli; existing Claude CLI session
+  location was supplied via the provider's explicit runtime HOME override. No credential
+  files were inspected, no authentication was changed, and no repository/private content
+  was sent. Raw provider stderr and credentials were not recorded.
+
+### L12 and CI
+
+L12: FIXED in `test_cli.py` and `test_configure.py`. Temporary HOME remains isolated;
+`PYTHONUSERBASE=site.getuserbase()` preserves access to the actual interpreter's user-site
+packages without inheriting user configuration or credentials. Python 3.9 reproduced the
+second subprocess failure before this fix and validates both paths afterward.
+
+CI: ADDED in `.github/workflows/llmtool-ci.yml`, push/pull_request path filters include
+`tools/llmtool/**` and the workflow itself. Ubuntu matrix: Python 3.9 and 3.14;
+documented editable install followed by `make -C tools/llmtool check`. YAML syntax,
+matrix, path filters and commands inspected. Read-only contents permission; no secrets,
+live providers, API keys or VPN requirements; nlf workflows unchanged.
+Local validation is not a GitHub Actions PASS. Remote execution status is recorded below.
+
+### Final validation and review
+
+- Focused validator: 47 discovered/passed, 0 failures/errors/skips; 0.300 seconds.
+- Canonical Python 3.13.3: `make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"`, exit 0; 376 discovered, 375 passed, 0 failures, 0 errors, 1 existing non-UTF-8 filesystem skip; unittest elapsed 42.261 seconds.
+- Actual Python 3.9.6: `make -C tools/llmtool check PYTHON=/usr/bin/python3`, exit 0; 376 discovered, 375 passed, 0 failures, 0 errors, 1 same skip; unittest elapsed 66.421 seconds. Complete suite, not grammar-only validation.
+- Initial sandbox attempts encountered denied loopback binds and Python 3.9 bytecode-cache writes; approved host reruns were used. The first host Python 3.9 run reproduced the configure-subprocess L12 failure; after the second small environment fix, both complete suites passed.
+- Wheel: PASS; rebuilt with declared isolated setuptools dependencies, byte-identical `validator.py`, `providers/claude_cli.py`, and `terminal.py`. Wheel SHA256: `7ecb3e5043659dc762507f5ebec83fb0b882cf070166fa8dab92015b53ffe115`.
+- Documentation links and milestone wording checked; `git diff --check` PASS.
+- Final production diff security review: no material findings. Validator remains data-only; no `shell=True`, `os.system`, eval/exec, automatic execution or Git mutation was introduced. No credential/raw provider stderr output or repository exposure to Claude. A5 and A7 implementations remain untouched; no A8 work.
+- Remaining deferred findings: L11 and the unrelated nits/uncertain items in the historical tables remain deferred or out of scope. L12 is superseded by the FIXED result above. No security control was weakened for live validation.
+- CI remote status at commit: pending first push; GitHub Actions execution is not claimed by local checks.
+
+Stop for external ChatGPT review; do not merge this branch to main or advance milestones.

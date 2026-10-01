@@ -34,6 +34,7 @@ class CommandTests(unittest.TestCase):
                 self.assertEqual(result.risk, risk)
                 self.assertEqual(result.command, command)
                 self.assertTrue(result.reason)
+                self.assertEqual(v.requires_approval(result.risk), risk != v.CommandRisk.SAFE_READ)
 
     def test_safe_reads(self):
         self.check_table(v.CommandRisk.SAFE_READ, ['pwd', 'ls', 'ls -l', 'ls -l /etc/company/app/config.yaml',
@@ -84,6 +85,31 @@ class CommandTests(unittest.TestCase):
             assessment = v.classify_command(command)
             self.assertEqual(assessment.risk, v.CommandRisk.UNKNOWN)
             self.assertTrue(v.requires_approval(assessment.risk))
+
+    def test_round2_option_terminators(self):
+        self.check_table(v.CommandRisk.MUTATING, ['git reset -- file.txt', 'git reset -- .'])
+        self.check_table(v.CommandRisk.UNKNOWN, ['git clean -- x'])
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git reset --h', 'git reset --ha',
+            'git reset --har', 'git reset --hard', 'git clean --forc', 'git clean --force', 'git clean -f'])
+
+    def test_round2_force_refspec(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git push origin +main',
+            'git push origin +main:main', 'git push origin +refs/heads/main:refs/heads/main'])
+        self.check_table(v.CommandRisk.MUTATING, ['git push origin main', 'git push origin topic+name'])
+
+    def test_round2_sed_in_place(self):
+        self.check_table(v.CommandRisk.MUTATING, ['sed -i s/a/b/ .env', 'sed -i.bak s/a/b/ file',
+            'sed --in-place s/a/b/ .env', 'sed --in-place=.bak s/a/b/ file'])
+
+    def test_round2_checkout_restore(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git checkout -- .', 'git checkout -- file.txt'])
+        self.check_table(v.CommandRisk.MUTATING, ['git checkout branch'])
+
+    def test_round2_content_reads_require_approval(self):
+        commands = ['git diff', 'git diff --staged', 'git diff --cached', 'git log', 'git show', 'git show HEAD']
+        self.check_table(v.CommandRisk.SENSITIVE_READ, commands)
+        for command in commands:
+            self.assertTrue(v.requires_approval(v.classify_command(command).risk))
 
     def test_blank(self):
         self.check_table(v.CommandRisk.UNKNOWN, ['', ' ', '\t'])
