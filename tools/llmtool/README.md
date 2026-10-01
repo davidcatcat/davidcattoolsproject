@@ -61,6 +61,19 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
+## Planned A11 delivery (not implemented)
+
+A11a → A11b → A11c 各自需要 validation report、external review 與 merge gate。
+A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
+config opt-in 才保存 bounded safe metadata。Debug 不保存 prompt/response、retrieved
+content 或 raw stderr，也不改既有 stdout/JSON schema。LLMTOOL_HOME、runs/trace/doctor
+等新 diagnostics 設定與 CLI 仍為規劃，目前不能使用。
+
+A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
+approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
+provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
+[Roadmap](ROADMAP.md)。本次只修文件，未開始 A11 implementation。
+
 ## Canonical repository workflow
 
 All project development, tests, validation, documentation, and Git operations
@@ -593,7 +606,7 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 模型命令唯讀本機資料並向設定的 API provider 發出 HTTPS/HTTP request；`claude-cli` 會以
 固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
 及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
-明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 不寫檔。
+明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 與 A10 retrieval 不寫檔。
 不自動讀取 SSH、keychain 或任意 secret file；明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。
 工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
@@ -1385,7 +1398,7 @@ read task input, config, credentials, instantiate providers, or access network.
 Repository examples live under `orchestration/` and are not packaged.
 
 Anthropic HTTP API remains future A2.3 work. A9 has no Anthropic special case; a
-future registered provider can use the same explicit profile contract. A9 is DONE and merged to `main` via PR #10 (`8776476`). A9-R1 is FIXED; updated external ChatGPT review PASS and final-head CI PASS. A10 implementation is on its feature branch, pending external review.
+future registered provider can use the same explicit profile contract. A9 is DONE and merged to `main` via PR #10 (`8776476`). A9-R1 is FIXED; updated external ChatGPT review PASS and final-head CI PASS. A10 is DONE and merged via PR #12; see its section below.
 
 A9 bounds: original task <= 1 MiB UTF-8; each output <= 128 KiB UTF-8; summed
 step content <= 512 KiB; serialized result <= 1 MiB. Each completed prefix must
@@ -1561,7 +1574,7 @@ contains no secret. The narrow deny policy is defense in depth, not comprehensiv
 secret detection; it cannot detect secret content or hard-link aliases. Sent task
 and evidence are subject to the selected provider's normal data handling.
 
-A10 is implemented on its feature branch, NOT merged; external re-review PENDING.
+A10 is DONE and merged via PR #12 (`21b9757`); Claude re-review APPROVE, final VPN acceptance PASS.
 There is no --save-output option: A10 remains read-only, with no malformed-output
 file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.

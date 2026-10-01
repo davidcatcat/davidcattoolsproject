@@ -13,9 +13,13 @@ Deliver a working change, not just code generation.
 2. Restate the requested behavior and the smallest acceptance criteria.
 3. Identify the public seam where behavior should be verified.
 4. Implement in small vertical slices.
-5. Add or update tests that verify behavior through public interfaces. For runtime/execution features, include failure-path tests: stable error classification, nonzero exit behavior, diagnostics/trace visibility, recovery/STOP policy, and secret redaction where applicable.
+5. Add or update tests through public interfaces. For runtime/execution features, derive
+   failure-path acceptance cases from the provider/runtime checklist in
+   [review-change](../review-change/SKILL.md); keep the safety review rules there.
 6. Run the narrow tests after each meaningful slice.
-7. Run repository-wide required format, lint/static analysis, tests, and build checks.
+7. Run required checks for the changed artifacts. Documentation-only work uses documentation
+   validation (links, examples, schema/status consistency); run application tests/builds when
+   production behavior or package resources change, or repository instructions require them.
 8. Manually exercise the user-facing flow when practical.
 9. Use `review-change` on the final diff.
 10. Use `safe-git` only when the user asks to commit, synchronize, or push.

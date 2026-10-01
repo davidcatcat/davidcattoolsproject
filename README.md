@@ -12,6 +12,7 @@ This repository currently provides:
 - `debug-ci` — diagnose CI failures and apply the smallest correct fix.
 - `review-change` — review a diff for correctness, regression, security, and tests.
 - `safe-git` — safely fetch, synchronize, commit, and push Git changes.
+- `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
 
 Each skill is stored at:
 
@@ -77,7 +78,7 @@ checkout workflow is deprecated and must not be reused. See [AGENTS.md](AGENTS.m
 If sandbox permissions block `.git` writes, leave changes in the canonical
 repository and report exact host-terminal staging/commit/push commands; do not
 create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start A2.6 or merge main.
+when required; do not automatically start the next milestone or merge main.
 
 All unit, targeted, canonical, smoke, provider integration, regression, Git, and
 documentation validation must be launched from the canonical repository.
@@ -107,7 +108,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 are completed and merged; A11 Production Workflow & Diagnostics is next and is staged as A11a observability, A11b execution/approval/recovery, then A11c integration/acceptance before the optional A12 Telegram frontend. Anthropic API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 mainline milestones are completed and merged (A2.3 Anthropic API remains planned); A11 Production Workflow & Diagnostics is next and is staged as A11a observability, A11b execution/approval/recovery, then A11c integration/acceptance before the optional A12 Telegram frontend. See the [roadmap](tools/llmtool/ROADMAP.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 

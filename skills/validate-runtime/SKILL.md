@@ -20,8 +20,10 @@ authentication, inference, and end-to-end claims separate.
 4. **Use the smallest real test that proves the requirement.** Prefer an exact output marker and a
    low-cost request. Avoid paid or high-cost workloads, destructive operations, and arbitrary file
    mutation.
-5. **Check the output and diagnostics contract.** Verify exit code, expected stdout, stderr, safe metadata, and—when supported—the run/task identifier plus persisted trace/error record. Check
-   for prompt echo, credential leakage, raw-response leakage, and internal reasoning leakage.
+5. **Check the output and diagnostics contract.** Verify exit code, stdout/stderr, safe metadata,
+   and available run/task identifiers. Inspect persisted trace/error records only when explicitly
+   enabled; ephemeral runs must not be reported as having saved traces. Apply the leakage and
+   compatibility checks in [review-change](../review-change/SKILL.md).
 6. **Check network coexistence.** For VPN-dependent or internal services, test required internal and
    external endpoints plus required source control. Check DNS and the destination route/interface;
    record the selected route when split tunneling may apply.

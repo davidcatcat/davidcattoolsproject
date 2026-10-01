@@ -28,9 +28,13 @@ If no material issue is found, say so directly and identify any testing or envir
   policy, and approval. Upstream support does not count as an implementation capability unless
   this implementation enables and safely supports it; upstream tool support alone cannot justify
   `shell=true`, `git=true`, or `code_edit=true`.
-- For provider/model transports and debug/verbose modes, check that credentials, Authorization headers, raw HTTP error
-  bodies, raw responses, prompts, and internal reasoning cannot leak through stdout, stderr,
-  exceptions, or final replies. Include provider fields such as `reasoning_content` in that check.
+- Transport credentials and Authorization headers must never leak into any output or final reply.
+- Check that diagnostics, traces, exceptions and debug/verbose modes do not leak credentials,
+  Authorization headers, raw HTTP bodies, prompts or internal reasoning (including
+  `reasoning_content`). Distinguish explicitly requested result/evidence content from accidental
+  diagnostic echo; preserve the documented stdout/JSON contract and persistence defaults.
+- For execution engines, verify policy/required approval precedes each side effect, including tests, repair and Git;
+  changed actions/state invalidate old approvals. A cwd restriction alone is not a sandbox.
 - State validation evidence precisely: source review, unit test, mock integration, network
   reachability, authentication, real inference, backend session, repository access, and live
   provider test are separate results. Reachability is not inference; mock success is not live
