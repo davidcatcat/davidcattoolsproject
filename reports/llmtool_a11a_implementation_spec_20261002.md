@@ -225,6 +225,7 @@ Only codes needed by the first `ask` integration are implemented:
 - `CONFIG_INVALID`
 - `CONFIG_PROVIDER_NOT_READY`
 - `AUTH_CREDENTIAL_MISSING`
+- `AUTH_PROVIDER_REJECTED`
 - `ENV_PROVIDER_RUNTIME_MISSING`
 - `NETWORK_PROVIDER_UNREACHABLE`
 - `PROVIDER_TIMEOUT`
@@ -423,9 +424,11 @@ Rules:
 3. Persisted diagnostics backend support in the first A11a release is POSIX
    (macOS/Linux) only.
 4. On Windows or an unsupported platform, normal in-memory diagnostics still
-   work. An explicit persistence request fails safely **before provider I/O** with
-   a store-unsupported diagnostic. Merely setting `LLMTOOL_HOME` does not fail
-   or perform I/O.
+   work. A persistence request must reject the unsupported store backend before
+   provider I/O, emit one bounded `DIAGNOSTICS_STORE_UNAVAILABLE` warning, then
+   continue the read-only `ask` exactly once without persistence under the store
+   failure policy in section 11. It must never fall back to a weaker/insecure
+   storage backend. Merely setting `LLMTOOL_HOME` does not fail or perform I/O.
 5. `runs`, `trace`, and `doctor` resolve the same location but do not create
    it just by being invoked.
 
@@ -454,7 +457,8 @@ LLMTOOL_HOME/
 
 - store/run directories created mode 0700
 - files created mode 0600
-- existing store/run directories must be owned by the effective user
+- existing store/run directories must be owned by the effective user and have no
+  group/other permission bits; A11a does not silently chmod an unsafe existing store
 - reject symlink components and non-directory path components
 - all traversal after the trusted anchor uses directory-relative no-follow
   operations
@@ -903,7 +907,8 @@ A11a is complete only after this gate is merged.
 - invalid relative XDG fallback
 - explicit absolute `LLMTOOL_HOME`
 - relative/control-containing home rejected for persistence
-- Windows persistence opt-in fails closed before provider I/O
+- Windows persistence backend is rejected before provider I/O, emits one bounded
+  warning, and the original read-only provider call still occurs exactly once unsaved
 - ephemeral diagnostics remain available on unsupported persistence platforms
 
 ### Diagnostics CLI
