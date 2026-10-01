@@ -488,6 +488,8 @@ A11 從 A0～A10 的 read-only、validation、orchestration 與 retrieval primit
 
 ## A11a — Observability & Diagnostics
 
+Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md). This spec is documentation only; A11a remains NOT STARTED until production implementation begins.
+
 A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
 retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mutation 或 Git mutation；
 唯一新增寫入範圍是明確 opt-in 的 private diagnostics store。現有 config/feedback 的明確
