@@ -185,3 +185,20 @@ usage discarded rather than inferred. Platform file reader remains POSIX and req
 physical paths; no automatic datasets/storage/replay, parallel provider calls or retry.
 The live criterion miss remains visible, not weakened for a green smoke. Broader Git
 syntax and dependency artifact/build-tool hash locks remain outside A8. A9 NOT STARTED.
+
+## Published draft / remote CI — 2026-10-01
+
+Implementation commit: `dbc5908db6ed2e344dc8832c7dff4b76b7076298`.
+Normal push succeeded to feat/a8-regression-benchmark. Existing main remained the
+recorded base after a fresh fetch; branch was 0 behind / 1 ahead. Expected 11-file
+A8-only delta, four additive shared CLI lines; unrelated untracked entries untouched.
+[PR #9](https://github.com/davidcatcat/davidcattoolsproject/pull/9) is OPEN and DRAFT.
+Not merged; external ChatGPT review pending, A9 NOT STARTED.
+
+Python 3.9 and Python 3.14 SUCCESS, including both Working tree is clean steps, on
+[push CI 36819426970](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36819426970)
+and [PR CI 36819794400](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36819794400).
+Both runs tested the implementation SHA above with the existing hardened workflow.
+This report append is documentation-only; production/tests/fixtures and workflow
+remain byte-identical to that tested implementation. Final-head PR CI is checked
+again after this append; final checkpoint reports its status. No live rerun.
