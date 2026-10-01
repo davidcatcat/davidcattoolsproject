@@ -23,6 +23,7 @@ from .context import PACKET_LIMIT
 from .feedback_cli import add_feedback_parser, run_feedback
 from .benchmark_cli import add_benchmark_parser, run_benchmark
 from .orchestration_cli import add_orchestration_parser, run_orchestration
+from .retrieval_cli import add_retrieval_parser, run_retrieval
 
 
 def _validation_packet(filename):
@@ -80,6 +81,7 @@ def parser_for_cli():
     add_feedback_parser(sub)
     add_benchmark_parser(sub, add_options)
     add_orchestration_parser(sub)
+    add_retrieval_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -110,6 +112,8 @@ def parser_for_cli():
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
     try:
+        if args.command == "retrieve-context":
+            return run_retrieval(args)
         if args.command == "benchmark":
             return run_benchmark(args)
         if args.command == "orchestrate":
