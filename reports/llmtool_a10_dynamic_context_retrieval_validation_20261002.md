@@ -397,3 +397,70 @@ Documentation UTF-8/links/fences/whitespace/README CLI parser checks PASS;
 unstaged and scoped staged git diff --check PASS. No gh, PR creation/merge,
 alternate branch/checkouts/worktree/clone or A11 work. PR #12 final review and
 Claude re-review remain pending; no final-head remote CI result claimed.
+
+## Final VPN live acceptance — 2026-10-02
+
+Validated the real canonical-source `llmtool retrieve-context` CLI/runtime on
+`feat/a10-dynamic-context-retrieval` at
+`660e389e3707bcd4e480755728cf32112afa55b0`. Company VPN gateway
+`http://10.29.7.58:4000` was reachable. Requests used the persisted isolated
+`company` openai-compatible profile, model `gw`, and
+`provider_options: {enable_thinking: false}`. No API key or Authorization header
+was used. Temporary HOME/config and synthetic evidence were created under a
+physical `/private/tmp/llmtool-a10-final-live-*` directory and removed by the
+runtime fixture cleanup. Real user configuration and credentials were not read
+or modified.
+
+| Required case | Actual result | Real gateway requests |
+| --- | --- | --- |
+| ANSI log | PASS; rc=0; 2.263 s; planner selected `app/color.log`; strict A4 packet validated and all three evidence sources were exactly `app/color.log` | 1 planner + 1 synthesizer |
+| Eligibility filter | PASS; rc=0; 2.285 s; manifest contained only `app/plain.log`; planner selected it; strict A4 packet validated and all three evidence sources were exactly `app/plain.log` | 1 planner + 1 synthesizer |
+| Broken synthesizer readiness with open stdin pipe | PASS; rc=1; 0.010 s; sanitized error `provider base_url is not configured`; stdout empty | 0 |
+
+The ANSI fixture contained real ESC bytes around a database authentication error,
+followed by connection-refused and retry-failed text. Retrieved metadata was
+`control_escaped=true`, original `byte_count=78`, and original SHA-256
+`67883446489afaa82d6f6b1908a4fc44b1b9ae285251dbea3a0ca96e6ab2c58b`.
+Instrumentation verified the synthesizer received visible literal `\x1b`
+sequences, no raw ESC, and otherwise preserved the fixture text. Public JSON
+metadata matched the original-byte size/hash and retrieval records.
+
+The eligibility fixture included a 70-byte UTF-8 `app/plain.log`, a 262145-byte
+`app/big.log` (above MAX_FILE_BYTES), and `app/diagram.png`. The actual planner
+payload contained only the plain log's relative path and byte count. Descriptor
+instrumentation verified no candidate content was opened during manifest
+construction and only selected `app/plain.log` was opened during retrieval;
+excluded big/binary fixtures were not read. Plain-log metadata preserved
+`control_escaped=false`, original byte count 70, and SHA-256
+`5ddad2bea56d6689981ab47b817ad68d951c1d9a5526e71fa8a752f5f73e2a4c`.
+
+For preflight, the real persisted `broken` profile lacked base_url. A real pipe
+had its writer held open with no bytes and no EOF. Events stopped after planner
+and synthesizer readiness resolution: no full input read, credential lookup,
+client construction, file retrieval, or gateway request occurred. Both successful
+cases resolved both profiles before input/credentials; synthesizer credential
+lookup occurred only after retrieval.
+
+The one-time acceptance harness called the real CLI and actual provider HTTP
+transport without simulating model replies. It counted both Provider.complete
+calls and HTTP POSTs, inspected outgoing payloads, verified absence of
+Authorization, and trapped subprocess/os.system execution attempts. Total real
+gateway requests: **4**. MODEL-OUTPUT FAIL: **none**. No retries, fallback,
+shell/Git/tool execution, provider substitution, or production modifications
+occurred. Optional real-repository selection observation was not performed; only
+synthetic evidence was sent.
+
+Post-live focused A10 tests on Python 3.13.3: **53 discovered, 53 passed, 0 failed,
+0 errors, 0 skipped**, elapsed **0.655 s**. `git diff --check` passed. No production
+or package bytes changed, so wheel and full Python suites were not repeated in
+this documentation-only pass; prior exact-head validation remains separate
+historical evidence.
+
+Claude final re-review verdict: **APPROVE**. Accepted non-blocking follow-ups
+remain **N1** (excluded-candidate visibility/zero-selection UX), **N2** (narrow
+binary-extension coverage), and **N3** (reproducibility of one-time validation
+helpers). None was expanded into production work here. The framework evidence
+supports the A10 merge gate; this is not a model-quality score. PR #12 remains
+unmerged, A11 remains NOT STARTED, M6 remains DEFERRED. No worktree/clone was
+created and no gh command was used. Claude's review/re-review reports and the
+known unrelated untracked benchmark/reasoning reports were left untouched.
