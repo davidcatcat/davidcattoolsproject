@@ -49,7 +49,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
-- **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS. A10 NOT STARTED.
+- **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
+- **A10 — Dynamic Context Retrieval:** implemented on `feat/a10-dynamic-context-retrieval`; external review PENDING; NOT merged. A11 NOT STARTED; A12 remains future optional frontend.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1369,7 +1370,7 @@ The selected profile's configured api_key_env still reads its credential value a
 Handoff is shallow and bounded: every step receives the original task plus only the
 immediately previous role output. Earlier outputs are not accumulated and there is
 no hidden long-term memory. Previous role output is marked as untrusted model text; delimiters reduce ambiguity but are not claimed to prevent prompt injection.
-A10 Dynamic Context Retrieval remains future work.
+A10 is a separate explicit retrieval command; A9 does not automatically retrieve context.
 
 A9 is text-only. It never executes shell/VERIFY_NEXT/Git, edits files or code, applies
 patches, runs tests, or treats model words such as "approved" as authorization. The
@@ -1382,7 +1383,7 @@ read task input, config, credentials, instantiate providers, or access network.
 Repository examples live under `orchestration/` and are not packaged.
 
 Anthropic HTTP API remains future A2.3 work. A9 has no Anthropic special case; a
-future registered provider can use the same explicit profile contract. A9 is DONE and merged to `main` via PR #10 (`8776476`). A9-R1 is FIXED; updated external ChatGPT review PASS and final-head CI PASS. A10 NOT STARTED.
+future registered provider can use the same explicit profile contract. A9 is DONE and merged to `main` via PR #10 (`8776476`). A9-R1 is FIXED; updated external ChatGPT review PASS and final-head CI PASS. A10 implementation is on its feature branch, pending external review.
 
 A9 bounds: original task <= 1 MiB UTF-8; each output <= 128 KiB UTF-8; summed
 step content <= 512 KiB; serialized result <= 1 MiB. Each completed prefix must
@@ -1402,5 +1403,166 @@ passed Python 3.9 / 3.14 CI with 552/552 tests in each job. M1/M2/M3/M4/M5/M7, R
 and the final F1 credential-source gap are fixed within the documented bounded contracts.
 Unsafe analyze-log NEXT_COMMANDS suggestions are visibly suppressed as text; no suggested command is executed.
 M6 preferred_verify_next_any matching remains DEFERRED for a separate design review; exact A8 criteria and
-the historical Claude model safety FAIL remain preserved. A10 NOT STARTED. Evidence:
+the historical Claude model safety FAIL remain preserved. A10 status is documented below. Evidence:
 [hardening validation report](../../reports/llmtool_post_a9_hardening_validation_20261001.md).
+
+## A10 — Dynamic Context Retrieval (feature branch; review pending)
+
+A10 provides one bounded path-manifest retrieval round, independent of A9 roles.
+Task → deterministic candidate manifest → planner → selected file reads →
+synthesizer → strict A4 ContextPacket. Exactly two sequential Provider.complete
+calls on success; no retry, fallback, recursive retrieval, parallel calls, hidden
+profile substitution, or automatic A9 integration. Provider != Role != Retrieval Planner.
+
+~~~sh
+llmtool retrieve-context \
+  --root . \
+  --scope tools/llmtool/llmtool \
+  --scope tools/llmtool/tests \
+  --planner-provider office-qwen \
+  --synthesizer-provider office-qwen \
+  "Why can explicit orchestration profiles still be overridden?"
+
+llmtool retrieve-context --root ./synthetic-evidence --scope auth.py --scope db.py \
+  --planner-provider local-profile --synthesizer-provider local-profile \
+  --file task.txt --json
+~~~
+
+Both profiles must explicitly exist in trusted persisted user configuration.
+Generic LLMTOOL_* request overrides and project .llmtool.yaml cannot rewrite
+either binding. Readiness precedes configured api_key_env value access. The
+planner and synthesizer profiles are both readiness-validated before any input read
+or provider request. No credentials are read during preflight. Synthesizer credential
+access/client creation remain deferred until all retrieval succeeds.
+Normal ask/config precedence remains unchanged. Explicit-input queued pipe/socket
+conflicts are checked before config; stdin-only reading starts after BOTH profiles
+pass readiness. Existing closed-stdin, regular-file shell-loop and empty-pipe behavior applies.
+
+### Authorization and data sent to providers
+
+Root and at least one scope are required; no default plan, HOME scan, repository
+discovery, parent traversal, Git history or implicit extra evidence. Each scope is
+a relative regular file or recursively scanned directory. Overlapping scopes are
+deduplicated, and manifest paths are sorted, relative POSIX paths.
+
+**Choosing root + scopes authorizes selected files in those scopes to be sent to
+the configured synthesizer provider. Choose narrow scopes.** The planner sees
+only the original task, candidate path names and byte sizes; it sees no candidate
+contents. Its entire response must be exactly strict JSON of the form:
+
+~~~json
+{"files":["relative/path/a.py","relative/path/b.md"]}
+~~~
+
+The only key is files, containing 0..8 unique exact manifest paths. Empty selection
+is valid and still proceeds to the synthesizer with the task. Duplicate JSON keys,
+constants, extra fields, malformed/fenced/prose output, duplicate/unknown/noncanonical
+paths and excessive selection fail before any selected content is read or any
+synthesizer credential/client access. Model output never grants authorization.
+
+The synthesizer receives structured JSON with the original task and the selected
+documents' relative paths, normalized UTF-8 content and control_escaped flags.
+Ordinary safe UTF-8 text is passed unchanged. Unsafe C0/C1/bidi controls are
+deterministically escaped into visible text (ESC becomes a literal backslash + x1b),
+never removed or interpreted as ANSI. LF/CR/TAB and normal Unicode formatting
+including ZWJ/ZWNJ are preserved. NUL and invalid UTF-8 still fail. Filenames, task and documents
+are untrusted data, not instructions. No absolute root or host paths are included
+by A10. User-supplied task or file content may itself mention host paths.
+
+### Filesystem policy and bounds
+
+A10 uses POSIX anchored descriptors, no-follow/nonblocking opens and metadata
+identity checks before/open/after reads. macOS/Linux support requires their
+no-follow directory APIs; unsupported platforms fail closed. Root and every
+ancestor must be physical directories (use /private/tmp rather than its symlink
+alias /tmp). Symlink scopes are rejected; nested symlink files/directories and
+nonregular entries are excluded, never followed. Detected file replacement,
+changes, or symlink substitution fail before synthesis. This is not an atomic
+snapshot or protection against every hostile concurrent filesystem change.
+
+.git content is excluded, including a root inside .git. Obvious credential stores
+(.ssh, .password-store, .aws, .kube, .docker, .gnupg, .azure,
+.config/llmtool, .config/gh and .config/gcloud)
+are excluded, including roots inside them. Credential files excluded even in
+authorized scopes include .env/.env.*, .netrc, .npmrc, .pypirc, .pgpass,
+.git-credentials, .vault-token, id_rsa/id_dsa/id_ecdsa/id_ed25519 and
+.pem/.key/.p12/.pfx files. Known etc/shadow, etc/gshadow and proc/<pid>/environ
+locations are excluded even when root points inside their parent directories.
+Additional narrow exclusions: .cargo/credentials, .cargo/credentials.toml, .htpasswd,
+kubeconfig, credentials.json, *.tfstate and *.tfstate.backup. No broad config/secret/
+credentials substring rule is used. There is no allow-sensitive escape hatch.
+Ordinary source names such as config.py, configuration_test.py and secret_manager.py
+remain candidates. Path text rejects C0/C1/bidi controls and invisible format
+characters; file contents allow ordinary Unicode formatting such as ZWJ/ZWNJ
+while visibly escaping unsafe C0/C1/bidi controls; NUL and invalid UTF-8 are rejected.
+
+| Bound | Maximum |
+|---|---|
+| Task UTF-8 | 1 MiB (shared source reader has an outer 16 MiB bound) |
+| Explicit scopes | 32 before deduplication |
+| Relative path UTF-8 / path depth | 4096 bytes / 64 components |
+| Scanned directory entries, including excluded entries | 16,384 |
+| Manifest regular files | 4096 |
+| Compact serialized manifest UTF-8 | 256 KiB |
+| Planner response UTF-8 / JSON depth | 64 KiB / 2 |
+| Selected files | 8 |
+| Each selected file / summed evidence (original bytes) | 256 KiB / 512 KiB |
+| Normalized content UTF-8 | at most 4x original bytes |
+| Structured provider user payload UTF-8 | 4 MiB including JSON escaping |
+| ContextPacket | existing A4 1 MiB, depth 4; A6 1024 items |
+| Public result JSON UTF-8 | 2 MiB including packet, metadata and escaping |
+
+Manifest construction reads metadata only; it never reads initial bytes to identify
+binary data. Regular files larger than 256 KiB are excluded, not truncated.
+A narrow suffix exclusion covers .png/.jpg/.jpeg/.gif/.webp/.ico/.pdf/.zip/.gz/
+.bz2/.xz/.7z/.woff/.woff2/.ttf/.otf/.mp3/.mp4/.mov/.sqlite/.sqlite3 (case insensitive).
+Extensionless and ordinary source/data files remain eligible. Unknown/misnamed
+binary files may still be selected and fail bounded UTF-8/NUL validation.
+Planner instructions state at most 8 files, each candidate <=256 KiB, total selected
+byte_count <=512 KiB, intended UTF-8 evidence and exact manifest paths only.
+Selection's declared total is checked before read_selected; read-time checks remain.
+Exceeding a scan/count/manifest budget
+fails clearly and asks for narrower scopes; nothing is silently truncated.
+Selected files are read at most 256 KiB + 1 each. Binary, oversize or changed files
+fail before synthesizer credentials/client access. Message/result caps account for
+JSON escaping and preserve the inherited packet bound.
+
+### Packet provenance and output
+
+The synthesizer must output strict A4 JSON; parse_context_packet and A6 structural
+validation remain authoritative. Every evidence source must exactly equal task
+or an actually retrieved relative path. Invented sources fail, without repairing
+model output. This checks the supplied source set, not whether each claim is true
+or properly supported by that source. VERIFY_NEXT remains text only, never executed.
+
+Frozen result data includes planner/synthesizer profile names, scopes, selected
+path/byte_count/SHA-256/control_escaped metadata, A8 allowlisted runtime metadata and the final
+packet. byte_count and SHA-256 always describe ORIGINAL file bytes, even when
+control_escaped=true records that model-facing content was transformed. Public
+result never includes raw document contents. Hashes are audit/provenance only, not authorization. No raw retrieved
+documents or raw provider objects are duplicated in result JSON; the generated
+packet can quote evidence and therefore can contain selected material.
+Unavailable token counts stay null, without estimation or quality/provider ranking.
+
+Human output shows retrieved metadata and the packet through the existing
+terminal-safe boundary. JSON preserves generated/user-supplied packet data.
+All stages validate before stdout; failures emit sanitized stderr and nonzero
+exit, with no partial result. A10 never executes shell/Git/commands/tools, edits
+files, applies patches, runs tests, searches the web, or discovers credentials.
+
+A10 MVP selects from paths/sizes, not semantic search. It may choose the wrong
+files (the independent review observed missed log_safety.py selections). Use narrow
+scopes and explicitly name likely relevant files in the task when known. There are
+no embeddings, indexes, grep/ripgrep, AST search, vector DB,
+recursive loops or file watchers. Explicit scope cannot prove that ordinary source
+contains no secret. The narrow deny policy is defense in depth, not comprehensive
+secret detection; it cannot detect secret content or hard-link aliases. Sent task
+and evidence are subject to the selected provider's normal data handling.
+
+A10 is implemented on its feature branch, NOT merged; external re-review PENDING.
+There is no --save-output option: A10 remains read-only, with no malformed-output
+file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
+sanitized with no partial stdout. Output retention needs a separate future design.
+A11 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
+future A2.3; M6 remains DEFERRED. Validation is recorded in the
+[A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

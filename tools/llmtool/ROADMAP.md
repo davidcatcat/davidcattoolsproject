@@ -391,7 +391,7 @@ LLMTOOL_* request overrides；configured api_key_env 的 secret value 仍在 rea
 所有 model output 都是 untrusted TEXT ONLY；不得執行 shell、VERIFY_NEXT、Git、
 file/code edit、patch、tests 或 provider-native tools。A9 validator role 是 LLM review
 responsibility，不能覆寫 deterministic A6 Validator。A8 負責 benchmark/measurement，
-A9 不自動跑 benchmark。A10 Dynamic Context Retrieval 尚未開始。
+A9 不自動跑 benchmark 或 A10 retrieval；A10 是獨立 explicit CLI。
 
 `llmtool orchestrate --plan ... --dry-run` 僅做 plan structural validation，不讀 task、
 config、credentials，也不建 provider client。Normal mode 才依序 resolve explicit
@@ -401,14 +401,35 @@ Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthr
 未來 provider registry 加入後即可由同一 plan/profile contract 使用。
 
 A9 DONE and merged via PR #10 (`8776476`)；A9-R1 FIXED，updated external ChatGPT review PASS，
-final-head Python 3.9/3.14 CI PASS。A10 NOT STARTED。
+final-head Python 3.9/3.14 CI PASS。A10 feature-branch implementation status 見下方。
 
 ## A10 — Dynamic Context Retrieval
 
-Task → first-pass model → identify relevant files → fetch missing evidence →
-second-pass context packet。取得證據的權限與範圍需明確。
+Task → deterministic path/size manifest → one planner → bounded selected file
+reads → one synthesizer → existing strict A4 ContextPacket。
+Implemented on feat/a10-dynamic-context-retrieval；external re-review PENDING，
+NOT merged / NOT marked DONE。Exactly two provider calls on success；fail-fast，
+no retry/fallback/recursive round/parallelism；不整合 A9 roles。
 
-## A11 — Production Workflow
+retrieve-context 要求 explicit root、one or more relative scopes、planner profile、
+synthesizer profile。Root/scopes 是 authorization；planner 只能選 deterministic
+manifest 裡的 paths。Planner 只看 task + path/size；synthesizer 才看 selected contents。
+Symlinks/.git/obvious credential stores/files excluded；metadata-only sorted manifest，
+oversize/obvious binary-extension metadata exclusion；bounded UTF-8 no-follow reads、
+race checks、unsafe-control visible escaping、original-byte SHA-256/byte_count
+provenance + control_escaped metadata。No candidate content sniffing。
+Explicit profiles use trusted persisted data；BOTH profiles readiness preflight
+before input/provider calls，credentials deferred to each execution stage；
+generic LLMTOOL_* / project overrides cannot rewrite bindings。
+
+A4 parser + A6 structural validation reused；evidence source 必須為 task 或 actual
+retrieved relative path。Model output never grants access or execution permission。
+No shell/Git/tools/file writes/patches/command execution、search/index/embeddings。
+Path selection may miss relevant evidence；scopes/denylist do not prove secret absence。
+完整 bounds、data handling、CLI/security limitations 見 README A10 section；
+validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
+
+## A11 — Production Workflow — NOT STARTED
 
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
@@ -492,5 +513,5 @@ analyze-log 從不執行 NEXT_COMMANDS；不安全或不支援的建議只會以
 External ChatGPT review PASS；Claude re-review APPROVE；final reviewed head `566cdb5` 的 Python 3.9 / 3.14
 CI 各 552/552 PASS。M6 preferred_verify_next_any = DEFERRED（semantic equivalence、exact curated evidence、
 prompted vs unprompted evidence 需要獨立設計決策）；保留 A8 criteria 和 Claude measured model safety FAIL。
-A10 NOT STARTED；Anthropic HTTP API 仍是 future A2.3。
+A10 feature-branch implementation pending external review；Anthropic HTTP API 仍是 future A2.3。
 詳見 [hardening validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md)。
