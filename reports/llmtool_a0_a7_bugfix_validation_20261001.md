@@ -189,3 +189,40 @@ Confirmed:
 
 No blocking issue remains for merge review. Deferred historical nits remain explicitly
 out of scope and do not invalidate this bugfix pass.
+
+
+## Final merge gate — 2026-10-01
+
+Merged to main through [PR #7](https://github.com/davidcatcat/davidcattoolsproject/pull/7)
+using normal GitHub merge commit `643caa248ae3d3f75494aa539820591d05016633`
+on 2026-10-01 (03:40:52 UTC). Reviewed PR branch HEAD:
+`a5d8bf911672650b646e9f10d36ab4ea855576bf`.
+
+The branch was synchronized with main `5cecbd6cf188259b2df1988734423c1ff6460135`,
+including the independent Claude Round-2 report. Before merge it was 0 behind /
+6 ahead; only the reviewed bugfix/hardening files remained in the diff.
+Production, tests, workflow and README content matched CI-tested implementation
+`c096e851fd57cdb66087eb07758a224e7e53633b`; subsequent differences were review/report
+records. No new local live smoke was needed or performed.
+
+PR CI [run 36811430097](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36811430097):
+`check (3.9)` SUCCESS and `check (3.14)` SUCCESS before merge. GitHub reported
+MERGEABLE / CLEAN and the exact head commit was required by the merge command.
+
+Post-merge verification PASS: all required production, workflow and validation/review
+files exist on origin/main; independent Claude reports retain their original bytes;
+root README has no stale A2.5 review-pending statement. Pure classifier checks on the
+main implementation confirmed UNKNOWN git status/sudo ls, SENSITIVE_READ git diff,
+and DESTRUCTIVE path checkout, force-refspec push and sudo rm. Commands were assessed
+as data, never executed. Unrelated benchmark/reasoning files were preserved.
+
+Known non-blocking follow-ups remain DEFERRED:
+
+- Git discard severity alignment: restore paths/worktree, forced checkout,
+  switch --discard-changes, stash drop/clear.
+- CI hardening: action commit-SHA pins, persist-credentials: false,
+  dependency pinning/hash strategy and a working-tree-clean check.
+
+This merge includes no A7 feature implementation, does not change its separate branch,
+and does not start A8. Historical unmerged/review-pending statements above describe
+the earlier validation stages; this section records the final merged state.
