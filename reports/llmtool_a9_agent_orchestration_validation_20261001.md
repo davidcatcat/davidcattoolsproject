@@ -125,3 +125,22 @@ local authenticated CLI sessions. No credential inspection, auth change, VPN
 dependency, or paid API call was introduced merely to make validation green.
 
 PR #10 remains DRAFT and unmerged. A10 NOT STARTED.
+
+## Final branch CI checkpoint
+
+CI-tested feature head: `876600e8644b69e0e3d1b962df2431117df044a3`.
+
+GitHub llmtool CI run `36851862564` completed successfully:
+- Python 3.9: 501 tests PASS; compileall PASS; Working tree is clean PASS.
+- Python 3.14: 501 tests PASS; compileall PASS; Working tree is clean PASS.
+
+The production code, A9 tests, README, and ROADMAP at that head are therefore
+CI-verified. This appended report-only checkpoint does not modify
+`tools/llmtool/**` and does not require another llmtool CI run.
+
+External ChatGPT review: PASS. No material A9 blocker remains in this review.
+Standalone wheel build remains explicitly NOT-RUN; package-layout/static review and
+CI editable-install/import validation PASS. Live provider smoke remains NOT-TESTED
+because the GitHub connector cannot access the user's local authenticated CLI session.
+
+PR #10 remains DRAFT and unmerged by design. A10 NOT STARTED.
