@@ -301,7 +301,7 @@ Merged to main in `63b5bae`；external ChatGPT review PASS。
 A7/A8 可重用 feedback/regression，A9/A11 仍須獨立建立 permissions／approval／execution；
 A6 不開始 trainer、agents、routing、retrieval、autonomous repair 或 production execution。
 
-## A7 — Skill Trainer / Feedback Loop — IMPLEMENTATION + CANONICAL VALIDATION + EXTERNAL REVIEW PASS
+## A7 — Skill Trainer / Feedback Loop — implementation complete, NOT YET merged
 
 model failure → explicit capture → human／external review → declarative skill
 proposal → regression case → manual versioned Skill revision → validation。
@@ -343,9 +343,10 @@ tag inference、linked-case discovery 或 concurrent multi-user storage。
 Fixtures 不打包；三個 packaged skills 不變。A8 可另加 live-output collection／benchmark；
 A7 不開始 A8/A9/A10/A11 implementation。
 
-47 targeted tests PASS；canonical syntax + 392 tests：391 passed、1 inherited A5
-filesystem skip，exit 0；wheel contents 與 manual offline CLI/fixture validation PASS。
-Feature branch implementation complete；external ChatGPT review PASS；尚未 merged。
+Historical pre-sync validation: 47 targeted tests; 392 discovered, 391 passed, one skip.
+A0–A6 DONE and merged; A0–A7 bugfix/hardening merged (`643caa2`).
+A7 synchronized with hardened main; post-sync validation complete (423 discovered, 422 passed, one skip).
+External ChatGPT review PASS; A7 NOT YET merged.
 詳見 [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md)。
 
 ## A8 — Regression / Benchmark System

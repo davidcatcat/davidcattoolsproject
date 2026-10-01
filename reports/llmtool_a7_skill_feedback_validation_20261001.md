@@ -212,3 +212,58 @@ concurrent writers are not supported. Credential rejection is heuristic, not pro
 of redaction. Cases and statuses are human-managed data, not authenticated approval.
 A8 may add collection/measurement independently; A7 provides no agent/orchestration,
 automatic repair, retrieval, shell/Git mutation or production execution.
+
+
+## Post-hardening main synchronization validation — 2026-10-01
+
+Historical pre-sync results above remain intact. Old A7 HEAD:
+`97ab0a362ac17e3ab16c7c589169071a03b16d25`. Hardened main:
+`c8c63d2803228104fdf5227fa382484a24364fec` (bugfix PR #7 merge `643caa2`).
+Synchronization merge: `eefa616cf6c58deff8d9d08b7a4a9596cf778fac`.
+No conflicts occurred; Git automatically combined README and cli.py. The verified
+cli.py delta over main is only four additive lines: feedback import, parser and
+early offline dispatch. Shared input/terminal/chat/config/provider/validator source,
+shared tests and CI retain current main bytes; M1–M7 and Round-2 hardening are retained.
+
+The 16-file A7 delta contains only the three feedback modules, minimal CLI integration,
+feedback tests/fixtures and A7 docs/report. A7 production, tests and fixtures are
+byte-identical to the previously externally reviewed A7 HEAD, so external ChatGPT
+review PASS remains applicable. No unrelated hardening follow-up was implemented.
+
+All validation ran from the canonical repository on synchronization HEAD plus docs:
+
+| Gate | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+|---|---:|---:|---:|---:|---:|---:|
+| A7 focused test_feedback.py | 47 | 47 | 0 | 0 | 0 | 0.665 s |
+| Shared CLI/validator/context/input/terminal/chat | 145 | 145 | 0 | 0 | 0 | 14.263 s |
+| Canonical Python 3.13.3 syntax + complete suite | 423 | 422 | 0 | 0 | 1 | 41.875 s |
+| Actual Python 3.9.6 syntax + complete suite | 423 | 422 | 0 | 0 | 1 | 65.715 s |
+
+Canonical: `make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"`.
+Python 3.9: `make -C tools/llmtool check PYTHON=/usr/bin/python3`.
+Both exited 0; one inherited A5 non-UTF-8 host-filesystem skip, no A7 skips.
+Shared and complete suites used approved host execution for loopback fixtures.
+`git diff --check` PASS. Current counts supersede historical 392-test evidence.
+
+Packaging PASS: isolated wheel build; exact source bytes for feedback.py,
+feedback_cli.py, feedback_files.py, cli.py, validator.py and terminal.py verified;
+three packaged SKILL.md resources match main unchanged; repository fixtures excluded.
+Wheel SHA256: `e0a449f6acd167248df6d1e18a0ca50e5b8a9354cca40becd23271aa969b8b83`.
+
+Installed canonical llmtool fixture regressions: historical sensitive-read 3/3 PASS;
+ContextPacket quality 6/6 PASS (HTTP 500 fact, configuration mismatch hypothesis,
+missing exception unknown, verify_next present, structurally valid packet).
+Eleven required hardened classifier cases PASS with approval required, using only data.
+
+A7 security review PASS: source and AST/mock coverage confirm fixed assertion allowlist,
+strict bounded immutable models, deterministic IDs/results, exact forward lifecycle,
+reviewed/current skill proposal prerequisites and +1 version rule. No provider or
+credential resolution, shell/command/Git execution, eval/exec, executable JSON loading,
+repository scanning, automatic SKILL.md mutation or arbitrary patch application.
+File reads/writes remain explicit case operations; feedback/regression content is data.
+No current live-provider call was needed or performed.
+
+README/ROADMAP now distinguish merged A0–A6 and bugfix hardening from synchronized,
+validated A7. A7 NOT YET merged at this validation stage. Existing PR #6 will be
+updated and marked ready after these local gates; GitHub CI result is pending push.
+Deferred Git-discard severity and CI-hardening follow-ups remain deferred. A8 excluded.

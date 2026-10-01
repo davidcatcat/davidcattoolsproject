@@ -46,7 +46,8 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A4 — Evidence-first Context Packet:** DONE and merged to `main` (`38b1a67`); external review PASS
 - **A5 — Git Intelligence:** DONE and merged to `main` (`7de6a99`); external review PASS
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
-- **A7 — Skill Trainer / Feedback Loop:** implementation + canonical validation + external review PASS on feature branch; not merged
+- **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
+- **A7 — Skill Trainer / Feedback Loop:** implementation complete; post-main synchronization validation complete; external ChatGPT review PASS; NOT YET merged
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1014,8 +1015,8 @@ A7 means **failure → human/external review → declarative skill proposal → 
 → manual skill revision/version bump → validation**. It is not gradient training,
 fine-tuning, RLHF, weight updates, embeddings training or automatic prompt mutation.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator != Feedback Case.
-A7 is implemented on `feat/a7-skill-feedback-loop`; external ChatGPT review PASS;
-not merged. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
+A7 is implemented on `feat/a7-skill-feedback-loop`, synchronized with hardened main;
+external ChatGPT review PASS; NOT YET merged. A3–A6 contracts and all packaged SKILL.md versions remain unchanged.
 
 ### Data models and strict format
 
@@ -1167,6 +1168,7 @@ A8 can later add benchmark/live-output collection separately; A7 adds no A8
 scoring/analytics, A9 orchestration, retrieval or approval/execution engine.
 Exact validation counts, packaging, environment limitations and manual CLI results
 are recorded in the [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md).
-Validation: 47 targeted tests PASS; canonical syntax + 392 tests, 391 passed and
-1 inherited A5 filesystem skip, exit 0. Wheel contents and offline manual CLI checks
-PASS. No live provider call was made or required.
+Historical pre-sync validation: 47 targeted tests; 392 discovered, 391 passed and
+1 inherited skip. Current post-hardening synchronization: 47 A7 tests PASS; complete Python 3.13/3.9
+suites each 423 discovered, 422 passed, one skip. Full results are recorded in
+the validation report. No live provider call was made or required.
