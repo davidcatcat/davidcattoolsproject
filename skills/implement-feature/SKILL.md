@@ -28,7 +28,6 @@ Deliver a working change, not just code generation.
 - Do not weaken tests to obtain a green build.
 - Preserve unrelated work.
 - Provider or agent integration must not treat technical capability as permission to execute actions.
-- A model or agent saying "done" is not completion evidence when deterministic validation is available; verify tests, expected artifacts, and repository/runtime state independently.
 - Do not add execution before the affected workflow has a diagnosable failure path. New mutations should emit enough structured diagnostics/audit evidence to identify what ran, what failed, and why without exposing secrets.
 
 ## Completion criteria
