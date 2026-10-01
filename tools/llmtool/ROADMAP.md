@@ -403,13 +403,14 @@ Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthr
 A9 DONE and merged via PR #10 (`8776476`)；A9-R1 FIXED，updated external ChatGPT review PASS，
 final-head Python 3.9/3.14 CI PASS。A10 feature-branch implementation status 見下方。
 
-## A10 — Dynamic Context Retrieval
+## A10 — Dynamic Context Retrieval ✅ DONE and merged
 
 Task → deterministic path/size manifest → one planner → bounded selected file
 reads → one synthesizer → existing strict A4 ContextPacket。
-Implemented on feat/a10-dynamic-context-retrieval；external re-review PENDING，
-NOT merged / NOT marked DONE。Exactly two provider calls on success；fail-fast，
-no retry/fallback/recursive round/parallelism；不整合 A9 roles。
+DONE and merged to `main` via PR #12（merge commit `21b9757f0ea5abfb06a7a07dc12430f036f6e395`）。
+Final reviewed head `77004c6`：independent Claude re-review APPROVE、external ChatGPT final review PASS、
+company-VPN final live acceptance PASS；Python 3.9 / 3.14 exact-head CI 各 605/605 PASS。
+Exactly two provider calls on normal successful retrieval；fail-fast，no retry/fallback/recursive round/parallelism；不整合 A9 roles。
 
 retrieve-context 要求 explicit root、one or more relative scopes、planner profile、
 synthesizer profile。Root/scopes 是 authorization；planner 只能選 deterministic
@@ -429,7 +430,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow — NOT STARTED
+## A11 — Production Workflow — NOT STARTED / NEXT
 
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。

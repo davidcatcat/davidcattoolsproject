@@ -464,3 +464,37 @@ supports the A10 merge gate; this is not a model-quality score. PR #12 remains
 unmerged, A11 remains NOT STARTED, M6 remains DEFERRED. No worktree/clone was
 created and no gh command was used. Claude's review/re-review reports and the
 known unrelated untracked benchmark/reasoning reports were left untouched.
+
+
+## Final merge status — 2026-10-02
+
+External ChatGPT final merge review: PASS.
+
+Final reviewed branch head:
+
+`77004c69574f213a7619dfec6353b25a8842a851`
+
+Exact-head GitHub Actions run `36915340789`: SUCCESS. Python 3.9 and
+Python 3.14 each ran 605/605 tests PASS; Offline canonical checks and
+Working tree is clean both succeeded.
+
+The final VPN live acceptance on the preceding production-equivalent head recorded:
+- ANSI/control normalization PASS with original-byte provenance preserved.
+- Oversize/obvious-binary manifest eligibility PASS without candidate-content sniffing.
+- Broken synthesizer readiness preflight PASS with zero provider requests.
+- Four total real company-gateway requests, no retries/fallback/tools/Git/shell.
+- Claude final re-review verdict: APPROVE.
+
+PR #12 was marked ready for review and merged normally to `main` with merge commit:
+
+`21b9757f0ea5abfb06a7a07dc12430f036f6e395`
+
+A10 Dynamic Context Retrieval is DONE and merged.
+
+Accepted non-blocking follow-ups remain:
+- N1: excluded-candidate visibility / zero-selection UX.
+- N2: broader obvious-binary suffix coverage.
+- N3: reproducibility of one-time validation helpers.
+
+M6 remains DEFERRED. Anthropic HTTP A2.3 remains future work.
+A11 Production Workflow is NOT STARTED and is the next main milestone.
