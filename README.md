@@ -107,7 +107,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 are completed and merged; A11 Production Workflow & Diagnostics is next, with structured errors, persistent run tracing, approval/execution safety, validation/recovery, and real-world acceptance required before the optional A12 Telegram frontend. Anthropic API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 are completed and merged; A11 Production Workflow & Diagnostics is next and is staged as A11a observability, A11b execution/approval/recovery, then A11c integration/acceptance before the optional A12 Telegram frontend. Anthropic API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
