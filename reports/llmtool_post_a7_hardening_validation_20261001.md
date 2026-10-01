@@ -88,3 +88,28 @@ supply-chain guarantees. No unrelated historical nit is addressed.
 Pending branch push/PR CI. Local validation is not a GitHub Actions PASS.
 Normal merge is permitted only after both Python matrix jobs succeed and expected diff
 scope remains intact. Final remote evidence and merge status will be appended after gating.
+
+
+## Final GitHub CI and merge — 2026-10-01
+
+Implementation commit: `f43ff57a1606cf4847f5746ea1129a093bdd15d0`.
+CI commit / reviewed branch HEAD: `259d4810c224d2bd2e6bdd35d18090e35e347a23`.
+[PR #8](https://github.com/davidcatcat/davidcattoolsproject/pull/8) merged with normal
+merge commit `e8c59b0d0ea67c9077e20e86ab459c3e28c8cae6` at 04:38:57 UTC.
+Immediately before merge: 0 behind main; expected six-file diff only; MERGEABLE/CLEAN.
+
+GitHub Python 3.9 and 3.14 SUCCESS for both
+[PR run 36815813931](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36815813931)
+and [push run 36815776985](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36815776985).
+Both PR matrix clean-tree steps completed SUCCESS. This verifies exact PyYAML 6.0.3
+installation and fresh-checkout cleanliness; local evidence alone was not used as CI PASS.
+
+Post-merge verification PASS: canonical main fast-forwarded; production/tests/workflow
+and requirements bytes match the reviewed CI-tested head. Eleven required destructive
+forms were checked through the classifier only, with approval required. origin/main
+contains validator alignment, hardened workflow and this report. Unrelated untracked
+files remain untouched. Only this documentation record changed after merge.
+
+A0–A7 remain DONE and merged. A8 NOT STARTED; no provider/A7 behavior, orchestration,
+automatic execution, auto-approval or Telegram roadmap changes. Deferred hash/build-tool
+locks and broader syntax recognition remain deferred.
