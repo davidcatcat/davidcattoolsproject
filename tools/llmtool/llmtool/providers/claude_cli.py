@@ -4,7 +4,10 @@ import os
 import selectors
 import shutil
 import subprocess
+import signal
+import tempfile
 import time
+from pathlib import Path
 
 from ..errors import LLMToolError
 from .base import ProviderCapabilities, Reply
@@ -71,26 +74,57 @@ class ClaudeCLIProvider:
     @staticmethod
     def _kill(process):
         try:
-            process.kill()
+            if os.name == "posix" and hasattr(os, "killpg"):
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
         except ProcessLookupError:
             pass
+        except PermissionError:
+            try:
+                process.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
         process.wait()
 
     @staticmethod
     def _child_environment():
         # This explicit runtime-only override separates llmtool's isolated HOME
         # from the home in which the user configured Claude CLI authentication.
-        claude_home = os.environ.get("LLMTOOL_CLAUDE_CLI_HOME")
-        if claude_home is None:
-            return None
-        if not os.path.isabs(claude_home) or any(ord(char) < 32 for char in claude_home):
+        claude_home = os.environ.get("LLMTOOL_CLAUDE_CLI_HOME", os.environ.get("HOME"))
+        environment = {
+            name: os.environ[name] for name in (
+                "PATH", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "LANGUAGE",
+                "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+            ) if name in os.environ
+        }
+        if claude_home is not None and (not os.path.isabs(claude_home)
+                                        or any(ord(char) < 32 for char in claude_home)):
             raise LLMToolError("Claude CLI home must be an absolute path")
-        environment = os.environ.copy()
-        environment["HOME"] = claude_home
-        environment.pop("LLMTOOL_CLAUDE_CLI_HOME", None)
+        if claude_home is not None:
+            environment["HOME"] = claude_home
         return environment
 
+    @staticmethod
+    def _temporary_directory():
+        caller = Path.cwd().resolve()
+        repository = next((path for path in (caller, *caller.parents)
+                           if (path / ".git").exists()), caller)
+        for candidate in (Path("/tmp"), Path("/var/tmp")):
+            base = candidate.resolve()
+            if repository == base or repository in base.parents:
+                continue
+            try:
+                return tempfile.TemporaryDirectory(prefix="llmtool-claude-", dir=base)
+            except OSError:
+                continue
+        raise LLMToolError("Claude CLI isolated working directory is not available")
+
     def _invoke(self, executable, prompt):
+        try:
+            input_bytes = prompt.encode("utf-8")
+        except UnicodeError:
+            raise LLMToolError("invalid conversation input") from None
         argv = [
             executable, "--print", "--output-format", "text",
             "--no-session-persistence", "--safe-mode", "--tools", "",
@@ -99,20 +133,22 @@ class ClaudeCLIProvider:
         if model:
             argv.extend(("--model", model))
         try:
-            process = subprocess.Popen(
-                argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, shell=False, close_fds=True,
-                env=self._child_environment(),
-            )
+            with self._temporary_directory() as cwd:
+                process = subprocess.Popen(
+                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, shell=False, close_fds=True,
+                    start_new_session=True, cwd=cwd, env=self._child_environment(),
+                )
+                return self._collect(process, input_bytes)
         except FileNotFoundError:
             raise LLMToolError("Claude CLI executable is not available") from None
         except OSError:
             raise LLMToolError("Claude CLI could not be started") from None
 
+    def _collect(self, process, input_bytes):
         selector = selectors.DefaultSelector()
         stdout = bytearray()
         stderr = bytearray()
-        input_bytes = prompt.encode("utf-8")
         input_offset = 0
         streams = {
             process.stdout: ("stdout", stdout),
@@ -194,7 +230,7 @@ class ClaudeCLIProvider:
         self.validate_options(self.provider.get("provider_options", {}))
         self.validate_ready(self.provider)
         executable = shutil.which("claude")
-        if executable is None:
+        if executable is None or not os.path.isabs(executable):
             raise LLMToolError("Claude CLI executable is not available")
         content, elapsed = self._invoke(executable, self._prompt(messages))
         metadata = {"elapsed_seconds": round(elapsed, 3)}

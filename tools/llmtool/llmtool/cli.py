@@ -18,6 +18,7 @@ from .skills import discover_skills, load_skill
 from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
 from .validator import (classify_command, validate_context_packet,
                         format_command_assessment, format_validation_result)
+from .terminal import human_output
 from .context import PACKET_LIMIT
 
 
@@ -169,6 +170,11 @@ def main(argv=None):
         if args.command == "context-pack":
             packet = parse_context_packet(result.content)
             output = packet.to_json() if args.json else format_context_packet(packet)
+        if args.command == "context-pack":
+            if not args.json:
+                output = human_output(output, sys.stdout)
+        elif args.command in TEMPLATES:
+            output = human_output(output, sys.stdout)
         sys.stdout.write(output + "\n")
         if args.verbose:
             for key, value in result.metadata.items():
@@ -177,6 +183,10 @@ def main(argv=None):
     except LLMToolError as exc:
         print("llmtool: " + str(exc), file=sys.stderr)
         return 1
+    except BrokenPipeError:
+        # Avoid the interpreter's flush-at-exit traceback / exit 120 noise.
+        sys.stdout = None
+        return 0
     except (OSError, UnicodeError):
         print("llmtool: local I/O failed; details omitted", file=sys.stderr)
         return 1

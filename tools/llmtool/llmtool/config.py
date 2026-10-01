@@ -41,6 +41,7 @@ CLI_OPTIONS = {
     "temperature": ("generation", "temperature"),
 }
 CONFIG_LIMIT = 64 * 1024
+MAX_TIMEOUT_SECONDS = 3600.0
 
 
 def yaml_module():
@@ -138,6 +139,7 @@ def _apply_project(config, fragment):
     if not isinstance(profiles, dict):
         raise LLMToolError("project config: providers must be a mapping")
     for name, fields in profiles.items():
+        _provider_name(name)
         if name not in config["providers"]:
             raise LLMToolError("project config cannot define a provider")
         _fields(fields, {"model", "timeout_seconds"}, "project provider")
@@ -178,6 +180,13 @@ def _number(value, field, integer=False):
         raise LLMToolError(field + " must be a finite " + ("integer" if integer else "number")) from None
 
 
+def _timeout_seconds(value):
+    result = _number(value, "timeout_seconds")
+    if not 0 < result <= MAX_TIMEOUT_SECONDS:
+        raise LLMToolError("timeout_seconds must be greater than 0 and at most 3600")
+    return result
+
+
 def _validate_provider(provider):
     implementation = client_type(provider["type"])
     implementation.validate_options(provider["provider_options"])
@@ -201,14 +210,15 @@ def _validate_provider(provider):
     if model is not None and (not isinstance(model, str) or not model.strip()
                               or any(ord(c) < 32 for c in model)):
         raise LLMToolError("model must be a non-empty string without control characters")
-    provider["timeout_seconds"] = _number(provider["timeout_seconds"], "timeout_seconds")
-    if provider["timeout_seconds"] <= 0:
-        raise LLMToolError("timeout_seconds must be positive")
-    for field in ("api_key", "api_key_env"):
-        value = provider[field]
-        if value is not None and (not isinstance(value, str) or not value
-                                  or any(ord(c) < 32 or ord(c) > 126 for c in value)):
-            raise LLMToolError(field + " must be a non-empty printable ASCII string or null")
+    provider["timeout_seconds"] = _timeout_seconds(provider["timeout_seconds"])
+    value = provider["api_key"]
+    if value is not None and (not isinstance(value, str) or not value
+                              or any(ord(c) < 33 or ord(c) > 126 for c in value)):
+        raise LLMToolError("api_key must be nonempty printable ASCII without whitespace or null")
+    value = provider["api_key_env"]
+    if value is not None and (not isinstance(value, str) or not value
+                              or any(ord(c) < 33 or ord(c) > 126 for c in value)):
+        raise LLMToolError("api_key_env must be a non-empty printable ASCII string or null")
     if provider["api_key"] and provider["api_key_env"]:
         raise LLMToolError("choose either api_key or api_key_env, not both")
     if provider["api_key_env"] and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", provider["api_key_env"]):
@@ -217,7 +227,8 @@ def _validate_provider(provider):
 
 def _validate(config):
     selected_provider(config)
-    for provider in config["providers"].values():
+    for name, provider in config["providers"].items():
+        _provider_name(name)
         _validate_provider(provider)
     generation = config["generation"]
     generation["max_tokens"] = _number(generation["max_tokens"], "max_tokens", integer=True)
@@ -263,7 +274,8 @@ def api_key(config, environ=None):
         value = env.get(provider["api_key_env"])
         if not value:
             raise LLMToolError("configured API key environment variable is missing or empty")
-    if value and any(ord(c) < 33 or ord(c) > 126 for c in value):
+    if value is not None and (not isinstance(value, str) or not value
+                              or any(ord(c) < 33 or ord(c) > 126 for c in value)):
         raise LLMToolError("API key must contain only non-whitespace printable ASCII characters")
     return value
 

@@ -237,7 +237,10 @@ providers:
         self.assertNotIn('failed', str(self.client.complete.call_args.args[0]))
 
     def test_known_provider_errors_hidden(self):
-        for error in (LLMToolError('PRIVATE'), OSError('PRIVATE'), UnicodeError('PRIVATE')):
+        self.client.complete.side_effect = LLMToolError('provider rejected the request safely')
+        with self.assertRaisesRegex(LLMToolError, 'provider rejected the request safely'):
+            self.send()
+        for error in (OSError('PRIVATE'), UnicodeError('PRIVATE')):
             self.client.complete.side_effect = error
             with self.subTest(error=error), self.assertRaises(LLMToolError) as caught:
                 self.send()
@@ -251,6 +254,27 @@ providers:
         self.assertEqual(self.repl(['interrupted'])[0], 0)
         self.assertEqual(self.session.history, before)
         self.assertFalse(self.session.active)
+
+    def test_chat_io_failure_returns_nonzero_without_traceback(self):
+        def fail_input():
+            raise OSError("private input details")
+        out, err = io.StringIO(), io.StringIO()
+        status = run_chat(self.session, fail_input, out, err)
+        self.assertEqual(status, 1)
+        self.assertIn("chat I/O failed", err.getvalue())
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+
+    def test_tty_reply_and_history_escape_controls_but_keep_stored_data(self):
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        self.client.complete.return_value = Reply("reply\x1b]52;c;secret\x07\rspoof\u202e", {})
+        out, err = TTY(), io.StringIO()
+        lines = iter(["question", "/history", "/exit"])
+        status = run_chat(self.session, lambda: next(lines), out, err)
+        self.assertEqual(status, 0)
+        self.assertIn("\\x1b]52;c;secret\\x07\\x0dspoof\\u202e", out.getvalue())
+        self.assertEqual(self.session.history[-1]["content"], "reply\x1b]52;c;secret\x07\rspoof\u202e")
 
     def test_malformed_commands_do_not_call_provider_or_mutate(self):
         for command in ('/exit extra', '/clear extra', '/history extra', '/status extra', '/help extra', '/skill a b', '/provider a b', '/PRIVATE'):
@@ -284,7 +308,7 @@ providers:
         with patch('llmtool.chat.create_client', new=create_client):
             result = self.cli(['chat'], ['/help', '/status', 'question', '/exit'])
         self.assertEqual(result[0], 0)
-        self.assertIn('chat request failed', result[2])
+        self.assertIn('provider base_url is not configured', result[2])
 
     def test_invalid_reply_rolls_back(self):
         for content in ('', '  ', None):

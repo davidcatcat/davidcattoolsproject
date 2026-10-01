@@ -218,6 +218,27 @@ class ContextCLITests(unittest.TestCase):
         self.assertEqual((status, err), (0, ''))
         self.assertEqual(out, format_context_packet(parse_context_packet(json.dumps(DATA)))+'\n')
 
+    def test_context_packet_tty_escape_preserves_json_data(self):
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        hostile = {**DATA, 'facts': ['A\rB\x9b31m\u202eC']}
+        raw = json.dumps(hostile, ensure_ascii=False)
+        client = Mock()
+        client.complete.return_value = Reply(raw, {})
+        tty = TTY()
+        with patch('llmtool.cli.resolve_config', return_value={}), patch('llmtool.cli.api_key', return_value=None), \
+                patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.read_input', return_value=INCIDENT), \
+                patch('llmtool.cli.sys.stdout', tty):
+            self.assertEqual(main(['context-pack']), 0)
+        self.assertIn('A\\x0dB\\x9b31m\\u202eC', tty.getvalue())
+        output = io.StringIO()
+        with patch('llmtool.cli.resolve_config', return_value={}), patch('llmtool.cli.api_key', return_value=None), \
+                patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.read_input', return_value=INCIDENT), \
+                patch('llmtool.cli.sys.stdout', output):
+            self.assertEqual(main(['context-pack', '--json']), 0)
+        self.assertEqual(json.loads(output.getvalue()), hostile)
+
     def test_malformed_provider_output_no_stdout_sanitized(self):
         for response in ('PRIVATE_RAW_RESPONSE', '{"facts": ["PRIVATE"]}', json.dumps({**DATA, 'hypotheses': [4]})):
             for args in (['context-pack'], ['context-pack', '--json', '--verbose']):

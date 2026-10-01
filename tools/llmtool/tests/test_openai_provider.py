@@ -137,6 +137,7 @@ class OpenAIProviderTests(unittest.TestCase):
             {"role": "user", "content": "user prompt"},
         ])
         self.assertEqual(request["body"]["max_output_tokens"], 123)
+        self.assertIs(request["body"]["store"], False)
         self.assertNotIn("temperature", request["body"])
         self.assertNotIn("reasoning", request["body"])
         for field in ("tools", "tool_choice", "web_search", "file_search", "computer", "mcp"):

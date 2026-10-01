@@ -86,6 +86,11 @@ class CodexCLIProvider:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            try:
+                process.kill()
+            except (ProcessLookupError, PermissionError):
+                pass
         process.wait()
 
     @staticmethod
@@ -263,7 +268,7 @@ class CodexCLIProvider:
         self.validate_options(self.provider.get("provider_options", {}))
         self.validate_ready(self.provider)
         executable = shutil.which("codex")
-        if executable is None:
+        if executable is None or not os.path.isabs(executable):
             raise LLMToolError("Codex CLI executable is not available; install codex on PATH")
         prompt = self._prompt(messages)
         try:

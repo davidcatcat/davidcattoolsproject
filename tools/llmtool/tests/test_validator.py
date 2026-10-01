@@ -37,8 +37,7 @@ class CommandTests(unittest.TestCase):
 
     def test_safe_reads(self):
         self.check_table(v.CommandRisk.SAFE_READ, ['pwd', 'ls', 'ls -l', 'ls -l /etc/company/app/config.yaml',
-            'stat /etc/company/app/config.yaml', 'git status', 'git status --short', 'git diff --stat',
-            'git diff --cached --name-only', 'git log --oneline -10', 'git show --stat',
+            'stat /etc/company/app/config.yaml',
             'kubectl get pods', 'kubectl get deployments', 'kubectl get events',
             'kubectl rollout status deployment/api'])
 
@@ -52,7 +51,7 @@ class CommandTests(unittest.TestCase):
             'kubectl get secret', 'kubectl get secrets', 'kubectl get secret my-secret -o yaml',
             'kubectl get secret -o json', 'kubectl get pods -o yaml', 'kubectl describe pod api',
             'aws configure export-credentials', 'security find-generic-password -w', 'cat login.keychain-db',
-            'head .env', 'grep PASSWORD credentials', 'git diff', 'git diff --staged', 'git log',
+            'head .env', 'grep PASSWORD credentials',
             'systemctl status api', 'ps', 'ps aux'])
 
     def test_mutating(self):
@@ -74,7 +73,17 @@ class CommandTests(unittest.TestCase):
         self.check_table(v.CommandRisk.UNKNOWN, ['find /', 'grep -R /', 'cat arbitrary-config-file', 'curl example',
             'custom-command', 'git -c core.pager=evil status', 'git diff --ext-diff', 'git branch new',
             '/bin/../tmp/ls', '/usr/bin/other/ls',
+            'git status', 'git status --short', 'git diff --stat', 'git diff --name-only',
+            'git log --oneline', 'git show --stat', 'git -C . status',
+            'sudo ls /tmp', 'sudo git status', 'sudo /usr/bin/ls /tmp',
             'kubectl exec api -- cat file', 'sh -c pwd', 'env X=1 rm file', 'ls --unknown', 'stat "$PATH"'])
+
+    def test_raw_git_reads_are_not_approval_free(self):
+        for command in ('git status', 'git log --oneline', 'git diff --stat',
+                        'git diff --name-only', 'git show --stat'):
+            assessment = v.classify_command(command)
+            self.assertEqual(assessment.risk, v.CommandRisk.UNKNOWN)
+            self.assertTrue(v.requires_approval(assessment.risk))
 
     def test_blank(self):
         self.check_table(v.CommandRisk.UNKNOWN, ['', ' ', '\t'])
@@ -111,11 +120,26 @@ class CommandTests(unittest.TestCase):
         self.check_table(v.CommandRisk.SENSITIVE_READ, ["cat '/etc/company/app/config.yaml'"])
         self.check_table(v.CommandRisk.UNKNOWN, ["stat 'unterminated", 'stat "literal $variable"'])
 
-    def test_controls_rejected_sanitized(self):
-        for value in ('PRIVATE\x00', 'PRIVATE\x1b', 'PRIVATE\n', 'PRIVATE\x7f', 'PRIVATE\x9b', '\ud800'):
-            with self.subTest(value=value), self.assertRaises(LLMToolError) as error:
-                v.classify_command(value)
-            self.assertNotIn('PRIVATE', str(error.exception))
+    def test_controls_and_bidi_are_never_safe(self):
+        for value in ('ls\x00', 'ls\x1b', 'ls\n', 'ls\x7f', 'ls\x9b', 'pwd\u202e'):
+            with self.subTest(value=value):
+                self.assertNotEqual(v.classify_command(value).risk, v.CommandRisk.SAFE_READ)
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['rm -rf ~ \r- git status'])
+        risky = 'rm -rf ~ \r- git status'
+        assessed = v.assess_verify_next(packet(verify_next=[risky]))[0]
+        self.assertEqual(assessed.command, risky)
+        self.assertEqual(assessed.risk, v.CommandRisk.DESTRUCTIVE)
+
+    def test_review_hardening_cases(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, [
+            'git reset --har', 'git clean --forc', 'git branch -Df x', 'git push --force',
+            'git push origin :main', 'kubectl -n prod delete ns prod', '/usr/bin/sudo rm -rf /',
+            'rmdir x', 'unlink x', 'shred x', 'dd if=x of=y', 'find . -delete',
+            'docker rm x', 'docker rm -f x'])
+        self.check_table(v.CommandRisk.MUTATING, ['sed -i s/a/b/ file', 'sed -i s/a/b/ .env',
+                                                   'git commit -am test', 'kubectl rollout restart deployment/api'])
+        self.check_table(v.CommandRisk.SENSITIVE_READ, ['sudo cat ~/.aws/credentials'])
+        self.assertTrue(v.requires_approval(v.classify_command('git status').risk))
 
     def test_bounds_utf8_bytes_and_type(self):
         for value in ('x' * (v.COMMAND_LIMIT + 1), '日' * 3000, None, []):
