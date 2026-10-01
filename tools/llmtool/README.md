@@ -311,8 +311,10 @@ llmtool config show --provider home-vllm  # 先在 user config 建立該 profile
 
 `configure` 會依 provider 詢問設定；OpenAI 使用官方 endpoint，不詢問 base URL，驗證後寫入
 user config，不會連線測試 provider。API key 使用不回顯的終端輸入；也可只填 API key
-環境變數名稱，兩者不可同時設定。留空的 optional 欄位會保持 unset；provider-specific
-reasoning 設定留空時不會送出該參數。OpenAI API key env 預設提示 `OPENAI_API_KEY`，只是
+環境變數名稱，兩者不可同時設定。初次設定的空 optional 欄位保持 unset；編輯時留空保留
+既有 profile 欄位／provider_options、generation 和 active_provider。新增 profile 不自動切換 active provider。
+optional 欄位可輸入 `-` 清除；hidden API key 留空保留、輸入 `-` 清除，既有 secret 不顯示為 default。
+明確更換 provider type 會清除不相容的舊 transport 欄位。OpenAI API key env 初次設定預設提示 `OPENAI_API_KEY`，只是
 config 欄位建議值，不會在 configure 時讀取環境變數。新檔自動建立目錄並以 `0600` 權限原子寫入。
 若設定檔已存在，精靈先詢問是否更新，預設為 No；確認更新會保留其他 provider profiles。
 精靈需要互動終端，確保 API key 不會退回可回顯輸入。
@@ -477,7 +479,11 @@ llmtool context-pack --json --file incident.txt
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
-同時提供多種來源報錯；空 pipe 不與明確輸入衝突。若 pipe 尚未 EOF，會等待輸入結束。
+同時提供 positional 與 --file，或明確輸入加上當下已排入的非空 stdin，會在設定／provider 存取前報錯。
+明確輸入遇到 TTY、空 pipe 或 EOF 不衝突，不等待 writer 產生資料或結束；稍後才送入的資料不等待。
+POSIX pipe/socket 使用 FIONREAD 探測，不讀取、不輪詢、不建立背景 thread。regular stdin 依剩餘 bytes 判斷，
+空 /dev/null 支援；無法安全探測的 stream/platform 會 sanitized failure。此介面針對尚未被其他程式碼讀取的 stdin。
+只有 stdin-only 模式會讀至 EOF（有 16 MiB 上限）。macOS 與 Linux 測試涵蓋真實 pipe/fd。
 互動終端不主動提示輸入；要用 stdin 可貼入 pipe 或重新導向。
 輸入需為非空 UTF-8 文字，拒絕 NUL／二進位控制字元、非法 UTF-8、目錄與 FIFO 檔案。
 接受一般 log 的 tab、換行、form feed 與 ANSI escape；大小上限 16 MiB。
@@ -490,13 +496,18 @@ llmtool context-pack --json --file incident.txt
 | `review-diff` | 只列 diff 支持的 findings：severity、file/snippet、failure/security mode、minimal fix |
 | `context-pack` | A4 validated packet：`FACTS`、`EVIDENCE`、`INFERENCES`、`HYPOTHESES`、`UNKNOWNS`、`VERIFY_NEXT`；`--json` 輸出 JSON |
 
-ask/analyze-log/review-diff 仍是 prompt 約束，不驗證模型推論的正確性或指令安全性。
+ask/review-diff 不驗證模型推論；analyze-log（包括 ask --skill analyze-log）另有有限的 deterministic NEXT_COMMANDS guard。
+NEXT_COMMANDS 必須是最後一節，使用最多三個 single-line bullet commands（可用 inline backticks），或單獨 `(none)`。
+輸出上限 1 MiB、每個 command 8 KiB；不接受 fences、續行、shell interpreter、expansions 或後接 prose。
+明顯 kubectl get secret/secrets（含 flags、qualified names、pipes）、A6 已知 sensitive/mutating/destructive
+建議與不支援格式會在 stdout／verbose metadata 前失敗，沒有自動改寫。UNKNOWN 仍只是未證明安全的文字。
+此窄 guard 不證明所有 shell 語意或模型推論安全；chat 的 explicit skill 回覆仍未套用此 CLI guard。
 context-pack 從 A4 起驗證 structured JSON schema，再輸出 human text 或 JSON；不驗證 claim 真實性。
 
 Live smoke test 曾發現 `analyze-log` 建議 `cat /etc/company/app/config.yaml`；該命令沒有
 執行。**READ-ONLY != SAFE-TO-DISPLAY**：唯讀命令仍可能輸出 credentials 或 private
 configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 command safety validator
-及 A8 regression；A1 目前不會自動執行建議命令，也沒有 command validator。
+及 A8 regression；目前有 A6 deterministic validator 及 analyze-log 窄 post-check，但從不執行建議命令。
 
 ## OpenAI-compatible no-thinking 與共用輸出契約
 
@@ -566,10 +577,10 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 模型命令唯讀本機資料並向設定的 API provider 發出 HTTPS/HTTP request；`claude-cli` 會以
 固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
 及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
-唯一由 llmtool 直接進行的檔案寫入是明確的 config 操作。
+明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 不寫檔。
 不自動讀取 SSH、keychain 或任意 secret file；明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。
-工具不寫 prompt／response log、cache 或 benchmark report。
+工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
 
 ## 開發與驗證
 
@@ -678,7 +689,9 @@ code or evaluates instructions. There is no shell/Git execution, model-directed
 filesystem mutation, automatic tool use, or output execution added by A3. Existing
 provider transports and explicit config writes retain their existing boundaries.
 Model-returned command text remains only text; prompt instructions are not an
-output validator. The samples `analyze-log`, `review-diff`, and `context-pack` use
+output validator. Current analyze-log CLI additionally uses the Post-A9 narrow
+NEXT_COMMANDS guard described above; A3 resource loading itself stays declarative.
+The samples `analyze-log`, `review-diff`, and `context-pack` use
 only supplied evidence and warn against exposing credentials/private configuration.
 READ-ONLY != SAFE-TO-DISPLAY.
 
@@ -749,7 +762,7 @@ Replies are display text: no shell/Git execution, code execution, file mutation,
 tools, hooks, auto-approval, or routing is added. Existing provider transports
 retain their established boundaries. Technical capabilities grant no permission.
 Chat adds no orchestration, automatic skill/provider selection, retrieval, or
-automatic A4 packet extraction, A5 Git injection, or A6 validation; A9 remains a future milestone.
+automatic A4 packet extraction, A5 Git injection, or A6 validation. A9 is available separately through orchestrate.
 
 Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
 subcommand-required behavior; automatic interactive entry is a future UX option.
@@ -940,6 +953,10 @@ llmtool validate context --file packet.json --json
 | DESTRUCTIVE | Deletes data or disrupts systems/processes | `rm -rf /`, `git reset --hard`, `git clean -fd`, `git branch -D old`, `kubectl delete namespace production`, `terraform destroy`, `DROP TABLE users`, `kill -9 123` |
 | UNKNOWN | Unsupported syntax/operation; safety has not been established | raw `git status`, `git log --oneline`, `git diff --stat`, `git show --stat`, `find /`, `grep -R /`, substitutions, custom commands |
 
+Plain kubectl metadata reads assume a trusted kubeconfig/context and no connection/authentication/
+impersonation overrides. --server/-s, token, kubeconfig, impersonation, TLS identity and related overrides
+have at least UNKNOWN risk; recognized delete/apply/Secret reads retain their higher risk and require approval.
+
 Sensitive patterns include `.env` files/globs, credential/secret/token names,
 private key files (`.pem`, `.key`, `id_rsa`, `id_ed25519`), `~/.ssh`,
 `~/.aws/credentials`, `~/.kube/config`, kubeconfig, credential stores/keychains,
@@ -1044,7 +1061,8 @@ stable field order. `to_dict()`/`to_json()` return deterministic data; strict
 reject missing/extra fields, invalid types/enums, duplicate object keys, NaN,
 malformed JSON, unsupported controls and invalid UTF-8. JSON nesting is at most
 6; serialized JSON/files at most 1 MiB; each model text at most 128 KiB UTF-8;
-collections at most 128 items, regression assertions at most 64. Versions are
+collections at most 128 items, regression assertions at most 64. Ordinary Unicode spaces (NBSP/U+3000)
+are accepted; C0 except LF/CR/tab, DEL, C1, bidi controls and invalid UTF-8 remain rejected. A4 shares this rule. Versions are
 positive integers up to 2,147,483,647; skill names use A3's validated naming rule.
 
 FeedbackCase fields are `id`, `skill`, `skill_version`, `input`, `actual_output`,
@@ -1330,7 +1348,10 @@ llmtool orchestrate --plan plan.json "Review this supplied incident"
 The A9 parser has a hard cap of 8 steps; with the current four built-in unique roles the effective MVP maximum is 4 steps. It is fail-fast:
 no retries, fallback provider, hidden substitution, fan-out, voting, loops, branches,
 or dynamic routing. Every live step resolves its explicit profile with
-`require_configured=True` before credential value resolution.
+`resolve_profile_config(profile_name, require_configured=True)` before credential value resolution.
+Only trusted persisted user-profile data applies: cwd project overrides and generic LLMTOOL_PROVIDER /
+LLMTOOL_MODEL / LLMTOOL_BASE_URL / LLMTOOL_TIMEOUT / LLMTOOL_MAX_TOKENS cannot rewrite a plan binding.
+The selected profile's configured api_key_env still reads its credential value after readiness. Normal ask/config precedence is unchanged.
 
 Handoff is shallow and bounded: every step receives the original task plus only the
 immediately previous role output. Earlier outputs are not accumulated and there is
@@ -1358,3 +1379,10 @@ partial stdout. Human output escapes controls on TTYs; JSON and redirected text
 retain generated/user-supplied material. Roles do not automatically select skills;
 role + explicit skill composition remains future work. See the
 [A9 validation report](../../reports/llmtool_a9_agent_orchestration_validation_20261001.md).
+
+## Post-A9 Hardening — feature branch, external review pending
+
+A0–A9 remain DONE and merged. M1/M2/M3/M4/M5/M7 and current-status docs are hardened on
+`fix/post-a9-hardening`; this pass is not merged. M6 preferred_verify_next_any matching is DEFERRED
+for a separate design review; exact A8 criteria and the historical Claude model safety FAIL remain preserved.
+A10 NOT STARTED. Evidence: [hardening validation report](../../reports/llmtool_post_a9_hardening_validation_20261001.md).
