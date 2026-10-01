@@ -48,6 +48,63 @@ class Fixture(unittest.TestCase):
 
 
 class FilesystemTests(Fixture):
+    def test_metadata_eligibility_without_content_sniffing(self):
+        self.write("big.log", b"x" * (f.MAX_FILE_BYTES + 1))
+        self.write("image.PNG", b"\0\xff")
+        self.write("config.py", "source")
+        self.write("data.json", "{}")
+        self.write("extensionless", b"\0")
+        with patch.object(f.os, "fdopen", side_effect=AssertionError("content opened")), \
+                patch.object(Path, "open", side_effect=AssertionError("content sniffed")):
+            manifest = self.manifest()
+        self.assertEqual([c.path for c in manifest], ["config.py", "data.json", "extensionless"])
+        self.assertEqual(self.manifest(["big.log"]), ())
+        self.assertEqual(self.manifest(["image.PNG"]), ())
+        with self.assertRaises(LLMToolError):
+            self.read(["extensionless"])
+
+    def test_visible_control_escaping_keeps_original_provenance(self):
+        for content in ("plain\r\n\t中文👩‍💻\u200c", "\x1b[31mERROR\x1b[0m\r\n", "a\u0085b", "a\u202eb", "a\x01b"):
+            with self.subTest(content=repr(content)):
+                raw = content.encode("utf-8")
+                self.write("log.txt", raw)
+                doc = self.read(["log.txt"])[0]
+                expected = "".join(c if c == "\r" else f.terminal_safe_text(c) for c in content)
+                self.assertEqual(doc.content, expected)
+                self.assertEqual(doc.control_escaped, content != expected)
+                self.assertEqual(doc.byte_count, len(raw))
+                self.assertEqual(doc.sha256, hashlib.sha256(raw).hexdigest())
+                self.assertFalse(f.contains_unsafe_controls(doc.content))
+                self.assertEqual(doc.metadata()["control_escaped"], content != expected)
+                with self.assertRaises(LLMToolError):
+                    replace(doc, control_escaped="yes")
+
+    def test_narrow_additional_credential_exclusions(self):
+        denied = (".config/gh/hosts.yml", ".config/gcloud/config.json", ".cargo/credentials",
+                  ".cargo/credentials.toml", ".htpasswd", "kubeconfig", "credentials.json",
+                  "state.tfstate", "state.tfstate.backup")
+        allowed = ("config.py", "secret_manager.py", "configuration_test.py", "credentials.py",
+                   "credentials_test.json", "service_account.py", ".cargo/config.toml")
+        for name in denied + allowed:
+            self.write(name)
+        self.assertEqual([c.path for c in self.manifest()], sorted(allowed))
+        for name in denied:
+            self.assertTrue(f.excluded_credential_path(name), name)
+        for name in allowed:
+            self.assertFalse(f.excluded_credential_path(name), name)
+        for parent in (".config/gh", ".config/gcloud"):
+            with self.assertRaises(LLMToolError), f.authorize_root(self.root / parent, ["."]):
+                pass
+
+    def test_physical_path_error_is_useful_and_sanitized(self):
+        link = self.root / "PRIVATE_LOCATION"
+        link.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(LLMToolError) as caught, f.authorize_root(link, ["."]):
+            pass
+        self.assertIn("/private/tmp", str(caught.exception))
+        self.assertIn("physical", str(caught.exception))
+        self.assertNotIn("PRIVATE_LOCATION", str(caught.exception))
+
     def test_sorted_manifest_overlapping_scopes_and_file_scope(self):
         self.write("src/z.py"); self.write("src/a.py"); self.write("readme.md")
         with f.authorize_root(self.root, ["src/z.py", "src", "src", "readme.md"]) as access:
@@ -187,22 +244,25 @@ class FilesystemTests(Fixture):
         self.assertEqual(evidence.content, content)
         self.assertEqual(evidence.byte_count, len(content.encode()))
         self.assertEqual(evidence.sha256, hashlib.sha256(content.encode()).hexdigest())
-        self.assertEqual(set(evidence.metadata()), {"path", "byte_count", "sha256"})
+        self.assertEqual(set(evidence.metadata()), {"path", "byte_count", "sha256", "control_escaped"})
         with self.assertRaises(FrozenInstanceError):
             evidence.content = "changed"
         with self.assertRaises(LLMToolError):
             replace(evidence, byte_count=0)
 
     def test_binary_and_controls_rejected(self):
-        for data in (b"\xff", b"a\0b", b"a\x1bb", "a\u0085b", "a\u202eb"):
+        for data in (b"\xff", b"a\0b"):
             self.write("a", data)
             with self.assertRaises(LLMToolError):
                 self.read(["a"])
 
     def test_file_and_total_evidence_limits(self):
         self.write("a", b"x" * (f.MAX_FILE_BYTES + 1))
-        with self.assertRaisesRegex(LLMToolError, "256 KiB"):
-            self.read(["a"])
+        with f.authorize_root(self.root, ["."]) as access:
+            info = (self.root / "a").stat()
+            candidate = f.CandidateFile("a", info.st_size, f._identity(info))
+            with self.assertRaisesRegex(LLMToolError, "256 KiB"):
+                f.read_selected(access, [candidate], ["a"])
         for name in ("a", "b", "c"):
             self.write(name, b"x" * f.MAX_FILE_BYTES)
         self.assertEqual(sum(x.byte_count for x in self.read(["a", "b"])), f.MAX_TOTAL_EVIDENCE_BYTES)
@@ -270,6 +330,56 @@ class FilesystemTests(Fixture):
 
 
 class PipelineTests(Fixture):
+    def test_both_readiness_checks_before_stdin_and_any_credentials(self):
+        original = r.read_input
+        def read(*args):
+            self.events.append(("input", "read"))
+            return original(*args)
+        with self.mocks(), patch.object(r, "read_input", side_effect=read):
+            self.run_pipeline()
+        self.assertEqual([(e[0], e[1]) for e in self.events[:4]],
+                         [("resolve", "planner"), ("resolve", "synthesizer"), ("input", "read"), ("key", "planner")])
+
+    def test_broken_synthesizer_preflight_does_not_wait_for_stdin(self):
+        reader, writer = os.pipe()
+        try:
+            with os.fdopen(reader, "rb") as stream, \
+                    patch.object(r, "resolve_profile_config", side_effect=[{"profile": "planner"}, LLMToolError("not ready")]) as resolve, \
+                    patch.object(r, "read_input", side_effect=AssertionError("stdin consumed")), \
+                    patch.object(r, "api_key") as key, patch.object(r, "create_client") as factory:
+                self.assertEqual(self.cli(args=[], stdin=stream)[:2], (1, ""))
+                self.assertEqual(resolve.call_count, 2)
+                key.assert_not_called(); factory.assert_not_called()
+        finally:
+            os.close(writer)
+
+    def test_planner_budget_rejection_before_content_or_synth_credentials(self):
+        for name in ("a.py", "b.py", "c.py"):
+            self.write(name, b"x" * f.MAX_FILE_BYTES)
+        self.planner_text = '{"files":["a.py","b.py","c.py"]}'
+        with self.mocks(), patch.object(r, "read_selected", side_effect=AssertionError("read")), self.assertRaisesRegex(LLMToolError, "512 KiB"):
+            self.run_pipeline()
+        self.assertNotIn(("key", "synthesizer"), self.events)
+        self.clients[1].complete.assert_not_called()
+        self.assertIn("256 KiB", r.PLANNER_SYSTEM)
+        self.assertIn("512 KiB", r.PLANNER_SYSTEM)
+        self.assertIn("8 files", r.PLANNER_SYSTEM)
+        self.assertIn("UTF-8", r.PLANNER_SYSTEM)
+
+    def test_normalized_payload_and_original_metadata_no_raw_content_output(self):
+        raw = b"\x1b[31mERROR\x1b[0m\r\n"
+        self.write("a.py", raw)
+        with self.mocks():
+            result = self.run_pipeline()
+        doc = json.loads(self.events[-1][2][1]["content"])["documents"][0]
+        self.assertEqual(doc["content"], "\\x1b[31mERROR\\x1b[0m\r\n")
+        self.assertTrue(doc["control_escaped"])
+        metadata = result.retrieved_files[0]
+        self.assertEqual(metadata.byte_count, len(raw))
+        self.assertEqual(metadata.sha256, hashlib.sha256(raw).hexdigest())
+        self.assertTrue(metadata.control_escaped)
+        self.assertNotIn("ERROR", result.to_json())
+        self.assertEqual(result.to_json(), result.to_json())
     def test_stdin_only_ready_profile_then_real_pipe_read(self):
         read_fd, write_fd = os.pipe()
         os.write(write_fd, b"Synthetic stdin task")
@@ -289,7 +399,7 @@ class PipelineTests(Fixture):
         with self.mocks(), self.assertRaises(LLMToolError):
             self.run_pipeline()
         self.assertFalse(self.clients[1].complete.called)
-        self.assertNotIn(("resolve", "synthesizer"), self.events)
+        self.assertNotIn(("key", "synthesizer"), self.events)
 
     def setUp(self):
         super().setUp()
@@ -343,14 +453,14 @@ class PipelineTests(Fixture):
             result = self.run_pipeline()
         self.assertEqual(reads, [(self.root / "a.py").stat().st_ino])
         self.assertEqual([(x[0], x[1]) for x in self.events],
-                         [("resolve", "planner"), ("key", "planner"), ("complete", "planner"),
-                          ("resolve", "synthesizer"), ("key", "synthesizer"), ("complete", "synthesizer")])
-        planner = json.loads(self.events[2][2][1]["content"])
+                         [("resolve", "planner"), ("resolve", "synthesizer"), ("key", "planner"), ("complete", "planner"),
+                          ("key", "synthesizer"), ("complete", "synthesizer")])
+        planner = json.loads(self.events[3][2][1]["content"])
         synth = json.loads(self.events[-1][2][1]["content"])
         self.assertEqual(planner["task"], "Original task")
         self.assertEqual(planner["candidates"], [{"path": "a.py", "byte_count": 16}, {"path": "b.py", "byte_count": 18}])
-        self.assertEqual(synth, {"task": "Original task", "documents": [{"path": "a.py", "content": "SELECTED_CONTENT"}]})
-        self.assertNotIn("CONTENT", self.events[2][2][1]["content"])
+        self.assertEqual(synth, {"task": "Original task", "documents": [{"path": "a.py", "content": "SELECTED_CONTENT", "control_escaped": False}]})
+        self.assertNotIn("CONTENT", self.events[3][2][1]["content"])
         for client in self.clients:
             client.complete.assert_called_once()
         self.assertNotIn("PRIVATE", result.to_json())
@@ -370,7 +480,7 @@ class PipelineTests(Fixture):
             with self.subTest(text=text[:60]), self.mocks(), \
                     patch.object(r, "read_selected", side_effect=AssertionError("read")), self.assertRaises(LLMToolError):
                 self.run_pipeline()
-            self.assertEqual([e[1] for e in self.events if e[0] == "resolve"], ["planner"])
+            self.assertEqual([e[1] for e in self.events if e[0] == "resolve"], ["planner", "synthesizer"])
 
     def test_zero_files_task_source_valid(self):
         self.planner_text = '{"files":[]}'
@@ -420,20 +530,23 @@ class PipelineTests(Fixture):
     def test_manifest_failure_before_planner_credentials(self):
         with self.mocks(), patch.object(f, "MAX_MANIFEST_FILES", 0), self.assertRaises(LLMToolError):
             self.run_pipeline()
-        self.assertEqual(self.events, [("resolve", "planner")])
+        self.assertEqual(self.events, [("resolve", "planner"), ("resolve", "synthesizer")])
 
-    def test_bad_file_prevents_synthesizer_resolution(self):
+    def test_bad_file_prevents_synthesizer_credentials_and_call(self):
         for content in (b"\0", b"\xff", b"x" * (f.MAX_FILE_BYTES + 1)):
             self.write("a.py", content); self.events = []
             with self.mocks(), self.assertRaises(LLMToolError):
                 self.run_pipeline()
-            self.assertEqual([e[1] for e in self.events if e[0] == "resolve"], ["planner"])
+            self.assertEqual([e[1] for e in self.events if e[0] == "resolve"], ["planner", "synthesizer"])
+            self.assertNotIn(("key", "synthesizer"), self.events)
+            self.clients[1].complete.assert_not_called()
 
     def test_synth_readiness_before_its_credentials(self):
         with self.mocks(), patch.object(r, "resolve_profile_config", side_effect=[{"profile": "planner"}, LLMToolError("not ready")]), \
                 self.assertRaises(LLMToolError):
             self.run_pipeline()
-        self.assertEqual([e[1] for e in self.events if e[0] == "key"], ["planner"])
+        self.assertEqual([e[1] for e in self.events if e[0] == "key"], [])
+        self.clients[0].complete.assert_not_called()
         self.clients[1].complete.assert_not_called()
 
     def test_fail_fast_without_retry_or_substitution(self):

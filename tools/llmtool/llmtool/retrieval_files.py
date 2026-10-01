@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .errors import LLMToolError
-from .terminal import contains_unsafe_controls
+from .terminal import contains_unsafe_controls, terminal_safe_text
 
 MAX_MANIFEST_FILES = 4096
 MAX_MANIFEST_BYTES = 256 * 1024
@@ -22,6 +22,11 @@ MAX_PATH_BYTES = 4096
 MAX_SCOPES = 32
 MAX_PATH_DEPTH = 64
 MAX_SCAN_ENTRIES = 16384
+OBVIOUS_BINARY_SUFFIXES = frozenset((
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz",
+    ".bz2", ".xz", ".7z", ".woff", ".woff2", ".ttf", ".otf", ".mp3", ".mp4",
+    ".mov", ".sqlite", ".sqlite3",
+))
 
 
 def relative_path(value, allow_dot=False):
@@ -52,12 +57,16 @@ def excluded_credential_path(value):
     if any(p in (".ssh", ".password-store", ".aws", ".kube", ".docker", ".gnupg", ".azure")
            for p in lowered):
         return True
-    if any(lowered[i:i + 2] == (".config", "llmtool") for i in range(len(lowered) - 1)):
+    if any(lowered[i:i + 2] in ((".config", "llmtool"), (".config", "gh"), (".config", "gcloud"))
+           for i in range(len(lowered) - 1)):
         return True
     name = lowered[-1] if lowered else ""
     return (name in (".env", ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials",
-                     ".vault-token", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519")
+                     ".vault-token", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
+                     ".htpasswd", "kubeconfig", "credentials.json")
+            or lowered[-2:] in ((".cargo", "credentials"), (".cargo", "credentials.toml"))
             or name.startswith(".env.") or name.endswith((".pem", ".key", ".p12", ".pfx"))
+            or name.endswith((".tfstate", ".tfstate.backup"))
             or lowered[-2:] in (("etc", "shadow"), ("etc", "gshadow"))
             or (len(lowered) >= 3 and lowered[-3] == "proc" and lowered[-1] == "environ"
                 and (lowered[-2] in ("self", "thread-self") or lowered[-2].isascii() and lowered[-2].isdigit())))
@@ -74,7 +83,7 @@ def _identity(info):
 def _directory(parent, name):
     before = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if not stat.S_ISDIR(before.st_mode):
-        raise LLMToolError("retrieval directory must be real and non-symlink")
+        raise LLMToolError("retrieval requires physical non-symlink directories; on macOS use /private/tmp instead of /tmp")
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
     try:
         after = os.fstat(fd)
@@ -180,6 +189,9 @@ def build_manifest(root):
 
     def add(path, info):
         nonlocal serialized_bytes
+        # Eligibility uses metadata/name only; never sniff candidate contents.
+        if info.st_size > MAX_FILE_BYTES or PurePosixPath(path).suffix.lower() in OBVIOUS_BINARY_SUFFIXES:
+            return
         if path in files:
             return
         if len(files) >= MAX_MANIFEST_FILES:
@@ -238,6 +250,7 @@ class RetrievedEvidence:
     content: str
     byte_count: int
     sha256: str
+    control_escaped: bool = False
 
     def __post_init__(self):
         if relative_path(self.path) != self.path or _excluded(self.path):
@@ -246,14 +259,19 @@ class RetrievedEvidence:
             raw = self.content.encode("utf-8")
         except (AttributeError, UnicodeError):
             raise LLMToolError("retrieval evidence must be UTF-8 text") from None
-        if contains_unsafe_controls(self.content):
+        if contains_unsafe_controls(self.content) or "\0" in self.content:
             raise LLMToolError("retrieval evidence contains unsafe text controls")
-        if (type(self.byte_count) is not int or self.byte_count != len(raw)
-                or len(raw) > MAX_FILE_BYTES or self.sha256 != hashlib.sha256(raw).hexdigest()):
+        if (type(self.control_escaped) is not bool or type(self.byte_count) is not int
+                or not 0 <= self.byte_count <= MAX_FILE_BYTES
+                or not isinstance(self.sha256, str) or re.fullmatch(r"[0-9a-f]{64}", self.sha256) is None
+                or len(raw) > 4 * self.byte_count
+                or (not self.control_escaped and (self.byte_count != len(raw)
+                    or self.sha256 != hashlib.sha256(raw).hexdigest()))):
             raise LLMToolError("retrieval evidence byte count/hash is invalid")
 
     def metadata(self):
-        return {"path": self.path, "byte_count": self.byte_count, "sha256": self.sha256}
+        return {"path": self.path, "byte_count": self.byte_count, "sha256": self.sha256,
+                "control_escaped": self.control_escaped}
 
 
 def read_selected(root, manifest, selected):
@@ -296,9 +314,15 @@ def read_selected(root, manifest, selected):
         total += len(raw)
         if total > MAX_TOTAL_EVIDENCE_BYTES:
             raise LLMToolError("retrieval evidence exceeds 512 KiB")
+        digest = hashlib.sha256(raw).hexdigest()
         try:
             content = raw.decode("utf-8")
         except UnicodeError:
             raise LLMToolError("retrieval selected file must be UTF-8 text") from None
-        records.append(RetrievedEvidence(path, content, len(raw), hashlib.sha256(raw).hexdigest()))
+        if "\0" in content:
+            raise LLMToolError("retrieval selected file contains binary NUL data")
+        # Preserve CR as well as LF/tab; expose unsafe controls, never interpret ANSI.
+        escaped = contains_unsafe_controls(content)
+        normalized = "".join(c if c == "\r" else terminal_safe_text(c) for c in content) if escaped else content
+        records.append(RetrievedEvidence(path, normalized, len(raw), digest, escaped))
     return tuple(records)
