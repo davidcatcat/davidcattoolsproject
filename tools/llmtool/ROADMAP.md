@@ -490,6 +490,18 @@ A11 從 A0～A10 的 read-only、validation、orchestration 與 retrieval primit
 
 Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md). A11a.1 core models and coded errors are implemented on `feat/a11a1-diagnostics-core-20261002`, pending external review; A11a is not DONE/merged. A11a.2 NOT STARTED. See the [checkpoint validation](../../reports/llmtool_a11a1_core_diagnostics_validation_20261002.md).
 
+A11a.1 external review returned REQUEST CHANGES; R1–R4 remediation is on the
+same feature branch; external re-review is pending. Exact-head CI is a required
+gate for this checkpoint. Core models remain strict and may raise ValueError for invalid diagnostic input.
+**Diagnostic collection failure must never fail the primary read-only command.**
+A11a.2 lifecycle must catch diagnostics-only construction/validation failures,
+drop the event, count dropped events, and emit at most one fixed
+`DIAGNOSTICS_EVENT_DROPPED` warning while the primary `ask` continues. That
+lifecycle/drop policy is not implemented in A11a.1. Coded diagnostics use JSON;
+pickle/deepcopy support is deferred. Persisted `RunSummary` is not implemented;
+it belongs to implementation slice **A11a.3 — User diagnostics settings and
+secure POSIX store**. A11a.2 NOT STARTED.
+
 A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
 retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mutation 或 Git mutation；
 唯一新增寫入範圍是明確 opt-in 的 private diagnostics store。現有 config/feedback 的明確

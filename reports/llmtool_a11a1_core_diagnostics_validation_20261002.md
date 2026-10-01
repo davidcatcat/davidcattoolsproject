@@ -195,3 +195,96 @@ No retry/fallback, executor, approval, A11b/A11c or A12 work. No private
 Claude/Codex logs/session/auth files were read. No worktree/clone/alternate
 checkout or gh command was used. The next recommended checkpoint after external
 review is A11a.2, under its separate lifecycle/output/provider compatibility gate.
+
+
+## External review remediation — 2026-10-02
+
+This section supersedes the original implementation's pending-review status, not
+its historical validation evidence. The [independent Claude review](llmtool_a11a1_core_diagnostics_review_20261002.md)
+returned **REQUEST CHANGES**. Its report is unchanged. Reviewed implementation
+HEAD was `9712bf3818e024e2d49ce0ca18bb5ad44f6cacde`; historical Actions run
+[36925256634](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36925256634)
+passed Python 3.9 but **FAILED Python 3.14** in Offline canonical checks at
+`test_timestamp_requires_exact_format_and_real_date`, for
+`2026-10-02T24:00:00.000Z`. The original local results did not establish remote CI
+success and are not relabeled as such.
+
+Preflight: canonical root and existing branch verified; fetched origin/main is
+`624c33c6f7850ea281bce9fe0ef9a806d89e4548`, including the required base commit.
+Starting branch HEAD was `7522d5bd78fc00f82a60b4623bfe8c99018836a0`, identical to
+its remote, three commits ahead of main and zero behind. No tracked modifications
+or conflicts were present. Known unrelated untracked reports were preserved.
+
+Production fix commit: `274b689fb045797de423e343e966b2337c83cc94`
+(`fix(llmtool): address A11a.1 external review findings`). Subsequent report/roadmap
+commit(s) do not change tested production bytes; exact final HEAD and its CI gates
+are recorded in the final delivery checkpoint. Remediation completion requires
+exact-head Python 3.9 and 3.14, Offline canonical checks and clean-tree PASS; local
+results alone cannot satisfy that gate.
+
+### Review disposition
+
+| Finding | Disposition | Decision and evidence |
+| --- | --- | --- |
+| R1 — version-dependent timestamp parsing | ACCEPTED / FIXED | Grammar explicitly restricts hour 00–23, minute/second 00–59, exactly three fractional digits and final Z. datetime checks calendar dates only after grammar acceptance. Tests reject 24/25 hours, minute/second 60 without even calling the calendar parser; 23:59:59.999 and a valid leap day pass, invalid dates fail. The original failing regression remains in the suite. |
+| R2 — credential false positives | ACCEPTED / FIXED | Bare authorization vocabulary is allowed. Bearer/Authorization Basic require token-shaped value evidence (at least eight characters), excluding fixed status tokens. Credential assignments reject non-status RHS values, including short passwords. Quoted/unquoted missing, unset, redacted, none, null, not configured and placeholder states are accepted. OpenAI/AWS/private-key markers remain rejected. Positive and negative fixtures verify fixed rejection messages never echo credential markers. |
+| R3 — model ID / collection failure boundary | ACCEPTED WITH BOUNDARY | Model IDs now permit @ in bounded ASCII `A-Za-z0-9._:/@-`, retaining the initial alphanumeric rule and 128-character limit. Dot/dot-dot path segments, whitespace, controls and recognizable credentials fail. Claude @version, Qwen, OpenAI and Codex fixtures pass. Diagnostics-only failure containment is required of A11a.2, not implemented in this foundation. |
+| R4 — event invariants | ACCEPTED / FIXED | error requires ERROR, warning requires WARNING; both require data containing code and message. run.start/provider.request/provider.response require INFO. Invalid combinations and absent/empty/partial data are explicitly tested. run.end status-to-severity mapping is deferred to lifecycle policy rather than guessed. |
+| R5 — coded pickle/deepcopy | DEFERRED BY SCOPE | MappingProxyType representation is retained. Coded DiagnosticError/DiagnosticEvent/LLMToolError pickle/deepcopy are NOT SUPPORTED. JSON remains the supported transfer format; no multiprocessing/cross-process transport requirement exists. Legacy uncoded exception pickle compatibility test is retained and passes. Existing production paths still raise uncoded errors; no direct production dependency on coded pickle/deepcopy was found. |
+| R6 — report completeness | ACCEPTED / DOCUMENTATION FIX | This append preserves failed CI and original local evidence, records all dispositions and explicitly defers persisted RunSummary to A11a.3. |
+
+### Required future lifecycle boundary (not implemented)
+
+**Diagnostic collection failure must never fail the primary read-only command.**
+A11a.1 strict constructors may raise ValueError for programmer/invalid diagnostic
+input. A11a.2 lifecycle must catch diagnostics-only construction/validation
+failures, drop the affected event, increment future dropped-event accounting and
+emit at most one fixed `DIAGNOSTICS_EVENT_DROPPED` warning while primary `ask`
+continues with unchanged result/provider-call semantics. No RunContext/drop engine
+or instrumentation is introduced here.
+
+Persisted **RunSummary is not implemented**. Its planned slice is
+**A11a.3 — User diagnostics settings and secure POSIX store**, alongside summary
+publication and persistence validation. No evidence requires moving it into
+A11a.2; this remediation does not change milestone sequencing.
+
+### Actual remediation validation
+
+All commands launched from the canonical repository. Counts are new observations,
+not reused baseline values. Production bytes were unchanged after these checks.
+
+| Check | Python | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Focused test_diagnostics | 3.13.3 | 55 | 55 | 0 | 0 | 0 | 0.118 s |
+| Full canonical make check + compileall | 3.13.3 | 660 | 659 | 0 | 0 | 1 | 47.827 s |
+| Full canonical make check + compileall | actual 3.9.6 (/usr/bin/python3) | 660 | 659 | 0 | 0 | 1 | 76.513 s |
+
+The sole inherited skip remains the non-UTF-8 filename filesystem limitation in
+`test_git_intel.GitFixture.test_unusual_filename_bytes_roundtrip`. Logs:
+`/private/tmp/llmtool-a11a1-remediation-current.log` and
+`/private/tmp/llmtool-a11a1-remediation-py39.log`; these are test artifacts, not
+project checkouts or diagnostics-store files. Commands are the same canonical
+commands listed above; nine new test methods raise the focused count from 46 to 55.
+
+Full review of diagnostics.py, errors.py and test_diagnostics.py found no additional
+merge blocker within this slice. Credential checks remain defense in depth, not a
+secret detector for arbitrary data: callers must minimize collection. State-value
+exceptions are intended for application-controlled messages. No arbitrary str/repr
+or default=str serialization is added; bounded, deterministic JSON remains intact.
+
+Legacy constructor/args/str/catching/pickle tests pass. CLI, provider, config,
+A9/A10, terminal, feedback and runtime skill bytes are unchanged by remediation.
+All inherited tests remain unchanged; only diagnostics fixtures were corrected to
+supply valid event data/severity under the stricter contract, with explicit
+negative tests for the old invalid combinations.
+
+Security/side-effect tests still trap filesystem/network/provider/process calls
+and assert empty stdout/stderr; AST review finds no execution or persistence.
+No store, trace, runtime logs, provider calls, live/VPN tests, retry/fallback,
+CLI integration or A11a.2 implementation was added. GitHub CI queries are repository
+validation, not live provider tests. `git diff --check` passed.
+
+Changed files in this remediation: diagnostics.py, errors.py, test_diagnostics.py,
+ROADMAP.md and this report. Claude's review and unrelated reports remain unchanged.
+External re-review remains required; A11a is not DONE or merged.
+**A11a.2 NOT STARTED.**
