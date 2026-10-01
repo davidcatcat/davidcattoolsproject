@@ -140,10 +140,10 @@ class CLITests(unittest.TestCase):
             with self.subTest(command=command):
                 packet_text = json.dumps({name: [] for name in
                                           ("facts", "evidence", "inferences", "hypotheses", "unknowns", "verify_next")})
-                self.server.reply = (200, success(packet_text if command == "context-pack" else "final answer"), 0, {})
+                self.server.reply = (200, success(packet_text if command == "context-pack" else ("NEXT_COMMANDS:\n(none)" if command == "analyze-log" else "final answer")), 0, {})
                 result = self.run_cli(command, data="測試 evidence\n".encode())
                 self.assertEqual(result.returncode, 0, result.stderr)
-                expected = format_context_packet(parse_context_packet(packet_text)) if command == "context-pack" else "final answer"
+                expected = format_context_packet(parse_context_packet(packet_text)) if command == "context-pack" else ("NEXT_COMMANDS:\n(none)" if command == "analyze-log" else "final answer")
                 self.assertEqual(result.stdout.decode(), expected + "\n")
                 path, headers, payload = self.server.requests[-1]
                 self.assertEqual(path, "/v1/chat/completions")
@@ -154,19 +154,22 @@ class CLITests(unittest.TestCase):
     def test_file(self):
         path = self.cwd / "app.log"
         path.write_text("ERROR evidence\n")
+        self.server.reply = (200, success("NEXT_COMMANDS:\n(none)"), 0, {})
         result = self.run_cli("analyze-log", "--file", str(path))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.server.requests[0][2]["messages"][1]["content"], "ERROR evidence\n")
 
-    def test_explicit_input_wins_and_does_not_consume_stdin(self):
+    def test_nonempty_stdin_conflicts_with_explicit_input_before_provider(self):
         path = self.cwd / "app.log"
         path.write_text("private log")
         for args, expected in ((('ask', 'private-text'), 'private-text'),
                                (('ask', '--file', str(path)), 'private log')):
             with self.subTest(args=args):
                 result = self.run_cli(*args, data=b'pipe must remain unread')
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.server.requests[-1][2]['messages'][1]['content'], expected)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(b"provide only one", result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(self.server.requests, [])
 
     def test_closed_stdin_has_sanitized_cli_error(self):
         result = self.run_cli("ask", data=b"")

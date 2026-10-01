@@ -245,7 +245,7 @@ class ProviderIntegrationTests(unittest.TestCase):
                 for other in PROFILES:
                     if other != name:
                         resolved = self.resolve()["providers"][other]
-                        self.assertEqual(saved["providers"][other], resolved)
+                        self.assertEqual(saved["providers"][other], PROFILES[other])
                         for key, value in PROFILES[other].items():
                             self.assertEqual(resolved[key], value)
                 self.assertEqual(saved["active_provider"], "office-qwen")

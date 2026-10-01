@@ -222,7 +222,7 @@ class ContextCLITests(unittest.TestCase):
         class TTY(io.StringIO):
             def isatty(self):
                 return True
-        hostile = {**DATA, 'facts': ['A\rB\x9b31m\u202eC']}
+        hostile = {**DATA, 'facts': ['A\rB中文　C']}
         raw = json.dumps(hostile, ensure_ascii=False)
         client = Mock()
         client.complete.return_value = Reply(raw, {})
@@ -231,13 +231,20 @@ class ContextCLITests(unittest.TestCase):
                 patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.read_input', return_value=INCIDENT), \
                 patch('llmtool.cli.sys.stdout', tty):
             self.assertEqual(main(['context-pack']), 0)
-        self.assertIn('A\\x0dB\\x9b31m\\u202eC', tty.getvalue())
+        self.assertIn('A\\x0dB中文　C', tty.getvalue())
         output = io.StringIO()
         with patch('llmtool.cli.resolve_config', return_value={}), patch('llmtool.cli.api_key', return_value=None), \
                 patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.read_input', return_value=INCIDENT), \
                 patch('llmtool.cli.sys.stdout', output):
             self.assertEqual(main(['context-pack', '--json']), 0)
         self.assertEqual(json.loads(output.getvalue()), hostile)
+
+    def test_c1_and_bidi_rejected_before_human_or_json_stdout(self):
+        for control in ('\x9b', '\u202e'):
+            for args in (['context-pack'], ['context-pack', '--json', '--verbose']):
+                status, out, err, _ = self.cli(json.dumps({**DATA, 'facts': ['A' + control + 'B']}), args)
+                self.assertEqual((status, out), (1, ''))
+                self.assertIn('unsupported control', err)
 
     def test_malformed_provider_output_no_stdout_sanitized(self):
         for response in ('PRIVATE_RAW_RESPONSE', '{"facts": ["PRIVATE"]}', json.dumps({**DATA, 'hypotheses': [4]})):

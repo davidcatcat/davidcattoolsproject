@@ -266,6 +266,26 @@ def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configur
     return config
 
 
+def resolve_profile_config(profile_name, *, home=None, require_configured=True):
+    """Resolve an explicit persisted profile without project/runtime overrides.
+
+    Credential values are deliberately not read here; api_key() reads the
+    configured credential environment variable only after readiness succeeds.
+    """
+    _provider_name(profile_name)
+    config = copy.deepcopy(DEFAULTS)
+    saved_user = _read_yaml(user_config_path(home), "user config")
+    _apply_user(config, saved_user)
+    if profile_name not in saved_user.get("providers", {}):
+        raise LLMToolError("active provider is not defined")
+    config["active_provider"] = profile_name
+    _validate(config)
+    provider = selected_provider(config)
+    if require_configured:
+        client_type(provider["type"]).validate_ready(provider)
+    return config
+
+
 def api_key(config, environ=None):
     env = os.environ if environ is None else environ
     provider = selected_provider(config)

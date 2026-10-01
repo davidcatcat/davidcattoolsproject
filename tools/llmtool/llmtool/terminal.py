@@ -8,6 +8,13 @@ _BIDI_CONTROLS = frozenset(chr(value) for value in (
 ))
 
 
+def contains_unsafe_controls(text):
+    """Allow ordinary Unicode whitespace; reject controls and bidi formatting."""
+    return any((ord(c) < 32 and c not in '\n\r\t')
+               or 0x7f <= ord(c) <= 0x9f or c in _BIDI_CONTROLS
+               or (not c.isprintable() and not c.isspace()) for c in text)
+
+
 def terminal_safe_text(text):
     """Render controls visibly; preserve ordinary Unicode, LF and horizontal tabs."""
     out = []

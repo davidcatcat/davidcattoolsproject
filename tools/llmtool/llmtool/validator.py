@@ -248,6 +248,34 @@ def _simple(text):
             return CommandRisk.SENSITIVE_READ
         return CommandRisk.UNKNOWN
     if name == 'kubectl':
+        # Destination, identity and impersonation overrides can forward trusted
+        # context credentials elsewhere. Never strip them into SAFE_READ.
+        overrides = frozenset((
+            '-s', '--server', '--token', '--kubeconfig', '--kuberc', '--as',
+            '--as-group', '--as-uid', '--as-user-extra', '--client-certificate',
+            '--client-key', '--certificate-authority', '--username', '--password',
+            '--insecure-skip-tls-verify', '--tls-server-name', '--proxy-url',
+            '--cluster', '--user',
+        ))
+        if any(a.split('=', 1)[0] in overrides or
+               (a.startswith('-s') and not a.startswith('--')) for a in args):
+            remaining = []
+            index = 0
+            while index < len(args):
+                option = args[index].split('=', 1)[0]
+                if option in overrides or option in ('-n', '--namespace', '--context'):
+                    if '=' in args[index] or option == '--insecure-skip-tls-verify':
+                        index += 1
+                    elif index + 1 < len(args):
+                        index += 2
+                    else:
+                        return CommandRisk.UNKNOWN
+                elif args[index].startswith('-s') and not args[index].startswith('--'):
+                    index += 1
+                else:
+                    remaining.append(args[index])
+                    index += 1
+            return max(CommandRisk.UNKNOWN, _simple('kubectl ' + shlex.join(remaining)), key=RISK_ORDER.get)
         while args and args[0] in ('-n', '--namespace', '-s', '--server', '--context'):
             if len(args) < 2:
                 return CommandRisk.UNKNOWN

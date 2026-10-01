@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 
 from .benchmark import BenchmarkRuntime, normalize_runtime
-from .config import _provider_name, api_key, resolve_config
+from .config import _provider_name, api_key, resolve_profile_config
 from .errors import LLMToolError
 from .feedback import JSON_LIMIT, _items, _parse, _schema
 from .prompts import COMMON
@@ -182,7 +182,7 @@ def run_orchestration_plan(plan, task):
     total = 0
     for binding in plan.steps:
         messages = messages_for_role(binding.role, task, previous)
-        config = resolve_config({"provider": binding.provider}, require_configured=True)
+        config = resolve_profile_config(binding.provider, require_configured=True)
         key = api_key(config)
         client = create_client(config, key)
         started = time.monotonic()
