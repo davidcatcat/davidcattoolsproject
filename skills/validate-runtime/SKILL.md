@@ -20,7 +20,7 @@ authentication, inference, and end-to-end claims separate.
 4. **Use the smallest real test that proves the requirement.** Prefer an exact output marker and a
    low-cost request. Avoid paid or high-cost workloads, destructive operations, and arbitrary file
    mutation.
-5. **Check the output contract.** Verify exit code, expected stdout, stderr, and safe metadata. Check
+5. **Check the output and diagnostics contract.** Verify exit code, expected stdout, stderr, safe metadata, and—when supported—the run/task identifier plus persisted trace/error record. Check
    for prompt echo, credential leakage, raw-response leakage, and internal reasoning leakage.
 6. **Check network coexistence.** For VPN-dependent or internal services, test required internal and
    external endpoints plus required source control. Check DNS and the destination route/interface;
@@ -32,7 +32,8 @@ authentication, inference, and end-to-end claims separate.
    `SKIPPED-ENVIRONMENT`, or `NOT-TESTED`. A skipped check is not a pass.
 9. **Attach minimal evidence to every PASS:** for example, tested revision/version, HTTP status,
    exit code, exact output marker, safe metadata, or route/interface.
-10. **Decide against explicit prerequisites.** Declare an end-to-end prerequisite PASS only after
+10. **Exercise one safe failure path when diagnostics are part of the requirement.** Confirm that normal output is actionable, the structured error/trace identifies the failing layer, debug/verbose mode does not expose secrets, and retry/fallback/STOP behavior matches policy.
+11. **Decide against explicit prerequisites.** Declare an end-to-end prerequisite PASS only after
     every required layer and dependency has been tested successfully. Record anything not tested.
 
 ## Rules
@@ -49,5 +50,5 @@ authentication, inference, and end-to-end claims separate.
 
 - Tested revision and executable version are known.
 - Validation layers are distinguished and required real inference was performed when applicable.
-- Output and error streams meet the expected contract without sensitive data leakage.
+- Output, error, and available diagnostic/trace streams meet the expected contract without sensitive data leakage.
 - Skipped checks are explicit and the final conclusion matches the evidence.
