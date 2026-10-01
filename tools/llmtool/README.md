@@ -48,6 +48,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
+- **A8 — Regression / Benchmark System:** implementation complete on feature branch after canonical validation; NOT merged, external review pending. A9 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -600,6 +601,9 @@ llmtool/skills/*/SKILL.md               packaged runtime prompt resources
 llmtool/feedback.py                    immutable feedback/proposal/regression data and offline evaluator
 llmtool/feedback_files.py              explicit bounded reads and atomic case writes
 llmtool/feedback_cli.py                offline capture/show/validate/review/regression adapter
+llmtool/benchmark.py                   A7-derived quality, efficiency, runtime and safety measurement
+llmtool/benchmark_cli.py               offline explicit files/suites and opt-in single live request
+benchmarks/                           repository-local synthetic benchmark fixtures (not packaged)
 feedback/                             repository-local curated regression fixtures (not packaged)
 llmtool/providers/base.py              capability model 與 Provider.complete() / Reply contract
 llmtool/providers/__init__.py          static provider registry、capability lookup 與 factory
@@ -1183,3 +1187,125 @@ Historical pre-sync validation: 47 targeted tests; 392 discovered, 391 passed an
 1 inherited skip. Current post-hardening synchronization: 47 A7 tests PASS; complete Python 3.13/3.9
 suites each 423 discovered, 422 passed, one skip. Full results are recorded in
 the validation report. No live provider call was made or required.
+
+## A8 — Regression / Benchmark System
+
+Benchmark measures outputs; it grants no authorization and is not an Agent.
+Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator
+!= Feedback Case != Benchmark. A0–A7 and hardening remain merged; A8 is on its
+feature branch, not merged. A9 NOT STARTED.
+
+```sh
+llmtool benchmark evaluate --case regression.json --output-file candidate.json --json
+llmtool benchmark evaluate --spec benchmark.json --output-file candidate.json
+llmtool benchmark suite --manifest suite.json --json
+# Explicitly opt in to ONE request using an already configured named profile:
+llmtool benchmark live --spec benchmark.json --provider local-claude --json
+```
+
+Evaluate and suite are completely offline, including with an empty HOME and no
+provider configuration. They read only explicit regular UTF-8 files, using A7's
+bounded/no-follow file adapter; symlink components and `..` are rejected. No stdin,
+glob, recursive discovery, repository scan or implicit database. No suggested
+command, VERIFY_NEXT item, regression input or patch is ever executed or applied.
+Human output separates QUALITY, EFFICIENCY, RUNTIME and SAFETY, uses the shared
+terminal-safe boundary, and does not dump the candidate. Stable JSON includes
+static per-assertion results and metrics, not raw candidate text or arbitrary metadata.
+
+### Specifications and suites
+
+`BenchmarkSpec` wraps exactly one validated A7 RegressionCase without changing its
+ID, assertion language or semantics. Strict JSON requires `regression` (the whole
+A7 case), `name`, `tags` (array), and `safety` (null or the exact fields below).
+`--case` accepts an A7 case (and the exact wrapper schema); `--spec` requires the
+wrapper. Assertions, expected facts and findings remain solely in A7.
+
+Safety fields are `forbidden_command_risks` (unique A6 risk names) and
+`preferred_verify_next_any` (unique exact command strings). A safety expectation
+requires a supported packet with no A6 ERROR, no forbidden risk, and at least one
+preferred command when that list is nonempty. Classification uses A6 only; it is
+DATA, never command execution or permission. Prose/oversized command suggestions
+remain UNKNOWN. Sensitive suggestions can pass an explicit expectation that only
+forbids mutation/destruction; that does not authorize displaying sensitive data.
+
+A suite manifest requires exactly `entries`, an ordered nonempty array of objects
+with `case_file`, `output_file`, and `runtime` (null or normalized runtime object).
+File paths are relative to the manifest's directory, or explicit absolute physical
+paths. Cases can be plain A7 cases or benchmark wrappers. Duplicate regression IDs
+are rejected. Order is preserved. All cases validate before any stdout is emitted;
+no partial successful JSON on a later input error. Aggregate ratios sum raw counts,
+never average case percentages. Byte totals produce the aggregate compression
+ratio. Runtime summaries give sample count, minimum/maximum/mean wall and provider
+latency separately, and token totals only across available samples.
+
+Frozen typed models detach collections into tuples. A7's strict parser rejects
+missing/extra fields, duplicate keys, NaN/Infinity, invalid UTF-8/controls and depth
+above 6. Files, specification/manifest/result JSON and candidate text: 1 MiB;
+A7 input: 128 KiB; assertions: 64; suite: 32 cases; tags/preferred commands: 16;
+name: 256 bytes; paths: 4096 bytes; preferred commands: 8192 bytes; packet: A6's
+1024 total items. Full serialized suite results also must fit 1 MiB. No executable
+objects, dynamic imports from data, hidden reasoning fields or arbitrary metadata.
+
+### Metrics
+
+Each quality dimension reports numerator, denominator, ratio and `assessed`.
+Zero denominator gives null, never NaN. Malformed/unsupported structured output
+fails A7's structured assertions, including negative assertions. Content metrics
+then have `assessed: false`, zero observed numerator and null ratio; those are not
+claims of measured absence or presence. Aggregate content ratios remain unavailable
+if any contributing case with a nonzero denominator was unassessable.
+
+| Dimension | Numerator / denominator |
+|---|---|
+| assertion_pass_rate | passed assertions / all assertions |
+| fact_retention | matched FACT_CONTAINS / expected fact assertions |
+| hallucination_rate | violated FACT_NOT_CONTAINS / curated forbidden fact assertions |
+| finding_recall | matched FINDING_PRESENT / expected finding assertions |
+| false_positive_rate | violated FINDING_ABSENT / curated forbidden finding assertions |
+| hypothesis/unknown/verify_next retention | corresponding matched positive assertions / corresponding assertions |
+| command_risk_pass_rate | matched COMMAND_RISK_EQUALS / command-risk assertions |
+| context_validity | passed CONTEXT_VALID / context-validity assertions |
+
+**hallucination_rate measures violations of explicitly curated forbidden facts only.**
+It is not open-world factual verification. False-positive rate likewise measures
+explicitly curated forbidden findings only. Exact A7 matching remains unchanged;
+no universal factual detection, provider ranking or weighted intelligence score.
+
+Efficiency uses exact UTF-8 bytes: `compression_ratio = output_bytes / input_bytes`.
+Lower means a shorter output relative to the benchmark input. Empty input is rejected.
+No token estimate is derived from bytes, characters or words.
+
+Normalized runtime input requires exactly `wall_latency_ms`, `provider_latency_ms`,
+`model`, `input_tokens`, `output_tokens`, `total_tokens`; each may be null. Supply
+via evaluate's `--runtime-file` or a manifest entry's `runtime`. Offline latency
+is absent unless explicitly supplied by the caller. These values are supplied data,
+not authenticated observations. Timing is integer milliseconds in 0..86,400,000;
+tokens are integers in 0..10^12, never booleans/negative/nonfinite values. Explicit
+usage requires all three consistent counts (`total = input + output`).
+
+Only live resolves normal provider/config precedence and credentials. It reuses
+A3 `messages_for('ask', case.input, explicit_case_skill)` and calls Provider.complete
+exactly once, without retries, skill auto-selection, command execution or recording
+files. Whole-request latency uses `time.monotonic()` and is separate from normalized
+provider `elapsed_seconds`. Model identifiers and bounded elapsed/token fields are
+the only metadata retained. OpenAI input/output tokens map directly; compatible
+prompt/completion tokens map to input/output. The provider's valid total is retained.
+Incomplete, malformed or inconsistent provider token triplets become entirely
+unavailable. Claude/Codex elapsed-only metadata therefore gives null token counts
+and `token_usage_available: false`, never fabricated zeros or cost estimates.
+Zero counts from a complete valid triplet remain available. Token totals are not
+monetary cost. Live provider failures remain sanitized and raw stderr is omitted.
+
+Exit 0: all A7 assertions and explicit safety criteria pass. Exit 1: evaluated
+failure or sanitized input/runtime/file error. Argparse usage: 2; interruption: 130.
+Malformed input produces empty stdout. A malformed candidate can produce a failed
+result when within the text bound; this distinguishes scoring failure from invalid
+case/manifest/runtime data. Existing A7 text-only assertions can evaluate prose;
+only an explicit safety expectation requires a structurally/semantically valid packet.
+
+Synthetic historical permission-denied fixtures and examples are in
+[benchmarks/README.md](benchmarks/README.md), excluded from wheels. The fixture
+allows historical sensitive cat as classified data but requires narrower metadata
+evidence and forbids MUTATING/DESTRUCTIVE suggestions. See the
+[A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md)
+for exact current tests, packaging, optional live smoke and CI evidence.
