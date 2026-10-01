@@ -375,7 +375,7 @@ External ChatGPT review PASS; A8-R1 FIXED; merged to `main` via PR #9 in
 remains FAIL as measured. A9 NOT STARTED.
 Details: [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md).
 
-## A9 — Agent Orchestration — implementation complete on feature branch
+## A9 — Agent Orchestration ✅ DONE and merged to main
 
 Provider-independent sequential orchestration。內建 declarative roles：
 `grinder`、`validator`、`coder`、`reviewer`，每一步由 plan 明確綁定 named
@@ -412,7 +412,7 @@ second-pass context packet。取得證據的權限與範圍需明確。
 Git / Logs / Files → llmtool → provider / grinder → context packet → validator →
 Claude/Codex → patch → tests → human approval where required → Git。
 
-此為完整流程目標。目前 A0～A8 已完成並合併至 `main`；A9 feature branch 只建立 bounded text orchestration，仍沒有 production mutation／approval execution。
+此為完整流程目標。目前 A0～A9 已完成並合併至 `main`；A9 只建立 bounded text orchestration，仍沒有 production mutation／approval execution。
 
 ## A12 — Remote Frontends / Telegram Agent
 

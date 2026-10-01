@@ -295,3 +295,24 @@ section no longer says A9 is NOT STARTED while the same branch documents complet
 A9 implementation.
 
 PR #10 remains DRAFT and unmerged pending the merge decision. A10 NOT STARTED.
+
+
+## Final merge status — 2026-10-01
+
+PR #10 was marked ready for review and merged to `main` with a normal merge commit:
+
+`8776476d22a009423eedf0d385c11228967b9896`
+
+Merged reviewed A9 head:
+
+`01bd1ec71c18d814f9342d6523ff1613fd4cd67b`
+
+Final-head CI run `36856486140` PASS on that exact A9 head before merge:
+Python 3.9 and Python 3.14 each ran 514/514 tests PASS; Offline canonical checks
+and Working tree is clean both SUCCESS.
+
+A9-R1 remains FIXED. Updated external ChatGPT review PASS. Standalone wheel checks
+PASS and the real two-role Claude transport/orchestration smoke remains PASS exactly
+as recorded, without inferring model-quality PASS.
+
+A9 is DONE and merged to main. A10 NOT STARTED.
