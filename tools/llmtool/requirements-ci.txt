@@ -1,0 +1,3 @@
+# CI runtime/test dependency, matching the validated Python 3.13 environment.
+# Exact version pin only; this is not a hash lock or a package dependency change.
+PyYAML==6.0.3
