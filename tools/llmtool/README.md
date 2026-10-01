@@ -510,6 +510,8 @@ A6 SENSITIVE_READ 表示未來執行需 approval，並非此文字建議的執�
 journalctl 等正常診斷不因 SENSITIVE_READ 自動隱藏。UNKNOWN 仍是未證明安全、未批准的文字。
 analyze-log **從不執行 NEXT_COMMANDS**。窄 guard 偵測 literal Secret/raw API／env／config display 與
 secret-store reads，不解析完整 shell、aliases、動態 expansions 或證明模型推論安全。
+Credential/private-data sources 包括 `/etc/shadow`、`/etc/gshadow`、`.pgpass`、
+`/proc/<pid>/environ`／`/proc/self/environ`，以及不帶參數的 shell 變數 dump `set`；內容顯示建議會被抑制。
 只對 command text 使用嚴格 invisible/control 規則；分析文字仍走既有 human terminal escaping boundary。
 chat 的 explicit skill 回覆仍未套用此 CLI guard。第二輪隔離公司 gateway smoke 見
 [Post-A9 validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md#second-round-independent-review-follow-up--2026-10-02)。

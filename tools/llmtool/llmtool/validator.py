@@ -138,7 +138,9 @@ def sensitive_path(value):
                                          '.password-store', '.netrc', '.npmrc', '.pypirc',
                                          'private-key', 'private_key', 'id_rsa', 'id_ed25519', 'id_dsa', 'id_ecdsa'))
             or basename.startswith('.env') or basename.endswith(('.pem', '.key', '.p12', '.pfx', '.conf'))
-            or basename in ('application.yml', 'application.yaml', 'application.properties')
+            or basename in ('.pgpass', 'application.yml', 'application.yaml', 'application.properties')
+            or path in ('/etc/shadow', '/etc/gshadow')
+            or re.fullmatch(r'/proc/(?:[0-9]+|self|thread-self|\*)/environ', path) is not None
             or ('config' in basename and (path.startswith('/etc/') or basename.endswith(('.yaml', '.yml', '.json', '.ini', '.conf')))))
 
 
@@ -170,7 +172,7 @@ def credential_display(command, include_connection=True):
                 'base64', 'hexdump', 'xxd', 'strings', 'od')
     if any(n in displays for n in names) and any(sensitive_path(t) for t in tokens):
         return True
-    if 'printenv' in names:
+    if tokens == ['set'] or 'printenv' in names:
         return True
     for i, name in enumerate(names):
         tail = tokens[i + 1:]

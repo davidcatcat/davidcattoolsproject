@@ -15,7 +15,7 @@ from llmtool.errors import LLMToolError
 from llmtool.inputs import read_input
 from llmtool.log_safety import filter_log_suggestions
 from llmtool.providers.base import Reply
-from llmtool.validator import credential_display, classify_command, CommandRisk
+from llmtool.validator import credential_display, classify_command, CommandRisk, sensitive_path, requires_approval
 
 FIXTURES = json.loads(Path(__file__).with_name('fixtures').joinpath('analyze_log_review.json').read_text())
 BYPASSES = (
@@ -106,6 +106,62 @@ class ReviewSuggestionTests(unittest.TestCase):
         self.assertEqual(classify_command('od -c ~/.ssh/id_rsa').risk, CommandRisk.SENSITIVE_READ)
         self.assertEqual(classify_command('kubectl get secret NAME --template={{.data}}').risk, CommandRisk.SENSITIVE_READ)
         self.assertEqual(classify_command('rm credentials.txt').risk, CommandRisk.DESTRUCTIVE)
+
+
+class F1CredentialTests(unittest.TestCase):
+    COMMANDS = (
+        'cat /etc/shadow', 'sudo cat /etc/shadow', 'head -n 20 /etc/shadow',
+        'cat /etc/gshadow', 'cat /var/lib/postgresql/.pgpass', 'cat ~/.pgpass',
+        'cat /proc/1/environ', 'strings /proc/1234/environ', 'cat /proc/self/environ',
+        'cat /proc/thread-self/environ', 'cat /proc/*/environ', 'set',
+    )
+
+    def test_shared_detection_a6_and_suggestion_suppression(self):
+        for path in ('/etc/shadow', '/etc/gshadow', '.pgpass', '~/.pgpass',
+                     '/var/lib/postgresql/.pgpass', '/proc/1/environ', '/proc/self/environ'):
+            self.assertTrue(sensitive_path(path), path)
+        for command in self.COMMANDS:
+            with self.subTest(command=command):
+                self.assertTrue(credential_display(command))
+                risk = classify_command(command).risk
+                self.assertEqual(risk, CommandRisk.SENSITIVE_READ)
+                self.assertTrue(requires_approval(risk))
+                output, suppressed = filter_log_suggestions('ROOT_CAUSE:\nSupplied evidence.\nNEXT_COMMANDS:\n' + command)
+                self.assertEqual(suppressed, 1)
+                self.assertIn('Supplied evidence.', output)
+                self.assertNotIn(command, output)
+                self.assertIn('(none)', output)
+
+    def test_nearby_paths_and_set_arguments_are_not_credential_dumps(self):
+        for path in ('/etc/hosts', '/etc/shadowing', '/etc/gshadow.txt', '/proc/1/status',
+                     '/proc/self/status', '/proc/1234/environ.txt', '/tmp/environ', '.pgpass.example'):
+            self.assertFalse(sensitive_path(path), path)
+            command = 'cat ' + path
+            self.assertFalse(credential_display(command))
+            self.assertEqual(classify_command(command).risk, CommandRisk.UNKNOWN)
+            output, suppressed = filter_log_suggestions('NEXT_COMMANDS:\n- ' + command)
+            self.assertEqual(suppressed, 0)
+            self.assertIn(command, output)
+        for command in ('set -e', 'set -- VALUE', 'grep set app.log'):
+            self.assertFalse(credential_display(command), command)
+
+    def test_cli_suppresses_without_losing_analysis_retry_or_execution(self):
+        for command in self.COMMANDS:
+            client = Mock()
+            client.complete.return_value = Reply('ROOT_CAUSE:\nObserved failure.\nEVIDENCE:\nSupplied log.\nNEXT_COMMANDS:\n- ' + command, {})
+            out, err = io.StringIO(), io.StringIO()
+            with patch('sys.stdin', None), patch('llmtool.cli.resolve_config', return_value={}), \
+                    patch('llmtool.cli.api_key', return_value=None), patch('llmtool.cli.create_client', return_value=client), \
+                    patch('subprocess.run', side_effect=AssertionError('execution')), \
+                    patch('subprocess.Popen', side_effect=AssertionError('execution')), \
+                    patch('os.system', side_effect=AssertionError('execution')), redirect_stdout(out), redirect_stderr(err):
+                self.assertEqual(main(['analyze-log', 'synthetic evidence']), 0)
+            client.complete.assert_called_once()
+            self.assertIn('Observed failure.', out.getvalue())
+            self.assertIn('Supplied log.', out.getvalue())
+            self.assertNotIn(command, out.getvalue())
+            self.assertIn('suppressed 1', err.getvalue())
+            self.assertNotIn(command, err.getvalue())
 
 
 class ReviewInputUnicodeTests(unittest.TestCase):

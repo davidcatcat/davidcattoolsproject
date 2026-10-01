@@ -305,3 +305,63 @@ CI-status claim was made for this new head. Final-head GitHub CI and external
 ChatGPT review remain for the reviewer to inspect. M6 remains DEFERRED; historical
 Claude A8 live safety remains FAIL as measured; Anthropic A2.3 remains future.
 A0–A9 DONE and merged; Post-A9 follow-up unmerged; A10 NOT STARTED.
+
+## Final F1 credential-source follow-up — 2026-10-02
+
+F1: FIXED (bounded literal detection). Source:
+[Claude re-review](llmtool_post_a9_hardening_rereview_20261002.md).
+Started at `d3feef12192f95b37590ab8e9974959933ea2966` on the existing
+`fix/post-a9-hardening` branch in the canonical repository. Both independent
+review reports remain unchanged. This pass fixes only F1; F2 is not changed.
+
+Root cause: the public `sensitive_path` list omitted password databases,
+PostgreSQL password files and process environments; `credential_display` did not
+recognize the no-argument shell variable dump `set`.
+
+Production correction is confined to validator public detection helpers:
+exact `/etc/shadow` and `/etc/gshadow`, basename `.pgpass`, and anchored
+`/proc/<numeric pid|self|thread-self|*>/environ` paths are credential sources.
+`credential_display` recognizes token-exact, no-argument `set`. Existing A6 policy
+then classifies these content reads/dumps as SENSITIVE_READ (approval required),
+while the unchanged analyze-log display policy suppresses their suggestions.
+No duplicate list or filter-flow change was introduced in log_safety.py.
+
+Three new `F1CredentialTests` methods exercise public detection, A6 classification,
+bare/bulleted suggestion suppression and the CLI under execution traps. They
+cover all requested commands, sudo/head/strings variants and process self paths.
+CLI analysis survives with rc=0, count-only sanitized warnings and exactly one
+mock provider call. Nearby `/etc/hosts`, `/proc/1/status`, similarly named files
+and `set` arguments remain outside this credential-dump rule; no SAFE_READ rule
+was added or broadened. No listed credential file or /proc environ source was read.
+
+Newly measured validation, launched from the canonical repository:
+
+| Check | Python | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Validator + analyze-log safety + post-A9 review tests | 3.13.3 | 68 | 68 | 0 | 0 | 0 | 0.733 s |
+| Full canonical syntax + suite | 3.13.3 | 552 | 551 | 0 | 0 | 1 | 46.200 s |
+| Full canonical syntax + suite | actual 3.9.6 | 552 | 551 | 0 | 0 | 1 | 73.569 s |
+
+The sole skip remains the inherited A5 non-UTF-8 filename filesystem limitation.
+Logs: `/private/tmp/llmtool-f1-focused.log`, `llmtool-f1-canonical.log`,
+`llmtool-f1-py39.log`. Commands:
+
+```sh
+PYTHONPATH=tools/llmtool:tools/llmtool/tests tools/llmtool/.venv/bin/python -m unittest test_validator test_post_a9_hardening.AnalyzeLogSafetyTests test_post_a9_review -v
+make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"
+make -C tools/llmtool check PYTHON=/usr/bin/python3
+git diff --check
+```
+
+`git diff --check`: PASS. Security review: PASS for F1; pure string/token matching,
+no shell parser, suggested-command execution, credential logging, filesystem/Git
+mutation, provider-native tools, retries or fallback. Shared public helpers remain
+the single detection source; A6 classification and display filtering retain their
+separate policies. Detection is literal and does not resolve aliases/symlinks or
+claim exhaustive credential discovery. README examples now mention these sources.
+
+No gateway request was repeated: static deterministic evidence is sufficient for
+this helper-only patch, and prior four-case smoke remains historical evidence.
+The known unrelated untracked reports were untouched. No branch/worktree/clone,
+gh command or new PR was created/used. Normal scoped commit/push updates PR #11;
+do not merge. M6 remains DEFERRED. A10 NOT STARTED. Await ChatGPT final merge review.
