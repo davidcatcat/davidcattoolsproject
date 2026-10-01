@@ -84,15 +84,50 @@ _CAUSE_CATEGORIES = frozenset((
 ))
 _PROVIDER_TYPES = frozenset(('openai', 'openai-compatible', 'claude-cli', 'codex-cli'))
 _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', 'incomplete'))
+# Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
-    r'authorization|\bbearer\s+\S+|-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
-    r'["\']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
-    r'aws_secret_access_key)["\']?\s*[:=]\s*\S+', re.IGNORECASE,
+    r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
+    r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}', re.IGNORECASE,
 )
+_AUTH_VALUE = re.compile(
+    r'\b(?:bearer|authorization\s*:\s*basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
+    re.IGNORECASE,
+)
+_CREDENTIAL_ASSIGNMENT = re.compile(
+    r'["\']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
+    r'aws_secret_access_key)["\']?\s*[:=]\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
+    re.IGNORECASE,
+)
+_CREDENTIAL_STATUSES = frozenset((
+    'missing', 'unset', 'redacted', 'none', 'null', 'not configured', 'placeholder',
+))
 _IDENTIFIER = re.compile(r'[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*')
-_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]*')
+_MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@-]*')
+_EVENT_SEVERITIES = {
+    EventType.ERROR: DiagnosticSeverity.ERROR,
+    EventType.WARNING: DiagnosticSeverity.WARNING,
+    EventType.RUN_START: DiagnosticSeverity.INFO,
+    EventType.PROVIDER_REQUEST: DiagnosticSeverity.INFO,
+    EventType.PROVIDER_RESPONSE: DiagnosticSeverity.INFO,
+}
 _MAPPING_TYPES = (dict, MappingProxyType)
+
+
+def _contains_credential_value(value):
+    if _CREDENTIAL.search(value):
+        return True
+    for match in _AUTH_VALUE.finditer(value):
+        token = match.group(1)
+        if len(token) >= 8 and token.lower() not in _CREDENTIAL_STATUSES:
+            return True
+    for match in _CREDENTIAL_ASSIGNMENT.finditer(value):
+        token = match.group(1).strip('"\'').lower()
+        if token in _CREDENTIAL_STATUSES or not token:
+            continue
+        if token == 'not' and re.match(r'\s+configured\b', value[match.end():], re.IGNORECASE):
+            continue
+        return True
+    return False
 
 
 def safe_diagnostic_text(value, max_bytes=DIAGNOSTIC_TEXT_MAX_BYTES):
@@ -109,7 +144,7 @@ def safe_diagnostic_text(value, max_bytes=DIAGNOSTIC_TEXT_MAX_BYTES):
         raise ValueError('diagnostic text exceeds byte bound')
     if contains_unsafe_controls(value) or any(ord(c) < 32 for c in value):
         raise ValueError('diagnostic text contains unsupported controls')
-    if _CREDENTIAL.search(value):
+    if _contains_credential_value(value):
         raise ValueError('diagnostic text contains recognizable credential material')
     return value
 
@@ -156,7 +191,7 @@ def utc_timestamp(when=None):
 
 def validate_timestamp(value):
     if type(value) is not str or re.fullmatch(
-            r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z', value) is None:
+            r'[0-9]{4}-[0-9]{2}-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\.[0-9]{3}Z', value) is None:
         raise ValueError('diagnostic timestamp requires UTC RFC3339 milliseconds')
     try:
         datetime.fromisoformat(value[:-1] + '+00:00')
@@ -272,7 +307,7 @@ def _provider_data(data):
                 raise ValueError('invalid diagnostic profile identifier')
         elif key == 'model':
             safe_diagnostic_text(value, MODEL_MAX_CHARS)
-            if _MODEL.fullmatch(value) is None:
+            if _MODEL.fullmatch(value) is None or any(part in ('.', '..') for part in value.split('/')):
                 raise ValueError('invalid diagnostic model identifier')
         elif key == 'duration_ms':
             _integer(value, 0, MAX_DURATION_MS)
@@ -297,17 +332,16 @@ def _event_data(kind, value, component, severity):
                    'user_action_required', 'safe_cause'}
         if set(data) - allowed:
             raise ValueError('unsupported diagnostic event field')
-        if data:
-            if not {'code', 'message'} <= set(data):
-                raise ValueError('diagnostic error event requires code and message')
-            if type(data['code']) is not str:
-                raise ValueError('diagnostic event code must be supported text')
-            try:
-                code = ErrorCode(data['code'])
-            except ValueError:
-                raise ValueError('unsupported diagnostic event code') from None
-            error = DiagnosticError(component=component, severity=severity, **{**data, 'code': code})
-            data = {k: v for k, v in error.to_dict().items() if k not in ('component', 'severity')}
+        if not {'code', 'message'} <= set(data):
+            raise ValueError('diagnostic error event requires code and message')
+        if type(data['code']) is not str:
+            raise ValueError('diagnostic event code must be supported text')
+        try:
+            code = ErrorCode(data['code'])
+        except ValueError:
+            raise ValueError('unsupported diagnostic event code') from None
+        error = DiagnosticError(component=component, severity=severity, **{**data, 'code': code})
+        data = {k: v for k, v in error.to_dict().items() if k not in ('component', 'severity')}
     elif kind in (EventType.PROVIDER_REQUEST, EventType.PROVIDER_RESPONSE):
         allowed = {'provider_type', 'profile', 'model'}
         if kind == EventType.PROVIDER_RESPONSE:
@@ -359,6 +393,10 @@ class DiagnosticEvent:
         validate_timestamp(self.timestamp)
         if type(self.type) is not EventType or type(self.severity) is not DiagnosticSeverity:
             raise ValueError('event type and severity require supported enum values')
+        expected_severity = _EVENT_SEVERITIES.get(self.type)
+        if expected_severity is not None and self.severity is not expected_severity:
+            raise ValueError('diagnostic event severity does not match its type')
+        # run.end status-to-severity policy belongs to the future lifecycle slice.
         _identifier(self.component)
         for value in (self.span_id, self.parent_span_id):
             if value is not None:

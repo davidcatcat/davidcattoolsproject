@@ -7,6 +7,8 @@ class LLMToolError(Exception):
     Untouched positional constructors retain Exception's args/str semantics.
     Coded callers use LLMToolError(diagnostic=DiagnosticError(...)); no message
     duplication or implicit classification of legacy strings is performed.
+    Coded diagnostics transfer via bounded JSON; pickle/deepcopy are unsupported.
+    Legacy uncoded exception pickle behavior is preserved.
     """
 
     def __init__(self, *args, diagnostic=None):

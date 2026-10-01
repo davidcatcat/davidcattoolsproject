@@ -28,8 +28,18 @@ def error(**changes):
 def event(**changes):
     values = dict(run_id='a' * 32, event_id=1, timestamp='2026-10-02T00:00:00.000Z',
                   type=d.EventType.ERROR, component='provider.openai',
-                  severity=d.DiagnosticSeverity.ERROR)
+                  severity=d.DiagnosticSeverity.ERROR,
+                  data={'code': 'PROVIDER_TIMEOUT', 'message': 'gateway request timed out'})
     values.update(changes)
+    if 'type' in changes:
+        if 'severity' not in changes:
+            if changes['type'] == d.EventType.WARNING:
+                values['severity'] = d.DiagnosticSeverity.WARNING
+            elif changes['type'] in (d.EventType.RUN_START, d.EventType.PROVIDER_REQUEST,
+                                     d.EventType.PROVIDER_RESPONSE):
+                values['severity'] = d.DiagnosticSeverity.INFO
+        if 'data' not in changes and changes['type'] not in (d.EventType.ERROR, d.EventType.WARNING):
+            values['data'] = {}
     return d.DiagnosticEvent(**values)
 
 
@@ -85,6 +95,23 @@ class IdentityTests(unittest.TestCase):
                       '2026-10-02T00:00:00.0000Z', '2026-02-30T00:00:00.000Z',
                       '2026-10-02T24:00:00.000Z', '2026-10-02T00:00:60.000Z',
                       '0000-01-01T00:00:00.000Z', '', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                d.validate_timestamp(value)
+
+    def test_timestamp_rejects_iso_edge_times_before_calendar_parser(self):
+        for value in ('2026-10-02T24:00:00.000Z', '2026-10-02T25:00:00.000Z',
+                      '2026-10-02T23:60:00.000Z', '2026-10-02T23:59:60.000Z'):
+            # The grammar must reject these even if a Python parser normalizes them.
+            with self.subTest(value=value), patch.object(d, 'datetime') as parser:
+                with self.assertRaises(ValueError):
+                    d.validate_timestamp(value)
+                parser.fromisoformat.assert_not_called()
+
+    def test_timestamp_last_millisecond_and_leap_calendar(self):
+        for value in ('2026-10-02T23:59:59.999Z', '2024-02-29T00:00:00.000Z'):
+            self.assertEqual(d.validate_timestamp(value), value)
+        for value in ('2026-02-29T00:00:00.000Z', '1900-02-29T00:00:00.000Z',
+                      '2026-04-31T00:00:00.000Z', '2026-13-01T00:00:00.000Z'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 d.validate_timestamp(value)
 
@@ -286,6 +313,33 @@ class SerializationAndPrivacyTests(unittest.TestCase):
                     self.assertNotIn(MARKER, str(caught.exception))
                     self.assertNotIn(text, str(caught.exception))
 
+    def test_credential_status_vocabulary_is_not_a_secret(self):
+        values = ['provider authorization rejected', 'Authorization header missing',
+                  'token=missing for profile', 'secret: not configured',
+                  'Authorization: Bearer redacted', 'Authorization: Basic placeholder']
+        for status in ('missing', 'unset', 'redacted', 'none', 'null',
+                       'not configured', 'placeholder'):
+            values.extend(('api_key="' + status + '"', 'password: ' + status,
+                           "'token': '" + status + "'", 'secret=' + status.upper()))
+        for text in values:
+            with self.subTest(text=text):
+                self.assertEqual(error(message=text).message, text)
+                self.assertEqual(json.loads(d.diagnostic_json({'message': text}))['message'], text)
+
+    def test_credential_values_still_rejected_with_fixed_safe_message(self):
+        for text in ('Authorization: Basic dXNlcjpwYXNzd29yZA==',
+                     'Authorization: Bearer ' + MARKER, 'Bearer ' + MARKER,
+                     'api_key="' + MARKER + '"', "password='" + MARKER + "'",
+                     'token=missing_' + MARKER, 'token=placeholder-' + MARKER,
+                     'secret: not-' + MARKER, 'password=x',
+                     '-----BEGIN RSA PRIVATE KEY-----'):
+            with self.subTest(prefix=text[:12]):
+                with self.assertRaises(ValueError) as caught:
+                    error(message=text)
+                self.assertEqual(str(caught.exception),
+                                 'diagnostic text contains recognizable credential material')
+                self.assertNotIn(MARKER, str(caught.exception))
+
 
 class EventTests(unittest.TestCase):
     def test_event_exact_schema_and_stable_detached_json(self):
@@ -356,6 +410,44 @@ class EventTests(unittest.TestCase):
                 event(type=d.EventType.PROVIDER_REQUEST, data={'profile': value})
         with self.assertRaises(ValueError):
             event(data={str(i): 0 for i in range(d.MAX_JSON_ITEMS + 1)})
+
+    def test_model_identifiers_allow_known_provider_version_syntax(self):
+        for model in ('claude-3-5-sonnet@20240620', 'qwen/Qwen3-32B', 'gpt-5',
+                      'gpt-5.3-codex', 'codex-mini-latest', 'local-model:latest', 'a' * 128):
+            with self.subTest(model=model):
+                obj = event(type=d.EventType.PROVIDER_REQUEST, data={'model': model})
+                self.assertEqual(obj.data['model'], model)
+
+    def test_model_identifiers_reject_unsafe_values_and_traversal(self):
+        for model in ('with space', 'model\tname', 'model\x1bname', 'a' * 129,
+                      'sk-' + 'a' * 24, 'Bearer ' + MARKER, '../model',
+                      'model/../version', 'model/./version', 'model/..'):
+            with self.subTest(model_type=type(model)), self.assertRaises(ValueError):
+                event(type=d.EventType.PROVIDER_REQUEST, data={'model': model})
+
+    def test_error_and_warning_require_matching_severity_code_and_message(self):
+        for kind, severity in ((d.EventType.ERROR, d.DiagnosticSeverity.ERROR),
+                               (d.EventType.WARNING, d.DiagnosticSeverity.WARNING)):
+            event(type=kind, severity=severity,
+                  data={'code': 'PROVIDER_TIMEOUT', 'message': 'request timed out'})
+            for other in d.DiagnosticSeverity:
+                if other != severity:
+                    with self.subTest(kind=kind, severity=other), self.assertRaises(ValueError):
+                        event(type=kind, severity=other)
+            for data in ({}, None, {'code': 'PROVIDER_TIMEOUT'}, {'message': 'safe'}):
+                with self.subTest(kind=kind, data=data), self.assertRaises(ValueError):
+                    event(type=kind, severity=severity, data=data)
+
+    def test_start_and_provider_events_require_info(self):
+        for kind in (d.EventType.RUN_START, d.EventType.PROVIDER_REQUEST, d.EventType.PROVIDER_RESPONSE):
+            event(type=kind, severity=d.DiagnosticSeverity.INFO, data={})
+            for severity in (d.DiagnosticSeverity.WARNING, d.DiagnosticSeverity.ERROR):
+                with self.subTest(kind=kind, severity=severity), self.assertRaises(ValueError):
+                    event(type=kind, severity=severity, data={})
+
+    def test_run_end_severity_mapping_is_not_a_lifecycle_policy_yet(self):
+        for severity in d.DiagnosticSeverity:
+            event(type=d.EventType.RUN_END, severity=severity, data={'status': 'success'})
 
     def test_provider_response_integer_counts_and_null_tokens(self):
         data = {'provider_type': 'openai', 'input_tokens': 3, 'output_tokens': None,
