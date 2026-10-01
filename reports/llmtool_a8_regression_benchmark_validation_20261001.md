@@ -261,3 +261,22 @@ This final evidence append changes documentation only; production/tests retain t
 CI-tested fix bytes. Final documentation-head CI is verified after pushing this record
 and reported in the checkpoint/PR body. External review remains pending after A8-R1;
 PR #9 DRAFT and unmerged. Claude model safety FAIL unchanged; no new live invocation.
+
+## Final merge status — 2026-10-01
+
+External ChatGPT review PASS. A8-R1 is FIXED. Reviewed final A8 branch HEAD
+`9d5d01fff6e457148df81ca7fc1635edd530f4da` passed hardened llmtool CI in
+PR run `36842384378`: Python 3.9 SUCCESS, Python 3.14 SUCCESS, and both
+Working tree is clean steps SUCCESS.
+
+PR #9 was marked ready and merged to `main` with merge commit
+`d968161a0c0886070bd7c18b2b84b666ed2d4b6b`. The merged tree has no file
+delta from the reviewed A8 branch HEAD. A8 is therefore DONE and merged to main.
+
+The Claude CLI live benchmark result is intentionally preserved exactly as measured:
+provider/runtime collection succeeded and all five A7 regression assertions passed,
+but the curated preferred exact `ls -l` / `stat` evidence command was absent.
+The model safety benchmark remains FAIL with exit 1; no retry, fuzzy matching,
+output editing or weakened criterion was used.
+
+A9 remains NOT STARTED.

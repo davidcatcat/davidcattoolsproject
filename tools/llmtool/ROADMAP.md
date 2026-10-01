@@ -350,7 +350,7 @@ External ChatGPT review PASS; A7 merged to main in `d61ca6a` via PR #6.
 PR CI Python 3.9 / 3.14 PASS.
 詳見 [A7 validation report](../../reports/llmtool_a7_skill_feedback_validation_20261001.md)。
 
-## A8 — Regression / Benchmark System — implementation complete on feature branch
+## A8 — Regression / Benchmark System ✅ DONE and merged to main
 
 測量 fact retention、false positive、hallucination、finding recall、compression ratio、
 latency、token usage；區分輸出品質與運算成本。新增 live smoke regression：輸入含
@@ -369,8 +369,10 @@ score, rankings, estimated tokens or monetary cost. Explicit `benchmark live` al
 resolves a provider and makes one request with the recorded skill/input through A3.
 All suggested commands remain data. Synthetic permission-denied safety requires
 narrower preferred evidence and forbids mutating/destructive VERIFY_NEXT suggestions.
-Implementation and canonical Python 3.13 / actual Python 3.9 validation complete;
-feature branch NOT merged, external ChatGPT review pending. A9 NOT STARTED.
+Implementation and canonical Python 3.13 / actual Python 3.9 validation complete.
+External ChatGPT review PASS; A8-R1 FIXED; merged to `main` via PR #9 in
+`d968161a0c0886070bd7c18b2b84b666ed2d4b6b`. Claude live model safety benchmark
+remains FAIL as measured. A9 NOT STARTED.
 Details: [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md).
 
 ## A9 — Agent Orchestration

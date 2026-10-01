@@ -48,7 +48,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A6 — Safety & Validator Layer:** DONE and merged to `main` (`63b5bae`); external review PASS
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
-- **A8 — Regression / Benchmark System:** implementation complete on feature branch after canonical validation; NOT merged, external review pending. A9 NOT STARTED.
+- **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured. A9 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1192,8 +1192,9 @@ the validation report. No live provider call was made or required.
 
 Benchmark measures outputs; it grants no authorization and is not an Agent.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator
-!= Feedback Case != Benchmark. A0–A7 and hardening remain merged; A8 is on its
-feature branch, not merged. A9 NOT STARTED.
+!= Feedback Case != Benchmark. A0–A8 and hardening are merged to `main`; external
+ChatGPT review PASS and A8-R1 is FIXED. Claude live model safety benchmark remains
+FAIL as measured. A9 NOT STARTED.
 
 ```sh
 llmtool benchmark evaluate --case regression.json --output-file candidate.json --json
