@@ -411,6 +411,25 @@ class BenchmarkCLITests(unittest.TestCase):
             code,raw,error=self.invoke(['live','--spec',str(path),'--json'])
         self.assertEqual(code,1); self.assertFalse(marker.exists()); client.complete.assert_called_once()
 
+    def test_live_readiness_failure_before_credentials(self):
+        client = Mock()
+        def resolve(options, *, require_configured=False):
+            if require_configured:
+                raise LLMToolError('provider model is not configured')
+            return {}
+        with patch('llmtool.config.resolve_config', side_effect=resolve) as config, \
+             patch('llmtool.config.api_key') as key, \
+             patch('llmtool.providers.create_client', return_value=client) as factory:
+            code, raw, error = self.invoke(['live', '--case', str(self.casefile), '--provider', 'fake', '--json'])
+        self.assertEqual((code, raw), (1, ''))
+        self.assertIn('provider model is not configured', error)
+        config.assert_called_once()
+        self.assertEqual(config.call_args.kwargs, {'require_configured': True})
+        self.assertEqual(config.call_args.args[0]['provider'], 'fake')
+        key.assert_not_called()
+        factory.assert_not_called()
+        client.complete.assert_not_called()
+
     def test_live_precondition_fails_before_provider(self):
         future=case()
         from llmtool.feedback import RegressionCase

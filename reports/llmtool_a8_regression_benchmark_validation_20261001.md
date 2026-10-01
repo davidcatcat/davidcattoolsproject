@@ -202,3 +202,50 @@ Both runs tested the implementation SHA above with the existing hardened workflo
 This report append is documentation-only; production/tests/fixtures and workflow
 remain byte-identical to that tested implementation. Final-head PR CI is checked
 again after this append; final checkpoint reports its status. No live rerun.
+
+## External-review follow-up: A8-R1 — 2026-10-01
+
+Starting branch HEAD: `0c722cd8b6def45acb16a4181d8f94069e657aee`.
+Fetched main remains `a01015b677d2335792e9ea69fbfe5a8ff7dec319`.
+Historical final-head [PR CI 36819909127](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36819909127)
+verified before this follow-up: Python 3.9 SUCCESS, Python 3.14 SUCCESS, both
+Working tree is clean steps SUCCESS. These results apply to the old HEAD, not
+as remote proof of the new production/test fix.
+
+External ChatGPT review identified A8-R1: live could resolve API-key environment
+values before detecting incomplete provider readiness. FIXED with exactly
+`resolve_config(options, require_configured=True)` in collect_live_benchmark().
+The existing config contract performs provider validate_ready before returning;
+api_key() and create_client() remain afterward. No config.py redesign or manually
+copied readiness logic. Existing valid live single-request/prompt/timing/metadata
+semantics are preserved; offline behavior and benchmark result semantics unchanged.
+
+New test `test_live_readiness_failure_before_credentials` uses fake resolution
+that raises readiness failure when require_configured=True, asserts that keyword
+and explicit profile selection, and proves api_key, create_client and provider
+complete are never called. No real credentials or provider request. Existing live
+tests retained unchanged; one new test added.
+
+| Gate | Discovered | Passed | Failed | Errors | Skipped | Elapsed |
+|---|---:|---:|---:|---:|---:|---:|
+| A8 focused test_benchmark.py | 56 | 56 | 0 | 0 | 0 | 0.469 s |
+| Canonical Python 3.13.3 syntax + complete suite | 482 | 481 | 0 | 0 | 1 | 43.760 s |
+| Actual Python 3.9.6 syntax + complete suite | 482 | 481 | 0 | 0 | 1 | 68.803 s |
+
+Both complete make check runs exited 0 with compileall PASS, launched from the
+canonical repository. One inherited A5 host-filesystem skip, no A8 skips.
+`git diff --check` PASS. Complete follow-up diff/security review PASS: readiness
+precedes credential value resolution; no credential output, raw provider stderr,
+subprocess, command/Git execution, Agent/A9, approval engine or automatic skill/
+feedback mutation added. Existing Provider abstraction remains the live boundary.
+Only benchmark_cli.py, test_benchmark.py and this report change; README/ROADMAP
+remain accurate without edits. Unrelated untracked files preserved.
+
+Claude evidence remains exactly measured: framework/runtime collection succeeded;
+5/5 A7 assertions passed, no MUTATING or DESTRUCTIVE suggestions, preferred exact
+ls -l/stat absent; model safety benchmark FAIL and exit 1. No live rerun, retry,
+fuzzy matching, altered output or relaxed expectation.
+
+New-fix remote CI pending commit/push; old-head SUCCESS above is historical only.
+Final-head remote results will be recorded after verification. PR #9 remains DRAFT,
+A8 unmerged, external review pending after the fix. A9 NOT STARTED.

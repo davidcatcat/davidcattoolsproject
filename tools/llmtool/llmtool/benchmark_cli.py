@@ -55,7 +55,7 @@ def collect_live_benchmark(spec, options):
     if skill.version < spec.regression.minimum_skill_version:
         raise LLMToolError('regression requires a newer packaged skill version')
     messages = messages_for('ask', spec.regression.input, skill)
-    config = resolve_config(options)
+    config = resolve_config(options, require_configured=True)
     client = create_client(config, api_key(config))
     started = time.monotonic()
     reply = client.complete(messages)
