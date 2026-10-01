@@ -365,3 +365,28 @@ this helper-only patch, and prior four-case smoke remains historical evidence.
 The known unrelated untracked reports were untouched. No branch/worktree/clone,
 gh command or new PR was created/used. Normal scoped commit/push updates PR #11;
 do not merge. M6 remains DEFERRED. A10 NOT STARTED. Await ChatGPT final merge review.
+
+
+## Final merge status — 2026-10-02
+
+External ChatGPT final merge review: PASS.
+
+Final reviewed branch head:
+
+`566cdb518ce7c3a3b1b3bbff888fe25a2827178f`
+
+Exact-head GitHub Actions run `36896840814`: SUCCESS. Python 3.9 and
+Python 3.14 each ran 552/552 tests PASS; Offline canonical checks and
+Working tree is clean both succeeded.
+
+PR #11 was marked ready for review and merged to `main` with a normal
+merge commit:
+
+`5f581b46968a2dd09d808b3d3125beb4597c0fc1`
+
+Merge parents are the previous main
+`f5001b54978dc77c40468ddd099c6cbd78d86ce6` and final reviewed branch
+head `566cdb518ce7c3a3b1b3bbff888fe25a2827178f`.
+
+Post-A9 hardening is DONE and merged. M6 remains DEFERRED by design.
+The historical Claude A8 model safety FAIL remains preserved. A10 NOT STARTED.

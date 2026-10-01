@@ -1393,9 +1393,14 @@ retain generated/user-supplied material. Roles do not automatically select skill
 role + explicit skill composition remains future work. See the
 [A9 validation report](../../reports/llmtool_a9_agent_orchestration_validation_20261001.md).
 
-## Post-A9 Hardening — feature branch, external review pending
+## Post-A9 Hardening — DONE and merged to main
 
-A0–A9 remain DONE and merged. M1/M2/M3/M4/M5/M7 and current-status docs are hardened on
-`fix/post-a9-hardening`; this pass is not merged. M6 preferred_verify_next_any matching is DEFERRED
-for a separate design review; exact A8 criteria and the historical Claude model safety FAIL remain preserved.
-A10 NOT STARTED. Evidence: [hardening validation report](../../reports/llmtool_post_a9_hardening_validation_20261001.md).
+A0–A9 remain DONE and merged. Post-A9 hardening is DONE and merged to `main` via PR #11
+(`5f581b46968a2dd09d808b3d3125beb4597c0fc1`) after external ChatGPT review PASS and Claude
+re-review APPROVE. Final reviewed branch head `566cdb518ce7c3a3b1b3bbff888fe25a2827178f`
+passed Python 3.9 / 3.14 CI with 552/552 tests in each job. M1/M2/M3/M4/M5/M7, R1–R8,
+and the final F1 credential-source gap are fixed within the documented bounded contracts.
+Unsafe analyze-log NEXT_COMMANDS suggestions are visibly suppressed as text; no suggested command is executed.
+M6 preferred_verify_next_any matching remains DEFERRED for a separate design review; exact A8 criteria and
+the historical Claude model safety FAIL remain preserved. A10 NOT STARTED. Evidence:
+[hardening validation report](../../reports/llmtool_post_a9_hardening_validation_20261001.md).

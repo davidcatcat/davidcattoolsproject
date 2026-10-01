@@ -481,14 +481,16 @@ roles、command 等欄位。此 roadmap 不加入 RAG、vector DB、embeddings �
 再以 A12 Remote Frontends / Telegram Agent 擴充遠端入口；A12 是未來附加功能，不改變
 既有 milestone 的完成狀態、驗證紀錄或主線開發順序。
 
-## Post-A9 Hardening — feature branch / external review pending
+## Post-A9 Hardening ✅ DONE and merged to main
 
-A0–A9 DONE and merged；本次 hardening 尚未 merged。修正 kubectl connection/auth/impersonation
+A0–A9 DONE and merged；Post-A9 hardening 亦已透過 PR #11 合併到 `main`
+（merge commit `5f581b46968a2dd09d808b3d3125beb4597c0fc1`）。修正 kubectl connection/auth/impersonation
 approval floor、nonblocking stdin conflict、configure preservation、A9 explicit-profile isolation、Unicode
-text controls 與 analyze-log credential-display guard。Plain kubectl SAFE_READ 的前提是 trusted
-kubeconfig/context 且沒有連線／認證／impersonation overrides。analyze-log 不執行或改寫命令，
-不支援的 NEXT_COMMANDS 格式 fail closed；UNKNOWN 文字並不表示安全。
-M6 preferred_verify_next_any = DEFERRED（semantic equivalence、exact curated evidence、prompted vs
-unprompted evidence 需要獨立設計決策）；保留 A8 criteria 和 Claude measured model safety FAIL。
+text controls、analyze-log credential-display guard，以及 final F1 credential-source gap。Plain kubectl
+SAFE_READ 的前提是 trusted kubeconfig/context 且沒有連線／認證／impersonation overrides。
+analyze-log 從不執行 NEXT_COMMANDS；不安全或不支援的建議只會以可見 marker 抑制，不會丟掉可用分析。
+External ChatGPT review PASS；Claude re-review APPROVE；final reviewed head `566cdb5` 的 Python 3.9 / 3.14
+CI 各 552/552 PASS。M6 preferred_verify_next_any = DEFERRED（semantic equivalence、exact curated evidence、
+prompted vs unprompted evidence 需要獨立設計決策）；保留 A8 criteria 和 Claude measured model safety FAIL。
 A10 NOT STARTED；Anthropic HTTP API 仍是 future A2.3。
 詳見 [hardening validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md)。
