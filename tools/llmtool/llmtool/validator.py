@@ -122,16 +122,81 @@ def _segments(text):
     return segments, operators, bool(quote or escaped)
 
 
-def _sensitive_path(value):
+KUBECTL_CONNECTION_OPTIONS = frozenset((
+    '-s', '--server', '--token', '--kubeconfig', '--kuberc', '--as',
+    '--as-group', '--as-uid', '--as-user-extra', '--client-certificate',
+    '--client-key', '--certificate-authority', '--username', '--password',
+    '--insecure-skip-tls-verify', '--tls-server-name', '--proxy-url',
+    '--cluster', '--user',
+))
+
+def sensitive_path(value):
     path = value.lower()
     basename = path.rsplit('/', 1)[-1]
-    return (any(word in path for word in ('credential', 'secret', 'token', 'kubeconfig',
+    return (any(word in path for word in ('credential', 'secret', 'token', 'password', 'api_key', 'api-key', 'config', 'kubeconfig',
                                          '.ssh', '.aws/', '.kube/', 'keychain', 'keystore',
                                          '.password-store', '.netrc', '.npmrc', '.pypirc',
                                          'private-key', 'private_key', 'id_rsa', 'id_ed25519', 'id_dsa', 'id_ecdsa'))
-            or basename.startswith('.env') or basename.endswith(('.pem', '.key', '.p12', '.pfx'))
-            or basename in ('application.yml', 'application.yaml', 'application.properties')
+            or basename.startswith('.env') or basename.endswith(('.pem', '.key', '.p12', '.pfx', '.conf'))
+            or basename in ('.pgpass', 'application.yml', 'application.yaml', 'application.properties')
+            or path in ('/etc/shadow', '/etc/gshadow')
+            or re.fullmatch(r'/proc/(?:[0-9]+|self|thread-self|\*)/environ', path) is not None
             or ('config' in basename and (path.startswith('/etc/') or basename.endswith(('.yaml', '.yml', '.json', '.ini', '.conf')))))
+
+
+def connection_override(tokens):
+    """Detect explicit Kubernetes destination/identity overrides; no policy."""
+    return any(a.split('=', 1)[0] in KUBECTL_CONNECTION_OPTIONS
+               or (a.startswith('-s') and not a.startswith('--')) for a in tokens)
+
+
+def secret_resource(value):
+    """Recognize literal Secret resources and raw API path components."""
+    return any(part.lower().split('.', 1)[0] in ('secret', 'secrets')
+               for item in value.split(',') for part in item.split('/'))
+
+
+def credential_display(command, include_connection=True):
+    """Bounded literal exposure facts shared by A6 and suggestion filtering.
+
+    No expansions, aliases, shell interpretation or authorization are performed.
+    """
+    if not isinstance(command, str) or len(command) > COMMAND_LIMIT:
+        return False
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    names = [t.rsplit('/', 1)[-1] for t in tokens]
+    displays = ('cat', 'grep', 'head', 'tail', 'sed', 'awk', 'less', 'more',
+                'base64', 'hexdump', 'xxd', 'strings', 'od')
+    if any(n in displays for n in names) and any(sensitive_path(t) for t in tokens):
+        return True
+    if tokens == ['set'] or 'printenv' in names:
+        return True
+    for i, name in enumerate(names):
+        tail = tokens[i + 1:]
+        if name == 'env' and not tail:
+            return True
+        if name in ('kubectl', 'oc'):
+            if include_connection and connection_override(tail):
+                return True
+            if 'xargs' in names[:i] and 'get' in tail:
+                return True  # Runtime-supplied resource selections are opaque.
+            if 'get' in tail and any(secret_resource(t) for t in tail):
+                return True
+            if ('get' in tail and any('jsonpath' in t or 'template' in t for t in tail)
+                    and any('env' in t.lower() or 'data' in t.lower() for t in tail)):
+                return True
+        if name == 'aws' and tail[:2] == ['secretsmanager', 'get-secret-value']:
+            return True
+        if name == 'vault' and tail[:2] == ['kv', 'get']:
+            return True
+        if name == 'helm' and tail[:2] == ['get', 'values']:
+            return True
+        if name == 'git' and 'config' in tail and any(t in ('--list', '-l') for t in tail):
+            return True
+    return False
 
 
 def _simple(text):
@@ -185,7 +250,7 @@ def _simple(text):
     if name in ('env', 'printenv'):
         return CommandRisk.SENSITIVE_READ
     if name in ('cat', 'head', 'tail', 'less', 'more', 'grep', 'rg', 'sed', 'awk', 'strings'):
-        return CommandRisk.SENSITIVE_READ if any(_sensitive_path(a) for a in args) else CommandRisk.UNKNOWN
+        return CommandRisk.SENSITIVE_READ if any(sensitive_path(a) for a in args) else CommandRisk.UNKNOWN
     if name == 'security' and args and args[0] in ('find-generic-password', 'find-internet-password', 'dump-keychain'):
         return CommandRisk.SENSITIVE_READ
     if name == 'aws' and args[:2] == ['configure', 'export-credentials']:
@@ -248,6 +313,27 @@ def _simple(text):
             return CommandRisk.SENSITIVE_READ
         return CommandRisk.UNKNOWN
     if name == 'kubectl':
+        # Destination, identity and impersonation overrides can forward trusted
+        # context credentials elsewhere. Never strip them into SAFE_READ.
+        overrides = KUBECTL_CONNECTION_OPTIONS
+        if connection_override(args):
+            remaining = []
+            index = 0
+            while index < len(args):
+                option = args[index].split('=', 1)[0]
+                if option in overrides or option in ('-n', '--namespace', '--context'):
+                    if '=' in args[index] or option == '--insecure-skip-tls-verify':
+                        index += 1
+                    elif index + 1 < len(args):
+                        index += 2
+                    else:
+                        return CommandRisk.UNKNOWN
+                elif args[index].startswith('-s') and not args[index].startswith('--'):
+                    index += 1
+                else:
+                    remaining.append(args[index])
+                    index += 1
+            return max(CommandRisk.UNKNOWN, _simple('kubectl ' + shlex.join(remaining)), key=RISK_ORDER.get)
         while args and args[0] in ('-n', '--namespace', '-s', '--server', '--context'):
             if len(args) < 2:
                 return CommandRisk.UNKNOWN
@@ -262,7 +348,7 @@ def _simple(text):
             return CommandRisk.MUTATING
         if args[0] == 'get' and len(args) >= 2:
             resource = args[1].lower()
-            if any(r.split('/')[0] in ('secret', 'secrets') for r in resource.split(',')):
+            if secret_resource(resource):
                 return CommandRisk.SENSITIVE_READ
             if resource in ('pods', 'pod', 'deployments', 'deployment', 'events', 'event'):
                 if len(args) == 2 or (len(args) == 3 and re.fullmatch(r'[a-z0-9][a-z0-9.-]*', args[2])):
@@ -325,6 +411,8 @@ def classify_command(command):
     if operators and (any(not part.strip() for part in parts) or any(op in ('>', '>>', '<') for op in operators)):
         risks.append(CommandRisk.UNKNOWN)
     risk = max(risks, key=RISK_ORDER.__getitem__)
+    if credential_display(command, include_connection=False):
+        risk = max((risk, CommandRisk.SENSITIVE_READ), key=RISK_ORDER.__getitem__)
     if unsafe_controls:
         risk = max((risk, CommandRisk.UNKNOWN), key=RISK_ORDER.__getitem__)
     return CommandAssessment(command, risk, REASONS[risk])

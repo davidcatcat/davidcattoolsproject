@@ -147,7 +147,7 @@ class SkillCLITests(unittest.TestCase):
             result = self.run_cli(['skill', 'show', 'analyze-log'])
         self.assertEqual(result[0], 0)
         self.assertIn(load_skill('analyze-log').instructions, result[1])
-        self.assertIn('"version": 1', result[1])
+        self.assertIn('"version": 2', result[1])
 
     def test_unknown_and_traversal_cli(self):
         with patch('llmtool.cli.create_client', side_effect=AssertionError):
@@ -167,12 +167,14 @@ class SkillCLITests(unittest.TestCase):
             config.write_text('providers:\n  default:\n    base_url: http://example.test\n    model: test\n')
             before = config.read_bytes()
             client = Mock()
-            command = 'git status; cat /etc/private-config; touch forbidden'
+            command = 'NEXT_COMMANDS:\n- git status; cat /etc/private-config; touch forbidden'
             client.complete.return_value = Reply(command, {})
             text = '  exact 測試\n'
             with patch('pathlib.Path.home', return_value=home), patch('llmtool.cli.create_client', return_value=client), patch('llmtool.cli.api_key', return_value=None), patch('llmtool.cli.read_input', return_value=text), patch('subprocess.run', side_effect=AssertionError), patch('subprocess.Popen', side_effect=AssertionError), patch('os.system', side_effect=AssertionError):
                 result = self.run_cli(['ask', '--skill', 'analyze-log', text])
-            self.assertEqual(result, (0, command+'\n', ''))
+            self.assertEqual(result[0], 0)
+            self.assertNotIn(command, result[1])
+            self.assertIn('suppressed 1', result[2])
             client.complete.assert_called_once_with(messages_for('ask', text, load_skill('analyze-log')))
             self.assertEqual(config.read_bytes(), before)
             self.assertFalse((home / 'forbidden').exists())

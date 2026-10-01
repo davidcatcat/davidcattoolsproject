@@ -2,7 +2,7 @@
 
 目標是 generic, portable LLM CLI and future orchestration foundation。
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
-coder、reviewer；Agent 是可使用工具或修改環境的執行實體。三者分離，不用模型品牌
+coder、reviewer；目前 A9 AgentStep 是 role + explicit profile + bounded text handoff，沒有工具或環境修改權限。三者分離，不用模型品牌
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
 
 以下 A0 驗證成果沿用既有 benchmark 與已記錄的驗證結果，並非本輪重新連線測得。
@@ -372,7 +372,7 @@ narrower preferred evidence and forbids mutating/destructive VERIFY_NEXT suggest
 Implementation and canonical Python 3.13 / actual Python 3.9 validation complete.
 External ChatGPT review PASS; A8-R1 FIXED; merged to `main` via PR #9 in
 `d968161a0c0886070bd7c18b2b84b666ed2d4b6b`. Claude live model safety benchmark
-remains FAIL as measured. A9 NOT STARTED.
+remains FAIL as measured. A9 is DONE and merged; see below.
 Details: [A8 validation report](../../reports/llmtool_a8_regression_benchmark_validation_20261001.md).
 
 ## A9 — Agent Orchestration ✅ DONE and merged to main
@@ -385,6 +385,8 @@ A9 parser hard cap 為 8 steps；目前只有四個 built-in unique roles，所�
 task + immediately previous role output；不累積所有歷史輸出、不做 hidden memory。
 Fail-fast，無 retry、fallback、parallel fan-out、voting、loop、branch 或 dynamic routing。
 Provider readiness 必須先於 credential value resolution。
+Post-A9 hardening 以 resolve_profile_config 讀 trusted persisted user profile，忽略 cwd project 與 generic
+LLMTOOL_* request overrides；configured api_key_env 的 secret value 仍在 readiness 後讀取。
 
 所有 model output 都是 untrusted TEXT ONLY；不得執行 shell、VERIFY_NEXT、Git、
 file/code edit、patch、tests 或 provider-native tools。A9 validator role 是 LLM review
@@ -398,9 +400,8 @@ profiles 並各呼叫 Provider.complete 一次。
 Anthropic HTTP API 仍屬 A2.3 planned/unimplemented；A9 不 special-case Anthropic，
 未來 provider registry 加入後即可由同一 plan/profile contract 使用。
 
-A9 feature branch implementation complete；prior external ChatGPT review / CI PASS。
-Output-budget follow-up local validation / Python 3.9、3.14 CI PASS；updated external review pending。
-NOT merged。A10 NOT STARTED。
+A9 DONE and merged via PR #10 (`8776476`)；A9-R1 FIXED，updated external ChatGPT review PASS，
+final-head Python 3.9/3.14 CI PASS。A10 NOT STARTED。
 
 ## A10 — Dynamic Context Retrieval
 
@@ -479,3 +480,15 @@ roles、command 等欄位。此 roadmap 不加入 RAG、vector DB、embeddings �
 整體方向由 A3.5 Interactive Chat Shell 提供互動入口，主線逐步建立至 A11 Production Workflow，
 再以 A12 Remote Frontends / Telegram Agent 擴充遠端入口；A12 是未來附加功能，不改變
 既有 milestone 的完成狀態、驗證紀錄或主線開發順序。
+
+## Post-A9 Hardening — feature branch / external review pending
+
+A0–A9 DONE and merged；本次 hardening 尚未 merged。修正 kubectl connection/auth/impersonation
+approval floor、nonblocking stdin conflict、configure preservation、A9 explicit-profile isolation、Unicode
+text controls 與 analyze-log credential-display guard。Plain kubectl SAFE_READ 的前提是 trusted
+kubeconfig/context 且沒有連線／認證／impersonation overrides。analyze-log 不執行或改寫命令，
+不支援的 NEXT_COMMANDS 格式 fail closed；UNKNOWN 文字並不表示安全。
+M6 preferred_verify_next_any = DEFERRED（semantic equivalence、exact curated evidence、prompted vs
+unprompted evidence 需要獨立設計決策）；保留 A8 criteria 和 Claude measured model safety FAIL。
+A10 NOT STARTED；Anthropic HTTP API 仍是 future A2.3。
+詳見 [hardening validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md)。

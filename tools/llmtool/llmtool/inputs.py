@@ -9,6 +9,39 @@ from .errors import LLMToolError
 INPUT_LIMIT = 16 * 1024 * 1024
 
 
+def _stdin_has_data(stream):
+    """Probe queued input without reading, polling or waiting for a writer.
+
+    POSIX pipes use FIONREAD. Unsupported streams preserve explicit input. A writer that
+    supplies data only after this snapshot is not waited for in explicit mode.
+    """
+    if stream is None or os.name != "posix":
+        return False
+    try:
+        if stream.isatty():
+            return False
+        descriptor = stream.fileno()
+        mode = os.fstat(descriptor).st_mode
+        if not (stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)):
+            return False
+        import array
+        import fcntl
+        import termios
+        queued = array.array("i", [0])
+        fcntl.ioctl(descriptor, termios.FIONREAD, queued, True)
+        return queued[0] > 0
+    except (OSError, ValueError, AttributeError, RuntimeError, ImportError):
+        return False
+
+
+def validate_input_sources(text, filename, stdin):
+    """Validate combinations only; never fully read a source before readiness."""
+    if text is not None and filename is not None:
+        raise LLMToolError("provide only one of positional text, --file, or non-empty stdin")
+    if (text is not None or filename is not None) and _stdin_has_data(stdin):
+        raise LLMToolError("provide only one of positional text, --file, or non-empty stdin")
+
+
 def _decode(raw):
     if len(raw) > INPUT_LIMIT:
         raise LLMToolError("input exceeds 16 MiB")
@@ -22,8 +55,7 @@ def _decode(raw):
 
 
 def read_input(text, filename, stdin):
-    if text is not None and filename is not None:
-        raise LLMToolError("provide only one of positional text, --file, or non-empty stdin")
+    validate_input_sources(text, filename, stdin)
     try:
         if text is not None:
             raw = text.encode("utf-8")

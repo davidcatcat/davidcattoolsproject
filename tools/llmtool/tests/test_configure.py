@@ -222,9 +222,10 @@ class ConfigureTests(unittest.TestCase):
         self.assertTrue(result)
         saved = yaml.safe_load(self.path.read_text())
         self.assertIn("other", saved["providers"])
-        self.assertEqual(saved["active_provider"], "new")
+        self.assertEqual(saved["active_provider"], "other")
+        self.assertEqual(saved["generation"]["max_tokens"], 30)
         self.assertEqual(saved["providers"]["new"]["provider_options"], {"enable_thinking": False})
-        self.assertIn("Active provider: new", out)
+        self.assertIn("Active provider: other", out)
 
     def test_invalid_endpoint_or_model_rejected_before_write(self):
         for url, model in (("file:///etc/passwd", "model"),

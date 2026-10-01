@@ -28,7 +28,8 @@ def _text(value):
         value.encode("utf-8")
     except UnicodeError:
         raise LLMToolError("context packet text must be valid UTF-8") from None
-    if any(ord(c) < 32 and c not in "\n\r\t" for c in value) or "\x7f" in value:
+    from .terminal import contains_unsafe_controls
+    if contains_unsafe_controls(value):
         raise LLMToolError("context packet text contains unsupported control characters")
     return value
 

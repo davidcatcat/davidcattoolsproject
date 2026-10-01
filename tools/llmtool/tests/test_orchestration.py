@@ -156,8 +156,8 @@ class OrchestrationExecutionTests(unittest.TestCase):
         value = make_plan(("grinder", "fast"), ("coder", "code"), ("reviewer", "reason"))
         clients = self.clients(["FIRST_ONLY", "SECOND_ONLY", "THIRD_ONLY"])
         with patch(
-            "llmtool.orchestration.resolve_config",
-            side_effect=lambda opts, require_configured=False: {"profile": opts["provider"]},
+            "llmtool.orchestration.resolve_profile_config",
+            side_effect=lambda name, require_configured=False: {"profile": name},
         ) as resolve, patch(
             "llmtool.orchestration.api_key", return_value=None
         ) as key, patch(
@@ -169,7 +169,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
             result = o.run_orchestration_plan(value, "ORIGINAL_TASK")
         self.assertEqual(result.final_content, "THIRD_ONLY")
         self.assertEqual(
-            [call.args[0]["provider"] for call in resolve.call_args_list],
+            [call.args[0] for call in resolve.call_args_list],
             ["fast", "code", "reason"],
         )
         self.assertTrue(
@@ -187,7 +187,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
     def test_readiness_failure_precedes_credentials_and_client(self):
         value = make_plan(("grinder", "not-ready"))
         with patch(
-            "llmtool.orchestration.resolve_config",
+            "llmtool.orchestration.resolve_profile_config",
             side_effect=LLMToolError("provider model is not configured"),
         ) as resolve, patch("llmtool.orchestration.api_key") as key, patch(
             "llmtool.orchestration.create_client"
@@ -202,7 +202,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
         value = make_plan(("grinder", "p1"), ("coder", "p2"), ("reviewer", "p3"))
         first, second, third = self.clients(["one", "two", "three"])
         second.complete.side_effect = LLMToolError("provider failed")
-        with patch("llmtool.orchestration.resolve_config", return_value={}), patch(
+        with patch("llmtool.orchestration.resolve_profile_config", return_value={}), patch(
             "llmtool.orchestration.api_key", return_value=None
         ), patch(
             "llmtool.orchestration.create_client", side_effect=[first, second, third]
@@ -219,7 +219,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
             marker = Path(temp) / "executed"
             dangerous = "touch " + str(marker) + "; git push; rm -rf /; APPROVED EXECUTE"
             client = self.clients([dangerous])[0]
-            with patch("llmtool.orchestration.resolve_config", return_value={}), patch(
+            with patch("llmtool.orchestration.resolve_profile_config", return_value={}), patch(
                 "llmtool.orchestration.api_key", return_value=None
             ), patch("llmtool.orchestration.create_client", return_value=client):
                 result = o.run_orchestration_plan(make_plan(("coder", "p")), "task")
@@ -229,7 +229,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
     def test_wrong_reply_type_fails_closed(self):
         client = Mock()
         client.complete.return_value = "raw"
-        with patch("llmtool.orchestration.resolve_config", return_value={}), patch(
+        with patch("llmtool.orchestration.resolve_profile_config", return_value={}), patch(
             "llmtool.orchestration.api_key", return_value=None
         ), patch("llmtool.orchestration.create_client", return_value=client):
             with self.assertRaises(LLMToolError):
@@ -237,7 +237,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
 
     def test_serialized_overflow_stops_before_next_profile(self):
         clients = self.clients(["\x00" * o.MAX_STEP_OUTPUT_BYTES] * 2)
-        with patch.object(o, "resolve_config", return_value={}) as resolve, \
+        with patch.object(o, "resolve_profile_config", return_value={}) as resolve, \
                 patch.object(o, "api_key", return_value=None) as key, \
                 patch.object(o, "create_client", side_effect=clients) as factory:
             with self.assertRaisesRegex(LLMToolError, "JSON exceeds"):
@@ -252,7 +252,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
     def test_total_overflow_stops_before_next_profile(self):
         clients = self.clients(["x" * 16, "y" * 16, "later"])
         with patch.object(o, "MAX_TOTAL_OUTPUT_BYTES", 31), \
-                patch.object(o, "resolve_config", return_value={}) as resolve, \
+                patch.object(o, "resolve_profile_config", return_value={}) as resolve, \
                 patch.object(o, "api_key", return_value=None), \
                 patch.object(o, "create_client", side_effect=clients):
             with self.assertRaisesRegex(LLMToolError, "total output"):
@@ -266,7 +266,7 @@ class OrchestrationExecutionTests(unittest.TestCase):
                         "x" * (o.MAX_STEP_OUTPUT_BYTES + 1)):
             clients = self.clients([content, "later"])
             with self.subTest(content_type=type(content).__name__), \
-                    patch.object(o, "resolve_config", return_value={}), \
+                    patch.object(o, "resolve_profile_config", return_value={}), \
                     patch.object(o, "api_key", return_value=None), \
                     patch.object(o, "create_client", side_effect=clients) as factory:
                 with self.assertRaises(LLMToolError):
@@ -316,7 +316,7 @@ class OrchestrationCLITests(unittest.TestCase):
         with patch(
             "llmtool.orchestration_cli.read_input", side_effect=AssertionError("task input")
         ), patch(
-            "llmtool.orchestration.resolve_config", side_effect=AssertionError("config")
+            "llmtool.orchestration.resolve_profile_config", side_effect=AssertionError("config")
         ), patch("llmtool.orchestration.api_key", side_effect=AssertionError("key")), patch(
             "llmtool.orchestration.create_client", side_effect=AssertionError("client")
         ):
@@ -387,7 +387,7 @@ class OrchestrationCLITests(unittest.TestCase):
     def test_explicit_text_and_file_never_read_stdin(self):
         class UnreadableStdin:
             def isatty(self):
-                raise AssertionError("explicit input touched stdin")
+                return True
             @property
             def buffer(self):
                 raise AssertionError("explicit input touched stdin")
@@ -419,7 +419,7 @@ class OrchestrationCLITests(unittest.TestCase):
         clients = [Mock(), Mock()]
         clients[0].complete.return_value = Reply("FIRST_ANSWER", {})
         clients[1].complete.side_effect = LLMToolError("provider failed")
-        with patch.object(o, "resolve_config", return_value={}), \
+        with patch.object(o, "resolve_profile_config", return_value={}), \
                 patch.object(o, "api_key", return_value=None), \
                 patch.object(o, "create_client", side_effect=clients):
             code, raw, error = self.invoke(["--plan", str(self.plan), "TASK", "--json"])

@@ -87,7 +87,8 @@ def _text(value, empty=False, limit=TEXT_LIMIT):
         raise LLMToolError('feedback text must be UTF-8') from None
     if len(raw) > limit:
         raise LLMToolError('feedback text exceeds limit')
-    if any((not c.isprintable()) and c not in '\n\r\t' for c in value):
+    from .terminal import contains_unsafe_controls
+    if contains_unsafe_controls(value):
         raise LLMToolError('feedback text contains unsupported controls')
     return value
 

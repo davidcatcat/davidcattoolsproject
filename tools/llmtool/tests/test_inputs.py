@@ -9,13 +9,15 @@ from llmtool.cli import main
 
 
 class InputTests(unittest.TestCase):
-    def test_explicit_text_never_inspects_stdin(self):
+    def test_explicit_text_with_tty_does_not_read_stdin(self):
         stdin = Mock()
+        stdin.isatty.return_value = True
         self.assertEqual(read_input("explicit", None, stdin), "explicit")
         stdin.assert_not_called()
 
-    def test_explicit_file_never_inspects_stdin(self):
+    def test_explicit_file_with_tty_does_not_read_stdin(self):
         stdin = Mock()
+        stdin.isatty.return_value = True
         with open(__file__, encoding="utf-8") as source:
             expected = source.read()
         self.assertEqual(read_input(None, __file__, stdin), expected)

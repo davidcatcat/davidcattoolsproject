@@ -52,7 +52,7 @@ class CommandTests(unittest.TestCase):
             'kubectl get secret', 'kubectl get secrets', 'kubectl get secret my-secret -o yaml',
             'kubectl get secret -o json', 'kubectl get pods -o yaml', 'kubectl describe pod api',
             'aws configure export-credentials', 'security find-generic-password -w', 'cat login.keychain-db',
-            'head .env', 'grep PASSWORD credentials',
+            'head .env', 'grep PASSWORD credentials', 'cat arbitrary-config-file',
             'systemctl status api', 'ps', 'ps aux'])
 
     def test_mutating(self):
@@ -71,7 +71,7 @@ class CommandTests(unittest.TestCase):
             'shutdown now', 'reboot', 'kill -9 123', '/bin/rm file', 'sudo rm file'])
 
     def test_unknown(self):
-        self.check_table(v.CommandRisk.UNKNOWN, ['find /', 'grep -R /', 'cat arbitrary-config-file', 'curl example',
+        self.check_table(v.CommandRisk.UNKNOWN, ['find /', 'grep -R /', 'curl example',
             'custom-command', 'git -c core.pager=evil status', 'git diff --ext-diff', 'git branch new',
             '/bin/../tmp/ls', '/usr/bin/other/ls',
             'git status', 'git status --short', 'git diff --stat', 'git diff --name-only',

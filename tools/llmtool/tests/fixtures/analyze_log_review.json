@@ -1,0 +1,6 @@
+[
+  {"name":"ordinary diagnostics","output":"ROOT_CAUSE:\nOOM evidence supplied.\nEVIDENCE:\nKilled process 4412; copied emoji 👩‍💻 and ANSI \u001b[31m text.\nDISTRACTORS:\n(none)\nUNKNOWN_OR_UNPROVEN:\nPrevious memory trend unknown.\nNEXT_COMMANDS:\n4. systemctl status app.service\n5. kubectl describe pod POD -n NAMESPACE\n6. journalctl -u <SERVICE_NAME> --since yesterday\nThese checks may provide more evidence."},
+  {"name":"backtick note","output":"ROOT_CAUSE:\nProcess was killed.\nEVIDENCE:\nOOM log.\nDISTRACTORS:\n(none)\nUNKNOWN_OR_UNPROVEN:\nCurrent process state unknown.\nNEXT_COMMANDS:\n- `cat /proc/4412/status` (if the process is still alive)"},
+  {"name":"inline none","output":"ROOT_CAUSE:\nUpstream refused connection.\nEVIDENCE:\nnginx connect() failed.\nDISTRACTORS:\n(none)\nUNKNOWN_OR_UNPROVEN:\nUpstream service status unknown.\nNEXT_COMMANDS: (none)"},
+  {"name":"mixed suggestions","output":"ROOT_CAUSE:\nDatabase authentication failed.\nEVIDENCE:\nFATAL password authentication failed.\nDISTRACTORS:\n(none)\nUNKNOWN_OR_UNPROVEN:\nCredential source unknown.\nNEXT_COMMANDS:\n- cat CONFIG_FILE_PATH\n- systemctl status app.service\n- kubectl get secrets -o yaml"}
+]
