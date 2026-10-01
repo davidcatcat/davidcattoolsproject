@@ -142,8 +142,17 @@ def _simple(text):
     if not tokens:
         return CommandRisk.UNKNOWN
     # No expansions, substitutions, scripts, wrappers or interpreter analysis.
-    if any(c in text for c in ('$','`','(',')','{','}')):
+    if any(c in text for c in ('$','`','(',')')):
         return CommandRisk.UNKNOWN
+    if any(c in text for c in ('{', '}')):
+        # A literal numeric stash reference is Git data, not shell brace syntax.
+        git_args = tokens[1:]
+        while len(git_args) >= 2 and git_args[0] in ('-C', '-c'):
+            git_args = git_args[2:]
+        if (tokens[0] not in ('git', '/usr/bin/git', '/bin/git')
+                or git_args[:2] != ['stash', 'drop'] or len(git_args) != 3
+                or not re.fullmatch(r'stash@\{[0-9]+\}', git_args[2])):
+            return CommandRisk.UNKNOWN
     name, args = tokens[0], tokens[1:]
     if name.rsplit('/', 1)[-1] == 'sudo':
         if not args or args[0].startswith('-'):
@@ -202,6 +211,28 @@ def _simple(text):
         if operation == 'branch':
             return CommandRisk.DESTRUCTIVE if any(a.startswith('-') and not a.startswith('--') and 'D' in a[1:] for a in options) else CommandRisk.UNKNOWN
         if operation == 'checkout' and '--' in options and options.index('--') < len(options) - 1:
+            return CommandRisk.DESTRUCTIVE
+        # Only literal flags before the option terminator are options.
+        flags = options[:options.index('--')] if '--' in options else options
+        if operation == 'checkout' and any(a in ('-f', '--force') for a in flags):
+            return CommandRisk.DESTRUCTIVE
+        if operation == 'switch' and '--discard-changes' in flags:
+            return CommandRisk.DESTRUCTIVE
+        if operation == 'restore':
+            known = ('--staged', '-S', '--worktree', '-W')
+            if any(a.startswith('-') and a not in known for a in flags):
+                return CommandRisk.UNKNOWN
+            paths = [a for a in flags if a not in known]
+            if '--' in options:
+                paths += options[options.index('--') + 1:]
+            if not paths:
+                return CommandRisk.UNKNOWN
+            if any(a in ('--worktree', '-W') for a in flags) or not any(a in ('--staged', '-S') for a in flags):
+                return CommandRisk.DESTRUCTIVE
+            return CommandRisk.MUTATING
+        if operation == 'stash' and (options == ['clear'] or options == ['drop']
+                or (len(options) == 2 and options[0] == 'drop'
+                    and re.fullmatch(r'(?:[0-9]+|stash@\{[0-9]+\})', options[1]))):
             return CommandRisk.DESTRUCTIVE
         if operation in ('add', 'commit', 'push', 'pull', 'fetch', 'merge', 'rebase', 'checkout', 'switch', 'restore', 'stash', 'tag'):
             if operation == 'push' and (any(a == '-f' or a.startswith('--force') for a in options) or any(a.startswith(':') or (a.startswith('+') and len(a) > 1) for a in options)):

@@ -58,7 +58,7 @@ class CommandTests(unittest.TestCase):
     def test_mutating(self):
         self.check_table(v.CommandRisk.MUTATING, ['touch file', 'mkdir dir', 'cp a b', 'mv a b', 'chmod 600 file',
             'chown user file', 'git add .', 'git commit -am test', 'git push', 'git pull', 'git fetch',
-            'git merge other', 'git rebase main', 'git checkout branch', 'git switch main', 'git restore file',
+            'git merge other', 'git rebase main', 'git checkout branch', 'git switch main', 'git restore --staged file',
             'git stash', 'git reset HEAD', 'git diff --output=out', 'kubectl apply -f manifest.yaml',
             'kubectl patch pod api', 'kubectl edit deployment/api', 'kubectl scale deployment/api',
             'kubectl rollout restart deployment/api', 'systemctl restart api', 'systemctl start api',
@@ -110,6 +110,32 @@ class CommandTests(unittest.TestCase):
         self.check_table(v.CommandRisk.SENSITIVE_READ, commands)
         for command in commands:
             self.assertTrue(v.requires_approval(v.classify_command(command).risk))
+
+    def test_post_a7_restore_discard(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git restore .', 'git restore src/a.go',
+            'git restore --worktree .', 'git restore --worktree src/a.go', 'git restore -W .',
+            'git restore . --worktree', 'git restore --staged --worktree a', 'git restore -- .',
+            'git -C . restore src/a.go', 'git -c key=value restore -W .'])
+        self.check_table(v.CommandRisk.MUTATING, ['git restore --staged a', 'git restore -S a',
+            'git restore a --staged', 'git restore --staged -- a'])
+        self.check_table(v.CommandRisk.UNKNOWN, ['git restore', 'git restore --worktree',
+            'git restore --unsupported a', 'git restore --source HEAD a'])
+
+    def test_post_a7_forced_branch_switch(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git checkout -f main',
+            'git checkout --force main', 'git checkout main -f', 'git checkout main --force',
+            'git switch --discard-changes main', 'git switch main --discard-changes',
+            'git -C . checkout -f main', 'git -c key=value switch --discard-changes main'])
+        self.check_table(v.CommandRisk.MUTATING, ['git checkout main', 'git switch main',
+            'git switch -- --discard-changes'])
+
+    def test_post_a7_stash_deletion(self):
+        self.check_table(v.CommandRisk.DESTRUCTIVE, ['git stash drop', 'git stash drop stash@{0}',
+            "git stash drop 'stash@{12}'", 'git stash drop 0', 'git stash clear',
+            'git -C . stash drop stash@{0}', 'git -c key=value stash clear'])
+        self.check_table(v.CommandRisk.MUTATING, ['git stash', 'git stash push', 'git stash list'])
+        self.check_table(v.CommandRisk.UNKNOWN, ['git stash drop stash@{evil}',
+            'git stash drop stash@{0,1}', 'custom stash@{0}', 'git stash push stash@{0}'])
 
     def test_blank(self):
         self.check_table(v.CommandRisk.UNKNOWN, ['', ' ', '\t'])
