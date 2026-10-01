@@ -1,0 +1,6 @@
+{
+  "steps": [
+    {"role": "grinder", "provider": "fast-local"},
+    {"role": "reviewer", "provider": "reasoning-model"}
+  ]
+}
