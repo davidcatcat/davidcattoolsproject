@@ -49,7 +49,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A0–A6:** DONE and merged; A0–A7 bugfix/hardening merged to main (`643caa2`).
 - **A7 — Skill Trainer / Feedback Loop:** DONE and merged to main (`d61ca6a`); post-hardening validation and external ChatGPT review PASS
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
-- **A9 — Agent Orchestration:** implementation complete on feature branch; prior external ChatGPT review PASS. Output-budget follow-up local validation and Python 3.9/3.14 CI PASS; updated external review pending. NOT merged. A10 NOT STARTED.
+- **A9 — Agent Orchestration:** implementation complete on feature branch; A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS; NOT merged. A10 NOT STARTED.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
 automatic user config path handling, hidden API
@@ -1195,7 +1195,7 @@ Benchmark measures outputs; it grants no authorization and is not an Agent.
 Provider != Role != Agent != Skill != Context Packet != Git Intelligence != Validator
 != Feedback Case != Benchmark. A0–A8 and hardening are merged to `main`; external
 ChatGPT review PASS and A8-R1 is FIXED. Claude live model safety benchmark remains
-FAIL as measured. A9 NOT STARTED.
+FAIL as measured. A9 is implemented on its feature branch but is not merged; see the A9 section below.
 
 ```sh
 llmtool benchmark evaluate --case regression.json --output-file candidate.json --json
@@ -1348,7 +1348,7 @@ read task input, config, credentials, instantiate providers, or access network.
 Repository examples live under `orchestration/` and are not packaged.
 
 Anthropic HTTP API remains future A2.3 work. A9 has no Anthropic special case; a
-future registered provider can use the same explicit profile contract. A9 is on its feature branch and is not merged. Prior external review/CI passed; updated-head review/CI evidence is recorded in the validation report. A10 NOT STARTED.
+future registered provider can use the same explicit profile contract. A9 is on its feature branch and is not merged. A9-R1 is FIXED; updated external ChatGPT review PASS and final-head CI PASS. A10 NOT STARTED.
 
 A9 bounds: original task <= 1 MiB UTF-8; each output <= 128 KiB UTF-8; summed
 step content <= 512 KiB; serialized result <= 1 MiB. Each completed prefix must

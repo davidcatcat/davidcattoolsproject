@@ -266,3 +266,32 @@ HEAD CI is checked again after publication. A9-R1 FIXED; local functional/securi
 validation PASS; real two-step transport/orchestration smoke PASS without claiming
 model quality. Updated external ChatGPT review remains pending. PR #10 DRAFT,
 unmerged. Anthropic API future A2.3; A10 NOT STARTED.
+
+
+## Updated external review checkpoint — 2026-10-01
+
+External ChatGPT review of the A9-R1 follow-up and final branch state: PASS.
+
+Reviewed production/test commit `4e7b5f35673632b46540845982b0a405e41a49e5`
+and documentation head `842481a8fdf40e5eb00fc0383af21a9af530aba6`.
+A9-R1 is correctly fixed: every completed result prefix is fully serialized and
+validated before the next provider profile, credential, client, or request is reached.
+The new regressions prove both escaped-JSON overflow and aggregate-output overflow
+stop before later provider access.
+
+Final-head PR CI run `36855891389` PASS on exact SHA `842481a8f...`:
+Python 3.9 and Python 3.14 each ran 514 tests with all PASS; compileall,
+Offline canonical checks, and Working tree is clean all SUCCESS.
+
+Independent review found no production/security merge blocker. Role/provider
+separation, shallow handoff, readiness-before-credentials, fail-fast semantics,
+inert command text, no retry/fallback/parallelism, no A10 retrieval, and no
+provider-native tool enablement remain intact. Wheel and real two-step Claude
+transport/orchestration smoke evidence are accepted as recorded; no model-quality
+PASS is inferred from transport success.
+
+A documentation consistency nit was corrected in this checkpoint: the A8 README
+section no longer says A9 is NOT STARTED while the same branch documents completed
+A9 implementation.
+
+PR #10 remains DRAFT and unmerged pending the merge decision. A10 NOT STARTED.
