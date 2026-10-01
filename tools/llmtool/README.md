@@ -571,6 +571,12 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 
 ## 開發與驗證
 
+llmtool CI uses immutable action SHA pins, `persist-credentials: false`, read-only
+permissions, a 15-minute timeout and clean-tree verification after offline tests.
+`requirements-ci.txt` pins PyYAML 6.0.3 (the current validated runtime/test dependency);
+it is an exact version pin, not a cryptographic hash lock. CI installs it first, then
+uses `pip install --no-deps -e tools/llmtool`; package dependency compatibility is unchanged.
+
 ```sh
 make -C tools/llmtool check PYTHON="$(pwd)/tools/llmtool/.venv/bin/python"
 ```
@@ -938,6 +944,11 @@ private key files (`.pem`, `.key`, `id_rsa`, `id_ed25519`), `~/.ssh`,
 forms are conservatively sensitive because they may expose environment, logs, or process
 arguments. Recognized content-bearing raw Git reads (`git diff`, staged/cached diffs,
 full `git log`, and narrowly recognized `git show`) are SENSITIVE_READ and require approval.
+
+Recognized Git discard/delete forms are DESTRUCTIVE: default/worktree `restore`
+(including `-W`), forced `checkout`, `switch --discard-changes`, and `stash drop`/`clear`.
+Staged-only restore remains MUTATING. These are data classifications and grant no
+execution permission. Unsupported/ambiguous restore syntax remains UNKNOWN.
 
 Historical regression: `cat /etc/company/app/config.yaml` is **SENSITIVE_READ**.
 Metadata alternatives `ls -l /etc/company/app/config.yaml` and
