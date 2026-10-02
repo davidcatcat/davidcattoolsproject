@@ -390,11 +390,15 @@ class AskTests(unittest.TestCase):
         client.complete.assert_called_once()
 
     def test_broken_pipe_keeps_exit_zero(self):
+        class ClosedPipe(io.StringIO):
+            def write(self, value):
+                raise BrokenPipeError
+
         actual = RunContext()
         with patch('llmtool.diagnostics_runtime.RunContext', return_value=actual), \
              patch('llmtool.cli.resolve_config', return_value=configured()), patch('llmtool.cli.api_key'), \
              patch('llmtool.cli.create_client') as factory, patch('llmtool.cli.sys.stdin', None), \
-             patch('llmtool.cli.sys.stdout', Mock(write=Mock(side_effect=BrokenPipeError))), redirect_stderr(io.StringIO()):
+             patch('llmtool.cli.sys.stdout', ClosedPipe()), redirect_stderr(io.StringIO()):
             factory.return_value.complete.return_value = Reply(CONTENT, {})
             self.assertEqual(cli.main(['ask', PROMPT]), 0)
         self.assertEqual(actual.final_status, 'output_closed')
