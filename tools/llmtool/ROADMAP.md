@@ -430,7 +430,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — NOT STARTED / NEXT
+## A11 — Production Workflow & Diagnostics — A11a.1 feature-branch checkpoint
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -444,14 +444,14 @@ A11 拆成三個可獨立 merge / review / validation 的 milestone，避免一�
 - **A11c — Integration & Real-world Acceptance**
 
 每個 milestone 都要有自己的 validation report、external review 與 Definition of Done。
-A10 已 DONE and merged；A11a 是下一個 implementation milestone。
-本 PR 只定義文件與驗收契約；A11a/A11b/A11c 均 NOT STARTED，以下 CLI、設定與事件
-皆為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A10 已 DONE and merged；A11a.1 core models/coded errors 已在 feature branch 實作，等待外部 review。
+A11a 尚未完成或合併；A11a.2～A11a.7、A11b/A11c 均 NOT STARTED。以下 CLI、
+persistence、lifecycle 與 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — NEXT / NOT STARTED | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1 feature branch / external review pending | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | 有限 executor、action approval、bounded recovery | A11a 完成合併；sandbox、approval、audit failure 規格先通過 review |
 | A11c — NOT STARTED | 組合既有能力與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -488,7 +488,23 @@ A11 從 A0～A10 的 read-only、validation、orchestration 與 retrieval primit
 
 ## A11a — Observability & Diagnostics
 
-Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md). This spec is documentation only; A11a remains NOT STARTED until production implementation begins.
+Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md). A11a.1 core models and coded errors are implemented on `feat/a11a1-diagnostics-core-20261002`, pending external review; A11a is not DONE/merged. A11a.2 NOT STARTED. See the [checkpoint validation](../../reports/llmtool_a11a1_core_diagnostics_validation_20261002.md).
+
+A11a.1 external review returned REQUEST CHANGES; R1–R4 remediation is on the
+same feature branch; external re-review is pending. Exact-head CI is a required
+gate for this checkpoint. Remediation validation HEAD `1b23da7` passed Python
+3.9/3.14, offline canonical and clean-tree checks in Actions run
+[36928125467](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36928125467).
+Any later publication HEAD must pass its own CI before delivery. Core models
+remain strict and may raise ValueError for invalid diagnostic input.
+**Diagnostic collection failure must never fail the primary read-only command.**
+A11a.2 lifecycle must catch diagnostics-only construction/validation failures,
+drop the event, count dropped events, and emit at most one fixed
+`DIAGNOSTICS_EVENT_DROPPED` warning while the primary `ask` continues. That
+lifecycle/drop policy is not implemented in A11a.1. Coded diagnostics use JSON;
+pickle/deepcopy support is deferred. Persisted `RunSummary` is not implemented;
+it belongs to implementation slice **A11a.3 — User diagnostics settings and
+secure POSIX store**. A11a.2 NOT STARTED.
 
 A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
 retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mutation 或 Git mutation；
