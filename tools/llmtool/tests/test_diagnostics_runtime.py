@@ -185,11 +185,13 @@ class LifecycleTests(unittest.TestCase):
 
 
 class AskTests(unittest.TestCase):
-    def invoke(self, argv=None, *, metadata=None, fail=None, configure_fail=None, input_stream=None):
+    def invoke(self, argv=None, *, metadata=None, fail=None, configure_fail=None, input_stream=None,
+               reply=None):
         out, err = io.StringIO(), io.StringIO()
         client = Mock()
-        client.complete.return_value = Reply(CONTENT, {'elapsed_seconds': 0.1, 'model': 'qwen/test',
-                                                       'total_tokens': 7} if metadata is None else metadata)
+        client.complete.return_value = reply if reply is not None else Reply(
+            CONTENT, {'elapsed_seconds': 0.1, 'model': 'qwen/test',
+                      'total_tokens': 7} if metadata is None else metadata)
         client.complete.side_effect = fail
         runs = []
         def new_run(mode):
@@ -285,6 +287,19 @@ class AskTests(unittest.TestCase):
         self.assertEqual((status, out), (0, CONTENT + '\n'))
         self.assertGreater(runs[0].dropped_event_count, 0)
         self.assertNotIn('m' * 129, err)
+        client.complete.assert_called_once()
+
+    def test_reply_metadata_access_failure_is_secondary(self):
+        class ReplyWithUnavailableMetadata:
+            content = CONTENT
+
+            @property
+            def metadata(self):
+                raise ValueError(MARKER)
+
+        status, out, err, client, runs, *_ = self.invoke(reply=ReplyWithUnavailableMetadata())
+        self.assertEqual((status, out, err), (0, CONTENT + '\n', ''))
+        self.assertEqual(runs[0].dropped_event_count, 1)
         client.complete.assert_called_once()
 
     def test_adapter_or_observer_initialization_failure_is_nonfatal(self):

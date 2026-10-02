@@ -164,7 +164,12 @@ def _run_ask(args):
         client = create_client(config, key)
         observe('request', config)
         result = client.complete(messages)  # Exactly once, including debug/drop cases.
-        observe('response', result.metadata)
+        try:
+            metadata = result.metadata
+        except Exception:
+            observe('drop')
+        else:
+            observe('response', metadata)
         code, component = d.ErrorCode.MODEL_RESPONSE_INVALID, 'output'
         output = result.content
         if selected_skill is not None and selected_skill.name == 'analyze-log':
