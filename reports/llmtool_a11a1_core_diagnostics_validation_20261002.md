@@ -288,3 +288,33 @@ Changed files in this remediation: diagnostics.py, errors.py, test_diagnostics.p
 ROADMAP.md and this report. Claude's review and unrelated reports remain unchanged.
 External re-review remains required; A11a is not DONE or merged.
 **A11a.2 NOT STARTED.**
+
+
+### Verified remote remediation CI
+
+Exact tested HEAD: `1b23da7b66b4b23b968162efe7988c3da2c1e0b2`.
+[Actions run 36928125467](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36928125467)
+(push, attempt 1) completed SUCCESS. The PR-filtered listing returned no runs
+because this branch currently has a push-triggered run; the authenticated GitHub
+connector's general workflow API provided exact-head evidence. No gh was used.
+
+| Job | Discovered | Passed | Failed | Errors | Skipped | Elapsed | Offline canonical checks | Working tree is clean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| check (3.9), job 110590397321 | 660 | 660 | 0 | 0 | 0 | 20.075 s | SUCCESS | SUCCESS |
+| check (3.14), job 110590397752 | 660 | 660 | 0 | 0 | 0 | 17.103 s | SUCCESS | SUCCESS |
+
+Both logs explicitly report these tests **ok**:
+
+- `test_timestamp_requires_exact_format_and_real_date` — retains the original 24:00:00 rejection case.
+- `test_timestamp_rejects_iso_edge_times_before_calendar_parser` — rejects 24/25 hours and minute/second 60 before calling datetime.
+- `test_timestamp_last_millisecond_and_leap_calendar` — accepts 23:59:59.999/valid leap date and rejects invalid dates.
+
+Thus Python 3.14 no longer accepts `2026-10-02T24:00:00.000Z` through the diagnostics
+validator. CI's Linux filesystem had no inherited filename skip. Both jobs' final
+clean-tree step was SUCCESS, with `working tree clean` in the logs.
+
+This evidence records the named tested revision, not a future self-containing
+publication commit. The report/roadmap publication changes only documentation;
+its final exact-head CI must also be checked before delivery, with final SHA/run
+recorded in the delivery checkpoint. External re-review remains pending. No merge
+or A11a.2 work is authorized by this CI result.

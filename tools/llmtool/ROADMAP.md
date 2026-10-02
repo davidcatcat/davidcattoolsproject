@@ -492,7 +492,11 @@ Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_i
 
 A11a.1 external review returned REQUEST CHANGES; R1–R4 remediation is on the
 same feature branch; external re-review is pending. Exact-head CI is a required
-gate for this checkpoint. Core models remain strict and may raise ValueError for invalid diagnostic input.
+gate for this checkpoint. Remediation validation HEAD `1b23da7` passed Python
+3.9/3.14, offline canonical and clean-tree checks in Actions run
+[36928125467](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36928125467).
+Any later publication HEAD must pass its own CI before delivery. Core models
+remain strict and may raise ValueError for invalid diagnostic input.
 **Diagnostic collection failure must never fail the primary read-only command.**
 A11a.2 lifecycle must catch diagnostics-only construction/validation failures,
 drop the event, count dropped events, and emit at most one fixed
