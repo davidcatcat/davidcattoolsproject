@@ -9,7 +9,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from ..errors import LLMToolError
+from ..errors import LLMToolError, coded_error
 from .base import ProviderCapabilities, Reply
 
 OUTPUT_LIMIT = 1024 * 1024
@@ -118,7 +118,11 @@ class ClaudeCLIProvider:
                 return tempfile.TemporaryDirectory(prefix="llmtool-claude-", dir=base)
             except OSError:
                 continue
-        raise LLMToolError("Claude CLI isolated working directory is not available")
+        raise coded_error(
+            "Claude CLI isolated working directory is not available",
+            'PROVIDER_RUNTIME_ERROR',
+            'provider.claude-cli',
+        )
 
     def _invoke(self, executable, prompt):
         try:
@@ -141,9 +145,18 @@ class ClaudeCLIProvider:
                 )
                 return self._collect(process, input_bytes)
         except FileNotFoundError:
-            raise LLMToolError("Claude CLI executable is not available") from None
+            raise coded_error(
+                "Claude CLI executable is not available",
+                'ENV_PROVIDER_RUNTIME_MISSING',
+                'provider.claude-cli',
+                user_action_required=True,
+            ) from None
         except OSError:
-            raise LLMToolError("Claude CLI could not be started") from None
+            raise coded_error(
+                "Claude CLI could not be started",
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.claude-cli',
+            ) from None
 
     def _collect(self, process, input_bytes):
         selector = selectors.DefaultSelector()
@@ -168,7 +181,12 @@ class ClaudeCLIProvider:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._kill(process)
-                    raise LLMToolError("Claude CLI timed out")
+                    raise coded_error(
+                        "Claude CLI timed out",
+                        'PROVIDER_TIMEOUT',
+                        'provider.claude-cli',
+                        retryable=True,
+                    )
                 for key, _ in selector.select(min(remaining, 0.1)):
                     stream = key.fileobj
                     kind, output = key.data
@@ -196,17 +214,31 @@ class ClaudeCLIProvider:
                             selector.unregister(stream)
                             stream.close()
                 if overflow:
-                    raise LLMToolError("Claude CLI output exceeded 1 MiB")
+                    raise coded_error(
+                        "Claude CLI output exceeded 1 MiB",
+                        'MODEL_RESPONSE_TOO_LARGE',
+                        'provider.claude-cli',
+                    )
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill(process)
-                raise LLMToolError("Claude CLI timed out")
+                raise coded_error(
+                    "Claude CLI timed out",
+                    'PROVIDER_TIMEOUT',
+                    'provider.claude-cli',
+                    retryable=True,
+                )
             try:
                 returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 self._kill(process)
-                raise LLMToolError("Claude CLI timed out") from None
+                raise coded_error(
+                    "Claude CLI timed out",
+                    'PROVIDER_TIMEOUT',
+                    'provider.claude-cli',
+                    retryable=True,
+                ) from None
         finally:
             selector.close()
             for stream in (process.stdin, process.stdout, process.stderr):
@@ -216,13 +248,22 @@ class ClaudeCLIProvider:
                 self._kill(process)
 
         if returncode != 0:
-            raise LLMToolError("Claude CLI exited with status " + str(returncode))
+            raise coded_error(
+                "Claude CLI exited with status " + str(returncode),
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.claude-cli',
+                safe_cause={"process_status": returncode},
+            )
         try:
             content = bytes(stdout).decode("utf-8").strip()
         except UnicodeError:
-            raise LLMToolError("Claude CLI returned invalid UTF-8") from None
+            raise coded_error(
+                "Claude CLI returned invalid UTF-8",
+                'MODEL_RESPONSE_INVALID',
+                'provider.claude-cli',
+            ) from None
         if not content:
-            raise LLMToolError("Claude CLI returned no final text")
+            raise coded_error("Claude CLI returned no final text", 'MODEL_RESPONSE_INVALID', 'provider.claude-cli')
         return content, time.monotonic() - started
 
     def complete(self, messages):
@@ -231,7 +272,12 @@ class ClaudeCLIProvider:
         self.validate_ready(self.provider)
         executable = shutil.which("claude")
         if executable is None or not os.path.isabs(executable):
-            raise LLMToolError("Claude CLI executable is not available")
+            raise coded_error(
+                "Claude CLI executable is not available",
+                'ENV_PROVIDER_RUNTIME_MISSING',
+                'provider.claude-cli',
+                user_action_required=True,
+            )
         content, elapsed = self._invoke(executable, self._prompt(messages))
         metadata = {"elapsed_seconds": round(elapsed, 3)}
         model = self.provider.get("model")

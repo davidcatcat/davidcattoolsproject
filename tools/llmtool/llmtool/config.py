@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from .errors import LLMToolError
+from .errors import LLMToolError, coded_error
 from .providers import client_type
 
 PROVIDER_DEFAULTS = {
@@ -293,7 +293,8 @@ def api_key(config, environ=None):
     if provider["api_key_env"]:
         value = env.get(provider["api_key_env"])
         if not value:
-            raise LLMToolError("configured API key environment variable is missing or empty")
+            raise coded_error("configured API key environment variable is missing or empty",
+                              "AUTH_CREDENTIAL_MISSING", "config.auth", user_action_required=True)
     if value is not None and (not isinstance(value, str) or not value
                               or any(ord(c) < 33 or ord(c) > 126 for c in value)):
         raise LLMToolError("API key must contain only non-whitespace printable ASCII characters")

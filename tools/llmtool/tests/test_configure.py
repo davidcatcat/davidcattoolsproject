@@ -171,7 +171,9 @@ class ConfigureTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
-        self.assertEqual(result.stderr, b"llmtool: provider base_url is not configured\n")
+        self.assertRegex(result.stderr.decode(),
+                         r"^llmtool: provider base_url is not configured\n"
+                         r"llmtool: code=CONFIG_PROVIDER_NOT_READY run_id=[0-9a-f]{32} trace=not-saved\n$")
 
     def test_hidden_api_key_is_never_emitted(self):
         secret = "fake-private-api-token"

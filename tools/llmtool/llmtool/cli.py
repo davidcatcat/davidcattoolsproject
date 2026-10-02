@@ -70,6 +70,7 @@ def parser_for_cli():
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
         if command == "ask":
             child.add_argument("--skill", help="explicit runtime skill name")
+            child.add_argument("--debug", action="store_true", help="write safe ephemeral event summaries; never save a trace")
         if command == "context-pack":
             child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
@@ -109,8 +110,101 @@ def parser_for_cli():
     return parser
 
 
+def _run_ask(args):
+    """Observe ask only. Diagnostics never authorize recovery or execution."""
+    from . import diagnostics as d
+    from .diagnostics_runtime import RunContext
+    from .errors import coded_error
+
+    mode = (d.DiagnosticMode.DEBUG if args.debug else
+            d.DiagnosticMode.VERBOSE if args.verbose else d.DiagnosticMode.NORMAL)
+    try:
+        run = RunContext(mode)
+    except Exception:
+        run = None  # Even an observer initialization failure is secondary.
+    code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
+
+    def observe(method, *values):
+        if run is None:
+            return None
+        try:
+            return getattr(run, method)(*values)
+        except Exception:
+            try:
+                run.drop()
+            except Exception:
+                pass
+            return None
+
+    def failure(exc):
+        # Preserve the primary safe message even if secondary observation fails.
+        print('llmtool: ' + str(exc), file=sys.stderr)
+        mapped = observe('error', exc, code, component) or code
+        observe('finish', 'incomplete' if mapped is d.ErrorCode.MODEL_OUTPUT_INCOMPLETE else 'error')
+        try:
+            line = observe('failure_line', mapped)
+            print(line or ('llmtool: code=' + mapped.value +
+                          ' run_id=unavailable trace=not-saved'), file=sys.stderr)
+        except Exception:
+            observe('drop')
+        observe('display', sys.stderr)
+        return 1
+
+    try:
+        selected_skill = load_skill(args.skill) if args.skill is not None else None
+        validate_input_sources(args.text, args.file, sys.stdin)
+        code, component = d.ErrorCode.CONFIG_INVALID, 'config'
+        config = resolve_config(vars(args), require_configured=True)
+        code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
+        text = read_input(args.text, args.file, sys.stdin)
+        messages = messages_for('ask', text, selected_skill)
+        code, component = d.ErrorCode.AUTH_CREDENTIAL_MISSING, 'config.auth'
+        key = api_key(config)
+        code, component = d.ErrorCode.PROVIDER_RUNTIME_ERROR, 'provider'
+        client = create_client(config, key)
+        observe('request', config)
+        result = client.complete(messages)  # Exactly once, including debug/drop cases.
+        observe('response', result.metadata)
+        code, component = d.ErrorCode.MODEL_RESPONSE_INVALID, 'output'
+        output = result.content
+        if selected_skill is not None and selected_skill.name == 'analyze-log':
+            from .log_safety import filter_log_suggestions
+            output, suppressed = filter_log_suggestions(output)
+            if suppressed:
+                print('llmtool: analyze-log suppressed ' + str(suppressed) +
+                      ' unsafe or unsupported NEXT_COMMANDS suggestion(s)', file=sys.stderr)
+        output = human_output(output, sys.stdout)
+        sys.stdout.write(output + '\n')
+        observe('finish', 'success')
+        observe('display', sys.stderr)
+        return 0
+    except LLMToolError as exc:
+        return failure(exc)
+    except BrokenPipeError:
+        sys.stdout = None
+        observe('finish', 'output_closed')
+        return 0
+    except (OSError, UnicodeError):
+        return failure(coded_error('local I/O failed; details omitted',
+                                  'LOCAL_IO_ERROR', 'cli.ask'))
+    except EOFError:
+        return failure(coded_error('input ended before configuration was complete',
+                                  'USER_INPUT_ERROR', 'input'))
+    except KeyboardInterrupt:
+        observe('finish', 'interrupted')
+        print('llmtool: interrupted', file=sys.stderr)
+        observe('display', sys.stderr)
+        return 130
+    except Exception:
+        # Never stringify an unexpected exception or print a Python traceback.
+        return failure(coded_error('internal error; details omitted',
+                                  'INTERNAL_UNEXPECTED', 'cli.ask'))
+
+
 def main(argv=None):
     args = parser_for_cli().parse_args(argv)
+    if args.command == 'ask':
+        return _run_ask(args)
     try:
         if args.command == "retrieve-context":
             return run_retrieval(args)

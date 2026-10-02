@@ -88,6 +88,30 @@ else:
     def captured(self):
         return json.loads(self.capture.read_text())
 
+    def test_coded_runtime_sites_use_one_fake_process_and_no_private_data(self):
+        cases = (("timeout", "PROVIDER_TIMEOUT"), ("failure", "PROVIDER_RUNTIME_ERROR"),
+                 ("large", "MODEL_RESPONSE_TOO_LARGE"), ("empty", "MODEL_RESPONSE_INVALID"),
+                 ("invalid", "MODEL_RESPONSE_INVALID"))
+        for mode, code in cases:
+            self.fake(mode)
+            with self.subTest(mode=mode), patch("llmtool.providers.codex_cli.OUTPUT_LIMIT", 128), \
+                 patch("llmtool.providers.codex_cli.subprocess.Popen", wraps=subprocess.Popen) as spawn:
+                with self.assertRaises(LLMToolError) as caught:
+                    self.complete(timeout_seconds=0.2 if mode == "timeout" else 5)
+                diagnostic = caught.exception.diagnostic
+                self.assertEqual(diagnostic.code.value, code)
+                self.assertFalse(diagnostic.fallback_allowed)
+                self.assertNotIn("PRIVATE_DIAGNOSTIC", diagnostic.to_json())
+                if mode == "failure":
+                    self.assertEqual(diagnostic.safe_cause["process_status"], 7)
+                spawn.assert_called_once()
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value=None), \
+             patch("llmtool.providers.codex_cli.subprocess.Popen") as spawn:
+            with self.assertRaises(LLMToolError) as caught:
+                self.complete()
+            self.assertEqual(caught.exception.diagnostic.code.value, "ENV_PROVIDER_RUNTIME_MISSING")
+            spawn.assert_not_called()
+
     def test_registration_factory_and_capabilities(self):
         self.assertIn("codex-cli", PROVIDER_REGISTRY.names())
         self.assertEqual(get_provider_capabilities("codex-cli").to_dict(), CAPABILITIES)

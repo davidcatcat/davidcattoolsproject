@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ..errors import LLMToolError
+from ..errors import LLMToolError, coded_error
 from .base import ProviderCapabilities, Reply
 
 OUTPUT_LIMIT = 1024 * 1024
@@ -126,7 +126,11 @@ class CodexCLIProvider:
                 return tempfile.TemporaryDirectory(prefix="llmtool-codex-", dir=base)
             except OSError:
                 continue
-        raise LLMToolError("Codex CLI isolated working directory is not available")
+        raise coded_error(
+            "Codex CLI isolated working directory is not available",
+            'PROVIDER_RUNTIME_ERROR',
+            'provider.codex-cli',
+        )
 
     def _argv(self, executable, runtime):
         argv = [
@@ -180,9 +184,18 @@ class CodexCLIProvider:
                 env=self._child_environment(runtime),
             )
         except FileNotFoundError:
-            raise LLMToolError("Codex CLI executable is not available; install codex on PATH") from None
+            raise coded_error(
+                "Codex CLI executable is not available; install codex on PATH",
+                'ENV_PROVIDER_RUNTIME_MISSING',
+                'provider.codex-cli',
+                user_action_required=True,
+            ) from None
         except OSError:
-            raise LLMToolError("Codex CLI could not be started") from None
+            raise coded_error(
+                "Codex CLI could not be started",
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.codex-cli',
+            ) from None
 
         selector = selectors.DefaultSelector()
         stdout = bytearray()
@@ -206,7 +219,12 @@ class CodexCLIProvider:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._kill(process)
-                    raise LLMToolError("Codex CLI timed out")
+                    raise coded_error(
+                        "Codex CLI timed out",
+                        'PROVIDER_TIMEOUT',
+                        'provider.codex-cli',
+                        retryable=True,
+                    )
                 for key, _ in selector.select(min(remaining, 0.1)):
                     stream = key.fileobj
                     kind, output = key.data
@@ -234,17 +252,26 @@ class CodexCLIProvider:
                             selector.unregister(stream)
                             stream.close()
                 if overflow:
-                    raise LLMToolError("Codex CLI output exceeded 1 MiB")
+                    raise coded_error(
+                        "Codex CLI output exceeded 1 MiB",
+                        'MODEL_RESPONSE_TOO_LARGE',
+                        'provider.codex-cli',
+                    )
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 self._kill(process)
-                raise LLMToolError("Codex CLI timed out")
+                raise coded_error("Codex CLI timed out", 'PROVIDER_TIMEOUT', 'provider.codex-cli', retryable=True)
             try:
                 returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired:
                 self._kill(process)
-                raise LLMToolError("Codex CLI timed out") from None
+                raise coded_error(
+                    "Codex CLI timed out",
+                    'PROVIDER_TIMEOUT',
+                    'provider.codex-cli',
+                    retryable=True,
+                ) from None
         finally:
             selector.close()
             for stream in (process.stdin, process.stdout, process.stderr):
@@ -254,13 +281,22 @@ class CodexCLIProvider:
                 self._kill(process)
 
         if returncode != 0:
-            raise LLMToolError("Codex CLI exited with status " + str(returncode))
+            raise coded_error(
+                "Codex CLI exited with status " + str(returncode),
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.codex-cli',
+                safe_cause={"process_status": returncode},
+            )
         try:
             content = bytes(stdout).decode("utf-8").strip()
         except UnicodeError:
-            raise LLMToolError("Codex CLI returned invalid UTF-8") from None
+            raise coded_error(
+                "Codex CLI returned invalid UTF-8",
+                'MODEL_RESPONSE_INVALID',
+                'provider.codex-cli',
+            ) from None
         if not content:
-            raise LLMToolError("Codex CLI returned no final text")
+            raise coded_error("Codex CLI returned no final text", 'MODEL_RESPONSE_INVALID', 'provider.codex-cli')
         return content, time.monotonic() - started
 
     def complete(self, messages):
@@ -269,13 +305,22 @@ class CodexCLIProvider:
         self.validate_ready(self.provider)
         executable = shutil.which("codex")
         if executable is None or not os.path.isabs(executable):
-            raise LLMToolError("Codex CLI executable is not available; install codex on PATH")
+            raise coded_error(
+                "Codex CLI executable is not available; install codex on PATH",
+                'ENV_PROVIDER_RUNTIME_MISSING',
+                'provider.codex-cli',
+                user_action_required=True,
+            )
         prompt = self._prompt(messages)
         try:
             with self._temporary_directory() as directory:
                 content, elapsed = self._invoke(executable, prompt, str(Path(directory).resolve()))
         except OSError:
-            raise LLMToolError("Codex CLI isolated runtime failed") from None
+            raise coded_error(
+                "Codex CLI isolated runtime failed",
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.codex-cli',
+            ) from None
         metadata = {"elapsed_seconds": round(elapsed, 3)}
         model = self.provider.get("model")
         if isinstance(model, str) and model and all(

@@ -4,7 +4,7 @@ import os
 import stat
 from pathlib import Path
 
-from .errors import LLMToolError
+from .errors import LLMToolError, coded_error
 
 INPUT_LIMIT = 16 * 1024 * 1024
 
@@ -69,7 +69,9 @@ def read_input(text, filename, stdin):
                 raw = stream.read(INPUT_LIMIT + 1)
         else:
             raw = b"" if stdin.isatty() else stdin.buffer.read(INPUT_LIMIT + 1)
-    except (OSError, UnicodeError, ValueError, AttributeError, RuntimeError):
+    except OSError:
+        raise coded_error("cannot read input as UTF-8 text", "LOCAL_IO_ERROR", "input") from None
+    except (UnicodeError, ValueError, AttributeError, RuntimeError):
         raise LLMToolError("cannot read input as UTF-8 text") from None
     result = _decode(raw)
     if not result.strip():
