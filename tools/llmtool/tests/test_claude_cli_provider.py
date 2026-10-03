@@ -52,6 +52,8 @@ elif mode == "descendant":
     import subprocess
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     sys.stdout.write("CLAUDE_FINAL\\n")
+elif mode == "invalid":
+    sys.stdout.buffer.write(b"\\xff")
 elif mode == "empty":
     pass
 elif mode == "failure":
@@ -81,6 +83,29 @@ else:
         with patch.object(ClaudeCLIProvider, "_child_environment",
                           staticmethod(lambda: {**original(), "CLAUDE_TEST_MODE": mode})):
             return self.client(timeout_seconds=timeout).complete([{"role": "user", "content": "hello"}])
+
+    def test_coded_runtime_sites_use_one_fake_process_and_no_private_data(self):
+        cases = (("timeout", "PROVIDER_TIMEOUT"), ("failure", "PROVIDER_RUNTIME_ERROR"),
+                 ("large", "MODEL_RESPONSE_TOO_LARGE"), ("empty", "MODEL_RESPONSE_INVALID"),
+                 ("invalid", "MODEL_RESPONSE_INVALID"))
+        for mode, code in cases:
+            with self.subTest(mode=mode), patch("llmtool.providers.claude_cli.OUTPUT_LIMIT", 128), \
+                 patch("llmtool.providers.claude_cli.subprocess.Popen", wraps=subprocess.Popen) as spawn:
+                with self.assertRaises(LLMToolError) as caught:
+                    self.complete_mode(mode, timeout=0.2 if mode == "timeout" else 5)
+                diagnostic = caught.exception.diagnostic
+                self.assertEqual(diagnostic.code.value, code)
+                self.assertFalse(diagnostic.fallback_allowed)
+                self.assertNotIn("PRIVATE_CLI_DIAGNOSTIC", diagnostic.to_json())
+                if mode == "failure":
+                    self.assertEqual(diagnostic.safe_cause["process_status"], 7)
+                spawn.assert_called_once()
+        with patch("llmtool.providers.claude_cli.shutil.which", return_value=None), \
+             patch("llmtool.providers.claude_cli.subprocess.Popen") as spawn:
+            with self.assertRaises(LLMToolError) as caught:
+                self.client().complete([{"role": "user", "content": "hello"}])
+            self.assertEqual(caught.exception.diagnostic.code.value, "ENV_PROVIDER_RUNTIME_MISSING")
+            spawn.assert_not_called()
 
     def test_argv_stdin_and_successful_output_use_safe_noninteractive_mode(self):
         prompt = [{"role": "system", "content": "Follow instruction."},

@@ -7,7 +7,7 @@ import socket
 import time
 from urllib import error, request
 
-from ..errors import LLMToolError
+from ..errors import LLMToolError, coded_error, http_error_code
 from .base import ProviderCapabilities, Reply
 
 API_ORIGIN = "https://api.openai.com"
@@ -47,9 +47,19 @@ class OpenAIProvider:
     @staticmethod
     def validate_ready(provider):
         if provider.get("model") is None:
-            raise LLMToolError("provider model is not configured")
+            raise coded_error(
+                "provider model is not configured",
+                'CONFIG_PROVIDER_NOT_READY',
+                'provider.openai',
+                user_action_required=True,
+            )
         if not provider.get("api_key") and not provider.get("api_key_env"):
-            raise LLMToolError("provider authentication is not configured")
+            raise coded_error(
+                "provider authentication is not configured",
+                'CONFIG_PROVIDER_NOT_READY',
+                'provider.openai',
+                user_action_required=True,
+            )
 
     def __init__(self, provider, generation, key=None):
         self.provider = provider
@@ -74,14 +84,23 @@ class OpenAIProvider:
     @staticmethod
     def _final_text(response):
         if response.get("status") != "completed":
-            raise LLMToolError("OpenAI response did not complete")
+            raise coded_error("OpenAI response did not complete",
+                              'MODEL_OUTPUT_INCOMPLETE' if response.get("status") == "incomplete" else 'MODEL_RESPONSE_INVALID', 'provider.openai')
         if response.get("error") is not None:
-            raise LLMToolError("OpenAI returned an API error; response body omitted")
+            raise coded_error(
+                "OpenAI returned an API error; response body omitted",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai',
+            )
 
         if "output" not in response:
             output_text = response.get("output_text")
             if not isinstance(output_text, str):
-                raise LLMToolError("OpenAI response is missing valid output")
+                raise coded_error(
+                    "OpenAI response is missing valid output",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             output = None
             parts = [output_text]
         else:
@@ -89,24 +108,48 @@ class OpenAIProvider:
             parts = []
         if not isinstance(output, list):
             if output is not None:
-                raise LLMToolError("OpenAI response is missing valid output")
+                raise coded_error(
+                    "OpenAI response is missing valid output",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
         for item in output or []:
             if not isinstance(item, dict):
-                raise LLMToolError("OpenAI response contains invalid output")
+                raise coded_error(
+                    "OpenAI response contains invalid output",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             item_type = item.get("type")
             if item_type == "reasoning":
                 continue
             if item_type != "message" or item.get("role") != "assistant":
                 # This provider requests no tools and never returns tool payloads.
-                raise LLMToolError("OpenAI response contains unsupported output")
+                raise coded_error(
+                    "OpenAI response contains unsupported output",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             if item.get("status") not in (None, "completed"):
-                raise LLMToolError("OpenAI response message did not complete")
+                raise coded_error(
+                    "OpenAI response message did not complete",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             content = item.get("content")
             if not isinstance(content, list):
-                raise LLMToolError("OpenAI response contains invalid message content")
+                raise coded_error(
+                    "OpenAI response contains invalid message content",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             for block in content:
                 if not isinstance(block, dict):
-                    raise LLMToolError("OpenAI response contains invalid message content")
+                    raise coded_error(
+                        "OpenAI response contains invalid message content",
+                        'MODEL_RESPONSE_INVALID',
+                        'provider.openai',
+                    )
                 if block.get("type") == "output_text":
                     value = block.get("text")
                 elif block.get("type") == "refusal":
@@ -114,16 +157,24 @@ class OpenAIProvider:
                 else:
                     continue
                 if not isinstance(value, str):
-                    raise LLMToolError("OpenAI response contains invalid text")
+                    raise coded_error(
+                        "OpenAI response contains invalid text",
+                        'MODEL_RESPONSE_INVALID',
+                        'provider.openai',
+                    )
                 parts.append(value)
 
         content = "".join(parts).strip()
         if not content:
-            raise LLMToolError("OpenAI response is missing final text")
+            raise coded_error("OpenAI response is missing final text", 'MODEL_RESPONSE_INVALID', 'provider.openai')
         try:
             content.encode("utf-8")
         except UnicodeError:
-            raise LLMToolError("OpenAI response contains invalid text") from None
+            raise coded_error(
+                "OpenAI response contains invalid text",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai',
+            ) from None
         return content
 
     @staticmethod
@@ -136,13 +187,21 @@ class OpenAIProvider:
         if "usage" in response:
             usage = response["usage"]
             if not isinstance(usage, dict):
-                raise LLMToolError("OpenAI response contains invalid usage metadata")
+                raise coded_error(
+                    "OpenAI response contains invalid usage metadata",
+                    'MODEL_RESPONSE_INVALID',
+                    'provider.openai',
+                )
             for field in ("input_tokens", "output_tokens", "total_tokens"):
                 if field not in usage:
                     continue
                 value = usage[field]
                 if type(value) is not int or not 0 <= value <= 10**12:
-                    raise LLMToolError("OpenAI response contains invalid usage metadata")
+                    raise coded_error(
+                        "OpenAI response contains invalid usage metadata",
+                        'MODEL_RESPONSE_INVALID',
+                        'provider.openai',
+                    )
                 metadata[field] = value
         return metadata
 
@@ -151,7 +210,12 @@ class OpenAIProvider:
         self.validate_options(self.provider.get("provider_options", {}))
         self.validate_ready(self.provider)
         if not isinstance(self.key, str) or not self.key:
-            raise LLMToolError("configured OpenAI API key is missing or empty")
+            raise coded_error(
+                "configured OpenAI API key is missing or empty",
+                'AUTH_CREDENTIAL_MISSING',
+                'provider.openai',
+                user_action_required=True,
+            )
 
         body = {
             "model": self.provider["model"],
@@ -178,29 +242,66 @@ class OpenAIProvider:
         try:
             with self.opener.open(req, timeout=self.provider["timeout_seconds"]) as response:
                 if not 200 <= response.status < 300:
-                    raise LLMToolError("OpenAI returned a non-success HTTP status")
+                    raise coded_error(
+                        "OpenAI returned a non-success HTTP status",
+                        http_error_code(response.status),
+                        'provider.openai',
+                        retryable=response.status == 429,
+                        user_action_required=response.status in (401, 403),
+                        safe_cause={"http_status": response.status},
+                    )
                 raw = response.read(RESPONSE_LIMIT + 1)
         except error.HTTPError as exc:
             status = exc.code
             exc.close()
-            raise LLMToolError("OpenAI API HTTP " + str(status) + "; response body omitted") from None
+            raise coded_error(
+                "OpenAI API HTTP " + str(status) + "; response body omitted",
+                http_error_code(status),
+                'provider.openai',
+                retryable=status == 429,
+                user_action_required=status in (401, 403),
+                safe_cause={"http_status": status},
+            ) from None
         except (TimeoutError, socket.timeout):
-            raise LLMToolError("OpenAI API request timed out") from None
+            raise coded_error(
+                "OpenAI API request timed out",
+                'PROVIDER_TIMEOUT',
+                'provider.openai',
+                retryable=True,
+            ) from None
         except error.URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise LLMToolError("OpenAI API request timed out") from None
-            raise LLMToolError("cannot connect to OpenAI API; check network and TLS") from None
+                raise coded_error(
+                    "OpenAI API request timed out",
+                    'PROVIDER_TIMEOUT',
+                    'provider.openai',
+                    retryable=True,
+                ) from None
+            raise coded_error(
+                "cannot connect to OpenAI API; check network and TLS",
+                'NETWORK_PROVIDER_UNREACHABLE',
+                'provider.openai',
+                retryable=True,
+            ) from None
         except (OSError, http.client.HTTPException, ValueError, OverflowError):
-            raise LLMToolError("OpenAI API transport failed; details omitted") from None
+            raise coded_error(
+                "OpenAI API transport failed; details omitted",
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.openai',
+            ) from None
 
         if len(raw) > RESPONSE_LIMIT:
-            raise LLMToolError("OpenAI response exceeds 16 MiB")
+            raise coded_error("OpenAI response exceeds 16 MiB", 'MODEL_RESPONSE_TOO_LARGE', 'provider.openai')
         try:
             result = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
         except (ValueError, UnicodeError, RecursionError):
-            raise LLMToolError("OpenAI returned invalid JSON") from None
+            raise coded_error(
+                "OpenAI returned invalid JSON",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai',
+            ) from None
         if not isinstance(result, dict):
-            raise LLMToolError("OpenAI response must be a JSON object")
+            raise coded_error("OpenAI response must be a JSON object", 'MODEL_RESPONSE_INVALID', 'provider.openai')
         content = self._final_text(result)
         metadata = self._metadata(result, self.key, time.monotonic() - start)
         return Reply(content, metadata)

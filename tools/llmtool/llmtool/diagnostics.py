@@ -5,6 +5,8 @@ Validation rejects recognizable credentials; it is not arbitrary secret discover
 No flag/event authorizes recovery, execution, or a provider request.
 """
 
+import base64
+import binascii
 import json
 import re
 import secrets
@@ -29,6 +31,8 @@ MAX_TOKEN_COUNT = 10**12
 MAX_EVENT_ID = 2**63 - 1
 MAX_JSON_DEPTH = 3
 MAX_JSON_ITEMS = 64
+MAX_RUN_EVENTS = 32
+MAX_RUN_EVENT_BYTES = 64 * 1024
 
 EVENT_SCHEMA = 'llmtool.diagnostics.event'
 EVENT_SCHEMA_VERSION = 1
@@ -87,19 +91,23 @@ _RUN_STATUSES = frozenset(('success', 'error', 'interrupted', 'output_closed', '
 # Recognizable credential values, not ordinary authorization/status vocabulary.
 _CREDENTIAL = re.compile(
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}', re.IGNORECASE,
+    r'\bAKIA[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
+    r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b', re.IGNORECASE,
 )
 _AUTH_VALUE = re.compile(
-    r'\b(?:bearer|authorization\s*:\s*basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
+    r'\b(bearer|basic)\s+([A-Za-z0-9._~+/-]+={0,2})',
     re.IGNORECASE,
 )
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r'["\']?\b(?:api[_-]?key|password|token|secret|access[_-]?token|client[_-]?secret|'
-    r'aws_secret_access_key)["\']?\s*[:=]\s*("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
+    r'aws_secret_access_key)["\']?\s*[:=]\s*(<redacted>|\[redacted\]|"[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)',
     re.IGNORECASE,
 )
 _CREDENTIAL_STATUSES = frozenset((
-    'missing', 'unset', 'redacted', 'none', 'null', 'not configured', 'placeholder',
+    'missing', 'unset', 'redacted', '<redacted>', '[redacted]', 'none', 'null',
+    'not configured', 'placeholder',
 ))
 _IDENTIFIER = re.compile(r'[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9_-]*)*')
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@-]*')
@@ -117,12 +125,19 @@ def _contains_credential_value(value):
     if _CREDENTIAL.search(value):
         return True
     for match in _AUTH_VALUE.finditer(value):
-        token = match.group(1)
+        scheme, token = match.groups()
         if len(token) >= 8 and token.lower() not in _CREDENTIAL_STATUSES:
+            if scheme.lower() == 'basic':
+                try:
+                    decoded = base64.b64decode(token, validate=True)
+                except (ValueError, binascii.Error):
+                    continue
+                if b':' not in decoded:
+                    continue  # Ordinary words after Basic are not credentials.
             return True
     for match in _CREDENTIAL_ASSIGNMENT.finditer(value):
         token = match.group(1).strip('"\'').lower()
-        if token in _CREDENTIAL_STATUSES or not token:
+        if token in _CREDENTIAL_STATUSES or not token or set(token) == {'*'}:
             continue
         if token == 'not' and re.match(r'\s+configured\b', value[match.end():], re.IGNORECASE):
             continue
@@ -396,7 +411,7 @@ class DiagnosticEvent:
         expected_severity = _EVENT_SEVERITIES.get(self.type)
         if expected_severity is not None and self.severity is not expected_severity:
             raise ValueError('diagnostic event severity does not match its type')
-        # run.end status-to-severity policy belongs to the future lifecycle slice.
+        # diagnostics_runtime owns the deterministic ask run.end severity policy.
         _identifier(self.component)
         for value in (self.span_id, self.parent_span_id):
             if value is not None:

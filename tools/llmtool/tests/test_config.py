@@ -456,7 +456,9 @@ active_provider: local
         factory.assert_not_called()
         http.assert_not_called()
         self.assertEqual(stdout.getvalue(), "")
-        self.assertEqual(stderr.getvalue(), "llmtool: provider base_url is not configured\n")
+        self.assertRegex(stderr.getvalue(),
+                         r"^llmtool: provider base_url is not configured\n"
+                         r"llmtool: code=CONFIG_PROVIDER_NOT_READY run_id=[0-9a-f]{32} trace=not-saved\n$")
 
     def test_explicit_cli_or_environment_can_configure_provider(self):
         for cli, env in (({"base_url": "http://localhost:1234", "model": "test-model"}, {}),

@@ -443,7 +443,9 @@ generation:
         self.env.pop("LLMTOOL_MODEL")
         result = self.run_cli("ask", "test")
         self.assert_failure(result)
-        self.assertEqual(result.stderr, b"llmtool: provider base_url is not configured\n")
+        self.assertRegex(result.stderr.decode(),
+                         r"^llmtool: provider base_url is not configured\n"
+                         r"llmtool: code=CONFIG_PROVIDER_NOT_READY run_id=[0-9a-f]{32} trace=not-saved\n$")
         shown = self.run_cli("config", "show")
         self.assertEqual(shown.returncode, 0, shown.stderr)
         provider = yaml.safe_load(shown.stdout)["providers"]["default"]
@@ -464,7 +466,11 @@ generation:
                 }}}))
                 result = self.run_cli("ask", "private-input", "--verbose")
                 self.assert_failure(result)
-                self.assertEqual(result.stderr.decode(), "llmtool: provider " + missing + " is not configured\n")
+                lines = result.stderr.decode().splitlines()
+                self.assertEqual(lines[0], "llmtool: provider " + missing + " is not configured")
+                self.assertRegex(lines[1], r"^llmtool: code=CONFIG_PROVIDER_NOT_READY run_id=[0-9a-f]{32} trace=not-saved$")
+                self.assertRegex(lines[2], r"^run_id=[0-9a-f]{32}$")
+                self.assertEqual(lines[3:], ["diagnostics_persisted=false"])
                 self.assertEqual(self.server.requests, [])
 
     def test_explicit_user_config_thinking_false_still_sent(self):

@@ -7,7 +7,7 @@ import socket
 import time
 from urllib import error, request
 
-from ..errors import LLMToolError
+from ..errors import LLMToolError, coded_error, http_error_code
 from .base import ProviderCapabilities, Reply
 
 RESPONSE_LIMIT = 16 * 1024 * 1024
@@ -39,7 +39,12 @@ class OpenAICompatibleClient:
     def validate_ready(provider):
         for field in ("base_url", "model"):
             if provider.get(field) is None:
-                raise LLMToolError("provider " + field + " is not configured")
+                raise coded_error(
+                    "provider " + field + " is not configured",
+                    'CONFIG_PROVIDER_NOT_READY',
+                    'provider.openai-compatible',
+                    user_action_required=True,
+                )
 
     @staticmethod
     def validate_options(options):
@@ -80,49 +85,122 @@ class OpenAICompatibleClient:
         try:
             with self.opener.open(req, timeout=self.provider["timeout_seconds"]) as response:
                 if not 200 <= response.status < 300:
-                    raise LLMToolError("gateway returned a non-success HTTP status")
+                    raise coded_error(
+                        "gateway returned a non-success HTTP status",
+                        http_error_code(response.status),
+                        'provider.openai-compatible',
+                        retryable=response.status == 429,
+                        user_action_required=response.status in (401, 403),
+                        safe_cause={"http_status": response.status},
+                    )
                 raw = response.read(RESPONSE_LIMIT + 1)
         except error.HTTPError as exc:
             status = exc.code
             exc.close()
-            raise LLMToolError("gateway HTTP " + str(status) + "; response body omitted") from None
+            raise coded_error(
+                "gateway HTTP " + str(status) + "; response body omitted",
+                http_error_code(status),
+                'provider.openai-compatible',
+                retryable=status == 429,
+                user_action_required=status in (401, 403),
+                safe_cause={"http_status": status},
+            ) from None
         except (TimeoutError, socket.timeout):
-            raise LLMToolError("gateway request timed out") from None
+            raise coded_error(
+                "gateway request timed out",
+                'PROVIDER_TIMEOUT',
+                'provider.openai-compatible',
+                retryable=True,
+            ) from None
         except error.URLError as exc:
             if isinstance(exc.reason, (TimeoutError, socket.timeout)):
-                raise LLMToolError("gateway request timed out") from None
-            raise LLMToolError("cannot connect to gateway; check network, base_url, and TLS") from None
+                raise coded_error(
+                    "gateway request timed out",
+                    'PROVIDER_TIMEOUT',
+                    'provider.openai-compatible',
+                    retryable=True,
+                ) from None
+            raise coded_error(
+                "cannot connect to gateway; check network, base_url, and TLS",
+                'NETWORK_PROVIDER_UNREACHABLE',
+                'provider.openai-compatible',
+                retryable=True,
+            ) from None
         except (OSError, http.client.HTTPException, ValueError, OverflowError):
-            raise LLMToolError("gateway transport failed; details omitted") from None
+            raise coded_error(
+                "gateway transport failed; details omitted",
+                'PROVIDER_RUNTIME_ERROR',
+                'provider.openai-compatible',
+            ) from None
         if len(raw) > RESPONSE_LIMIT:
-            raise LLMToolError("gateway response exceeds 16 MiB")
+            raise coded_error(
+                "gateway response exceeds 16 MiB",
+                'MODEL_RESPONSE_TOO_LARGE',
+                'provider.openai-compatible',
+            )
         try:
             obj = json.loads(raw.decode("utf-8"), parse_constant=_reject_json_constant)
         except (ValueError, UnicodeError, RecursionError):
-            raise LLMToolError("gateway returned invalid JSON") from None
+            raise coded_error(
+                "gateway returned invalid JSON",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            ) from None
         if not isinstance(obj, dict):
-            raise LLMToolError("gateway response must be a JSON object")
+            raise coded_error(
+                "gateway response must be a JSON object",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         if obj.get("error") is not None:
-            raise LLMToolError("gateway returned an API error; response body omitted")
+            raise coded_error(
+                "gateway returned an API error; response body omitted",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise LLMToolError("gateway response is missing valid choices")
+            raise coded_error(
+                "gateway response is missing valid choices",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         choice = choices[0]
         if choice.get("finish_reason") == "length":
-            raise LLMToolError("incomplete result (finish_reason=length); increase max_tokens")
+            raise coded_error(
+                "incomplete result (finish_reason=length); increase max_tokens",
+                'MODEL_OUTPUT_INCOMPLETE',
+                'provider.openai-compatible',
+            )
         if choice.get("finish_reason") != "stop":
-            raise LLMToolError("gateway response did not finish normally (expected finish_reason=stop)")
+            raise coded_error(
+                "gateway response did not finish normally (expected finish_reason=stop)",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         message = choice.get("message")
         if not isinstance(message, dict) or message.get("tool_calls") or message.get("function_call"):
-            raise LLMToolError("gateway returned an invalid or tool-call message")
+            raise coded_error(
+                "gateway returned an invalid or tool-call message",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
-            raise LLMToolError("gateway returned empty or invalid final content")
+            raise coded_error(
+                "gateway returned empty or invalid final content",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            )
         content = content.strip()
         try:
             content.encode("utf-8")
         except UnicodeError:
-            raise LLMToolError("gateway returned invalid Unicode content") from None
+            raise coded_error(
+                "gateway returned invalid Unicode content",
+                'MODEL_RESPONSE_INVALID',
+                'provider.openai-compatible',
+            ) from None
         # No reasoning fields or raw response are retained in Reply.
         metadata = {"elapsed_seconds": round(time.monotonic() - start, 3)}
         model = obj.get("model")

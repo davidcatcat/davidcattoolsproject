@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** NOT STARTED; split into **A11a Observability & Diagnostics (NEXT)**, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance**. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE and merged (`98f9d48`); A11a.2 ephemeral ask diagnostics implemented on feature branch, external review pending. Split into **A11a Observability & Diagnostics (in progress)**, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance**. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -61,7 +61,7 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
-## Planned A11 delivery (not implemented)
+## A11 delivery checkpoint
 
 A11a → A11b → A11c 各自需要 validation report、external review 與 merge gate。
 A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
@@ -72,7 +72,7 @@ content 或 raw stderr，也不改既有 stdout/JSON schema。LLMTOOL_HOME、run
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
 provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
-[Roadmap](ROADMAP.md)。本次只修文件，未開始 A11 implementation。
+[Roadmap](ROADMAP.md)。A11a.1 已合併；本 branch 只接入 A11a.2 ephemeral `ask` lifecycle。A11a.3 persistence 尚未開始。
 
 ## Canonical repository workflow
 
@@ -578,6 +578,57 @@ HTTP 非 2xx、API error body、malformed JSON、missing/empty final text、Resp
 `openai-compatible` 的 `finish_reason=length` 或非 `stop`、以及不支援的 tool output 都失敗。
 錯誤只給分類／HTTP status，不印 raw response、輸入、URL credentials 或 exception body。
 不自動 retry、不跟隨 HTTP redirect，不讀環境 proxy 設定，避免意外轉送內網資料。
+
+## Ephemeral ask diagnostics — A11a.2 feature branch
+
+Only `ask` has the new in-memory lifecycle; external review is pending. No
+settings/store/trace file is created. `LLMTOOL_HOME` is ignored. Other commands,
+including A9 orchestration and A10 retrieval, retain their output/call contracts.
+
+```sh
+llmtool ask "Explain this supplied evidence" --verbose
+llmtool ask "Explain this supplied evidence" --debug
+```
+
+Normal success keeps final-text stdout and quiet stderr. Expected ask failures
+keep their original safe first line and append:
+
+```text
+llmtool: code=PROVIDER_TIMEOUT run_id=<32 lowercase hex characters> trace=not-saved
+```
+
+`--verbose` keeps validated provider model/token/elapsed keys in their previous
+order, then adds run_id, provider_type (when available), and
+`diagnostics_persisted=false`. `--debug` implies verbose and adds safe event
+summaries: ID, type, component, severity, and available duration. It never displays
+prompt/response, reasoning, raw stderr/body, environment, host paths, or Python
+tracebacks. Invalid/credential-looking metadata is omitted; it cannot fail the
+primary request. No tokens are estimated.
+An event-only schema or construction failure preserves already validated legacy
+verbose metadata; the rejected event is counted without suppressing that display.
+
+A successful ask emits run.start → provider.request → provider.response →
+run.end(success). Expected errors emit error then run.end(error), except incomplete
+model output ends as incomplete. End severity is INFO for success/output_closed,
+ERROR for error, WARNING for interrupted/incomplete. Exit status remains 0/1/2/130;
+BrokenPipe keeps 0. Argparse failures do not create a run.
+
+Events are bounded to 16 KiB each, 32 per run and 64 KiB total. Construction or
+adapter failure drops observation, counts it, and attempts at most one fixed
+DIAGNOSTICS_EVENT_DROPPED warning before finalization. Warning failure never
+recurses; display failure is accounted without appending past run.end. Normal
+success still prints no diagnostics warning. An exceptional ID generator failure
+uses `run_id=unavailable` rather than inventing an insecure identifier.
+
+Codes come from input/config stages and numeric/typed provider failure sites,
+never message substring matching. All recovery flags are metadata only;
+`fallback_allowed=false`. Every provider execution attempt remains one complete()
+call, with no retry or fallback. Sanitized internal stack summaries are deferred
+to the later A11a.6 failure-injection checkpoint; unexpected errors use fixed text.
+JSON is the coded-diagnostics transfer format; coded pickle/deepcopy remain
+unsupported. No diagnostics file is saved or available to a trace command.
+
+See [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
 
 ## Troubleshooting 與已知限制
 
@@ -1578,6 +1629,6 @@ A10 is DONE and merged via PR #12 (`21b9757`); Claude re-review APPROVE, final V
 There is no --save-output option: A10 remains read-only, with no malformed-output
 file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
-A11 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
+A11a.1 merged; A11a.2 feature branch / external review pending; A11a.3 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

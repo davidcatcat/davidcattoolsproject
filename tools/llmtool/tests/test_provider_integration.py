@@ -208,8 +208,10 @@ class ProviderIntegrationTests(unittest.TestCase):
                 self.assertEqual(self.cli(["ask", "test", "--provider", name]), (0, "FINAL\n", ""))
                 self.assertEqual(factory.call_args.args[0]["active_provider"], name)
                 stack.enter_context(patch.object(client, "complete", side_effect=LLMToolError("safe failure")))
-                self.assertEqual(self.cli(["ask", "test", "--provider", name]),
-                                 (1, "", "llmtool: safe failure\n"))
+                status, output, error = self.cli(["ask", "test", "--provider", name])
+                self.assertEqual((status, output), (1, ""))
+                self.assertRegex(error, r"^llmtool: safe failure\n"
+                                 r"llmtool: code=PROVIDER_RUNTIME_ERROR run_id=[0-9a-f]{32} trace=not-saved\n$")
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_returned_commands_are_only_printed(self):
