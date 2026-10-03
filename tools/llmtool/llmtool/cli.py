@@ -157,11 +157,13 @@ def _run_ask(args):
         config = resolve_config(vars(args), require_configured=True)
         code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
         text = read_input(args.text, args.file, sys.stdin)
-        messages = messages_for('ask', text, selected_skill)
         code, component = d.ErrorCode.AUTH_CREDENTIAL_MISSING, 'config.auth'
         key = api_key(config)
         code, component = d.ErrorCode.PROVIDER_RUNTIME_ERROR, 'provider'
         client = create_client(config, key)
+        code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
+        messages = messages_for('ask', text, selected_skill)
+        code, component = d.ErrorCode.PROVIDER_RUNTIME_ERROR, 'provider'
         observe('request', config)
         result = client.complete(messages)  # Exactly once, including debug/drop cases.
         try:

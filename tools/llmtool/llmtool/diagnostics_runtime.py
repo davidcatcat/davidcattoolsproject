@@ -1,6 +1,7 @@
 """Ephemeral ask observation only: bounded events, no persistence or recovery."""
 
 import math
+import re
 import time
 
 from . import diagnostics as d
@@ -118,13 +119,26 @@ class RunContext:
                 elif key == 'model' and type(value) is str and value == '[redacted]':
                     # Existing provider redaction marker is display data, not a model ID.
                     d.safe_diagnostic_text(value)
+                elif key == 'model':
+                    # Display accepts provider identifiers independently of the
+                    # stricter event schema; credentials/controls remain rejected.
+                    d.safe_diagnostic_text(value, d.MODEL_MAX_CHARS)
+                    if re.fullmatch(r'[A-Za-z0-9_./:@-]+', value) is None:
+                        raise ValueError('invalid provider model')
+                    data[key] = value
                 else:
+                    if value is not None and (type(value) is not int
+                                              or not 0 <= value <= d.MAX_TOKEN_COUNT):
+                        raise ValueError('invalid provider token count')
                     data[key] = value
             data['token_usage_available'] = any(type(data.get(k)) is int for k in TOKEN_FIELDS)
+            # Validate bounded display scalars before storing them. Event-only
+            # validation/construction must never erase legacy verbose metadata.
+            d.diagnostic_json(data, d.PROVIDER_METADATA_MAX_BYTES)
+            self._metadata = safe
             if self.emit(d.EventType.PROVIDER_RESPONSE, self._provider_component,
                          d.DiagnosticSeverity.INFO, data) is None:
                 return {}
-            self._metadata = safe
             return safe
         except Exception:
             self.drop()

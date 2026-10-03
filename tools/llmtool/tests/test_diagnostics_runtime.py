@@ -225,6 +225,35 @@ class AskTests(unittest.TestCase):
         self.assertNotIn('event_id', err)
         client.complete.assert_called_once()
 
+    def test_verbose_metadata_survives_stricter_event_model_validation(self):
+        for model in ('_internal', 'models/./x'):
+            for flag in ('--verbose', '--debug'):
+                with self.subTest(model=model, flag=flag):
+                    metadata = {'elapsed_seconds': 0.1, 'model': model,
+                                'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+                    status, out, err, client, runs, *_ = self.invoke(
+                        ['ask', PROMPT, flag], metadata=metadata)
+                    self.assertEqual((status, out), (0, CONTENT + '\n'))
+                    self.assertTrue(err.startswith(''.join(f'{k}={v}\n' for k, v in metadata.items())))
+                    self.assertEqual(runs[0].dropped_event_count, 1)
+                    self.assertFalse(any(e.type == d.EventType.PROVIDER_RESPONSE for e in runs[0].events))
+                    client.complete.assert_called_once()
+
+    def test_credential_client_message_order_matches_legacy_ask(self):
+        order = []
+        original = cli.messages_for
+        def messages(*args):
+            order.append('messages')
+            return original(*args)
+        with patch('llmtool.cli.api_key', side_effect=lambda *_: order.append('key')), \
+             patch('llmtool.cli.create_client') as factory, \
+             patch('llmtool.cli.messages_for', side_effect=messages), \
+             patch('llmtool.cli.resolve_config', return_value=configured()), \
+             patch('llmtool.cli.sys.stdin', None), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            factory.side_effect = lambda *_: (order.append('client') or Mock(complete=Mock(return_value=Reply(CONTENT, {}))))
+            self.assertEqual(cli.main(['ask', PROMPT]), 0)
+        self.assertEqual(order, ['key', 'client', 'messages'])
+
     def test_debug_safe_summaries_and_one_request(self):
         metadata = {'model': 'test', 'reasoning': MARKER, 'stderr': MARKER,
                     'path': '/private/secret', 'raw': PrivateObject()}
@@ -281,6 +310,8 @@ class AskTests(unittest.TestCase):
             self.assertNotIn(MARKER, err)
             if not flag:
                 self.assertEqual(err, '')
+            else:
+                self.assertTrue(err.startswith('elapsed_seconds=0.1\nmodel=qwen/test\ntotal_tokens=7\n'))
 
     def test_invalid_provider_metadata_is_nonfatal(self):
         status, out, err, client, runs, *_ = self.invoke(['ask', PROMPT, '--debug'], metadata={'model': 'm' * 129})
