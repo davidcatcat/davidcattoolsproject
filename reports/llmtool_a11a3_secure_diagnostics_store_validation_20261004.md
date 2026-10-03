@@ -1,5 +1,14 @@
 # A11a.3 — User settings and secure POSIX store validation — 2026-10-04
 
+Current external-review checkpoint: R1/R2 fixed, latest main integrated, local and
+implementation-head CI PASS. Required company inference is SKIPPED-CONFIG because
+no matching configured profile exists; actual CLI failure-path no-write PASS.
+**A11a.3 external-review remediation NOT complete / required live verification blocked.**
+**A11a.4 NOT STARTED.** See the appended remediation evidence for current provenance;
+the original results below are historical and do not describe the current parser.
+
+## Historical baseline — initial implementation c54aea58
+
 Status: **IMPLEMENTED / LOCAL VALIDATION PASS / EXTERNAL REVIEW AND CI PENDING**.
 The evidence below records the canonical working tree before its delivery commit/push.
 A11a.3 is not merged/DONE;
@@ -207,3 +216,168 @@ Tests, relative to tools/llmtool:
 `tests/test_diagnostics_summary.py`.
 
 Docs: tools/llmtool/README.md, tools/llmtool/ROADMAP.md and this report.
+
+## External review remediation — 2026-10-04
+
+External review: **REQUEST CHANGES**. Only the two requested production findings
+were changed; the reviewed store architecture remains in place. This work uses the
+actual local Mac canonical repository, not a Cloud checkout. No branch creation,
+rebase, force push, history rewrite, feature-to-main merge or A11a.4 work occurred.
+
+### Revision and integration evidence
+
+| Revision | SHA |
+| --- | --- |
+| Original A11a.3 implementation | c54aea58c60bc4ae9d7139bd5b49cc77683af3d8 |
+| Old feature base | 0d324038ac44ac9ca1c9b32a11fb9cc163e12a12 |
+| Latest origin/main, verified by fetch in this round | b719aadd99948596b683292ee0e37756406f48f7 |
+| Main integration merge on existing feature branch | edbf1c410926100213c604630d76b1f96cf8d046 |
+| Remediation implementation / actual Mac tested SHA | 918468e8f5ea858e49188bd847a8003a7bf24108 |
+
+Branch: `feat/a11a3-secure-diagnostics-store-20261003`.
+Initial comparison after fetch: feature/main ahead 1, behind 2. The normal
+`git merge origin/main` completed without conflict. After implementation, origin/main
+is an ancestor of HEAD, feature/main ahead 3, behind 0. The delivery report/README
+commit adds documentation only; its final SHA/CI is checked after publication and
+recorded in the final handoff. WORKFLOW.md permits such documentation commits to
+cite the tested implementation SHA when runtime/config/tests are unchanged.
+
+Read latest AGENTS.md, WORKFLOW.md and engineering skills before integration.
+AGENTS.md, WORKFLOW.md, root README and updated engineering skills are byte-identical
+to latest main after remediation. The llmtool README/ROADMAP retain main's
+Cloud/local workflow and separately reflect A11a.1/2 DONE/merged, A11a.3 feature
+branch/remediation, A11a.4 NOT STARTED and overall A11a NOT DONE. No unexpected
+production/test integration conflict occurred.
+
+Remediation source/test manifest SHA-256 (same 12-file encoding as baseline):
+`365d280a81cea42bf21c45373328a063427dd76b58972f6316e25db7ddc0a1f3`.
+All local-tested source/test bytes match the committed implementation. The installed
+`tools/llmtool/.venv/bin/llmtool` reports 0.1.0 and imports this canonical checkout.
+
+### Findings and disposition
+
+| Finding | Disposition | Evidence |
+| --- | --- | --- |
+| R1 public no-op flags | ACCEPTED / FIXED | Removed both parser flags, persist_metadata parser default, persistence_warning and all calls. Both flags now exit 2 before RunContext/provider/store/filesystem creation. Help omits them. Internal True/False/None precedence remains. |
+| R2 cleanup tie-break | ACCEPTED / FIXED | Sorting now uses (completion timestamp, run_id). Equal-ended_at count and byte pressure tests reverse enumeration and remove lexical a before b. Active c and unknown entry survive. |
+| R3 latest main integration | ACCEPTED | Normal merge edbf1c41 integrates fetched b719aadd; Cloud/local workflow and milestone checkpoints reconciled. |
+| R4 company live smoke | SKIPPED-CONFIG | Safe existing config/readiness view finds only default with unset base_url/model; no matching company profile. No inference or credential request was attempted. |
+| R5 company LLMTOOL_HOME smoke | SKIPPED-CONFIG for company inference; PASS for actual no-write assertion | On exact implementation SHA, debug synthetic marker request exits 1 / CONFIG_PROVIDER_NOT_READY, zero provider.request events; absent temporary home remains absent. |
+| R6 validation provenance/report | ACCEPTED / UPDATED | Historical results preserved; current merge/implementation/local/CI/Mac evidence appended, baseline pending CI resolved, remaining company prerequisite recorded without claiming live PASS. |
+
+R1 restores cli.py byte-for-byte to latest main's ephemeral ask behavior. Normal/
+verbose/debug output contracts and failure trace=not-saved remain unchanged. No
+store-to-ask connection, new retries, fallback or provider switching was introduced.
+The internal settings resolver remains unchanged with explicit internal option >
+trusted user persist_metadata > false. Both true/false overrides and unspecified
+None behavior have coverage; the user mapping is still validated and preserved.
+
+R2 regression creates completed run IDs a*32 and b*32 with exactly equal
+`2099-01-01T00:00:00.000Z` ended_at. b is created first and os.listdir is explicitly
+forced to enumerate b before a. Both count and byte pressure remove a first, keep
+b and retain active c*32 and unknown data. A safe in-memory replay of the historical
+timestamp-only sort fails both subcases; the fixed implementation passes. Existing
+one-hour abandoned grace, owner/mode/no-follow/hardlink safety, reservations,
+atomic publication, failure containment and two-process concurrency tests pass.
+No broad store refactor was performed.
+
+### Local checks — actual Mac
+
+All commands launched from the canonical root, with temporary runtime fixtures only:
+
+```sh
+tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p 'test_diagnostics*.py' -q
+tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p 'test_cli.py' -q
+make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"
+make -C tools/llmtool check PYTHON=/usr/bin/python3
+git diff --check
+```
+
+| Check | Python | Discovered | Passed | Failure/error | Skip | Time |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Focused settings/store/summary/runtime/core | 3.13.3 | 146 | 146 | 0 | 0 | 1.316 s |
+| Affected CLI | 3.13.3 | 31 | 31 | 0 | 0 | 16.303 s |
+| Full canonical compileall + offline suite | 3.13.3 | 753 | 752 | 0 | 1 | 51.929 s |
+| Full canonical compileall + offline suite | actual 3.9.6 | 753 | 752 | 0 | 1 | 80.700 s |
+
+All final commands exit 0. The same inherited non-UTF-8 filename test is skipped
+by the Mac filesystem; this skip is not PASS. The first sandboxed affected-CLI
+attempt could not bind its local mock HTTP server (0 tests / one setup error);
+approved canonical-root rerun passed. No test was weakened to avoid the restriction.
+Logs: `/private/tmp/llmtool-a11a3-remediation-py313.log` and
+`/private/tmp/llmtool-a11a3-remediation-py39.log`.
+
+### Remote CI correction and implementation evidence
+
+The baseline report's remote/exact-committed-head pending entries are historical:
+[old run 37139821212](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37139821212)
+was checked in this round and is SUCCESS for c54aea58, both Python 3.9/3.14 jobs,
+offline canonical checks and working tree clean. It proves only the old implementation.
+
+[Remediation implementation run 37141187577](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37141187577)
+is SUCCESS and headSha exactly equals 918468e8f5ea858e49188bd847a8003a7bf24108:
+
+| Job | Tests | Offline canonical checks | Working tree clean |
+| --- | --- | --- | --- |
+| Python 3.9 | 753/753 PASS; no skip; 18.143 s | SUCCESS | SUCCESS |
+| Python 3.14 | 753/753 PASS; no skip; 21.847 s | SUCCESS | SUCCESS |
+
+Final report/README publication must have its own exact-head CI checked; the final
+handoff records its SHA and run URL/status. This implementation run is not presented
+as proof of an untested later delivery HEAD. Neither CI proves company connectivity
+or inference, and green CI does not authorize merge or satisfy missing required
+Mac live verification.
+
+### Required company verification and LLMTOOL_HOME
+
+Expected existing profile: openai-compatible / `http://10.29.7.58:4000` / `gw`.
+These are the requested target endpoint/model, not a claim that the profile exists.
+Both the trusted-user view and current runtime redacted config show only active
+default, type openai-compatible, base_url=null and model=null. Matching profile:
+none. R4 normal, verbose and debug are each **SKIPPED-CONFIG**. Authentication,
+company routing/connectivity and inference remain **NOT-TESTED**. A VPN being on
+does not establish a configured provider. Config was not modified to manufacture
+a test, and no literal key, environment dump, Keychain or CLI auth/session file
+was accessed. No provider request, retry, fallback or switching occurred.
+
+After committing 918468e8, R5 used an absent physical temporary child path and
+the installed canonical llmtool CLI:
+
+```sh
+LLMTOOL_HOME=<new-absent-absolute-path> tools/llmtool/.venv/bin/llmtool ask 'Reply with exactly: A11A3_COMPANY_LIVE_OK' --debug
+```
+
+Actual result: exit 1, empty stdout, code=CONFIG_PROVIDER_NOT_READY,
+run_id=3a816d4dc6722a9c579a2d3f80710973, trace=not-saved,
+diagnostics_persisted=false; no traceback; zero provider.request events.
+The supplied diagnostics home did not exist afterward: **no-write assertion PASS**.
+This validates config-failure CLI behavior, not company live inference. The requested
+company live portion of R5 remains SKIPPED-CONFIG. User config metadata
+(device/inode/size/mtime) was unchanged from preflight; no config writes were performed.
+Additional installed-CLI checks on this exact SHA confirm both removed flags exit 2,
+empty stdout and no run_id (argparse precedes run creation).
+
+### Review, remaining gate and future integration note
+
+review-change and validate-runtime workflows checked the actual remediation diff,
+failure/output/privacy contract, Mac versus CI evidence and current milestone scope.
+No additional material code finding remains in the requested remediation scope.
+No runtime diagnostics artifacts were created in the repository. No packaged skill
+changes were made by remediation; engineering skill changes come only from main's
+authorized merge. Existing benchmark/reasoning artifacts remain untracked/untouched.
+Whitespace, local document links/settings examples and workflow reconciliation pass.
+Historical A11a.1/A11a.2 reports are unchanged.
+
+Required company inference is still unavailable because a matching existing profile
+is missing. Under WORKFLOW.md, missing required Mac checks remain merge-blocking;
+SKIPPED-CONFIG is not a PASS. External re-review also remains outstanding. Source/
+offline remediation is implemented, but **A11a.3 external-review remediation NOT
+complete / MERGE BLOCKED** for the required live prerequisite. **A11a.4 NOT STARTED.**
+
+A11a.4 integration requirement (documentation only):
+
+> A11a.4 must establish the final persisted run_id before persisted events are emitted, or otherwise explicitly reconcile a store collision. Persisted DiagnosticEvent.run_id, RunSummary.run_id, user-visible run_id and store directory must remain identical.
+
+Remediation changed cli.py, one store sort expression, three diagnostic test files,
+llmtool README/ROADMAP and this report. Main integration separately added the listed
+Cloud/local workflow files. No collision refactor or A11a.4 implementation was started.

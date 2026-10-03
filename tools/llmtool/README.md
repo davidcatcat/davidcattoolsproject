@@ -75,7 +75,9 @@ A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先�
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
 provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
 [Roadmap](ROADMAP.md)。A11a.1 / A11a.2 已合併；本 branch 完成 A11a.3 基礎 API，
-等待 validation / external review gate。A11a.4 尚未開始。
+R1/R2 remediation 與本機／implementation CI 已驗證；company live 因缺少 matching
+configured profile 為 SKIPPED-CONFIG，required verification 與 external re-review
+仍待完成。A11a.4 尚未開始。
 
 ## Canonical repository workflow
 
