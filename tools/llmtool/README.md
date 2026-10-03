@@ -76,23 +76,24 @@ provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安�
 
 ## Canonical repository workflow
 
-All project development, tests, validation, documentation, and Git operations
-must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-Do not create or use worktrees, independent or milestone clones, sibling or nested
-repositories, or alternate project checkouts. The previous isolated project
-checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AGENTS.md).
+Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+When the user chooses Codex Cloud, use only the repository checkout configured for
+that Cloud task; discover its actual root instead of assuming `/workspace` is a
+Git repository. Verify repository identity, branch, HEAD and working-tree state.
+This Cloud exception does not authorize worktrees, independent/milestone clones,
+sibling/nested repositories, or alternate local Mac checkouts.
 
-If sandbox permissions block `.git` writes, leave changes in the canonical
-repository and report exact host-terminal staging/commit/push commands; do not
-create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start the next milestone or merge main.
+Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
+Mac-required verification, evidence handoff and merge gates. Complete independent
+Cloud work before handing off checks that require the user's Mac. Mock/CI success
+does not replace required live verification. Preserve unrelated user work and
+stop at the milestone's review gate; do not automatically merge or start the next milestone.
 
-All unit, targeted, canonical, smoke, provider integration, regression, Git, and
-documentation validation must be launched from the canonical repository.
-Test-generated temporary files are allowed only when required by the test/runtime.
-The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
-runtime security mechanism, not a project checkout. It must contain no Git clone,
-worktree, or copy of this repository. This policy does not change provider behavior.
+If Git writes are blocked, leave changes in the authorized checkout and provide
+exact commands for that environment; do not create another checkout.
+Test-generated temporary files and the `codex-cli` provider's empty ephemeral
+runtime cwd remain allowed security/test mechanisms, never project checkouts.
+This development policy does not change llmtool provider capabilities or runtime isolation.
 
 ## A2.6 integration validation
 

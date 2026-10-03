@@ -34,6 +34,14 @@ Deliver a working change, not just code generation.
 - Provider or agent integration must not treat technical capability as permission to execute actions.
 - Do not add execution before the affected workflow has a diagnosable failure path. New mutations should emit enough structured diagnostics/audit evidence to identify what ran, what failed, and why without exposing secrets.
 
+## Cloud and Mac verification
+
+For llmtool work in Codex Cloud, follow
+[the development workflow](../../tools/llmtool/WORKFLOW.md).
+Classify required checks before implementation; complete Cloud-capable work and
+publish an exact-revision handoff for Mac-only checks. Treat implementation complete,
+required verification complete and merge ready as separate claims.
+
 ## Completion criteria
 
 - Requested behavior works.

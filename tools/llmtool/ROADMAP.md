@@ -13,23 +13,44 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 
 ## Canonical repository workflow
 
-All project development, tests, validation, documentation, and Git operations
-must run from `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-Do not create or use worktrees, independent or milestone clones, sibling or nested
-repositories, or alternate project checkouts. The previous isolated project
-checkout workflow is deprecated and must not be reused. See [AGENTS.md](../../AGENTS.md).
+Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+When the user chooses Codex Cloud, use only the repository checkout configured for
+that Cloud task; discover its actual root instead of assuming `/workspace` is a
+Git repository. Verify repository identity, branch, HEAD and working-tree state.
+This Cloud exception does not authorize worktrees, independent/milestone clones,
+sibling/nested repositories, or alternate local Mac checkouts.
 
-If sandbox permissions block `.git` writes, leave changes in the canonical
-repository and report exact host-terminal staging/commit/push commands; do not
-create another checkout. Preserve unrelated user work. Stop for external review
-when required; do not automatically start the next milestone or merge main.
+Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
+Mac-required verification, evidence handoff and merge gates. Complete independent
+Cloud work before handing off checks that require the user's Mac. Mock/CI success
+does not replace required live verification. Preserve unrelated user work and
+stop at the milestone's review gate; do not automatically merge or start the next milestone.
 
-All unit, targeted, canonical, smoke, provider integration, regression, Git, and
-documentation validation must be launched from the canonical repository.
-Test-generated temporary files are allowed only when required by the test/runtime.
-The `codex-cli` provider's ephemeral cwd under `/tmp` or `/var/tmp` remains a
-runtime security mechanism, not a project checkout. It must contain no Git clone,
-worktree, or copy of this repository. This policy does not change provider behavior.
+If Git writes are blocked, leave changes in the authorized checkout and provide
+exact commands for that environment; do not create another checkout.
+Test-generated temporary files and the `codex-cli` provider's empty ephemeral
+runtime cwd remain allowed security/test mechanisms, never project checkouts.
+This development policy does not change llmtool provider capabilities or runtime isolation.
+
+## Cross-milestone Cloud development and local acceptance
+
+Codex Cloud 開發流程是 A0–A12 共用的工程規範，不新增 milestone、不代表新增
+llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](WORKFLOW.md)。
+
+- 任務開始先列出 Cloud-capable / Mac-required / not-required 驗收項目。
+- Cloud 可完成開發、review、offline/mock tests、build、CI 與已授權的 feature branch/PR。
+- 只有依賴實際 Mac 的 VPN、既有 provider auth、macOS sandbox、本機檔案或服務的
+  必要驗證才交給 Mac；保留 canonical Mac path，不允許另建本機 checkout/worktree。
+- 每個交接報告綁定 implementation SHA，附 prerequisites、commands、expected
+  marker/exit、Cloud/CI 結果和 Mac pending checks。
+- 必要本機驗證未完成時標示 LOCAL VERIFICATION REQUIRED / MERGE BLOCKED；
+  Cloud 實作完成不等於 milestone DONE。既有 optional live tests 不因此變成必要 gate。
+- A11a/A11b/A11c 的 review 與驗收 gates 照原規範執行；A11c 真實任務若依賴 Mac，
+  必須有該 Mac 的實測證據。A12 未來 host/Telegram acceptance 同樣依實際依賴分配。
+- relevant code/config/tests 或整合變更後重新驗證受影響項目；純報告更新可保留
+  明確引用的 implementation SHA。不得將歷史 PASS 改寫成新一輪驗證。
+- 文件變更只做文件驗證，不新增 production code、dependency、runtime config 或
+  provider calls，也不改既有 milestone 的完成與合併紀錄。
 
 ## A0 — Model Validation ✅ DONE
 

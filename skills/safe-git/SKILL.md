@@ -54,6 +54,14 @@ Hard guardrails:
 - Never delete branches or tags unless explicitly requested.
 - Never overwrite unrelated remote work.
 
+## Cloud/Mac evidence gate
+
+For llmtool work, follow [the development workflow](../../tools/llmtool/WORKFLOW.md).
+Publish only the authorized feature branch; branch publication does not establish
+merge readiness. Verify required Cloud/CI/review/Mac results against the affected
+implementation revision before merge. Keep pending required Mac checks blocking,
+and never use a new checkout to bypass Git permissions.
+
 ## Completion criteria
 
 - Local and remote state are understood.

@@ -43,6 +43,15 @@ If no material issue is found, say so directly and identify any testing or envir
 - Check that branch, merge, roadmap, and report wording matches the actual tested revision and
   validation state. Keep CURRENT, DONE, merged, and unmerged claims accurate.
 
+## Cloud verification review
+
+For llmtool Cloud/Mac changes, check
+[the development workflow](../../tools/llmtool/WORKFLOW.md).
+Verify the handoff names the tested implementation SHA, distinguishes Cloud/CI/mock
+from Mac/live evidence, and leaves required pending checks merge-blocking. Check for
+changes since validation before accepting old results. Documentation-only work needs
+documentation checks, not an unnecessary live provider run.
+
 ## Completion criteria
 
 - Entire intended diff was reviewed.
