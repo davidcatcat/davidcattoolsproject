@@ -468,14 +468,15 @@ A11 拆成三個可獨立 merge / review / validation 的 milestone，避免一�
 A10 已 DONE and merged；A11a.1 core models/coded errors DONE and merged (`98f9d48d8344ab1f005446fde1b77cf3e0df252f`)。
 A11a.2 ephemeral ask lifecycle DONE/merged via PR #16 (`0d324038ac44ac9ca1c9b32a11fb9cc163e12a12`)。
 A11a.3 settings 與獨立 POSIX store DONE/merged via PR #18 (`b9ac5389ea9e45fa3f66450e0269920ee03734e7`)。
-A11a.4 persisted ask integration 已在本 feature branch 實作，review/publication pending。
+A11a.4 persisted ask integration 已發布為 draft PR #19，independent review 與
+reviewed-head CI PASS；external/human review 與 final documentation-head CI pending，未合併。
 A11a 整體尚未完成；A11a.5～A11a.7、A11b/A11c 均 NOT STARTED。其他 diagnostics CLI 與
 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–3 DONE/merged; A11a.4 feature branch / review pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1–3 DONE/merged; A11a.4 draft PR #19 / independent review and reviewed-head CI PASS / external and final-head gates pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | 有限 executor、action approval、bounded recovery | A11a 完成合併；sandbox、approval、audit failure 規格先通過 review |
 | A11c — NOT STARTED | 組合既有能力與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -545,8 +546,8 @@ cleanup uses deterministic (completion timestamp, run_id) ordering. The standalo
 API was not connected to ask in A11a.3. Historical remediation/company live evidence
 remains in
 [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
-**A11a.4 — Persisted ask integration: implemented on feature branch; review and
-publication pending, not merged/DONE.** Ask-only mutually exclusive save/no-save
+**A11a.4 — Persisted ask integration: draft [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19);
+independent review and reviewed-head CI PASS, not merged/DONE.** Ask-only mutually exclusive save/no-save
 flags use explicit CLI > trusted user > false; debug/home alone remain unsaved.
 Safe buffered run.start is rebound to the collision-resolved store ID before
 persisted events. Streaming metadata and a typed completed summary retain stdout,
@@ -555,9 +556,14 @@ close failures yield one bounded warning after primary task error lines; they ne
 replace the task result or trigger retry/fallback. Descriptor cleanup attempts all
 releases even if one close fails. See
 [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
-Cloud Linux/offline/mock evidence does not claim new live inference. Independent
-review, required external/human review and exact publication-head CI are separate
-gates; overall A11a is NOT DONE.
+R1 legacy input/skill error precedence is closed after correction round 1;
+independent Reviewer PASS on `852f5108199586c7ab237fd3f8e79f08cca574dd`.
+Developer/Reviewer each passed canonical 784/784 with prospective user-approved
+runtime-fixture permission. Reviewed-head PR CI [37155723038](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155723038)
+passed Python 3.9 and 3.14, each 784/784, no skips, clean tree. Exact API object
+publication succeeded; direct Git RPC authentication failed. Cloud Linux/offline/mock
+evidence does not claim new live inference. External/human review and final
+documentation-head CI remain separate pending gates; overall A11a is NOT DONE.
 **A11a.5–A11a.7 NOT STARTED.** The numbered architecture sections below describe the
 broader design; implementation checkpoints follow section 17 of the spec.
 

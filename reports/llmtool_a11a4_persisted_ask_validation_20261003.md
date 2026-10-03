@@ -1,9 +1,9 @@
 # A11a.4 — Persisted ask integration validation — 2026-10-03
 
-Status: **IMPLEMENTED ON FEATURE BRANCH / CORRECTION ROUND 1 LOCAL CANONICAL PASS /
-INDEPENDENT RE-REVIEW AND FINAL-HEAD CI PENDING**. A11a.4 is not merged/DONE. Overall A11a remains
+Status: **DRAFT PR #19 / INDEPENDENT REVIEW PASS / REVIEWED-HEAD CI PASS /
+FINAL DOCUMENTATION-HEAD CI AND EXTERNAL/HUMAN REVIEW PENDING**. A11a.4 is not merged/DONE. Overall A11a remains
 incomplete; A11a.5–7, A11b, A11c and A12 are NOT STARTED. No merge is authorized.
-The current correction checkpoint at the end supersedes the explicitly historical
+The current publication checkpoint at the end supersedes the explicitly historical
 initial-candidate check/review sections; the prior permission event remains historical.
 
 ## Repository and exact implementation
@@ -232,7 +232,7 @@ and frozen-candidate handoff. Review uses that exact committed SHA; any correcti
 requires coordinator authorization, new affected checks and re-review. Source is
 not pushed and no PR is opened until the coordinator authorizes publication.
 
-## Correction round 1 — current local validation and second-review checkpoint
+## Correction round 1 — historical local validation and second-review checkpoint
 
 Initial independent review of frozen candidate
 `51aef5757df6d90fa2d99fa5dd809306f593e627`: **REQUEST CHANGES** with one P2
@@ -307,3 +307,78 @@ No Mac/company/Claude/paid-provider live PASS is claimed. A11a.4 remains impleme
 on a feature branch, not merged/DONE; overall A11a and later-slice status is unchanged.
 The Developer freezes all writes after the correction documentation delivery and
 hands the exact clean candidate SHA to the coordinator for second review.
+
+## Current publication checkpoint — independent PASS and reviewed-head CI
+
+Independent review history: **REQUEST CHANGES** on first candidate `51aef575` for
+R1 primary input/skill error precedence → accepted correction round 1 committed as
+`7affd93dcc94f9026dc7f7330f1297af3044ab5e` → second review **PASS / R1 CLOSED** on
+exact candidate `852f5108199586c7ab237fd3f8e79f08cca574dd`. No remaining material
+finding was reported. Independent baseline/candidate replay confirmed malformed
+config plus input conflict, invalid skill and combined failures retain the
+original safe first line, USER_INPUT_ERROR, empty stdout and exit 1. Valid opt-in
+still saves those early error events with zero provider calls.
+
+| Approved current source validation | Exact source identity | Result |
+| --- | --- | --- |
+| Developer compileall/canonical | Source/test commit `7affd93dcc94f9026dc7f7330f1297af3044ab5e` | 784/784 PASS, no failure/error/skip, Python 3.12.14, 15.493 s |
+| Independent Reviewer compileall/canonical | Frozen candidate `852f5108199586c7ab237fd3f8e79f08cca574dd`, source/test bytes identical to `7affd93` | 784/784 PASS, no failure/error/skip, Python 3.12.14, 15.777 s |
+
+Both current local runs used the user's prospective `/var/tmp` test-runtime
+permission and loopback allowance; runtime directories were removed by the tests.
+Reviewer log: `/tmp/llmtool-a11a4-reviewer-round2-canonical.log`. Manifest matched
+`a00ef5d3b685777d675fdb6470cd5d66304888c6f34c973ef547636d1dcbec1c` and the
+reviewed tree was clean. The earlier unapproved permission event remains
+historical; these later approved results satisfy the local gate prospectively.
+
+### First published exact head and authentication evidence
+
+Draft [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) is OPEN
+against main. First published/reviewed head:
+`852f5108199586c7ab237fd3f8e79f08cca574dd`.
+Direct Git RPC publication: **FAIL — authentication unavailable**. The initial
+push could not read a username; a command-only existing gh credential-helper
+attempt returned HTTP 401. No login, account switch or global credential/config
+change was made; no credential values were printed.
+
+Existing-authorized GitHub REST Git-data API publication: **PASS**. Advisory
+repository permissions reported push=true, and actual API writes succeeded. The
+uploader read original local objects, preserved ordered parents, tree, message,
+author, committer and UTC dates, and verified returned SHA equality for 17 blobs,
+four trees and all four commits. It rechecked that the feature ref was unused and
+created that feature ref without force. Fetch subsequently established upstream
+`origin/feat/a11a4-persisted-ask-cloud-20261003`, with local/remote heads identical
+and ahead/behind 0/0. This is exact-object API publication, not a successful Git
+push. No main ref was changed.
+
+### Exact first-published-head GitHub Actions evidence
+
+The coordinator verified all runs below have headSha exactly
+`852f5108199586c7ab237fd3f8e79f08cca574dd`; they are evidence for that published
+head and code-identical source revision, not for an unpublished later docs head.
+
+| Run / job | Result |
+| --- | --- |
+| [PR run 37155723038](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155723038) | Completed SUCCESS on exact first published head |
+| [Python 3.9 job 111298585886](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155723038/job/111298585886) | 784/784 PASS, no skips, 16.143 s; install, compileall/canonical and working-tree-clean SUCCESS |
+| [Python 3.14 job 111298586050](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155723038/job/111298586050) | 784/784 PASS, no skips, 16.155 s; install, compileall/canonical and working-tree-clean SUCCESS |
+| [Push run 37155679821](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155679821) | Completed SUCCESS on the same exact head |
+
+Current source/config/tests/packaged skills/workflow are unchanged after independent
+PASS. This finalization edits documentation only. Meaningful current-status updates
+in tools/llmtool README/ROADMAP are within the CI paths and will trigger a separate
+final documentation-head check after authorized publication. The final commit
+SHA/run cannot appear in its own bytes; the PR/coordinator handoff records that
+exact final head and run. Old/base/first-published CI is never substituted for it.
+
+Independent final documentation-diff confirmation: **PENDING**. Final
+documentation-head publication/CI: **PENDING**. Required external/human review:
+**PENDING**; the same-session Reviewer PASS does not satisfy that separate gate.
+One source correction round was used; no second source-fix round was needed.
+Requested Developer/Reviewer models and reasoning remain actual-runtime
+**UNVERIFIED**, as the capability table states. No required Mac/company/Claude or
+paid live inference prerequisite was added; those optional checks remain
+NOT-TESTED, and Linux/mock evidence is not presented as live inference.
+A11a.4 is not merged/DONE, overall A11a remains incomplete, and no later milestone
+or merge is authorized. The Developer freezes the documentation candidate before
+the coordinator obtains final docs-only confirmation and permits publication.
