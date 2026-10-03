@@ -2,13 +2,13 @@
 
 ## Canonical repository and pre-change checks
 
-The ONLY project repository directory is:
+The canonical local Mac project repository directory is:
 
 ```text
 /Users/davidsun/git/davidcataiporject/davidcattoolsproject
 ```
 
-All project work must be performed from this canonical repository: source changes,
+Local Mac project work must be performed from this canonical repository: source changes,
 unit tests, targeted tests, canonical tests, smoke tests, validation, documentation
 work, Git inspection, and staging/commit/push when sandbox permissions permit.
 
@@ -21,9 +21,22 @@ git branch --show-current
 git status --short --branch
 ```
 
-The repository root must resolve exactly to
+For local Mac work, the root must resolve exactly to
 `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-If not, STOP and report the mismatch.
+For user-selected Codex Cloud work, use only the checkout configured for that task.
+Discover its root with Git and verify it is `davidcatcat/davidcattoolsproject`;
+do not assume `/workspace` is the repository. Record environment, root, branch,
+HEAD, remote identity and working-tree state. If identity/root cannot be established,
+STOP before changes. Cloud is an explicit exception to the Mac path requirement,
+not permission to create alternate local project checkouts.
+
+For authorized documentation edits through the connected GitHub API, pin reads
+and the change branch to a known base SHA and verify the final remote diff.
+Do not claim local checkout, test or synchronization evidence from API operations.
+
+Read [llmtool development workflow](tools/llmtool/WORKFLOW.md) when using Cloud or
+handing verification between Cloud and Mac. Keep Mac-only VPN/auth/local-service
+checks pending until verified on the actual Mac; complete independent Cloud work.
 
 Codex must NOT create or use:
 
@@ -33,15 +46,17 @@ Codex must NOT create or use:
 - Nested Git repositories
 - Project checkouts under `/tmp` or `/private/tmp`
 - Project checkouts under `/Users/davidsun/git/davidcataiporject/tmp/`
-- Project checkouts under any other path or alternate project workspaces
+- Agent-created project checkouts under any other path or alternate project workspaces
+  (the task-configured Codex Cloud checkout is allowed)
 
 Do not invent alternate project workspaces or move this project. The former
 independent-clone/worktree workflow is deprecated and must not be reused.
 
 ## Testing and runtime isolation
 
-All project tests and validation must be launched from
-`/Users/davidsun/git/davidcataiporject/davidcattoolsproject`, including unit,
+Local Mac project tests and validation must be launched from
+`/Users/davidsun/git/davidcataiporject/davidcattoolsproject`; Cloud checks must use
+that task's verified configured checkout. This includes unit,
 targeted, canonical, smoke, provider integration, regression, Git, and documentation
 validation. Do not create separate project checkouts for testing.
 
@@ -56,9 +71,9 @@ not contain a Git clone, worktree, or copy of the repository. Do not modify
 
 If the Codex sandbox prevents writing `.git`, for example `.git/index.lock`,
 do NOT create another checkout or worktree, or move to `/tmp`. Leave source
-changes in this canonical repository and report the exact host-terminal Git
+changes in the authorized environment's repository and report the exact environment-specific Git
 commands needed for staging, committing, and pushing. Those commands must run
-from the canonical repository and name only files belonging to the task.
+from that repository and name only files belonging to the task.
 
 - Preserve unrelated user work, including existing untracked files/directories.
 - Do not use `git reset --hard` or `git clean -fd`.

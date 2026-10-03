@@ -48,6 +48,16 @@ authentication, inference, and end-to-end claims separate.
   network/system settings merely to make a smoke test pass.
 - Report skipped checks explicitly and keep the final conclusion within the evidence collected.
 
+## Environment handoff
+
+For llmtool Cloud/Mac work, follow
+[the development workflow](../../tools/llmtool/WORKFLOW.md).
+Run checks requiring the user's VPN, existing CLI sessions, macOS isolation or local
+services on the actual Mac. Record unavailable Cloud checks precisely, then hand off
+the exact implementation SHA, prerequisites, commands and expected markers.
+Do not transfer auth files or replace required live evidence with mocks. Relevant
+code/config/test changes invalidate affected previous runtime evidence.
+
 ## Completion criteria
 
 - Tested revision and executable version are known.
