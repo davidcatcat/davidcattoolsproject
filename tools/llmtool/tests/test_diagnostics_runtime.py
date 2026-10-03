@@ -216,6 +216,27 @@ class AskTests(unittest.TestCase):
         client.complete.assert_called_once()
         self.assertEqual(runs[0].final_status, 'success')
 
+    def test_save_syntax_pending_integration_keeps_one_call_and_result(self):
+        for flag in ('--save-diagnostics', '--no-save-diagnostics'):
+            with self.subTest(flag=flag):
+                status, out, err, client, *_ = self.invoke(['ask', PROMPT, flag])
+                self.assertEqual((status, out), (0, CONTENT + '\n'))
+                client.complete.assert_called_once()
+                if flag == '--save-diagnostics':
+                    self.assertEqual(err.count('DIAGNOSTICS_STORE_UNAVAILABLE'), 1)
+                    self.assertIn('integration pending', err)
+                else:
+                    self.assertEqual(err, '')
+
+    def test_save_warning_secondary_to_primary_failure(self):
+        status, out, err, client, *_ = self.invoke(['ask', PROMPT, '--save-diagnostics'],
+            fail=coded_error('provider timed out', 'PROVIDER_TIMEOUT', 'provider'))
+        self.assertEqual((status, out), (1, ''))
+        client.complete.assert_called_once()
+        self.assertTrue(err.startswith('llmtool: provider timed out\n'))
+        self.assertLess(err.index('code=PROVIDER_TIMEOUT'), err.index('code=DIAGNOSTICS_STORE_UNAVAILABLE'))
+        self.assertEqual(err.count('DIAGNOSTICS_STORE_UNAVAILABLE'), 1)
+
     def test_verbose_preserves_metadata_order_and_appends_safe_fields(self):
         status, out, err, client, *_ = self.invoke(['ask', PROMPT, '--verbose'])
         self.assertEqual(status, 0)

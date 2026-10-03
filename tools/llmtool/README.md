@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE and merged (`98f9d48`); A11a.2 ephemeral ask diagnostics implemented on feature branch, external review pending. Split into **A11a Observability & Diagnostics (in progress)**, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance**. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models merged (`98f9d48`); A11a.2 ephemeral ask diagnostics merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store implemented locally, external review pending. Split into **A11a Observability & Diagnostics (in progress)**, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance**. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -66,13 +66,16 @@ request during configuration. The live gateway result is recorded in the
 A11a → A11b → A11c 各自需要 validation report、external review 與 merge gate。
 A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
 config opt-in 才保存 bounded safe metadata。Debug 不保存 prompt/response、retrieved
-content 或 raw stderr，也不改既有 stdout/JSON schema。LLMTOOL_HOME、runs/trace/doctor
-等新 diagnostics 設定與 CLI 仍為規劃，目前不能使用。
+content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 validated user settings、
+LLMTOOL_HOME resolver 與獨立 POSIX store API。ask 落盤接線屬於 A11a.4；目前
+`--save-diagnostics` 只回報一次安全 unavailable warning，原始結果照常回傳。
+`runs` / `trace` / `doctor` 尚未實作。
 
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
 provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
-[Roadmap](ROADMAP.md)。A11a.1 已合併；本 branch 只接入 A11a.2 ephemeral `ask` lifecycle。A11a.3 persistence 尚未開始。
+[Roadmap](ROADMAP.md)。A11a.1 / A11a.2 已合併；本 branch 完成 A11a.3 基礎 API，
+等待 validation / external review gate。A11a.4 尚未開始。
 
 ## Canonical repository workflow
 
@@ -579,9 +582,9 @@ HTTP 非 2xx、API error body、malformed JSON、missing/empty final text、Resp
 錯誤只給分類／HTTP status，不印 raw response、輸入、URL credentials 或 exception body。
 不自動 retry、不跟隨 HTTP redirect，不讀環境 proxy 設定，避免意外轉送內網資料。
 
-## Ephemeral ask diagnostics — A11a.2 feature branch
+## Ephemeral ask diagnostics — A11a.2 merged
 
-Only `ask` has the new in-memory lifecycle; external review is pending. No
+Only `ask` has the new in-memory lifecycle; A11a.2 is merged. No
 settings/store/trace file is created. `LLMTOOL_HOME` is ignored. Other commands,
 including A9 orchestration and A10 retrieval, retain their output/call contracts.
 
@@ -629,6 +632,65 @@ JSON is the coded-diagnostics transfer format; coded pickle/deepcopy remain
 unsupported. No diagnostics file is saved or available to a trace command.
 
 See [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
+
+## Diagnostics settings and standalone store — A11a.3 local implementation
+
+Only trusted user `~/.config/llmtool/config.yaml` may contain this optional mapping:
+
+```yaml
+diagnostics:
+  persist_metadata: false
+  max_runs: 100
+  max_total_bytes: 67108864
+  max_age_days: 14
+  max_run_bytes: 1048576
+```
+
+`persist_metadata` must be a boolean. Limits require integers: max_runs 1–1000,
+max_total_bytes 1–512 MiB, max_age_days 1–365, max_run_bytes 64 KiB–8 MiB and
+no greater than max_total_bytes. Unknown fields, wrong types and out-of-range
+limits fail configuration before provider access. Project `.llmtool.yaml` cannot
+set diagnostics. `config show` keeps its existing provider/generation output;
+`configure` preserves a validated diagnostics mapping without expanding it.
+
+The settings resolver uses explicit CLI save/no-save > user setting > false.
+The mutually exclusive `ask --save-diagnostics` / `--no-save-diagnostics` syntax
+is available. **Ask persistence is not connected in this slice:** a CLI save
+request emits one `DIAGNOSTICS_STORE_UNAVAILABLE` warning after the task result;
+stdout, exit status and one provider call remain unchanged. User diagnostics
+settings are validated and preserved, but do not cause ask writes yet.
+`--no-save-diagnostics`, the unspecified CLI default and `--debug` remain unsaved.
+
+`LLMTOOL_HOME` selects a location without enabling persistence. It must be an
+absolute path without controls or parent traversal; shell expansion is not
+performed. Defaults: macOS `~/Library/Application Support/llmtool`; Linux
+absolute `$XDG_STATE_HOME/llmtool`, falling back to `~/.local/state/llmtool`.
+Windows `%LOCALAPPDATA%\\llmtool` is reporting-only; the persistence backend
+rejects unsupported platforms. Current ask never resolves or creates this home.
+
+The standalone `diagnostics_store.DiagnosticsStore` API is opt-in and POSIX-only.
+It accepts validated typed events and a typed `RunSummary`; construction/default-off
+start perform no filesystem access. An enabled start securely anchors traversal,
+creates directories 0700/files 0600, rejects symlink components, unsafe existing
+permissions/ownership and hardlinked lock/data files. It does not chmod unsafe
+existing stores. File operations use directory descriptors and no-follow flags.
+Store/run flock locks protect cleanup, no-clobber run creation, active writers and
+full max-run capacity reservations. Run ID collisions have three bounded attempts.
+
+Completion fsyncs and atomically publishes `trace.jsonl` and `summary.json`, then
+releases the reservation. Readers must require the summary as the completion marker;
+the two files are published individually. Interrupted/failed writers retain a partial
+trace or a trace without summary. Cleanup only occurs on enabled start: age, count
+and byte limits evict validated eligible runs, active locks prevent deletion, and
+abandoned runs have a one-hour grace. Unknown data remains and consumes capacity;
+malformed reservations disable new persistence. Failed summary temp files are
+retained conservatively when their ownership/schema cannot be proved.
+
+The API returns unavailable/false plus one fixed bounded `StoreWarning` instead of
+raw exception/path data. Specific store codes distinguish unsafe state, capacity,
+collision and write failures. CLI lifecycle integration and rendering of those
+store results belongs to A11a.4; offline inspection commands belong to A11a.5/6.
+See [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 
 ## Troubleshooting 與已知限制
 
@@ -1629,6 +1691,7 @@ A10 is DONE and merged via PR #12 (`21b9757`); Claude re-review APPROVE, final V
 There is no --save-output option: A10 remains read-only, with no malformed-output
 file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
-A11a.1 merged; A11a.2 feature branch / external review pending; A11a.3 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
+A11a.1 / A11a.2 merged; A11a.3 local implementation / external review pending;
+A11a.4–7 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

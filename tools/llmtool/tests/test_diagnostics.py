@@ -151,7 +151,17 @@ class ErrorCompatibilityTests(unittest.TestCase):
             LLMToolError('different message', diagnostic=error())
 
     def test_codes_are_closed_and_exactly_spec_set(self):
-        self.assertEqual(len(d.ErrorCode), 18)
+        self.assertEqual({code.value for code in d.ErrorCode}, {
+            'USER_INPUT_ERROR', 'CONFIG_INVALID', 'CONFIG_PROVIDER_NOT_READY',
+            'AUTH_CREDENTIAL_MISSING', 'AUTH_PROVIDER_REJECTED',
+            'ENV_PROVIDER_RUNTIME_MISSING', 'NETWORK_PROVIDER_UNREACHABLE',
+            'PROVIDER_TIMEOUT', 'PROVIDER_RATE_LIMITED', 'PROVIDER_HTTP_ERROR',
+            'PROVIDER_RUNTIME_ERROR', 'MODEL_RESPONSE_INVALID', 'MODEL_OUTPUT_INCOMPLETE',
+            'MODEL_RESPONSE_TOO_LARGE', 'LOCAL_IO_ERROR', 'INTERNAL_UNEXPECTED',
+            'DIAGNOSTICS_STORE_UNAVAILABLE', 'DIAGNOSTICS_EVENT_DROPPED',
+            'DIAGNOSTICS_STORE_UNSAFE', 'DIAGNOSTICS_STORE_FULL',
+            'DIAGNOSTICS_RUN_COLLISION', 'DIAGNOSTICS_WRITE_FAILED',
+        })
         for code in d.ErrorCode:
             self.assertEqual(error(code=code).code, code)
         for code in ('PROVIDER_TIMEOUT', 'TOOL_EXECUTION_FAILED', None, 1):

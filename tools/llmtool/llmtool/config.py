@@ -114,7 +114,10 @@ def _provider_name(name):
 
 
 def _apply_user(config, fragment):
-    _fields(fragment, {"providers", "generation", "active_provider"}, "user config")
+    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics"}, "user config")
+    if "diagnostics" in fragment:
+        from .diagnostics_settings import parse_diagnostics_settings
+        parse_diagnostics_settings(fragment["diagnostics"])
     if "active_provider" in fragment:
         config["active_provider"] = fragment["active_provider"]
     if "providers" in fragment:
