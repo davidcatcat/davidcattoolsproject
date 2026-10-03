@@ -1,10 +1,12 @@
 # A11a.3 — User settings and secure POSIX store validation — 2026-10-04
 
-Current external-review checkpoint: R1/R2 fixed, latest main integrated, local and
-implementation-head CI PASS. Required company inference is SKIPPED-CONFIG because
-no matching configured profile exists; actual CLI failure-path no-write PASS.
-**A11a.3 external-review remediation NOT complete / required live verification blocked.**
-**A11a.4 NOT STARTED.** See the appended remediation evidence for current provenance;
+Current external-review checkpoint: **A11a.3 CODE APPROVED** per the user's final
+external repo review. Company normal/verbose/debug inference now returns the exact
+marker through trusted CLI runtime overrides; a persisted company profile is not
+required. Debug diagnostics and live LLMTOOL_HOME no-write PASS. Complete verbose
+diagnostics evidence and the new report HEAD's CI are still pending.
+**A11a.3 MERGE BLOCKED: final verification evidence pending.**
+**A11a.4 NOT STARTED.** See the final company LLM section for current provenance;
 the original results below are historical and do not describe the current parser.
 
 ## Historical baseline — initial implementation c54aea58
@@ -381,3 +383,132 @@ A11a.4 integration requirement (documentation only):
 Remediation changed cli.py, one store sort expression, three diagnostic test files,
 llmtool README/ROADMAP and this report. Main integration separately added the listed
 Cloud/local workflow files. No collision refactor or A11a.4 implementation was started.
+
+## Final company LLM Mac verification
+
+This section supersedes the earlier current-status SKIPPED-CONFIG conclusion and
+the earlier external re-review pending gate; historical evidence above is retained.
+The user reports **A11a.3 CODE APPROVED**, reviewed HEAD
+`d1360f119cdfb003dbc854199e2e54577d163944`. A persisted company provider profile is
+not required: existing trusted `--base-url` and `--model` CLI overrides supply the
+runtime target without modifying user configuration.
+
+### Exact checkout and environment
+
+- Tested implementation/reviewed HEAD: `d1360f119cdfb003dbc854199e2e54577d163944`.
+  Runtime/config/tests are unchanged from remediation implementation
+  `918468e8f5ea858e49188bd847a8003a7bf24108`.
+- Actual Mac canonical cwd/root:
+  `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+- Branch: `feat/a11a3-secure-diagnostics-store-20261003`.
+- macOS 15.7.9 / Darwin; installed checkout CLI 0.1.0, canonical .venv interpreter.
+  Imported llmtool module resolves inside this checkout.
+- Preflight tracked tree clean; unrelated benchmark/reasoning artifacts preserved.
+- Successful fetch: origin/main `b719aadd99948596b683292ee0e37756406f48f7`;
+  preflight HEAD/main ahead 4 / behind 0, HEAD/upstream ahead 0 / behind 0.
+- Company VPN enabled by user. Actual route to `10.29.7.58` selects `utun4`,
+  gateway `10.123.144.1`; route query is read-only, no VPN/route modification.
+- Provider type `openai-compatible`, endpoint `http://10.29.7.58:4000`, requested
+  model alias `gw`. No persisted profile was created or active profile changed.
+
+### Commands and live evidence
+
+All requests use the same synthetic input and a 20-second timeout:
+
+```sh
+tools/llmtool/.venv/bin/llmtool ask \
+  'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
+  --base-url http://10.29.7.58:4000 --model gw --timeout 20
+
+tools/llmtool/.venv/bin/llmtool ask \
+  'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
+  --base-url http://10.29.7.58:4000 --model gw --timeout 20 --verbose
+
+LLMTOOL_HOME=/private/tmp/llmtool-a11a3-live-home-4aaf80975ad44d52afde482b9579fe04 \
+tools/llmtool/.venv/bin/llmtool ask \
+  'Reply with exactly: A11A3_COMPANY_LIVE_OK' \
+  --base-url http://10.29.7.58:4000 --model gw --timeout 20 --debug
+```
+
+The commands were launched once each by a temporary capture helper from canonical
+cwd. The helper is a validation artifact, not a project checkout or source change.
+Network calls ran outside the sandbox to avoid confusing sandbox restrictions with
+company connectivity. No provider request was retried or redirected/fallen back.
+
+| Invocation | Exit | Exact stdout | Traceback | Request count | Result |
+| --- | ---: | --- | --- | --- | --- |
+| Normal | 0 | `A11A3_COMPANY_LIVE_OK` + newline | none | 1; source-path evidence | PASS; stderr empty |
+| Verbose | 0 | `A11A3_COMPANY_LIVE_OK` + newline | none | 1; source-path evidence | Inference PASS; full diagnostics evidence NOT-TESTED |
+| Debug + absent home | 0 | `A11A3_COMPANY_LIVE_OK` + newline | none | 1; one provider.request event | PASS |
+
+The reviewed CLI calls client.complete exactly once; the reviewed provider opens
+one HTTP request with redirects disabled and no retry/fallback. Normal/verbose do
+not print request events, so their counts use the one-invocation source path rather
+than independent wire instrumentation. Debug directly records exactly one request
+and one response event. Total initial CLI invocations/provider requests: 3 / 3.
+
+Verbose run_id: `1b0b32283c3b9163e9fd208d0c8e4c39`.
+The capture helper incorrectly accepted only `llmtool:` stderr prefixes, whereas
+the reviewed renderer emits metadata as `key=value`. It withheld and did not retain
+the full verbose stderr, so provider_type, diagnostics_persisted and full verbose
+leakage checks cannot be claimed as observed PASS. This is a verification evidence
+gap, not an observed provider/code failure. No repeat verbose request was made.
+
+Debug safe stderr was retained and checked:
+
+```text
+elapsed_seconds=2.58
+model=qwen3.6-35b-a3b
+prompt_tokens=134
+completion_tokens=528
+total_tokens=662
+run_id=b57356a46f550c3ba73152118d9ee048
+provider_type=openai-compatible
+diagnostics_persisted=false
+event_id=1 type=run.start component=cli.ask severity=info
+event_id=2 type=provider.request component=provider.openai-compatible severity=info
+event_id=3 type=provider.response component=provider.openai-compatible severity=info duration_ms=2580
+event_id=4 type=run.end component=cli.ask severity=info duration_ms=2639
+dropped_event_count=0
+```
+
+Debug diagnostics contain only bounded timing/token/model metadata and safe event
+summaries: no prompt, duplicated output marker, raw HTTP body, reasoning,
+Authorization/API key or traceback. Requested `gw` is the gateway alias; the
+returned safe model identifier is `qwen3.6-35b-a3b`.
+
+### Live no-write and scope checks
+
+The unique LLMTOOL_HOME path was generated without mkdir/removal and checked absent
+before the debug request. It remained absent after successful real inference:
+**LLMTOOL_HOME live no-write PASS**. `LLMTOOL_HOME` alone selects a location; it
+does not opt into persistence or create the filesystem directory. The normal Mac
+diagnostics home `~/Library/Application Support/llmtool` is also absent afterward.
+
+User config mutation: **NO**. Stat-only checks of `~/.config/llmtool/config.yaml`
+show absent before and after all requests; its contents were not inspected. No
+credential file, Keychain, CLI auth/session file or environment dump was accessed.
+The installed CLI used its normal runtime credential handling; validation did not
+inspect credentials. No company/private data was submitted. No retry, fallback,
+provider switch, persistence opt-in or ask/store wiring was added.
+
+After live requests, `git diff --name-only d1360f119cdfb003dbc854199e2e54577d163944`
+was empty. Production/config/test bytes: **UNCHANGED**. No runtime diagnostics
+artifacts were created in the repo. Only this report is edited for publication;
+existing unrelated untracked artifacts remain untouched. `git diff --check` PASS.
+
+### CI publication and remaining gate
+
+[Reviewed-head CI 37141706156](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37141706156)
+is SUCCESS for exactly `d1360f119cdfb003dbc854199e2e54577d163944`: Python 3.9 and
+3.14, Offline canonical checks and Working tree is clean all SUCCESS.
+This remains historical reviewed-head evidence, not the new report commit's CI.
+
+The current workflow's push path filter excludes reports and no open PR existed
+at preflight. Report-only push alone does not trigger new exact-head CI. Final
+publication SHA, CI URL and exact-head job/step statuses must be recorded in the
+final handoff after publication; old CI must not be substituted for that gate.
+
+**A11a.3 MERGE BLOCKED: complete verbose diagnostics evidence and new final-head
+CI pending.** Company inference/configuration is no longer the blocker.
+**A11a.4 NOT STARTED.** No production changes, branch creation or merge occurred.
