@@ -313,7 +313,10 @@ class DiagnosticsStore:
             return None
         finally:
             for fd in reversed(fds):
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except Exception as exc:
+                    self._warn(exc)
 
     def _candidate(self, runs, name, now):
         """Hold candidate run lock through deletion. Unknown/active entries are kept."""
@@ -545,7 +548,11 @@ class StoredRun:
             if not self.closed:
                 self.closed = True
                 for fd in reversed(self._fds):
-                    os.close(fd)
+                    try:
+                        os.close(fd)
+                    except Exception as exc:
+                        # Attempt every remaining release even if one close fails.
+                        self._warn(exc)
 
     def __enter__(self):
         return self

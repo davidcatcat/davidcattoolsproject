@@ -95,6 +95,7 @@ class StoreTests(unittest.TestCase):
 
     def test_existing_unsafe_permissions_not_chmodded(self):
         self.home.mkdir(mode=0o755)
+        self.home.chmod(0o755)  # Preserve the unsafe fixture under a private umask.
         before = self.home.stat().st_mode
         store = self.store()
         self.assertIsNone(store.start())

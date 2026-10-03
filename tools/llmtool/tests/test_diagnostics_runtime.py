@@ -216,16 +216,18 @@ class AskTests(unittest.TestCase):
         client.complete.assert_called_once()
         self.assertEqual(runs[0].final_status, 'success')
 
-    def test_public_persistence_flags_rejected_before_run_provider_or_store(self):
-        for flag in ('--save-diagnostics', '--no-save-diagnostics'):
+    def test_conflicting_or_non_ask_persistence_flags_rejected_before_observation(self):
+        for argv in (['ask', 'x', '--save-diagnostics', '--no-save-diagnostics'],
+                     ['review-diff', 'x', '--save-diagnostics'],
+                     ['context-pack', 'x', '--no-save-diagnostics']):
             out, err = io.StringIO(), io.StringIO()
-            with self.subTest(flag=flag), redirect_stdout(out), redirect_stderr(err), \
+            with self.subTest(argv=argv), redirect_stdout(out), redirect_stderr(err), \
                     patch('llmtool.cli.create_client') as factory, \
                     patch('llmtool.diagnostics_runtime.RunContext') as run, \
                     patch('llmtool.diagnostics_store.DiagnosticsStore.start') as store, \
                     patch('os.mkdir') as mkdir, \
                     self.assertRaises(SystemExit) as caught:
-                cli.main(['ask', 'x', flag])
+                cli.main(argv)
             self.assertEqual(caught.exception.code, 2)
             factory.assert_not_called()
             run.assert_not_called()
@@ -234,13 +236,14 @@ class AskTests(unittest.TestCase):
             self.assertEqual(out.getvalue(), '')
             self.assertEqual(err.getvalue(), 'llmtool: invalid command or options; use --help\n')
 
-    def test_ask_help_excludes_persistence_flags(self):
+    def test_ask_help_exposes_metadata_only_persistence_flags(self):
         out = io.StringIO()
         with redirect_stdout(out), self.assertRaises(SystemExit) as caught:
             cli.main(['ask', '--help'])
         self.assertEqual(caught.exception.code, 0)
-        self.assertNotIn('--save-diagnostics', out.getvalue())
-        self.assertNotIn('--no-save-diagnostics', out.getvalue())
+        self.assertIn('--save-diagnostics', out.getvalue())
+        self.assertIn('--no-save-diagnostics', out.getvalue())
+        self.assertIn('metadata only', out.getvalue())
 
     def test_verbose_preserves_metadata_order_and_appends_safe_fields(self):
         status, out, err, client, *_ = self.invoke(['ask', PROMPT, '--verbose'])
@@ -554,7 +557,7 @@ class AskTests(unittest.TestCase):
             credential.assert_not_called()
             factory.assert_not_called()
 
-    def test_runtime_ast_has_no_execution_or_persistence(self):
+    def test_runtime_ast_has_no_execution_or_direct_filesystem_access(self):
         from llmtool import diagnostics_runtime
         tree = ast.parse(Path(diagnostics_runtime.__file__).read_text())
         forbidden = {'subprocess', 'socket', 'pathlib', 'tempfile', 'fcntl', 'os', 'logging'}

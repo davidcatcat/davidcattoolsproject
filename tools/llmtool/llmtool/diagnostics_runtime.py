@@ -1,8 +1,9 @@
-"""Ephemeral ask observation only: bounded events, no persistence or recovery."""
+"""Bounded ask observation with optional metadata persistence, never recovery."""
 
 import math
 import re
 import time
+from dataclasses import replace
 
 from . import diagnostics as d
 
@@ -37,6 +38,12 @@ class RunContext:
         self._events = []
         self._event_bytes = 0
         self._metadata = {}
+        self.persistence_requested = False
+        self.persisted = False
+        self.final_error_code = None
+        self._stored_run = None
+        self._store_warning = None
+        self._store_warning_displayed = False
         try:
             self.run_id = d.new_run_id()
             self.started = time.monotonic()
@@ -49,6 +56,79 @@ class RunContext:
     def events(self):
         return tuple(self._events)
 
+    def _persistence_failure(self, warning=None, *, writing=False):
+        from .diagnostics_store import StoreWarning
+        # Copy only a closed code; never render a foreign warning's message/repr.
+        code = (d.ErrorCode.DIAGNOSTICS_WRITE_FAILED if writing else
+                d.ErrorCode.DIAGNOSTICS_STORE_UNAVAILABLE)
+        allowed = {d.ErrorCode.DIAGNOSTICS_STORE_UNAVAILABLE,
+                   d.ErrorCode.DIAGNOSTICS_STORE_UNSAFE,
+                   d.ErrorCode.DIAGNOSTICS_STORE_FULL,
+                   d.ErrorCode.DIAGNOSTICS_RUN_COLLISION,
+                   d.ErrorCode.DIAGNOSTICS_WRITE_FAILED}
+        if type(warning) is StoreWarning and type(warning.code) is d.ErrorCode and warning.code in allowed:
+            code = warning.code
+        if self._store_warning is None:
+            self._store_warning = StoreWarning(code)
+        self.persisted = False
+        self.close()
+
+    def enable_persistence(self, settings):
+        """Explicit settings only; reconcile a store collision before any write.
+
+        run.start already exists in memory. Rebind buffered immutable events to
+        the final ID before appending them; no event with the old ID is saved.
+        """
+        if not settings.persist_metadata or self.persistence_requested:
+            return
+        self.persistence_requested = True
+        store = None
+        try:
+            from .diagnostics_store import DiagnosticsStore
+            store = DiagnosticsStore(settings)
+            self._stored_run = store.start(self.run_id)
+            if self._stored_run is None:
+                self._persistence_failure(store.warning)
+                return
+            identity = d.validate_run_id(self._stored_run.run_id)
+            rebound = [replace(event, run_id=identity) for event in self._events]
+            self.run_id, self._events = identity, rebound
+            for event in self._events:
+                self._persist_event(event)
+        except Exception:
+            self._persistence_failure()
+
+    def _persist_event(self, event):
+        writer = self._stored_run
+        if writer is None:
+            return
+        try:
+            if writer.append(event) is not True:
+                self._persistence_failure(writer.warning, writing=True)
+        except Exception:
+            self._persistence_failure(writing=True)
+
+    def close(self):
+        """Release the optional writer on every CLI exit; never retry a write."""
+        writer, self._stored_run = self._stored_run, None
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                # Store close is secondary just like append/publication.
+                from .diagnostics_store import StoreWarning
+                if self._store_warning is None:
+                    self._store_warning = StoreWarning(d.ErrorCode.DIAGNOSTICS_WRITE_FAILED)
+                self.persisted = False
+
+    def display_store_warning(self, stream):
+        if self._store_warning is not None and not self._store_warning_displayed:
+            self._store_warning_displayed = True
+            try:
+                print(self._store_warning.line(), file=stream)
+            except Exception:
+                pass
+
     def _append(self, kind, component, severity, data):
         obj = d.DiagnosticEvent(
             run_id=self.run_id, event_id=len(self._events) + 1,
@@ -60,6 +140,7 @@ class RunContext:
             raise ValueError('ephemeral diagnostics budget exceeded')
         self._events.append(obj)
         self._event_bytes += size
+        self._persist_event(obj)
         return obj
 
     def drop(self):
@@ -165,6 +246,7 @@ class RunContext:
             self.emit(d.EventType.ERROR, component, d.DiagnosticSeverity.ERROR, data)
         except Exception:
             self.drop()
+        self.final_error_code = code
         return code
 
     def finish(self, status):
@@ -178,9 +260,33 @@ class RunContext:
                       {'status': status, 'duration_ms': duration})
         except Exception:
             self.drop()
+        writer = self._stored_run
+        if writer is not None:
+            try:
+                from .diagnostics_summary import RunSummary
+                first, last = self._events[0], self._events[-1]
+                summary = RunSummary(
+                    run_id=self.run_id, mode=self.mode, status=status,
+                    started_at=first.timestamp, ended_at=last.timestamp,
+                    duration_ms=last.data['duration_ms'], event_count=len(self._events),
+                    dropped_event_count=self.dropped_event_count,
+                    trace_bytes=writer.trace_bytes, provider_type=self.provider_type,
+                    final_error_code=self.final_error_code,
+                )
+                if (writer.finish(summary) is True and writer.persisted is True
+                        and writer.warning is None):
+                    self.persisted = True
+                else:
+                    self._persistence_failure(writer.warning, writing=True)
+            except Exception:
+                self._persistence_failure(writing=True)
+            finally:
+                self.close()
 
     def failure_line(self, code):
-        return 'llmtool: code=' + code.value + ' run_id=' + (self.run_id or 'unavailable') + ' trace=not-saved'
+        trace = ('saved' if self.persisted else
+                 'unavailable' if self.persistence_requested else 'not-saved')
+        return 'llmtool: code=' + code.value + ' run_id=' + (self.run_id or 'unavailable') + ' trace=' + trace
 
     def display(self, stream):
         """All output here is optional; a failed display cannot alter task status."""
@@ -192,7 +298,7 @@ class RunContext:
             print('run_id=' + (self.run_id or 'unavailable'), file=stream)
             if self.provider_type is not None:
                 print('provider_type=' + self.provider_type, file=stream)
-            print('diagnostics_persisted=false', file=stream)
+            print('diagnostics_persisted=' + ('true' if self.persisted else 'false'), file=stream)
             if self.mode is d.DiagnosticMode.DEBUG:
                 for obj in self.events:
                     line = (f'event_id={obj.event_id} type={obj.type.value} '

@@ -93,13 +93,13 @@ class SettingsTests(unittest.TestCase):
         factory.assert_not_called()
         self.assertIn('code=CONFIG_INVALID', err.getvalue())
 
-    def test_internal_option_precedence_without_public_parser_fields(self):
+    def test_internal_option_precedence_and_unspecified_public_default(self):
         self.save({'persist_metadata': True})
         for value in (None, True, False):
             self.assertEqual(resolve_diagnostics_settings(home=self.home,
                 persist_metadata=value).persist_metadata, value is not False)
         args = cli.parser_for_cli().parse_args(['ask', 'x'])
-        self.assertFalse(hasattr(args, 'persist_metadata'))
+        self.assertIsNone(args.persist_metadata)
 
 
 class LocationTests(unittest.TestCase):
