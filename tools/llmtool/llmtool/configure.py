@@ -179,6 +179,8 @@ def run_configure(home=None, input_fn=input, secret_fn=None, stdout=None, stderr
     old_generation.update(saved_user.get("generation", {}))
     if "generation" in saved_user and config["generation"] == old_generation:
         persisted["generation"] = copy.deepcopy(saved_user["generation"])
+    if "diagnostics" in saved_user:
+        persisted["diagnostics"] = copy.deepcopy(saved_user["diagnostics"])
     save_config(path, persisted, replace=exists)
 
     print("Configuration saved: " + str(path), file=stdout)
