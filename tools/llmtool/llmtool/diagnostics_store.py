@@ -397,7 +397,7 @@ class DiagnosticsStore:
                 item = self._candidate(runs, name, now)
                 if item is not None:
                     candidates.append(item)
-            candidates.sort(key=lambda item: item[4])
+            candidates.sort(key=lambda item: (item[4], item[0]))
             # Age cleanup and abandoned recovery precede count/byte pressure.
             deleted = set()
             for item in candidates:

@@ -93,18 +93,13 @@ class SettingsTests(unittest.TestCase):
         factory.assert_not_called()
         self.assertIn('code=CONFIG_INVALID', err.getvalue())
 
-    def test_cli_options_mutually_exclusive_and_precedence(self):
-        parser = cli.parser_for_cli()
+    def test_internal_option_precedence_without_public_parser_fields(self):
         self.save({'persist_metadata': True})
-        for flags, value in (([], None), (['--save-diagnostics'], True),
-                             (['--no-save-diagnostics'], False)):
-            args = parser.parse_args(['ask', 'x', *flags])
-            self.assertIs(args.persist_metadata, value)
+        for value in (None, True, False):
             self.assertEqual(resolve_diagnostics_settings(home=self.home,
-                persist_metadata=args.persist_metadata).persist_metadata, value is not False)
-        with patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as caught:
-            parser.parse_args(['ask', 'x', '--save-diagnostics', '--no-save-diagnostics'])
-        self.assertEqual(caught.exception.code, 2)
+                persist_metadata=value).persist_metadata, value is not False)
+        args = cli.parser_for_cli().parse_args(['ask', 'x'])
+        self.assertFalse(hasattr(args, 'persist_metadata'))
 
 
 class LocationTests(unittest.TestCase):

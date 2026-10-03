@@ -187,6 +187,40 @@ class StoreTests(unittest.TestCase):
         self.assertFalse(completed.exists())
         self.assertEqual(unrelated.stat().st_size, 1048576 - 65536 - 50)
 
+    def test_equal_completion_times_evict_by_run_id_under_count_and_byte_pressure(self):
+        for pressure in ('count', 'bytes'):
+            with self.subTest(pressure=pressure):
+                self.home = self.base / pressure
+                small_id, large_id = 'a' * 32, 'b' * 32
+                stamp = '2099-01-01T00:00:00.000Z'
+                # Create the lexically larger ID first and explicitly reverse
+                # enumeration: filesystem ordering cannot make this test pass.
+                large = self.complete(self.start(identity=large_id), stamp)
+                small = self.complete(self.start(identity=small_id), stamp)
+                active = self.start(self.store(max_run_bytes=65536), identity='c' * 32)
+                unknown = self.home / 'runs' / 'unknown'
+                unknown.write_bytes(b'KEEP')
+                limits = dict(max_run_bytes=65536)
+                if pressure == 'count':
+                    limits['max_runs'] = 4
+                else:
+                    limits['max_total_bytes'] = 1048576
+                    large_bytes = sum(p.stat().st_size for p in large.iterdir())
+                    filler = self.home / 'unrelated'
+                    filler.write_bytes(b'K' * (1048576 - 2 * 65536 - large_bytes - 4))
+                original = os.listdir
+                def reverse_run_order(directory):
+                    names = original(directory)
+                    if small_id in names and large_id in names:
+                        return [large_id, small_id] + [n for n in names if n not in (small_id, large_id)]
+                    return names
+                with patch('llmtool.diagnostics_store.os.listdir', side_effect=reverse_run_order):
+                    self.start(self.store(**limits), identity='d' * 32)
+                self.assertFalse(small.exists())
+                self.assertTrue(large.exists())
+                self.assertTrue((self.home / 'runs' / active.run_id).exists())
+                self.assertEqual(unknown.read_bytes(), b'KEEP')
+
     def test_unknown_files_and_invalid_completed_runs_never_deleted(self):
         directory = self.complete(self.start())
         (directory / 'foreign').write_text('KEEP')

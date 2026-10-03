@@ -451,7 +451,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a.2 feature-branch checkpoint
+## A11 — Production Workflow & Diagnostics — A11a.3 feature-branch review remediation
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -466,15 +466,15 @@ A11 拆成三個可獨立 merge / review / validation 的 milestone，避免一�
 
 每個 milestone 都要有自己的 validation report、external review 與 Definition of Done。
 A10 已 DONE and merged；A11a.1 core models/coded errors DONE and merged (`98f9d48d8344ab1f005446fde1b77cf3e0df252f`)。
-A11a.2 ephemeral ask lifecycle 已隨 PR #16 合併 (`0d32403`)。
-A11a.3 settings 與獨立 POSIX store 已在 canonical repository 實作，等待 external review。
+A11a.2 ephemeral ask lifecycle DONE/merged via PR #16 (`0d324038ac44ac9ca1c9b32a11fb9cc163e12a12`)。
+A11a.3 settings 與獨立 POSIX store 已在 feature branch 實作，正在 external review remediation；未合併。
 A11a 整體尚未完成；A11a.4～A11a.7、A11b/A11c 均 NOT STARTED。以下 ask persistence、
 其他 diagnostics CLI 與 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1/2 merged; A11a.3 local implementation / external review pending | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1/2 DONE/merged; A11a.3 feature branch / external review remediation; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | 有限 executor、action approval、bounded recovery | A11a 完成合併；sandbox、approval、audit failure 規格先通過 review |
 | A11c — NOT STARTED | 組合既有能力與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -533,14 +533,15 @@ Coded diagnostics transfer via JSON; pickle/deepcopy remain deferred. Sanitized
 internal stack summaries are deferred to implementation slice A11a.6 failure
 injection.
 
-**A11a.3 — User diagnostics settings and secure POSIX store: implemented locally;
-external review and CI pending; not merged.** Dedicated user-only settings,
+**A11a.3 — User diagnostics settings and secure POSIX store: implemented on feature branch;
+external review remediation; not merged.** Dedicated user-only settings,
 configure preservation, pure home resolution, immutable persisted RunSummary,
 POSIX no-follow/private storage, store/run locks, capacity reservations, atomic
 publication and conservative retention are implemented. Persistence remains off
-by default. `ask` accepts save/no-save syntax; explicit save reports the pending
-integration once without altering the task result or calling the store. User
-settings do not trigger ask writes yet. A11a.4 will connect the event lifecycle
+by default. Public save/no-save flags are rejected (exit 2) before run/provider/store
+access. Internal `persist_metadata=True/False/None` precedence is preserved, and
+cleanup uses deterministic (completion timestamp, run_id) ordering. User settings
+do not trigger ask writes yet. A11a.4 will connect the event lifecycle and parser
 after this slice's review gate. See
 [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 **A11a.4–A11a.7 NOT STARTED.** The numbered architecture sections below describe the

@@ -71,12 +71,6 @@ def parser_for_cli():
         if command == "ask":
             child.add_argument("--skill", help="explicit runtime skill name")
             child.add_argument("--debug", action="store_true", help="write safe ephemeral event summaries; never save a trace")
-            persistence = child.add_mutually_exclusive_group()
-            persistence.add_argument('--save-diagnostics', dest='persist_metadata', action='store_true',
-                                     help='request metadata persistence (ask integration pending)')
-            persistence.add_argument('--no-save-diagnostics', dest='persist_metadata', action='store_false',
-                                     help='disable metadata persistence')
-            child.set_defaults(persist_metadata=None)
         if command == "context-pack":
             child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
@@ -130,16 +124,6 @@ def _run_ask(args):
         run = None  # Even an observer initialization failure is secondary.
     code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
 
-    def persistence_warning():
-        # A11a.3 exposes the opt-in syntax and standalone store. Connecting ask's
-        # event lifecycle is gated on A11a.4; never silently claim a saved trace.
-        if args.persist_metadata is True:
-            try:
-                print('llmtool: code=DIAGNOSTICS_STORE_UNAVAILABLE '
-                      'ask persistence integration pending; task result unaffected', file=sys.stderr)
-            except Exception:
-                pass
-
     def observe(method, *values):
         if run is None:
             return None
@@ -164,7 +148,6 @@ def _run_ask(args):
         except Exception:
             observe('drop')
         observe('display', sys.stderr)
-        persistence_warning()
         return 1
 
     try:
@@ -201,14 +184,12 @@ def _run_ask(args):
         sys.stdout.write(output + '\n')
         observe('finish', 'success')
         observe('display', sys.stderr)
-        persistence_warning()
         return 0
     except LLMToolError as exc:
         return failure(exc)
     except BrokenPipeError:
         sys.stdout = None
         observe('finish', 'output_closed')
-        persistence_warning()
         return 0
     except (OSError, UnicodeError):
         return failure(coded_error('local I/O failed; details omitted',
@@ -220,7 +201,6 @@ def _run_ask(args):
         observe('finish', 'interrupted')
         print('llmtool: interrupted', file=sys.stderr)
         observe('display', sys.stderr)
-        persistence_warning()
         return 130
     except Exception:
         # Never stringify an unexpected exception or print a Python traceback.
