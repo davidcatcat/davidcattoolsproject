@@ -1,11 +1,15 @@
 # A11a.3 — User settings and secure POSIX store validation — 2026-10-04
 
-Current external-review checkpoint: **A11a.3 CODE APPROVED** per the user's final
-external repo review. Company normal/verbose/debug inference now returns the exact
-marker through trusted CLI runtime overrides; a persisted company profile is not
-required. Debug diagnostics and live LLMTOOL_HOME no-write PASS. Complete verbose
-diagnostics evidence and the new report HEAD's CI are still pending.
-**A11a.3 MERGE BLOCKED: final verification evidence pending.**
+Current external-review checkpoint: **A11a.3 EXTERNAL REVIEW PASS / COMPANY LIVE VERIFIED**.
+Company normal, verbose and debug inference each returned the exact synthetic marker
+through trusted CLI runtime overrides; a persisted company profile is not required.
+Debug captured the complete safe metadata renderer output plus debug-only events, and
+live LLMTOOL_HOME no-write PASS. The standalone verbose invocation succeeded but its
+capture helper did not retain the full key=value stderr; external review accepts this
+as a non-blocking evidence gap because verbose and debug use the same RunContext.display
+metadata path, debug captured that shared path in full, and focused/full regression
+tests plus Python 3.9/3.14 CI cover verbose behavior.
+**A11a.3 MERGE GATE: pull-request exact-head CI pending.**
 **A11a.4 NOT STARTED.** See the final company LLM section for current provenance;
 the original results below are historical and do not describe the current parser.
 
@@ -509,6 +513,14 @@ at preflight. Report-only push alone does not trigger new exact-head CI. Final
 publication SHA, CI URL and exact-head job/step statuses must be recorded in the
 final handoff after publication; old CI must not be substituted for that gate.
 
-**A11a.3 MERGE BLOCKED: complete verbose diagnostics evidence and new final-head
-CI pending.** Company inference/configuration is no longer the blocker.
-**A11a.4 NOT STARTED.** No production changes, branch creation or merge occurred.
+External re-review disposition: **PASS**. The missing standalone verbose stderr
+capture is retained as a documented, non-blocking evidence gap: the verbose request
+itself returned exit 0 and the exact marker, while the subsequent debug live request
+captured the same shared metadata renderer fields (elapsed/model/tokens/run_id/
+provider_type/diagnostics_persisted) plus debug-only events. Source review confirms
+both modes use the same RunContext.display path, and existing focused/full tests and
+Python 3.9/3.14 reviewed-head CI cover verbose output compatibility and privacy.
+
+**A11a.3 MERGE GATE: pull-request exact-head CI pending.** Company inference,
+configuration and Mac no-write verification are satisfied. **A11a.4 NOT STARTED.**
+No production changes were made after the reviewed implementation SHA.
