@@ -249,3 +249,47 @@ A11b/c/A12. A11a.3 will own user settings and secure POSIX persistence and must 
 be started until authorized. External review PENDING; branch NOT merged.
 
 **A11a.3 NOT STARTED.**
+
+## Independent review follow-up — 2026-10-03
+
+Historical review: [Claude independent review](llmtool_a11a2_ephemeral_ask_diagnostics_review_20261002.md),
+APPROVE WITH CHANGES at `cdc9b487dc64f11bf83710ae20e699c23100fbed`.
+That report is unchanged. Starting checkpoint for this follow-up was `55411149847e0f6f030cccaa0241edbb86b3b05d`,
+the documentation-only independent-review commit. Fetched origin/main remains
+`98f9d48d8344ab1f005446fde1b77cf3e0df252f`. Same feature branch; no new branch/checkout.
+
+| Finding | Disposition | Decision / regression evidence |
+| --- | --- | --- |
+| V1: dropped response event erased legacy verbose metadata | FIXED | Independently validate bounded allowlisted display scalars, store them before attempting the strict event. `_internal` and `models/./x` preserve elapsed/model/token order in verbose/debug while the invalid event is dropped/counted. Full DiagnosticEvent construction failure also preserves verbose metadata, answer/exit and exactly-one call. |
+| V2: message assembly preceded credential/client construction | FIXED | Restore legacy `api_key → create_client → messages_for` order. Stage codes still change at each boundary. An explicit ordering regression covers all three calls. |
+| V3: HTTP-200 API-error classification and timeout detail | DEFERRED | Preserve the current typed site/status mapping. Future safe category refinement requires separate evidence; no message parsing, raw body capture or transport change is added. |
+
+Display metadata still rejects credential-looking/control/oversize model values,
+non-scalar objects, invalid counts and non-finite durations. Unknown keys are never
+stringified. The display model charset matches existing provider names (also `@`
+from A11a.1); strict event identifier/path-segment policy is unchanged. This is
+display/collection separation, not relaxation of the event schema or authorization.
+
+New production fix commit: `9d2445e` (`fix(llmtool): preserve verbose metadata when diagnostics drop`).
+Documentation publication HEAD and final exact-head CI run are verified separately
+at delivery; this section does not claim a pending run passed.
+
+All validation below launched from the canonical repository after these fixes:
+
+| Suite / interpreter | Discovered | Passed | Failed | Errors | Skipped | Seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| focused diagnostics/core/runtime — Python 3.13.3 | 100 | 100 | 0 | 0 | 0 | 0.819 |
+| affected diagnostics/CLI/input/config/configure/providers — Python 3.13.3 | 299 | 299 | 0 | 0 | 0 | 32.904 |
+| full canonical compileall + unittest — Python 3.13.3 | 707 | 706 | 0 | 0 | 1 | 49.762 |
+| full canonical compileall + unittest — actual Python 3.9.6 | 707 | 706 | 0 | 0 | 1 | 79.883 |
+
+The one skip remains the inherited non-UTF-8 Git filename filesystem fixture.
+`git diff --check` PASS. Production/test diff and documentation links reviewed.
+No provider modules, packaged runtime skills, A9/A10 or non-ask main path changed
+in this follow-up. Existing privacy/no-persistence/one-call/containment tests pass.
+No new filesystem writes, credentials/config discovery, retry/fallback, shell/Git/tool
+execution, environment mutation or live provider/network test. Six unrelated
+untracked benchmark/reasoning reports remain untouched. No gh/worktree/clone.
+
+Sanitized debug stack and coded pickle/deepcopy limitations remain as previously
+recorded. External re-review pending; branch NOT merged. **A11a.3 NOT STARTED.**

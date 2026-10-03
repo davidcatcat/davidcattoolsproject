@@ -505,7 +505,8 @@ provider calls, retry/fallback, or non-ask output changes. See
 [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
 **Diagnostic collection failure must never fail the primary read-only command.**
 Invalid observation is dropped/counted with at most one fixed warning; primary
-stdout/status/provider-call count survives. Core constructors remain strict.
+stdout/status/provider-call count and validated legacy verbose metadata survive.
+Independent review V1/V2 addressed on branch; re-review pending. Core constructors remain strict.
 Coded diagnostics transfer via JSON; pickle/deepcopy remain deferred. Sanitized
 internal stack summaries are deferred to implementation slice A11a.6 failure
 injection. Persisted RunSummary is not implemented and belongs to implementation

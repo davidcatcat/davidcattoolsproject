@@ -604,6 +604,8 @@ summaries: ID, type, component, severity, and available duration. It never displ
 prompt/response, reasoning, raw stderr/body, environment, host paths, or Python
 tracebacks. Invalid/credential-looking metadata is omitted; it cannot fail the
 primary request. No tokens are estimated.
+An event-only schema or construction failure preserves already validated legacy
+verbose metadata; the rejected event is counted without suppressing that display.
 
 A successful ask emits run.start → provider.request → provider.response →
 run.end(success). Expected errors emit error then run.end(error), except incomplete
