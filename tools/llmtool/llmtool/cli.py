@@ -155,6 +155,22 @@ def _run_ask(args):
         else:
             observe('display_store_warning', sys.stderr)
 
+    def setup_persistence(primary_error=False):
+        nonlocal requested_without_observer
+        try:
+            settings = resolve_diagnostics_settings(persist_metadata=args.persist_metadata)
+        except Exception:
+            if not primary_error:
+                raise
+            # Legacy skill/input errors precede config errors. Invalid settings
+            # cannot be used to write, but an explicit save still reports failure.
+            if args.persist_metadata is True:
+                requested_without_observer = run is None
+                observe('persistence_unavailable')
+            return
+        requested_without_observer = settings.persist_metadata and run is None
+        observe('enable_persistence', settings)
+
     def failure(exc):
         # Preserve the primary safe message even if secondary observation fails.
         print('llmtool: ' + str(exc), file=sys.stderr)
@@ -172,14 +188,14 @@ def _run_ask(args):
         return 1
 
     try:
+        try:
+            selected_skill = load_skill(args.skill) if args.skill is not None else None
+            validate_input_sources(args.text, args.file, sys.stdin)
+        except LLMToolError:
+            setup_persistence(primary_error=True)
+            raise
         code, component = d.ErrorCode.CONFIG_INVALID, 'config'
-        settings = resolve_diagnostics_settings(persist_metadata=args.persist_metadata)
-        requested_without_observer = settings.persist_metadata and run is None
-        observe('enable_persistence', settings)
-        code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
-        selected_skill = load_skill(args.skill) if args.skill is not None else None
-        validate_input_sources(args.text, args.file, sys.stdin)
-        code, component = d.ErrorCode.CONFIG_INVALID, 'config'
+        setup_persistence()
         config = resolve_config(vars(args), require_configured=True)
         code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
         text = read_input(args.text, args.file, sys.stdin)

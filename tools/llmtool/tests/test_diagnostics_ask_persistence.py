@@ -21,6 +21,14 @@ PROMPT = 'PRIVATE_PROMPT_A11A4'
 CONTENT = 'PRIVATE_RESPONSE_A11A4'
 SECRET = 'sk-' + 'a' * 40
 RAW = 'PRIVATE_RAW_STDERR_BODY_A11A4'
+EARLY_ERRORS = (
+    (['ask', 'x', '--file', 'x'],
+     'provide only one of positional text, --file, or non-empty stdin'),
+    (['ask', 'x', '--skill', 'invalid/skill'],
+     'skill name must use 1-64 lowercase letters, digits or hyphens'),
+    (['ask', 'x', '--file', 'x', '--skill', 'invalid/skill'],
+     'skill name must use 1-64 lowercase letters, digits or hyphens'),
+)
 
 
 class PrivateValue:
@@ -222,6 +230,68 @@ class PersistedAskTests(unittest.TestCase):
         summary, events, *_ = self.record()
         self.assertEqual(summary.final_error_code, d.ErrorCode.USER_INPUT_ERROR)
         self.assertEqual([e['type'] for e in events], ['run.start', 'error', 'run.end'])
+
+    def test_legacy_input_and_skill_errors_precede_malformed_user_yaml(self):
+        self.config.write_text('providers: [\n')
+        for flags in ([], ['--no-save-diagnostics'], ['--save-diagnostics']):
+            for argv, message in EARLY_ERRORS:
+                with self.subTest(flags=flags, argv=argv), \
+                        patch.object(DiagnosticsStore, 'start') as store, \
+                        patch('llmtool.cli.resolve_config') as config:
+                    status, out, err, client, factory, credential = self.invoke(argv=[*argv, *flags])
+                self.assertEqual((status, out), (1, ''))
+                self.assertEqual(err.splitlines()[0], 'llmtool: ' + message)
+                trace = 'unavailable' if '--save-diagnostics' in flags else 'not-saved'
+                self.assertEqual(err.splitlines()[1], 'llmtool: code=USER_INPUT_ERROR run_id=' +
+                                 self.runs[-1].run_id + ' trace=' + trace)
+                self.assertNotIn('CONFIG_INVALID', err)
+                self.assertEqual(len(err.splitlines()), 3 if trace == 'unavailable' else 2)
+                if trace == 'unavailable':
+                    self.assertIn('code=DIAGNOSTICS_STORE_UNAVAILABLE', err.splitlines()[2])
+                store.assert_not_called()
+                config.assert_not_called()
+                factory.assert_not_called()
+                credential.assert_not_called()
+                client.complete.assert_not_called()
+                self.assertFalse(self.state.exists())
+
+    def test_legacy_early_errors_precede_invalid_trusted_opt_in_settings(self):
+        self.set_config('true', extra='  max_runs: invalid\n')
+        for flags in ([], ['--no-save-diagnostics'], ['--save-diagnostics']):
+            for argv, message in EARLY_ERRORS:
+                with self.subTest(flags=flags, argv=argv), patch.object(DiagnosticsStore, 'start') as store:
+                    status, out, err, client, factory, credential = self.invoke(argv=[*argv, *flags])
+                self.assertEqual((status, out), (1, ''))
+                self.assertEqual(err.splitlines()[0], 'llmtool: ' + message)
+                self.assertIn('code=USER_INPUT_ERROR', err.splitlines()[1])
+                self.assertNotIn('CONFIG_INVALID', err)
+                store.assert_not_called()
+                factory.assert_not_called()
+                credential.assert_not_called()
+                client.complete.assert_not_called()
+                self.assertFalse(self.state.exists())
+
+    def test_valid_settings_still_save_early_errors_with_correct_precedence(self):
+        for setting, flags, saved in ((None, [], False), (None, ['--save-diagnostics'], True),
+                                     ('true', [], True), ('true', ['--no-save-diagnostics'], False)):
+            for argv, message in EARLY_ERRORS:
+                with self.subTest(setting=setting, flags=flags, argv=argv):
+                    self.state = self.base / ('early-' + str(len(self.runs)))
+                    self.set_config(setting)
+                    status, out, err, client, factory, credential = self.invoke(argv=[*argv, *flags])
+                    self.assertEqual((status, out), (1, ''))
+                    self.assertEqual(err.splitlines()[0], 'llmtool: ' + message)
+                    self.assertEqual(err.splitlines()[1], 'llmtool: code=USER_INPUT_ERROR run_id=' +
+                                     self.runs[-1].run_id + ' trace=' + ('saved' if saved else 'not-saved'))
+                    self.assertEqual(len(err.splitlines()), 2)
+                    factory.assert_not_called()
+                    credential.assert_not_called()
+                    client.complete.assert_not_called()
+                    self.assertEqual(self.state.exists(), saved)
+                    if saved:
+                        summary, events, *_ = self.record()
+                        self.assertEqual(summary.final_error_code, d.ErrorCode.USER_INPUT_ERROR)
+                        self.assertEqual([event['type'] for event in events], ['run.start', 'error', 'run.end'])
 
     def test_saved_readiness_error_does_not_consume_open_stdin(self):
         self.set_config(model='null')

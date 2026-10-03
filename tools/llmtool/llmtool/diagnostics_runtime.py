@@ -98,6 +98,11 @@ class RunContext:
         except Exception:
             self._persistence_failure()
 
+    def persistence_unavailable(self):
+        """A requested save with unusable settings cannot mask an input error."""
+        self.persistence_requested = True
+        self._persistence_failure()
+
     def _persist_event(self, event):
         writer = self._stored_run
         if writer is None:
