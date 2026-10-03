@@ -672,10 +672,14 @@ llmtool ask "Explain this supplied evidence" --save-diagnostics --debug
 llmtool ask "Explain this supplied evidence" --no-save-diagnostics
 ```
 
-Opt-in resolves settings and starts the store before input/readiness/provider work.
+Legacy skill and input-source validation run first. Opt-in then resolves settings
+and starts the store before readiness, blocking input reads and provider work.
 The final store collision-resolved ID is assigned to buffered run.start and all
 subsequent events before the first append; events, summary, directory and displayed
-run_id agree. Valid settings allow input/config/provider failures to be recorded;
+run_id agree. Valid settings still allow early input/skill errors to be recorded:
+settings resolution after such an error is best effort and never replaces the
+original error. Unusable settings plus explicit save report one secondary
+unavailable warning without opening the store. When no earlier error exists,
 invalid diagnostics settings fail configuration before any store/provider access.
 Only validated metadata events and the versioned summary are saved, never prompt,
 response, raw provider stderr/body, credentials, reasoning or host paths.
