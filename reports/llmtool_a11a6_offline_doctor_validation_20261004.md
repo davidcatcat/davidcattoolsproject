@@ -1,7 +1,8 @@
 # A11a.6 — Offline doctor and failure matrix — 2026-10-04
 
-Status: implementation and required Cloud local validation PASS; independent
-frozen-revision review, exact-head CI, external review and publication gates pending.
+Status: implementation, required Cloud local validation and independent native
+review **PASS** on `909d39078fc272ba7ffd4ce28a6ff3c740ec6857`; publication,
+final-published-head CI and external review gates **PENDING**.
 Overall A11a remains incomplete. A11a.7 and A11b/A11c/A12 remain unstarted.
 
 ## Pinned Task Contract
@@ -257,8 +258,9 @@ sequence contract; the ID/span rows check the pure schema/generators.
 ## Required gates and evidence limits
 
 Cloud local checks above are PASS only on the bound source/test patch. Independent
-Reviewer verdict/frozen SHA, PR publication and exact-head Python 3.9/3.14 CI are
-pending coordinator delivery. External/human review remains a separate gate; this
+native Reviewer PASS on exact repaired SHA `909d390` is recorded below. PR
+publication and exact final-published-head Python 3.9/3.14 CI remain pending
+coordinator delivery. External/human review remains a separate gate; this
 Developer report does not replace it. Do not merge or mark A11a.6/A11a DONE from
 local checks alone. A11a.7 final A11a validation remains unstarted.
 
@@ -366,7 +368,7 @@ Round 1 rebuilt wheel SHA-256:
 No runtime/test/package source bytes changed after the successful 855-test run.
 Only the review/validation report was finalized afterward.
 
-### Replacement frozen binding and review gate
+### Replacement frozen binding and pre-review gate — historical checkpoint
 
 Full eight-file source/test manifest SHA-256:
 `4dc617498879ddff2d29b777de1b9172fe845319c85d15ca088ad7e6bcf15054`.
@@ -393,3 +395,83 @@ the four-file repair. Developer is frozen without Git mutation for independent
 review on the next exact committed SHA. R1/R2 repairs are Developer dispositions;
 Reviewer acceptance remains **PENDING**, as do publication, exact-head CI and
 external gates. This does not mark A11a.6 or overall A11a DONE.
+
+## Final independent native review checkpoint — 909d390
+
+Approved implementation SHA: `909d39078fc272ba7ffd4ce28a6ff3c740ec6857`.
+The independent native Reviewer completed source-first re-review on that exact
+clean SHA before reading Developer validation evidence. Verdict: **PASS**,
+**R1/R2 CLOSED**, no further findings. The coordinator accepted the verdict and
+authorized only this documentation followup after review ended. One correction
+round was used out of a maximum two; no second repair or implementation slice
+was started. Initial `c09e832` REQUEST CHANGES, R1 Windows credential-fetch/presence
+blocker and R2 optional stale checkpoint documentation remain historical facts
+above; they are not hidden by the final PASS.
+
+### Role and model provenance
+
+| Role | Agent identity | Requested model / reasoning | Actual runtime attestation |
+| --- | --- | --- | --- |
+| Developer | `/root/a11a6_developer` | `gpt-6.1-sol` / high | UNVERIFIED; no authoritative runtime identity metadata |
+| Independent native Reviewer | `/root/a11a6_reviewer` | `gpt-6.1-sol` / high | UNVERIFIED; no authoritative runtime identity metadata |
+| Bounded Git agent | Not spawned | `gpt-5.6-luna` / low | UNAVAILABLE: not listed in the native available model catalog; no substitute agent was spawned |
+| Coordinator / sole Git writer fallback | `/root` | Existing coordinator session | Not claimed as the requested Git-agent model; user-authorized fallback |
+
+Requested configuration is not proof of actual executed model/reasoning.
+Developer alone wrote source/tests/docs; Reviewer stayed independent/read-only;
+Root alone mutated Git. No clone/worktree/alternate checkout or Git-agent model
+substitution was used.
+
+### Independent evidence on approved implementation bytes
+
+| Check | Reviewer evidence / command | Result |
+| --- | --- | --- |
+| Doctor and regression/Windows-case tests | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p test_doctor.py -v` on `909d390` | PASS, exit 0, 26/26, 0.748 s |
+| Independent canonical syntax/full unittest | `make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"`; `/tmp/a11a6-reviewer-909d390-canonical.log` | PASS, exit 0, compileall + 855/855, no skips, 22.728 s |
+| Independent credential boundary probes | Separate Windows-case Mapping get/getitem tripwires and actual synthetic os._Environ uppercase codec; lower/mixed reserved bindings and ordinary presence | PASS, no credential-value fetch; injected Linux platform branches, not native Windows |
+| Independent editable/wheel and public console CLI | Separate installed editable/fresh wheel codec probes plus console doctor/runs/trace/nonmutation checks and source/resource SHA/provenance verification | PASS; all 43 Python/skill files verified against approved source |
+| Contract/docs/scope/history/whitespace | 63 local links, 170 concrete matrix references, pinned v1 digest, historical reports and approved diff | PASS |
+
+Approved source/test manifest SHA-256:
+`4dc617498879ddff2d29b777de1b9172fe845319c85d15ca088ad7e6bcf15054`.
+Approved full source/test patch SHA-256 against original main `da027f0`:
+`1fbd9e92e66ff781118f0fdc619f6d2d0ff554571d14e705db1a6b5119cc144a`.
+These match the Round 1 Developer binding above; independent results were
+executed on the approved commit, not inferred from Developer claims.
+
+### Documentation-only delivery and remaining gates
+
+This followup changes only report/current README/ROADMAP gate wording. All
+non-documentation tracked bytes are checked against approved `909d390`; runtime,
+tests, config and package source remain identical. Documentation/diff checks and
+a final docs-only allowlist/manifest are provided at freeze, followed by Root's
+commit and the Reviewer's documentation-only identity check. No application
+retest is required for these evidence-only bytes.
+
+Publication/draft PR, exact **final published HEAD** Python 3.9/3.14 CI and
+external review remain **PENDING**. The PR/coordinator delivery will record that
+HEAD and CI after commit; this report does not invent its own future commit SHA
+or copy old 824/852/855 runs as new final-head CI. Independent native PASS is
+separate from external review and merge authorization. No merge is authorized by
+this checkpoint; A11a.6 is not merged/DONE, overall A11a remains incomplete,
+A11a.7 and A11b/A11c/A12 remain unstarted.
+
+Native Mac filesystem behavior, native Windows execution, live provider
+authentication/session, company VPN/gateway and inference remain optional
+**NOT-TESTED** for this offline-only slice. Linux mocks/codec probes and executable
+presence are not promoted to native-platform/auth/inference PASS. Task Contract
+v1 and its digest are unchanged.
+
+Documentation-only followup verification: `tools/llmtool/.venv/bin/python
+/tmp/a11a6-doc-check.py` and `git diff --check` PASS, 63 local links/170 matrix
+references, pinned contract/history preserved.
+`tools/llmtool/.venv/bin/python /tmp/a11a6-docs-identity.py` PASS: all **244 other
+tracked files** match approved `909d390` checkout bytes; runtime/tests/config/
+package bytes are unchanged. One unrelated preexisting NLF `.cmd` has declared
+`text eol=crlf` checkout representation; verification accounts for that attribute
+and verifies exact expected CRLF bytes, without rewriting the file. The initial
+raw Git-blob comparison identified this representation difference and the
+attribute-aware comparison passed. Other-tracked-byte manifest SHA-256:
+`802db762f16bab966b4732f6d71a679611b4ee7a7cbc687a4a9f07d753544247`.
+Only the four documentation paths appear in the diff. Final documentation
+allowlist/digest is supplied separately at freeze to avoid report self-reference.

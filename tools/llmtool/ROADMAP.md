@@ -473,13 +473,13 @@ A11a.4 persisted ask integration DONE/merged via PR #19，merge SHA
 post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d404c49c8beb08ec28`；
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
-A11a 整體尚未完成；A11a.6 offline doctor/failure matrix 在 feature branch 實作，review/delivery gates pending；
+A11a 整體尚未完成；A11a.6 offline doctor/failure matrix 在 feature branch 實作，independent native review `909d390` PASS；publication/final-head CI/external review pending；
 A11a.7、A11b/A11c 與後續 milestones 尚未啟動。Execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–5 DONE/merged; A11a.6 feature branch, review/delivery pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1–5 DONE/merged; A11a.6 feature branch, native review 909d390 PASS; publication/CI/external pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
 | A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -604,15 +604,16 @@ passed Python 3.9/3.14, each 824 tests. Historical review/repair/pre-merge statu
 remains preserved in [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
 Runs shows recorded summary status with unverified trace evidence; trace verifies
 completion. A11a.6 adds offline doctor and the named store/provider/error failure
-matrix on this feature branch; independent review/exact-head CI/external delivery
-gates remain pending. See [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
+matrix on this feature branch; independent native review PASS on `909d390`,
+R1/R2 closed after one correction round. Publication/final-head CI/external gates
+remain pending. See [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
 
 Implementation slices remain exactly spec section 17:
 
 | Slice | Scope / current delivery status |
 | --- | --- |
 | A11a.5 | Offline runs/trace readers and human/JSON rendering; DONE/merged PR #22 `da027f0`, post-merge CI 3.9/3.14 824 each PASS |
-| A11a.6 | Offline doctor and named full spec failure matrix; implemented on feature branch, Cloud local validation PASS, review/delivery pending |
+| A11a.6 | Offline doctor and named full spec failure matrix; implemented on feature branch, Cloud local validation and native review `909d390` PASS; publication/final-head CI/external review pending |
 | A11a.7 | Final A11a validation/review/merge gate; not started |
 
 The numbered architecture topics below describe the broader design, not the
