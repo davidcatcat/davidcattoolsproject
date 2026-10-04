@@ -114,9 +114,14 @@ Create:
 
 ```text
 skills/<new-skill>/SKILL.md
+skills/<new-skill>/agents/openai.yaml
 ```
 
-Minimum frontmatter:
+`SKILL.md` is the shared workflow/source of truth. `agents/openai.yaml` contains
+interface metadata only (display name, short description, default prompt) and must
+not duplicate the workflow.
+
+Minimum SKILL.md frontmatter:
 
 ```yaml
 ---
