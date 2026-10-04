@@ -84,3 +84,28 @@ live PASS. Documentation checks validate structure, provenance and scope; they d
 not prove future workflow semantics or semantic correctness of all model output.
 External review remains **NOT-TESTED / PENDING**, and merge is not authorized.
 Any automatically triggered final-head CI is reported separately in the PR.
+
+## PR #21 integration checkpoint — 2026-10-04
+
+User authorized merging PR #21 and integrating new main into this existing draft
+branch. PR #21 merged as `e8ecf05310a53b8bbb7edba0aee98aba8818e59e` after its
+exact-head PR CI 37174055116 succeeded. This integration uses a normal two-parent
+merge commit with original PR #20 head `8193dd3b42cbff6bac9cea73aabb4aac186484be`
+and the new main SHA as parents; no force push or published history rewrite.
+
+The three overlapping status documents retain PR #20's architecture additions
+and accurate PR #19 DONE/merged status. The A11a.4 report keeps PR #21's top
+post-merge checkpoint and historical pre-merge body, folds in PR #20's historical
+post-merge CI reference, and removes the redundant bottom merge checkpoint.
+The validate-runtime UI YAML is inherited unchanged from merged main.
+These metadata changes are explicitly authorized by the user for integration;
+the original Task Contract above describes the original seven-file design task.
+
+Validation performed through connected GitHub APIs and in-memory document checks:
+exact pinned-revision reads; allowed-file/tree comparison; unchanged design files
+and historical report body; one consolidated report merge checkpoint; whitespace,
+Markdown fence and relative-link checks; final exact remote content readback.
+No local checkout, local Git command, application test or new provider/live result
+is claimed. Earlier local validation/CI above is historical and does not validate
+this integration head. Final-head CI is recorded in the PR publication metadata.
+PR #20 stays draft and external architecture review remains pending.

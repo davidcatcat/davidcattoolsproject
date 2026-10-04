@@ -1,5 +1,21 @@
 # A11a.4 — Persisted ask integration validation — 2026-10-03
 
+## Post-merge status — 2026-10-04
+
+[PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) merged to
+`main` at 2026-10-04T01:12:53Z as `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
+A11a.4 is DONE/merged. Overall A11a remains incomplete; A11a.5–7, A11b/A11c
+and A12 remain NOT STARTED at this checkpoint. This status update adds no new
+runtime/CI evidence and does not authorize later-slice implementation.
+The pre-merge status and review checkpoints below are historical; their
+unmerged/authorization statements describe those earlier checkpoints.
+
+Historical post-merge [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+passed for the PR #19 merge SHA above (Python 3.9/3.14); this is historical
+CI evidence, not a new live inference result or CI for this integration commit.
+
+## Historical pre-merge validation
+
 Status: **PR #19 / INDEPENDENT AND EXTERNAL SOURCE REVIEW PASS /
 REVIEWED-HEAD CI PASS / LATEST DOCUMENTATION-HEAD CI IN PR**. A11a.4 is not merged/DONE. Overall A11a remains
 incomplete; A11a.5–7, A11b, A11c and A12 are NOT STARTED. No merge is authorized.
@@ -423,18 +439,3 @@ remains unchanged; optional Mac/company/provider live checks remain NOT-TESTED.
 The separate external source-review gate is satisfied. A11a.4 remains unmerged,
 overall A11a remains incomplete, and this documentation update does not authorize
 merge or A11a.5 implementation.
-
-## Subsequent merge checkpoint — 2026-10-04
-
-Native GitHub PR metadata reconfirmed PR #19 as **MERGED**, merged at
-2026-10-04T01:12:53Z, merge SHA
-`2bade6aa95963d3f2c3d9332aa3939407512da7e`. A separate REST workflow read
-confirmed [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-is the post-merge **push** run for that exact main SHA, completed SUCCESS;
-both Python 3.9 and 3.14 jobs succeeded. It is not the final feature-head CI.
-
-A11a.4 is DONE/merged. The unmerged/not-authorized statements above retain their
-original historical meaning. Overall A11a remains incomplete. The current
-architecture refinement is documentation only, does not start/resume A11a.5,
-does not implement A11b/A11c or authorize any further merge, and claims no new
-live inference. See the current ROADMAP/WORKFLOW for planning and review gates.
