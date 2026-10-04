@@ -1,10 +1,12 @@
 # A11a.5 — Offline runs / trace validation — 2026-10-04
 
-Current status: **EXTERNAL REQUEST CHANGES REPAIR ROUND 1 / CLOUD CHECKS PASS**.
+Current status: **EXTERNAL REQUEST CHANGES REPAIR ROUND 1 / CLOUD CHECKS PASS /
+INDEPENDENT NATIVE REVIEW PASS**.
 Draft [PR #22](https://github.com/davidcatcat/davidcattoolsproject/pull/22) was
 published at historical head `389dbd6b31d73a22c03c6b3aa37cbb8eac41317b`; its CI
-succeeded. Those results do not validate the current repairs. Independent review
-and final-head CI are pending; external ChatGPT acceptance remains pending.
+succeeded. Those results do not validate the current repairs. Native review passed
+on implementation `1991f0f78de66ae58ee0b2b9d8b2fcef595fd344`; new final-head CI
+and external ChatGPT re-review acceptance remain pending.
 Overall A11a is incomplete; merge is not authorized.
 
 ## Initial contract checkpoint — historical
@@ -428,3 +430,53 @@ The wheel was installed into a temporary package target, not another checkout;
 both console CLIs used isolated temporary HOME/config and preserved store snapshots.
 No live inference/Mac/VPN/Windows evidence is claimed or required for this offline
 repair. Overall A11a remains **NOT DONE**; merge and later-slice work are forbidden.
+
+## External repair round 1 independent native review — 2026-10-04
+
+Read-only Reviewer `/root/a11a5_external_reviewer` independently reviewed the
+exact clean implementation candidate
+`1991f0f78de66ae58ee0b2b9d8b2fcef595fd344` (parent
+`389dbd6b31d73a22c03c6b3aa37cbb8eac41317b`) against the pinned
+**A11a5-external-review-repair v1** contract and original three findings.
+The Reviewer inspected source before reading the new Developer report.
+Disposition: **PASS; no blocker or optional findings; all three repairs accepted
+within scope**. The coordinator accepts this native review. Developer and Reviewer
+both requested `gpt-6.1-sol` / high; actual runtime model/effort remains
+**UNVERIFIED** because authoritative attestation is unavailable.
+
+Reviewer independently executed the reader suite **35/35 PASS**, diagnostics
+suite **217/217 PASS**, and canonical compileall/full unittest **824/824 PASS,
+exit 0, no skips, 17.890 s**, using the existing authorized test-only `/var/tmp`
+fixture writes and loopback permission. Canonical command:
+`make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"`.
+The Reviewer verified the Developer runtime/test patch digest and independently
+ran the fresh installed editable/wheel smoke with all **42 packaged resources
+matching source**. No runtime guard, source or inherited test was weakened.
+
+Additional Reviewer probes used real locks and unmocked elapsed time:
+
+| Probe on reviewed implementation | Independent result |
+| --- | --- |
+| Writer finish while reader holds root SH beyond cleanup deadline | PASS: 2.004 s; finish True, persisted True, no warning, complete readable trace, stale reservation retained |
+| Later start under byte pressure | PASS: safe reconciliation removed stale reservation and preserved completed run without overcharge |
+| Root reader retry until writer releases | PASS: 0.123 s, complete result |
+| Root reader contention timeout | PASS: 2.001 s, fixed STORE_UNAVAILABLE |
+| Active run while reader holds root SH | PASS: 0.00048 s, incomplete with empty events, no artifact read |
+| Injected `os.read` OSError through CLI | PASS: exit 1, empty stdout, safe STORE_UNAVAILABLE |
+
+This checkpoint supersedes the repair-round pending native-review row above.
+The subsequent delivery commit changes only this report and README/ROADMAP native
+gate status; runtime/tests/config/package bytes remain identical to reviewed
+`1991f0f78de66ae58ee0b2b9d8b2fcef595fd344`. Documentation validation passed:
+60 local Markdown targets exist, `git diff --check` passed, and `git diff
+--exit-code` excluding only these four authorized Markdown paths proved all
+other tracked bytes unchanged. Reviewer will check the final clean identity
+before coordinator publication.
+
+The prior CI success on `389dbd6` is historical only. New exact final publication
+head Python 3.9/3.14 CI remains **PENDING**. Its full publication SHA and CI evidence
+will be recorded in [draft PR #22](https://github.com/davidcatcat/davidcattoolsproject/pull/22)
+after the documentation commit exists; this report cannot include its own SHA.
+Independent native PASS does not satisfy external ChatGPT acceptance: the external
+REQUEST CHANGES response now awaits **re-review**. Overall A11a remains **NOT DONE**;
+merge is forbidden, and A11a.6/7, A11b/c and later implementation remain unstarted.
