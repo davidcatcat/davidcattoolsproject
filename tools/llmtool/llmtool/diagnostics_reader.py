@@ -3,6 +3,7 @@
 import os
 import re
 import stat
+import time
 from contextlib import contextmanager
 from dataclasses import fields
 
@@ -150,12 +151,25 @@ def _lock(parent, name):
         _private(os.fstat(fd))
         _check_link(parent, name, fd)
         import fcntl
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except BlockingIOError:
+        # Only the root lock gets the writer's bounded contention policy.
+        # Waiting on a run lock while holding root would obstruct finish().
+        deadline = time.monotonic() + 2 if name == '.store.lock' else None
+        acquired = False
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except BlockingIOError:
+                if deadline is None or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+        if not acquired:
             yield False
         else:
             try:
+                _check_link(parent, name, fd)
+                _private(os.fstat(fd))
                 yield True
                 _check_link(parent, name, fd)
                 _private(os.fstat(fd))
@@ -333,7 +347,7 @@ class DiagnosticsReader:
             except FileNotFoundError:
                 raise _AbsentStore() from None
             try:
-                # Root before run: same order as writer cleanup. Never wait for a writer.
+                # Root before run: same order as writer cleanup; root wait is bounded.
                 with _lock(root, '.store.lock') as acquired:
                     if not acquired:
                         raise ReaderError('STORE_UNAVAILABLE')
@@ -444,7 +458,9 @@ class DiagnosticsReader:
             raise
         except (_AbsentStore, FileNotFoundError):
             raise ReaderError('NOT_FOUND') from None
-        except (OSError, ValueError, TypeError, KeyError):
+        except OSError:
+            raise ReaderError('STORE_UNAVAILABLE') from None
+        except (ValueError, TypeError, KeyError):
             raise ReaderError('FORMAT_INVALID') from None
         if errors:
             result['events'] = [event for event in result['events'] if event['type'] in ('error', 'warning')]

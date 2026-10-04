@@ -472,14 +472,14 @@ A11a.4 persisted ask integration DONE/merged via PR #19，merge SHA
 `2bade6aa95963d3f2c3d9332aa3939407512da7e`；independent/external source review PASS，
 post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a 整體尚未完成；A11a.5～A11a.7 未合併，A11b/A11c 尚未實作。A11a.5 在原 feature branch 恢復 offline runs/trace 實作；
-independent review PASS；publication/final-head CI/external ChatGPT review gates 尚待完成，A11a.6–7 與後續 milestones 尚未啟動。
+draft PR #22 已發布；external REQUEST CHANGES 修正待 independent review/final-head CI；external ChatGPT acceptance pending，A11a.6–7 與後續 milestones 尚未啟動。
 其他 diagnostics CLI 與
 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–4 DONE/merged; A11a.5 feature branch independent review PASS, final gates pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1–4 DONE/merged; A11a.5 draft PR #22 external REQUEST CHANGES repairs, final gates pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
 | A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -599,9 +599,10 @@ is tracked in PR #19. PR #19 subsequently merged at 2026-10-04T01:12:53Z as
 SUCCESS。Overall A11a is NOT DONE. A11a.5 is resumed on the existing feature
 branch after initial independent review of the preserved checkpoint requested
 corrections. Independent integrated review on `a4affd9` is PASS with R1/R2 closed;
-Reviewer canonical checks passed 816/816. Offline runs/trace readers remain
-unmerged; publication, exact final-head Python 3.9/3.14 CI and external ChatGPT
-review are pending. Runs shows recorded summary status with
+Historical Reviewer canonical checks passed 816/816. Draft PR #22 was published
+at `389dbd6` with successful CI. External REQUEST CHANGES repairs now require
+independent review and new exact final-head Python 3.9/3.14 CI; external ChatGPT
+acceptance remains pending. Offline runs/trace readers remain unmerged. Runs shows recorded summary status with
 unverified trace evidence; trace verifies completion. See
 [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
 
@@ -609,7 +610,7 @@ Implementation slices remain exactly spec section 17:
 
 | Slice | Scope / current delivery status |
 | --- | --- |
-| A11a.5 | Offline runs/trace readers and human/JSON rendering; feature branch independent review PASS, unmerged, final-head CI/external review pending |
+| A11a.5 | Offline runs/trace readers and human/JSON rendering; draft PR #22 external REQUEST CHANGES repairs, unmerged, independent review/final-head CI/external acceptance pending |
 | A11a.6 | Offline doctor and failure injection; not started |
 | A11a.7 | Final A11a validation/review/merge gate; not started |
 

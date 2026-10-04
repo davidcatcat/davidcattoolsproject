@@ -1,8 +1,11 @@
 # A11a.5 — Offline runs / trace validation — 2026-10-04
 
-Current status: **IMPLEMENTED / CORRECTION ROUND 1 CLOUD CHECKS PASS /
-INTEGRATED INDEPENDENT REVIEW PASS**. Publication, final-head CI and external
-ChatGPT review remain pending. Overall A11a is incomplete; merge is not authorized.
+Current status: **EXTERNAL REQUEST CHANGES REPAIR ROUND 1 / CLOUD CHECKS PASS**.
+Draft [PR #22](https://github.com/davidcatcat/davidcattoolsproject/pull/22) was
+published at historical head `389dbd6b31d73a22c03c6b3aa37cbb8eac41317b`; its CI
+succeeded. Those results do not validate the current repairs. Independent review
+and final-head CI are pending; external ChatGPT acceptance remains pending.
+Overall A11a is incomplete; merge is not authorized.
 
 ## Initial contract checkpoint — historical
 
@@ -313,3 +316,115 @@ External ChatGPT review remains **PENDING**. Exact final documentation-head
 Python 3.9/3.14 CI is also pending before publication. These are distinct gates;
 the candidate remains unmerged and overall A11a remains **NOT DONE**.
 A11a.6/7 and A11b/c remain unstarted. No main merge or next stage is authorized.
+
+## External review repair contract checkpoint — 2026-10-04
+
+Coordinator-pinned **A11a5-external-review-repair v1**, authorized by the user:
+address only the three external REQUEST CHANGES on draft PR #22. Preserve all
+original CLI, null-last ordering, offline/read-only, privacy and security/race
+invariants. Durable trace + summary publication is the persistence commit point;
+later reservation cleanup failure/timeout must preserve success. Reconcile stale
+reservations only during exclusive writer capacity processing, with the run lock
+and validated completed summary + trace; unknown/unsafe/malformed/incomplete
+records remain conservatively charged. Readers may retry the root shared lock
+for about two seconds; run-lock contention must remain immediate incomplete
+without mutable artifact access. Unexpected trace OSError maps to
+STORE_UNAVAILABLE; validation ValueError/TypeError/KeyError maps to FORMAT_INVALID;
+explicit ReaderError remains authoritative.
+
+Required new evidence: deterministic durable finish during root-reader timeout,
+temporary stale reservation/readable completion/later capacity reconciliation
+without overcharge; root reader retry/release success and bounded timeout; no run
+lock retry or mutable reads; injected I/O/validation error classification. Required
+regressions: focused reader/store/ask persistence, canonical compileall/full suite,
+installed offline CLI smoke, docs/scope/diff check, independent native review and
+exact final-head Python 3.9/3.14 CI. No doctor/A11a.6, executor/router/hooks,
+provider retry/fallback/escalation, clone/worktree/history rewrite/main merge.
+
+Existing configured Cloud checkout/branch remain unchanged; initial clean HEAD
+`389dbd6b31d73a22c03c6b3aa37cbb8eac41317b`, fetched main
+`1cee64eaec4559b56c70dd6a5b508ca9f810160f`. Developer sole writer:
+`/root/a11a5_external_developer`; read-only Reviewer:
+`/root/a11a5_external_reviewer`. Both requested `gpt-6.1-sol` / high; actual
+runtime model/effort **UNVERIFIED** (no authoritative runtime attestation exposed).
+The developer commits a clean candidate and freezes without pushing; coordinator
+handles publication and CI. No prior PASS is reused as new repair evidence.
+
+### External repair round 1 implementation and new evidence
+
+This additive checkpoint supersedes historical root-lock immediate-failure and
+publication-pending descriptions above. It preserves their original evidence.
+External findings addressed in the candidate, pending independent acceptance:
+
+- Durable publication sets `StoredRun.persisted=True` after trace/summary fsync,
+  no-clobber publication and run-directory sync. Later reservation maintenance
+  errors/timeouts return success without a misleading persistence warning. The
+  existing descriptor-close failure warning contract remains unchanged.
+- Exclusive capacity processing validates completed candidates using the existing
+  full summary/trace/reservation checks, then rechecks anchored directory identity,
+  names and private artifacts before removing a stale reservation under root/run
+  exclusive locks. Its candidate name set is updated for subsequent eviction.
+  Invalid/unsafe/unknown/incomplete/busy candidates retain reservations and
+  conservative accounting; readers never perform reconciliation.
+- Reader root SH uses LOCK_NB attempts, 0.01-second spacing and a two-second
+  monotonic deadline. Run SH remains one immediate LOCK_NB attempt, without a
+  deadline or sleep. Lock inode/privacy is rechecked after successful acquisition.
+- Trace unexpected OSError returns STORE_UNAVAILABLE; ValueError/TypeError/
+  KeyError returns FORMAT_INVALID. Explicit ReaderError and missing-run behavior
+  remain authoritative. Failure stdout remains empty and messages fixed/safe.
+
+New deterministic public tests hold the real reader root SH across the writer's
+simulated timeout, prove committed success/readable completion with a temporarily
+retained reservation, then use byte pressure to prove later capacity reconciliation
+preserves the run without reservation overcharge. Separate unlink failure and
+ask success/error tests prove saved reporting and one provider call. Reconciliation
+rejects malformed reservation/summary/trace, unknown files, unsafe mode, incomplete
+and busy runs without mutation, and corrected names permit count-pressure eviction.
+Reader tests prove retry then writer release succeeds for both commands, bounded
+timeout with no artifact scan/read, immediate busy-run acquisition with no mutable
+artifact access, and fixed I/O versus validation classifications. All pre-existing
+security and publication/replacement/cleanup race tests remain intact.
+
+Tested initial HEAD: `389dbd6b31d73a22c03c6b3aa37cbb8eac41317b` plus the
+runtime/test patch SHA256
+`b966f7b94b4bcb0195eb51eae4bd363f43d7eeec70c7d45dd68cf2120c7bd92e`.
+The clean committed candidate SHA will be supplied after commit, outside its own
+contents; no self-referential SHA is fabricated. Linux Cloud/Python 3.12.14,
+installed editable llmtool 0.1.0 imports from this configured checkout. Managed
+observations are current/running/connected, HTTP unrestricted/enforced; no
+configured secrets, VPN, runtime variables or outbound identities. Inherited
+proxy/CA/runtime authentication guards remain unchanged.
+
+| New check | Command / evidence | Result |
+| --- | --- | --- |
+| Reader focused | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p test_diagnostics_reader.py -v` | PASS, 35/35, 1.264 s |
+| Store focused | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p test_diagnostics_store.py -v` | PASS, exit 0, 33/33, 0.173 s |
+| All diagnostics including ask persistence | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p 'test_diagnostics*.py' -v` | PASS, exit 0, 217/217, 2.204 s |
+| Canonical compileall/full unittest | `make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"` | PASS, exit 0, 824/824, no skips, 17.911 s |
+| Fresh offline wheel | `tools/llmtool/.venv/bin/python -m pip wheel --no-deps --no-build-isolation --no-index --wheel-dir /tmp/a11a5-external-wheel tools/llmtool` | PASS, exit 0 |
+| Fresh installed editable/wheel console CLI | `tools/llmtool/.venv/bin/python /tmp/a11a5-external-smoke.py` | PASS, exit 0; absent/saved/human/JSON/filter/invalid-ID/nonmutation and committed stale reservation/read/reconcile |
+| Wheel provenance | All 42 packaged Python/skill files compared byte-for-byte with current source; console entry point checked | PASS |
+| Docs/scope/full diff | 60 local Markdown link targets exist; history/scope/current statuses checked; `git diff --check` | PASS, exit 0 |
+| Independent native review | Exact frozen candidate, read-only Reviewer | INCOMPLETE, pending |
+| Final published Python 3.9/3.14 CI | Exact final publication head | NOT-TESTED, pending |
+| External ChatGPT acceptance | Separate external gate after REQUEST CHANGES | INCOMPLETE, pending |
+
+Canonical checks used only user-authorized test-only `/var/tmp` empty Codex fixture
+writes and loopback network permission. No real provider request/auth discovery
+occurred, and no inherited fake-runtime guard was weakened. One newly added ask
+test initially omitted its `coded_error` fixture component (isolated run: 32 tests,
+one fixture error); the fixture was corrected before the successful full diagnostics
+and canonical runs. No production criterion or inherited test was weakened.
+
+New logs: `/tmp/a11a5-external-reader.log`, `/tmp/a11a5-external-store.log`,
+`/tmp/a11a5-external-ask.log` (initial fixture error),
+`/tmp/a11a5-external-diagnostics.log`, `/tmp/a11a5-external-canonical.log`,
+`/tmp/a11a5-external-wheel.log`, `/tmp/a11a5-external-smoke.log`.
+Fresh wheel SHA256:
+`b78cf436e6d607892a63540ee511ba7bfe32affc1b3250c10ea4da7b27f5d106`.
+Fresh smoke script SHA256:
+`97c312cfcd8e59cff8b246751d8251842f3744facecf2ac88dd7228d202d0420`.
+The wheel was installed into a temporary package target, not another checkout;
+both console CLIs used isolated temporary HOME/config and preserved store snapshots.
+No live inference/Mac/VPN/Windows evidence is claimed or required for this offline
+repair. Overall A11a remains **NOT DONE**; merge and later-slice work are forbidden.

@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool import diagnostics as d
+from llmtool.diagnostics_reader import DiagnosticsReader
 from llmtool.diagnostics_settings import DiagnosticsSettings
 from llmtool.diagnostics_store import (ABANDONED_GRACE_SECONDS, DiagnosticsStore,
     persistence_supported)
@@ -166,6 +167,95 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(len(list((self.home / 'runs').iterdir())), 16)
         self.complete(writers[0])
         self.start(self.store(**limits))
+
+    def test_durable_finish_survives_reader_timeout_then_capacity_reconciles(self):
+        limits = dict(max_run_bytes=65536, max_total_bytes=1048576)
+        writer = self.start(self.store(**limits))
+        reader = DiagnosticsReader(home=self.home)
+        # Actual reader root SH remains held beyond the writer's simulated
+        # two-second deadline. Publication is independent of the root lock.
+        with reader._store():
+            with patch('llmtool.diagnostics_store.time.monotonic', side_effect=[0, .1, 2.1]), \
+                    patch('llmtool.diagnostics_store.time.sleep') as sleeping:
+                directory = self.complete(writer)
+            sleeping.assert_called_once_with(.01)
+            self.assertTrue(writer.persisted)
+            self.assertIsNone(writer.warning)
+            self.assertTrue(writer.closed)
+            self.assertTrue((directory / '.reservation').exists())
+            self.assertEqual(reader.trace(writer.run_id)['state'], 'complete')
+        filler = self.home / 'unrelated'
+        filler.write_bytes(b'K' * (1048576 - 65536 - 4096))
+        before = {name: (directory / name).read_bytes() for name in ('trace.jsonl', 'summary.json')}
+        # Charging the stale 64 KiB reservation would force eviction here.
+        next_writer = self.start(self.store(**limits))
+        self.assertTrue(directory.exists())
+        self.assertFalse((directory / '.reservation').exists())
+        self.assertTrue((self.home / 'runs' / next_writer.run_id / '.reservation').exists())
+        self.assertEqual({name: (directory / name).read_bytes() for name in before}, before)
+        self.assertEqual(filler.stat().st_size, 1048576 - 65536 - 4096)
+        self.assertEqual(reader.trace(writer.run_id)['state'], 'complete')
+
+    def test_durable_finish_survives_reservation_unlink_failure(self):
+        writer = self.start()
+        original_unlink = os.unlink
+        def unlink(name, *args, **kwargs):
+            if name == '.reservation':
+                raise PermissionError('PRIVATE_PATH')
+            return original_unlink(name, *args, **kwargs)
+        with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink):
+            directory = self.complete(writer)
+        self.assertTrue(writer.persisted)
+        self.assertIsNone(writer.warning)
+        self.assertTrue((directory / '.reservation').exists())
+        self.assertEqual(DiagnosticsReader(home=self.home).trace(writer.run_id)['state'], 'complete')
+        self.start()
+        self.assertFalse((directory / '.reservation').exists())
+
+    def test_stale_reservation_reconciliation_preserves_ineligible_runs(self):
+        for damage in ('reservation', 'summary', 'trace', 'unknown', 'unsafe', 'incomplete', 'busy'):
+            with self.subTest(damage=damage):
+                self.home = self.base / damage
+                writer = self.start(self.store(max_run_bytes=65536))
+                with DiagnosticsReader(home=self.home)._store(), \
+                        patch('llmtool.diagnostics_store.time.monotonic', side_effect=[0, 3]):
+                    directory = self.complete(writer)
+                descriptor = None
+                if damage in ('reservation', 'summary', 'trace'):
+                    name = { 'reservation': '.reservation', 'summary': 'summary.json',
+                             'trace': 'trace.jsonl'}[damage]
+                    (directory / name).write_bytes(b'{}')
+                elif damage == 'unknown':
+                    (directory / 'foreign').write_bytes(b'KEEP')
+                    (directory / 'foreign').chmod(0o600)
+                elif damage == 'unsafe':
+                    (directory / '.reservation').chmod(0o644)
+                elif damage == 'incomplete':
+                    (directory / 'summary.json').unlink()
+                else:
+                    import fcntl
+                    descriptor = os.open(directory / '.run.lock', os.O_RDONLY)
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                before = {p.name: (p.read_bytes(), p.stat().st_mode) for p in directory.iterdir()}
+                filler = self.home / 'unrelated'
+                filler.write_bytes(b'K' * (1048576 - 65536 - 4096))
+                store = self.store(max_run_bytes=65536, max_total_bytes=1048576)
+                try:
+                    self.assertIsNone(store.start())
+                    self.assertEqual(store.warning.code, d.ErrorCode.DIAGNOSTICS_STORE_FULL)
+                    self.assertEqual({p.name: (p.read_bytes(), p.stat().st_mode) for p in directory.iterdir()},
+                                     before)
+                finally:
+                    if descriptor is not None:
+                        os.close(descriptor)
+
+    def test_reconciled_candidate_names_allow_count_eviction(self):
+        writer = self.start()
+        with DiagnosticsReader(home=self.home)._store(), \
+                patch('llmtool.diagnostics_store.time.monotonic', side_effect=[0, 3]):
+            directory = self.complete(writer)
+        self.start(self.store(max_runs=1))
+        self.assertFalse(directory.exists())
 
     def test_age_and_count_cleanup_oldest_first(self):
         old = self.complete(self.start(), '2000-01-01T00:00:00.000Z')

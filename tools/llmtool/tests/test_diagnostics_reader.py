@@ -450,10 +450,96 @@ class ReaderTests(unittest.TestCase):
         fd = os.open(self.home / '.store.lock', os.O_RDONLY)
         self.addCleanup(os.close, fd)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.assert_trace_failure('STORE_UNAVAILABLE')
-        self.assertEqual(self.invoke(['runs'])[0], 1)
+        before = snapshot(self.home)
+        with patch.object(r.time, 'monotonic', side_effect=[0, .1, .5, 2.1] * 3), \
+                patch.object(r.time, 'sleep') as sleeping, \
+                patch.object(r, '_names', side_effect=AssertionError('contended artifact scan')), \
+                patch.object(r, '_read', side_effect=AssertionError('contended artifact read')):
+            self.assert_trace_failure('STORE_UNAVAILABLE')
+            status, out, err = self.invoke(['runs'])
+            self.assertEqual((status, out), (1, ''))
+            self.assertIn('code=STORE_UNAVAILABLE', err)
+        self.assertEqual(sleeping.call_args_list, [unittest.mock.call(.01)] * 6)
+        self.assertEqual(snapshot(self.home), before)
         fcntl.flock(fd, fcntl.LOCK_UN)
         self.assertEqual(self.reader.trace(RUN_ID)['state'], 'complete')
+
+    def test_root_lock_retry_succeeds_after_writer_releases(self):
+        import fcntl
+        self.completed()
+        before = snapshot(self.home)
+        original_flock = fcntl.flock
+        for method in ('runs', 'trace'):
+            with self.subTest(method=method):
+                fd = os.open(self.home / '.store.lock', os.O_RDONLY)
+                try:
+                    original_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    operations = []
+                    def flock(descriptor, operation):
+                        operations.append(operation)
+                        return original_flock(descriptor, operation)
+                    def release(delay):
+                        self.assertEqual(delay, .01)
+                        original_flock(fd, fcntl.LOCK_UN)
+                    with patch.object(r.time, 'monotonic', side_effect=[0, .1]), \
+                            patch.object(r.time, 'sleep', side_effect=release) as sleeping, \
+                            patch.object(fcntl, 'flock', side_effect=flock):
+                        value = getattr(self.reader, method)(*([RUN_ID] if method == 'trace' else []))
+                    sleeping.assert_called_once_with(.01)
+                    self.assertEqual(operations, [fcntl.LOCK_SH | fcntl.LOCK_NB] * 3 +
+                                     [fcntl.LOCK_UN] * 2)
+                    self.assertEqual(value['state'] if method == 'trace' else value['runs'][0]['status'],
+                                     'complete' if method == 'trace' else 'error')
+                finally:
+                    os.close(fd)
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_busy_run_lock_never_retries_or_inspects_mutable_artifacts(self):
+        import fcntl
+        writer = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID)
+        self.assertIsNotNone(writer)
+        self.addCleanup(writer.close)
+        original_flock, original_names, original_stat = fcntl.flock, r._names, os.stat
+        for method in ('runs', 'trace'):
+            with self.subTest(method=method):
+                operations = []
+                def flock(fd, operation):
+                    operations.append(operation)
+                    return original_flock(fd, operation)
+                def names(fd, limit):
+                    if os.fstat(fd).st_ino == os.fstat(writer.directory).st_ino:
+                        raise AssertionError('busy run scanned')
+                    return original_names(fd, limit)
+                def statting(name, *args, **kwargs):
+                    if name in r.RUN_FILES - {'.run.lock'}:
+                        raise AssertionError('busy artifact statted')
+                    return original_stat(name, *args, **kwargs)
+                with patch.object(r.time, 'sleep', side_effect=AssertionError('busy run waited')), \
+                        patch.object(r.time, 'monotonic', return_value=0) as clock, \
+                        patch.object(fcntl, 'flock', side_effect=flock), \
+                        patch.object(r, '_names', side_effect=names), \
+                        patch.object(r.os, 'stat', side_effect=statting), \
+                        patch.object(r, '_read', side_effect=AssertionError('busy bytes')):
+                    value = getattr(self.reader, method)(*([RUN_ID] if method == 'trace' else []))
+                self.assertEqual(clock.call_count, 1)  # Root only; no run deadline.
+                self.assertEqual(operations, [fcntl.LOCK_SH | fcntl.LOCK_NB] * 2 + [fcntl.LOCK_UN])
+                row = value if method == 'trace' else value['runs'][0]
+                self.assertEqual(row.get('state', row.get('status')), 'incomplete')
+                if method == 'trace':
+                    self.assertEqual((row['events'], row['summary']), ([], None))
+
+    def test_trace_io_and_validation_errors_have_distinct_safe_codes(self):
+        self.completed()
+        for target in ('_read', '_names'):
+            for failure in (OSError(PROMPT), PermissionError(RESPONSE), ValueError(PROMPT),
+                            TypeError(RESPONSE), KeyError(PROMPT), r.ReaderError('STORE_UNSAFE')):
+                with self.subTest(target=target, failure=type(failure).__name__):
+                    code = (failure.code if isinstance(failure, r.ReaderError) else
+                            'STORE_UNAVAILABLE' if isinstance(failure, OSError) else 'FORMAT_INVALID')
+                    with patch.object(r, target, side_effect=failure):
+                        self.assert_trace_failure(code)
+        with patch.object(r.os, 'read', side_effect=OSError(PROMPT)):
+            self.assert_trace_failure('STORE_UNAVAILABLE')
 
     def test_partial_and_published_without_summary_remain_incomplete(self):
         directory = self.completed()
