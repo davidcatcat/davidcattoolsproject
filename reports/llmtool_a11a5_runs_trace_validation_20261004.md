@@ -1,6 +1,12 @@
 # A11a.5 — Offline runs / trace validation — 2026-10-04
 
-Status: **CONTRACT ACCEPTED / IMPLEMENTATION AND VALIDATION PENDING**.
+Current status: **RESUMED / CORRECTION ROUND 1 CLOUD CHECKS PASS /
+INTEGRATED INDEPENDENT REVIEW PENDING**. Publication, final-head CI and external
+ChatGPT review remain pending. Overall A11a is incomplete; merge is not authorized.
+
+## Initial contract checkpoint — historical
+
+Original status: **CONTRACT ACCEPTED / IMPLEMENTATION AND VALIDATION PENDING**.
 This checkpoint precedes source implementation. Only spec section 17 A11a.5 is
 authorized. Overall A11a is incomplete; A11a.6/7, A11b/c and A12 remain unstarted.
 No merge or later-slice work is authorized.
@@ -128,3 +134,136 @@ is required by this offline reader slice, and no such PASS will be claimed.
 Implementation, command/results, exact SHA, review and publication evidence will
 be appended after execution. User-authorized commit/push/draft PR are deferred
 until independent review converges; merge remains forbidden.
+
+## Additive resumed checkpoint — 2026-10-04
+
+This section supersedes the initial pending-implementation status while retaining
+the accepted initial contract and historical agent/evidence record above.
+The coordinator accepted **A11a.5-resume v1** before writes: reuse the paused
+implementation for only offline `runs` and `trace`, with trace `--errors` / `--json`;
+strict version-1 normalized metadata, exact IDs, bounded reads/JSON/output,
+anchored no-follow private/single-link snapshots; no creation, cleanup, repair,
+record mutation, config/credential/auth/provider/network/subprocess resolution,
+raw/free-text/control rendering, or false completion from incomplete evidence.
+Preserve ask stdout/exits, default-off persistence and provider-call counts.
+No doctor, executor, hooks, router, retry, fallback, escalation, A11b/c or later
+slice. Required evidence remains the declared focused/canonical/adversarial,
+installed smoke/wheel provenance, docs/scope, independent review, exact final-head
+Python 3.9/3.14 CI and draft-PR gates. External ChatGPT review remains separate
+and pending; no merge or next slice is authorized. Max two correction rounds;
+this is round 1. No requirement was removed or reduced during repair.
+
+### Repository and execution provenance
+
+- Configured Cloud checkout remains `/workspace/davidcattoolsproject`, origin
+  `https://github.com/davidcatcat/davidcattoolsproject.git`; branch remains
+  `feat/a11a5-runs-trace-cloud-20261004`. It was clean before switching.
+- Initial base/merge base: `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
+  Reused implementation: `b02e8cf945a8201427ee1f0f2c158f83389e99c2`.
+  Preserved paused checkpoint: `93fcb24e7501b6d45a74ea1d8c2c65c942a9cf5c`.
+- Confirmed fetched latest main: `1cee64eaec4559b56c70dd6a5b508ca9f810160f`
+  (architecture refinement PR #20 merge). The paused branch was 2 ahead / 5
+  behind main; main's eight changed paths contained no runtime/test changes.
+- Normal integration/corrected implementation commit:
+  `94bbfe57193361d89711ac080e223296c7271701`, with parents exactly
+  `93fcb24e7501b6d45a74ea1d8c2c65c942a9cf5c` and
+  `1cee64eaec4559b56c70dd6a5b508ca9f810160f`. No rebase, rewrite, clone,
+  worktree, alternate checkout or main-ref mutation occurred.
+- Newest main's WORKFLOW, architecture spec appendix/validation, validate-runtime
+  agent metadata and consolidated A11a.4 report are preserved byte-for-byte.
+  README/ROADMAP current slice status and reader usage were reconciled.
+- Resume Developer: `/root/a11a5_resume_developer`, requested `gpt-6.1-sol` / high;
+  resume Reviewer: `/root/a11a5_resume_reviewer`, requested `gpt-6-astra` / high.
+  Actual runtime model/reasoning for both remains **UNVERIFIED**; no tool
+  attestation is available. Coordinator accepts evidence and is not the writer.
+- Linux 6.18.44 x86_64; Python 3.12.14; pip 25.0.1; setuptools 84.0.0;
+  wheel 0.48.0. Installed editable llmtool version 0.1.0 resolves to this checkout.
+  Current Cloud observations: running/connected, HTTP unrestricted/enforced,
+  no configured VPN, secrets, runtime variables or outbound identities. Proxy
+  and CA trust remain inherited. No live inference/auth/Mac/VPN claim is made.
+
+### Initial review findings and round-1 corrections
+
+The independent initial source review on pinned `93fcb24` requested changes:
+
+- **R1 / P2:** The reader inspected mutable artifact names/private-link state
+  before acquiring the run lock. Real finish can expose `.summary-<id>` and
+  two-link publication windows. The reader now validates the directory/existing
+  lock and acquires a nonblocking shared run lock before scanning artifacts.
+  Busy runs return `incomplete`, events `[]`, summary `null`; no mutable
+  artifact names, stats or bytes are inspected. Stable snapshots retain all
+  private/owner/regular/single-link/identity checks. Missing replacement run locks
+  now classify as `STORE_UNSAFE` before artifact validation.
+- **R2 / P2:** Summary-only listing previously rendered unqualified status.
+  Human runs now explicitly says `Saved summaries only; trace evidence
+  unverified. Use trace <run_id> to verify completion.` Rows use
+  `recorded_status=<summary status>`. No reader schema or public flag was added.
+  Runs remains bounded summaries-only; it never claims verified success or
+  completion. Trace requires the summary and matching complete trace/end evidence.
+
+New tests pause the actual writer at summary-temp existence, trace link-before-
+unlink, and summary link-before-unlink, proving incomplete/no-artifact-stat/no-read,
+zero mutation and unchanged bytes/modes/names/mtime/ctime/link counts. The writer
+then completes successfully and trace reads complete. Forged valid success
+summaries paired with empty/malformed/missing-end traces remain visibly recorded
+and unverified in runs; trace fails safely with empty stdout. Missing trace with
+summary is damaged; missing summary (with or without trace) remains incomplete.
+No eager trace-body scan was added to runs.
+
+An initial focused execution failed because the new multi-phase fixture retained
+a prior completed run while forbidding every summary read. Each phase now uses
+an isolated fixture. The existing replacement-directory test also now expects the
+exact earlier `STORE_UNSAFE` missing-lock classification. Neither change weakens
+product acceptance. The subsequent executions below passed.
+
+### Fresh validation on corrected integrated bytes
+
+All commands ran from the configured checkout. Production, tests and package
+bytes were unchanged between execution and implementation commit `94bbfe571`;
+`git diff 94bbfe571 --` on the runtime/test/package paths was empty afterward.
+SHA256 of `git ls-tree -r 94bbfe571` for `tools/llmtool/llmtool`, `tests`,
+`pyproject.toml`, `Makefile`, and `llmtool.py`:
+`0490006bc405a1fc18f1f82ecc8233179d73e85397691088bfd2a5faa44ff158`.
+Historical 784/814 results are not reused as resumed evidence.
+
+| Check | Command / evidence | Result |
+| --- | --- | --- |
+| Public reader/adversarial/race suite | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p test_diagnostics_reader.py -v` | PASS, exit 0, 32/32, 1.221 s |
+| Diagnostics and ask regressions | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p 'test_diagnostics*.py'` | PASS, exit 0, 209/209, 2.079 s |
+| Canonical compileall/full unittest | `make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"` | PASS, exit 0, 816/816, no skips, 17.101 s |
+| Offline wheel build | `tools/llmtool/.venv/bin/python -m pip wheel --no-deps --no-build-isolation --no-index --wheel-dir /tmp/a11a5-resume-wheel tools/llmtool` | PASS, exit 0 |
+| Installed editable + wheel CLI | `tools/llmtool/.venv/bin/python /tmp/a11a5-resume-smoke.py` | PASS, exit 0; absent/saved/human/JSON/filter/invalid-ID/nonmutation |
+| Wheel source/resource provenance | Byte comparison of all 42 packaged Python/skill files and console entry point | PASS |
+| Main architecture/historical evidence preservation | Empty diff vs exact main on five protected documents/metadata paths | PASS |
+| Docs/link/status/scope validation | 60 local Markdown link targets exist; current slice/gate wording and full diff checked; `git diff --check` | PASS, exit 0 |
+| Integrated independent review | Exact committed documentation candidate to be frozen after this report | INCOMPLETE, pending |
+| Final published Python 3.9/3.14 CI | Exact final documentation head | NOT-TESTED, unpublished |
+| External ChatGPT source review | Separate required review gate | NOT-TESTED, pending |
+| Draft PR delivery | Deferred until independent review converges | INCOMPLETE, pending |
+
+The canonical run used the user's previously approved test-only `/var/tmp` empty
+Codex fixture writes and loopback network permission. No credential discovery or
+real provider requests occurred. Existing canonical ask tests prove output,
+save/no-save/default-off, exit and exactly-one-provider-request regressions.
+This offline slice has no required Mac/live-provider prerequisite; optional
+Mac/Windows backend/live checks remain NOT-TESTED and are not implied by Linux tests.
+
+Artifacts in this Cloud environment: `/tmp/a11a5-resume-diagnostics.log`,
+`/tmp/a11a5-resume-canonical.log`, `/tmp/a11a5-resume-wheel.log`,
+`/tmp/a11a5-resume-smoke.log`, `/tmp/a11a5-resume-smoke.py`, and
+`/tmp/a11a5-resume-wheel/llmtool-0.1.0-py3-none-any.whl`. The reader result was
+captured directly by the tool (32 tests, exit 0). Wheel SHA256:
+`6e7824d0121b6371e2131b565fca08f7c9bb9a578cbbaffbe1de5aa18c666938`.
+Smoke-script SHA256:
+`4f0e88097a035b3122dbf17cb98d59139fa89b17d8ddb48d7887ee64833d2ec0`.
+The wheel was installed into an isolated temporary package target (not a project
+checkout), its import path verified, and both installed console scripts exercised
+with isolated malformed config and temporary HOME. Saved-store snapshots were
+identical before/after commands. No claim extends beyond tested cases.
+
+After the documentation-only commit, the Developer freezes the exact clean HEAD
+and stops all writes for independent review. The coordinator records that final
+candidate SHA externally; the report does not attempt to embed its own commit SHA.
+Publication/CI/external-review evidence must be bound to the eventual exact head.
+Overall A11a is **NOT DONE**. A11a.6/7 and A11b/c remain unstarted; merge is blocked
+and not authorized by this task.
