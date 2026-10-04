@@ -200,3 +200,47 @@ approval or fallback, and does not change milestone numbering or implementation 
 - [Codex Cloud overview](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
 - [Repository guidance](../../AGENTS.md)
 - [Roadmap](ROADMAP.md)
+
+## Default Codex Cloud agent roles — user decision 2026-10-04
+
+Apply these defaults to future user-selected Codex Cloud development tasks unless
+the user explicitly changes them. This is a development-tool workflow, not llmtool
+runtime routing or a new milestone.
+
+| Role | Requested model / reasoning | Responsibility |
+| --- | --- | --- |
+| Developer | `gpt-6.1-sol` / high | Implement the accepted scope and run required tests; sole source/test writer |
+| Reviewer | `gpt-6.1-sol` / high | Independently inspect requirements, source, diff and evidence; read-only review |
+| Git agent | `gpt-5.6-luna` / low | Bounded branch inspection, staging/commit, push, PR updates and exact-head CI checks; execute an authorized merge after all gates pass |
+| Coordinator | Current main agent | Pin scope, coordinate handoffs, decide acceptance and handle exceptions |
+
+The Reviewer default supersedes the earlier Astra preference for future tasks.
+Preserve historical reports and requested-model records; do not relabel past runs.
+Developer and Reviewer remain separate agent instances even with the same model.
+
+Verify model availability when launching agents. Report requested model/effort
+separately from actual runtime attestation; unavailable or unobservable values are
+UNAVAILABLE or UNVERIFIED. Do not silently substitute models or claim successful
+model selection. If the requested Git model is unavailable, the coordinator can
+perform routine Git work and disclose that delegation did not occur.
+
+Activate the Git agent for a bounded publication batch after implementation and
+required review have finished. Give it only the contract/reference, repository,
+branch, base/approved implementation SHA, exact file allowlist, permitted operations,
+required CI/review gates and concise evidence links. Do not copy the entire development
+conversation or ask it to redo code review. Small isolated Git commands can stay
+with the coordinator. Delegation does not establish measured token/quota savings.
+
+Only one agent may mutate Git state at a time. Developer freezes the approved
+source/test bytes before Git handoff; Reviewer never edits them. The Git agent may
+commit those approved changes but must not repair code, weaken tests, change scope
+or approve its own merge. Follow `skills/safe-git/SKILL.md`; preserve unrelated work,
+use no force push/history rewrite, and stage only the supplied allowlist. On conflicts,
+unexpected HEAD/file changes, authentication failures or failing CI, stop that
+operation and return concise evidence to the coordinator. Do not retry indefinitely.
+
+Merge requires existing user authorization and every contract-required gate,
+including external review and applicable Mac verification. Green CI alone is
+insufficient. Recheck branch/target SHA before publication or merge; a changed SHA
+requires coordinator assessment of affected evidence. Report final commit/PR/CI
+identity once; avoid report-only commits made solely to embed their own SHA.
