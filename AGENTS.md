@@ -98,3 +98,11 @@ in the skill's `agents/openai.yaml`.
 Documentation-only changes require documentation validation, not application
 builds. Report checks that passed and any that could not run. Do not claim remote
 synchronization from local tracking references without fetching.
+
+## Default Cloud agent roles
+
+For future Codex Cloud tasks, use Developer `gpt-6.1-sol` / high,
+independent read-only Reviewer `gpt-6.1-sol` / high, and a bounded Git agent
+`gpt-5.6-luna` / low when available. Reviewer replaces the previous Astra default.
+Read [the role and handoff rules](tools/llmtool/WORKFLOW.md#default-codex-cloud-agent-roles--user-decision-2026-10-04).
+Keep one Git writer, verify model availability, and preserve all existing review/merge gates.
