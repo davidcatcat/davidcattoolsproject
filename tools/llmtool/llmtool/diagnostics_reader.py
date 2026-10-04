@@ -1,5 +1,6 @@
 """Offline, bounded, read-only diagnostics snapshots; never use writer helpers."""
 
+import errno
 import os
 import re
 import stat
@@ -102,7 +103,12 @@ def _check_link(parent, name, fd, directory=False):
 
 
 def _directory(parent, name, private=True):
-    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ReaderError('STORE_UNSAFE') from None
+        raise
     try:
         if private:
             _private(os.fstat(fd), True)
@@ -147,6 +153,10 @@ def _lock(parent, name):
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
     except FileNotFoundError:
         raise ReaderError('STORE_UNSAFE') from None
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ReaderError('STORE_UNSAFE') from None
+        raise
     try:
         _private(os.fstat(fd))
         _check_link(parent, name, fd)

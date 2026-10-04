@@ -50,7 +50,8 @@ class _Collision(Exception):
 
 
 def _warning(exc, writing=False):
-    code = (d.ErrorCode.DIAGNOSTICS_STORE_UNSAFE if isinstance(exc, _Unsafe) else
+    code = (d.ErrorCode.DIAGNOSTICS_STORE_UNSAFE if (isinstance(exc, _Unsafe) or
+            isinstance(exc, OSError) and exc.errno in (errno.ELOOP, errno.ENOTDIR)) else
             d.ErrorCode.DIAGNOSTICS_STORE_FULL if isinstance(exc, _Full) else
             d.ErrorCode.DIAGNOSTICS_RUN_COLLISION if isinstance(exc, _Collision) else
             d.ErrorCode.DIAGNOSTICS_WRITE_FAILED if writing else
