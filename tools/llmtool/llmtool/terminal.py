@@ -31,3 +31,17 @@ def terminal_safe_text(text):
 def human_output(text, stream):
     """Escape only on TTYs; preserve exact JSON and redirected text."""
     return terminal_safe_text(text) if getattr(stream, 'isatty', lambda: False)() else text
+
+
+def silence_broken_pipe(stream):
+    """Prevent another buffered flush during interpreter shutdown after EPIPE."""
+    import os
+    try:
+        descriptor = stream.fileno()
+        sink = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(sink, descriptor)
+        finally:
+            os.close(sink)
+    except (AttributeError, OSError, ValueError):
+        pass  # In-memory/custom streams need no OS descriptor replacement.

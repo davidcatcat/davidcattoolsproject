@@ -23,7 +23,9 @@ def _runs_text(value):
     lines = ['run_id=' + row['run_id'] + ' recorded_status=' + row['status'] +
              ' started_at=' + (row['started_at'] or 'unknown') +
              ' provider_type=' + (row['provider_type'] or 'unknown') +
-             ' final_error_code=' + (row['final_error_code'] or 'none') for row in value['runs']]
+             ' final_error_code=' + (row['final_error_code'] or
+                                    ('unknown' if row['status'] == 'incomplete' else 'none'))
+             for row in value['runs']]
     if not lines:
         lines.append('No saved diagnostics runs.')
     else:
@@ -62,6 +64,7 @@ def run_diagnostics(args):
         if len((output + '\n').encode('utf-8')) > READER_OUTPUT_MAX_BYTES:
             raise ReaderError('LIMIT_EXCEEDED')
         sys.stdout.write(output + '\n')
+        sys.stdout.flush()
         return 0
     except ReaderError as exc:
         print(exc.line(), file=sys.stderr)

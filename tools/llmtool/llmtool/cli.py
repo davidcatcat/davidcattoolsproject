@@ -18,7 +18,7 @@ from .skills import discover_skills, load_skill
 from .providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
 from .validator import (classify_command, validate_context_packet,
                         format_command_assessment, format_validation_result)
-from .terminal import human_output
+from .terminal import human_output, silence_broken_pipe
 from .context import PACKET_LIMIT
 from .feedback_cli import add_feedback_parser, run_feedback
 from .benchmark_cli import add_benchmark_parser, run_benchmark
@@ -162,13 +162,13 @@ def _run_ask(args):
         try:
             settings = resolve_diagnostics_settings(persist_metadata=args.persist_metadata)
         except Exception:
-            if not primary_error:
-                raise
             # Legacy skill/input errors precede config errors. Invalid settings
             # cannot be used to write, but an explicit save still reports failure.
             if args.persist_metadata is True:
                 requested_without_observer = run is None
                 observe('persistence_unavailable')
+            if not primary_error:
+                raise
             return
         requested_without_observer = settings.persist_metadata and run is None
         observe('enable_persistence', settings)
@@ -226,6 +226,8 @@ def _run_ask(args):
                       ' unsafe or unsupported NEXT_COMMANDS suggestion(s)', file=sys.stderr)
         output = human_output(output, sys.stdout)
         sys.stdout.write(output + '\n')
+        # Detect a buffered EPIPE before recording successful delivery.
+        sys.stdout.flush()
         observe('finish', 'success')
         store_warning()
         observe('display', sys.stderr)
@@ -233,6 +235,7 @@ def _run_ask(args):
     except LLMToolError as exc:
         return failure(exc)
     except BrokenPipeError:
+        silence_broken_pipe(sys.stdout)
         sys.stdout = None
         observe('finish', 'output_closed')
         store_warning()
@@ -363,6 +366,7 @@ def main(argv=None):
         return 1
     except BrokenPipeError:
         # Avoid the interpreter's flush-at-exit traceback / exit 120 noise.
+        silence_broken_pipe(sys.stdout)
         sys.stdout = None
         return 0
     except (OSError, UnicodeError):
