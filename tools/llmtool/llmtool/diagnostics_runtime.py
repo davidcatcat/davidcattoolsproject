@@ -70,7 +70,7 @@ class RunContext:
             code = warning.code
         if self._store_warning is None:
             self._store_warning = StoreWarning(code)
-        self.persisted = False
+        # A verified durable commit is monotonic; later release warnings are secondary.
         self.close()
 
     def enable_persistence(self, settings):
@@ -124,13 +124,16 @@ class RunContext:
                 from .diagnostics_store import StoreWarning
                 if self._store_warning is None:
                     self._store_warning = StoreWarning(d.ErrorCode.DIAGNOSTICS_WRITE_FAILED)
-                self.persisted = False
 
     def display_store_warning(self, stream):
         if self._store_warning is not None and not self._store_warning_displayed:
             self._store_warning_displayed = True
             try:
-                print(self._store_warning.line(), file=stream)
+                if self.persisted:
+                    print('llmtool: code=' + self._store_warning.code.value +
+                          ' diagnostics cleanup failed; saved metadata retained', file=stream)
+                else:
+                    print(self._store_warning.line(), file=stream)
             except Exception:
                 pass
 
@@ -283,9 +286,10 @@ class RunContext:
                     trace_bytes=writer.trace_bytes, provider_type=self.provider_type,
                     final_error_code=self.final_error_code,
                 )
-                if (writer.finish(summary) is True and writer.persisted is True
-                        and writer.warning is None):
+                if writer.finish(summary) is True and writer.persisted is True:
                     self.persisted = True
+                    if writer.warning is not None:
+                        self._persistence_failure(writer.warning, writing=True)
                 else:
                     self._persistence_failure(writer.warning, writing=True)
             except Exception:

@@ -120,17 +120,18 @@ class PersistedAskTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     os.fstat(fd)
 
-    def assert_secondary(self, result, code, *, status=0, output=CONTENT + '\n'):
+    def assert_secondary(self, result, code, *, status=0, output=CONTENT + '\n', persisted=False):
         actual, out, err, client, *_ = result
         self.assertEqual((actual, out), (status, output))
         client.complete.assert_called_once()
         warnings = [line for line in err.splitlines() if line.startswith('llmtool: code=DIAGNOSTICS_')]
         self.assertEqual(warnings, ['llmtool: code=' + code +
-                                   ' diagnostics persistence unavailable; task result unaffected'])
+                                   (' diagnostics cleanup failed; saved metadata retained' if persisted else
+                                    ' diagnostics persistence unavailable; task result unaffected')])
         self.assertLess(len(warnings[0].encode()), 256)
         for marker in (PROMPT, CONTENT, SECRET, RAW, str(self.state), 'Traceback'):
             self.assertNotIn(marker, err)
-        self.assertFalse(self.runs[-1].persisted)
+        self.assertIs(self.runs[-1].persisted, persisted)
         self.assert_closed()
 
     def test_parser_tri_state_and_mutual_exclusion(self):
@@ -360,7 +361,7 @@ class PersistedAskTests(unittest.TestCase):
         target = self.base / 'target'
         target.mkdir(mode=0o700)
         self.state.symlink_to(target, target_is_directory=True)
-        self.assert_secondary(self.invoke(['--save-diagnostics']), 'DIAGNOSTICS_STORE_UNAVAILABLE')
+        self.assert_secondary(self.invoke(['--save-diagnostics']), 'DIAGNOSTICS_STORE_UNSAFE')
         self.assertEqual(list(target.iterdir()), [])
 
     def test_store_warning_payload_is_never_copied_or_stringified(self):
@@ -444,8 +445,10 @@ class PersistedAskTests(unittest.TestCase):
             with patch('llmtool.diagnostics_store.os.close', side_effect=close):
                 return original_finish(writer, summary)
         with patch.object(StoredRun, 'finish', new=finish):
-            self.assert_secondary(self.invoke(['--save-diagnostics']), 'DIAGNOSTICS_WRITE_FAILED')
+            self.assert_secondary(self.invoke(['--save-diagnostics']), 'DIAGNOSTICS_WRITE_FAILED', persisted=True)
         self.assertTrue(set(self.writers[-1]._fds) <= set(released))
+        from llmtool.diagnostics_reader import DiagnosticsReader
+        self.assertEqual(DiagnosticsReader(home=self.state).trace(self.runs[-1].run_id)['state'], 'complete')
 
     def test_start_cleanup_close_error_still_releases_remaining_descriptors(self):
         from llmtool import diagnostics_store
