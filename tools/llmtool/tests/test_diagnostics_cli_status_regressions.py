@@ -42,8 +42,13 @@ class CLIStatusRegressions(unittest.TestCase):
     invoke = fixture.PersistedAskTests.invoke
 
     def child(self, argv, broken=True):
+        import yaml
+        # System Python's user-site dependency lives under the real HOME;
+        # preserve only its package location while isolating config in HOME.
+        packages = os.pathsep.join((str(ROOT / 'tools/llmtool'),
+                                    str(Path(yaml.__file__).resolve().parent.parent)))
         env = {'HOME': str(self.home), 'LLMTOOL_HOME': str(self.state),
-               'PYTHONPATH': str(ROOT / 'tools/llmtool'), 'PATH': '/usr/bin:/bin',
+               'PYTHONPATH': packages, 'PATH': '/usr/bin:/bin',
                'PYTHONDONTWRITEBYTECODE': '1'}
         read, write = os.pipe()
         if broken:
