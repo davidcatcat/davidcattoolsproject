@@ -193,30 +193,35 @@ class RunContext:
         try:
             if type(metadata) is not dict:
                 raise ValueError('provider metadata requires a plain mapping')
-            safe = {k: v for k, v in metadata.items()
-                    if type(k) is str and k in ('elapsed_seconds', 'model', *TOKEN_FIELDS)}
-            data = {}
-            for key, value in safe.items():
-                if key == 'elapsed_seconds':
-                    if (type(value) not in (int, float) or not math.isfinite(value)
-                            or not 0 <= value <= d.MAX_DURATION_MS / 1000):
-                        raise ValueError('invalid provider duration')
-                    data['duration_ms'] = int(value * 1000)
-                elif key == 'model' and type(value) is str and value == '[redacted]':
-                    # Existing provider redaction marker is display data, not a model ID.
-                    d.safe_diagnostic_text(value)
-                elif key == 'model':
-                    # Display accepts provider identifiers independently of the
-                    # stricter event schema; credentials/controls remain rejected.
-                    d.safe_diagnostic_text(value, d.MODEL_MAX_CHARS)
-                    if re.fullmatch(r'[A-Za-z0-9_./:@-]+', value) is None:
-                        raise ValueError('invalid provider model')
-                    data[key] = value
-                else:
-                    if value is not None and (type(value) is not int
-                                              or not 0 <= value <= d.MAX_TOKEN_COUNT):
-                        raise ValueError('invalid provider token count')
-                    data[key] = value
+            safe, data, rejected = {}, {}, False
+            for key, value in metadata.items():
+                if type(key) is not str or key not in ('elapsed_seconds', 'model', *TOKEN_FIELDS):
+                    continue  # Never validate/stringify unknown adapter values.
+                try:
+                    if key == 'elapsed_seconds':
+                        if (type(value) not in (int, float) or not math.isfinite(value)
+                                or not 0 <= value <= d.MAX_DURATION_MS / 1000):
+                            raise ValueError('invalid provider duration')
+                        data['duration_ms'] = int(value * 1000)
+                    elif key == 'model' and type(value) is str and value == '[redacted]':
+                        d.safe_diagnostic_text(value)
+                    elif key == 'model':
+                        # Display validation remains independent of event-only bounds.
+                        d.safe_diagnostic_text(value, d.MODEL_MAX_CHARS)
+                        if re.fullmatch(r'[A-Za-z0-9_./:@-]+', value) is None:
+                            raise ValueError('invalid provider model')
+                        data[key] = value
+                    else:
+                        if value is not None and (type(value) is not int
+                                                  or not 0 <= value <= d.MAX_TOKEN_COUNT):
+                            raise ValueError('invalid provider token count')
+                        data[key] = value
+                    safe[key] = value
+                except Exception:
+                    rejected = True
+                    self.drop()
+            if rejected and not safe:
+                return {}  # Preserve the existing all-invalid event-drop contract.
             data['token_usage_available'] = any(type(data.get(k)) is int for k in TOKEN_FIELDS)
             # Validate bounded display scalars before storing them. Event-only
             # validation/construction must never erase legacy verbose metadata.
