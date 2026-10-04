@@ -4,13 +4,13 @@ import os
 import selectors
 import shutil
 import subprocess
-import signal
 import tempfile
 import time
 from pathlib import Path
 
 from ..errors import LLMToolError, coded_error
 from .base import ProviderCapabilities, Reply
+from .cli_lifecycle import CLIProcessLifecycle, terminate
 
 OUTPUT_LIMIT = 1024 * 1024
 READ_SIZE = 8192
@@ -73,19 +73,7 @@ class ClaudeCLIProvider:
 
     @staticmethod
     def _kill(process):
-        try:
-            if os.name == "posix" and hasattr(os, "killpg"):
-                os.killpg(process.pid, signal.SIGKILL)
-            else:
-                process.kill()
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            try:
-                process.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
-        process.wait()
+        terminate(process)
 
     @staticmethod
     def _child_environment():
@@ -137,13 +125,19 @@ class ClaudeCLIProvider:
         if model:
             argv.extend(("--model", model))
         try:
-            with self._temporary_directory() as cwd:
-                process = subprocess.Popen(
-                    argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE, shell=False, close_fds=True,
-                    start_new_session=True, cwd=cwd, env=self._child_environment(),
-                )
-                return self._collect(process, input_bytes)
+            with CLIProcessLifecycle(self.TYPE) as lifecycle:
+                with self._temporary_directory() as cwd:
+                    try:
+                        lifecycle.check()
+                        process = subprocess.Popen(
+                            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, shell=False, close_fds=True,
+                            start_new_session=True, cwd=cwd, env=self._child_environment(),
+                        )
+                        lifecycle.own(process)
+                        return self._collect(process, input_bytes, lifecycle)
+                    finally:
+                        lifecycle.stop()
         except FileNotFoundError:
             raise coded_error(
                 "Claude CLI executable is not available",
@@ -158,7 +152,7 @@ class ClaudeCLIProvider:
                 'provider.claude-cli',
             ) from None
 
-    def _collect(self, process, input_bytes):
+    def _collect(self, process, input_bytes, lifecycle):
         selector = selectors.DefaultSelector()
         stdout = bytearray()
         stderr = bytearray()
@@ -178,6 +172,7 @@ class ClaudeCLIProvider:
             selector.register(process.stdin, selectors.EVENT_WRITE, ("stdin", None))
 
             while selector.get_map():
+                lifecycle.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._kill(process)
@@ -229,23 +224,24 @@ class ClaudeCLIProvider:
                     'provider.claude-cli',
                     retryable=True,
                 )
-            try:
-                returncode = process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                self._kill(process)
-                raise coded_error(
-                    "Claude CLI timed out",
-                    'PROVIDER_TIMEOUT',
-                    'provider.claude-cli',
-                    retryable=True,
-                ) from None
+            while True:
+                lifecycle.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._kill(process)
+                    raise coded_error("Claude CLI timed out", 'PROVIDER_TIMEOUT',
+                                      'provider.claude-cli', retryable=True)
+                try:
+                    returncode = process.wait(timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         finally:
             selector.close()
             for stream in (process.stdin, process.stdout, process.stderr):
                 if not stream.closed:
                     stream.close()
-            if process.poll() is None:
-                self._kill(process)
+            lifecycle.stop()
 
         if returncode != 0:
             raise coded_error(
