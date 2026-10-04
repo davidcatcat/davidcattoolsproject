@@ -451,7 +451,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a.1–5 merged; A11a.6 feature branch
+## A11 — Production Workflow & Diagnostics — A11a.1–6 merged; A11a.7 acceptance in progress
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -473,13 +473,13 @@ A11a.4 persisted ask integration DONE/merged via PR #19，merge SHA
 post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d404c49c8beb08ec28`；
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
-A11a 整體尚未完成；A11a.6 offline doctor/failure matrix 在 feature branch 實作，independent native review `909d390` PASS；publication/final-head CI/external review pending；
-A11a.7、A11b/A11c 與後續 milestones 尚未啟動。Execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**.
+A11b/A11c 與後續 execution milestones 尚未啟動。Execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–5 DONE/merged; A11a.6 feature branch, native review 909d390 PASS; publication/CI/external pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1–6 merged; A11a.7 final acceptance in progress, external review/gate merge pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
 | A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -536,7 +536,7 @@ provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a.1–5 merged、A11a.6 feature branch、整體 incomplete；A12 = future optional frontend。
+- A10 = DONE and merged；A11a.1–6 merged、A11a.7 acceptance in progress、整體 incomplete；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics
@@ -603,18 +603,25 @@ SUCCESS。Overall A11a is NOT DONE. A11a.5 subsequently merged via
 passed Python 3.9/3.14, each 824 tests. Historical review/repair/pre-merge status
 remains preserved in [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
 Runs shows recorded summary status with unverified trace evidence; trace verifies
-completion. A11a.6 adds offline doctor and the named store/provider/error failure
-matrix on this feature branch; independent native review PASS on `909d390`,
-R1/R2 closed after one correction round. Publication/final-head CI/external gates
-remain pending. See [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
+completion. A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**.
+See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md) for the delivery audit, fresh evidence and retained limits. Historical A11a.6
+review checkpoints remain in [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
+
+Deferred limits remain explicit: M2 late artifacts/capacity, M4 root-lock full trace
+validation, M5 reader scan limits, unchanged P1–P4 doctor behavior and N1 unknown
+staging byte/scan accumulation without staging reporting/cleanup. P5 current-status
+wording is refreshed, with historical findings preserved. Legacy malformed reservations
+fail closed; native publication/platform and same-UID limits and one-hour abandoned
+grace remain. Runs keeps null/incomplete ordering and supports no `--json`. Final
+acceptance adds no automatic repair, cleanup policy, executor, retry or fallback.
 
 Implementation slices remain exactly spec section 17:
 
 | Slice | Scope / current delivery status |
 | --- | --- |
 | A11a.5 | Offline runs/trace readers and human/JSON rendering; DONE/merged PR #22 `da027f0`, post-merge CI 3.9/3.14 824 each PASS |
-| A11a.6 | Offline doctor and named full spec failure matrix; implemented on feature branch, Cloud local validation and native review `909d390` PASS; publication/final-head CI/external review pending |
-| A11a.7 | Final A11a validation/review/merge gate; not started |
+| A11a.6 | Offline doctor/failure matrix and narrow M1/M3 hardening; merged PR #24 `6b7809a`, post-merge CI 3.9/3.14 PASS; M2/M4/M5, doctor behavioral findings and N1 retained |
+| A11a.7 | Final acceptance/dated report/docs in progress on `feat/a11a7-final-acceptance-20261004`; external review/gate merge pending; overall A11a NOT DONE |
 
 The numbered architecture topics below describe the broader design, not the
 implementation slice numbering. A11a adds no executor, hooks engine, automatic
@@ -643,6 +650,11 @@ retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mut
 - 只建立實際需要的核心 error codes，不為了數量預先發明大量未驗證錯誤。
 
 Diagnostics modes:
+
+Delivered A11a `ask --debug` emits bounded safe event summaries on stderr;
+it collects no Python stack/traceback, host paths, locals, raw bodies or tool
+stdout/stderr. The broader stack/tool/validator bullets below remain future
+design topics, with no implemented executor, retry or fallback implied.
 
 - **normal**：concise CLI output、error/warning、run ID、safe metadata。
 - **verbose**：增加 provider/profile routing、retry/fallback、timing/token metadata、
