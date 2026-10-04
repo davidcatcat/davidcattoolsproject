@@ -885,7 +885,7 @@ or save flag. Existing `ask`, `runs` and `trace` contracts remain unchanged.
 
 See [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md)
 for the named spec failure matrix and historical offline fault-injection evidence.
-A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**. See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md) for fresh acceptance evidence and the full spec section 18 coverage matrix. Historical live/provider results remain historical.
+A11a.6 offline doctor/failure matrix and M1/M3 persistence hardening merged via PR #24 (`6b7809a`). A11a.7 final acceptance merged via PR #25 (`e3869828`), and post-acceptance B1–B7 fixes merged via PR #26 (`2761ce10`); post-merge CI `37228032137` passed Python 3.9/3.14. Overall **A11a DONE**. Historical validation/review reports retain their original checkpoint wording.
 
 ## Troubleshooting 與已知限制
 
