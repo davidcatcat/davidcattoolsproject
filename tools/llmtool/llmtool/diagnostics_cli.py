@@ -7,6 +7,7 @@ from .diagnostics_reader import DiagnosticsReader, ReaderError, READER_OUTPUT_MA
 
 
 def add_diagnostics_parser(sub):
+    sub.add_parser('doctor', help='Inspect configuration and existing diagnostics offline; never write or probe')
     sub.add_parser('runs', help='List saved diagnostics metadata offline; never write')
     trace = sub.add_parser('trace', help='Read one saved diagnostics run offline; never write')
     trace.add_argument('run_id', help='32 lowercase hexadecimal characters; never a path')

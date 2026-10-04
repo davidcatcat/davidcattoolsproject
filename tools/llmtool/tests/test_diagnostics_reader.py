@@ -193,7 +193,7 @@ class ReaderTests(unittest.TestCase):
             self.assertIn('code=ID_INVALID', err)
             self.assertNotIn(identity, err)
         for argv in (['runs', '--json'], ['runs', '--errors'], ['trace', RUN_ID, '--provider', PROMPT],
-                     ['trace', RUN_ID, '--save-diagnostics'], ['doctor']):
+                     ['trace', RUN_ID, '--save-diagnostics'], ['doctor', '--json']):
             with patch.object(cli.sys, 'stderr', io.StringIO()) as err, self.assertRaises(SystemExit) as caught:
                 cli.main(argv)
             self.assertEqual(caught.exception.code, 2)

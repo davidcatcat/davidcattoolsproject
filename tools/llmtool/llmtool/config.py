@@ -5,6 +5,7 @@ import math
 import os
 import re
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -39,6 +40,14 @@ CLI_OPTIONS = {
     "timeout": ENV_OPTIONS["LLMTOOL_TIMEOUT"],
     "max_tokens": ENV_OPTIONS["LLMTOOL_MAX_TOKENS"],
     "temperature": ("generation", "temperature"),
+}
+# Doctor uses these for configuration/location/executable lookup. A credential
+# binding to one of them makes inspection ambiguous; ordinary resolution keeps
+# its existing contract. User-config location bootstrap precedes known bindings.
+INSPECTION_ENV_NAMES = frozenset(ENV_OPTIONS) | {
+    'LLMTOOL_PROVIDER', 'LLMTOOL_HOME', 'XDG_STATE_HOME', 'LOCALAPPDATA',
+    'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PATH', 'PATHEXT',
+    'NoDefaultCurrentDirectoryInExePath',
 }
 CONFIG_LIMIT = 64 * 1024
 MAX_TIMEOUT_SECONDS = 3600.0
@@ -242,13 +251,25 @@ def _validate(config):
         raise LLMToolError("temperature must be between 0 and 2")
 
 
-def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
-    """Resolve a viewable config; model requests must require readiness as well."""
+def _inspection_env_name(name):
+    """Windows environment names are case-insensitive; POSIX names are exact."""
+    return name.upper() if sys.platform == 'win32' else name
+
+
+def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=False):
+    """Strict layered validation only; never look up a credential value."""
     env = os.environ if environ is None else environ
     cli = cli or {}
     config = copy.deepcopy(DEFAULTS)
-    _apply_user(config, _read_yaml(user_config_path(home), "user config"))
+    user = _read_yaml(user_config_path(home), "user config")
+    _apply_user(config, user)
     _apply_project(config, _read_yaml((Path.cwd() if cwd is None else Path(cwd)) / ".llmtool.yaml", "project config"))
+    if inspection:
+        reserved = {_inspection_env_name(name) for name in INSPECTION_ENV_NAMES}
+        for provider in config['providers'].values():
+            name = provider['api_key_env']
+            if isinstance(name, str) and _inspection_env_name(name) in reserved:
+                raise LLMToolError('offline inspection credential binding conflicts with configuration environment')
     # Only trusted sources may select a profile. Resolve selection before applying
     # endpoint/model overrides so credentials and overrides come from one profile.
     if "LLMTOOL_PROVIDER" in env:
@@ -263,10 +284,48 @@ def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configur
         if name in CLI_OPTIONS and value is not None:
             _set(config, CLI_OPTIONS[name], value)
     _validate(config)
+    return config, user
+
+
+def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
+    """Resolve a viewable config; model requests must require readiness as well."""
+    config, _ = _config_view(cli, environ, cwd, home)
     if require_configured:
         provider = selected_provider(config)
         client_type(provider["type"]).validate_ready(provider)
     return config
+
+
+def inspect_config(*, environ=None, cwd=None, home=None):
+    """Offline projection: configuration readiness and credential presence only.
+
+    Preserve normal layering and validation, without calling the model-request
+    loader, constructing a client, or resolving literal/environment credentials.
+    Only membership is checked for a configured credential environment name;
+    even an empty value is present and does not establish authentication.
+    """
+    from .diagnostics_settings import parse_diagnostics_settings
+    env = os.environ if environ is None else environ
+    config, user = _config_view(environ=env, cwd=cwd, home=home, inspection=True)
+    provider = selected_provider(config)
+    ready = True
+    try:
+        client_type(provider['type']).validate_ready(provider)
+    except LLMToolError:
+        ready = False
+    if provider['api_key'] is not None:
+        credential = 'literal-configured'
+    elif provider['api_key_env'] is not None:
+        # Mapping.__contains__ (including os._Environ) can fetch the value.
+        # Iterate keys instead, so configured secret values are never accessed.
+        keys = tuple(_inspection_env_name(name) for name in env)
+        credential = ('env-configured-present' if _inspection_env_name(provider['api_key_env']) in keys
+                      else 'env-configured-absent')
+    else:
+        credential = 'not-configured'
+    return {'settings': parse_diagnostics_settings(user.get('diagnostics', {})),
+            'provider_type': provider['type'], 'readiness': 'ready' if ready else 'not-configured',
+            'credential': credential}
 
 
 def resolve_profile_config(profile_name, *, home=None, require_configured=True):

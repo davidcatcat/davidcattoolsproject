@@ -64,6 +64,15 @@ def persistence_supported(platform=None):
         hasattr(os, name) for name in ('O_NOFOLLOW', 'O_DIRECTORY', 'geteuid'))
 
 
+def _inode(info):
+    return info.st_dev, info.st_ino
+
+
+def _fingerprint(info):
+    return (_inode(info), info.st_mode, info.st_uid, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
 def _private(info, directory=False):
     expected = stat.S_ISDIR if directory else stat.S_ISREG
     if (not expected(info.st_mode) or info.st_uid != os.geteuid()
@@ -185,6 +194,27 @@ def _publish(parent, source, target):
     os.unlink(source, dir_fd=parent)
 
 
+def _publish_run_directory(parent, source, runs, target):
+    """Atomic no-replace directory publication on the supported POSIX backends.
+
+    No portable rename fallback: os.rename can replace an existing empty run.
+    Missing libc/kernel support disables this save without touching the target.
+    """
+    import ctypes
+    library = ctypes.CDLL(None, use_errno=True)
+    symbol, flag = ('renameatx_np', 0x4) if sys.platform == 'darwin' else ('renameat2', 1)
+    try:
+        rename = getattr(library, symbol)
+    except AttributeError:
+        raise OSError(errno.ENOTSUP, 'atomic diagnostics publication unavailable') from None
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(parent, os.fsencode(source), runs, os.fsencode(target), flag) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, 'atomic diagnostics publication failed')
+
+
 def _reservation(raw, run_id):
     value = strict_object(raw, RESERVATION_MAX_BYTES)
     if (set(value) != {'schema', 'schema_version', 'run_id', 'max_run_bytes', 'created_at'}
@@ -278,20 +308,38 @@ class DiagnosticsStore:
                 identity = d.new_run_id() if run_id is None else d.validate_run_id(run_id)
                 for attempt in range(3):
                     try:
-                        os.mkdir(identity, 0o700, dir_fd=runs)
+                        os.stat(identity, dir_fd=runs, follow_symlinks=False)
+                    except FileNotFoundError:
                         break
-                    except FileExistsError:
-                        if attempt == 2:
-                            raise _Collision() from None
-                        identity = d.new_run_id()
-                directory = _directory(runs, identity)
-                fds.append(directory)
-                run_lock = _file(directory, '.run.lock', os.O_EXCL, create=True)
-                fds.append(run_lock)
-                import fcntl
-                fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                reservation = _file(directory, '.reservation', os.O_EXCL, create=True)
+                    if attempt == 2:
+                        raise _Collision()
+                    identity = d.new_run_id()
+                # mkdir cannot return a creation-bound inode. Initialize outside
+                # runs, never rmdir this unknown staging namespace, even on failure.
+                # Root byte/scan accounting still includes every retained stage.
+                import secrets
+                stage = '.run-init-' + secrets.token_hex(16)
+                os.mkdir(stage, 0o700, dir_fd=root)
+                directory = None
+                created = {}
+                run_locked = published = False
                 try:
+                    directory = _directory(root, stage)
+                    fds.append(directory)
+
+                    def create_file(name):
+                        fd = os.open(name, os.O_RDWR | os.O_NONBLOCK | os.O_NOFOLLOW |
+                                     os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+                        fds.append(fd)
+                        created[name] = os.fstat(fd)
+                        _private(created[name])
+                        return fd
+
+                    run_lock = create_file('.run.lock')
+                    import fcntl
+                    fcntl.flock(run_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    run_locked = True
+                    reservation = create_file('.reservation')
                     raw = d.diagnostic_json({
                         'schema': RESERVATION_SCHEMA, 'schema_version': 1,
                         'run_id': identity, 'max_run_bytes': self.settings.max_run_bytes,
@@ -299,13 +347,35 @@ class DiagnosticsStore:
                     }, RESERVATION_MAX_BYTES).encode('utf-8')
                     _write(reservation, raw)
                     os.fsync(reservation)
-                finally:
                     os.close(reservation)
-                trace = _file(directory, 'trace.partial.jsonl', os.O_EXCL, create=True)
-                fds.append(trace)
-                _sync_directory(directory)
-                _sync_directory(runs)
-            writer = StoredRun(self, identity, root, runs, lock, directory, run_lock, trace)
+                    fds.remove(reservation)
+                    trace = create_file('trace.partial.jsonl')
+                    os.fsync(trace)
+                    _sync_directory(directory)
+                    _sync_directory(root)
+                    _sync_directory(runs)
+                    # Finish all construction before the namespace commit point.
+                    writer = StoredRun(self, identity, root, runs, lock, directory, run_lock, trace)
+                    snapshot = self._snapshot(directory, set(created))
+                    self._check_initialization(root, stage, directory, created)
+                    _reservation(_read(directory, '.reservation', RESERVATION_MAX_BYTES), identity)
+                    _events(_read(directory, 'trace.partial.jsonl', self.settings.max_run_bytes), identity)
+                    if self._snapshot(directory, set(created)) != snapshot:
+                        raise _Unsafe()
+                    _publish_run_directory(root, stage, runs, identity)
+                    published = True
+                    # Directory rename has no portable fd-source form. Recheck
+                    # the namespace after publication; an unmanaged same-UID race
+                    # may move a replacement, but we never delete that unknown data.
+                    self._check_initialization(runs, identity, directory, created)
+                    _sync_directory(runs)
+                    _sync_directory(root)
+                except Exception:
+                    if not published and run_locked:
+                        self._rollback_start(root, stage, directory, created)
+                    # Postpublication errors retain valid/ambiguous run data;
+                    # no rollback deletes a final run directory.
+                    raise
             fds = []  # Writer owns all descriptors, including root lock for completion.
             return writer
         except Exception as exc:
@@ -318,8 +388,36 @@ class DiagnosticsStore:
                 except Exception as exc:
                     self._warn(exc)
 
+    def _check_initialization(self, parent, name, directory, created):
+        original = os.fstat(directory)
+        current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        _private(original, True)
+        _private(current, True)
+        if _inode(original) != _inode(current) or set(os.listdir(directory)) != set(created):
+            raise _Unsafe()
+        for filename, info in created.items():
+            current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+            _private(current)
+            if _inode(current) != _inode(info):
+                raise _Unsafe()
+
+    def _rollback_start(self, root, stage, directory, created):
+        try:
+            self._check_initialization(root, stage, directory, created)
+            for filename, info in created.items():
+                current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                _private(current)
+                if (_inode(current) != _inode(info) or
+                        _inode(os.fstat(directory)) != _inode(os.stat(stage, dir_fd=root, follow_symlinks=False))):
+                    return
+                os.unlink(filename, dir_fd=directory)
+            _sync_directory(directory)
+            # Never rmdir stage: even the initial open cannot prove mkdir identity.
+        except (OSError, _Unsafe):
+            pass  # Preserve unprovable data and the original warning.
+
     def _candidate(self, runs, name, now):
-        """Hold candidate run lock through deletion. Unknown/active entries are kept."""
+        """Validate one locked run; callers must release it before scanning another."""
         directory = lock = None
         try:
             d.validate_run_id(name)
@@ -332,6 +430,7 @@ class DiagnosticsStore:
                 raise _Unsafe()
             for filename in names:
                 _private(os.stat(filename, dir_fd=directory, follow_symlinks=False))
+            snapshot = self._snapshot(directory, names)
             summary = None
             reservation = None
             if '.reservation' in names:
@@ -364,7 +463,9 @@ class DiagnosticsStore:
                 stamp = max([os.fstat(directory).st_mtime] + [
                     os.stat(n, dir_fd=directory, follow_symlinks=False).st_mtime for n in names])
                 eligible = now - stamp >= ABANDONED_GRACE_SECONDS
-            candidate = (name, directory, lock, names, stamp, summary is not None, eligible)
+            if self._snapshot(directory, names) != snapshot:
+                raise _Unsafe()
+            candidate = (name, directory, lock, names, stamp, summary is not None, eligible, snapshot)
             directory = lock = None
             return candidate
         except (OSError, ValueError, TypeError, KeyError, _Unsafe):
@@ -374,13 +475,34 @@ class DiagnosticsStore:
                 if fd is not None:
                     os.close(fd)
 
+    @staticmethod
+    def _snapshot(directory, names):
+        return (_fingerprint(os.fstat(directory)), {
+            name: _fingerprint(os.stat(name, dir_fd=directory, follow_symlinks=False))
+            for name in names})
+
+    @staticmethod
+    def _close_candidate(candidate):
+        os.close(candidate[2])
+        os.close(candidate[1])
+
+    def _reopen_candidate(self, runs, saved, now):
+        candidate = self._candidate(runs, saved[0], now)
+        if candidate is not None and candidate[7] != saved[7]:
+            self._close_candidate(candidate)
+            return None
+        return candidate
+
     def _check_candidate(self, runs, candidate):
-        name, directory, _, names, *_ = candidate
+        name, directory, lock, names, *_ = candidate
         original = os.fstat(directory)
         current = os.stat(name, dir_fd=runs, follow_symlinks=False)
-        if (original.st_dev, original.st_ino) != (current.st_dev, current.st_ino):
+        _private(current, True)
+        if _inode(original) != _inode(current):
             raise _Unsafe()
-        if set(os.listdir(directory)) != names:
+        if set(os.listdir(directory)) != names or self._snapshot(directory, names) != candidate[7]:
+            raise _Unsafe()
+        if _fingerprint(os.fstat(lock)) != candidate[7][1]['.run.lock']:
             raise _Unsafe()
         for filename in names:
             _private(os.stat(filename, dir_fd=directory, follow_symlinks=False))
@@ -389,7 +511,13 @@ class DiagnosticsStore:
         self._check_candidate(runs, candidate)
         name, directory, _, names, *_ = candidate
         for filename in names:
+            current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+            if (_fingerprint(current) != candidate[7][1][filename] or
+                    _inode(os.fstat(directory)) != _inode(os.stat(name, dir_fd=runs, follow_symlinks=False))):
+                raise _Unsafe()
             os.unlink(filename, dir_fd=directory)
+        if _inode(os.fstat(directory)) != _inode(os.stat(name, dir_fd=runs, follow_symlinks=False)):
+            raise _Unsafe()
         os.rmdir(name, dir_fd=runs)
         _sync_directory(runs)
 
@@ -399,75 +527,88 @@ class DiagnosticsStore:
         if len(names) > SCAN_LIMIT:
             raise _Full()
         candidates = []
-        try:
-            for name in names:
-                item = self._candidate(runs, name, now)
-                if item is not None:
-                    candidates.append(item)
-                    if item[5] and '.reservation' in item[3]:
-                        # Completed summary + trace were validated by _candidate.
-                        # Root EX and candidate run EX remain held throughout.
-                        self._check_candidate(runs, item)
-                        os.unlink('.reservation', dir_fd=item[1])
-                        item[3].remove('.reservation')
-                        _sync_directory(item[1])
-            candidates.sort(key=lambda item: (item[4], item[0]))
-            # Age cleanup and abandoned recovery precede count/byte pressure.
-            deleted = set()
-            for item in candidates:
-                if item[6] and (not item[5] or now - item[4] > settings.max_age_days * 86400):
-                    self._remove(runs, item)
+        for name in names:
+            item = self._candidate(runs, name, now)
+            if item is not None:
+                # Keep only metadata, never descriptors for the whole inventory.
+                saved = (item[0], None, None, set(item[3]), *item[4:])
+                self._close_candidate(item)
+                if saved[5] and '.reservation' in saved[3]:
+                    item = self._reopen_candidate(runs, saved, now)
+                    if item is not None:
+                        try:
+                            self._check_candidate(runs, item)
+                            os.unlink('.reservation', dir_fd=item[1])
+                            item[3].remove('.reservation')
+                            _sync_directory(item[1])
+                            saved = (item[0], None, None, set(item[3]), *item[4:7],
+                                     self._snapshot(item[1], item[3]))
+                        finally:
+                            self._close_candidate(item)
+                candidates.append(saved)
+        candidates.sort(key=lambda item: (item[4], item[0]))
+
+        def remove(saved):
+            item = self._reopen_candidate(runs, saved, now)
+            if item is None:
+                return False
+            try:
+                self._remove(runs, item)
+                return True
+            finally:
+                self._close_candidate(item)
+
+        # Age cleanup and abandoned recovery precede count/byte pressure.
+        deleted = set()
+        for item in candidates:
+            if item[6] and (not item[5] or now - item[4] > settings.max_age_days * 86400):
+                if remove(item):
                     deleted.add(item[0])
-            def usage():
-                budget = [SCAN_LIMIT]
-                total = _bytes(root, budget, skip=('runs',))
-                current = os.listdir(runs)
-                budget[0] -= len(current)
-                if budget[0] < 0:
-                    raise _Full()
-                for name in current:
-                    directory = None
-                    try:
-                        info = os.stat(name, dir_fd=runs, follow_symlinks=False)
-                        if not stat.S_ISDIR(info.st_mode):
-                            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
-                                raise _Full()
-                            total += info.st_size
-                            continue
-                        directory = _directory(runs, name, private=False)
-                        actual = _bytes(directory, budget)
-                        if '.reservation' in os.listdir(directory):
-                            d.validate_run_id(name)
-                            _private(os.fstat(directory), True)
-                            reservation = _reservation(_read(directory, '.reservation', RESERVATION_MAX_BYTES), name)
-                            # Charge the whole reservation once. Sampling root bytes
-                            # then subtracting a later run size would undercount
-                            # a concurrently growing active trace.
-                            actual = max(actual, reservation['max_run_bytes'])
-                        total += actual
-                    except (OSError, ValueError, TypeError, KeyError, _Unsafe):
-                        # Invalid reservations cannot guarantee a capacity bound.
-                        raise _Full() from None
-                    finally:
-                        if directory is not None:
-                            os.close(directory)
-                return len(current), total
-            count, total = usage()
-            for item in candidates:
-                if item[0] in deleted:
-                    continue
-                if count < settings.max_runs and total + settings.max_run_bytes <= settings.max_total_bytes:
-                    break
-                if item[5] and item[6]:
-                    self._remove(runs, item)
-                    count, total = usage()
-            if count >= settings.max_runs or total + settings.max_run_bytes > settings.max_total_bytes:
+        def usage():
+            budget = [SCAN_LIMIT]
+            total = _bytes(root, budget, skip=('runs',))
+            current = os.listdir(runs)
+            budget[0] -= len(current)
+            if budget[0] < 0:
                 raise _Full()
-        finally:
-            # Includes deleted directories: their still-open lock descriptors are valid.
-            for item in candidates:
-                os.close(item[2])
-                os.close(item[1])
+            for name in current:
+                directory = None
+                try:
+                    info = os.stat(name, dir_fd=runs, follow_symlinks=False)
+                    if not stat.S_ISDIR(info.st_mode):
+                        if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                            raise _Full()
+                        total += info.st_size
+                        continue
+                    directory = _directory(runs, name, private=False)
+                    actual = _bytes(directory, budget)
+                    if '.reservation' in os.listdir(directory):
+                        d.validate_run_id(name)
+                        _private(os.fstat(directory), True)
+                        reservation = _reservation(_read(directory, '.reservation', RESERVATION_MAX_BYTES), name)
+                        # Charge the whole reservation once. Sampling root bytes
+                        # then subtracting a later run size would undercount
+                        # a concurrently growing active trace.
+                        actual = max(actual, reservation['max_run_bytes'])
+                    total += actual
+                except (OSError, ValueError, TypeError, KeyError, _Unsafe):
+                    # Invalid reservations cannot guarantee a capacity bound.
+                    raise _Full() from None
+                finally:
+                    if directory is not None:
+                        os.close(directory)
+            return len(current), total
+        count, total = usage()
+        for item in candidates:
+            if item[0] in deleted:
+                continue
+            if count < settings.max_runs and total + settings.max_run_bytes <= settings.max_total_bytes:
+                break
+            if item[5] and item[6]:
+                if remove(item):
+                    count, total = usage()
+        if count >= settings.max_runs or total + settings.max_run_bytes > settings.max_total_bytes:
+            raise _Full()
 
 
 class StoredRun:

@@ -262,6 +262,9 @@ def main(argv=None):
     if args.command == 'ask':
         return _run_ask(args)
     try:
+        if args.command == 'doctor':
+            from .doctor import run_doctor
+            return run_doctor()
         if args.command in ('runs', 'trace'):
             return run_diagnostics(args)
         if args.command == "retrieve-context":
