@@ -11,6 +11,25 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
+## Current milestone snapshot
+
+This table is the authoritative current-state summary. Historical validation reports
+retain the status that was true when they were written; they are evidence, not the
+current roadmap.
+
+| Track | Current state | Next gate |
+| --- | --- | --- |
+| A0–A10 | **DONE and merged** (A2.3 Anthropic HTTP API remains a planned provider gap, not a blocker to the completed mainline) | Maintain regression/security boundaries |
+| A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed; post-merge Python 3.9/3.14 CI PASS | QG-S1 Security Baseline / Threat Model, then QG-QA1 Formal QA |
+| QG-S1 — Security Baseline / Threat Model | **NEXT / NOT STARTED** | Threat model current A11a and define security requirements that A11b must satisfy |
+| QG-QA1 — Formal A11a QA | **NOT STARTED** | Public-interface smoke/functional/failure/concurrency/cross-environment QA; fix confirmed regressions |
+| A11b — Execution, Approval & Recovery | **NOT STARTED** | May start only after QG-S1 and QG-QA1 are accepted |
+| A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates |
+| A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
+
+Quality gates are not product milestones and do not renumber A11. They exist to keep
+bug discovery, security assessment and QA distinct from feature implementation.
+
 ## Canonical repository workflow
 
 Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
@@ -451,7 +470,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a.1–6 merged; A11a.7 acceptance in progress
+## A11 — Production Workflow & Diagnostics — A11a DONE; pre-A11b quality gates next
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -479,9 +498,11 @@ A11b/A11c 與後續 execution milestones 尚未啟動。Execution 契約仍為�
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`), post-merge CI 3.9/3.14 PASS | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE; security baseline/threat model and formal QA remain pre-A11b quality gates |
-| A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
-| A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
+| A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
+| QG-S1 — NEXT | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
+| QG-QA1 — NOT STARTED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
+| A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
+| A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -536,269 +557,90 @@ provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a.1–6 merged、A11a.7 acceptance in progress、整體 incomplete；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 precede A11b；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
-## A11a — Observability & Diagnostics
+## A11a — Observability & Diagnostics ✅ DONE
 
-Implementation contract: [A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md).
-A11a.1 DONE and merged via PR #15 (`98f9d48d8344ab1f005446fde1b77cf3e0df252f`):
-external remediation complete, Claude re-review APPROVE, exact-head Python 3.9/3.14,
-offline canonical and clean-tree PASS. Historical findings/evidence remain in
-[A11a.1 validation](../../reports/llmtool_a11a1_core_diagnostics_validation_20261002.md).
+A11a is complete and merged. The implementation contract and historical slice evidence
+remain in [the A11a implementation spec](../../reports/llmtool_a11a_implementation_spec_20261002.md)
+and dated reports; this roadmap keeps only the current delivered map.
 
-A11a.2 merged via PR #16 (`0d324038ac44ac9ca1c9b32a11fb9cc163e12a12`).
-Historical production-head Python 3.9/3.14 offline canonical and
-clean-tree PASS in Actions run [36960532402](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/36960532402);
-see the linked report for that slice's evidence. Only ask is instrumented:
-in-memory run.start/request/response/error/end, safe verbose/debug summaries,
-stable error-code/run-ID line, bounded drop containment. No persistence, extra
-provider calls, retry/fallback, or non-ask output changes. See
-[A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
-**Diagnostic collection failure must never fail the primary read-only command.**
-Invalid observation is dropped/counted with at most one fixed warning; primary
-stdout/status/provider-call count and validated legacy verbose metadata survive.
-Independent review V1/V2 fixes are included in the merged history. Core constructors remain strict.
-Coded diagnostics transfer via JSON; pickle/deepcopy remain deferred. A11a.6
-retains fixed unexpected-error text and safe debug event summaries; Python stack
-paths, locals, tracebacks and exception repr are not collected or displayed.
+| Slice | Delivered capability | Final status |
+| --- | --- | --- |
+| A11a.1 | Core diagnostic models, coded errors, safe structured diagnostics foundation | DONE / PR #15 |
+| A11a.2 | Ephemeral `ask` lifecycle diagnostics, normal/verbose/debug compatibility, stable code/run-ID errors | DONE / PR #16 |
+| A11a.3 | Trusted user diagnostics settings + secure POSIX metadata store, persistence default off | DONE / PR #18 |
+| A11a.4 | Explicit persisted-`ask` integration and save/no-save precedence | DONE / PR #19 |
+| A11a.5 | Offline bounded `runs` / `trace` readers and structured/human rendering | DONE / PR #22 |
+| A11a.6 | Offline `doctor`, failure matrix, M1/M3 persistence hardening | DONE / PR #24 |
+| A11a.7 | Final acceptance/documentation gate | DONE / PR #25 |
+| Post-acceptance | B1–B7 confirmed diagnostics regressions fixed with permanent regression tests | DONE / PR #26 (`2761ce10`) |
 
-**A11a.3 — User diagnostics settings and secure POSIX store: DONE and merged via
-PR #18 (`b9ac5389ea9e45fa3f66450e0269920ee03734e7`).** Dedicated user-only settings,
-configure preservation, pure home resolution, immutable persisted RunSummary,
-POSIX no-follow/private storage, store/run locks, capacity reservations, atomic
-publication and conservative retention are implemented. Persistence remains off
-by default. Its reviewed parser rejected the premature public save/no-save flags;
-A11a.4 now implements them with actual persistence. Internal True/False/None precedence is preserved, and
-cleanup uses deterministic (completion timestamp, run_id) ordering. The standalone
-API was not connected to ask in A11a.3. Historical remediation/company live evidence
-remains in
-[A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
-**A11a.4 — Persisted ask integration: [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19);
-DONE/merged (`2bade6a`), independent/external source review PASS, post-merge main CI PASS.** Ask-only mutually exclusive save/no-save
-flags use explicit CLI > trusted user > false; debug/home alone remain unsaved.
-Safe buffered run.start is rebound to the collision-resolved store ID before
-persisted events. Streaming metadata and a typed completed summary retain stdout,
-exit and exactly-one-provider-request contracts. Store creation/append/completion/
-close failures yield one bounded warning after primary task error lines; they never
-replace the task result or trigger retry/fallback. Descriptor cleanup attempts all
-releases even if one close fails. See
-[A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
-R1 legacy input/skill error precedence is closed after correction round 1;
-independent Reviewer PASS on `852f5108199586c7ab237fd3f8e79f08cca574dd`.
-Developer/Reviewer each passed canonical 784/784 with prospective user-approved
-runtime-fixture permission. Reviewed-head PR CI [37155723038](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37155723038)
-passed Python 3.9 and 3.14, each 784/784, no skips, clean tree. Exact API object
-publication succeeded; direct Git RPC authentication failed. Cloud Linux/offline/mock
-evidence does not claim new live inference. External ChatGPT source review PASS
-on `bf37bb86`; documentation-head CI [37156216279](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37156216279)
-passed both Python versions, each 784/784. Latest documentation-only revision CI
-is tracked in PR #19. PR #19 subsequently merged at 2026-10-04T01:12:53Z as
-`2bade6aa95963d3f2c3d9332aa3939407512da7e`; post-merge main CI
-[37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-SUCCESS。Overall A11a is NOT DONE. A11a.5 subsequently merged via
-[PR #22](https://github.com/davidcatcat/davidcattoolsproject/pull/22) as
-`da027f0d728e3b3ff605a6d404c49c8beb08ec28`; post-merge main
-[CI 37193806074](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37193806074)
-passed Python 3.9/3.14, each 824 tests. Historical review/repair/pre-merge status
-remains preserved in [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
-Runs shows recorded summary status with unverified trace evidence; trace verifies
-completion. A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**.
-See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md) for the delivery audit, fresh evidence and retained limits. Historical A11a.6
-review checkpoints remain in [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
+Current A11a contract:
 
-Post-acceptance observations O1–O3 remain non-blocking and explicit: legacy non-A11a commands can still show the pre-existing buffered broken-pipe exit-120 behavior; a SIGKILL after quarantine lock removal may leave an empty `.evicted-*` directory; and interruption before eviction-journal publication may leave `.eviction-init-*` staging. These are fail-safe retained artifacts/legacy behavior, not A11a blockers, and do not authorize cleanup of unknown data.
+- diagnostics must remain secondary to the primary read-only task;
+- metadata persistence is explicit/trusted opt-in and never stores raw prompts/responses by default;
+- provider/tool retries, fallback, execution and mutation are **not** A11a capabilities;
+- error/run IDs, trace/doctor behavior and persisted metadata remain bounded and redacted;
+- existing known limitations stay explicit rather than being silently repaired.
 
-Deferred limits remain explicit: M2 late artifacts/capacity, M4 root-lock full trace
-validation, M5 reader scan limits, unchanged P1–P4 doctor behavior and N1 unknown
-staging byte/scan accumulation without staging reporting/cleanup. P5 current-status
-wording is refreshed, with historical findings preserved. Legacy malformed reservations
-fail closed; native publication/platform and same-UID limits and one-hour abandoned
-grace remain. Runs keeps null/incomplete ordering and supports no `--json`. Final
-acceptance adds no automatic repair, cleanup policy, executor, retry or fallback.
+Post-acceptance non-blocking observations remain tracked: legacy non-A11a commands may
+still exhibit the old buffered-broken-pipe exit behavior; extreme interruption can
+leave conservative empty eviction/staging artifacts; M2/M4/M5, doctor P1–P4, N1,
+platform/native-publication constraints and documented reader limits remain deferred.
+None authorizes automatic deletion/repair of unknown data.
 
-Implementation slices remain exactly spec section 17:
+### QG-S1 — Security Baseline / Threat Model — NEXT
 
-| Slice | Scope / current delivery status |
-| --- | --- |
-| A11a.5 | Offline runs/trace readers and human/JSON rendering; DONE/merged PR #22 `da027f0`, post-merge CI 3.9/3.14 824 each PASS |
-| A11a.6 | Offline doctor/failure matrix and narrow M1/M3 hardening; merged PR #24 `6b7809a`, post-merge CI 3.9/3.14 PASS; M2/M4/M5, doctor behavioral findings and N1 retained |
-| A11a.7 | DONE and merged via PR #25 (`e3869828`); post-acceptance B1–B7 bugfix merged via PR #26 (`2761ce10`), post-merge CI `37228032137` PASS |
+This is a **quality gate, not a new product milestone**. It does not modify runtime
+behavior. Review A11a's current attack surface and define the security requirements
+that A11b must meet before any executor/mutation work starts.
 
-The numbered architecture topics below describe the broader design, not the
-implementation slice numbering. A11a adds no executor, hooks engine, automatic
-routing, retry, fallback or escalation engine. Task Contract enforcement belongs
-to A11b; cheap-first integrated workflow/independent verification/bounded repair
-belongs to A11c. Context budget/cost routing need a later reviewed design.
+Minimum scope:
 
-A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
-retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mutation 或 Git mutation；
-唯一新增寫入範圍是明確 opt-in 的 private diagnostics store。現有 config/feedback 的明確
-寫入契約照舊，不因 diagnostics 擴張。
+- assets, actors and trust boundaries;
+- provider/data-export boundaries, prompt/model output as untrusted data;
+- config/credential handling, diagnostics/redaction/privacy;
+- filesystem path/symlink/hardlink/TOCTOU/race boundaries;
+- dependency/supply-chain and CI/release assumptions;
+- future A11b command/file/Git execution, approval and rollback threats;
+- findings mapped to CWE where applicable and severity scored with CVSS v4.0 when
+  an exploitable vulnerability is actually demonstrated; OWASP ASVS/Top 10 are
+  verification/reference frameworks, not a requirement to force every finding into a category.
 
-### A11a.1 — Diagnostics Foundation
+Output: dated threat-model/security-review report with confirmed findings separated
+from design requirements, theoretical risks and accepted limitations.
 
-建立統一 diagnostics contract：
+### QG-QA1 — Formal A11a QA — AFTER QG-S1
 
-- 每次可追蹤 workflow 產生唯一 `run_id`；需要巢狀追蹤時使用 `span_id` / `event_id`。
-- 統一 structured error model，不允許 production path 只丟 raw exception/string。
-- Error fields 至少包含 `code`, `message`, `component`, `run_id`, `severity`,
-  `retryable`, `recoverable`, `fallback_allowed`, `user_action_required`。
-- taxonomy 預留 `USER_*`, `CONFIG_*`, `ENV_*`, `AUTH_*`, `NETWORK_*`, `PROVIDER_*`,
-  `MODEL_*`, `TOOL_*`, `FILE_*`, `GIT_*`, `WORKFLOW_*`, `VALIDATION_*`, `APPROVAL_*`,
-  `SAFETY_*`, `INTERNAL_*` 分類；A11a 只實作已接入 path 實際需要的 codes。
-- `retryable` / `recoverable` / `fallback_allowed` 是診斷與 policy 輸入，不是執行授權；
-  不得因錯誤欄位為 true 而自動呼叫 provider 或 tool。
-- 只建立實際需要的核心 error codes，不為了數量預先發明大量未驗證錯誤。
+Formal QA tests the product through public/user-facing interfaces, not by reading
+implementation internals. It is distinct from code review, bug hunt and security review.
 
-Diagnostics modes:
+Required buckets:
 
-Delivered A11a `ask --debug` emits bounded safe event summaries on stderr;
-it collects no Python stack/traceback, host paths, locals, raw bodies or tool
-stdout/stderr. The broader stack/tool/validator bullets below remain future
-design topics, with no implemented executor, retry or fallback implied.
+- smoke and primary happy paths;
+- functional CLI behavior and output/exit contracts;
+- failure/recovery and malformed inputs;
+- concurrency/state/capacity/interruption behavior;
+- privacy/security smoke cases already promised by the public contract;
+- Python/platform/environment coverage that is actually supported;
+- regression of B1–B7 and any confirmed issues fixed after QG-S1.
 
-- **normal**：concise CLI output、error/warning、run ID、safe metadata。
-- **verbose**：增加 provider/profile routing、retry/fallback、timing/token metadata、
-  tool summaries。
-- **debug**：增加 detailed trace、stack trace、sanitized provider diagnostics、
-  bounded tool stdout/stderr、validator internals。
-- Debug mode 不得停用 redaction、approval 或 safety policy。Stack trace 不包含 locals、
-  raw exception/provider body 或未處理的 host path；所有 diagnostics 使用 allowlist schema、
-  byte bounds 和 terminal-safe rendering。既有 provider 故意丟棄的 raw stderr 不重新開放。
-- 上述 modes 只增加已允許的 diagnostics；不會啟用 tool execution、retry 或 fallback。
+Record PASS / FAIL / BLOCKED / NOT-TESTED with exact revision/environment. A QA failure
+becomes a bug candidate; reproduce and confirm it before production changes. QG-QA1
+must finish cleanly before A11b implementation starts.
 
-### A11a.2 — Exit-code Compatibility
+### A11a Definition of Done — satisfied
 
-現有 CLI 契約 0=success、1=general error、2=usage、130=interrupt 必須保持相容。
-細分類以 stable error code 與新 diagnostics JSON 的 `code` 欄位表達；除非有明確 compatibility review，
-不得把既有錯誤重新分配到不同 exit code。若新增 exit code，只能使用目前未使用值並在
-README 完整列出。既有 command-specific 例外也保留，例如 chat 的 EOF/Ctrl-C 為 0。
-成功 stdout 的文字/JSON schema 不插入 run ID、trace、額外 JSON envelope；失敗時原本的
-empty-stdout 契約保持。Diagnostics 寫 stderr 或 opt-in store，JSON schema 擴充需獨立
-compatibility review，不能直接把所有 command 的 `--json` 改成 error/result envelope。
-
-### A11a.3 — Persistent Run Logging Contract
-
-引入持久化 diagnostics 會改變既有寫檔契約，因此必須先定義資料與預設行為。
-
-Conceptual layout:
-
-```text
-LLMTOOL_HOME/
-├── logs/
-│   └── llmtool.log
-└── runs/
-    └── <run_id>/
-        ├── summary.json
-        └── trace.jsonl
-```
-
-預設政策：
-
-- 現有 read-only/text-only commands **不得因 A11a 自動保存 prompt、model response、
-  retrieved file contents 或 raw user data**。
-- 所有既有 read-only/text-only commands 預設 **不新增持久化寫入**，包含 ask、chat、
-  analyze-log、review-diff、context-pack、retrieve-context、orchestrate、Git inspection、
-  validation、benchmark 與 offline introspection。Normal/verbose/debug 均遵守此預設。
-- 已接入的 flow 可產生 ephemeral run ID 與 bounded safe metadata；必須明示未保存 trace，
-  不得引導使用者讀取不存在的 run artifact。Uninstrumented commands 不假裝有 trace。
-- 僅 trusted user config 或 explicit CLI opt-in 可保存 metadata；flag/config key 的確切
-  schema 在 A11a implementation spec 定案。設定 LLMTOOL_HOME 本身不啟用 persistence。
-- 未來 A11b execution workflow 可預設保存安全 audit metadata，因為 mutation 必須可追溯。
-- A11a 不提供完整 prompt/response/body retention 或 --save-output。未來若需要，必須
-  經獨立設計 review 定義內容授權、redaction、overwrite 與 retention；不能由 --debug
-  或 metadata persistence opt-in 隱式開啟。
-- user config / CLI 可控制 diagnostics retention；project `.llmtool.yaml` 不得設定
-  `LLMTOOL_HOME` 或放寬 retention/redaction policy。
-- README 必須同步更新新的寫檔契約。
-
-### A11a.4 — LLMTOOL_HOME Security & Retention
-
-- 使用 platform-appropriate user data directory；可由 trusted user-level setting /
-  `LLMTOOL_HOME` 明確覆寫。
-- 目錄預設 0700、檔案 0600（Windows 使用等價 user-private ACL expectation）。
-- 拒絕或 fail closed 處理 symlink 的 `LLMTOOL_HOME`、`runs/`、`<run_id>/`
-  destination；寫入採 atomic create/replace 規則。
-- concurrent runs 的 run ID 不得碰撞；每個 run 只寫自己的 namespace。
-- Opt-in store 的 A11a 預設上限：100 runs、總計 64 MiB、completed run 保留 14 天；
-  每 run 1 MiB。Implementation spec 必須定義單筆 event bound 與 rotation/overflow
-  行為，所有 store bytes（包括暫存檔與共用 log）計入總額。
-- Cleanup 只處理 store 自己建立且已完成的 run，不跟隨 symlink、不刪 active run 或
-  unrelated files；依完成時間、run_id 決定順序。Concurrent reservation/locking 和 crash
-  recovery 要有測試，不能靠「隨機 run ID」取代容量與同時寫入保護。
-- Diagnostics write/full/permission failure 不掩蓋原始任務結果，也不假報 trace 已保存；
-  A11a 發出 bounded sanitized warning。A11b 必須在執行 action 前確認 audit 可寫，否則
-  fail closed；不得先 mutation 再發現沒有 audit。
-- Windows support 必須明確列出已支援/未支援行為；不得假設 A10 POSIX-only retrieval
-  自動代表 A11 diagnostics 也 POSIX-only。
-
-### A11a.5 — Unified Workflow Tracing
-
-最低事件集合：
-
-`run.start`, `run.end`, `context.retrieve`, `router.select`,
-`provider.request`, `provider.response`, `validation.start`, `validation.result`,
-`retry`, `fallback`, `warning`, `error`。
-
-OpenAI-compatible、OpenAI、Claude CLI、Codex CLI 的現有 allowlisted runtime metadata
-與 sanitized errors 由 adapter 正規化進同一 run；不讀取 provider 私有 session/log/auth
-檔案、不 dump raw responses/stderr。Reserved retry/fallback/tool events 在 A11a 不會
-觸發對應行為；只記錄實際發生的事件，不能用虛構 span 掩蓋尚未整合的能力。
-
-### A11a.6 — Fallback Trust Boundary
-
-Fallback 不只是 availability 行為，也是資料治理決策。此節定義 A11b 的 policy 邊界；
-A11a 只提供 diagnostics schema，不新增 retry/fallback 路由或 recovery engine。
-
-- **預設禁止跨 trust boundary fallback。**
-- fallback 只能發生在 trusted user config 明確宣告的 provider group / policy 內；
-  project config 不得宣告或擴大 fallback trust group。
-- 從 internal/company provider 切到 external provider 不得因 timeout 自動發生，除非
-  user-level policy 明確授權該資料可送往該 provider。
-- 每次 fallback 產生 audit event，至少記錄 from、to、reason、policy decision；
-  不記錄 secret 或 raw content。
-- AUTH/CONFIG/SAFETY 類錯誤永遠不觸發 provider fallback。
-- Provider group 不能只依品牌、transport 或「internal/external」名稱推論資料授權；policy
-  必須指定 source/destination profiles、可傳送資料範圍及適用錯誤，每次決策都重新檢查。
-- A9/A10 原有 fail-fast CLI 契約保持；A11b 新 workflow 若整合 recovery，必須由明確的
-  workflow policy opt-in，不能改寫原有 profile binding 或偷偷重跑 A10 retrieval。
-
-### A11a.7 — Redaction / Retention / Diagnostics CLI
-
-永不明文持久化：API key、token、password、Authorization header、credential environment
-values。Debug 也必須先 redaction 再輸出/保存。
-
-目標 CLI：
-
-```sh
-llmtool runs
-llmtool trace <run_id>
-llmtool trace <run_id> --errors
-llmtool trace <run_id> --json
-llmtool doctor
-```
-
-已接入 diagnostics 的 normal error 至少顯示 stable error code、human-readable summary、run ID 與下一步。
-`doctor` 預設 offline，只檢查明確 config、readiness、configured credential presence、
-runtime availability 與 diagnostics store 狀態，不讀 provider auth files、不 resolve secret
-value、不登入、不發模型請求，也不自行建立 store/測試寫檔。Presence/readiness 不代表
-authentication/inference 成功；任何主動 probe 需獨立明確授權與有界設計。
-
-### A11a Definition of Done
-
-- 現有 read-only/text-only workflow 至少一條完整接上 structured diagnostics。
-- normal/verbose/debug 契約有測試且不洩漏 secret。
-- exit code 向後相容。
-- persisted metadata 的 path/permission/symlink/concurrency/retention policy 有測試。
-- Opt-in/off、JSON/stdout、open-stdin readiness、redaction failure 與 diagnostics 寫入失敗
-  有 offline failure-injection tests；證明 instrumentation 不增加 provider calls/retry/fallback。
-- 所有尚未接入的 commands、platform limits、retention 預設與失敗語意有明確文件。
-- 使用 run ID 能定位 provider/component failure layer。
+A11a's implementation, independent review, final acceptance, post-acceptance bug hunt,
+B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. This does
+**not** mean A11 as a whole is complete: QG-S1/QG-QA1 remain pre-A11b gates, and
+A11b/A11c are not implemented.
 
 ## A11b — Execution, Approval & Recovery
 
-A11b 才新增有限 executor。A11a 未完成前不得開工 production mutation。
+A11b 才新增有限 executor。A11a 已完成，但在 QG-S1 Security Baseline / Threat Model 與 QG-QA1 Formal QA 通過前，不開始 production mutation。
 
 ### A11b.1 — Execution Sandbox & Policy
 
