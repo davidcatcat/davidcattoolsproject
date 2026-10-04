@@ -44,6 +44,7 @@ def run_doctor():
     try:
         output = doctor_output()
         sys.stdout.write(output)
+        sys.stdout.flush()
         return 0
     except ReaderError as exc:
         print(exc.line(), file=sys.stderr)
