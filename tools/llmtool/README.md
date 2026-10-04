@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration has independent and external source review PASS in [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19); reviewed head `bf37bb86` passed Python 3.9/3.14 CI. The PR records the latest documentation-head CI. A11a.4 is DONE and merged via PR #19 (`2bade6a`) on 2026-10-04. Overall **A11a Observability & Diagnostics remains incomplete**; A11a.5–7, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance** are NOT STARTED. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration DONE/merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) (`2bade6a`); post-merge main CI `37167325001` passed Python 3.9/3.14. Overall **A11a Observability & Diagnostics remains incomplete**. A11a.5–7 are not merged; **A11b Execution/Approval/Recovery** and **A11c Integration/Real-world Acceptance** remain unstarted planning. This docs-only refinement does not start or resume A11a.5. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -67,8 +67,8 @@ A11a → A11b → A11c 各自需要 validation report、external review 與 merg
 A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
 config opt-in 才保存 bounded safe metadata。Debug 不保存 prompt/response、retrieved
 content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 validated user settings、
-LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 在本 feature
-branch 接上 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
+LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 已透過 PR #19
+合併 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
 優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
 `runs` / `trace` / `doctor` 尚未實作。
 
@@ -80,9 +80,22 @@ evidence 保留在原報告。A11a.4 的 R1 precedence finding 經 correction ro
 independent Reviewer 對 `852f510` PASS；Developer/Reviewer 各自 canonical 784/784 PASS，
 該已發布 SHA 的 Python 3.9/3.14 CI 各 784/784 PASS。External ChatGPT source review
 對 `bf37bb86` PASS；該 head 的 final documentation-head CI 37156216279 亦已 SUCCESS，
-兩個 Python jobs 各 784/784 PASS。後續純文件提交的 CI 見 PR #19；A11a.4 未合併，
-不表示 A11a DONE，也不啟動後續 slices。
+兩個 Python jobs 各 784/784 PASS。上述為歷史 review evidence。PR #19 已於
+2026-10-04 合併為 `2bade6aa95963d3f2c3d9332aa3939407512da7e`；post-merge main
+[CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+SUCCESS。A11a 整體仍未 DONE；本文件任務不啟動或恢復後續 slices。
 See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
+
+Architecture refinement 只更新設計與工程指引：固定且版本化的 Task Contract、公司 LLM
+優先整理 context／摘要／分類／log normalization／初步規劃／第一輪 review，並以客觀
+failure/evidence 事件決定是否升級。Schema 合格與模型自報 confidence 都不能證明內容
+正確或完成。Contract 與原始驗證證據不可由摘要取代；摘要仍受公司資料外送邊界約束。
+只有符合 contract、綁定 revision/patch digest 的 required evidence 可通過 verification；
+tests/deterministic checks 有覆蓋限制，不能保證所有語意正確。A11b 規劃 enforcement／
+execution gates；A11c 規劃 cheap-first workflow、獨立驗證與 bounded repair；context budget
+與 cost routing 留待後續設計。詳見 [Roadmap](ROADMAP.md#architecture-refinement--planning-only)
+及 [WORKFLOW](WORKFLOW.md#task-contract-company-llm-and-evidence)。沒有新增 runtime
+schema、hooks engine、automatic routing、retry、fallback 或 escalation 實作。
 
 ## Canonical repository workflow
 
@@ -643,7 +656,7 @@ described below; the `trace` reader command is not implemented yet.
 
 See [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
 
-## Diagnostics settings and store — A11a.3 merged; A11a.4 ask integration on feature branch
+## Diagnostics settings and store — A11a.3 and A11a.4 merged
 
 Only trusted user `~/.config/llmtool/config.yaml` may contain this optional mapping:
 
@@ -733,8 +746,9 @@ is preserved conservatively. Offline inspection commands belong to A11a.5/6.
 See [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md)
 for Cloud/offline evidence, R1 closure, external source review and reviewed-head CI.
-The latest documentation-head CI is recorded in PR #19. Exact Git objects were published through existing GitHub API access; direct
-Git RPC push authentication failed. No new live inference
+PR #19 merged as `2bade6a`; post-merge main CI `37167325001` passed Python 3.9/3.14.
+Historical exact Git objects were published through existing GitHub API access;
+direct Git RPC push authentication failed at that checkpoint. No new live inference
 is claimed by local mock HTTP or real Linux filesystem validation.
 
 ## Troubleshooting 與已知限制
@@ -1736,9 +1750,9 @@ A10 is DONE and merged via PR #12 (`21b9757`); Claude re-review APPROVE, final V
 There is no --save-output option: A10 remains read-only, with no malformed-output
 file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
-A11a.1–4 DONE/merged; A11a.4 merged via PR #19 (`2bade6a`) on 2026-10-04;
-independent and external source review PASS; reviewed-head `bf37bb86` CI PASS;
-final pre-merge documentation-head CI in PR;
-A11a.5–7 NOT STARTED; overall A11a NOT DONE; A12 remains future optional frontend; Anthropic HTTP API remains
+A11a.1–4 DONE/merged; A11a.4 PR #19 merge `2bade6a` / historical independent and
+external source review PASS / post-merge main CI `37167325001` PASS;
+A11a.5–7 not merged and not started/resumed by this docs task; overall A11a NOT DONE;
+A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

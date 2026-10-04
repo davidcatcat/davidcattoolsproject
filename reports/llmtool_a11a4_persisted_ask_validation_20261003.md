@@ -10,6 +10,10 @@ runtime/CI evidence and does not authorize later-slice implementation.
 The pre-merge status and review checkpoints below are historical; their
 unmerged/authorization statements describe those earlier checkpoints.
 
+Historical post-merge [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+passed for the PR #19 merge SHA above (Python 3.9/3.14); this is historical
+CI evidence, not a new live inference result or CI for this integration commit.
+
 ## Historical pre-merge validation
 
 Status: **PR #19 / INDEPENDENT AND EXTERNAL SOURCE REVIEW PASS /
