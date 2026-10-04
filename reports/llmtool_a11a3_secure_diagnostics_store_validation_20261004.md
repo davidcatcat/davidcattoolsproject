@@ -1,6 +1,20 @@
 # A11a.3 — User settings and secure POSIX store validation — 2026-10-04
 
-Current external-review checkpoint: **A11a.3 EXTERNAL REVIEW PASS / COMPANY LIVE VERIFIED**.
+## Current merge checkpoint — 2026-10-03
+
+**A11a.3 DONE / MERGED** via PR #18 at 2026-10-03T18:07:25Z, merge SHA
+`b9ac5389ea9e45fa3f66450e0269920ee03734e7`. The connected GitHub PR state
+and fetched main ancestry supersede the pre-merge pending summaries below.
+[Merge-head CI 37143028827](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37143028827)
+is SUCCESS for exactly that SHA. Existing Mac/company live and external review
+results remain historical evidence, not new Cloud inference. A11a.4 implementation
+is tracked separately in its
+[validation report](llmtool_a11a4_persisted_ask_validation_20261003.md);
+overall A11a remains incomplete. All original validation sections below are retained.
+
+## Pre-merge external-review checkpoint (historical)
+
+External-review checkpoint: **A11a.3 EXTERNAL REVIEW PASS / COMPANY LIVE VERIFIED**.
 Company normal, verbose and debug inference each returned the exact synthetic marker
 through trusted CLI runtime overrides; a persisted company profile is not required.
 Debug captured the complete safe metadata renderer output plus debug-only events, and

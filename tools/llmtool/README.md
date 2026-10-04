@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store implemented on feature branch, external review remediation in progress. Split into **A11a Observability & Diagnostics (in progress)**, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance**. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration has independent and external source review PASS in [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19); reviewed head `bf37bb86` passed Python 3.9/3.14 CI. The PR records the latest documentation-head CI. A11a.4 is not merged/DONE. Overall **A11a Observability & Diagnostics remains incomplete**; A11a.5–7, **A11b Execution/Approval/Recovery**, and **A11c Integration/Real-world Acceptance** are NOT STARTED. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -67,17 +67,22 @@ A11a → A11b → A11c 各自需要 validation report、external review 與 merg
 A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
 config opt-in 才保存 bounded safe metadata。Debug 不保存 prompt/response、retrieved
 content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 validated user settings、
-LLMTOOL_HOME resolver 與獨立 POSIX store API。ask 落盤接線及公開 save/no-save flags
-屬於 A11a.4；A11a.3 的 ask 完全 ephemeral，這兩個 flags 都是 invalid option（exit 2）。
+LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 在本 feature
+branch 接上 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
+優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
 `runs` / `trace` / `doctor` 尚未實作。
 
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
 provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
-[Roadmap](ROADMAP.md)。A11a.1 / A11a.2 已合併；本 branch 完成 A11a.3 基礎 API，
-R1/R2 remediation 與本機／implementation CI 已驗證；company live 因缺少 matching
-configured profile 為 SKIPPED-CONFIG，required verification 與 external re-review
-仍待完成。A11a.4 尚未開始。
+[Roadmap](ROADMAP.md)。A11a.1–3 已合併；A11a.3 的 historical company live 與 review
+evidence 保留在原報告。A11a.4 的 R1 precedence finding 經 correction round 1 修正後，
+independent Reviewer 對 `852f510` PASS；Developer/Reviewer 各自 canonical 784/784 PASS，
+該已發布 SHA 的 Python 3.9/3.14 CI 各 784/784 PASS。External ChatGPT source review
+對 `bf37bb86` PASS；該 head 的 final documentation-head CI 37156216279 亦已 SUCCESS，
+兩個 Python jobs 各 784/784 PASS。後續純文件提交的 CI 見 PR #19；A11a.4 未合併，
+不表示 A11a DONE，也不啟動後續 slices。
+See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
 
 ## Canonical repository workflow
 
@@ -585,10 +590,11 @@ HTTP 非 2xx、API error body、malformed JSON、missing/empty final text、Resp
 錯誤只給分類／HTTP status，不印 raw response、輸入、URL credentials 或 exception body。
 不自動 retry、不跟隨 HTTP redirect，不讀環境 proxy 設定，避免意外轉送內網資料。
 
-## Ephemeral ask diagnostics — A11a.2 merged
+## Ask diagnostics — ephemeral by default
 
-Only `ask` has the new in-memory lifecycle; A11a.2 is merged. No
-settings/store/trace file is created. `LLMTOOL_HOME` is ignored. Other commands,
+Only `ask` has the instrumented lifecycle; A11a.2 is merged. Without CLI or
+trusted user opt-in, no diagnostics store/trace file is created and `LLMTOOL_HOME`
+is ignored. Other commands,
 including A9 orchestration and A10 retrieval, retain their output/call contracts.
 
 ```sh
@@ -605,7 +611,7 @@ llmtool: code=PROVIDER_TIMEOUT run_id=<32 lowercase hex characters> trace=not-sa
 
 `--verbose` keeps validated provider model/token/elapsed keys in their previous
 order, then adds run_id, provider_type (when available), and
-`diagnostics_persisted=false`. `--debug` implies verbose and adds safe event
+`diagnostics_persisted=true|false`. `--debug` implies verbose and adds safe event
 summaries: ID, type, component, severity, and available duration. It never displays
 prompt/response, reasoning, raw stderr/body, environment, host paths, or Python
 tracebacks. Invalid/credential-looking metadata is omitted; it cannot fail the
@@ -632,11 +638,12 @@ never message substring matching. All recovery flags are metadata only;
 call, with no retry or fallback. Sanitized internal stack summaries are deferred
 to the later A11a.6 failure-injection checkpoint; unexpected errors use fixed text.
 JSON is the coded-diagnostics transfer format; coded pickle/deepcopy remain
-unsupported. No diagnostics file is saved or available to a trace command.
+unsupported. Diagnostics files are saved only by the explicit metadata opt-in
+described below; the `trace` reader command is not implemented yet.
 
 See [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
 
-## Diagnostics settings and standalone store — A11a.3 feature branch / review remediation
+## Diagnostics settings and store — A11a.3 merged; A11a.4 ask integration on feature branch
 
 Only trusted user `~/.config/llmtool/config.yaml` may contain this optional mapping:
 
@@ -656,20 +663,38 @@ limits fail configuration before provider access. Project `.llmtool.yaml` cannot
 set diagnostics. `config show` keeps its existing provider/generation output;
 `configure` preserves a validated diagnostics mapping without expanding it.
 
-The internal settings resolver uses explicit internal option > user setting > false.
-It retains `persist_metadata=True/False/None` for the future A11a.4 integration.
-**Ask persistence is not connected in this slice:** public `--save-diagnostics`
-and `--no-save-diagnostics` are rejected with exit 2 before run creation or provider
-access. Normal/verbose/debug ask remain ephemeral (`diagnostics_persisted=false`,
-failure `trace=not-saved`). User diagnostics settings are validated and preserved,
-but do not cause ask writes yet.
+Ask accepts mutually exclusive `--save-diagnostics` / `--no-save-diagnostics`.
+Precedence: explicit CLI save/no-save > trusted user `persist_metadata` > false.
+The unspecified argparse value is `None`; no generic environment variable enables
+persistence. `--no-save-diagnostics` disables even trusted user opt-in. Both flags
+are ask-only; conflicts and flags on other commands remain usage errors (exit 2)
+before observation or store access.
+
+```sh
+llmtool ask "Explain this supplied evidence" --save-diagnostics
+llmtool ask "Explain this supplied evidence" --save-diagnostics --debug
+llmtool ask "Explain this supplied evidence" --no-save-diagnostics
+```
+
+Legacy skill and input-source validation run first. Opt-in then resolves settings
+and starts the store before readiness, blocking input reads and provider work.
+The final store collision-resolved ID is assigned to buffered run.start and all
+subsequent events before the first append; events, summary, directory and displayed
+run_id agree. Valid settings still allow early input/skill errors to be recorded:
+settings resolution after such an error is best effort and never replaces the
+original error. Unusable settings plus explicit save report one secondary
+unavailable warning without opening the store. When no earlier error exists,
+invalid diagnostics settings fail configuration before any store/provider access.
+Only validated metadata events and the versioned summary are saved, never prompt,
+response, raw provider stderr/body, credentials, reasoning or host paths.
 
 `LLMTOOL_HOME` selects a location without enabling persistence. It must be an
 absolute path without controls or parent traversal; shell expansion is not
 performed. Defaults: macOS `~/Library/Application Support/llmtool`; Linux
 absolute `$XDG_STATE_HOME/llmtool`, falling back to `~/.local/state/llmtool`.
 Windows `%LOCALAPPDATA%\\llmtool` is reporting-only; the persistence backend
-rejects unsupported platforms. Current ask never resolves or creates this home.
+rejects unsupported platforms. Ask resolves/creates this home only after opt-in;
+unsupported persistence warns once and continues the existing ask unsaved.
 
 The standalone `diagnostics_store.DiagnosticsStore` API is opt-in and POSIX-only.
 It accepts validated typed events and a typed `RunSummary`; construction/default-off
@@ -682,8 +707,10 @@ full max-run capacity reservations. Run ID collisions have three bounded attempt
 
 Completion fsyncs and atomically publishes `trace.jsonl` and `summary.json`, then
 releases the reservation. Readers must require the summary as the completion marker;
-the two files are published individually. Interrupted/failed writers retain a partial
-trace or a trace without summary. Cleanup only occurs on enabled start: age, count
+the two files are published individually. Ask interrupts finalize with status
+`interrupted`; broken output pipes finalize with `output_closed`. A crash or store
+failure can leave a partial trace or a trace without summary. Cleanup only occurs
+on enabled start: age, count
 and byte limits evict validated eligible runs, active locks prevent deletion, and
 abandoned runs have a one-hour grace. Equal completion times use run_id as a
 deterministic eviction tie-break. Unknown data remains and consumes capacity;
@@ -692,9 +719,23 @@ retained conservatively when their ownership/schema cannot be proved.
 
 The API returns unavailable/false plus one fixed bounded `StoreWarning` instead of
 raw exception/path data. Specific store codes distinguish unsafe state, capacity,
-collision and write failures. CLI lifecycle integration and rendering of those
-store results belongs to A11a.4; offline inspection commands belong to A11a.5/6.
+collision and write failures. A11a.4 connects these results to ask: successful
+stdout and exits 0/1/2/130 retain their contracts; each existing provider execution
+still makes exactly one request. Creation/append/publication/close errors preserve
+the task result and emit at most one fixed bounded store warning. On task errors,
+the original safe first line and code/run_id line precede that warning. Failure
+metadata reports `trace=saved` only after successful completion, `unavailable`
+after requested persistence fails, and `not-saved` when persistence is off.
+Verbose/debug report the actual completion result in `diagnostics_persisted`.
+The integration attempts every remaining descriptor release even when one close
+fails; it never retries the provider or store publication. Unknown partial state
+is preserved conservatively. Offline inspection commands belong to A11a.5/6.
 See [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
+See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md)
+for Cloud/offline evidence, R1 closure, external source review and reviewed-head CI.
+The latest documentation-head CI is recorded in PR #19. Exact Git objects were published through existing GitHub API access; direct
+Git RPC push authentication failed. No new live inference
+is claimed by local mock HTTP or real Linux filesystem validation.
 
 ## Troubleshooting 與已知限制
 
@@ -1695,7 +1736,8 @@ A10 is DONE and merged via PR #12 (`21b9757`); Claude re-review APPROVE, final V
 There is no --save-output option: A10 remains read-only, with no malformed-output
 file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
-A11a.1 / A11a.2 DONE/merged; A11a.3 feature branch / external review remediation;
-A11a.4–7 NOT STARTED; A12 remains future optional frontend; Anthropic HTTP API remains
+A11a.1–3 DONE/merged; A11a.4 PR #19 / independent and external source review PASS /
+reviewed-head `bf37bb86` CI PASS; latest documentation-head CI in PR;
+A11a.5–7 NOT STARTED; overall A11a NOT DONE; A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).

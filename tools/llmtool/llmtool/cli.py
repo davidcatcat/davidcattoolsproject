@@ -70,7 +70,13 @@ def parser_for_cli():
         child.add_argument("--verbose", action="store_true", help="write safe metadata to stderr")
         if command == "ask":
             child.add_argument("--skill", help="explicit runtime skill name")
-            child.add_argument("--debug", action="store_true", help="write safe ephemeral event summaries; never save a trace")
+            child.add_argument("--debug", action="store_true", help="write safe event summaries; does not enable saving")
+            persistence = child.add_mutually_exclusive_group()
+            persistence.add_argument("--save-diagnostics", dest="persist_metadata", action="store_true",
+                                     help="save bounded diagnostics metadata only")
+            persistence.add_argument("--no-save-diagnostics", dest="persist_metadata", action="store_false",
+                                     help="disable diagnostics saving, including user opt-in")
+            child.set_defaults(persist_metadata=None)
         if command == "context-pack":
             child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
@@ -114,6 +120,7 @@ def _run_ask(args):
     """Observe ask only. Diagnostics never authorize recovery or execution."""
     from . import diagnostics as d
     from .diagnostics_runtime import RunContext
+    from .diagnostics_settings import resolve_diagnostics_settings
     from .errors import coded_error
 
     mode = (d.DiagnosticMode.DEBUG if args.debug else
@@ -123,6 +130,7 @@ def _run_ask(args):
     except Exception:
         run = None  # Even an observer initialization failure is secondary.
     code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
+    requested_without_observer = False
 
     def observe(method, *values):
         if run is None:
@@ -136,6 +144,33 @@ def _run_ask(args):
                 pass
             return None
 
+    def store_warning():
+        if requested_without_observer:
+            # Observer construction itself can fail; explicit opt-in stays honest.
+            try:
+                from .diagnostics_store import StoreWarning
+                print(StoreWarning(d.ErrorCode.DIAGNOSTICS_STORE_UNAVAILABLE).line(), file=sys.stderr)
+            except Exception:
+                pass
+        else:
+            observe('display_store_warning', sys.stderr)
+
+    def setup_persistence(primary_error=False):
+        nonlocal requested_without_observer
+        try:
+            settings = resolve_diagnostics_settings(persist_metadata=args.persist_metadata)
+        except Exception:
+            if not primary_error:
+                raise
+            # Legacy skill/input errors precede config errors. Invalid settings
+            # cannot be used to write, but an explicit save still reports failure.
+            if args.persist_metadata is True:
+                requested_without_observer = run is None
+                observe('persistence_unavailable')
+            return
+        requested_without_observer = settings.persist_metadata and run is None
+        observe('enable_persistence', settings)
+
     def failure(exc):
         # Preserve the primary safe message even if secondary observation fails.
         print('llmtool: ' + str(exc), file=sys.stderr)
@@ -144,16 +179,23 @@ def _run_ask(args):
         try:
             line = observe('failure_line', mapped)
             print(line or ('llmtool: code=' + mapped.value +
-                          ' run_id=unavailable trace=not-saved'), file=sys.stderr)
+                          ' run_id=unavailable trace=' +
+                          ('unavailable' if requested_without_observer else 'not-saved')), file=sys.stderr)
         except Exception:
             observe('drop')
+        store_warning()
         observe('display', sys.stderr)
         return 1
 
     try:
-        selected_skill = load_skill(args.skill) if args.skill is not None else None
-        validate_input_sources(args.text, args.file, sys.stdin)
+        try:
+            selected_skill = load_skill(args.skill) if args.skill is not None else None
+            validate_input_sources(args.text, args.file, sys.stdin)
+        except LLMToolError:
+            setup_persistence(primary_error=True)
+            raise
         code, component = d.ErrorCode.CONFIG_INVALID, 'config'
+        setup_persistence()
         config = resolve_config(vars(args), require_configured=True)
         code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
         text = read_input(args.text, args.file, sys.stdin)
@@ -183,6 +225,7 @@ def _run_ask(args):
         output = human_output(output, sys.stdout)
         sys.stdout.write(output + '\n')
         observe('finish', 'success')
+        store_warning()
         observe('display', sys.stderr)
         return 0
     except LLMToolError as exc:
@@ -190,6 +233,7 @@ def _run_ask(args):
     except BrokenPipeError:
         sys.stdout = None
         observe('finish', 'output_closed')
+        store_warning()
         return 0
     except (OSError, UnicodeError):
         return failure(coded_error('local I/O failed; details omitted',
@@ -200,12 +244,15 @@ def _run_ask(args):
     except KeyboardInterrupt:
         observe('finish', 'interrupted')
         print('llmtool: interrupted', file=sys.stderr)
+        store_warning()
         observe('display', sys.stderr)
         return 130
     except Exception:
         # Never stringify an unexpected exception or print a Python traceback.
         return failure(coded_error('internal error; details omitted',
                                   'INTERNAL_UNEXPECTED', 'cli.ask'))
+    finally:
+        observe('close')
 
 
 def main(argv=None):
