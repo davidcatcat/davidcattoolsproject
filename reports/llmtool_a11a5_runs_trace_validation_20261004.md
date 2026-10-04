@@ -1,7 +1,7 @@
 # A11a.5 — Offline runs / trace validation — 2026-10-04
 
-Current status: **RESUMED / CORRECTION ROUND 1 CLOUD CHECKS PASS /
-INTEGRATED INDEPENDENT REVIEW PENDING**. Publication, final-head CI and external
+Current status: **IMPLEMENTED / CORRECTION ROUND 1 CLOUD CHECKS PASS /
+INTEGRATED INDEPENDENT REVIEW PASS**. Publication, final-head CI and external
 ChatGPT review remain pending. Overall A11a is incomplete; merge is not authorized.
 
 ## Initial contract checkpoint — historical
@@ -267,3 +267,49 @@ candidate SHA externally; the report does not attempt to embed its own commit SH
 Publication/CI/external-review evidence must be bound to the eventual exact head.
 Overall A11a is **NOT DONE**. A11a.6/7 and A11b/c remain unstarted; merge is blocked
 and not authorized by this task.
+
+## Additive independent review checkpoint — 2026-10-04
+
+Independent Reviewer `/root/a11a5_resume_reviewer` reviewed the exact frozen,
+clean candidate `a4affd9b58aa40bdfec21890c0437a5efb4866a8` against merged main
+`1cee64eaec4559b56c70dd6a5b508ca9f810160f` and the accepted A11a.5-resume v1
+contract. Source was inspected before consuming the Developer's new validation
+report. Disposition: **PASS; no remaining findings; R1 and R2 CLOSED**.
+Requested model/reasoning: `gpt-6-astra` / high; actual runtime remains
+**UNVERIFIED** without attestation. The Developer remains requested
+`gpt-6.1-sol` / high, actual runtime **UNVERIFIED**.
+
+Reviewer independently ran canonical compileall/full unittest with the user's
+existing approved test-only empty Codex fixture `/var/tmp` writes and loopback
+permission: **PASS, exit 0, 816/816, no skips, 17.414 s**.
+Command: `make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"`.
+Log: `/tmp/a11a5-independent-review-check-authorized.log`.
+The earlier default restricted execution is not a PASS: 770 tests were counted,
+one failure/four errors, because isolated Codex runtime fixtures and local socket
+operations were blocked by the environment. Log:
+`/tmp/a11a5-independent-review-check.log`. The authorized rerun tested the full
+816 cases without source/test changes; the restricted attempt did not cause a
+product or acceptance change.
+
+The Reviewer also exercised six additional unsafe busy-directory/run-lock cases:
+all rejected safely. A valid busy run returned incomplete with no event bytes,
+events `[]` and summary `null`. The actual-writer publication windows and
+recorded/unverified runs semantics satisfied the contract. Independently checked
+runtime/test/package fingerprint:
+`0490006bc405a1fc18f1f82ecc8233179d73e85397691088bfd2a5faa44ff158`.
+The corrected implementation remains normal merge
+`94bbfe57193361d89711ac080e223296c7271701` with its two preserved parents.
+
+This checkpoint supersedes the historical pending independent-review rows above.
+The publication followup changes only this report and README/ROADMAP gate status;
+runtime/tests/config/package bytes remain identical to the reviewed candidate.
+Latest target was fetched again and remains
+`1cee64eaec4559b56c70dd6a5b508ca9f810160f`. Final documentation commit identity,
+remote publication, draft PR and exact-head CI evidence will be recorded in the
+PR after that commit exists. No self-referential commit SHA is fabricated here.
+
+**Independent native review PASS does not satisfy external ChatGPT review.**
+External ChatGPT review remains **PENDING**. Exact final documentation-head
+Python 3.9/3.14 CI is also pending before publication. These are distinct gates;
+the candidate remains unmerged and overall A11a remains **NOT DONE**.
+A11a.6/7 and A11b/c remain unstarted. No main merge or next stage is authorized.

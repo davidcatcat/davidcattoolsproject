@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration DONE/merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) (`2bade6a`); post-merge main CI `37167325001` passed Python 3.9/3.14. Overall **A11a Observability & Diagnostics remains incomplete**. A11a.5 offline `runs` / `trace` is resumed on its feature branch with review/publication/CI gates pending; A11a.6–7 are not started or merged; **A11b Execution/Approval/Recovery** and **A11c Integration/Real-world Acceptance** remain unstarted planning. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration DONE/merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) (`2bade6a`); post-merge main CI `37167325001` passed Python 3.9/3.14. Overall **A11a Observability & Diagnostics remains incomplete**. A11a.5 offline `runs` / `trace` is implemented on its feature branch; independent review PASS, publication/final-head CI and external ChatGPT review pending; A11a.6–7 are not started or merged; **A11b Execution/Approval/Recovery** and **A11c Integration/Real-world Acceptance** remain unstarted planning. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -70,7 +70,7 @@ content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 vali
 LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 已透過 PR #19
 合併 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
 優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
-`runs` / `trace` 在 A11a.5 feature branch 恢復實作；review/CI 尚待完成。`doctor` 留待 A11a.6。
+`runs` / `trace` 在 A11a.5 feature branch 恢復實作；independent review PASS；publication/final-head CI/external ChatGPT review 尚待完成。`doctor` 留待 A11a.6。
 
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
@@ -813,7 +813,8 @@ codes/messages on stderr and exit 1 (missing run: `NOT_FOUND`; invalid ID:
 `ID_INVALID`). Usage 2, interrupt 130 and broken pipe 0 remain unchanged.
 
 See [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md)
-for exact bounds, offline/security/race evidence and pending review/CI gates.
+for exact bounds, offline/security/race evidence, independent review PASS on
+`a4affd9`, and pending final-head CI/external ChatGPT review gates.
 
 ## Troubleshooting 與已知限制
 
@@ -1816,7 +1817,7 @@ file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
 A11a.1–4 DONE/merged; A11a.4 PR #19 merge `2bade6a` / historical independent and
 external source review PASS / post-merge main CI `37167325001` PASS;
-A11a.5 resumed on its feature branch, review/publication/CI pending; A11a.6–7 not started; overall A11a NOT DONE;
+A11a.5 feature branch independent review PASS; publication/final-head CI/external ChatGPT review pending; A11a.6–7 not started; overall A11a NOT DONE;
 A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).
