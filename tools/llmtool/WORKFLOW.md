@@ -123,6 +123,37 @@ versions. Record missing tokens/cost as unknown/null, never zero; a known subtot
 is partial, not the total. This task supplies no cost measurement, savings claim,
 budget enforcement or automatic cost router.
 
+## Quality-gate model
+
+Engineering evidence is split by purpose. Do not use one green result as a substitute
+for a different required gate.
+
+| Gate / skill | Question it answers |
+| --- | --- |
+| `review-change` | Does this diff correctly implement the requirement without obvious regressions or scope drift? |
+| `bug-hunt` | Can we reproduce any observable defect in the current implementation? |
+| `security-review` | What assets/trust boundaries/attack paths exist, and are there exploitable weaknesses or design gaps? |
+| `qa-validation` | Does the product behave correctly through its public/user-facing interfaces across the defined matrix? |
+| `validate-runtime` | Does the exact runtime/environment/provider/VPN/auth/inference layer actually work? |
+| `safe-git` | Is the exact reviewed/tested revision safely published/merged with current CI evidence? |
+
+Not every change needs every gate. The pinned Task Contract/milestone declares which
+are required. A confirmed finding is fixed via normal implementation with a permanent
+regression test where appropriate, then the affected gate is re-run.
+
+Current llmtool sequence after A11a:
+
+```text
+A11a DONE
+  -> QG-S1 security-review / threat model
+  -> confirmed security fixes + re-review if needed
+  -> QG-QA1 qa-validation
+  -> confirmed QA regressions + regression if needed
+  -> A11b design and implementation
+```
+
+QG-S1 and QG-QA1 are quality gates, not new product milestone numbers.
+
 ## 2. Plan verification before implementation
 
 Derive acceptance checks from the pinned Task Contract, then classify them as
@@ -179,8 +210,7 @@ an environment/auth failure is not automatically a code regression.
 
 Check the pinned contract and original evidence before accepting a completion claim.
 Do not use summaries or model confidence to bypass a missing required check.
-Merge only when task authorization, required Cloud checks/CI, external review and
-applicable required Mac verification are satisfied. Do not mark a milestone DONE
+Merge only when task authorization and every gate required by the Task Contract/milestone are satisfied: applicable Cloud checks/CI, review, bug-hunt/security/QA gates, and required Mac/runtime verification. Do not mark a milestone DONE
 merely because Cloud implementation or mocks passed. Optional tests can remain
 NOT-TESTED when the milestone explicitly permits that, with the limitation reported.
 
