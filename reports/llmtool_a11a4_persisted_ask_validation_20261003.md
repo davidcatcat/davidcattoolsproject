@@ -1,5 +1,17 @@
 # A11a.4 — Persisted ask integration validation — 2026-10-03
 
+## Post-merge status — 2026-10-04
+
+[PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) merged to
+`main` at 2026-10-04T01:12:53Z as `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
+A11a.4 is DONE/merged. Overall A11a remains incomplete; A11a.5–7, A11b/A11c
+and A12 remain NOT STARTED at this checkpoint. This status update adds no new
+runtime/CI evidence and does not authorize later-slice implementation.
+The pre-merge status and review checkpoints below are historical; their
+unmerged/authorization statements describe those earlier checkpoints.
+
+## Historical pre-merge validation
+
 Status: **PR #19 / INDEPENDENT AND EXTERNAL SOURCE REVIEW PASS /
 REVIEWED-HEAD CI PASS / LATEST DOCUMENTATION-HEAD CI IN PR**. A11a.4 is not merged/DONE. Overall A11a remains
 incomplete; A11a.5–7, A11b, A11c and A12 are NOT STARTED. No merge is authorized.

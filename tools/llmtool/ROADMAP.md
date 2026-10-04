@@ -451,7 +451,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a.4 feature-branch integration
+## A11 — Production Workflow & Diagnostics — A11a.4 DONE and merged
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -470,14 +470,14 @@ A11a.2 ephemeral ask lifecycle DONE/merged via PR #16 (`0d324038ac44ac9ca1c9b32a
 A11a.3 settings 與獨立 POSIX store DONE/merged via PR #18 (`b9ac5389ea9e45fa3f66450e0269920ee03734e7`)。
 A11a.4 persisted ask integration 已發布為 PR #19，independent 與 external source
 review PASS；reviewed head `bf37bb86` 的 Python 3.9/3.14 CI PASS。最新純文件提交 CI
-見 PR #19；A11a.4 尚未合併。
+見 PR #19；A11a.4 已於 2026-10-04 合併至 main，merge commit `2bade6aa95963d3f2c3d9332aa3939407512da7e`，DONE/merged。
 A11a 整體尚未完成；A11a.5～A11a.7、A11b/A11c 均 NOT STARTED。其他 diagnostics CLI 與
 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–3 DONE/merged; A11a.4 PR #19 / independent and external source review PASS / bf37bb86 CI PASS / latest docs CI in PR; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — A11a.1–4 DONE/merged; A11a.4 merged via PR #19 (`2bade6a`) / independent and external source review PASS / bf37bb86 CI PASS / latest docs CI in PR; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
 | A11b — NOT STARTED | 有限 executor、action approval、bounded recovery | A11a 完成合併；sandbox、approval、audit failure 規格先通過 review |
 | A11c — NOT STARTED | 組合既有能力與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -548,7 +548,7 @@ API was not connected to ask in A11a.3. Historical remediation/company live evid
 remains in
 [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 **A11a.4 — Persisted ask integration: [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19);
-independent and external source review PASS, reviewed-head CI PASS, not merged/DONE.** Ask-only mutually exclusive save/no-save
+independent and external source review PASS, reviewed-head CI PASS, DONE/merged (`2bade6a`, 2026-10-04).** Ask-only mutually exclusive save/no-save
 flags use explicit CLI > trusted user > false; debug/home alone remain unsaved.
 Safe buffered run.start is rebound to the collision-resolved store ID before
 persisted events. Streaming metadata and a typed completed summary retain stdout,

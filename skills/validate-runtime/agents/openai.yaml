@@ -1,0 +1,4 @@
+interface:
+  display_name: "Validate Runtime"
+  short_description: "Verify runtime connectivity with revision-bound evidence"
+  default_prompt: "Use $validate-runtime to verify this runtime at the exact revision, distinguish reachability from inference, and report evidence and untested checks."
