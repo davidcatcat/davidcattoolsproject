@@ -405,6 +405,32 @@ class PersistedAskTests(unittest.TestCase):
                 with patch(target, **effect):
                     self.assert_secondary(self.invoke(['--save-diagnostics', '--verbose']), 'DIAGNOSTICS_WRITE_FAILED')
 
+    def test_postpublication_reservation_failure_still_reports_saved(self):
+        from llmtool.diagnostics_reader import DiagnosticsReader
+        original_unlink = os.unlink
+        def unlink(name, *args, **kwargs):
+            if name == '.reservation':
+                raise PermissionError(RAW)
+            return original_unlink(name, *args, **kwargs)
+        for failed in (False, True):
+            with self.subTest(provider_failed=failed):
+                self.state = self.base / ('committed-' + str(failed))
+                error = coded_error('provider failed', d.ErrorCode.PROVIDER_TIMEOUT, 'provider') if failed else None
+                with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink):
+                    status, out, err, client, *_ = self.invoke(['--save-diagnostics', '--verbose'], fail=error)
+                self.assertEqual((status, out), (1, '') if failed else (0, CONTENT + '\n'))
+                client.complete.assert_called_once()
+                self.assertTrue(self.runs[-1].persisted)
+                self.assertIn('diagnostics_persisted=true', err)
+                if failed:
+                    self.assertIn('trace=saved', err)
+                self.assertNotIn('code=DIAGNOSTICS_', err)
+                self.assertNotIn(RAW, err)
+                directory = self.state / 'runs' / self.runs[-1].run_id
+                self.assertTrue((directory / '.reservation').exists())
+                self.assertEqual(DiagnosticsReader(home=self.state).trace(directory.name)['state'], 'complete')
+                self.assert_closed()
+
     def test_close_error_still_releases_remaining_descriptors_and_preserves_result(self):
         original_close, original_finish = os.close, StoredRun.finish
         released = []

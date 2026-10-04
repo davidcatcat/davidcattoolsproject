@@ -374,7 +374,7 @@ class DiagnosticsStore:
                 if fd is not None:
                     os.close(fd)
 
-    def _remove(self, runs, candidate):
+    def _check_candidate(self, runs, candidate):
         name, directory, _, names, *_ = candidate
         original = os.fstat(directory)
         current = os.stat(name, dir_fd=runs, follow_symlinks=False)
@@ -384,6 +384,10 @@ class DiagnosticsStore:
             raise _Unsafe()
         for filename in names:
             _private(os.stat(filename, dir_fd=directory, follow_symlinks=False))
+
+    def _remove(self, runs, candidate):
+        self._check_candidate(runs, candidate)
+        name, directory, _, names, *_ = candidate
         for filename in names:
             os.unlink(filename, dir_fd=directory)
         os.rmdir(name, dir_fd=runs)
@@ -400,6 +404,13 @@ class DiagnosticsStore:
                 item = self._candidate(runs, name, now)
                 if item is not None:
                     candidates.append(item)
+                    if item[5] and '.reservation' in item[3]:
+                        # Completed summary + trace were validated by _candidate.
+                        # Root EX and candidate run EX remain held throughout.
+                        self._check_candidate(runs, item)
+                        os.unlink('.reservation', dir_fd=item[1])
+                        item[3].remove('.reservation')
+                        _sync_directory(item[1])
             candidates.sort(key=lambda item: (item[4], item[0]))
             # Age cleanup and abandoned recovery precede count/byte pressure.
             deleted = set()
@@ -531,14 +542,17 @@ class StoredRun:
                     os.close(fd)
                 _publish(self.directory, temporary, 'summary.json')
                 _sync_directory(self.directory)
+                # Durable publication is the commit point. Reservation cleanup
+                # is maintenance; a later capacity pass reconciles it safely.
+                self.persisted = True
                 with _store_lock(self.store_lock):
                     os.unlink('.reservation', dir_fd=self.directory)
                     _sync_directory(self.directory)
-                self.persisted = True
                 return True
             except Exception as exc:
-                self._warn(exc)
-                return False
+                if not self.persisted:
+                    self._warn(exc)
+                return self.persisted
             finally:
                 # Temp artifacts after a failure are deliberately unknown to cleanup.
                 self.close()

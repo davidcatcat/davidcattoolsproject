@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration DONE/merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) (`2bade6a`); post-merge main CI `37167325001` passed Python 3.9/3.14. Overall **A11a Observability & Diagnostics remains incomplete**. A11a.5–7 are not merged; **A11b Execution/Approval/Recovery** and **A11c Integration/Real-world Acceptance** remain unstarted planning. This docs-only refinement does not start or resume A11a.5. A11a must land before production mutation is introduced.
+- **A11 — Production Workflow & Diagnostics:** A11a.1 core models DONE/merged (`98f9d48`); A11a.2 ephemeral ask diagnostics DONE/merged via PR #16 (`0d32403`); A11a.3 settings/standalone POSIX store DONE/merged via PR #18 (`b9ac538`). A11a.4 persisted ask integration DONE/merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) (`2bade6a`); post-merge main CI `37167325001` passed Python 3.9/3.14. Overall **A11a Observability & Diagnostics remains incomplete**. A11a.5 offline `runs` / `trace` is published as draft PR #22; external REQUEST CHANGES repairs passed independent native review on `1991f0f`, with new final-head CI and external ChatGPT re-review pending; A11a.6–7 are not started or merged; **A11b Execution/Approval/Recovery** and **A11c Integration/Real-world Acceptance** remain unstarted planning. A11a must land before production mutation is introduced.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -70,7 +70,7 @@ content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 vali
 LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 已透過 PR #19
 合併 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
 優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
-`runs` / `trace` / `doctor` 尚未實作。
+`runs` / `trace` 已發布 draft PR #22；external REQUEST CHANGES 修正已通過 independent native review (`1991f0f`)，新 final-head CI 與 external ChatGPT re-review 尚待完成。`doctor` 留待 A11a.6。
 
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
@@ -83,7 +83,7 @@ independent Reviewer 對 `852f510` PASS；Developer/Reviewer 各自 canonical 78
 兩個 Python jobs 各 784/784 PASS。上述為歷史 review evidence。PR #19 已於
 2026-10-04 合併為 `2bade6aa95963d3f2c3d9332aa3939407512da7e`；post-merge main
 [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-SUCCESS。A11a 整體仍未 DONE；本文件任務不啟動或恢復後續 slices。
+SUCCESS。A11a 整體仍未 DONE；A11a.5 恢復實作，後續 slices 尚未啟動。
 See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
 
 Architecture refinement 只更新設計與工程指引：固定且版本化的 Task Contract、公司 LLM
@@ -652,7 +652,7 @@ call, with no retry or fallback. Sanitized internal stack summaries are deferred
 to the later A11a.6 failure-injection checkpoint; unexpected errors use fixed text.
 JSON is the coded-diagnostics transfer format; coded pickle/deepcopy remain
 unsupported. Diagnostics files are saved only by the explicit metadata opt-in
-described below; the `trace` reader command is not implemented yet.
+described below; this A11a.5 feature branch adds the offline `trace` reader.
 
 See [A11a.2 validation](../../reports/llmtool_a11a2_ephemeral_ask_diagnostics_validation_20261002.md).
 
@@ -718,8 +718,14 @@ existing stores. File operations use directory descriptors and no-follow flags.
 Store/run flock locks protect cleanup, no-clobber run creation, active writers and
 full max-run capacity reservations. Run ID collisions have three bounded attempts.
 
-Completion fsyncs and atomically publishes `trace.jsonl` and `summary.json`, then
-releases the reservation. Readers must require the summary as the completion marker;
+Completion fsyncs and atomically publishes `trace.jsonl` and `summary.json` and
+syncs the run directory; this durable publication commits persistence success.
+Reservation release follows as maintenance: a root-lock timeout or cleanup failure
+does not report the committed trace as unsaved. A later enabled start removes a
+stale reservation only after validating its completed summary and trace while
+holding exclusive root/run locks, then charges actual bytes. Unsafe, unknown,
+malformed or incomplete records retain conservative capacity accounting.
+Readers must require the summary as the completion marker;
 the two files are published individually. Ask interrupts finalize with status
 `interrupted`; broken output pipes finalize with `output_closed`. A crash or store
 failure can leave a partial trace or a trace without summary. Cleanup only occurs
@@ -742,7 +748,8 @@ after requested persistence fails, and `not-saved` when persistence is off.
 Verbose/debug report the actual completion result in `diagnostics_persisted`.
 The integration attempts every remaining descriptor release even when one close
 fails; it never retries the provider or store publication. Unknown partial state
-is preserved conservatively. Offline inspection commands belong to A11a.5/6.
+is preserved conservatively. Offline runs/trace are resumed in A11a.5 on this
+feature branch; doctor remains deferred to A11a.6.
 See [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md)
 for Cloud/offline evidence, R1 closure, external source review and reviewed-head CI.
@@ -750,6 +757,75 @@ PR #19 merged as `2bade6a`; post-merge main CI `37167325001` passed Python 3.9/3
 Historical exact Git objects were published through existing GitHub API access;
 direct Git RPC push authentication failed at that checkpoint. No new live inference
 is claimed by local mock HTTP or real Linux filesystem validation.
+
+## Offline diagnostics readers — A11a.5 feature branch
+
+```sh
+llmtool runs
+llmtool trace 0123456789abcdef0123456789abcdef
+llmtool trace 0123456789abcdef0123456789abcdef --errors
+llmtool trace 0123456789abcdef0123456789abcdef --errors --json
+```
+
+These commands read saved metadata from the same `LLMTOOL_HOME` resolver without
+reading user/project config, credentials or provider session/auth files, or
+calling a provider. They never create storage, clean old runs, repair permissions
+or alter records. POSIX macOS/Linux support uses anchored no-follow read-only
+descriptors, effective-user/private ownership checks and shared existing locks
+(root before run). Root acquisition uses nonblocking attempts with a bounded
+two-second retry; contention timeout reports `STORE_UNAVAILABLE`. Run acquisition
+is immediate and never waits/retries while holding root. Other backends fail safely. Missing lock files,
+symlinks, unsafe modes/owners, hardlinks and nonregular artifacts are rejected.
+
+`runs` renders up to 100 newest validated summaries, ordered by started_at then
+run_id descending. Rows label summary status as `recorded_status`; the listing reports
+that trace evidence is unverified. It checks summary metadata and artifact
+security without reading trace bodies. A recorded success is not evidence of
+a completed run; use `trace <run_id>` to verify completion. A completed-looking
+active run is incomplete. The run lock is checked before mutable artifacts;
+publication temporary files and transient hardlinks in a busy run are not scanned.
+No-summary rows have unknown times and sort last. Damaged and unrelated entries
+are summarized by generic counts; their names/content never appear. The scan
+includes unrelated entries and fails above 1,000 entries; each run permits at
+most 16 artifact names. Summary reads are bounded to 4 KiB each and 4 MiB total.
+An absent store returns exit 0 with `No saved diagnostics runs.` and creates nothing.
+
+`trace` accepts only 32 lowercase hexadecimal characters. Completed status
+requires a valid summary and matching trace IDs, ordered event sequence, counts,
+bytes, start/end times, mode, command, status and duration. An active run returns
+incomplete with no events; a stable partial or published-without-summary trace
+remains incomplete. Only complete valid JSONL lines are displayed; an unfinished
+bounded final line is omitted. Completed corruption fails with empty stdout.
+`--errors` selects structured error/warning event types after the entire trace
+validates; severity alone does not select run.end or unknown types.
+
+Trace file reads are bounded to 8 MiB, 16 KiB per line and 32 events; JSON depth
+is at most 3 with 64 values per document. Duplicate keys, nonfinite numbers,
+invalid UTF-8, dangerous controls, recognizable credential patterns and invalid
+required fields fail safely. Version 1 extensions validate within bounds and are
+ignored; unsupported versions return `FORMAT_UNSUPPORTED`. Unknown v1 event
+types are generic metadata with type/component `unknown` and empty data.
+
+Trace JSON is the explicit `llmtool.diagnostics.trace` schema, version 1, with
+`run_id`, `state`, projected `summary`, projected `events`, `filtered` and
+`omitted_partial_line`. Summary fields are run_id, command, mode, status,
+started_at, ended_at, duration_ms, provider_type, final_error_code, event_count,
+dropped_event_count and trace_bytes. Event fields are event_id, timestamp, type,
+component, severity, span_id, parent_span_id and allowlisted data. Reader output
+omits stored free-text messages/model/profile strings and arbitrary extensions;
+closed codes/flags/numeric cause metadata identify failure layers. It never dumps
+raw JSONL, prompts/responses, exception text, credentials or host paths.
+Human output uses the same projection. Output is fully bounded to 256 KiB before
+stdout; oversized output fails with no partial JSON. Reader errors use fixed
+codes/messages on stderr and exit 1 (missing run: `NOT_FOUND`; invalid ID:
+`ID_INVALID`; unexpected I/O failure: `STORE_UNAVAILABLE`; invalid metadata:
+`FORMAT_INVALID`). Usage 2, interrupt 130 and broken pipe 0 remain unchanged.
+
+See [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md)
+for exact bounds and offline/security/race evidence. Draft PR #22 is published;
+its external REQUEST CHANGES repair round passed independent native review on
+`1991f0f`. New final-head CI and external ChatGPT re-review acceptance remain
+pending. Historical review PASS on `a4affd9` does not validate these repairs.
 
 ## Troubleshooting 與已知限制
 
@@ -1752,7 +1828,7 @@ file writes, retention/overwrite contract or raw diagnostic dump. Errors remain
 sanitized with no partial stdout. Output retention needs a separate future design.
 A11a.1–4 DONE/merged; A11a.4 PR #19 merge `2bade6a` / historical independent and
 external source review PASS / post-merge main CI `37167325001` PASS;
-A11a.5–7 not merged and not started/resumed by this docs task; overall A11a NOT DONE;
+A11a.5 draft PR #22 published; external REQUEST CHANGES repairs independent native review PASS (`1991f0f`); new final-head CI/external ChatGPT re-review pending; A11a.6–7 not started; overall A11a NOT DONE;
 A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).
