@@ -48,6 +48,13 @@ authentication, inference, and end-to-end claims separate.
   network/system settings merely to make a smoke test pass.
 - Report skipped checks explicitly and keep the final conclusion within the evidence collected.
 
+## Relationship to formal QA
+
+`validate-runtime` proves environment/runtime layers such as VPN reachability,
+authentication, inference or a live provider session. `qa-validation` owns the broader
+public-interface acceptance matrix. Formal QA may call this skill for runtime-dependent
+cases, but neither mock success nor one live marker substitutes for the other QA cases.
+
 ## Environment handoff
 
 For llmtool Cloud/Mac work, follow
