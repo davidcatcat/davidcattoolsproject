@@ -308,13 +308,19 @@ normalized. Default text mode returns only final stdout; internal stderr diagnos
 captured and discarded, never forwarded. Reasoning summaries are suppressed. Temporary cwd
 cleanup runs on success/failure; CLI-owned authentication/runtime state is not deleted.
 
-Claude/Codex CLI invocations also stop their owned process group before temporary cwd
-cleanup on SIGINT, SIGTERM and SIGHUP. Signal handlers only record cancellation; the
-provider loop performs cleanup. SIGINT retains the existing interruption contract;
-TERM/HUP during an active invocation exit 143/129 (`128 + signal`), without provider
-stderr or a traceback. Repeated signals retain the first cancellation. This synchronous
-lifecycle requires the main thread and default SIGCHLD reaping, rejecting other
-contexts before spawn so an unreaped owned child pins its process-group identity.
+Claude/Codex CLI invocations preserve inherited `SIG_IGN` for SIGINT, SIGTERM and
+SIGHUP, including nohup/background-job ignores. For other dispositions, the first
+observed signal drives coordinated cleanup of the owned process group and temporary
+cwd. Signal handlers only record cancellation; the provider loop performs cleanup.
+SIGINT retains the existing interruption contract; TERM/HUP cancellation during an
+active invocation exits 143/129 (`128 + signal`), without provider stderr or a traceback.
+Signals observed while scoped handlers are installed retain the first cancellation.
+Repeated signals after restoration may use the normal OS disposition; process-tree
+and runtime cleanup is complete before restoration on the supported cleanup path.
+This synchronous lifecycle requires the main thread. Default SIGCHLD reaping is
+retained; inherited SIGCHLD ignore is temporarily changed to default and restored
+after cleanup. Custom SIGCHLD handlers are rejected before spawn so an unreaped
+owned child pins its process-group identity.
 It does not contain a trusted child that deliberately detaches with setsid (TR-3),
 and cannot clean up after SIGKILL or a host crash.
 

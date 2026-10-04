@@ -93,14 +93,108 @@ class LifecycleStateTests(unittest.TestCase):
         self.assertEqual(len(caught), 1)
         self.assertEqual(caught[0].diagnostic.code.value, 'PROVIDER_RUNTIME_ERROR')
 
-    def test_nondefault_child_reaper_rejected_before_lifecycle(self):
+    def test_custom_child_reaper_rejected_before_lifecycle_or_spawn(self):
+        previous = signal.getsignal(signal.SIGCHLD)
+        def custom(number, frame):
+            pass
+        try:
+            signal.signal(signal.SIGCHLD, custom)
+            with patch('llmtool.providers.cli_lifecycle.signal.signal') as install:
+                with patch('subprocess.Popen') as spawn:
+                    with self.assertRaises(LLMToolError) as caught:
+                        with CLIProcessLifecycle('claude-cli'):
+                            spawn()
+                    spawn.assert_not_called()
+                install.assert_not_called()
+            self.assertEqual(caught.exception.diagnostic.code.value, 'PROVIDER_RUNTIME_ERROR')
+            self.assertIs(signal.getsignal(signal.SIGCHLD), custom)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_ignored_termination_dispositions_are_retained_and_recorded(self):
+        before = self.handlers()
+        try:
+            for name in before:
+                signal.signal(getattr(signal, name), signal.SIG_IGN)
+            with CLIProcessLifecycle('claude-cli') as lifecycle:
+                for name in before:
+                    number = getattr(signal, name)
+                    self.assertIs(signal.getsignal(number), signal.SIG_IGN)
+                    self.assertIs(lifecycle.previous[number], signal.SIG_IGN)
+                lifecycle.check()
+                self.assertIsNone(lifecycle.signum)
+            self.assertTrue(all(handler is signal.SIG_IGN for handler in self.handlers().values()))
+        finally:
+            for name, handler in before.items():
+                signal.signal(getattr(signal, name), handler)
+
+    def test_default_sigchld_remains_default(self):
         previous = signal.getsignal(signal.SIGCHLD)
         try:
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+            with CLIProcessLifecycle('claude-cli'):
+                self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+            self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_ignored_sigchld_scoped_default_and_exact_restore_all_exit_paths(self):
+        previous = signal.getsignal(signal.SIGCHLD)
+        cases = ('success', 'provider-error', 'timeout', 'popen-failure', 'cleanup-failure',
+                 'SIGINT', 'SIGTERM') + (('SIGHUP',) if hasattr(signal, 'SIGHUP') else ())
+        try:
+            for case in cases:
+                with self.subTest(case=case):
+                    signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+                    before = self.handlers()
+                    exception = (KeyboardInterrupt if case == 'SIGINT' else
+                                 SystemExit if case in ('SIGTERM', 'SIGHUP') else OSError)
+                    def exercise():
+                        with CLIProcessLifecycle('codex-cli') as lifecycle:
+                            self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+                            self.assertIs(lifecycle.previous[signal.SIGCHLD], signal.SIG_IGN)
+                            if case.startswith('SIG'):
+                                lifecycle._record(getattr(signal, case), None)
+                                lifecycle.check()
+                            elif case == 'cleanup-failure':
+                                lifecycle.own(Mock(returncode=None))
+                            elif case == 'popen-failure':
+                                import subprocess
+                                with patch('subprocess.Popen', side_effect=OSError('synthetic')):
+                                    subprocess.Popen(['synthetic'])
+                            elif case != 'success':
+                                raise OSError(case)
+                    def stop(process):
+                        self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_DFL)
+                        raise OSError('synthetic cleanup')
+                    with patch('llmtool.providers.cli_lifecycle.terminate', side_effect=stop):
+                        if case == 'success':
+                            exercise()
+                        else:
+                            with self.assertRaises(exception):
+                                exercise()
+                    self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_IGN)
+                    self.assertEqual(self.handlers(), before)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_ignored_sigchld_restored_after_partial_handler_install_failure(self):
+        previous = signal.getsignal(signal.SIGCHLD)
+        before = self.handlers()
+        original, failed = signal.signal, []
+        def install(number, handler):
+            if number == signal.SIGTERM and not failed:
+                failed.append(True)
+                raise OSError('synthetic installation')
+            return original(number, handler)
+        try:
             signal.signal(signal.SIGCHLD, signal.SIG_IGN)
-            with self.assertRaises(LLMToolError) as caught:
-                with CLIProcessLifecycle('claude-cli'):
-                    self.fail('ignored SIGCHLD permits PID reuse')
-            self.assertEqual(caught.exception.diagnostic.code.value, 'PROVIDER_RUNTIME_ERROR')
+            with patch('llmtool.providers.cli_lifecycle.signal.signal', side_effect=install):
+                with self.assertRaises(LLMToolError):
+                    with CLIProcessLifecycle('codex-cli'):
+                        self.fail('installation failed')
+            self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_IGN)
+            self.assertEqual(self.handlers(), before)
         finally:
             signal.signal(signal.SIGCHLD, previous)
 

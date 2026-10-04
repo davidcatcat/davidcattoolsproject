@@ -49,18 +49,24 @@ class CLIProcessLifecycle:
         if threading.current_thread() is not threading.main_thread():
             raise coded_error('CLI provider invocation requires the main thread',
                               'PROVIDER_RUNTIME_ERROR', self.component)
-        if (os.name == 'posix' and
-                signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL):
-            # Ignored SIGCHLD auto-reaps children; another reaper also invalidates
-            # the unreaped-child identity pin. Reject before creating a runtime.
-            raise coded_error('CLI provider requires default child reaping',
+        child_handler = signal.getsignal(signal.SIGCHLD) if os.name == 'posix' else None
+        if os.name == 'posix' and child_handler not in (signal.SIG_DFL, signal.SIG_IGN):
+            # A foreign reaper invalidates the unreaped-child identity pin.
+            raise coded_error('CLI provider cannot use a custom child reaper',
                               'PROVIDER_RUNTIME_ERROR', self.component)
         try:
+            if child_handler is signal.SIG_IGN:
+                # Prevent automatic reaping until the owned child is stopped and
+                # waited. Record before installation so setup failures restore it.
+                self.previous[signal.SIGCHLD] = child_handler
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL)
             for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
                 if hasattr(signal, name):
                     number = getattr(signal, name)
-                    self.previous[number] = signal.getsignal(number)
-                    signal.signal(number, self._record)
+                    previous = signal.getsignal(number)
+                    self.previous[number] = previous
+                    if previous is not signal.SIG_IGN:
+                        signal.signal(number, self._record)
         except (OSError, ValueError):
             self._restore()
             raise coded_error('CLI provider signal lifecycle is not available',

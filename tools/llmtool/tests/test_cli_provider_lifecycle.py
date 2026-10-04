@@ -18,7 +18,7 @@ PRIVATE = 'DG1_PRIVATE_STDERR'
 SECRET = 'DG1_SYNTHETIC_SECRET'
 
 FAKE = '''#!{python}
-import json, os, signal, sys
+import json, os, signal, sys, time
 from pathlib import Path
 mode = {mode!r}
 prompt = '' if mode == 'spawn' else sys.stdin.read()
@@ -26,6 +26,7 @@ with open({starts!r}, 'a') as f: f.write(str(os.getpid()) + '\\n')
 sys.stderr.write('DG1_PRIVATE_STDERR DG1_SYNTHETIC_PROMPT DG1_SYNTHETIC_SECRET reasoning\\n')
 sys.stderr.flush()
 pids = [os.getpid()]
+if mode == 'release': shutdown_read, shutdown_write = os.pipe()
 if mode != 'success':
     for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
         if hasattr(signal, name): signal.signal(getattr(signal, name), signal.SIG_IGN)
@@ -36,23 +37,37 @@ if mode != 'success':
         grandchild = os.fork()
         if grandchild == 0:
             os.close(write)
+            if mode == 'release':
+                os.close(shutdown_write)
+                os.read(shutdown_read, 1)
+                os._exit(0)
             if mode == 'closed':
                 for fd in (0, 1, 2): os.close(fd)
             while True: signal.pause()
         os.write(write, (str(os.getpid()) + ' ' + str(grandchild)).encode())
         os.close(write)
+        if mode == 'release':
+            os.close(shutdown_write)
+            os.read(shutdown_read, 1)
+            os.waitpid(grandchild, 0)
+            os._exit(0)
         if mode == 'closed':
             for fd in (0, 1, 2): os.close(fd)
         while True: signal.pause()
     os.close(write)
     pids.extend(map(int, os.read(read, 256).decode().split()))
     os.close(read)
+    if mode == 'release': os.close(shutdown_read)
 capture = {{'pids': pids, 'pgid': os.getpgrp(), 'cwd': os.getcwd(),
            'argv': sys.argv[1:], 'secret_inherited': 'OPENAI_API_KEY' in os.environ}}
 temporary = Path({capture!r} + '.tmp')
 temporary.write_text(json.dumps(capture))
 temporary.replace({capture!r})
-if mode == 'success':
+if mode == 'release':
+    while not Path({release!r}).exists(): time.sleep(0.01)
+    os.close(shutdown_write)
+    os.waitpid(child, 0)
+if mode in ('success', 'release'):
     sys.stdout.write('DG1_FINAL\\n')
 else:
     if mode == 'closed':
@@ -108,10 +123,11 @@ class CLIProviderLifecycleTests(unittest.TestCase):
             # evidence/user artifacts. This cleanup also contains baseline leaks.
             shutil.rmtree(self.evidence['cwd'], ignore_errors=True)
 
-    def launch(self, provider, mode='waiting', timeout=20, phase=None):
+    def launch(self, provider, mode='waiting', timeout=20, phase=None, ignored=None):
         executable = self.bin / provider.split('-')[0]
         executable.write_text(FAKE.format(python=sys.executable, mode=mode,
-            starts=str(self.starts), capture=str(self.capture)))
+            starts=str(self.starts), capture=str(self.capture),
+            release=str(self.directory / 'release')))
         executable.chmod(0o700)
         config = self.home / '.config/llmtool/config.yaml'
         config.parent.mkdir(parents=True)
@@ -151,6 +167,33 @@ def wait(process, *args, **kwargs):
 with patch('subprocess.Popen', side_effect=spawn), patch.object(original_spawn, 'wait', new=wait):
     raise SystemExit(main())
 ''' % (phase, str(self.capture), str(self.directory / 'waiting'))
+        if ignored is None:
+            # Test the documented normal dispositions explicitly, even when the
+            # runner itself is a non-job-control shell's background job.
+            bootstrap = '''
+import signal
+signal.signal(signal.SIGINT, signal.default_int_handler)
+signal.signal(signal.SIGTERM, signal.SIG_DFL)
+if hasattr(signal, 'SIGHUP'): signal.signal(signal.SIGHUP, signal.SIG_DFL)
+''' + bootstrap
+        else:
+            # Exec preserves SIG_IGN: exercise genuine inherited disposition,
+            # without preexec_fn in a possibly multithreaded test runner.
+            body = '''
+import signal
+from pathlib import Path
+from llmtool.cli import main
+try:
+    result = main()
+finally:
+    Path(%r).write_text(str(int(signal.getsignal(%r))))
+raise SystemExit(result)
+''' % (str(self.directory / 'restored'), int(ignored))
+            bootstrap = '''
+import os, signal, sys
+signal.signal(%r, signal.SIG_IGN)
+os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
+''' % (int(ignored), body, PROMPT)
         self.process = subprocess.Popen([sys.executable, '-c', bootstrap, 'ask', PROMPT],
             cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -243,6 +286,54 @@ with patch('subprocess.Popen', side_effect=spawn), patch.object(original_spawn, 
 
     def test_codex_normal_success_contract(self):
         self.successful('codex-cli')
+
+    def inherited_ignore(self, provider, number):
+        before = signal.getsignal(number)
+        self.launch(provider, 'release', ignored=number)
+        self.assertEqual(len(self.evidence['pids']), 3)
+        self.process.send_signal(number)
+        (self.directory / 'release').write_text('complete')
+        out, err = self.process.communicate(timeout=5)
+        self.assertEqual((self.process.returncode, out, err), (0, b'DG1_FINAL\n', b''))
+        self.assertEqual(self.running(self.evidence['pids']), {})
+        # Cooperative successful children/grandchildren are waited/reaped too.
+        self.assertEqual(self.states(self.evidence['pids']), {})
+        self.assertFalse(Path(self.evidence['cwd']).exists())
+        self.assertEqual((self.directory / 'restored').read_text(), str(int(signal.SIG_IGN)))
+        self.assertIs(signal.getsignal(number), before)
+        self.assert_private_omitted(out, err)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGHUP'), 'platform has no SIGHUP')
+    def test_claude_inherited_sighup_ignore_completes_tree_and_runtime(self):
+        self.inherited_ignore('claude-cli', signal.SIGHUP)
+
+    @unittest.skipUnless(hasattr(signal, 'SIGHUP'), 'platform has no SIGHUP')
+    def test_codex_inherited_sighup_ignore_completes_tree_and_runtime(self):
+        self.inherited_ignore('codex-cli', signal.SIGHUP)
+
+    def test_claude_inherited_sigint_ignore_completes_tree_and_runtime(self):
+        self.inherited_ignore('claude-cli', signal.SIGINT)
+
+    def test_codex_inherited_sigint_ignore_completes_tree_and_runtime(self):
+        self.inherited_ignore('codex-cli', signal.SIGINT)
+
+    def inherited_child_ignore(self, provider):
+        before = signal.getsignal(signal.SIGCHLD)
+        self.launch(provider, 'release', ignored=signal.SIGCHLD)
+        (self.directory / 'release').write_text('complete')
+        out, err = self.process.communicate(timeout=5)
+        self.assertEqual((self.process.returncode, out, err), (0, b'DG1_FINAL\n', b''))
+        self.assertEqual(self.states(self.evidence['pids']), {})
+        self.assertFalse(Path(self.evidence['cwd']).exists())
+        self.assertEqual((self.directory / 'restored').read_text(), str(int(signal.SIG_IGN)))
+        self.assertIs(signal.getsignal(signal.SIGCHLD), before)
+        self.assert_private_omitted(out, err)
+
+    def test_claude_inherited_sigchld_ignore_still_works_and_reaps(self):
+        self.inherited_child_ignore('claude-cli')
+
+    def test_codex_inherited_sigchld_ignore_still_works_and_reaps(self):
+        self.inherited_child_ignore('codex-cli')
 
     def wait_phase(self, provider):
         self.launch(provider, 'closed', phase='wait')
