@@ -1,4 +1,4 @@
 interface:
   display_name: "Validate Runtime"
   short_description: "Verify runtime connectivity with revision-bound evidence"
-  default_prompt: "Use $validate-runtime to verify this runtime at the exact revision, distinguish reachability from inference, and report evidence and untested checks."
+  default_prompt: "Use $validate-runtime to verify this runtime at the exact revision, distinguish reachability/authentication/inference/E2E claims, and report evidence and untested checks. Do not treat this as a substitute for the broader $qa-validation matrix."
