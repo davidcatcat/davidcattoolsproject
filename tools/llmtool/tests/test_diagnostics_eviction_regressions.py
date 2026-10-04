@@ -33,6 +33,11 @@ class EvictionRegressions(unittest.TestCase):
         with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink):
             self.assertIsNone(self.store(max_runs=1).start())
         self.assertEqual(len(calls), 2)
+        if directory.exists():
+            return directory
+        quarantines = [p for p in self.home.glob('.evicted-*') if p.stat().st_ino == identity]
+        self.assertEqual(len(quarantines), 1)
+        return quarantines[0]
 
     def test_b2_unlink_fault_next_start_recovers_max_runs_one(self):
         directory = self.complete(self.start(identity='a' * 32))
@@ -49,10 +54,17 @@ import os, signal, sys
 from unittest.mock import patch
 from llmtool.diagnostics_store import DiagnosticsStore
 from llmtool.diagnostics_settings import DiagnosticsSettings
+from llmtool import diagnostics_store as module
 original, original_rmdir, count = os.unlink, os.rmdir, 0
+original_publish = module._publish_run_directory
 inode = os.stat(sys.argv[2]).st_ino
 point = sys.argv[3]
 def die(): os.kill(os.getpid(), signal.SIGKILL)
+def publish(source, name, destination, target):
+    result = original_publish(source, name, destination, target)
+    if point == 'published' and target.startswith('.eviction-'): die()
+    if point == 'moved' and target.startswith('.evicted-'): die()
+    return result
 def unlink(name, *args, **kwargs):
     global count
     fd = kwargs.get('dir_fd')
@@ -63,14 +75,14 @@ def unlink(name, *args, **kwargs):
     if point == 'receipt' and name.startswith('.eviction-') and name.endswith('.json'): die()
     return result
 def rmdir(name, *args, **kwargs):
-    if name == 'b' * 32 and point == 'lockless': die()
+    if name.startswith('.evicted-') and point == 'lockless': die()
     result = original_rmdir(name, *args, **kwargs)
-    if name == 'b' * 32 and point == 'removed': die()
+    if name.startswith('.evicted-') and point == 'removed': die()
     return result
-with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink), patch('llmtool.diagnostics_store.os.rmdir', side_effect=rmdir):
+with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink), patch('llmtool.diagnostics_store.os.rmdir', side_effect=rmdir), patch.object(module, '_publish_run_directory', side_effect=publish):
     DiagnosticsStore(DiagnosticsSettings(persist_metadata=True, max_runs=1), home=sys.argv[1]).start()
 '''
-        for point in ('intent', 'mid', 'lockless', 'removed', 'receipt'):
+        for point in ('published', 'moved', 'intent', 'mid', 'lockless', 'removed', 'receipt'):
             with self.subTest(point=point):
                 self.home = self.base / point
                 directory = self.complete(self.start(identity='b' * 32))
@@ -85,25 +97,35 @@ with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink), patch('ll
                 self.addCleanup(writer.close)
                 self.assertFalse(directory.exists())
                 self.assertEqual(list(self.home.glob('.eviction-*.json')), [])
+                quarantines = list(self.home.glob('.evicted-*'))
+                if point == 'lockless':
+                    self.assertEqual(len(quarantines), 1)
+                    self.assertEqual(list(quarantines[0].iterdir()), [])
+                else:
+                    self.assertEqual(quarantines, [])
 
     def test_b2_interrupted_empty_directory_rmdir_recovers(self):
         directory = self.complete(self.start(identity='c' * 32))
         original = os.rmdir
         def rmdir(name, *args, **kwargs):
-            if name == directory.name:
+            if name.startswith('.evicted-'):
                 raise OSError(errno.EIO, 'synthetic rmdir interruption')
             return original(name, *args, **kwargs)
         with patch('llmtool.diagnostics_store.os.rmdir', side_effect=rmdir):
             self.assertIsNone(self.store(max_runs=1).start())
-        self.assertEqual(list(directory.iterdir()), [])
+        self.assertFalse(directory.exists())
+        quarantine, = self.home.glob('.evicted-*')
+        self.assertEqual(list(quarantine.iterdir()), [])
         store = self.store(max_runs=1)
         writer = store.start()
         self.assertIsNotNone(writer, store.warning)
         self.addCleanup(writer.close)
+        self.assertTrue(quarantine.exists())
+        self.assertEqual(list(quarantine.iterdir()), [])
 
     def test_b2_recovery_preserves_foreign_directory_replacement(self):
         directory = self.complete(self.start(identity='d' * 32))
-        self.partial(directory)
+        directory = self.partial(directory)
         directory.rename(self.base / 'original')
         directory.mkdir(mode=0o700)
         foreign = directory / 'foreign'
@@ -112,12 +134,36 @@ with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink), patch('ll
         self.assertIsNone(self.store(max_runs=1).start())
         self.assertEqual(foreign.read_text(), 'KEEP_FOREIGN')
 
+    def test_b2_recovery_preserves_recreated_original_run_namespace(self):
+        directory = self.complete(self.start(identity='d' * 32))
+        quarantine = self.partial(directory)
+        directory.mkdir(mode=0o700)
+        foreign = directory / 'foreign'
+        foreign.write_text('KEEP_FOREIGN')
+        foreign.chmod(0o600)
+        self.assertIsNone(self.store(max_runs=1).start())
+        self.assertEqual(foreign.read_text(), 'KEEP_FOREIGN')
+        self.assertFalse(quarantine.exists())
+
+    def test_b2_lockless_quarantine_foreign_empty_replacement_is_preserved(self):
+        self.complete(self.start(identity='d' * 32))
+        with patch('llmtool.diagnostics_store.os.rmdir', side_effect=OSError(errno.EIO, 'synthetic fault')):
+            self.assertIsNone(self.store(max_runs=1).start())
+        quarantine, = self.home.glob('.evicted-*')
+        self.assertEqual(list(quarantine.iterdir()), [])
+        quarantine.rename(self.base / 'original-empty')
+        quarantine.mkdir(mode=0o700)
+        identity = quarantine.stat().st_ino
+        self.assertIsNone(self.store(max_runs=1).start())
+        self.assertEqual(quarantine.stat().st_ino, identity)
+        self.assertEqual(list(quarantine.iterdir()), [])
+
     def test_b2_recovery_preserves_symlink_hardlink_and_active_run(self):
         for attack in ('symlink', 'hardlink', 'active'):
             with self.subTest(attack=attack):
                 self.home = self.base / attack
                 directory = self.complete(self.start(identity='e' * 32))
-                self.partial(directory)
+                directory = self.partial(directory)
                 if attack == 'active':
                     import fcntl
                     fd = os.open(directory / '.run.lock', os.O_RDWR)
@@ -148,7 +194,7 @@ with patch('llmtool.diagnostics_store.os.unlink', side_effect=unlink), patch('ll
             with self.subTest(damage=damage):
                 self.home = self.base / damage
                 directory = self.complete(self.start(identity='f' * 32))
-                self.partial(directory)
+                directory = self.partial(directory)
                 if damage == 'unknown':
                     foreign = directory / 'foreign'
                     foreign.write_text('KEEP_FOREIGN')

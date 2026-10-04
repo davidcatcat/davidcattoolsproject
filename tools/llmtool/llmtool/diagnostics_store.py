@@ -586,11 +586,13 @@ class DiagnosticsStore:
     def _evict(self, root, runs, journal, candidate=None):
         """Resume a committed eviction, checking every remaining identity before unlink."""
         directory = lock = None
+        owned = candidate is None
         receipt = _file(root, journal)
         try:
             receipt_info = os.fstat(receipt)
             intent = _eviction_intent(_read(root, journal, EVICTION_MAX_BYTES))
             name, files = intent['run_id'], intent['files']
+            quarantine = '.evicted-' + journal[len('.eviction-'):-len('.json')]
 
             def check_receipt():
                 info = os.stat(journal, dir_fd=root, follow_symlinks=False)
@@ -600,18 +602,46 @@ class DiagnosticsStore:
 
             check_receipt()
             try:
-                info = os.stat(name, dir_fd=runs, follow_symlinks=False)
+                info = os.stat(quarantine, dir_fd=root, follow_symlinks=False)
             except FileNotFoundError:
                 info = None
+            if info is None:
+                try:
+                    original = os.stat(name, dir_fd=runs, follow_symlinks=False)
+                except FileNotFoundError:
+                    original = None
+                if original is not None:
+                    _private(original, True)
+                    if _eviction_fingerprint(original) != intent['directory']:
+                        raise _Unsafe()
+                    if candidate is None:
+                        candidate = self._candidate(runs, name, time.time())
+                        if candidate is None:
+                            raise _Unsafe()
+                    directory, lock = candidate[1:3]
+                    self._check_candidate(runs, candidate)
+                    if (not candidate[6] or candidate[3] != set(files) or any(
+                            _eviction_fingerprint(os.stat(filename, dir_fd=directory,
+                                                         follow_symlinks=False)) != files[filename]
+                            for filename in files)):
+                        raise _Unsafe()
+                    check_receipt()
+                    # Move the verified, locked run out of count accounting before
+                    # any unlink. Root byte/scan accounting still covers it.
+                    _publish_run_directory(runs, name, root, quarantine)
+                    _sync_directory(root)
+                    _sync_directory(runs)
+                    info = os.stat(quarantine, dir_fd=root, follow_symlinks=False)
             if info is not None:
                 _private(info, True)
                 if _eviction_fingerprint(info)[:4] != intent['directory'][:4]:
                     raise _Unsafe()
-                if candidate is not None:
-                    self._check_candidate(runs, candidate)
+                if directory is not None:
+                    pass  # Recovery already acquired the original run lock above.
+                elif candidate is not None:
                     directory, lock = candidate[1:3]
                 else:
-                    directory = _directory(runs, name)
+                    directory = _directory(root, quarantine)
                     if '.run.lock' in os.listdir(directory):
                         lock = _file(directory, '.run.lock')
                         import fcntl
@@ -622,7 +652,7 @@ class DiagnosticsStore:
 
                 def check_remaining():
                     check_receipt()
-                    current = os.stat(name, dir_fd=runs, follow_symlinks=False)
+                    current = os.stat(quarantine, dir_fd=root, follow_symlinks=False)
                     _private(current, True)
                     # APFS changes directory nlink as files are removed; size and
                     # timestamps also change. Inventory/file fingerprints below
@@ -651,23 +681,23 @@ class DiagnosticsStore:
                     os.unlink(filename, dir_fd=directory)
                 if check_remaining():
                     raise _Unsafe()
-                os.rmdir(name, dir_fd=runs)
-            # Receipt survives through rmdir and its durability boundary.
+                if lock is not None:
+                    # The verified open lock/directory pin this incarnation.
+                    os.rmdir(quarantine, dir_fd=root)
+                # A lockless empty quarantine after restart cannot prove its
+                # incarnation. Preserve it, never infer permission to rmdir from
+                # a filename/inode/owner/mode. It uses zero run slots/bytes and
+                # remains charged to the root scan budget (N1).
+            # Receipt survives through rename/rmdir and durability boundaries.
             _sync_directory(runs)
+            _sync_directory(root)
             check_receipt()
-            # Never remove a receipt if its namespace now names a replacement.
-            try:
-                os.stat(name, dir_fd=runs, follow_symlinks=False)
-            except FileNotFoundError:
-                pass
-            else:
-                raise _Unsafe()
             os.unlink(journal, dir_fd=root)
             _sync_directory(root)
             return True
         finally:
             failure = None
-            for fd in ((lock, directory, receipt) if candidate is None else (receipt,)):
+            for fd in ((lock, directory, receipt) if owned else (receipt,)):
                 if fd is not None:
                     try:
                         os.close(fd)
@@ -694,7 +724,8 @@ class DiagnosticsStore:
                     d.validate_run_id(token)
                 except ValueError:
                     continue  # Unknown names are capacity-accounted, never deleted.
-                self._evict(root, runs, name)
+                if not self._evict(root, runs, name):
+                    raise _Full()
         names = os.listdir(runs)
         if len(names) > SCAN_LIMIT:
             raise _Full()
