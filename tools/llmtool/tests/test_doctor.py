@@ -36,6 +36,32 @@ class KeysOnlyEnvironment(Mapping):
         raise KeyError(key)
 
 
+class CaseInsensitiveEnvironment(Mapping):
+    """Windows-like keys with both credential get paths forbidden."""
+    def __init__(self, name, present, value=SECRET):
+        self.secret_name = name.upper()
+        self.data = {self.secret_name: value} if present else {}
+        self.secret_fetches = []
+
+    def __iter__(self):
+        return iter(self.data)
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, key):
+        if key.upper() == self.secret_name:
+            self.secret_fetches.append(key)
+            raise AssertionError('case-insensitive credential value fetched')
+        return self.data[key.upper()]
+
+    def get(self, key, default=None):
+        if key.upper() == self.secret_name:
+            self.secret_fetches.append(key)
+            raise AssertionError('case-insensitive credential get used')
+        return self.data.get(key.upper(), default)
+
+
 def snapshot(path):
     result = {}
     for item in [path, *path.rglob('*')]:
@@ -85,6 +111,28 @@ class DoctorFixture(unittest.TestCase):
         if code is not None:
             self.assertEqual((status, out), (1, ''))
             self.assertIn('code=' + code, err)
+
+    def windows_inspection(self, name, present, *, native_codec, value=SECRET):
+        """Use a synthetic Windows codec on Linux, never native-Windows evidence."""
+        if native_codec:
+            environment = os._Environ({name.upper(): value} if present else {}, str.upper, str, str, str)
+            original = os._Environ.__getitem__
+            fetches = []
+            def guarded(instance, key):
+                if instance is environment and key.upper() == name.upper():
+                    fetches.append(key)
+                    raise AssertionError('os._Environ Windows-codec credential fetched')
+                return original(instance, key)
+            guard = patch.object(os._Environ, '__getitem__', new=guarded)
+        else:
+            environment = CaseInsensitiveEnvironment(name, present, value)
+            fetches = environment.secret_fetches
+            guard = ExitStack()
+        try:
+            with patch('llmtool.config.sys.platform', 'win32'), guard:
+                return config.inspect_config(environ=environment, cwd=self.project, home=self.user)
+        finally:
+            self.assertEqual(fetches, [])
 
 
 class DoctorTests(DoctorFixture):
@@ -184,6 +232,46 @@ class DoctorTests(DoctorFixture):
                 else:
                     lookup.assert_not_called()
                 self.assert_safe(result)
+
+    def test_windows_reserved_bindings_lower_mixed_case_active_inactive_no_value_fetch(self):
+        for reserved in config.INSPECTION_ENV_NAMES:
+            for name in (reserved.lower(), reserved.swapcase()):
+                for inactive in (False, True):
+                    extra = '    api_key_env: ' + name + '\n'
+                    if inactive:
+                        extra = '  inactive:\n    type: openai-compatible\n' + extra
+                    self.write_config(extra=extra)
+                    for native_codec in (False, True):
+                        with self.subTest(name=name, inactive=inactive, os_environ_codec=native_codec), \
+                                self.assertRaises(config.LLMToolError):
+                            self.windows_inspection(name, True, native_codec=native_codec)
+                    with patch('llmtool.config.sys.platform', 'win32'), \
+                            patch.object(r.DiagnosticsReader, 'inspect_store', side_effect=AssertionError('store inspected')), \
+                            patch('llmtool.doctor.shutil.which', side_effect=AssertionError('runtime lookup')):
+                        self.assert_safe(self.invoke(), 'CONFIG_INVALID')
+
+    def test_windows_credential_presence_lower_mixed_case_empty_absent_no_value_fetch(self):
+        for name in ('doctor_secret', 'DoCtOr_SeCrEt', 'DOCTOR_SECRET'):
+            self.write_config(extra='    api_key_env: ' + name + '\n')
+            for present, value in ((False, SECRET), (True, ''), (True, SECRET)):
+                for native_codec in (False, True):
+                    with self.subTest(name=name, present=present, empty=value == '', os_environ_codec=native_codec):
+                        result = self.windows_inspection(name, present, native_codec=native_codec, value=value)
+                        self.assertEqual(result['credential'], 'env-configured-' + ('present' if present else 'absent'))
+
+    def test_posix_credential_and_reserved_names_remain_case_sensitive(self):
+        self.write_config(extra='    api_key_env: doctor_secret\n')
+        with patch('llmtool.config.sys.platform', 'linux'):
+            value = config.inspect_config(environ=KeysOnlyEnvironment(True), cwd=self.project, home=self.user)
+        self.assertEqual(value['credential'], 'env-configured-absent')
+        self.write_config(extra='    api_key_env: llmtool_model\n')
+        with patch('llmtool.config.sys.platform', 'linux'):
+            value = config.inspect_config(environ={'LLMTOOL_MODEL': 'nonsecret-override'}, cwd=self.project, home=self.user)
+        self.assertEqual(value['credential'], 'env-configured-absent')
+        # Doctor normalization never changes ordinary config resolution.
+        with patch('llmtool.config.sys.platform', 'win32'):
+            normal = config.resolve_config(environ={'LLMTOOL_MODEL': 'legacy-model'}, cwd=self.project, home=self.user)
+        self.assertEqual(normal['providers']['default']['model'], 'legacy-model')
 
     def test_existing_config_selection_overrides_without_profile_value_output(self):
         self.write_config(policy='  private-profile:\n    type: codex-cli\n')

@@ -70,7 +70,7 @@ content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 vali
 LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 已透過 PR #19
 合併 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
 優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
-`runs` / `trace` 已發布 draft PR #22；external REQUEST CHANGES 修正已通過 independent native review (`1991f0f`)，新 final-head CI 與 external ChatGPT re-review 尚待完成。`doctor` 留待 A11a.6。
+`runs` / `trace` 已透過 PR #22 合併為 `da027f0`；post-merge main CI `37193806074` 的 Python 3.9/3.14 各 824 tests PASS。A11a.6 offline `doctor` 與 failure matrix 在此 feature branch 實作；independent review/delivery gates pending。原 A11a.5 report 的 draft/review pending 敘述為 historical checkpoints。
 
 A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
 approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
@@ -83,7 +83,7 @@ independent Reviewer 對 `852f510` PASS；Developer/Reviewer 各自 canonical 78
 兩個 Python jobs 各 784/784 PASS。上述為歷史 review evidence。PR #19 已於
 2026-10-04 合併為 `2bade6aa95963d3f2c3d9332aa3939407512da7e`；post-merge main
 [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-SUCCESS。A11a 整體仍未 DONE；A11a.5 恢復實作，後續 slices 尚未啟動。
+SUCCESS。A11a 整體仍未 DONE；A11a.5 已合併，A11a.6 在 feature branch 實作並待 review/delivery；A11a.7 與後續 milestones 尚未啟動。
 See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
 
 Architecture refinement 只更新設計與工程指引：固定且版本化的 Task Contract、公司 LLM
@@ -853,7 +853,9 @@ Presence/readiness proves neither authentication nor inference.
 Doctor fails closed with `CONFIG_INVALID` if any configured credential environment
 binding overlaps a configuration/location/runtime variable it consumes (including
 `LLMTOOL_MODEL`, `LLMTOOL_PROVIDER`, `LLMTOOL_HOME`, `HOME` or `PATH`). This
-inspection-only restriction does not change normal ask/config behavior. It is
+inspection-only restriction does not change normal ask/config behavior. Windows
+environment names are compared case-insensitively for both reserved bindings and
+key-only credential presence; POSIX comparisons remain case-sensitive. It is
 checked before configuration overrides, diagnostics location or executable lookup
 once trusted bindings are known. Locating the trusted user config still uses the
 existing HOME/default-path bootstrap before those bindings can be read; doctor

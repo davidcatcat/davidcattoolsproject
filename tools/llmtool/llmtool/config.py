@@ -5,6 +5,7 @@ import math
 import os
 import re
 import stat
+import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -250,6 +251,11 @@ def _validate(config):
         raise LLMToolError("temperature must be between 0 and 2")
 
 
+def _inspection_env_name(name):
+    """Windows environment names are case-insensitive; POSIX names are exact."""
+    return name.upper() if sys.platform == 'win32' else name
+
+
 def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=False):
     """Strict layered validation only; never look up a credential value."""
     env = os.environ if environ is None else environ
@@ -259,9 +265,10 @@ def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=Fals
     _apply_user(config, user)
     _apply_project(config, _read_yaml((Path.cwd() if cwd is None else Path(cwd)) / ".llmtool.yaml", "project config"))
     if inspection:
+        reserved = {_inspection_env_name(name) for name in INSPECTION_ENV_NAMES}
         for provider in config['providers'].values():
             name = provider['api_key_env']
-            if isinstance(name, str) and name in INSPECTION_ENV_NAMES:
+            if isinstance(name, str) and _inspection_env_name(name) in reserved:
                 raise LLMToolError('offline inspection credential binding conflicts with configuration environment')
     # Only trusted sources may select a profile. Resolve selection before applying
     # endpoint/model overrides so credentials and overrides come from one profile.
@@ -311,7 +318,8 @@ def inspect_config(*, environ=None, cwd=None, home=None):
     elif provider['api_key_env'] is not None:
         # Mapping.__contains__ (including os._Environ) can fetch the value.
         # Iterate keys instead, so configured secret values are never accessed.
-        credential = ('env-configured-present' if provider['api_key_env'] in tuple(env)
+        keys = tuple(_inspection_env_name(name) for name in env)
+        credential = ('env-configured-present' if _inspection_env_name(provider['api_key_env']) in keys
                       else 'env-configured-absent')
     else:
         credential = 'not-configured'

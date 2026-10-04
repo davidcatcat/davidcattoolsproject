@@ -56,8 +56,9 @@ configuration view without calling normal request loaders, `api_key`, client
 constructors or completion. All configured profiles still undergo existing
 validation; provider selection/environment/project precedence remains unchanged.
 User diagnostics settings are projected independently of legacy config-show.
-Credential presence uses key iteration (`tuple(env)`), because default Mapping
-and os._Environ membership can call `__getitem__`. Empty values are present,
+Credential presence uses key iteration, because default Mapping and os._Environ
+membership can call `__getitem__`. Inspection comparisons canonicalize Windows
+environment names to uppercase and preserve POSIX case sensitivity. Empty values are present,
 not authenticated. Literal credentials are only labeled configured.
 
 Doctor-only preflight rejects credential bindings to environment names consumed
@@ -89,7 +90,7 @@ obsolete deferred-to-A11a.6 stack wording is replaced with this explicit policy.
 case asserting bare doctor did not exist is replaced with forbidden `doctor
 --json`; every other traversal/usage/security assertion is preserved.
 
-## Executed validation
+## Executed validation — historical initial candidate c09e832
 
 All commands ran from `/workspace/davidcattoolsproject`, branch
 `feat/a11a6-offline-doctor-cloud-20261004`, HEAD
@@ -121,8 +122,9 @@ inference or repository Git mutation was performed by the Developer.
 Final wheel SHA-256:
 `e2dcd22534069f0d36a9e0976745c2eff8710531bf860ee248cd20d8fad9e6d4`.
 The first wheel's digest and 851-test PASS preceded the collision safety repair
-and are superseded for final source evidence. Final source/test bytes did not
-change after the successful 852-test canonical execution.
+and are superseded for final source evidence. Those source/test bytes did not change between the successful 852-test execution
+and initial review commit `c09e83274b970c769a21cab666e1b9c1ba0c3669`. They are
+historical initial-candidate evidence after the Round 1 repair below.
 
 Initial non-PASS attempts are retained honestly: matrix's first default-sandbox
 execution failed before fake CLI spawn because the existing isolation selected
@@ -205,8 +207,8 @@ sequence contract; the ID/span rows check the pure schema/generators.
 | Legacy config-show unchanged; configure preserves exact diagnostics mapping | `test_diagnostics_settings.py:test_diagnostics_do_not_change_resolved_or_show_contract`; `test_diagnostics_settings.py:test_configure_preserves_exact_partial_mapping` |
 | Malformed diagnostics config fails before provider I/O | `test_diagnostics_settings.py:test_invalid_config_fails_before_provider_io`; `test_diagnostics_ask_persistence.py:test_malformed_diagnostics_config_precedes_store_and_provider`; `test_doctor.py:test_invalid_config_fixed_error_before_store_or_provider_access` |
 | Doctor existing provider/environment/project selection retained | `test_doctor.py:test_existing_config_selection_overrides_without_profile_value_output` |
-| Configured credential presence by keys only, including default Mapping/os._Environ and empty value | `test_doctor.py:test_credential_key_iteration_only_not_values_or_default_contains`; `test_doctor.py:test_real_os_environ_never_fetches_configured_credential_value` |
-| Reserved credential-binding collisions fail closed before known secret fetch; normal config unchanged | `test_doctor.py:test_credential_binding_collisions_fail_before_known_env_value_fetch` |
+| Configured credential presence by keys only, including default Mapping/os._Environ and empty value | `test_doctor.py:test_credential_key_iteration_only_not_values_or_default_contains`; `test_doctor.py:test_real_os_environ_never_fetches_configured_credential_value`; `test_doctor.py:test_windows_credential_presence_lower_mixed_case_empty_absent_no_value_fetch`; `test_doctor.py:test_posix_credential_and_reserved_names_remain_case_sensitive` |
+| Reserved credential-binding collisions fail closed before known secret fetch; normal config unchanged | `test_doctor.py:test_credential_binding_collisions_fail_before_known_env_value_fetch`; `test_doctor.py:test_windows_reserved_bindings_lower_mixed_case_active_inactive_no_value_fetch` |
 
 ### Store/security
 
@@ -272,7 +274,7 @@ remain unchanged. README/ROADMAP now describe independently confirmed A11a.5 mer
 and historical post-merge CI, while A11a.6 remains a feature-branch implementation.
 No model/runtime identity or savings/complete semantic correctness claim is made.
 
-## Frozen source/test artifact binding
+## Initial frozen source/test artifact binding — historical c09e832
 
 Source/test manifest SHA-256: `2e7e20bbe6a0d7d26a5abb7a025fbf97872a22be9c34a45114e8441af774f764`.
 Source/test patch SHA-256 against base: `0e60ab16932fa4b1e19d51966846553290b5bfe86ca9a8d631332377907a248c`.
@@ -284,7 +286,9 @@ paths and delimiters, replacing file bytes with `git diff --binary --no-ext-diff
 --binary --no-ext-diff -- /dev/null <path>` output. Base is
 `da027f0d728e3b3ff605a6d404c49c8beb08ec28`. Only the eight runtime/test files
 below are included, so documentation changes do not alter tested runtime binding.
-Reproduction helper: `tools/llmtool/.venv/bin/python /tmp/a11a6-evidence.py`.
+Initial digests bind file bytes at `c09e832`; reconstruct those bytes with
+read-only Git inspection to reproduce that historical digest. The working-tree
+helper below now computes the replacement Round 1 digest.
 
 - `tools/llmtool/llmtool/cli.py`
 - `tools/llmtool/llmtool/config.py`
@@ -298,7 +302,94 @@ Reproduction helper: `tools/llmtool/.venv/bin/python /tmp/a11a6-evidence.py`.
 Exact final all-file manifest (including this report) and the 12-file publication
 allowlist are supplied separately in `/tmp/a11a6-freeze-evidence.json` and the
 coordinator handoff, avoiding a self-referential report digest. Root will commit
-only that allowlist. Developer source/tests/docs are frozen for independent
-review; no edits or Git mutations occur during that review unless a bounded
-correction is explicitly handed back. Review/publication/CI SHA and results must
+only that allowlist. This initial candidate was frozen during review; the coordinator authorized
+Round 1 repair only after the Reviewer stopped with REQUEST CHANGES. The next
+freeze is recorded below. Developer performs no Git mutations. Review/publication/CI SHA and results must
 be supplied by the coordinator, not inferred from this uncommitted working tree.
+
+## Independent review and correction Round 1 of at most 2
+
+Reviewer independently read requirements/source on exact clean commit
+`c09e83274b970c769a21cab666e1b9c1ba0c3669` before Developer report evidence.
+Verdict: **REQUEST CHANGES**, R1 blocker; R2 documentation finding accepted for
+routine correction. Its independent doctor 23/23 (0.464 s), canonical 852/852
+(no skips, 22.236 s) and wheel 43-file provenance PASS are historical evidence
+for that initial candidate, not acceptance of the repaired source. The coordinator
+authorized this bounded repair after review stopped; Task Contract v1 and its
+`a6c3bed07312c955b00a506f61984140e1a559de5dff09cec6855004f4e6b4d5`
+digest remain unchanged. No scope or acceptance condition was weakened.
+
+- **R1 — BLOCKER, config.py initial lines 264/314:** exact-case comparisons did
+  not match Windows os._Environ uppercase key semantics. A binding such as
+  `api_key_env: llmtool_model` bypassed reserved-variable preflight before the
+  later `LLMTOOL_MODEL` override lookup could fetch its value. A normal binding
+  such as `doctor_secret` falsely appeared absent when `DOCTOR_SECRET` existed.
+  Reviewer reproduced this with a case-insensitive Mapping and actual synthetic
+  `os._Environ` using `str.upper` as its key codec; the credential-getter tripwire
+  observed the forbidden fetch. Disposition: repaired by one pure platform-aware
+  inspection-name normalizer, applied only to reserved-binding and key-presence
+  comparisons. Windows uses uppercase canonical names; POSIX keeps exact case.
+  Ordinary ask/config layering and bootstrap location precedence are unchanged.
+  New tests cover lower/mixed-case active/inactive reserved bindings, ordinary
+  credentials present/absent/empty, both Mapping and synthetic actual os._Environ
+  codecs with credential get/getitem forbidden, POSIX case separation and ordinary
+  Windows-config behavior preservation. These are injected Linux-host tests,
+  **not native Windows validation**.
+- **R2 — documentation, README initial lines 73/86:** two active checkpoint
+  paragraphs still described PR #22 draft/pending, doctor deferred and A11a.5
+  resumed with later slices unstarted. Disposition: corrected to A11a.5 merged
+  PR #22/`da027f0`/historical post-merge CI and current A11a.6 feature-branch
+  implementation with review/delivery pending. Historical reports remain intact.
+
+Round 1 validation and replacement artifact binding are recorded below.
+Initial 852-test PASS does not establish repaired-byte PASS.
+
+### Fresh Round 1 validation on repaired bytes
+
+Checks ran from the same configured checkout, HEAD
+`c09e83274b970c769a21cab666e1b9c1ba0c3669` plus the repaired patch. Environment,
+Python/package provenance, permission authorization and offline/live limits are
+unchanged. Inherited guards and `/tmp/.git` marker remain intact.
+
+| Check | Exact command / evidence | Result |
+| --- | --- | --- |
+| Repaired doctor and Windows-codec regressions | `tools/llmtool/.venv/bin/python -m unittest discover -s tools/llmtool/tests -p test_doctor.py -v` | PASS, exit 0, 26/26, 0.804 s |
+| Repaired canonical compileall/full unittest | `make -C tools/llmtool check PYTHON="$PWD/tools/llmtool/.venv/bin/python"` | PASS, exit 0, 855/855, no skips, 23.309 s; includes all 232 provider/store fault scenarios and 2 concurrency cases |
+| Rebuilt wheel | `tools/llmtool/.venv/bin/python -m pip wheel --no-deps --no-build-isolation --no-index --wheel-dir /tmp/a11a6-wheel tools/llmtool` | PASS, exit 0 |
+| Fresh replacement install | `/tmp/a11a6-wheel-venv/bin/python -m pip install --no-index --no-deps --force-reinstall /tmp/a11a6-wheel/llmtool-0.1.0-py3-none-any.whl` | PASS, exit 0 |
+| Editable/reinstalled wheel CLI smoke/provenance | `tools/llmtool/.venv/bin/python /tmp/a11a6-smoke.py` | PASS, exit 0, same full console smoke/nonmutation cases and all 43 packaged Python/skill files byte-equal to repaired source |
+| Installed codec-specific repair smoke | `tools/llmtool/.venv/bin/python /tmp/a11a6-round1-installed-casefold.py` | PASS, exit 0, editable and wheel: lower/mixed reserved collision rejected and empty lower/mixed ordinary credential present with actual synthetic os._Environ codec and forbidden credential getters; injected Linux evidence only |
+| Round 1 documentation/history/contract/whitespace | `tools/llmtool/.venv/bin/python /tmp/a11a6-doc-check.py`; `git diff --check` | PASS, exit 0; 63 local links, 170 named matrix method references, unchanged pinned v1 digest and historical reports/spec |
+
+Round 1 rebuilt wheel SHA-256:
+`91c50b90d5142424ab8a40c2c39b94a6e9aafb5356a0794f7cdb86b05fc04f71`.
+No runtime/test/package source bytes changed after the successful 855-test run.
+Only the review/validation report was finalized afterward.
+
+### Replacement frozen binding and review gate
+
+Full eight-file source/test manifest SHA-256:
+`4dc617498879ddff2d29b777de1b9172fe845319c85d15ca088ad7e6bcf15054`.
+Full source/test patch SHA-256 against original main base `da027f0`:
+`1fbd9e92e66ff781118f0fdc619f6d2d0ff554571d14e705db1a6b5119cc144a`.
+Round 1 source/test repair patch SHA-256 against `c09e832`:
+`1ee57c9fb10604262d078ceef3b5f1bf956d40451fa64807162bef31657dd7c2`.
+The manifest/patch encodings are unchanged from the initial binding section.
+The repair patch includes only `tools/llmtool/llmtool/config.py` and
+`tools/llmtool/tests/test_doctor.py`.
+
+Four-file repair publication allowlist:
+
+- `reports/llmtool_a11a6_offline_doctor_validation_20261004.md`
+- `tools/llmtool/README.md`
+- `tools/llmtool/llmtool/config.py`
+- `tools/llmtool/tests/test_doctor.py`
+
+Final four-file and full 12-file feature manifests are supplied separately in
+`/tmp/a11a6-round1-freeze-evidence.json` to avoid self-reference. Reproduce with
+`tools/llmtool/.venv/bin/python /tmp/a11a6-evidence.py` followed by
+`tools/llmtool/.venv/bin/python /tmp/a11a6-round1-evidence.py`. Root alone commits
+the four-file repair. Developer is frozen without Git mutation for independent
+review on the next exact committed SHA. R1/R2 repairs are Developer dispositions;
+Reviewer acceptance remains **PENDING**, as do publication, exact-head CI and
+external gates. This does not mark A11a.6 or overall A11a DONE.
