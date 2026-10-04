@@ -84,20 +84,34 @@ from that repository and name only files belonging to the task.
 - Never weaken tests just to make them pass.
 - Stop for external review when the milestone requires it; do not automatically
   start the next milestone or merge main.
-- Provider != Role != Agent.
+- Provider != Profile != Role != Agent != Skill. Capability/role/model identity never grants execution authority.
 
 ## Repository workflows
 
 `AGENTS.md` is Codex-specific guidance; `CLAUDE.md` is Claude-specific guidance.
 Read the relevant reusable workflow in `skills/<name>/SKILL.md` before using it.
 Use `inspect-repo` for investigation, `implement-feature` for implementation,
-`debug-ci` for failing checks, `review-change` for review, and `safe-git` for Git
-operations. Keep one shared workflow per skill; Codex interface metadata belongs
+`debug-ci` for failing checks, `review-change` for ordinary diff review,
+`bug-hunt` for reproducible defect discovery, `security-review` for threat/security
+assessment, `qa-validation` for public-interface QA, `validate-runtime` for live
+runtime evidence, and `safe-git` for Git operations. These evidence gates are not
+interchangeable. Keep one shared workflow per skill; Codex interface metadata belongs
 in the skill's `agents/openai.yaml`.
 
 Documentation-only changes require documentation validation, not application
 builds. Report checks that passed and any that could not run. Do not claim remote
 synchronization from local tracking references without fetching.
+
+## Quality-gate discipline
+
+A Task Contract/milestone decides which gates are required. Ordinary code review does
+not automatically satisfy bug hunt, formal security review, QA, or live/runtime validation.
+When a gate finds a real defect, preserve its reproducer/evidence, fix through the normal
+implementation workflow, and re-run the affected gate. Do not start the next milestone
+while a required gate is unresolved.
+
+For llmtool after A11a, the current pre-A11b sequence is QG-S1 Security Baseline /
+Threat Model, then QG-QA1 Formal A11a QA. A11b remains NOT STARTED until both pass.
 
 ## Default Cloud agent roles
 
