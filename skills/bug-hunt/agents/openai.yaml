@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bug Hunt"
+  short_description: "Find reproducible defects without mixing in style review"
+  default_prompt: "Use $bug-hunt to search this exact revision for observable defects, reproduce candidates before calling them bugs, and classify confirmed, likely, theoretical, and expected behavior separately."

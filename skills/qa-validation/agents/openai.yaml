@@ -1,0 +1,4 @@
+interface:
+  display_name: "QA Validation"
+  short_description: "Test public product behavior with an explicit acceptance matrix"
+  default_prompt: "Use $qa-validation to test this exact revision through public/user-facing interfaces, record PASS/FAIL/BLOCKED/NOT-TESTED evidence, and preserve failing reproducers before any fixes."

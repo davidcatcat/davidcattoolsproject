@@ -22,7 +22,8 @@ Deliver a working change, not just code generation.
    production behavior or package resources change, or repository instructions require them.
 8. Manually exercise the user-facing flow when practical.
 9. Use `review-change` on the final diff.
-10. Use `safe-git` only when the user asks to commit, synchronize, or push.
+10. Run any additional gate explicitly required by the Task Contract/milestone: `bug-hunt`, `security-review`, `qa-validation`, or `validate-runtime`. Do not assume ordinary review satisfies those gates.
+11. Use `safe-git` only when the user asks to commit, synchronize, or push.
 
 ## Rules
 
@@ -49,3 +50,4 @@ required verification complete and merge ready as separate claims.
 - Required quality gates pass.
 - Final diff contains no unrelated changes.
 - Known limitations and manual verification steps are reported.
+- Required specialist gates are either complete or explicitly pending/blocked; implementation complete is not the same claim as security-reviewed, QA-passed, or merge-ready.

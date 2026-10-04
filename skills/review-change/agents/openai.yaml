@@ -1,4 +1,4 @@
 interface:
   display_name: "Review Change"
-  short_description: "Review correctness, security, tests, and validation"
-  default_prompt: "Use $review-change to review this diff or branch for correctness, regressions, security, maintainability, test coverage, and validation provenance."
+  short_description: "Review a diff without conflating bug hunt, security, or QA"
+  default_prompt: "Use $review-change to review this diff or branch for correctness, regressions, maintainability, test coverage, security-relevant boundaries, and validation provenance. If the task requires a formal bug hunt, security review, or QA gate, route to that specialist skill instead of claiming this review satisfies it."

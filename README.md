@@ -10,7 +10,10 @@ This repository currently provides:
 - `inspect-repo` — inspect an unfamiliar repository before changing it.
 - `implement-feature` — implement a change through tests and final validation.
 - `debug-ci` — diagnose CI failures and apply the smallest correct fix.
-- `review-change` — review a diff for correctness, regression, security, and tests.
+- `review-change` — review a diff for correctness, regressions, maintainability, tests, and validation provenance.
+- `bug-hunt` — search specifically for observable correctness/concurrency/security defects and require reproduction evidence before fixes.
+- `security-review` — threat-model and security-review a change/system using evidence, trust boundaries, CWE/CVSS where applicable, and OWASP verification references.
+- `qa-validation` — exercise public/user-facing behavior with explicit PASS/FAIL/BLOCKED/NOT-TESTED evidence.
 - `safe-git` — safely fetch, synchronize, commit, and push Git changes.
 - `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
 
@@ -42,28 +45,47 @@ The installer will not overwrite a real directory that already exists at a desti
 
 ## Recommended workflow
 
-For a new project, start with the project goal and use `start-project`.
+Skills are deliberately separated by evidence type. A normal code review is not a
+bug hunt; a bug hunt is not a security assessment; QA tests the product through its
+public surface instead of re-reading the implementation.
 
-A typical engineering flow is:
+Typical implementation flow:
 
 ```text
-start-project
+start-project (new projects only)
   -> inspect-repo
   -> implement-feature
   -> review-change
   -> safe-git
 ```
 
-For failures in an existing project:
+For important milestone/release gates, add only the gates required by the task:
+
+```text
+review-change
+  -> bug-hunt          # observable defects; reproduce before fixing
+  -> security-review   # when a security baseline/threat model or changed attack surface matters
+  -> qa-validation     # public/user-facing functional and failure-path validation
+  -> safe-git
+```
+
+For CI/runtime failures:
 
 ```text
 inspect-repo
-  -> debug-ci
+  -> debug-ci or validate-runtime
   -> review-change
   -> safe-git
 ```
 
-Skills are guidance for the coding agent, not a replacement for project-specific requirements. A project's own `AGENTS.md`, `CLAUDE.md`, tests, schemas, and source code remain the source of truth for that project.
+Confirmed findings flow back through `implement-feature` with a failing regression
+test/reproducer first, then the relevant gate is re-run. Do not force every small
+documentation change through security review or QA; the Task Contract/milestone
+defines which gates are required.
+
+Skills are guidance for the coding agent, not a replacement for project-specific
+requirements. A project's own `AGENTS.md`, `CLAUDE.md`, tests, schemas, source,
+Task Contract and current roadmap remain authoritative.
 
 ## Canonical repository workflow
 
@@ -92,9 +114,14 @@ Create:
 
 ```text
 skills/<new-skill>/SKILL.md
+skills/<new-skill>/agents/openai.yaml
 ```
 
-Minimum frontmatter:
+`SKILL.md` is the shared workflow/source of truth. `agents/openai.yaml` contains
+interface metadata only (display name, short description, default prompt) and must
+not duplicate the workflow.
+
+Minimum SKILL.md frontmatter:
 
 ```yaml
 ---
@@ -107,7 +134,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 mainline milestones and A11a.1–6 are merged (A2.3 Anthropic API remains planned). A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**. See [final acceptance](reports/llmtool_a11a7_final_validation_20261004.md) for current evidence and deferred limits; original validation/review reports remain historical. A11b Task Contract execution gates, A11c integration and optional A12 Telegram remain NOT STARTED. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 Security Baseline / Threat Model is next, then QG-QA1 Formal QA before A11b. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) for the authoritative current milestone snapshot and the [workflow](tools/llmtool/WORKFLOW.md) for engineering gates.
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 

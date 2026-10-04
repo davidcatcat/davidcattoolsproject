@@ -54,6 +54,16 @@ Hard guardrails:
 - Never delete branches or tags unless explicitly requested.
 - Never overwrite unrelated remote work.
 
+## Merge evidence discipline
+
+Before merge, verify the latest PR/head SHA and use exact-head checks. A report-only
+or documentation commit after a previously green implementation creates a new head;
+verify that head's required CI rather than citing only the older run. After merge,
+verify the new main SHA and any required post-merge CI. Green CI alone does not replace
+a required independent review, bug hunt, security review, QA or live/runtime gate.
+
+Keep one Git writer per publication batch when multiple agents are involved.
+
 ## Cloud/Mac evidence gate
 
 For llmtool work, follow [the development workflow](../../tools/llmtool/WORKFLOW.md).

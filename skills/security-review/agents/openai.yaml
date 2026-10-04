@@ -1,0 +1,4 @@
+interface:
+  display_name: "Security Review"
+  short_description: "Threat-model trust boundaries and verify exploitable weaknesses"
+  default_prompt: "Use $security-review to threat-model this exact revision, identify assets and trust boundaries, separate confirmed vulnerabilities from design gaps, and use CWE/CVSS/OWASP references only where they actually fit."

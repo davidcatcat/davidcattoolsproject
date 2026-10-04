@@ -10,7 +10,7 @@ Build a concrete map before proposing changes.
 ## Process
 
 1. Inspect repository status and top-level structure.
-2. Read applicable guidance files such as `CLAUDE.md`, `AGENTS.md`, README, CONTRIBUTING, and local instructions.
+2. Read applicable guidance files such as `CLAUDE.md`, `AGENTS.md`, README, ROADMAP, CONTRIBUTING, current Task Contract, and local instructions. Distinguish current status from historical validation reports.
 3. Locate the code, tests, schemas, configs, and workflows relevant to the task.
 4. Find at least one existing analogous implementation when available.
 5. Inspect recent history for the touched area when it can clarify intent.
@@ -21,7 +21,8 @@ Build a concrete map before proposing changes.
 8. Record the tested revision/version before runtime validation. Never interpret a runtime failure
    as a product regression until the tested checkout/version is proven to contain the expected
    feature.
-9. Summarize only facts that materially affect the requested change.
+9. Identify which evidence gate the task actually is: implementation review, bug hunt, security review, QA, runtime validation, or Git publication. Do not silently substitute one for another.
+10. Summarize only facts that materially affect the requested change.
 
 Do not start implementation merely because a plausible file was found. Finish the relevant inspection first.
 

@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** A11a.1–6 merged: core diagnostics, ephemeral ask, trusted settings/POSIX store, persisted ask, offline runs/trace and doctor. A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**. A11b Execution/Approval/Recovery and A11c Integration/Real-world Acceptance remain NOT STARTED. See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md).
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 Security Baseline / Threat Model is NEXT**, followed by **QG-QA1 Formal A11a QA**. A11b Execution/Approval/Recovery and A11c Integration/Real-world Acceptance remain NOT STARTED.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -63,39 +63,43 @@ request during configuration. The live gateway result is recorded in the
 
 ## A11 delivery checkpoint
 
-A11a → A11b → A11c 各自需要 validation report、external review 與 merge gate。
-A11a 先做 diagnostics，既有指令預設不新增持久化寫入；只有 explicit CLI / trusted user
-config opt-in 才保存 bounded safe metadata。Debug 不保存 prompt/response、retrieved
-content 或 raw stderr，也不改既有 stdout/JSON schema。A11a.3 提供 validated user settings、
-LLMTOOL_HOME resolver 與獨立 POSIX store API，已透過 PR #18 合併。A11a.4 已透過 PR #19
-合併 ask metadata persistence 與互斥 save/no-save flags；預設仍 off，CLI 明確選擇
-優先於 trusted user setting。`LLMTOOL_HOME` 或 `--debug` 本身都不啟用保存。
-`runs` / `trace` 已透過 PR #22 合併為 `da027f0`；post-merge main CI `37193806074` 的 Python 3.9/3.14 各 824 tests PASS。A11a.6 offline `doctor` / failure matrix 與 M1/M3 hardening 已透過 PR #24 合併為 `6b7809a`；post-merge CI `37213447952` Python 3.9/3.14 PASS。A11a.7 final acceptance 在 feature branch 進行，external review / gate merge pending。原 A11a.5 report 的 draft/review pending 敘述為 historical checkpoints。
+A11 is deliberately split into implementation milestones and independent quality
+gates so that "code reviewed", "bugs searched", "security assessed" and "QA passed"
+are never treated as the same claim.
 
-A11b 才加入有限 executor；每個 action、repair 與 Git mutation 都先經 policy/required
-approval，不能先執行再批准。A9/A10 原有 fail-fast、no-retry/no-fallback 與 text-only
-provider 契約保持。A11c 才整合真實任務驗收。詳細 bounds、安全邊界與 DoD 見
-[Roadmap](ROADMAP.md)。A11a.1–3 已合併；A11a.3 的 historical company live 與 review
-evidence 保留在原報告。A11a.4 的 R1 precedence finding 經 correction round 1 修正後，
-independent Reviewer 對 `852f510` PASS；Developer/Reviewer 各自 canonical 784/784 PASS，
-該已發布 SHA 的 Python 3.9/3.14 CI 各 784/784 PASS。External ChatGPT source review
-對 `bf37bb86` PASS；該 head 的 final documentation-head CI 37156216279 亦已 SUCCESS，
-兩個 Python jobs 各 784/784 PASS。上述為歷史 review evidence。PR #19 已於
-2026-10-04 合併為 `2bade6aa95963d3f2c3d9332aa3939407512da7e`；post-merge main
-[CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-SUCCESS。A11a.1–6 已合併；A11a.7 final acceptance 進行中，external review / gate merge pending，A11a 整體仍未 DONE；A11b 與後續 execution milestones 尚未啟動。
-See [A11a.4 validation](../../reports/llmtool_a11a4_persisted_ask_validation_20261003.md).
+| Stage | State | Purpose |
+| --- | --- | --- |
+| A11a — Observability & Diagnostics | **DONE** | Structured diagnostics, opt-in safe metadata store, runs/trace/doctor, failure handling |
+| QG-S1 — Security Baseline / Threat Model | **NEXT** | Assess current attack surface and pin security requirements before executor work |
+| QG-QA1 — Formal A11a QA | **NOT STARTED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
+| A11b — Execution, Approval & Recovery | **NOT STARTED** | Add bounded mutation only after both pre-A11b quality gates pass |
+| A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate company-first workflow, independent verification and real task acceptance |
 
-Architecture refinement 只更新設計與工程指引：固定且版本化的 Task Contract、公司 LLM
-優先整理 context／摘要／分類／log normalization／初步規劃／第一輪 review，並以客觀
-failure/evidence 事件決定是否升級。Schema 合格與模型自報 confidence 都不能證明內容
-正確或完成。Contract 與原始驗證證據不可由摘要取代；摘要仍受公司資料外送邊界約束。
-只有符合 contract、綁定 revision/patch digest 的 required evidence 可通過 verification；
-tests/deterministic checks 有覆蓋限制，不能保證所有語意正確。A11b 規劃 enforcement／
-execution gates；A11c 規劃 cheap-first workflow、獨立驗證與 bounded repair；context budget
-與 cost routing 留待後續設計。詳見 [Roadmap](ROADMAP.md#architecture-refinement--planning-only)
-及 [WORKFLOW](WORKFLOW.md#task-contract-company-llm-and-evidence)。沒有新增 runtime
-schema、hooks engine、automatic routing、retry、fallback 或 escalation 實作。
+A11a final acceptance merged through PR #25 (`e3869828`). The independent full bug
+hunt then found seven confirmed diagnostics defects; Codex reproduced each one,
+added permanent regression coverage and fixed B1–B7 in PR #26 (`2761ce10`).
+Claude independently re-ran the original probes and approved the fixes. Post-merge
+CI `37228032137` passed Python 3.9/3.14.
+
+A11a remains read-only/text-only apart from explicit trusted metadata persistence:
+no executor, hooks engine, automatic retry/fallback, patching or Git mutation.
+Persistence defaults off, and diagnostics must remain secondary to the primary
+task. Historical reports retain their original pre-merge status wording.
+
+The next sequence is fixed:
+
+```text
+QG-S1 security baseline / threat model
+  -> confirmed security fixes, if any
+  -> QG-QA1 formal QA
+  -> confirmed QA regressions fixed + regression
+  -> A11b design/implementation
+```
+
+Detailed milestone scope and retained limitations are in [ROADMAP](ROADMAP.md).
+Engineering execution/review rules are in [WORKFLOW](WORKFLOW.md). Root repository
+skills distinguish ordinary code review, bug hunting, security review and QA; those
+are separate evidence gates, not interchangeable labels.
 
 ## Canonical repository workflow
 
@@ -881,9 +885,11 @@ or save flag. Existing `ask`, `runs` and `trace` contracts remain unchanged.
 
 See [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md)
 for the named spec failure matrix and historical offline fault-injection evidence.
-A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**. See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md) for fresh acceptance evidence and the full spec section 18 coverage matrix. Historical live/provider results remain historical.
+A11a.6 offline doctor/failure matrix and M1/M3 persistence hardening merged via PR #24 (`6b7809a`). A11a.7 final acceptance merged via PR #25 (`e3869828`), and post-acceptance B1–B7 fixes merged via PR #26 (`2761ce10`); post-merge CI `37228032137` passed Python 3.9/3.14. Overall **A11a DONE**. Historical validation/review reports retain their original checkpoint wording.
 
 ## Troubleshooting 與已知限制
+
+Post-acceptance B1–B7 hardening is merged. Eviction now uses a durable intent plus quarantine/recovery flow, and committed diagnostics remain saved even if later cleanup/close reports a secondary warning. Remaining non-blocking observations are explicit: buffered broken-pipe handling for older non-A11a commands such as `analyze-log` is still legacy behavior; an extreme SIGKILL can conservatively leave an empty `.evicted-*` directory; and a kill before eviction-journal publication can leave an `.eviction-init-*` staging artifact. These do not consume a run slot or authorize automatic deletion of unknown data, and remain candidates for later hardening rather than A11a blockers.
 
 Current diagnostics limits are retained from the external reviews: M2 late partial
 trace/summary remnants can retain capacity; M4 full completed-trace validation
@@ -1908,7 +1914,7 @@ A11a.1–6 merged; A11a.4 PR #19 merge `2bade6a` / historical independent and
 external source review PASS / post-merge main CI `37167325001` PASS;
 A11a.5 PR #22 merged as `da027f0`, post-merge CI `37193806074` PASS (3.9/3.14, 824 each);
 A11a.6 PR #24 merged as `6b7809a`, post-merge CI `37213447952` Python 3.9/3.14 PASS;
-A11a.7 final acceptance in progress on `feat/a11a7-final-acceptance-20261004`, external review/gate merge pending; overall A11a NOT DONE;
+A11a.7 final acceptance merged via PR #25 (`e3869828`); post-acceptance B1–B7 bugfix merged via PR #26 (`2761ce10`) with post-merge CI `37228032137` PASS; overall A11a DONE;
 A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).
