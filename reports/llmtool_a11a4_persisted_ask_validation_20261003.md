@@ -1,9 +1,9 @@
 # A11a.4 — Persisted ask integration validation — 2026-10-03
 
-Status: **DRAFT PR #19 / INDEPENDENT REVIEW PASS / REVIEWED-HEAD CI PASS /
-FINAL DOCUMENTATION-HEAD CI AND EXTERNAL/HUMAN REVIEW PENDING**. A11a.4 is not merged/DONE. Overall A11a remains
+Status: **PR #19 / INDEPENDENT AND EXTERNAL SOURCE REVIEW PASS /
+REVIEWED-HEAD CI PASS / LATEST DOCUMENTATION-HEAD CI IN PR**. A11a.4 is not merged/DONE. Overall A11a remains
 incomplete; A11a.5–7, A11b, A11c and A12 are NOT STARTED. No merge is authorized.
-The current publication checkpoint at the end supersedes the explicitly historical
+The external review checkpoint at the end supersedes the explicitly historical
 initial-candidate check/review sections; the prior permission event remains historical.
 
 ## Repository and exact implementation
@@ -308,7 +308,7 @@ on a feature branch, not merged/DONE; overall A11a and later-slice status is unc
 The Developer freezes all writes after the correction documentation delivery and
 hands the exact clean candidate SHA to the coordinator for second review.
 
-## Current publication checkpoint — independent PASS and reviewed-head CI
+## Historical publication checkpoint — independent PASS and reviewed-head CI
 
 Independent review history: **REQUEST CHANGES** on first candidate `51aef575` for
 R1 primary input/skill error precedence → accepted correction round 1 committed as
@@ -382,3 +382,44 @@ NOT-TESTED, and Linux/mock evidence is not presented as live inference.
 A11a.4 is not merged/DONE, overall A11a remains incomplete, and no later milestone
 or merge is authorized. The Developer freezes the documentation candidate before
 the coordinator obtains final docs-only confirmation and permits publication.
+
+
+## External source review and CI checkpoint — 2026-10-04
+
+External reviewer: ChatGPT Work, a separate conversation from the Cloud Developer
+and Reviewer. Reviewed feature head: `bf37bb86a1554b128b191c990c8b3573efba02b5`;
+base: `b9ac5389ea9e45fa3f66450e0269920ee03734e7`.
+
+Disposition: **PASS — no new blocking source finding**. Review covered the complete
+12-file PR diff, implementation spec, ask/runtime/store integration and behavioral
+tests. Default-off and opt-in precedence, primary stdout/exit/error compatibility,
+one provider request, metadata privacy, run-ID collisions, failure containment and
+R1 input/skill precedence remediation were checked. No live inference, local
+checkout or local test rerun is claimed; source review used pinned GitHub API reads.
+
+One non-blocking documentation finding was accepted: summaries still said external
+review and final CI were pending after those results existed. This documentation-only
+update records the actual evidence and points subsequent head CI to the PR.
+
+[PR CI 37156216279](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37156216279)
+is completed SUCCESS, associated with head `bf37bb86a1554b128b191c990c8b3573efba02b5`.
+The job logs confirm checkout of GitHub's synthetic PR merge commit
+`6385b2e6d69ad51d43dcb0ca0b1f523a3b331f8c`, combining that head with the base above:
+
+| Job | Canonical suite | Other required steps |
+| --- | --- | --- |
+| Python 3.9, 111300017038 | 784 tests, OK, 18.903 s, no failures/errors/skips | Install, compileall/canonical, clean tree SUCCESS |
+| Python 3.14, 111300017198 | 784 tests, OK, 17.867 s, no failures/errors/skips | Install, compileall/canonical, clean tree SUCCESS |
+
+This is CI for the reviewed PR head and its tested integration tree. It is not a
+new Mac/live provider result, nor CI for a later documentation commit. The latest
+documentation revision SHA and its CI run/results are recorded in PR #19 after
+publication so the report does not need an impossible self-commit reference.
+
+This update changes only root README, llmtool README/ROADMAP and this report;
+production/config/tests/workflows/skills remain unchanged. Requested agent models
+and reasoning remain actual-runtime UNVERIFIED. The historical permission event
+remains unchanged; optional Mac/company/provider live checks remain NOT-TESTED.
+The separate external source-review gate is satisfied. A11a.4 remains unmerged,
+overall A11a remains incomplete, and this documentation update does not authorize
+merge or A11a.5 implementation.
