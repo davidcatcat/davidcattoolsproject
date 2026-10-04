@@ -1,11 +1,23 @@
 ---
 name: review-change
-description: Review a code change for correctness, regressions, security, maintainability, and test coverage. Use before committing important changes or when the user asks to review a diff, patch, branch, or implementation.
+description: Review a code change for correctness, regressions, security-relevant boundaries, maintainability, test coverage, and validation provenance. Use before committing important changes or when the user asks to review a diff, patch, branch, or implementation. Use bug-hunt, security-review, or qa-validation for those specialist gates.
 ---
 
 # Review Change
 
 Review the actual diff against the requested behavior and repository rules.
+
+## Boundary with specialist gates
+
+This skill is the ordinary implementation/diff review. Do not stretch one review
+label to cover every evidence type:
+
+- use `bug-hunt` for an active search for reproducible defects in the current implementation;
+- use `security-review` for a formal threat model/security baseline or exploit-focused assessment;
+- use `qa-validation` for public/user-facing functional and acceptance testing.
+
+A normal review may notice issues in any of those areas, but it does not automatically
+satisfy a milestone gate that explicitly requires one of the specialist workflows.
 
 ## Process
 
