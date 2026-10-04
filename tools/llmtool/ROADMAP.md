@@ -473,13 +473,13 @@ A11a.4 persisted ask integration DONE/merged via PR #19，merge SHA
 post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d404c49c8beb08ec28`；
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
-A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance is in progress on `feat/a11a7-final-acceptance-20261004`, pending external review and gate merge; overall **A11a NOT DONE**.
+A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b/A11c 與後續 execution milestones 尚未啟動。Execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–6 merged; A11a.7 final acceptance in progress, external review/gate merge pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`), post-merge CI 3.9/3.14 PASS | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE; security baseline/threat model and formal QA remain pre-A11b quality gates |
 | A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
 | A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
@@ -607,6 +607,8 @@ completion. A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence ha
 See [A11a.7 final validation](../../reports/llmtool_a11a7_final_validation_20261004.md) for the delivery audit, fresh evidence and retained limits. Historical A11a.6
 review checkpoints remain in [A11a.6 validation](../../reports/llmtool_a11a6_offline_doctor_validation_20261004.md).
 
+Post-acceptance observations O1–O3 remain non-blocking and explicit: legacy non-A11a commands can still show the pre-existing buffered broken-pipe exit-120 behavior; a SIGKILL after quarantine lock removal may leave an empty `.evicted-*` directory; and interruption before eviction-journal publication may leave `.eviction-init-*` staging. These are fail-safe retained artifacts/legacy behavior, not A11a blockers, and do not authorize cleanup of unknown data.
+
 Deferred limits remain explicit: M2 late artifacts/capacity, M4 root-lock full trace
 validation, M5 reader scan limits, unchanged P1–P4 doctor behavior and N1 unknown
 staging byte/scan accumulation without staging reporting/cleanup. P5 current-status
@@ -621,7 +623,7 @@ Implementation slices remain exactly spec section 17:
 | --- | --- |
 | A11a.5 | Offline runs/trace readers and human/JSON rendering; DONE/merged PR #22 `da027f0`, post-merge CI 3.9/3.14 824 each PASS |
 | A11a.6 | Offline doctor/failure matrix and narrow M1/M3 hardening; merged PR #24 `6b7809a`, post-merge CI 3.9/3.14 PASS; M2/M4/M5, doctor behavioral findings and N1 retained |
-| A11a.7 | Final acceptance/dated report/docs in progress on `feat/a11a7-final-acceptance-20261004`; external review/gate merge pending; overall A11a NOT DONE |
+| A11a.7 | DONE and merged via PR #25 (`e3869828`); post-acceptance B1–B7 bugfix merged via PR #26 (`2761ce10`), post-merge CI `37228032137` PASS |
 
 The numbered architecture topics below describe the broader design, not the
 implementation slice numbering. A11a adds no executor, hooks engine, automatic
