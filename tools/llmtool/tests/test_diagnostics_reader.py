@@ -53,7 +53,8 @@ def snapshot(path):
         raw = (entry.read_bytes() if stat.S_ISREG(info.st_mode) else
                os.readlink(entry) if stat.S_ISLNK(info.st_mode) else None)
         result[str(entry.relative_to(path))] = (info.st_mode, info.st_uid, info.st_ino,
-                                                info.st_mtime_ns, info.st_ctime_ns, raw)
+                                                info.st_mtime_ns, info.st_ctime_ns,
+                                                info.st_nlink, raw)
     return result
 
 
@@ -513,6 +514,52 @@ class ReaderTests(unittest.TestCase):
             rows = self.reader.runs()['runs']
         self.assertEqual([row['run_id'] for row in rows], ['c' * 32, 'b' * 32, 'a' * 32])
 
+    def test_runs_recorded_success_never_verifies_missing_completion_evidence(self):
+        directory = self.completed()
+        summary_path = directory / 'summary.json'
+        trace_path = directory / 'trace.jsonl'
+        summary = json.loads(summary_path.read_bytes())
+        summary.update(status='success', final_error_code=None)
+        values = [item.to_dict() for item in sample_events()]
+        values[-1]['data']['status'] = 'success'
+        values[-1]['severity'] = 'info'
+        valid_trace = b''.join(json.dumps(value).encode() + b'\n' for value in values)
+        for raw in (b'', b'malformed\n', b''.join(json.dumps(value).encode() + b'\n'
+                                                for value in values[:-1])):
+            with self.subTest(trace=raw[:20]):
+                trace_path.write_bytes(raw)
+                summary_path.write_text(json.dumps({**summary, 'trace_bytes': len(raw),
+                                                    'event_count': raw.count(b'\n')}))
+                before = snapshot(self.home)
+                status, out, err = self.invoke(['runs'])
+                self.assertEqual((status, err), (0, ''))
+                self.assertIn('Saved summaries only; trace evidence unverified.', out)
+                self.assertIn('recorded_status=success', out)
+                self.assertNotIn(' status=success', out)
+                self.assertNotIn('state=complete', out)
+                self.assert_trace_failure('FORMAT_INVALID')
+                self.assertEqual(snapshot(self.home), before)
+        trace_path.unlink()
+        self.assertEqual(self.reader.runs()['damaged_count'], 1)
+        self.assert_trace_failure('FORMAT_INVALID')
+        trace_path.write_bytes(valid_trace)
+        trace_path.chmod(0o600)
+        summary_path.unlink()
+        for missing_trace in (False, True):
+            if missing_trace:
+                trace_path.unlink()
+            before = snapshot(self.home)
+            status, out, err = self.invoke(['runs'])
+            self.assertEqual((status, err), (0, ''))
+            self.assertIn('recorded_status=incomplete', out)
+            self.assertNotIn('recorded_status=success', out)
+            status, out, err = self.invoke(['trace', RUN_ID, '--json'])
+            self.assertEqual((status, err), (0, ''))
+            value = json.loads(out)
+            self.assertEqual(value['state'], 'incomplete')
+            self.assertIsNone(value['summary'])
+            self.assertEqual(snapshot(self.home), before)
+
     def test_run_output_limit_and_scan_limit_include_unrelated_entries(self):
         directory = self.completed()
         summary = json.loads((directory / 'summary.json').read_bytes())
@@ -613,7 +660,7 @@ class ReaderTests(unittest.TestCase):
             return raw
         with patch.object(r, '_read', side_effect=change_after_read):
             self.assert_trace_failure('STORE_UNAVAILABLE', json_modes=(True,))
-        self.assert_trace_failure('FORMAT_INVALID')
+        self.assert_trace_failure('STORE_UNSAFE')  # Replacement lacks the required run lock.
 
     def test_real_cleanup_waits_for_reader_and_snapshot_remains_valid(self):
         self.completed()
@@ -686,6 +733,82 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(results, [True])
         self.assertEqual((value['state'], value['events'], value['summary']), ('incomplete', [], None))
         self.assertEqual(self.reader.trace(RUN_ID)['state'], 'complete')
+
+    def test_actual_publication_temp_and_hardlink_windows_are_incomplete(self):
+        for phase in ('summary_temp', 'trace_link', 'summary_link'):
+            with self.subTest(phase=phase):
+                self.home = self.base / phase
+                self.reader = r.DiagnosticsReader(home=self.home)
+                identity = {'summary_temp': '1', 'trace_link': '2', 'summary_link': '3'}[phase] * 32
+                writer = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True),
+                                          home=self.home).start(identity)
+                self.addCleanup(writer.close)
+                values = sample_events(identity)
+                for value in values:
+                    self.assertTrue(writer.append(value))
+                summary = RunSummary(run_id=identity, mode=d.DiagnosticMode.NORMAL, status='error',
+                    started_at=values[0].timestamp, ended_at=values[-1].timestamp, duration_ms=5,
+                    event_count=5, dropped_event_count=0, trace_bytes=writer.trace_bytes)
+                directory = self.home / 'runs' / identity
+                entered, release = threading.Event(), threading.Event()
+                results = []
+                original_publish, original_unlink = diagnostics_store._publish, os.unlink
+
+                def pause():
+                    entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError('publication test timed out')
+
+                def publishing(parent, source, target):
+                    if phase == 'summary_temp' and target == 'summary.json':
+                        self.assertTrue(source.startswith('.summary-'))
+                        self.assertTrue((directory / source).exists())
+                        pause()
+                    original_publish(parent, source, target)
+
+                def unlinking(name, *args, **kwargs):
+                    if ((phase == 'trace_link' and name == 'trace.partial.jsonl') or
+                            (phase == 'summary_link' and str(name).startswith('.summary-'))):
+                        self.assertEqual(os.stat(name, dir_fd=kwargs['dir_fd']).st_nlink, 2)
+                        pause()
+                    return original_unlink(name, *args, **kwargs)
+
+                thread = threading.Thread(target=lambda: results.append(writer.finish(summary)))
+                with patch.object(diagnostics_store, '_publish', side_effect=publishing), \
+                        patch.object(os, 'unlink', side_effect=unlinking):
+                    thread.start()
+                    try:
+                        self.assertTrue(entered.wait(3))
+                        before = snapshot(self.home)
+                        original_stat = os.stat
+                        inspected = []
+
+                        def statting(name, *args, **kwargs):
+                            inspected.append(str(name))
+                            return original_stat(name, *args, **kwargs)
+
+                        with ExitStack() as stack:
+                            stack.enter_context(patch.object(r, '_read', side_effect=AssertionError('active bytes')))
+                            stack.enter_context(patch.object(r.os, 'stat', side_effect=statting))
+                            for name in ('mkdir', 'makedirs', 'write', 'unlink', 'rmdir', 'chmod',
+                                         'fchmod', 'rename', 'replace', 'link'):
+                                stack.enter_context(patch.object(os, name, side_effect=AssertionError('mutation')))
+                            value = self.reader.trace(identity)
+                            self.assertEqual((value['state'], value['events'], value['summary']),
+                                             ('incomplete', [], None))
+                            rows = self.reader.runs()
+                            self.assertEqual(rows['damaged_count'], 0)
+                            row = next(row for row in rows['runs'] if row['run_id'] == identity)
+                            self.assertEqual(row['status'], 'incomplete')
+                        self.assertFalse(any(name in r.RUN_FILES - {'.run.lock'} or
+                                             name.startswith('.summary-') for name in inspected))
+                        self.assertEqual(snapshot(self.home), before)
+                    finally:
+                        release.set()
+                        thread.join(3)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(results, [True])
+                self.assertEqual(self.reader.trace(identity)['state'], 'complete')
 
     def test_non_posix_and_invalid_home_safe_no_io(self):
         with patch.object(r.os, 'open', side_effect=AssertionError('unsupported I/O')):

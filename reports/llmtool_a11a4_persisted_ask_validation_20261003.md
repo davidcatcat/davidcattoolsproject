@@ -1,5 +1,21 @@
 # A11a.4 — Persisted ask integration validation — 2026-10-03
 
+## Post-merge status — 2026-10-04
+
+[PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19) merged to
+`main` at 2026-10-04T01:12:53Z as `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
+A11a.4 is DONE/merged. Overall A11a remains incomplete; A11a.5–7, A11b/A11c
+and A12 remain NOT STARTED at this checkpoint. This status update adds no new
+runtime/CI evidence and does not authorize later-slice implementation.
+The pre-merge status and review checkpoints below are historical; their
+unmerged/authorization statements describe those earlier checkpoints.
+
+Historical post-merge [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+passed for the PR #19 merge SHA above (Python 3.9/3.14); this is historical
+CI evidence, not a new live inference result or CI for this integration commit.
+
+## Historical pre-merge validation
+
 Status: **PR #19 / INDEPENDENT AND EXTERNAL SOURCE REVIEW PASS /
 REVIEWED-HEAD CI PASS / LATEST DOCUMENTATION-HEAD CI IN PR**. A11a.4 is not merged/DONE. Overall A11a remains
 incomplete; A11a.5–7, A11b, A11c and A12 are NOT STARTED. No merge is authorized.
@@ -423,22 +439,3 @@ remains unchanged; optional Mac/company/provider live checks remain NOT-TESTED.
 The separate external source-review gate is satisfied. A11a.4 remains unmerged,
 overall A11a remains incomplete, and this documentation update does not authorize
 merge or A11a.5 implementation.
-
-## Additive merge checkpoint — 2026-10-04
-
-The coordinator verified native GitHub PR #19 as **MERGED** at
-2026-10-04T01:12:53Z, merge SHA
-`2bade6aa95963d3f2c3d9332aa3939407512da7e`. Final feature head:
-`01db2eff3347835f0bf7b38bc227247bf41d0fb0`.
-[Post-merge main CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
-was a push run on exact merge head `2bade6aa95963d3f2c3d9332aa3939407512da7e`,
-completed SUCCESS with both Python 3.9 and 3.14 jobs SUCCESS. This is post-merge
-main evidence, not final feature-head CI on `01db2eff`.
-The A11a.5 developer independently verified the configured Cloud checkout's
-fetched origin/main exactly equals the merge SHA before creating its new branch.
-
-A11a.4 is **DONE/merged**. This supersedes the historical unmerged/current-status
-wording above without rewriting its test, review, publication or permission
-history. Overall A11a remains incomplete. A11a.5 work is separately authorized
-and recorded in [its validation report](llmtool_a11a5_runs_trace_validation_20261004.md);
-later slices and merge remain outside that task. No new live inference is claimed.

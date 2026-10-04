@@ -19,12 +19,14 @@ def _json(value):
 
 
 def _runs_text(value):
-    lines = ['run_id=' + row['run_id'] + ' status=' + row['status'] +
+    lines = ['run_id=' + row['run_id'] + ' recorded_status=' + row['status'] +
              ' started_at=' + (row['started_at'] or 'unknown') +
              ' provider_type=' + (row['provider_type'] or 'unknown') +
              ' final_error_code=' + (row['final_error_code'] or 'none') for row in value['runs']]
     if not lines:
         lines.append('No saved diagnostics runs.')
+    else:
+        lines.insert(0, 'Saved summaries only; trace evidence unverified. Use trace <run_id> to verify completion.')
     if value['damaged_count'] or value['unknown_count']:
         lines.append('Diagnostics entries omitted: damaged=' + str(value['damaged_count']) +
                      ' unknown=' + str(value['unknown_count']) + '.')

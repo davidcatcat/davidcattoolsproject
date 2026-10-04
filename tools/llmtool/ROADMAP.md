@@ -451,7 +451,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a.5 offline readers on feature branch
+## A11 — Production Workflow & Diagnostics — A11a.1–4 merged; remaining work planned
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -468,18 +468,20 @@ A11 拆成三個可獨立 merge / review / validation 的 milestone，避免一�
 A10 已 DONE and merged；A11a.1 core models/coded errors DONE and merged (`98f9d48d8344ab1f005446fde1b77cf3e0df252f`)。
 A11a.2 ephemeral ask lifecycle DONE/merged via PR #16 (`0d324038ac44ac9ca1c9b32a11fb9cc163e12a12`)。
 A11a.3 settings 與獨立 POSIX store DONE/merged via PR #18 (`b9ac5389ea9e45fa3f66450e0269920ee03734e7`)。
-A11a.4 persisted ask integration DONE/merged via PR #19 (`2bade6a`)，independent
-與 external source review PASS；post-merge main Python 3.9/3.14 CI 37167325001 PASS。
-A11a.5 offline runs/trace 已在本 feature branch 實作；review/publication/CI gates 見 validation。
-A11a 整體尚未完成；A11a.6～A11a.7、A11b/A11c 均 NOT STARTED。其他 diagnostics CLI 與
+A11a.4 persisted ask integration DONE/merged via PR #19，merge SHA
+`2bade6aa95963d3f2c3d9332aa3939407512da7e`；independent/external source review PASS，
+post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
+A11a 整體尚未完成；A11a.5～A11a.7 未合併，A11b/A11c 尚未實作。A11a.5 在原 feature branch 恢復 offline runs/trace 實作；
+review/publication/CI gates 尚待完成，A11a.6–7 與後續 milestones 尚未啟動。
+其他 diagnostics CLI 與
 execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
-| A11a — A11a.1–4 DONE/merged; A11a.5 runs/trace feature branch / review and CI gates pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/retry/fallback | implementation spec 定案 → offline failure-path validation → external review → merge |
-| A11b — NOT STARTED | 有限 executor、action approval、bounded recovery | A11a 完成合併；sandbox、approval、audit failure 規格先通過 review |
-| A11c — NOT STARTED | 組合既有能力與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
+| A11a — A11a.1–4 DONE/merged; A11a.5 resumed on feature branch, gates pending; overall NOT DONE | 統一診斷、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | implementation spec 定案 → offline failure-path validation → external review → merge |
+| A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | A11a 完成合併；contract/sandbox/approval/audit failure 規格先通過 review |
+| A11c — NOT STARTED | cheap-first workflow、獨立驗證、bounded repair 與真實任務驗收 | A11a/A11b 完成合併；各自 validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -506,10 +508,35 @@ A11 從 A0～A10 的 read-only、validation、orchestration 與 retrieval primit
 可執行 workflow。Provider capability 不等於 authorization；model-reported success
 不等於 task success。
 
+### Architecture refinement — planning only
+
+目標是盡可能由已授權、可用且資料適合的公司 LLM 減少昂貴模型消耗，同時固定驗收
+標準、防止 scope 漂移與無證據的完成宣告。以下是既有 A11b/A11c 的設計要求，不新增
+milestone、不授權執行，不改 A9/A10 fail-fast/text-only 契約。
+
+| Layer | Authority / content | Planned responsibility |
+| --- | --- | --- |
+| Pinned Task Contract | task ID/version/digest、goal、authorized scope、forbidden scope、acceptance criteria、required evidence；使用者授權才可建立新版本 | A11b enforcement／execution gates；任何模型不得降低要求 |
+| Compressible working context | 有來源/revision 引用的摘要、unknown、限制、未解決問題與 evidence references | A11c company-LLM-first preparation；不能替換 contract 或原始證據 |
+| Structured evidence | 每項 criterion 對應的命令、exit status、environment、revision/patch digest、必要產物及結果 | A11b verification gate、A11c 獨立驗收；與 working summary 分開保留 |
+
+Fallback 是處理 provider/transport 失敗的替代執行選擇；escalation 是因客觀品質／證據
+問題提高 review/處理層級（可能交給人，並不必然換 provider）。兩者不是同義詞，也不
+表示允許自動重跑或外送資料。Schema failure、missing evidence、validator reject、test
+failure、review disagreement、bounded repair exhausted 才是可記錄的 escalation triggers；
+模型自報 confidence 不能決定升級或完成。每次升級仍須通過資料外送/provider trust policy，
+拒絕外送時停止並保留證據；公司內容的摘要仍可能敏感，不能因摘要或 redaction 就視為
+可送外部。Company LLM 第一輪 review 不能取代 required independent/external review。
+
+Context budget 與 cost routing 留待後續設計，不是本次可用的 config 或 router。未來成本
+比較須包含 context preparation、所有 retry/repair、escalation、第一輪及獨立 review 的
+provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost 記為 unknown/null，
+不填零。只知部分消耗時標示 partial，不能把 partial subtotal 當總成本或宣稱已節省。
+
 ### A11.0 — Documentation / Roadmap Sync
 
-- 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保持原樣。
-- A10 = DONE and merged；A11a = NEXT；A12 = future optional frontend。
+- 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
+- A10 = DONE and merged；A11a.1–4 merged、整體 incomplete；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics
@@ -548,7 +575,7 @@ API was not connected to ask in A11a.3. Historical remediation/company live evid
 remains in
 [A11a.3 validation](../../reports/llmtool_a11a3_secure_diagnostics_store_validation_20261004.md).
 **A11a.4 — Persisted ask integration: [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19);
-DONE/merged (`2bade6a`), independent and external source review PASS, post-merge main CI PASS.** Ask-only mutually exclusive save/no-save
+DONE/merged (`2bade6a`), independent/external source review PASS, post-merge main CI PASS.** Ask-only mutually exclusive save/no-save
 flags use explicit CLI > trusted user > false; debug/home alone remain unsaved.
 Safe buffered run.start is rebound to the collision-resolved store ID before
 persisted events. Streaming metadata and a typed completed summary retain stdout,
@@ -565,21 +592,30 @@ passed Python 3.9 and 3.14, each 784/784, no skips, clean tree. Exact API object
 publication succeeded; direct Git RPC authentication failed. Cloud Linux/offline/mock
 evidence does not claim new live inference. External ChatGPT source review PASS
 on `bf37bb86`; documentation-head CI [37156216279](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37156216279)
-passed both Python versions, each 784/784. Final A11a.4 feature head
-`01db2eff3347835f0bf7b38bc227247bf41d0fb0`; post-merge main CI 37167325001
-passed Python 3.9/3.14 on exact merge head `2bade6a`;
-PR #19 merged at 2026-10-04T01:12:53Z, SHA `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
-The preceding source/review/publication sequence remains historical evidence.
-**A11a.5 — Offline runs/trace: implemented on feature branch; review/CI pending.**
-Strict bounded read-only POSIX readers use the existing home resolver without
-config/credentials/providers. No storage creation, cleanup, permission repair or
-record mutation. Runs lists newest bounded summary metadata (no trace-body scan);
-trace validates completion/schema/sequence and projects only safe metadata.
-Active/partial runs remain incomplete; corruption/unsupported versions fail safely.
-Structured --errors and trace --json share the same normalized projection.
-See [A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
-Overall A11a is NOT DONE. **A11a.6–A11a.7 NOT STARTED.** The numbered architecture sections below describe the
-broader design; implementation checkpoints follow section 17 of the spec.
+passed both Python versions, each 784/784. Latest documentation-only revision CI
+is tracked in PR #19. PR #19 subsequently merged at 2026-10-04T01:12:53Z as
+`2bade6aa95963d3f2c3d9332aa3939407512da7e`; post-merge main CI
+[37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+SUCCESS。Overall A11a is NOT DONE. A11a.5 is resumed on the existing feature
+branch after initial independent review of the preserved checkpoint requested
+corrections. Offline runs/trace readers remain unmerged; integrated review,
+publication and CI gates are pending. Runs shows recorded summary status with
+unverified trace evidence; trace verifies completion. See
+[A11a.5 validation](../../reports/llmtool_a11a5_runs_trace_validation_20261004.md).
+
+Implementation slices remain exactly spec section 17:
+
+| Slice | Scope / current delivery status |
+| --- | --- |
+| A11a.5 | Offline runs/trace readers and human/JSON rendering; resumed on feature branch, unmerged, gates pending |
+| A11a.6 | Offline doctor and failure injection; not started |
+| A11a.7 | Final A11a validation/review/merge gate; not started |
+
+The numbered architecture topics below describe the broader design, not the
+implementation slice numbering. A11a adds no executor, hooks engine, automatic
+routing, retry, fallback or escalation engine. Task Contract enforcement belongs
+to A11b; cheap-first integrated workflow/independent verification/bounded repair
+belongs to A11c. Context budget/cost routing need a later reviewed design.
 
 A11a 先套用在現有 read-only / text-only flows，例如 ask、analyze-log、context-pack、
 retrieve-context、orchestrate。A11a 不引入 shell、patch、project file mutation 或 Git mutation；
@@ -747,6 +783,13 @@ A11b 才新增有限 executor。A11a 未完成前不得開工 production mutatio
 
 ### A11b.1 — Execution Sandbox & Policy
 
+- 固定 Task Contract：task ID、version/digest、goal、authorized scope、forbidden scope、
+  acceptance criteria、required evidence。任何模型（含 reviewer）不能自行改寫、忽略或
+  降低條件；使用者授權變更才產生新版本，保留原版與變更紀錄，重新評估計畫、approval
+  及受影響 evidence，不能沿用舊版 VERIFIED。
+- Execution preflight 對照 pinned contract、actual action/patch digest 與 policy；缺少
+  contract、超出 scope 或缺必要 approval 時 fail closed。模型輸出的 plan/schema 是提案，
+  不具有修改 contract 或授權執行的效力。這些 enforcement/gates 尚未實作。
 - shell/file/patch/test/Git mutation 全部經 executor + policy + audit event。
 - working directory 必須限制在 explicit authorized repo/scope。cwd/argv allowlist 本身
   不是 sandbox；執行 repository code/tests 時須能限制 host filesystem 與 network access，
@@ -797,12 +840,27 @@ dirty worktree、conflict、unexpected repository state 預設 fail closed；不
 
 **Model-reported success != task success.**
 
+模型「完成」只是一個 claim。每項 acceptance criterion 必須有原始驗證證據，綁定
+contract version/digest、被驗證 revision 或 patch digest、執行命令、exit status、environment
+與必要產物（可用 digest/reference，不把原始敏感內容塞入 A11a diagnostics）。
+Result 分為 PASS、FAIL、INCOMPLETE、NOT-TESTED；未執行 required check 不能 PASS，
+缺失／中斷／不完整 evidence 不能 VERIFIED。只有符合 pinned contract 的所有 required
+evidence 才能進入 VERIFIED；DONE 還須滿足 required review/merge 等 completion gates。
+這些是未來 task verification gates，不變更現有 A11a run status/schema 或 CLI exit codes。
+Tests/deterministic checks 只能驗其覆蓋範圍，不能保證所有語意正確；需要語意或人工驗收的
+criterion 仍須對應 review evidence。不得因 checks 綠燈就免除 required independent review。
+
 至少處理 model malformed/empty output、invalid tool call/patch、incomplete output、
 repeated identical failing action、test/validator failure、expected artifact missing、
 unexpected Git state。
 
 Recovery policy 依 structured error 決定 retry、fallback、bounded repair、request approval、
-stop 或 user action required。
+stop 或 user action required。Objective escalation 與 provider fallback 分開設計：記錄
+schema failure、missing evidence、validator reject、test failure、review disagreement 或
+bounded repair exhausted，以及精確 evidence reference/被授權的下一步；不能依 confidence。
+升級到外部模型、更多 context 或人員前重新檢查資料範圍、destination 與 provider trust
+policy；無授權就停止，不得用「cheap-first」繞過 policy。Bounded repair 每次仍回到
+contract/policy/required approval gate；耗盡後保留失敗證據與成果，不放寬 criteria。
 
 每個 run 必須有 explicit budgets：
 
@@ -811,6 +869,8 @@ stop 或 user action required。
 - wall-clock timeout；
 - input/output token budget where provider reports usage；
 - optional monetary budget 只能在價格資料可信且明確設定時啟用，不可自行估價當作 hard truth；
+- total usage 包含 preparation/retry/repair/escalation/review；缺 usage/pricing 時標示 unknown，
+  不視為零或已符合 monetary budget。Context budget/cost routing 實作待後續設計；
 - repeated-action detector 必須有 deterministic comparison rule。
 
 AUTH/CONFIG/SAFETY 等不可恢復錯誤不得 blind retry。
@@ -832,11 +892,28 @@ STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 - TTY/non-TTY approval 行為可驗證且 fail closed。
 - patch failure 不留下未知 partial state。
 - resource budgets 與 bounded repair 有 deterministic tests。
+- Task Contract version/scope enforcement、claim→evidence verification、客觀升級與 trust
+  拒絕路徑有 failure tests；模型不得改 criteria，缺 required evidence 不得 VERIFIED/DONE。
 - 所有 mutation 都有 audit trail。
 
 ## A11c — Integration & Real-world Acceptance
 
 ### A11c.1 — Production Workflow Integration
+
+規劃 company LLM first（cheap-first）：優先做 context 整理、保留來源的摘要、分類、log
+normalization、初步規劃與第一輪 review，條件是 provider 已授權可用且資料可送該 profile。
+不可用時如實記錄 environment/auth 限制，再依 objective escalation 與 trust policy 處理；
+不默認切到昂貴外部模型。沒有成本資料時這是 routing preference，不是成本節省證據。
+Schema validation 只確認結構，內容仍需原始 source/evidence 比對與獨立驗證。
+
+工作 context 可壓縮，但每次 handoff 固定三層：不可縮寫取代的 pinned contract、可壓縮
+working context、可追溯的 structured evidence。摘要必須保留 source/revision 引用、unknown、
+forbidden scope、未解決問題、矛盾與必要 evidence references；原始證據保留供驗證者查閱。
+Context overflow 時做有界分段／引用或回報 INCOMPLETE，不得靜默刪限制或未解 findings。
+
+第一輪 company review 產生 findings/claims；獨立驗證者對照 contract、完整相關 diff 與
+原始證據再判定，不因開發者或模型宣告完成而 PASS。Bounded repair 使用 A11b budgets/
+gates，修正後重驗受影響 criterion；超過上限仍有 blocker 就停止並回報。
 
 將 A0～A10 + A11a/A11b 組成 bounded end-to-end workflow：
 task → context → plan/router → policy/required approval → execution → validation；
@@ -854,6 +931,11 @@ A9 text orchestration、A10 retrieval、A6 validator、A5 Git intelligence 的�
 - policy-blocked cross-trust fallback；
 - dirty worktree STOP；
 - model 宣稱完成但 tests fail；
+- schema 合格但摘要漏 source/unknown/限制、或內容與原始 evidence 矛盾；
+- missing required evidence／NOT-TESTED check 阻擋 VERIFIED/DONE；
+- review disagreement 或 repair exhausted 觸發客觀升級，外送敏感摘要遭 policy 拒絕；
+- contract 變更未獲使用者授權、或新版本誤用舊 revision 的 PASS；
+- total usage 包含 review/retry/escalation，未知 token/cost 不填零；
 - tool failure + bounded repair；
 - dangerous/unknown action approval/block；
 - non-interactive approval fail closed；
@@ -868,7 +950,10 @@ trace（不依賴原開發者記憶）即可定位一個失敗 run 的主要 fai
 任何 production workflow 失敗都有 stable error code + unique run ID；normal mode 知道
 發生什麼與去哪查；trace 能定位 component/provider/tool；可恢復錯誤依 policy
 retry/fallback/repair，不可恢復錯誤 fail closed；AI 成功聲明經 deterministic validation；
-diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。
+diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。驗收還需證明 company-first
+handoff 保留 pinned contract/source/unknown/evidence，獨立 verification 不接受無證據 claim，
+且客觀升級與 bounded repair 不降低驗收標準。Coverage limitations 與 unknown cost 如實記錄；
+不宣稱所有語意正確，也不以尚未設計的 cost router 宣告成本最佳化完成。
 
 ## A12 — Remote Frontends / Telegram Agent
 

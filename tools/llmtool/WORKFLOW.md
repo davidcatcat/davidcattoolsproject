@@ -48,9 +48,85 @@ claim tracking refs are current. Preserve unrelated changes. Work on a task feat
 branch based on the confirmed intended base; do not automatically update main.
 The Cloud exception does not permit other Mac paths or agent-created project copies.
 
+## Task Contract, company LLM and evidence
+
+This section is engineering guidance and future A11b/A11c design; it does not
+implement a task engine, hooks, automatic routing, retry, fallback or escalation.
+Current A9/A10 fail-fast contracts and A11a metadata-only diagnostics are unchanged.
+The [roadmap](ROADMAP.md#architecture-refinement--planning-only) assigns runtime
+Task Contract enforcement/execution gates to A11b and cheap-first integration,
+independent verification and bounded repair to A11c. Context budgets and cost
+routing require later design. No new milestone or implementation is authorized here.
+
+Before work, pin a **Task Contract** with task ID, version/digest, goal, authorized
+scope, forbidden scope, acceptance criteria and required evidence. Keep the exact
+contract available at each handoff. No model, developer or reviewer may silently
+change it, remove a condition or lower acceptance requirements. A user-authorized
+change creates a new version, preserving its predecessor and authorization;
+reassess the plan, approvals and affected evidence rather than inheriting VERIFIED.
+Routine repairs within the existing scope do not require changing the contract.
+
+Prefer an authorized, available company LLM for context preparation, summaries,
+classification, log normalization, initial planning and first review when the data
+is permitted for that profile. Preserve source/revision references, unknowns,
+contradictions, constraints, unresolved findings and necessary evidence references.
+Schema validity does not establish factual correctness. A summary never replaces
+the pinned contract or original verification evidence; keep originals accessible
+under the applicable data policy. First review cannot replace required independent
+or external review. Company-provider unavailability is an environment/auth limit,
+not a reason to declare PASS or silently choose an external provider. Documentation
+work does not require a company-provider call merely to follow this preference.
+
+Use three context layers: pinned contract, compressible working context, and
+structured evidence. Company LLM compression applies only to working context;
+it must retain restrictions, unresolved issues and evidence links. If context
+cannot fit, use bounded chunks/references or report INCOMPLETE; never silently
+drop forbidden scope or findings. These are handoff rules, not a new persistent
+A11a record schema. Raw task content/evidence must not be added to diagnostics.
+
+Record objective escalation triggers: schema failure, missing evidence, validator
+reject, test failure, review disagreement or bounded repair exhausted. Escalation
+raises the handling/review level (possibly to a person); fallback substitutes a
+provider attempt under a recovery policy. Neither is determined by model-reported
+confidence, nor does either grant permission to retry, execute or send data.
+Before escalating to any destination, recheck authorized data, provider trust
+boundary and required approval. A company summary can still contain sensitive
+data; compression/redaction is not permission to export it. If policy denies the
+transfer, stop that path and preserve bounded evidence for authorized resolution.
+Use the agreed repair limit; exhaustion never permits weaker criteria.
+
+Treat model completion as a **claim**. Record evidence per acceptance criterion:
+contract version/digest, tested revision or patch digest, command, exit status,
+environment and required artifacts/references. For uncommitted changes, include
+the relevant patch/artifact digest; HEAD alone does not identify tested bytes.
+
+| Result | Meaning for an acceptance check |
+| --- | --- |
+| PASS | Executed on identified bytes/environment and met that criterion |
+| FAIL | Executed and contradicted the criterion |
+| INCOMPLETE | Interrupted, partial, missing/ambiguous evidence or unresolved disagreement prevents a decision |
+| NOT-TESTED | The check was not executed; include the reason |
+
+Keep existing SKIPPED-CONFIG/AUTH/ENVIRONMENT labels from validate-runtime as
+specific non-PASS reasons, mapped to NOT-TESTED when aggregating acceptance.
+Required non-PASS checks block VERIFIED/DONE; optional checks retain their explicit
+status without being promoted to PASS. VERIFIED requires all contract-required
+evidence; DONE additionally requires the contract's review/delivery/merge gates.
+These words describe planned task acceptance, not new CLI commands, exits or A11a
+run status values. Tests and deterministic checks only cover their tested cases;
+they cannot guarantee all semantic correctness. Preserve required human/semantic
+review evidence and disclose coverage limits even when checks pass.
+
+Future cost evaluations must include context preparation, retry/repair, escalation
+and all review calls, with reported input/output usage and trustworthy pricing
+versions. Record missing tokens/cost as unknown/null, never zero; a known subtotal
+is partial, not the total. This task supplies no cost measurement, savings claim,
+budget enforcement or automatic cost router.
+
 ## 2. Plan verification before implementation
 
-List acceptance checks as Cloud-capable, Mac-required, or not required for this change.
+Derive acceptance checks from the pinned Task Contract, then classify them as
+Cloud-capable, Mac-required, or not required for this change.
 A check is Mac-required because of an actual dependency, not merely because it is a
 smoke/integration test. Declare required merge gates before execution; do not demote a
 failed/missing required check after seeing its result. Documentation-only changes use
@@ -101,6 +177,8 @@ an environment/auth failure is not automatically a code regression.
 
 ## 6. Review and merge gate
 
+Check the pinned contract and original evidence before accepting a completion claim.
+Do not use summaries or model confidence to bypass a missing required check.
 Merge only when task authorization, required Cloud checks/CI, external review and
 applicable required Mac verification are satisfied. Do not mark a milestone DONE
 merely because Cloud implementation or mocks passed. Optional tests can remain

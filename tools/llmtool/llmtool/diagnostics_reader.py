@@ -346,15 +346,18 @@ class DiagnosticsReader:
     def _run(self, runs, run_id):
         directory = _directory(runs, run_id)
         try:
-            names = set(_names(directory, RUN_FILE_SCAN_LIMIT))
-            if not names <= RUN_FILES or '.run.lock' not in names:
-                raise ReaderError('FORMAT_INVALID')
-            snapshots = {}
-            for name in names:
-                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                _private(info)
-                snapshots[name] = _snapshot(info)
             with _lock(directory, '.run.lock') as acquired:
+                # Publication changes names/link counts under the writer's lock.
+                # A busy run is incomplete; do not inspect its mutable artifacts.
+                names, snapshots = set(), {}
+                if acquired:
+                    names = set(_names(directory, RUN_FILE_SCAN_LIMIT))
+                    if not names <= RUN_FILES or '.run.lock' not in names:
+                        raise ReaderError('FORMAT_INVALID')
+                    for name in names:
+                        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                        _private(info)
+                        snapshots[name] = _snapshot(info)
                 yield directory, names, acquired
                 _check_link(runs, run_id, directory, True)
                 if acquired:
