@@ -9,7 +9,7 @@ from dataclasses import fields
 
 from . import diagnostics as d
 from .diagnostics_settings import resolve_diagnostics_home
-from .diagnostics_store import persistence_supported
+from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES
 from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
@@ -426,6 +426,50 @@ class DiagnosticsReader:
         result['runs'].sort(key=lambda row: (row['started_at'] or '', row['run_id']), reverse=True)
         result['truncated'] = len(result['runs']) > RUN_OUTPUT_LIMIT
         result['runs'] = result['runs'][:RUN_OUTPUT_LIMIT]
+        return result
+
+    def inspect_store(self):
+        """Check existing structure/permissions only, never metadata contents.
+
+        A busy run's artifacts are deliberately not inspected. Unknown names
+        are counted without displaying, following or repairing them. This is
+        neither a completion check nor proof that persistence can be written.
+        """
+        result = {'state': 'absent', 'run_count': 0, 'active_count': 0, 'unknown_count': 0}
+        if not persistence_supported(self.platform):
+            result['state'] = 'unsupported'
+            return result
+        try:
+            with self._store() as runs:
+                result['state'] = 'present'
+                names = _names(runs, RUN_SCAN_LIMIT)
+                for name in names:
+                    try:
+                        d.validate_run_id(name)
+                    except ValueError:
+                        result['unknown_count'] += 1
+                        continue
+                    with self._run(runs, name) as (directory, files, acquired):
+                        result['run_count'] += 1
+                        if not acquired:
+                            result['active_count'] += 1
+                            continue
+                        for filename in files:
+                            info = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                            limit = (SUMMARY_MAX_BYTES if filename == 'summary.json' else
+                                     RESERVATION_MAX_BYTES if filename == '.reservation' else
+                                     TRACE_MAX_BYTES if filename in ('trace.jsonl', 'trace.partial.jsonl')
+                                     else 0)
+                            if info.st_size > limit:
+                                raise ReaderError('LIMIT_EXCEEDED')
+                if set(_names(runs, RUN_SCAN_LIMIT)) != set(names):
+                    raise ReaderError('STORE_UNAVAILABLE')
+        except _AbsentStore:
+            pass
+        except ReaderError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError):
+            raise ReaderError('STORE_UNAVAILABLE') from None
         return result
 
     def trace(self, run_id, *, errors=False):
