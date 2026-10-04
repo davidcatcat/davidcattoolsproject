@@ -1,6 +1,6 @@
 # llmtool DG-1 process lifecycle validation — 2026-10-05
 
-Status: LOCAL VALIDATION PASS; final-head CI/publication evidence follows in the Draft PR and delivery. Runtime lifecycle defect, not a security vulnerability. Independent
+Status (initial round, historical): LOCAL VALIDATION PASS; final-head CI/publication evidence follows in the Draft PR and delivery. Runtime lifecycle defect, not a security vulnerability. Independent
 Claude re-review remains required; this does not start QG-QA1 or approve a merge.
 
 ## Task Contract v1
@@ -251,3 +251,223 @@ is pending and is not replaced by self-review or CI. No merge is authorized.
 - Existing nine untracked benchmark/reasoning/case paths and historical QG-S1 temporary
   evidence are untouched. Only this task's self-owned synthetic runtime fixtures are
   cleaned. No credential/auth/Keychain files inspected or user config modified.
+
+## Round 2 — Task Contract v2 (pinned before implementation)
+
+User authorization: continue existing Draft PR #29 on 2026-10-05, addressing Claude
+R1/R2 and F2 only. Contract v1 and the independent Claude review remain historical
+evidence; the following policy supersedes v1's blanket rejection of ignored SIGCHLD.
+
+- Task ID: DG1-CLI-LIFECYCLE-20261005; version 2.
+- Starting reviewed HEAD: `b8fe3ddeeb78a4667fc9ca9efdb642ba7e87ed5c`; freshly fetched
+  main/base: `e9f550c4a77af51b5a58f0d2da4bb6fe695a4b61`; existing branch unchanged.
+- Goal/scope: preserve inherited ignored INT/TERM/HUP; temporarily default ignored
+  SIGCHLD during owned-child lifecycle and restore exactly; reject custom reapers
+  before spawn. Correct F2 documentation without a new signal state machine.
+- Forbidden: F1 diagnostics finalization, DG-2/DG-3, TR-1/2/3, DA-3, QG-QA1,
+  A11b/A11c, generic framework, retry/fallback, unrelated edits/artifact deletion,
+  Claude report changes, new branch/PR, merge, force push/history rewrite.
+- Acceptance: real exec-inherited IGN HUP/INT tests and ignored-SIGCHLD success for
+  both fake providers; scoped state restoration on success/error/cancellation/setup
+  and cleanup failure; custom handler rejected before spawn. Original TERM/HUP/INT,
+  timeout, tree/grandchild containment, runtime cleanup and safety checks remain PASS.
+- Evidence/delivery: regressions fail before production changes, focused and full
+  canonical checks on checkout Python and actual 3.9, available local 3.14; complete
+  diff review, preserved untracked baseline, normal commit/push to Draft PR #29,
+  final exact-head 3.9/3.14 CI including offline/clean-tree steps. Stop for Claude
+  round-2 re-review; no merge. F1 DEFERRED TO QG-QA1 TRIAGE, unchanged.
+
+Round-2 results are recorded below after execution; older PASS results above do not
+establish the new contract's acceptance.
+
+Unchanged v2 contract UTF-8 payload SHA256:
+`bc456398f22376cfe84206aace11e8db3b87bfe71c1dee296eb7d42669d93ad9`.
+Payload is the text between the v2 heading and the paragraph starting “Round-2 results”,
+excluding the heading, its two separating newlines and the newline before that paragraph.
+
+### Round-2 reproduction before production changes
+
+Actual Mac, canonical root, Python 3.13.3. Fresh fetch established local and published
+feature HEAD `b8fe3ddeeb78a4667fc9ca9efdb642ba7e87ed5c`, main `e9f550c...`, ahead/behind
+main 3/0, tracked clean. Nine existing untracked paths were retained. The complete
+Claude report was read and remains byte-identical to the starting commit.
+
+Before changing production or README, run newly added permanent tests:
+
+```sh
+PYTHONPATH=tools/llmtool:tools/llmtool/tests tools/llmtool/.venv/bin/python -m unittest -v test_cli_provider_lifecycle test_cli_lifecycle_state
+```
+
+Host execution: exit 1; **35 methods, 7 failures and 8 error subcases**, 19.580s.
+The eight errors are the ignored-SIGCHLD state test's exit-path subcases, each
+rejected at entry. Existing DG-1 signal/tree/runtime controls still passed.
+Production/README diff was empty at this reproduction cutoff.
+
+| Finding | Claude fake, before fix | Codex fake, before fix | Expected |
+| --- | --- | --- | --- |
+| R1 inherited HUP ignore, then HUP | Exit 129, stdout empty | Exit 129, stdout empty | Exit 0, `DG1_FINAL` |
+| R1 inherited INT ignore, then INT | Exit 130, stdout empty, fixed interrupted line | Same | Exit 0, `DG1_FINAL` |
+| R2 inherited SIGCHLD ignore | Exit 1, `PROVIDER_RUNTIME_ERROR`, zero provider starts | Same | Exit 0, one completed/reaped provider |
+
+These subprocess tests establish inherited ignore through an actual exec. Atomic fake
+readiness follows its child/grandchild PID handshake. Only after readiness does the
+test send a signal and release the fake to finish through pipe EOF and waitpid; no
+guessed completion delay or real provider/API/credential is involved. Correct behavior
+requires normal output, all three PIDs reaped, runtime absent and one invocation.
+The runner's own dispositions remain unchanged; a child-side post-main snapshot
+also requires exact IGN restoration.
+
+Initial sandbox executions were inconclusive for containment: `/bin/ps` was denied.
+The clean host rerun above is authoritative. Sandbox runs also exposed two test
+bootstrap construction mistakes (parenthesis / enum repr), corrected before the
+authoritative reproduction; those mistakes are not counted as bug evidence.
+Fourteen synthetic groups left by denied sandbox teardown were individually verified
+by this round's timestamp, limited PID range, fake argv/PGID and lsof cwd; only those
+groups and newly owned runtime dirs were cleaned. Historical evidence/user artifacts
+were untouched. Subsequent host tests use the existing owned-fixture cleanup.
+
+### Round-2 fix and contract dispositions
+
+- **R1 ACCEPTED / FIXED:** record each previous INT/TERM/HUP disposition; install the
+  cancellation handler only when it is not SIG_IGN. Ignored signals remain ignored.
+  Default/custom cancellation dispositions retain the original DG-1 coordinated path.
+- **R2 ACCEPTED / FIXED:** DFL remains DFL; IGN is recorded before installation and
+  temporarily made DFL before any runtime/spawn. Normal Python unwinding restores
+  exact IGN after stop/wait. Custom SIGCHLD handlers still reject before spawn,
+  without installing other handlers. The main-thread requirement remains.
+- **F2 ACCEPTED / DOCUMENTATION CORRECTION (Option A):** first observed signal drives
+  coordinated cleanup while scoped handlers are installed. After restoration,
+  repeated signals may use normal OS disposition. On the supported cleanup path,
+  process-tree/runtime cleanup has completed before restoration. No promise of
+  always-positive 143/129 through the final process-exit window; no new state machine.
+- **F1 DEFERRED TO QG-QA1 TRIAGE:** TERM/HUP diagnostics incomplete-run/summary behavior
+  remains unchanged. No diagnostics, store, reader or ask lifecycle source modified.
+
+Only production change this round: `providers/cli_lifecycle.py`. Adapter argv/env,
+kill-before-reap, stale-PGID guard, idempotent stop, signal handler (record-only),
+timeout/bounds, cwd isolation and cleanup order are unchanged. Scoped default SIGCHLD
+keeps automatic reaping disabled until the owned child has been stopped/reaped.
+Restoration also executes through Popen/collection errors and cleanup exceptions.
+
+README's one lifecycle paragraph now states inherited-ignore, SIGCHLD and repeated
+signal policy accurately. The historical Claude review report is not edited.
+
+### Round-2 permanent tests and actual coverage
+
+Six new real subprocess methods in `test_cli_provider_lifecycle.py`:
+
+- `test_claude_inherited_sighup_ignore_completes_tree_and_runtime`
+- `test_codex_inherited_sighup_ignore_completes_tree_and_runtime`
+- `test_claude_inherited_sigint_ignore_completes_tree_and_runtime`
+- `test_codex_inherited_sigint_ignore_completes_tree_and_runtime`
+- `test_claude_inherited_sigchld_ignore_still_works_and_reaps`
+- `test_codex_inherited_sigchld_ignore_still_works_and_reaps`
+
+Four new state methods in `test_cli_lifecycle_state.py`:
+
+- `test_ignored_termination_dispositions_are_retained_and_recorded` (INT/TERM/HUP).
+- `test_default_sigchld_remains_default`.
+- `test_ignored_sigchld_scoped_default_and_exact_restore_all_exit_paths`: normal;
+  synthetic provider error/timeout; injected Popen failure; cleanup exception;
+  recorded INT/TERM/HUP cancellation. Requires DFL inside and exact IGN outside,
+  along with exact previous termination handlers. Faults are deterministic, not
+  additional real provider invocations.
+- `test_ignored_sigchld_restored_after_partial_handler_install_failure`.
+
+The old blanket non-default reaper rejection test is replaced by the authorized
+`test_custom_child_reaper_rejected_before_lifecycle_or_spawn`, preserving the fail-closed
+assertion for custom handlers and additionally requiring zero spawn/handler writes.
+Other assertions remain intact. Normal-disposition subprocess controls now explicitly
+set INT/TERM/HUP defaults so a background test runner's ignore cannot accidentally
+change what the original DG-1 controls test. All original child/grandchild containment,
+timeout/success, spawn-window, final-wait, cleanup-fault/privacy and unrelated-group
+checks remain. SIGHUP cases conditionally skip only on a platform without SIGHUP.
+
+### Round-2 validation and publication cutoff
+
+Final four-file code/test/README manifest SHA256:
+`54e184888c670495dddfaadb02eda018ae880dc333e799c9e0fa4cc3c87872e0`.
+Construction is the same sorted path + NUL + bytes + NUL scheme as v1. Files:
+`tools/llmtool/README.md`, `tools/llmtool/llmtool/providers/cli_lifecycle.py`,
+`tools/llmtool/tests/test_cli_lifecycle_state.py`, `tools/llmtool/tests/test_cli_provider_lifecycle.py`.
+
+```sh
+PYTHONPATH=tools/llmtool:tools/llmtool/tests tools/llmtool/.venv/bin/python -m unittest -v test_cli_provider_lifecycle test_cli_lifecycle_state test_claude_cli_provider test_codex_cli_provider
+make -C tools/llmtool check PYTHON=/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python
+make -C tools/llmtool check PYTHON=/usr/bin/python3
+make -C tools/llmtool check PYTHON=/private/tmp/llmtool-a11a7-py314-venv/bin/python
+git diff --check
+```
+
+Implementation commit: `506d4b61fdedcf8d0ba6216d498fd12d4cbefbcc`,
+`fix(llmtool): preserve inherited signal dispositions`. Committed bytes match the
+tested manifest above. All checks launched from the canonical Mac repo; the existing
+3.14 interpreter environment is not a repository copy. No real provider traffic.
+
+| Check | Actual Python | Result | Exit / duration |
+| --- | --- | --- | --- |
+| Focused four modules | 3.13.3 | 89 tests PASS, no skip | 0 / 31.365s |
+| Full canonical | 3.13.3 | 928 tests PASS, 1 existing skip | 0 / 106.461s |
+| Full canonical | 3.9.6 | 928 tests PASS, 1 existing skip | 0 / 159.661s |
+| Full canonical | 3.14.8 | 928 tests PASS, 1 existing skip | 0 / 100.228s |
+
+Only skip: existing `test_unusual_filename_bytes_roundtrip`, host rejects non-UTF-8
+filename bytes. All signal cases execute on this Mac; no new lifecycle skip.
+
+| Fake provider | Inherited HUP ignore | Inherited INT ignore | Inherited SIGCHLD ignore | Normal TERM/HUP/INT | Timeout / normal |
+| --- | --- | --- | --- | --- | --- |
+| Claude | PASS / 0 / DG1_FINAL | PASS / 0 / DG1_FINAL | PASS / 0 / DG1_FINAL, reaped | PASS / 143,129,130 | PASS / PROVIDER_TIMEOUT; PASS / 0 |
+| Codex | PASS / 0 / DG1_FINAL | PASS / 0 / DG1_FINAL | PASS / 0 / DG1_FINAL, reaped | PASS / 143,129,130 | PASS / PROVIDER_TIMEOUT; PASS / 0 |
+
+Every row requires one provider invocation, no running owned tree and runtime removed.
+Ignored-signal successful fixtures also wait/reap child/grandchild and require no PID
+row left. Cancellation controls continue to allow the OS to reap non-executing orphan
+zombies on Linux, as described in the initial round. State tests PASS: scoped DFL,
+exact IGN restoration, custom reaper rejection, stop idempotence and no stale-group kill.
+
+`git diff --check` PASS. Ordinary self-review inspected the entire round-2 production,
+tests and docs diff against `b8fe3dde...`: no material blocker identified within scope.
+This is not independent Claude review. No provider adapter or CLI/diagnostics source
+changed. Full existing argv/env/output-limit/timeout/privacy and security/race tests PASS:
+shell=False, sanitized child env, Claude safe-mode/tools-empty, Codex restricted profile/
+network-off, stderr/reasoning omission remain. No retry/fallback.
+
+Final new-head CI remains **PENDING at this documentation cutoff**. After the report-only
+commit and single branch push, the final PR description/Checks and delivery record the
+report commit, final HEAD and exact-head CI links/results. Source/test/README diff from
+`506d4b6...` must be empty. Old initial-round CI is historical only. No recursive report
+commit embeds its own future SHA, per WORKFLOW. Required new CI: Python 3.9 and 3.14,
+Offline canonical checks and Working tree is clean, all SUCCESS on the final HEAD.
+
+Logs under `/private/tmp`:
+
+| Log | SHA256 |
+| --- | --- |
+| llmtool-dg1-round2-before-host.log | 46b0fff4569bb9d3f4bfd9fe00d39bcf676868c87156039cb84410f62ab7ffc4 |
+| llmtool-dg1-round2-focused.log | 39040ac45f15554afe853931c9b27229a7b7a3a08b7551169198be96a59027c8 |
+| llmtool-dg1-round2-py313.log | 50ed39dfdb080a752475e61586cb19065ceb108dbc5a015ebc8c2e0b45d42911 |
+| llmtool-dg1-round2-py39.log | 968e76b15ea786fbc439e8064a687ae24de34741c2a62c9878ecd26090bc1b76 |
+| llmtool-dg1-round2-py314.log | c5e615985b10e3d08f197971c4b7e69860d5755c151a3c5a0a79b8de5328f47d |
+
+### Round-2 remaining gates and limitations
+
+R1/R2 are **REPRODUCED → REGRESSION FAILED → FIXED → REGRESSION PASS**.
+F2 is corrected documentation; no implementation exit-state-machine change.
+**F1 DEFERRED TO QG-QA1 TRIAGE**, diagnostics lifecycle unchanged. DG-2/DG-3,
+TR-1/2/3, DA-3 remain unchanged. QG-QA1/A11b/A11c not started; no merge authorized.
+
+Historical v1 limitations still apply, with one explicit supersession: inherited
+SIGCHLD ignore is now supported through scoped DFL. Custom child reapers and worker
+threads still fail closed; deliberate foreign waits/reaping violate exclusive process
+ownership. Real CLI/auth/live APIs, non-POSIX/Windows, SIGKILL/crash, deliberate setsid
+escape and actual OS refusal/uninterruptible cleanup remain NOT-TESTED/outside scope.
+Repeated signals after restoration may alter final OS exit disposition as documented.
+
+Nine pre-existing untracked benchmark/reasoning/case paths remain, so “clean” locally
+means **tracked working tree clean, baseline untracked preserved**, not an empty
+porcelain output. CI has a fresh checkout and requires completely clean porcelain.
+Only five round-2 files change: helper, two lifecycle test files, README and this report.
+Claude's review report remains unchanged. User config/auth/session/Keychain files were
+not inspected or modified. Coordinator performed Git directly; no Git-agent/model/cost
+savings claim. Final required gate after publication: **Claude round-2 independent
+re-review pending**. PR #29 remains Draft; stop here without merge or QA.
