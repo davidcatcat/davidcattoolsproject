@@ -1,5 +1,13 @@
 # A11a Observability & Diagnostics — implementation spec (2026-10-02)
 
+> Documentation checkpoint — 2026-10-04: the original status, implementation facts
+> and recommended next A11a.1 checkpoint below describe 2026-10-02. A11a.1–4 have
+> since merged; PR #19 merged A11a.4 as `2bade6aa95963d3f2c3d9332aa3939407512da7e`.
+> Overall A11a is incomplete. This docs-only refinement does not start/resume
+> A11a.5 or change sections 1–20, event schemas or implementation slice boundaries.
+> Future Task Contract/cheap-first design is recorded in the additive appendix
+> below and in the current ROADMAP/WORKFLOW; it is not A11a runtime functionality.
+
 ## Status and scope
 
 Repository: `davidcatcat/davidcattoolsproject`.
@@ -962,3 +970,52 @@ After this spec is reviewed and merged, start only:
 
 Do not implement persistence, `runs`, `trace`, `doctor`, retry/fallback,
 executor, approvals, A11b, A11c, or A12 in that first coding checkpoint.
+
+## Additive architecture refinement — 2026-10-04 (planning only)
+
+This appendix preserves the historical spec and adds no milestone, production
+code, test, config, provider call or diagnostics schema. Section 17 continues to
+define A11a.5 as offline runs/trace readers with human/JSON rendering, A11a.6 as
+offline doctor/failure injection, and A11a.7 as final validation. A11a must not add
+an executor, hooks engine, automatic routing, retry, fallback or escalation engine.
+Previously started unpublished A11a.5 work is paused outside this docs-only branch;
+it is not merged or independently reviewed and is not resumed by this checkpoint.
+
+The purpose of the future workflow is to use eligible company LLM work to reduce
+expensive-model consumption while preserving fixed acceptance and evidence:
+
+- **A11b Task Contract enforcement/execution gates:** pin task ID, version/digest,
+  goal, authorized scope, forbidden scope, acceptance criteria and required evidence.
+  No model can modify or lower these requirements. Only user authorization creates
+  a new version; preserve the old version and re-evaluate affected approvals/evidence.
+- **A11c company LLM first:** prefer authorized company profiles for context
+  preparation, summaries, classification, log normalization, initial planning and
+  first review. Retain source/revision references, unknowns, constraints, unresolved
+  issues and necessary evidence. Valid schema is not correct content. Summaries
+  cannot replace the exact Task Contract, original evidence or independent review.
+- **Objective escalation:** schema failure, missing evidence, validator rejection,
+  test failure, review disagreement and bounded repair exhaustion are objective
+  triggers, not model confidence. Escalation changes the handling/review level;
+  fallback is provider recovery. Each remains subject to data export/provider trust
+  policy and required authorization. Summarized company data can still be sensitive;
+  denied export stops that path rather than automatically selecting an external model.
+- **Verification:** completion is a claim until contract-required evidence binds
+  to contract version/digest, revision/patch digest, commands, exits, environment
+  and necessary artifacts. Distinguish PASS, FAIL, INCOMPLETE and NOT-TESTED;
+  required non-PASS checks block VERIFIED/DONE. DONE also requires the applicable
+  review/delivery/merge gates. Tests/deterministic checks have finite coverage,
+  not a guarantee of semantic correctness. These are future task gates, not new
+  A11a run statuses, reader schemas or persistence fields.
+- **Context and cost:** separate pinned contract, compressible working context
+  and structured evidence. Compression must retain restrictions, unresolved issues
+  and evidence references. Context budget/cost routing is later design; future
+  accounting includes preparation, retries/repair, escalation and all review.
+  Unknown tokens/cost remain unknown/null, never zero; partial totals cannot prove
+  savings or budget compliance. No new cost or usage collection is required of A11a.
+
+The current design details and engineering guidance live in
+[ROADMAP](../tools/llmtool/ROADMAP.md#architecture-refinement--planning-only) and
+[WORKFLOW](../tools/llmtool/WORKFLOW.md#task-contract-company-llm-and-evidence).
+Enforcement/execution gates belong to A11b; cheap-first integration, independent
+verification and bounded repair belong to A11c. Neither is implemented or started
+here; the existing section 15 company/external fallback boundary remains intact.

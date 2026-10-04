@@ -107,7 +107,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 mainline milestones and A11a.1–3 are completed and merged (A2.3 Anthropic API remains planned). A11a.4 persisted ask integration has independent and external source review PASS in [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19); Python 3.9/3.14 CI passed for reviewed head `bf37bb86`. See the PR for the latest documentation-head CI. A11a.4 is not merged/DONE and overall A11a remains incomplete. A11b execution/approval/recovery, A11c integration/acceptance and optional A12 Telegram remain unstarted. See the [roadmap](tools/llmtool/ROADMAP.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 mainline milestones and A11a.1–4 are completed and merged (A2.3 Anthropic API remains planned). A11a.4 merged through [PR #19](https://github.com/davidcatcat/davidcattoolsproject/pull/19), SHA `2bade6a`; post-merge Python 3.9/3.14 CI `37167325001` passed. Overall A11a remains incomplete. A11b Task Contract enforcement and execution gates, A11c company-LLM-first workflow and independent verification, and optional A12 Telegram remain planning only. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md); this documentation refinement starts no implementation milestone.
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 

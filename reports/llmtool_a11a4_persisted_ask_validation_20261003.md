@@ -423,3 +423,18 @@ remains unchanged; optional Mac/company/provider live checks remain NOT-TESTED.
 The separate external source-review gate is satisfied. A11a.4 remains unmerged,
 overall A11a remains incomplete, and this documentation update does not authorize
 merge or A11a.5 implementation.
+
+## Subsequent merge checkpoint — 2026-10-04
+
+Native GitHub PR metadata reconfirmed PR #19 as **MERGED**, merged at
+2026-10-04T01:12:53Z, merge SHA
+`2bade6aa95963d3f2c3d9332aa3939407512da7e`. A separate REST workflow read
+confirmed [CI 37167325001](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37167325001)
+is the post-merge **push** run for that exact main SHA, completed SUCCESS;
+both Python 3.9 and 3.14 jobs succeeded. It is not the final feature-head CI.
+
+A11a.4 is DONE/merged. The unmerged/not-authorized statements above retain their
+original historical meaning. Overall A11a remains incomplete. The current
+architecture refinement is documentation only, does not start/resume A11a.5,
+does not implement A11b/A11c or authorize any further merge, and claims no new
+live inference. See the current ROADMAP/WORKFLOW for planning and review gates.
