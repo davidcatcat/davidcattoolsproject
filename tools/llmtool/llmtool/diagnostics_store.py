@@ -5,6 +5,7 @@ they must preserve the primary task result. Unknown store data is never removed.
 """
 
 import errno
+import json
 import os
 import stat
 import sys
@@ -26,6 +27,8 @@ SCAN_LIMIT = 10000
 RUN_OVERHEAD_BYTES = SUMMARY_MAX_BYTES + RESERVATION_MAX_BYTES
 RUN_FILES = frozenset(('.run.lock', '.reservation', 'trace.partial.jsonl',
                        'trace.jsonl', 'summary.json'))
+EVICTION_SCHEMA = 'llmtool.diagnostics.eviction'
+EVICTION_MAX_BYTES = 4096
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,33 @@ def _inode(info):
 def _fingerprint(info):
     return (_inode(info), info.st_mode, info.st_uid, info.st_nlink,
             info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _eviction_fingerprint(info):
+    return list(_inode(info)) + list(_fingerprint(info)[1:])
+
+
+def _eviction_intent(raw):
+    """A closed internal deletion receipt, never an inference from damaged runs."""
+    value = strict_object(raw, EVICTION_MAX_BYTES)
+    if (set(value) != {'schema', 'schema_version', 'run_id', 'directory', 'files'} or
+            value['schema'] != EVICTION_SCHEMA or type(value['schema_version']) is not int or
+            value['schema_version'] != 1):
+        raise _Unsafe()
+    d.validate_run_id(value['run_id'])
+    files = value['files']
+    if type(files) is not dict or not set(files) <= RUN_FILES or '.run.lock' not in files:
+        raise _Unsafe()
+    for fingerprint in [value['directory'], *files.values()]:
+        if (type(fingerprint) is not list or len(fingerprint) != 8 or
+                any(type(n) is not int or not -(2 ** 63) <= n < 2 ** 64 for n in fingerprint)):
+            raise _Unsafe()
+    if not stat.S_ISDIR(value['directory'][2]):
+        raise _Unsafe()
+    for fingerprint in files.values():
+        if not stat.S_ISREG(fingerprint[2]) or fingerprint[4] != 1:
+            raise _Unsafe()
+    return value
 
 
 def _private(info, directory=False):
@@ -508,22 +538,163 @@ class DiagnosticsStore:
         for filename in names:
             _private(os.stat(filename, dir_fd=directory, follow_symlinks=False))
 
-    def _remove(self, runs, candidate):
+    def _begin_eviction(self, root, runs, candidate):
+        """Durably authorize only this fully validated, eligible locked candidate."""
         self._check_candidate(runs, candidate)
-        name, directory, _, names, *_ = candidate
-        for filename in names:
-            current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
-            if (_fingerprint(current) != candidate[7][1][filename] or
-                    _inode(os.fstat(directory)) != _inode(os.stat(name, dir_fd=runs, follow_symlinks=False))):
-                raise _Unsafe()
-            os.unlink(filename, dir_fd=directory)
-        if _inode(os.fstat(directory)) != _inode(os.stat(name, dir_fd=runs, follow_symlinks=False)):
+        if not candidate[6]:
             raise _Unsafe()
-        os.rmdir(name, dir_fd=runs)
-        _sync_directory(runs)
+        import secrets
+        token = secrets.token_hex(16)
+        temporary, journal = '.eviction-init-' + token, '.eviction-' + token + '.json'
+        raw = json.dumps({'schema': EVICTION_SCHEMA, 'schema_version': 1,
+            'run_id': candidate[0], 'directory': _eviction_fingerprint(os.fstat(candidate[1])),
+            'files': {name: _eviction_fingerprint(os.stat(name, dir_fd=candidate[1], follow_symlinks=False))
+                      for name in candidate[3]}}, sort_keys=True, separators=(',', ':')).encode('ascii')
+        _eviction_intent(raw)
+        fd = _file(root, temporary, os.O_EXCL, create=True)
+        created, published = _inode(os.fstat(fd)), False
+        try:
+            _write(fd, raw)
+            os.fsync(fd)
+            self._check_candidate(runs, candidate)
+            if _fingerprint(os.stat(temporary, dir_fd=root, follow_symlinks=False)) != _fingerprint(os.fstat(fd)):
+                raise _Unsafe()
+            # Native no-replace rename also publishes regular files atomically,
+            # avoiding the link/unlink nlink=2 interruption window.
+            _publish_run_directory(root, temporary, root, journal)
+            published = True
+            if _fingerprint(os.stat(journal, dir_fd=root, follow_symlinks=False)) != _fingerprint(os.fstat(fd)):
+                raise _Unsafe()
+            _sync_directory(root)
+            return journal
+        except Exception:
+            if not published:
+                try:
+                    current = os.stat(temporary, dir_fd=root, follow_symlinks=False)
+                    _private(current)
+                    if (_inode(current) == created and
+                            _fingerprint(current) == _fingerprint(os.fstat(fd))):
+                        os.unlink(temporary, dir_fd=root)
+                        _sync_directory(root)
+                except (OSError, _Unsafe):
+                    pass  # Preserve replacements and the original failure.
+            raise
+        finally:
+            os.close(fd)
+            # SIGKILL leaves unpublished/ambiguous files unknown; no guessed repair.
+
+    def _evict(self, root, runs, journal, candidate=None):
+        """Resume a committed eviction, checking every remaining identity before unlink."""
+        directory = lock = None
+        receipt = _file(root, journal)
+        try:
+            receipt_info = os.fstat(receipt)
+            intent = _eviction_intent(_read(root, journal, EVICTION_MAX_BYTES))
+            name, files = intent['run_id'], intent['files']
+
+            def check_receipt():
+                info = os.stat(journal, dir_fd=root, follow_symlinks=False)
+                _private(info)
+                if _fingerprint(info) != _fingerprint(receipt_info):
+                    raise _Unsafe()
+
+            check_receipt()
+            try:
+                info = os.stat(name, dir_fd=runs, follow_symlinks=False)
+            except FileNotFoundError:
+                info = None
+            if info is not None:
+                _private(info, True)
+                if _eviction_fingerprint(info)[:4] != intent['directory'][:4]:
+                    raise _Unsafe()
+                if candidate is not None:
+                    self._check_candidate(runs, candidate)
+                    directory, lock = candidate[1:3]
+                else:
+                    directory = _directory(runs, name)
+                    if '.run.lock' in os.listdir(directory):
+                        lock = _file(directory, '.run.lock')
+                        import fcntl
+                        try:
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            return False  # Active data is never examined/deleted.
+
+                def check_remaining():
+                    check_receipt()
+                    current = os.stat(name, dir_fd=runs, follow_symlinks=False)
+                    _private(current, True)
+                    # APFS changes directory nlink as files are removed; size and
+                    # timestamps also change. Inventory/file fingerprints below
+                    # authorize those mutations, never a replacement inode/mode/uid.
+                    if (_eviction_fingerprint(current)[:4] != intent['directory'][:4] or
+                            _inode(current) != _inode(os.fstat(directory))):
+                        raise _Unsafe()
+                    remaining = set(os.listdir(directory))
+                    if not remaining <= set(files) or (remaining and '.run.lock' not in remaining):
+                        raise _Unsafe()
+                    for filename in remaining:
+                        current = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                        _private(current)
+                        if _eviction_fingerprint(current) != files[filename]:
+                            raise _Unsafe()
+                    if '.run.lock' in remaining and (lock is None or
+                            _eviction_fingerprint(os.fstat(lock)) != files['.run.lock']):
+                        raise _Unsafe()
+                    return remaining
+
+                remaining = check_remaining()
+                # Retain the verified lock through every data-file deletion.
+                for filename in sorted(remaining - {'.run.lock'}) + (['.run.lock'] if '.run.lock' in remaining else []):
+                    if filename not in check_remaining():
+                        raise _Unsafe()
+                    os.unlink(filename, dir_fd=directory)
+                if check_remaining():
+                    raise _Unsafe()
+                os.rmdir(name, dir_fd=runs)
+            # Receipt survives through rmdir and its durability boundary.
+            _sync_directory(runs)
+            check_receipt()
+            # Never remove a receipt if its namespace now names a replacement.
+            try:
+                os.stat(name, dir_fd=runs, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise _Unsafe()
+            os.unlink(journal, dir_fd=root)
+            _sync_directory(root)
+            return True
+        finally:
+            failure = None
+            for fd in ((lock, directory, receipt) if candidate is None else (receipt,)):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError as exc:
+                        failure = exc
+            if failure is not None:
+                raise failure
+
+    def _remove(self, root, runs, candidate):
+        self._check_candidate(runs, candidate)
+        journal = self._begin_eviction(root, runs, candidate)
+        self._evict(root, runs, journal, candidate)
 
     def _capacity(self, root, runs):
         settings, now = self.settings, time.time()
+        # Bound descriptor use: recover one durable receipt at a time under root EX.
+        root_names = os.listdir(root)
+        if len(root_names) > SCAN_LIMIT:
+            raise _Full()
+        for name in sorted(root_names):
+            if name.startswith('.eviction-') and name.endswith('.json'):
+                token = name[len('.eviction-'):-len('.json')]
+                try:
+                    d.validate_run_id(token)
+                except ValueError:
+                    continue  # Unknown names are capacity-accounted, never deleted.
+                self._evict(root, runs, name)
         names = os.listdir(runs)
         if len(names) > SCAN_LIMIT:
             raise _Full()
@@ -554,7 +725,7 @@ class DiagnosticsStore:
             if item is None:
                 return False
             try:
-                self._remove(runs, item)
+                self._remove(root, runs, item)
                 return True
             finally:
                 self._close_candidate(item)
