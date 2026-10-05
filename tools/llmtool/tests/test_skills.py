@@ -122,6 +122,21 @@ class SkillTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(load_skill(name).instructions, messages_for(name, 'data')[0]['content'])
 
+    def test_dogfood_triage_skills_are_bounded_prompt_resources(self):
+        for name in ('log-triage', 'test-triage'):
+            with self.subTest(name=name):
+                skill = load_skill(name)
+                text = ' '.join(skill.instructions.split())
+                self.assertEqual(skill.version, 1)
+                self.assertIn('Use only the supplied', text)
+                self.assertIn('Do not state a root cause as fact', text)
+                self.assertIn('Do not declare PASS, SAFE, DONE, VERIFIED, merge-ready or release-ready', text)
+                self.assertIn('The caller must compare this derived summary with original', text)
+                if name == 'log-triage':
+                    self.assertIn('model-side redaction is best-effort only', text)
+                    self.assertIn('deterministically redact/discard secrets before the provider call', text)
+                    self.assertIn('potentially containing any supplied value', text)
+
 
 class SkillCLITests(unittest.TestCase):
     def run_cli(self, args):
@@ -138,9 +153,9 @@ class SkillCLITests(unittest.TestCase):
                 self.assertEqual(first[0], 0)
                 self.assertEqual(first[2], '')
                 if '--json' in args:
-                    self.assertEqual([s['name'] for s in json.loads(first[1])], ['analyze-log', 'context-pack', 'review-diff'])
+                    self.assertEqual([s['name'] for s in json.loads(first[1])], ['analyze-log', 'context-pack', 'log-triage', 'review-diff', 'test-triage'])
                 else:
-                    self.assertEqual([line.split()[0] for line in first[1].splitlines()], ['analyze-log', 'context-pack', 'review-diff'])
+                    self.assertEqual([line.split()[0] for line in first[1].splitlines()], ['analyze-log', 'context-pack', 'log-triage', 'review-diff', 'test-triage'])
 
     def test_show_offline(self):
         with patch('llmtool.cli.resolve_config', side_effect=AssertionError), patch('llmtool.cli.create_client', side_effect=AssertionError):

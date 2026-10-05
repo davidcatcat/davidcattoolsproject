@@ -45,10 +45,9 @@ Select the buckets relevant to the product/milestone:
 Use `validate-runtime` for VPN/provider/auth/session/reachability evidence and keep
 reachability, authentication, inference and end-to-end behavior distinct. Mock evidence
 cannot replace a required live acceptance case. For llmtool Mac + VPN development
-dogfood, the company LLM may cluster or summarize bounded QA output through llmtool,
-but it cannot assign the authoritative PASS/FAIL verdict or replace raw public-interface
-evidence and independent verification; see the
-[development workflow](../../tools/llmtool/WORKFLOW.md#development-time-cost-aware-dogfood-available-now).
+dogfood, use [company-llm-delegation](../company-llm-delegation/SKILL.md) for bounded
+QA-output clustering/summarization. That delegation cannot assign the authoritative
+PASS/FAIL verdict or replace raw public-interface evidence and independent verification.
 
 ## Rules
 

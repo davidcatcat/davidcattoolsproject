@@ -578,7 +578,9 @@ provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost
 2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence，適合做 test/log
    summary、failure clustering、stack-trace extraction、簡單 category classification、
    baseline-vs-current 差異整理與 QA checklist presence。原始 command/exit/raw evidence
-   保留，摘要不能取代 ground truth。
+   保留，摘要不能取代 ground truth。Repo-level `company-llm-delegation` skill 統一這個
+   decision/data boundary；runtime 使用 provider-agnostic `test-triage`、`log-triage`
+   或既有 `context-pack`，不重複建立 evidence-summary。
 3. Root-cause-as-fact、production code 修改、architecture、security/auth/permission、
    concurrency/race、data-corruption、test-correctness、acceptance/merge verdict 仍由 Codex/
    Claude/人工等較強 verifier 對照 source + raw evidence 判斷。Company model 的 confidence

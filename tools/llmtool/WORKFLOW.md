@@ -38,23 +38,32 @@ Use this order:
    for facts the snapshot does not provide, and prefer bounded/structured output over
    repeatedly feeding verbose command output back to Codex.
 2. **Company LLM only for bounded triage.** When data policy permits and the actual
-   Mac/VPN can reach the configured company profile, call it **through llmtool** for
-   test/log summarization, failure clustering, stack-trace extraction, simple failure
-   classification, baseline/result comparison, or checklist presence. Do not call
+   Mac/VPN can reach the configured company profile, first deterministically redact or
+   discard secrets/sensitive values; model-side redaction is not a security control.
+   Then call it **through llmtool** for test/log summarization, failure clustering,
+   stack-trace extraction, simple failure classification, baseline/result comparison,
+   or checklist presence. Do not call
    the gateway directly to perform delegated engineering work; a direct endpoint probe
    is reserved for explicit runtime/connectivity comparison.
 3. **Strong verifier for judgement.** Codex/Claude/human must inspect source plus raw
    evidence for root cause, code changes, architecture, security/auth/permission,
    concurrency/race, data-corruption, test correctness and acceptance/merge decisions.
    Company-model confidence or prose cannot establish PASS, SAFE, DONE or merge-ready.
-4. **Repair loop stays evidence-driven.** Re-run the narrow deterministic failing check
+4. **Validate derived identifiers.** Any test/file identifier returned by company
+   triage must be checked deterministically against the supplied bounded evidence before
+   use as a locator; unsupported identifiers are invalid derived data, not source facts.
+5. **Repair loop stays evidence-driven.** Re-run the narrow deterministic failing check
    after a fix, then the required broader regression. Company triage may be repeated on
    newly bounded failure evidence, but it never overrides a command exit/test result.
-5. **Record delegation evidence.** For each company-model delegation, capture task type,
-   provider/profile, bounded input scope/bytes, usage tokens when reported (otherwise
-   unknown), latency, schema validity, whether Codex adopted/overrode the result, and
-   the later deterministic/independent verification outcome. Keep this in a development
-   report; it is not a new diagnostics persistence schema.
+6. **Record delegation evidence.** For each company-model delegation, capture task type,
+   selected runtime skill, provider/profile, **data permission basis**, bounded input
+   scope/bytes, usage tokens when reported (otherwise unknown), latency, schema validity,
+   identifier validity/invalid identifiers where applicable, whether Codex adopted/
+   overrode the result, and the later deterministic/independent
+   verification outcome. Keep this in a development report; it is not a new diagnostics
+   persistence schema. The report must not copy raw secrets or an entire sensitive log;
+   use a safe reference, digest or minimal redacted excerpt when raw evidence is retained
+   elsewhere.
 
 If VPN/company provider is unavailable, mark the optional dogfood step skipped/blocked
 and continue with the normal strong-model workflow unless the milestone explicitly
