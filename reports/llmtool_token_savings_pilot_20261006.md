@@ -97,6 +97,35 @@ Raw JSONL SHA-256:
 Raw JSONL and stderr remain temporary runtime artifacts outside the repository;
 neither full trace nor credentials are included in this report or publication.
 
+## Execution rules added after independent accounting review
+
+The independent Codex 0.159.2 accounting review returned PASS and added four
+non-blocking execution notes which are mandatory for the pilot:
+
+- **R1 — failed/incomplete Codex run:** if a measured run does not emit a usable
+  `turn.completed.usage`, record the Codex usage as `unknown` and invalidate that
+  control/dogfood pair for any savings claim. Never substitute zero or a partial count.
+- **R2 — cache-write observation:** record `cache_write_input_tokens` exactly as
+  reported. It remains a breakdown field and is not added to the comparable total.
+  If it is non-zero, call it out in the report and verify the usage schema/version did
+  not change before continuing.
+- **R3 — version/schema/turn evidence:** every measured session must record
+  `codex --version`, the exact set of usage-field names observed, and the number of
+  `turn.completed` events. Any CLI version/schema drift or anything other than the
+  expected fresh single-turn shape stops the benchmark pending revalidation.
+- **R4 — multiple model requests inside one turn:** the fresh thread-level usage may
+  include multiple Responses requests caused by tool use. Those tokens are real task
+  consumption and remain part of the measured Codex total. Do not reinterpret them as
+  context size or subtract them away.
+
+Accepted comparable total remains:
+
+```text
+codex_comparable_total = input_tokens + output_tokens
+```
+
+Cached input, cache-write input and reasoning output remain diagnostic breakdowns only.
+
 ## Planned execution state
 
 The requested fixed order is retained below. No measured session has started, so
