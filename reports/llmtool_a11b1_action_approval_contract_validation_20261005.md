@@ -30,8 +30,8 @@ builds and root-owned Git publication are separate authorized repository work.
 | Exact starting main | `7be031c2f8004143d56116717ada5c8599d47d3f` |
 | Documentation-first checkpoint | `0a112dbe3da35f44e0b5a0eef9e1984ea39ffecd`, six current-state docs only |
 | Original implementation review SHA | `50273c4ac0bbf22dce7113c7eaf5dfad7ece5d6b`; historical round-1 object |
-| Repair implementation review SHA | PENDING root-owned repair freeze commit; no own-SHA bookkeeping loop |
-| Independent review | Round 1 REQUEST CHANGES (R1 only); repair re-review PENDING; maximum two repair rounds |
+| Repair implementation review SHA | `546d0187c5aca0c78081edfc3fc80aab8da05f32`; exact independently reviewed implementation |
+| Independent review | FINAL PASS at `546d0187`; R1 CLOSED; one repair round used |
 | Publication / PR / feature-head CI | PENDING; final publication SHA belongs in PR/final handoff |
 | Historical baseline CI only | [37317208697](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37317208697), main `7be031c`, Python 3.9/3.14 SUCCESS |
 
@@ -196,8 +196,8 @@ Authorized repair round 1 renames only Action/Approval's version field to
 `version` remains unchanged. Updated fixed schema inventory/mutation checks and
 two permanent API/public CLI methods independently assert both contracts accept
 schema_version and reject legacy/both/missing/duplicate/bool/string/float/future
-values. All existing security tests are retained. R1 disposition is FIXED LOCALLY;
-independent re-review is PENDING the root-owned repair commit. No executor or
+values. All existing security tests are retained. R1 disposition is CLOSED by final
+independent PASS at `546d0187c5aca0c78081edfc3fc80aab8da05f32`. No executor or
 approval authentication changes were made.
 
 Historical local evidence on original `50273c4`: 33 new tests PASS (2.211 s),
@@ -209,7 +209,8 @@ Those results do not validate the repaired schema bytes.
 ## Final repair-round-1 local validation evidence
 
 All results below follow the R1 schema repair and bind the repair freeze manifest;
-the root-owned repair commit SHA is pending. Test fixture receipt helpers are
+the root-owned repair commit is `546d0187c5aca0c78081edfc3fc80aab8da05f32`.
+Test fixture receipt helpers are
 development data constructors, not product issuance APIs. No tests were weakened.
 
 | Check | Final result |
@@ -221,7 +222,7 @@ development data constructors, not product issuance APIs. No tests were weakened
 | Installed console | Five cases PASS: version/help/proposal/matching receipt/expired receipt; expected exits 0/0/0/0/1 |
 | Wheel production-source identity | All three production module bytes equal tested repository bytes |
 | Wheel SHA-256 | `2fad5d67b5254030aad25414324e54096cc309bfe2a32fd6dd77f08cfd443fc6` |
-| Diff / docs / freeze manifest | Final checks recorded at root-owned freeze handoff |
+| Diff / docs / freeze manifest | PASS; root verified frozen bytes before implementation commit |
 
 Focused invocation: `PYTHONPATH=tools/llmtool/tests:tools/llmtool tools/llmtool/.venv/bin/python
 -m unittest -v test_action_contract test_action_contract_cli`. Combined security modules:
@@ -268,6 +269,52 @@ used local socket/loopback mocks only, with no live provider. A standalone focus
 invocation missing tests in PYTHONPATH failed import and was corrected to the command
 above; final repaired 35-method execution passed. Test/dev fixtures do not grant product rights.
 
+## Final independent re-review
+
+Reviewer `/root/a11b1_reviewer` returned FINAL PASS on exact
+`546d0187c5aca0c78081edfc3fc80aab8da05f32`. Ordinary review, scoped security,
+public CLI QA and negative bug hunt PASS; confirmed new bugs: 0; remaining blockers:
+0; R1 CLOSED. The reviewer independently ran 192 focused regressions, PASS in
+6.775 s with no skips, plus 46 public source/fresh-installed checks. The public checks
+confirmed schema_version acceptance, legacy/missing/duplicate/bool/string/float/
+future rejection, stale receipt failure after relevant mutations, sanitized output,
+unchanged fixtures and authorized=false. Fresh wheel production identity, manifest
+and diff checks PASS. The 1016 canonical result remains developer-run evidence;
+the reviewer checked its log and attribution rather than claiming an independent rerun.
+
+Independent regression command, run from the canonical repository with permission
+for existing local socket regressions:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tools/llmtool:tools/llmtool/tests python3 -m unittest -q \
+  test_action_contract test_action_contract_cli test_qg_qa1_error_context \
+  test_qg_qa1_file_context test_entrypoint_interrupt test_validator test_diagnostics test_post_a9_review
+```
+
+The independent 46-check inline Python harness used `subprocess.run`, timeout=5,
+captured stdout/stderr and isolated HOME/PATH/LLMTOOL_HOME. It invoked both
+`[sys.executable, 'tools/llmtool/llmtool.py', *args]` and
+`['/tmp/a11b1-r1-installed-venv/bin/llmtool', *args]`. Args were `action validate
+--file action.json --json` and `approval validate --action action.json --approval
+approval.json --state state.json --nonce HEX --now 15 --json`, using explicit files
+in `/tmp/a11b1-r1-review-final-dhbc8l8v` and a synthetic nonce of 64 repetitions of 1.
+Each launcher ran two valid cases, ten rejection variants for each Action/Approval
+(legacy, both keys, missing, duplicate, true, string, float, future 2, zero and null),
+and one pre-repair stale-digest receipt, totaling 23 each. The harness independently
+computed canonical Action SHA-256, checked fixed outputs/authorized=false, unchanged
+fixture contents and absent store. Independent outputs/harness are recorded in the
+tool transcript; no separate saved script or regression log is claimed. Fixture
+JSON remains at the stated directory. The checked fresh wheel SHA-256 is
+`2fad5d67b5254030aad25414324e54096cc309bfe2a32fd6dd77f08cfd443fc6`.
+
+An initial independent probe used the old installed venv; that invalid artifact
+probe was discarded and the checks rerun against the correctly rebuilt fresh wheel.
+It is not included in the final passing evidence. This final report update changes
+documentation only after review; production/tests/README remain frozen at `546d0187`.
+The eventual report-only commit is not a second code-review SHA. Its publication
+HEAD/PR/CI will be recorded once by the coordinator in PR/final handoff, avoiding
+a self-referential report SHA loop.
+
 ## Environment, review boundary and remaining limitations
 
 Cloud Linux x86_64 kernel 6.18.44, Python 3.12.14 venv, pip 25.0.1, setuptools 84,
@@ -286,8 +333,8 @@ and CI. **MAC REQUIRED:** NONE. **NOT REQUIRED:** real provider/auth/VPN, remote
 approval or real executor acceptance. Fresh input-reader behavior is POSIX; unsupported
 platforms fail closed, while pure contract validation is filesystem-independent.
 
-Independent repair frozen-SHA re-review and new-head CI remain pending at this authoring
-cutoff. There is no merge recommendation before review. Executor, sandbox, trusted
+Independent repair frozen-SHA re-review is PASS; publication and new-head CI remain
+pending at this authoring cutoff. This report does not claim a merge. Executor, sandbox, trusted
 issuance, durable replay/audit, fresh actual state/TOCTOU controls, Git mutation and
 provider export policy need their own future design. Final publication SHA/PR/CI
 will be recorded once by the coordinator without self-referential report commits.
@@ -301,7 +348,7 @@ APPROVAL EXACT-BINDING: PASS
 TOCTOU PRECONDITION CONTRACT: PASS
 OFFLINE / ZERO-PROVIDER VALIDATION: PASS
 READY FOR INDEPENDENT REVIEW: YES
-INDEPENDENT REVIEW: ROUND 1 REQUEST CHANGES; RE-REVIEW PENDING
+INDEPENDENT REVIEW: FINAL PASS; R1 CLOSED
 FEATURE-HEAD CI: PENDING
 MERGED: NO
 ```
