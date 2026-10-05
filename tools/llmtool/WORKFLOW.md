@@ -51,10 +51,13 @@ Use this order:
    after a fix, then the required broader regression. Company triage may be repeated on
    newly bounded failure evidence, but it never overrides a command exit/test result.
 5. **Record delegation evidence.** For each company-model delegation, capture task type,
-   provider/profile, bounded input scope/bytes, usage tokens when reported (otherwise
-   unknown), latency, schema validity, whether Codex adopted/overrode the result, and
-   the later deterministic/independent verification outcome. Keep this in a development
-   report; it is not a new diagnostics persistence schema.
+   selected runtime skill, provider/profile, **data permission basis**, bounded input
+   scope/bytes, usage tokens when reported (otherwise unknown), latency, schema validity,
+   whether Codex adopted/overrode the result, and the later deterministic/independent
+   verification outcome. Keep this in a development report; it is not a new diagnostics
+   persistence schema. The report must not copy raw secrets or an entire sensitive log;
+   use a safe reference, digest or minimal redacted excerpt when raw evidence is retained
+   elsewhere.
 
 If VPN/company provider is unavailable, mark the optional dogfood step skipped/blocked
 and continue with the normal strong-model workflow unless the milestone explicitly
