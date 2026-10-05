@@ -71,6 +71,65 @@ requires live company-provider evidence. Never weaken acceptance criteria to mak
 cheap path usable, and never export data to an external provider merely because the
 company path failed.
 
+### Token savings measurement
+
+Do not claim that dogfood saves Codex tokens merely because company-provider usage is
+low or because the Codex prompt becomes shorter. For a quantitative claim, run a paired
+control/dogfood benchmark with the same bounded fixture, exact repository/test revision,
+Codex model, reasoning effort/speed and acceptance criteria. Start each variant in a
+fresh Codex session and prevent cross-variant answer/context leakage.
+
+For the dogfood variant, Codex initially receives the company-derived summary/packet,
+deterministic schema/identifier-validation result and a reference to the original
+bounded fixture. The full raw fixture is not automatically injected into model context.
+Before Codex relies on a company-derived claim, it must inspect the relevant original
+raw evidence; record actual ranges/bytes read. A dogfood run that skips required raw
+verification is invalid for a savings claim.
+
+Record, when actually reported by the runtime/accounting source:
+
+- Codex control: input, cached-input, output, reasoning and total tokens;
+- Codex dogfood: the same fields;
+- company LLM: prompt/input, completion/output and total tokens;
+- measurement source for each set and whether it is exact, reported aggregate or unknown;
+- wall-clock duration, Codex tool-call count and **all** company calls/retries;
+- raw fixture bytes/ranges actually read by dogfood Codex;
+- pre-registered run order;
+- final deterministic/independent quality result and grading method;
+- company result adopted/overridden and schema/identifier validity.
+
+Do not infer exact tokens from context bytes, remaining quota, credits, percentages or
+pricing. These may be recorded separately as supporting metrics only. When a source
+reports `total_tokens`, use that source total for the main comparison; do not add
+cached/reasoning subfields again unless that source explicitly defines them as excluded
+from total.
+
+Compute only when required totals are known and comparable:
+
+```text
+codex_tokens_saved = control_codex_total - dogfood_codex_total
+codex_savings_pct = codex_tokens_saved / control_codex_total * 100
+
+dogfood_mixed_token_volume = dogfood_codex_total + company_llm_total
+mixed_token_volume_delta = control_codex_total - dogfood_mixed_token_volume
+mixed_token_volume_delta_pct = mixed_token_volume_delta / control_codex_total * 100
+```
+
+A negative saving is a valid result and must be reported. The mixed-token-volume delta
+combines different model/tokenizer units and is descriptive only; it is not a cost,
+compute or energy metric. Always report Codex and company totals separately. Monetary
+comparison requires trusted per-model pricing/version data.
+
+Each fixture's gold labels/forbidden claims and fixture digest must be fixed before
+execution. Use deterministic grading where possible; any semantic remainder must be
+graded by an independent reviewer blinded to variant identity. Quality regression,
+missing required raw-evidence verification, missing acceptance evidence or a materially
+different task invalidates the pair for a savings claim. Keep unknown/null rather than
+zero when exact usage is unavailable.
+
+This measurement is development evidence only. It does not add an automatic cost router
+or make token savings a security/QA acceptance substitute.
+
 ## 1. Establish repository and scope
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
@@ -169,8 +228,9 @@ review evidence and disclose coverage limits even when checks pass.
 Future cost evaluations must include context preparation, retry/repair, escalation
 and all review calls, with reported input/output usage and trustworthy pricing
 versions. Record missing tokens/cost as unknown/null, never zero; a known subtotal
-is partial, not the total. This task supplies no cost measurement, savings claim,
-budget enforcement or automatic cost router.
+is partial, not the total. Development-time paired Token Savings Benchmark evidence
+may quantify dogfood ROI when its measurement contract is satisfied; it still does
+not implement budget enforcement or an automatic cost router.
 
 ## Quality-gate model
 

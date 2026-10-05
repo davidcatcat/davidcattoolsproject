@@ -106,6 +106,35 @@ For each delegation record only bounded metadata/reference data:
 Do not paste raw secrets or a full sensitive log into the report. Use a safe reference,
 small redacted excerpt, or digest when raw evidence must remain elsewhere.
 
+## Token-savings benchmark
+
+Ordinary delegation telemetry is not enough to claim Codex token savings. When the goal
+is to quantify savings, use a paired benchmark:
+
+- same bounded fixture, repo/test revision, Codex model, reasoning effort/speed and
+  acceptance criteria;
+- fresh independent Codex session for control and dogfood variants;
+- control analyzes the original bounded evidence without company-model help;
+- dogfood uses this skill and the configured company provider; Codex starts from the
+  derived summary plus deterministic validation results, while the original bounded
+  evidence remains available by reference;
+- before Codex relies on a company-derived claim, it must compare that claim with the
+  relevant raw evidence; record raw ranges/bytes read, and invalidate a savings pair if
+  required verification was skipped;
+- record actual Codex usage for each variant and **all** company-provider attempts,
+  including failures/retries, with an explicit measurement source;
+- if exact/reported comparable Codex totals are unavailable, report savings as
+  `unknown`; do not convert bytes, quota percentage, credits or estimates into tokens;
+- pre-register fixture gold labels/digest and use deterministic grading where possible;
+  grade any semantic remainder independently without revealing variant identity;
+- record quality result, latency, run order and adopt/override alongside token usage.
+
+Report Codex-only savings as the primary result. A mixed Codex+company token-volume delta
+may also be shown, but because it mixes tokenizer/model units it is descriptive only and
+must not be presented as cost or compute savings. A negative result is valid.
+Do not select only favorable pairs or declare savings when the two variants did not
+solve the same task to comparable quality.
+
 ## Completion criteria
 
 - Deterministic work was not needlessly delegated.
