@@ -1057,7 +1057,7 @@ llmtool ask --skill analyze-log "supplied log evidence"
 llmtool ask --skill review-diff --file supplied.diff
 llmtool ask --provider PROFILE_NAME --skill test-triage --file bounded-test-failure.txt --verbose
 llmtool ask --provider PROFILE_NAME --skill log-triage --file bounded-log.txt --verbose
-llmtool ask --provider PROFILE_NAME --skill context-pack --file bounded-evidence.txt --verbose
+llmtool context-pack --provider PROFILE_NAME --file bounded-evidence.txt --json --verbose
 ```
 
 Listing/show are offline and bypass config, credentials, and providers. Text and
