@@ -323,7 +323,7 @@ class GitAddPayload(ContractValue):
 
 @dataclass(frozen=True)
 class Action(ContractValue):
-    version: int
+    schema_version: int
     action_id: str
     created_at: int
     kind: ActionKind
@@ -333,7 +333,7 @@ class Action(ContractValue):
     payload: Union[FileChangePayload, FileDeletePayload, GitAddPayload]
 
     def __post_init__(self):
-        _version(self.version)
+        _version(self.schema_version)
         _identifier(self.action_id)
         _integer(self.created_at, maximum=MAX_EPOCH)
         _typed(self.kind, ActionKind)
@@ -366,7 +366,7 @@ class Action(ContractValue):
 
 @dataclass(frozen=True)
 class Approval(ContractValue):
-    version: int
+    schema_version: int
     source: str
     action_digest: str
     action_kind: ActionKind
@@ -379,7 +379,7 @@ class Approval(ContractValue):
     nonce: str
 
     def __post_init__(self):
-        _version(self.version)
+        _version(self.schema_version)
         if type(self.source) is not str or self.source != 'USER':
             _invalid()
         _hex(self.action_digest)
@@ -682,7 +682,7 @@ def parse_action(text):
             _expectations(payload['files']), payload['expected_index_sha256'])
     if type(value['scope']) is not list:
         _invalid()
-    return Action(value['version'], value['action_id'], value['created_at'], kind,
+    return Action(value['schema_version'], value['action_id'], value['created_at'], kind,
         _task(value['task']), _repository(value['repository']), value['scope'], payload)
 
 
@@ -690,7 +690,7 @@ def parse_approval(text):
     value = _object(_load(text), (f.name for f in fields(Approval)))
     if type(value['scope']) is not list:
         _invalid()
-    return Approval(value['version'], value['source'], value['action_digest'],
+    return Approval(value['schema_version'], value['source'], value['action_digest'],
         _enum(ActionKind, value['action_kind']), _task(value['task']),
         _repository(value['repository']), value['scope'], value['state_digest'],
         value['issued_at'], value['expires_at'], value['nonce'])

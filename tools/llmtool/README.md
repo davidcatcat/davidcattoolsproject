@@ -1946,6 +1946,9 @@ future A2.3; M6 remains DEFERRED. Validation is recorded in the
 
 ## A11b.1 — Typed Action & Approval Contract — current data-only slice
 
+Provider != Role != Agent != Skill != Action != Approval. None of these boundaries
+converts model output or provider capability into approval authority.
+
 `llmtool action validate` and `llmtool approval validate` validate strict version-1
 proposal and receipt data offline. They read only explicit bounded JSON inputs;
 there is no config/credential lookup, provider request, Git invocation, write,
@@ -1989,8 +1992,8 @@ contract needs a reviewed fixed executable/typed argv, credential-free environme
 policy, wall-clock/output limits and explicit sandbox/network controls. This slice
 does not derive command semantics from A6 classifier text or model output.
 
-Action requires exactly `version`, `action_id`, `created_at`, `kind`, `task`,
-`repository`, `scope`, `payload`. Version is integer 1; action_id/task_id are
+Action requires exactly `schema_version`, `action_id`, `created_at`, `kind`, `task`,
+`repository`, `scope`, `payload`. schema_version is integer 1; action_id/task_id are
 1–64 ASCII identifier characters starting with a letter or digit, then letters,
 digits, dot, underscore or hyphen. Task requires task_id, run_id (32 lowercase hex),
 contract_version (1..2^31-1), contract_digest (SHA-256). These are bindings to a
@@ -2017,11 +2020,13 @@ Canonical SHA-256 hashes the UTF-8 bytes of compact sorted-key JSON
 (`ensure_ascii=False`, `separators=(',', ':')`, `allow_nan=False`) with this envelope:
 `{"domain":DOMAIN,"value":VALUE,"version":1}`. DOMAIN is `llmtool.action`,
 `llmtool.action-state` or `llmtool.approval`. VALUE is the complete exact fixed
-serialized object, including its version. No normalization, coercion, omitted
+serialized object, including its schema_version (Action/Approval) or version (state).
+The digest envelope, RepositoryState and AuditEvent keep `version`; Action/Approval
+reject the legacy `version` key. No normalization, coercion, omitted
 execution fields or authoritative display text exists. Whitespace/key order in
 input JSON do not affect the digest. All action fields affect its digest.
 
-Approval requires exactly version, source, action_digest, action_kind, task,
+Approval requires exactly schema_version, source, action_digest, action_kind, task,
 repository, scope, state_digest, issued_at, expires_at and nonce (64 lowercase hex).
 The only accepted source spelling is USER, **a claimed source, not proof of issuance**.
 Issuance must not precede action.created_at; expires_at-issued_at is 1..3600 seconds.

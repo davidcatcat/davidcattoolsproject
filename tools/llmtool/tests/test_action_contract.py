@@ -74,6 +74,34 @@ def alternative(value):
 
 
 class ContractAPITests(unittest.TestCase):
+    def test_action_and_approval_schema_version_exact_key_and_strict_integer(self):
+        for model, parser, value in ((c.Action, c.parse_action, make_action()),
+                                    (c.Approval, c.parse_approval, make_approval())):
+            with self.subTest(model=model):
+                raw = value.to_dict()
+                self.assertEqual(raw['schema_version'], 1)
+                self.assertNotIn('version', raw)
+                self.assertEqual(parser(json.dumps(raw)), value)
+                self.assertEqual(replace(value, schema_version=1), value)
+                if model is c.Action:
+                    self.assertEqual(value.expected_state.version, 1)
+                for variant in ('legacy', 'both', 'missing', True, '1', 1.0, 2):
+                    invalid = copy.deepcopy(raw)
+                    if variant == 'legacy':
+                        invalid['version'] = invalid.pop('schema_version')
+                    elif variant == 'both':
+                        invalid['version'] = 1
+                    elif variant == 'missing':
+                        del invalid['schema_version']
+                    else:
+                        invalid['schema_version'] = variant
+                    with self.subTest(variant=variant), self.assertRaises(LLMToolError):
+                        parser(json.dumps(invalid))
+                with self.assertRaises(LLMToolError):
+                    parser(value.to_json()[:-1] + ',"schema_version":1}')
+                with self.assertRaises(TypeError):
+                    replace(value, version=1)
+
     def test_all_supported_kinds_roundtrip_with_exact_state(self):
         for kind in c.ActionKind:
             with self.subTest(kind=kind):
@@ -143,7 +171,7 @@ class ContractAPITests(unittest.TestCase):
         self.assertEqual(len(tested), 109)
 
     def test_fixed_schema_enumeration_and_each_git_path_precondition(self):
-        common = {'version','action_id','created_at','kind','task.task_id','task.run_id',
+        common = {'schema_version','action_id','created_at','kind','task.task_id','task.run_id',
             'task.contract_version','task.contract_digest','repository.repository_id',
             'repository.canonical_root','repository.root_device','repository.root_inode',
             'repository.expected_head','scope.0','scope.1'}
@@ -318,7 +346,7 @@ class StrictContractTests(unittest.TestCase):
                 target = target[part]
             target['PRIVATE_unknown'] = None
             self.reject(raw)
-        self.reject('{"version":1,"version":1}')
+        self.reject('{"schema_version":1,"schema_version":1}')
         self.reject(make_action().to_json().replace('"mode":420', '"mode":420,"mode":420'))
         for parser, value in ((c.parse_approval, make_approval().to_dict()),
                               (c.parse_repository_state, make_action().expected_state.to_dict())):
@@ -329,7 +357,7 @@ class StrictContractTests(unittest.TestCase):
 
     def test_strict_types_no_coercion_or_permissive_future_version(self):
         action = make_action().to_dict()
-        for field, values in (('version', (True, 0, 2, '1', 1.0, None)),
+        for field, values in (('schema_version', (True, 0, 2, '1', 1.0, None)),
                 ('created_at', (True, '100', 100.0, -1, c.MAX_EPOCH+1)),
                 ('action_id', (True, 7, '', 'approved;touch PRIVATE')),
                 ('kind', (True, 'COMMAND', 'FILE_WRITE ', 'file_write', 'EXECUTE')),
@@ -432,7 +460,7 @@ class StrictContractTests(unittest.TestCase):
         action = make_action()
         for kwargs in ({'kind':'FILE_WRITE'}, {'payload':action.payload.to_dict()},
                        {'task':action.task.to_dict()}, {'repository':action.repository.to_dict()},
-                       {'scope':('file.txt', object())}, {'version':True}):
+                       {'scope':('file.txt', object())}, {'schema_version':True}):
             with self.assertRaises(LLMToolError):
                 replace(action, **kwargs)
         with self.assertRaises(LLMToolError):

@@ -143,6 +143,38 @@ class ContractCLITests(unittest.TestCase):
         self.assertIn('NOT_AUTHORIZED bindings=PASS', output)
         self.assertEqual((result,error), (0,''))
 
+    def test_action_and_approval_schema_version_public_cli_exact_key(self):
+        for path, value, args in (
+                (self.action_file, self.action, ['action','validate','--file',str(self.action_file),'--json']),
+                (self.approval_file, self.approval, self.approval_args('--json'))):
+            raw = value.to_dict()
+            self.assertEqual(raw['schema_version'], 1)
+            self.assertNotIn('version', raw)
+            self.action_file.write_text(self.action.to_json())
+            path.write_text(json.dumps(raw))
+            result, output, error, _ = self.invoke(args)
+            self.assertEqual((result,error), (0,''))
+            self.assertFalse(json.loads(output)['authorized'])
+            invalid_texts = [value.to_json()[:-1] + ',"schema_version":1}']
+            for variant in ('legacy', 'both', 'missing', True, '1', 1.0, 2):
+                invalid = copy.deepcopy(raw)
+                if variant == 'legacy':
+                    invalid['version'] = invalid.pop('schema_version')
+                elif variant == 'both':
+                    invalid['version'] = 1
+                elif variant == 'missing':
+                    del invalid['schema_version']
+                else:
+                    invalid['schema_version'] = variant
+                invalid_texts.append(json.dumps(invalid))
+            for text in invalid_texts:
+                with self.subTest(contract=type(value), text=text):
+                    path.write_text(text)
+                    result, output, error, _ = self.invoke(args)
+                    self.assertEqual((result,output), (1,''))
+                    self.assertEqual(error,'llmtool: ACTION_CONTRACT_INVALID; details omitted\n')
+            path.write_text(value.to_json())
+
     def test_public_every_hashed_action_field_stale_receipt(self):
         accepted = rejected = 0
         for kind in c.ActionKind:
@@ -198,9 +230,9 @@ class ContractCLITests(unittest.TestCase):
 
     def test_malformed_duplicate_unknown_controls_nonfinite_version_no_partial_stdout(self):
         valid = self.action.to_dict()
-        cases = ['{PRIVATE', '{"version":1,"version":1}',
-            json.dumps({**valid,'PRIVATE_unknown':True}), json.dumps({**valid,'version':True}),
-            json.dumps({**valid,'version':2}), json.dumps({**valid,'kind':'COMMAND'}),
+        cases = ['{PRIVATE', '{"schema_version":1,"schema_version":1}',
+            json.dumps({**valid,'PRIVATE_unknown':True}), json.dumps({**valid,'schema_version':True}),
+            json.dumps({**valid,'schema_version':2}), json.dumps({**valid,'kind':'COMMAND'}),
             json.dumps({**valid,'action_id':'PRIVATE\x1b'}), '{"x":NaN}', '['*500+']'*500]
         for text in cases:
             self.action_file.write_text(text)

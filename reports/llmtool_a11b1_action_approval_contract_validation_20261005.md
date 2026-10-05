@@ -29,8 +29,9 @@ builds and root-owned Git publication are separate authorized repository work.
 | Feature branch | `feat/a11b1-action-approval-contract-20261005` |
 | Exact starting main | `7be031c2f8004143d56116717ada5c8599d47d3f` |
 | Documentation-first checkpoint | `0a112dbe3da35f44e0b5a0eef9e1984ea39ffecd`, six current-state docs only |
-| Implementation review SHA | PENDING root-owned freeze commit; no own-SHA bookkeeping loop |
-| Independent review | PENDING frozen-SHA read-only review; maximum two repair rounds |
+| Original implementation review SHA | `50273c4ac0bbf22dce7113c7eaf5dfad7ece5d6b`; historical round-1 object |
+| Repair implementation review SHA | PENDING root-owned repair freeze commit; no own-SHA bookkeeping loop |
+| Independent review | Round 1 REQUEST CHANGES (R1 only); repair re-review PENDING; maximum two repair rounds |
 | Publication / PR / feature-head CI | PENDING; final publication SHA belongs in PR/final handoff |
 | Historical baseline CI only | [37317208697](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37317208697), main `7be031c`, Python 3.9/3.14 SUCCESS |
 
@@ -42,6 +43,9 @@ Historical reports were not edited. Future QG-S1 R-EXEC/R-FS/R-GIT/R-APR/R-INJ/
 R-EXP/R-AUD controls remain required before a real executor is designed.
 
 ## Threat model and authority boundary
+
+Provider != Role != Agent != Skill != Action != Approval. Provider capability,
+agent role and skill guidance do not grant Action or Approval authority.
 
 Assets are exact proposal identity, pinned task/run/repository/scope/state bindings,
 host filesystem and credentials, and sanitized validation/audit output. Untrusted
@@ -68,8 +72,8 @@ they do not implement a Task Contract engine or approval authority.
 
 ## Exact schemas, kinds and bounds
 
-Action fields are exactly version, action_id, created_at, kind, task, repository,
-scope and payload. Version is strict integer 1. Identifiers are 1..64 ASCII
+Action fields are exactly schema_version, action_id, created_at, kind, task, repository,
+scope and payload. schema_version is strict integer 1. Identifiers are 1..64 ASCII
 letters/digits/dot/underscore/hyphen, starting with a letter/digit. Task fields are
 task_id, run_id (32 lowercase hex), contract_version (1..2^31-1) and contract_digest.
 Repository fields are repository_id, canonical_root, root_device, root_inode and
@@ -123,11 +127,13 @@ Each digest is SHA-256 over exactly UTF-8 encoded sorted-key compact JSON with
 `ensure_ascii=False`, `separators=(',', ':')` and `allow_nan=False`:
 `{"domain":DOMAIN,"value":VALUE,"version":1}`. Domain is `llmtool.action`,
 `llmtool.action-state` or `llmtool.approval`. VALUE contains every exact serialized
-field, including its own version; there are no omitted execution-relevant fields,
+field, including schema_version for Action/Approval or version for RepositoryState;
+the digest envelope also retains version. Action/Approval reject the legacy version
+key without aliases or compatibility coercion. There are no omitted execution-relevant fields,
 coercions or authoritative display text. Input whitespace/key order do not matter.
 Tests independently build these exact bytes, including Unicode and domain separation.
 
-Approval fields are exactly version, source, action_digest, action_kind, task,
+Approval fields are exactly schema_version, source, action_digest, action_kind, task,
 repository, scope, state_digest, issued_at, expires_at and nonce. Validation requires
 exact Action/kind/task/run/repository/HEAD/scope/state binding, issued_at >= created_at,
 issued_at <= supplied now < expires_at, exact expected nonce and optional supplied
@@ -170,21 +176,51 @@ reader platforms fail closed. No implicit discovery, config/credential lookup,
 provider/network/Git factory, subprocess, project write or approval prompt occurs.
 Reads may update OS atime; no kernel-level unchanged-atime claim is made.
 
-## Final local validation evidence
+## Independent round 1 and R1 repair
 
-All results below follow the final audit-invariant source tightening. Earlier wheel
-and 1014-test results are superseded. Test fixture receipt helpers are development
-data constructors, not product issuance APIs. No tests were weakened.
+Read-only reviewer `/root/a11b1_reviewer` reviewed exact
+`50273c4ac0bbf22dce7113c7eaf5dfad7ece5d6b` against base `7be031c` and returned
+REQUEST CHANGES for one acceptance blocker, R1. Action and Approval used `version`
+instead of the requested `schema_version`. Independent public console fixtures
+`action-schema.json` and `approval-schema.json` both returned 1 with empty stdout
+and fixed sanitized error, rejecting the required valid spelling. The affected
+contract declarations/validators and parser lookup are `action_contract.py` lines
+325/336, 368/382 and 685/693 (original source); this was a schema interoperability
+defect, not an execution or authority escalation. Reviewer reported no other ordinary
+blocker or confirmed security bug: 59 independent QA probes PASS plus these two R1
+failures, and 190 independent regressions PASS in 6.009 s after the authorized
+network rerun, no skips. Historical installed packaging matched the original source.
+
+Authorized repair round 1 renames only Action/Approval's version field to
+`schema_version`, strict integer 1, without legacy aliases. State/audit/envelope
+`version` remains unchanged. Updated fixed schema inventory/mutation checks and
+two permanent API/public CLI methods independently assert both contracts accept
+schema_version and reject legacy/both/missing/duplicate/bool/string/float/future
+values. All existing security tests are retained. R1 disposition is FIXED LOCALLY;
+independent re-review is PENDING the root-owned repair commit. No executor or
+approval authentication changes were made.
+
+Historical local evidence on original `50273c4`: 33 new tests PASS (2.211 s),
+196 security tests PASS (2.791 s), 1014 canonical tests PASS (50.808 s, no skips),
+fresh installed 196 PASS (2.964 s), five console cases PASS and original wheel
+SHA-256 `6d32f0dcc1abb96d5fb4629c5e605d983621647d56391a2197689b617d3dcb7d`.
+Those results do not validate the repaired schema bytes.
+
+## Final repair-round-1 local validation evidence
+
+All results below follow the R1 schema repair and bind the repair freeze manifest;
+the root-owned repair commit SHA is pending. Test fixture receipt helpers are
+development data constructors, not product issuance APIs. No tests were weakened.
 
 | Check | Final result |
 | --- | --- |
-| New contract/API + public CLI | **33 tests PASS**, 2.211 s |
-| New + security/context/feedback regressions | **196 tests PASS**, 2.791 s |
-| Canonical `make -C tools/llmtool check` with venv Python | **1014 tests PASS**, 50.808 s; compileall PASS, no skips |
-| Fresh installed wheel same security regressions | **196 tests PASS**, 2.964 s |
+| New contract/API + public CLI | **35 tests PASS**, 2.325 s |
+| New + security/context/feedback regressions | **198 tests PASS**, 3.021 s |
+| Canonical `make -C tools/llmtool check` with venv Python | **1016 tests PASS**, 52.265 s; compileall PASS, no skips |
+| Fresh installed wheel same security regressions | **198 tests PASS**, 2.917 s |
 | Installed console | Five cases PASS: version/help/proposal/matching receipt/expired receipt; expected exits 0/0/0/0/1 |
 | Wheel production-source identity | All three production module bytes equal tested repository bytes |
-| Wheel SHA-256 | `6d32f0dcc1abb96d5fb4629c5e605d983621647d56391a2197689b617d3dcb7d` |
+| Wheel SHA-256 | `2fad5d67b5254030aad25414324e54096cc309bfe2a32fd6dd77f08cfd443fc6` |
 | Diff / docs / freeze manifest | Final checks recorded at root-owned freeze handoff |
 
 Focused invocation: `PYTHONPATH=tools/llmtool/tests:tools/llmtool tools/llmtool/.venv/bin/python
@@ -230,15 +266,18 @@ standard locale/terminal-size environment only; no product config or credentials
 Initial local existing-socket tests required authorized network permissions; reruns
 used local socket/loopback mocks only, with no live provider. A standalone focused
 invocation missing tests in PYTHONPATH failed import and was corrected to the command
-above; final 33-method execution passed. Test/dev fixtures do not grant product rights.
+above; final repaired 35-method execution passed. Test/dev fixtures do not grant product rights.
 
 ## Environment, review boundary and remaining limitations
 
 Cloud Linux x86_64 kernel 6.18.44, Python 3.12.14 venv, pip 25.0.1, setuptools 84,
 wheel 0.48 and PyYAML 6.0.3. Runtime has no configured credentials/identities/secrets;
-no auth/session/private paths were inspected. Requested developer/reviewer model
-6.1sol/high and actual model/effort are **UNVERIFIED** where runtime attestation is
-not exposed. Root performs Git mutation; source/test/doc author performs none.
+no auth/session/private paths were inspected. Developer `/root/a11b1_developer`
+and independent reviewer `/root/a11b1_reviewer` were requested as gpt-6.1-sol/high;
+actual model/effort are **UNVERIFIED** where runtime attestation is not exposed.
+Requested Git model gpt-5.6-luna was UNAVAILABLE; coordinator `/root` performs
+Git mutation as the documented fallback, with no Git agent created. Source/test/doc
+author performs no Git mutation.
 Authorized local fixture permissions include empty `/var/tmp` runtime fixtures and
 loopback mocks; `/tmp/.git` guard was preserved. No live provider/VPN was used.
 
@@ -247,19 +286,25 @@ and CI. **MAC REQUIRED:** NONE. **NOT REQUIRED:** real provider/auth/VPN, remote
 approval or real executor acceptance. Fresh input-reader behavior is POSIX; unsupported
 platforms fail closed, while pure contract validation is filesystem-independent.
 
-Independent frozen-SHA review and new-head CI remain pending at this authoring
+Independent repair frozen-SHA re-review and new-head CI remain pending at this authoring
 cutoff. There is no merge recommendation before review. Executor, sandbox, trusted
 issuance, durable replay/audit, fresh actual state/TOCTOU controls, Git mutation and
 provider export policy need their own future design. Final publication SHA/PR/CI
 will be recorded once by the coordinator without self-referential report commits.
 
 ```text
-REAL MUTATION: NO
-EXECUTION: NO
-MODEL CAN GRANT: NO
-BINDINGS: PASS
+REAL MUTATION CAPABILITY ADDED: NO
+ACTION EXECUTION IMPLEMENTED: NO
+MODEL CAN GRANT APPROVAL: NO
+ACTION DIGEST BINDING: PASS
+APPROVAL EXACT-BINDING: PASS
+TOCTOU PRECONDITION CONTRACT: PASS
+OFFLINE / ZERO-PROVIDER VALIDATION: PASS
 READY FOR INDEPENDENT REVIEW: YES
-INDEPENDENT REVIEW: PENDING
+INDEPENDENT REVIEW: ROUND 1 REQUEST CHANGES; RE-REVIEW PENDING
 FEATURE-HEAD CI: PENDING
 MERGED: NO
 ```
+
+TOCTOU PRECONDITION CONTRACT PASS means supplied synthetic snapshots are bound
+and mismatches reject; actual fresh-state/TOCTOU protection is not implemented.
