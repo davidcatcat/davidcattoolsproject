@@ -71,6 +71,48 @@ requires live company-provider evidence. Never weaken acceptance criteria to mak
 cheap path usable, and never export data to an external provider merely because the
 company path failed.
 
+### Token savings measurement
+
+Do not claim that dogfood saves Codex tokens merely because company-provider usage is
+low or because the Codex prompt becomes shorter. For a quantitative claim, run a paired
+control/dogfood benchmark with the same bounded fixture, exact repository/test revision,
+Codex model, reasoning effort/speed and acceptance criteria. Start each variant in a
+fresh Codex session and prevent cross-variant answer/context leakage.
+
+Record, when actually reported by the runtime/accounting source:
+
+- Codex control: input, cached-input, output, reasoning and total tokens;
+- Codex dogfood: the same fields;
+- company LLM: prompt/input, completion/output and total tokens;
+- measurement source for each set and whether it is exact, reported aggregate or unknown;
+- wall-clock duration and relevant tool-call count;
+- final deterministic/independent quality result;
+- company result adopted/overridden and schema/identifier validity.
+
+Do not infer exact tokens from context bytes, remaining quota, credits, percentages or
+pricing. These may be recorded separately as supporting metrics only. When a source
+reports `total_tokens`, use that source total for the main comparison; do not add
+cached/reasoning subfields again unless that source explicitly defines them as excluded
+from total.
+
+Compute only when required totals are known and comparable:
+
+```text
+codex_tokens_saved = control_codex_total - dogfood_codex_total
+codex_savings_pct = codex_tokens_saved / control_codex_total * 100
+
+dogfood_system_total = dogfood_codex_total + company_llm_total
+whole_system_tokens_saved = control_codex_total - dogfood_system_total
+whole_system_savings_pct = whole_system_tokens_saved / control_codex_total * 100
+```
+
+A negative saving is a valid result and must be reported. Quality regression, missing
+acceptance evidence or a materially different task invalidates the pair for a savings
+claim. Keep unknown/null rather than zero when exact usage is unavailable.
+
+This measurement is development evidence only. It does not add an automatic cost router
+or make token savings a security/QA acceptance substitute.
+
 ## 1. Establish repository and scope
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
@@ -169,8 +211,9 @@ review evidence and disclose coverage limits even when checks pass.
 Future cost evaluations must include context preparation, retry/repair, escalation
 and all review calls, with reported input/output usage and trustworthy pricing
 versions. Record missing tokens/cost as unknown/null, never zero; a known subtotal
-is partial, not the total. This task supplies no cost measurement, savings claim,
-budget enforcement or automatic cost router.
+is partial, not the total. Development-time paired Token Savings Benchmark evidence
+may quantify dogfood ROI when its measurement contract is satisfied; it still does
+not implement budget enforcement or an automatic cost router.
 
 ## Quality-gate model
 
