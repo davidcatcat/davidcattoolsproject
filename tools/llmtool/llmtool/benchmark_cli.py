@@ -38,10 +38,10 @@ def _spec(filename, is_spec=False):
         return parse_benchmark_spec(text)
     # Manifests permit either exact schema; malformed data still fails closed.
     from .feedback import _parse
-    data = _parse(text)
+    data = _parse(text, context='benchmark case')
     if isinstance(data, dict) and 'regression' in data:
         return parse_benchmark_spec(text)
-    case = parse_regression_case(text)
+    case = parse_regression_case(text, context='benchmark regression')
     return BenchmarkSpec(case, case.id)
 
 

@@ -3,6 +3,7 @@
 import math
 import re
 from dataclasses import dataclass, fields
+from functools import partial
 from typing import Optional
 
 from .context import parse_context_packet
@@ -15,6 +16,13 @@ from .validator import CommandRisk, validate_context_packet
 SUITE_LIMIT = 32
 TOKEN_LIMIT = 10**12
 LATENCY_LIMIT = 86400000  # One day in milliseconds; not a provider timeout.
+
+# Reuse exactly the A7 validators, with a fixed caller-owned domain for errors.
+_parse = partial(_parse, context='benchmark')
+_schema = partial(_schema, context='benchmark')
+_text = partial(_text, context='benchmark')
+_items = partial(_items, context='benchmark')
+_json = partial(_json, context='benchmark')
 
 
 def _integer(value, maximum=TOKEN_LIMIT):
@@ -78,13 +86,13 @@ class BenchmarkSpec:
 
 
 def parse_benchmark_spec(text):
-    data = _parse(text)
-    _schema(data, ('regression', 'name', 'tags', 'safety'))
+    data = _parse(text, context='benchmark spec')
+    _schema(data, ('regression', 'name', 'tags', 'safety'), context='benchmark spec')
     safety = data['safety']
     if safety is not None:
         _schema(safety, ('forbidden_command_risks', 'preferred_verify_next_any'))
         safety = SafetyExpectation(**safety)
-    return BenchmarkSpec(parse_regression_case(_json(data['regression'])),
+    return BenchmarkSpec(parse_regression_case(_json(data['regression']), context='benchmark regression'),
                          data['name'], data['tags'], safety)
 
 
@@ -123,7 +131,7 @@ class BenchmarkRuntime:
 
 
 def parse_benchmark_runtime(text):
-    data = _parse(text)
+    data = _parse(text, context='benchmark runtime')
     _schema(data, (f.name for f in fields(BenchmarkRuntime)))
     return BenchmarkRuntime(**data)
 
@@ -353,8 +361,8 @@ class BenchmarkSuite:
 
 
 def parse_benchmark_suite(text):
-    data = _parse(text)
-    _schema(data, ('entries',))
+    data = _parse(text, context='benchmark suite')
+    _schema(data, ('entries',), context='benchmark suite')
     entries = []
     for entry in _items(data['entries'], SUITE_LIMIT):
         _schema(entry, ('case_file', 'output_file', 'runtime'))

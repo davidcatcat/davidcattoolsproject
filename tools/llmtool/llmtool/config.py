@@ -276,6 +276,10 @@ def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=Fals
         config["active_provider"] = env["LLMTOOL_PROVIDER"]
     if cli.get("provider") is not None:
         config["active_provider"] = cli["provider"]
+    if cli.get('provider') is not None or 'LLMTOOL_PROVIDER' in env:
+        _provider_name(config['active_provider'])
+        if config['active_provider'] not in config['providers']:
+            raise LLMToolError('requested provider profile is not defined')
     selected_provider(config)
     for name, path in ENV_OPTIONS.items():
         if name in env:
@@ -339,7 +343,7 @@ def resolve_profile_config(profile_name, *, home=None, require_configured=True):
     saved_user = _read_yaml(user_config_path(home), "user config")
     _apply_user(config, saved_user)
     if profile_name not in saved_user.get("providers", {}):
-        raise LLMToolError("active provider is not defined")
+        raise LLMToolError("requested provider profile is not defined")
     config["active_provider"] = profile_name
     _validate(config)
     provider = selected_provider(config)

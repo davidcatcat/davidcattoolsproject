@@ -76,20 +76,20 @@ def _enum(kind, value):
         raise LLMToolError('feedback enum value is unsupported') from None
 
 
-def _text(value, empty=False, limit=TEXT_LIMIT):
+def _text(value, empty=False, limit=TEXT_LIMIT, *, context='feedback'):
     if not isinstance(value, str) or (not empty and not value.strip()):
-        raise LLMToolError('feedback requires nonempty text')
+        raise LLMToolError(context + ' requires nonempty text')
     if len(value) > limit:
-        raise LLMToolError('feedback text exceeds limit')
+        raise LLMToolError(context + ' text exceeds limit')
     try:
         raw = value.encode('utf-8')
     except UnicodeError:
-        raise LLMToolError('feedback text must be UTF-8') from None
+        raise LLMToolError(context + ' text must be UTF-8') from None
     if len(raw) > limit:
-        raise LLMToolError('feedback text exceeds limit')
+        raise LLMToolError(context + ' text exceeds limit')
     from .terminal import contains_unsafe_controls
     if contains_unsafe_controls(value):
-        raise LLMToolError('feedback text contains unsupported controls')
+        raise LLMToolError(context + ' text contains unsupported controls')
     return value
 
 
@@ -103,9 +103,9 @@ def _id(value):
         raise LLMToolError('feedback identifier must be 24 lowercase hexadecimal characters')
 
 
-def _items(value, limit=ITEM_LIMIT):
+def _items(value, limit=ITEM_LIMIT, *, context='feedback'):
     if not isinstance(value, (list, tuple)) or len(value) > limit:
-        raise LLMToolError('feedback collection must be a bounded list or tuple')
+        raise LLMToolError(context + ' collection must be a bounded list or tuple')
     return tuple(value)
 
 
@@ -118,10 +118,10 @@ def _unique_ids(value):
     return result
 
 
-def _json(data):
+def _json(data, *, context='feedback'):
     result = json.dumps(data, ensure_ascii=True, indent=2, allow_nan=False)
     if len(result.encode('utf-8')) > JSON_LIMIT:
-        raise LLMToolError('feedback JSON exceeds 1 MiB')
+        raise LLMToolError(context + ' JSON exceeds 1 MiB')
     return result
 
 
@@ -132,26 +132,27 @@ def _digest(data):
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:24]
 
 
-def _schema(data, names):
+def _schema(data, names, *, context='feedback'):
     if not isinstance(data, dict) or set(data) != set(names):
-        raise LLMToolError('feedback object requires exactly the supported fields')
+        raise LLMToolError(context + ' object requires exactly the supported fields')
 
 
-def _pairs(pairs):
+def _pairs(pairs, *, context='feedback'):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise LLMToolError('feedback JSON contains duplicate keys')
+            raise LLMToolError(context + ' JSON contains duplicate keys')
         result[key] = value
     return result
 
 
-def _constant(value):
-    raise LLMToolError('feedback JSON constants are unsupported')
+def _constant(value, *, context='feedback'):
+    raise LLMToolError(context + ' JSON constants are unsupported')
 
 
-def _parse(text):
-    _text(text, limit=JSON_LIMIT)
+def _parse(text, *, context='feedback'):
+    # Context labels are fixed caller-owned strings, never input-derived data.
+    _text(text, limit=JSON_LIMIT, context=context)
     depth = 0
     quoted = escaped = False
     for char in text:
@@ -167,13 +168,14 @@ def _parse(text):
         elif char in '[{':
             depth += 1
             if depth > MAX_DEPTH:
-                raise LLMToolError('feedback JSON exceeds nesting limit')
+                raise LLMToolError(context + ' JSON exceeds nesting limit')
         elif char in ']}':
             depth -= 1
     try:
-        return json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
+        return json.loads(text, object_pairs_hook=lambda pairs: _pairs(pairs, context=context),
+                          parse_constant=lambda value: _constant(value, context=context))
     except (ValueError, RecursionError):
-        raise LLMToolError('feedback JSON is malformed') from None
+        raise LLMToolError(context + ' JSON is malformed') from None
 
 
 def _finding(data):
@@ -411,14 +413,22 @@ class RegressionCase:
         return _json(self.to_dict())
 
 
-def parse_regression_case(text):
-    data = _parse(text)
-    _schema(data, (field.name for field in fields(RegressionCase)))
+def parse_regression_case(text, *, context='feedback'):
+    data = _parse(text, context=context)
+    _schema(data, (field.name for field in fields(RegressionCase)), context=context)
     assertions = []
-    for assertion in _items(data['assertions'], ASSERTION_LIMIT):
-        _schema(assertion, ('type', 'value', 'command'))
-        assertions.append(RegressionAssertion(**assertion))
-    return RegressionCase(**{**data, 'assertions': assertions})
+    try:
+        for assertion in _items(data['assertions'], ASSERTION_LIMIT, context=context):
+            _schema(assertion, ('type', 'value', 'command'), context=context)
+            assertions.append(RegressionAssertion(**assertion))
+        return RegressionCase(**{**data, 'assertions': assertions})
+    except LLMToolError as exc:
+        # Reused A7 typed fields have fixed safe errors; preserve their semantics
+        # while identifying benchmark-owned cases. Never catch unexpected errors.
+        message = str(exc)
+        if context != 'feedback' and message.startswith('feedback '):
+            raise LLMToolError(context + message[len('feedback'):]) from None
+        raise
 
 
 @dataclass(frozen=True)
