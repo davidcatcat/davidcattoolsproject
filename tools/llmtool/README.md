@@ -1943,3 +1943,134 @@ A11a.7 final acceptance merged via PR #25 (`e3869828`); post-acceptance B1–B7 
 A12 remains future optional frontend; Anthropic HTTP API remains
 future A2.3; M6 remains DEFERRED. Validation is recorded in the
 [A10 validation report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md).
+
+## A11b.1 — Typed Action & Approval Contract — current data-only slice
+
+`llmtool action validate` and `llmtool approval validate` validate strict version-1
+proposal and receipt data offline. They read only explicit bounded JSON inputs;
+there is no config/credential lookup, provider request, Git invocation, write,
+executor, approval prompt/issuer, automatic approval, retry or recovery. A successful
+parse is a **PROPOSED** action. A matching receipt remains **NOT_AUTHORIZED**.
+Exit 0 means the requested structural check passed; it grants no permission.
+
+```sh
+llmtool action validate --file action.json --json
+llmtool approval validate --action action.json --approval approval.json \
+  --state state.json --nonce 8888888888888888888888888888888888888888888888888888888888888888 \
+  --now 150 --json
+```
+
+`--state`, `--nonce` and `--now` are mandatory caller-supplied synthetic inputs.
+`--consumed-nonce HEX` may repeat up to 128 times for a synthetic consumed-set check.
+No real execution state is collected. The output explicitly says
+`state_checked=SUPPLIED_ONLY`; all CLI results have `authorized=false`.
+Malformed contract/input errors return 1 with empty stdout and fixed stderr;
+binding/state/expiry/nonce failures return 1 with bounded validation metadata.
+Usage errors return 2. There are no execute/apply/yes/grant options.
+
+The reusable `llmtool.action_contract` API exposes frozen `Action`, `Approval`,
+`TaskBinding`, `RepositoryBinding`, `FileMetadata`, `FileState`, `FileExpectation`,
+`RepositoryState`, three typed payloads, `ApprovalValidation` and `AuditEvent`.
+Collections detach into tuples; serializers return detached dictionaries/arrays.
+`parse_action`, `parse_approval` and `parse_repository_state` accept only exact
+fixed fields. No generic payload dictionary, raw content, shell, argv, executable,
+provider/tool field or display text can acquire authority.
+
+| Kind | Exact payload fields | Constraints |
+| --- | --- | --- |
+| FILE_CREATE | target, new_content_sha256, new_size, new_mode | Target is ABSENT; content is digest-only |
+| FILE_WRITE | target, new_content_sha256, new_size, new_mode | Target is REGULAR with complete expected state |
+| FILE_DELETE | target | Target is REGULAR with complete expected state |
+| GIT_OPERATION | operation, files, expected_index_sha256 | operation is ADD only; every path has complete REGULAR state |
+
+COMMAND and COMMIT are deliberately deferred. PUSH, RESET, CLEAN, checkout,
+config, hooks/helpers and arbitrary subcommands are unsupported. A future command
+contract needs a reviewed fixed executable/typed argv, credential-free environment
+policy, wall-clock/output limits and explicit sandbox/network controls. This slice
+does not derive command semantics from A6 classifier text or model output.
+
+Action requires exactly `version`, `action_id`, `created_at`, `kind`, `task`,
+`repository`, `scope`, `payload`. Version is integer 1; action_id/task_id are
+1–64 ASCII identifier characters starting with a letter or digit, then letters,
+digits, dot, underscore or hyphen. Task requires task_id, run_id (32 lowercase hex),
+contract_version (1..2^31-1), contract_digest (SHA-256). These are bindings to a
+caller-owned pinned contract, not an implemented Task Contract engine.
+Repository requires repository_id (caller-assigned SHA-256 identity), canonical_root
+(absolute canonical literal POSIX spelling), root_device, root_inode, expected_head
+(40 or 64 lowercase hex). The root is a declaration of a physical repository;
+this module never resolves or proves that declaration, its identity or a sandbox.
+An embedding trusted caller must independently establish repository identity and
+supply the physical-root/HEAD/file/index snapshot. A root string cannot authorize
+access or protect the host filesystem.
+
+Scope is 1..32 sorted unique **exact relative file paths**, not recursive directories.
+Each payload target must occur in scope. A target contains exactly path and state.
+State contains exists (boolean), file_type (ABSENT or REGULAR), content_sha256,
+metadata. ABSENT means exists=false, digest=null and metadata=null. REGULAR requires
+exists=true, SHA-256 digest, and metadata with device, inode, mode, uid, gid, size,
+mtime_ns and nlink=1. Mode is 0..0777; special bits/hardlinked/symlink/device states
+are unsupported. New content is never stored: only its digest, byte count and mode
+are proposed. RepositoryState requires version, repository, files and index_sha256;
+index is null for file proposals and a supplied digest for Git ADD.
+
+Canonical SHA-256 hashes the UTF-8 bytes of compact sorted-key JSON
+(`ensure_ascii=False`, `separators=(',', ':')`, `allow_nan=False`) with this envelope:
+`{"domain":DOMAIN,"value":VALUE,"version":1}`. DOMAIN is `llmtool.action`,
+`llmtool.action-state` or `llmtool.approval`. VALUE is the complete exact fixed
+serialized object, including its version. No normalization, coercion, omitted
+execution fields or authoritative display text exists. Whitespace/key order in
+input JSON do not affect the digest. All action fields affect its digest.
+
+Approval requires exactly version, source, action_digest, action_kind, task,
+repository, scope, state_digest, issued_at, expires_at and nonce (64 lowercase hex).
+The only accepted source spelling is USER, **a claimed source, not proof of issuance**.
+Issuance must not precede action.created_at; expires_at-issued_at is 1..3600 seconds.
+Validation requires issued_at <= supplied now < expires_at and exact nonce equality.
+No separate Action expiry is needed here: Approval carries the bounded validity
+window; changes to created_at invalidate its bound action digest.
+The expected-state digest binds the repository and every expected file/index field;
+any supplied state mismatch fails closed. These are synthetic equality checks,
+not actual filesystem/Git rechecks or prevention of a concurrent TOCTOU attack.
+
+`validate_approval(..., trusted_context=None)` reports bindings separately from source
+attestation. `TrustedApprovalContext(approval_digest)` is a **caller attestation
+precondition**: a trusted embedding host must authenticate the actual user's exact
+receipt decision before supplying it. There is no context parser, CLI option, issuer,
+signature verifier or authentication implementation. Constructing this object from
+untrusted model/JSON data violates the API's trust precondition. Even matching
+USER_ATTESTED results have authorized=false because execution policy is absent.
+Model text saying “approved”, provider capability and a USER field never grant authority.
+
+A nonce field alone is **not anti-replay**. The supplied consumed set is not persisted
+or atomically updated; repeated validation succeeds again with the same unconsumed
+inputs. A durable replay ledger and trusted nonce issuance/consumption remain future
+requirements. Audit types PROPOSED, GRANTED, REJECTED, EXPIRED and INVALID_CONTRACT
+contain only fixed enums/digests. GRANTED records a caller-attested USER decision;
+it is not execution authorization. CLI can never emit GRANTED. Audit data is not
+persisted/durable/authenticated evidence and has no executed/rollback/resume flow.
+
+| Bound / strictness | Rule |
+| --- | --- |
+| JSON and explicit input file | 64 KiB UTF-8; nesting <=6, total values <=1024 |
+| Files/scopes | <=32; each and summed expected regular-file size <=1 MiB |
+| New content size | <=1 MiB; digest only |
+| Paths/root | <=1024 UTF-8 bytes and <=32 components; literal letters/digits/dot/underscore/hyphen |
+| Numeric metadata | strict integers 0..2^63-1; inode >0; size/mode narrower as above |
+| Times | strict epoch seconds 0..253402300799 |
+| Parser | Unknown/missing/duplicate keys, nonfinite/floats, invalid UTF-8, C0/C1/DEL/Cf controls and coercions rejected |
+
+Paths reject absolute targets, dot/parent traversal, empty components, leading-dash
+components, shell punctuation/expansions, backslashes, globs and obvious credential/
+Git storage paths. Input files require explicit .json physical POSIX paths, no-follow
+ancestor/leaf opens, single-link regular files and bounded before/after identity checks;
+symlinks, FIFO/device paths, oversize and changed inputs fail safely. Normal read access
+can update OS atime; no product write operation is performed. Unsupported input-reader
+platforms fail closed. The pure contract API itself performs no filesystem access.
+
+A11b remains IN PROGRESS. Executor, real state preflight/TOCTOU protection, OS sandbox,
+trusted issuance/UI, replay ledger, durable audit-before-mutation, Git hardening,
+rollback, bounded repair and provider data-export policy remain deferred and require
+QG-S1 controls and separate design/review. A11c is NOT STARTED; A12 is future optional.
+Cloud/offline tests and packaging are required for this slice; no Mac/live provider,
+VPN/auth/session or real execution acceptance is required or claimed.
+See the [A11b.1 validation report](../../reports/llmtool_a11b1_action_approval_contract_validation_20261005.md).
