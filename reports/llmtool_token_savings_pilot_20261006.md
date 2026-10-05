@@ -1,6 +1,6 @@
 # llmtool Token Savings / Dogfood ROI pilot — 2026-10-06
 
-Status: **CODEX_TOKEN_MEASUREMENT_BLOCKED**.
+Status: **ACCOUNTING PREFLIGHT UNBLOCKED; B01–B03 PILOT NOT YET EXECUTED**.
 
 This is a preflight blocker report. The planned pilot remains **NOT EXECUTED**;
 there are no measured CONTROL/DOGFOOD pairs and no token-savings or quality claim.
@@ -82,11 +82,15 @@ named `reasoning_tokens` is also absent. The reported `reasoning_output_tokens`
 and `cache_write_input_tokens` fields are retained as reported, not renamed.
 Missing fields are **unknown**, not zero.
 
-The preflight did not establish a verified accounting mapping for a comparable
-total under the benchmark contract. No total was guessed by adding fields or
-interpreting cache/reasoning accounting. Quota, credits, allowance, context bytes,
-and pricing were not used as token substitutes. This is a measurement-contract
-blocker, not evidence of provider/authentication failure or a llmtool regression.
+The original preflight correctly stopped because no accepted mapping had yet been established. A subsequent coordinator review inspected the exact upstream Codex CLI 0.159.2 source and OpenAI usage semantics and accepted a bounded mapping for fresh single-turn ephemeral sessions:
+
+```text
+codex_comparable_total = input_tokens + output_tokens
+```
+
+Cached input, cache-write input and reasoning output remain breakdown fields and must not be added again. For the observed preflight this yields `17473 + 9 = 17482`; this preflight is still excluded from B01–B03 totals. See [the accounting mapping decision](llmtool_codex_01592_usage_mapping_20261006.md).
+
+Quota, credits, allowance, context bytes, and pricing remain prohibited as token substitutes. The mapping is version/session-shape scoped and must be revalidated if the Codex CLI version or usage schema changes.
 
 Raw JSONL SHA-256:
 `e61d3bed0e2308f56ed69f328a95b61dfa75470b3a04d09a15e88c686f04b7a4`.
@@ -160,12 +164,7 @@ three pre-existing `tools/llmtool/case.*` directories are preserved. No clone,
 worktree, retry/fallback implementation, automatic router, A11b.2 or A11c work
 was performed. There is no merge-readiness assertion.
 
-Before resuming the pilot, establish a verified comparable per-session total
-measurement (source field or explicitly documented and accepted accounting
-mapping). Then pin the same explicit settings for all six sessions, prepare gold
-and digests before execution, validate company output mechanically, require raw
-evidence verification for adoption, and leave semantic quality to blind review.
-The current blocker does not silently relax that measurement contract.
+The comparable-total accounting blocker is now closed by the accepted Codex CLI 0.159.2 mapping documented above. Before resuming the pilot, pin the same explicit settings for all six sessions, prepare gold and digests before execution, validate company output mechanically, require raw evidence verification for adoption, and leave semantic quality to blind review. The mapping does not relax any other benchmark requirement.
 
 Documentation validation checks the extracted usage/digest against the local
 preflight evidence, repository file references, and whitespace. Application tests
@@ -173,4 +172,4 @@ and new benchmark/provider requests are not part of this report-only upload.
 The publication commit/PR and exact-head check status are recorded in the PR/final
 response rather than creating a recursive commit to embed this report's own SHA.
 
-**CODEX_TOKEN_MEASUREMENT_BLOCKED — Can claim token savings: NO.**
+**ACCOUNTING PREFLIGHT UNBLOCKED — Pilot NOT RUN — Can claim token savings: NO.**
