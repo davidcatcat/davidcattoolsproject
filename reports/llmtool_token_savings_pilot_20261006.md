@@ -1,5 +1,290 @@
 # llmtool Token Savings / Dogfood ROI pilot — 2026-10-06
 
+Status: **FIRST n=1 PAIRED PILOT EXECUTED — BLIND QUALITY REVIEW PENDING**.
+
+**No preliminary Codex token-savings claim.** The two mechanically eligible pairs
+both consumed more Codex tokens with dogfood. B03 has a frozen literal-check miss
+and is excluded from the provisional eligible-pair calculation. No executing
+measured session graded itself; semantic quality parity remains unknown.
+
+## Current execution provenance and contract
+
+- Actual Mac canonical repository:
+  `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+- Branch: `bench/llmtool-token-savings-pilot-20261006`; existing Draft PR #36.
+- Fetched starting remote HEAD: `1024ebf87dfadb93df3ce0b34e3cb915e0b81704`;
+  canonical checkout fast-forwarded safely to that HEAD.
+- Fetched `origin/main`: `f4d1019d984105431485ad364861ef07cc4dd887` (PR #35 merge).
+- Fixture/gold/schema/task/helper pre-registration commit, also exact repository
+  SHA for **all six measured sessions and all five company attempts**:
+  `f85413b55ab4f92d0988fdfb39082afebf68a2c4`.
+- Task Contract: `TOKEN-PILOT-20261006-v1`, fixed in
+  [preregistration.json](token_benchmark/20261006/preregistration.json).
+- Model requested: `gpt-6.1-sol`; reasoning effort `high`; service tier `default`;
+  approval `never`; sandbox `read-only`; `--ignore-user-config --ignore-rules`.
+- Each measured invocation: `codex exec --json --ephemeral`, fresh session, no
+  resume, one thread/one turn, same flags and task/acceptance for paired variants.
+  The same per-fixture `--output-schema` was used for both variants.
+- Actual `codex --version` before **each** measured session: `codex-cli 0.159.2`.
+  No version/schema/turn-count drift was observed. Model/service settings are
+  requested configuration; JSONL provides no independent runtime model attestation.
+- Accounting mapping is the independently accepted
+  [Codex 0.159.2 decision](llmtool_codex_01592_usage_mapping_20261006.md) and
+  [PASS review](llmtool_codex_01592_usage_mapping_review_20261006.md):
+  **`input_tokens + output_tokens`**. Cache/cache-write/reasoning are not added.
+- Source: `codex exec --json / turn.completed.usage`; reported fresh-thread aggregate
+  including every Responses request within the turn. Tool-related request usage
+  is retained, not discounted or treated as context size.
+
+All fixture/gold/schema/task files were committed **before the first measured
+session** and were not changed afterwards. See the immutable manifest for all
+file/helper digests. Fixture/gold digests:
+
+| Fixture | fixture.txt SHA-256 | gold.json SHA-256 |
+|---|---|---|
+| B01 | `d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e` | `753f9f2c017335cce722912033bea08e3dc626f279cde593b07e875819bc96a6` |
+| B02 | `d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c` | `d7b5498eec78fd34a603d00e569053f2a9aa4d1c52aed1f8b041abe10c48ac0b` |
+| B03 | `1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce` | `d8dce3a1437f8495ada044d9ac35d53fa3e6fe1a896a7050b9477a633a8cc977` |
+
+Fixed and actual session order: **B01 CONTROL → DOGFOOD; B02 DOGFOOD → CONTROL;
+B03 CONTROL → DOGFOOD**. Company preparation occurred immediately before each
+DOGFOOD session, after the preceding session in this sequence. No second paired
+repetition was performed.
+
+## Token results — provisional arithmetic, not a quality-approved claim
+
+| Fixture | Control Codex | Dogfood Codex | Company, all attempts | Codex saved | Saving % | Mixed delta | Quality |
+|---|---:|---:|---:|---:|---:|---:|---|
+| B01 | 18,452 | 37,517 | unknown (known subtotal 3,698) | −19,065 | −103.32% | unknown | Mechanical checks PASS; blind review required |
+| B02 | 17,582 | 39,294 | unknown (known subtotal 5,814) | −21,712 | −123.49% | unknown | Mechanical checks PASS; blind review required |
+| B03 | 18,815 | 35,333 | 4,285 | INVALID for claim | INVALID | INVALID | CONTROL literal fact predicate failed; blind review required |
+| **B01+B02 mechanically eligible subtotal** | **36,034** | **76,811** | **unknown** | **−40,777** | **−113.16%** | **unknown** | **Provisional only; no quality-approved pairs yet** |
+
+B01/B02 arithmetic is comparable under the pinned version/session/raw-verification
+rules and frozen mechanical checks. It is **not** a semantic quality PASS. There
+are **zero fully quality-approved pairs**, so the quality-approved savings aggregate
+remains unknown pending independent review. B03 is not included in the provisional
+subtotal. Its measured usage is retained; no unfavorable or failed observation was
+removed. These numbers do not support a positive savings claim.
+
+Company known usage subtotal for all successful calls is **13,797** tokens. The
+all-attempt company total is **unknown**, because two length-rejected attempts did
+not report usage. Missing values are not zero. Consequently the overall mixed
+volume/delta is unknown. Mixed metrics combine different tokenizers and are only
+descriptive; they are not cost, compute or energy savings.
+
+## Six measured Codex sessions
+
+| Session | input_tokens | cached_input_tokens | cache_write_input_tokens | output_tokens | reasoning_output_tokens | Comparable total | turn.completed | Tool calls | Wall seconds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| B01 control | 17,984 | 0 | 0 | 468 | 94 | 18,452 | 1 | 0 | 18.263 |
+| B01 dogfood | 37,000 | 18,048 | 0 | 517 | 82 | 37,517 | 1 | 1 | 24.300 |
+| B02 control | 16,748 | 0 | 0 | 834 | 205 | 17,582 | 1 | 0 | 28.332 |
+| B02 dogfood | 38,167 | 18,560 | 0 | 1,127 | 61 | 39,294 | 1 | 1 | 33.460 |
+| B03 control | 18,026 | 0 | 0 | 789 | 117 | 18,815 | 1 | 0 | 25.397 |
+| B03 dogfood | 34,412 | 29,184 | 0 | 921 | 127 | 35,333 | 1 | 1 | 28.988 |
+
+For every row: exit 0; exactly one `thread.started`, one `turn.started`, and one
+`turn.completed`; usage-field set exactly:
+
+```text
+cache_write_input_tokens
+cached_input_tokens
+input_tokens
+output_tokens
+reasoning_output_tokens
+```
+
+`total_tokens` is not reported; the accepted comparable total is derived from
+input/output. Every `cache_write_input_tokens` is zero. Breakdown fields are
+preserved in [results.json](token_benchmark/20261006/results.json), with per-session
+version, flags, prompt bytes/digest, raw JSONL digest, usage, counts and latency.
+No failed/incomplete Codex turn occurred; the unknown-usage invalidation rule was
+therefore not needed for these six sessions.
+
+CONTROL received only the shared task instructions, complete bounded fixture,
+output requirements/schema and the common CLI context. It had zero tool calls and
+no company call/output. DOGFOOD initially received company JSON, gold-independent
+mechanical validation, the same task/acceptance, and a raw fixture reference; full
+raw evidence was not injected in its initial prompt. All six sessions were fresh;
+no prior conversation/session context or opposite-variant answer was supplied.
+
+## Company attempts, selection and runtime evidence
+
+Safe `llmtool config show` projection found only the existing `default` profile,
+`openai-compatible`, with no configured endpoint/model. The user then explicitly
+**authorized `default` plus CLI overrides**, `--base-url http://10.29.7.58:4000
+--model gw`, without configuration mutation. This resolves the profile prerequisite
+for this run; it does not pretend a persisted company profile existed.
+
+Actual Mac route check showed endpoint traffic on **utun4**. This is VPN-route
+evidence; the successful company inferences below establish runtime reachability.
+Config readiness was checked without resolving/printing credentials. No credential
+file, Keychain, auth/session file or environment dump was inspected.
+
+All calls used the canonical checkout's installed
+`tools/llmtool/.venv/bin/llmtool`; module provenance resolved to this checkout.
+Only synthetic, non-sensitive fixture bytes were sent. No direct gateway curl,
+provider fallback, active-profile switch, or config write was performed.
+
+| Attempt | Exit | Prompt tokens | Completion tokens | Total tokens | Wrapper seconds | Provider elapsed seconds | Result |
+|---|---:|---:|---:|---:|---:|---:|---|
+| B01 #1 initial | 1 | unknown | unknown | unknown | 8.934 | unknown | MODEL_OUTPUT_INCOMPLETE |
+| B01 #2 manual_retry | 0 | 827 | 2871 | 3698 | 12.505 | 12.08 | PASS |
+| B02 #1 initial | 1 | unknown | unknown | unknown | 17.530 | unknown | MODEL_OUTPUT_INCOMPLETE |
+| B02 #2 manual_retry | 0 | 1052 | 4762 | 5814 | 20.201 | 19.723 | PASS |
+| B03 #1 initial | 0 | 857 | 3428 | 4285 | 14.851 | 14.423 | PASS |
+
+- B01 initial: `ask --skill test-triage --verbose --timeout 30`, existing default
+  generation limit (`max_tokens=2000`, `temperature=0.0`). Safe error
+  `MODEL_OUTPUT_INCOMPLETE`, run ID
+  `0f9ddd77605ee2718a46c9569e36ac78`, `trace=not-saved`; stdout empty.
+- B01 manual retry: same input/profile/model/skill, `--timeout 60 --max-tokens 4096`.
+- B02 initial: `ask --skill log-triage --verbose --timeout 60 --max-tokens 4096`.
+  Safe error `MODEL_OUTPUT_INCOMPLETE`, run ID
+  `618c00958a0191aceaf88d394924b56c`, `trace=not-saved`; stdout empty.
+- B02 manual retry: same input/profile/model/skill, `--max-tokens 8192`.
+- B03 initial only: `context-pack --json --verbose --timeout 60 --max-tokens 8192`.
+- All commands also used the explicitly authorized `--provider default --base-url
+  http://10.29.7.58:4000 --model gw --file <same-fixture>`.
+- Successful provider metadata reported model **`qwen3.6-35b-a3b`**, separately from
+  requested route/model `gw`.
+- Counts: **5 attempts = 3 successes + 2 failures; 2 manual retries; 0 automated
+  retries; 0 fallback**. All attempts, not just successes, are in results.json.
+
+Deviation from the planned zero manual retries is recorded explicitly: the two
+length failures required higher completion bounds for usable company results.
+No fixture, gold, acceptance instruction, or Codex setting changed. These are
+manual company-phase repairs, not another measured Codex repetition or a production
+retry feature. Company latency includes failures and retries: B01 **21.439 s**,
+B02 **37.731 s**, B03 **14.851 s**, based on wrapper timings.
+
+`llmtool --verbose` emitted usage only for successful normalized replies. It did
+not expose tokens for rejected length responses; no raw response/body was inspected
+and no missing failed-attempt token value was reconstructed. Known company usage is
+therefore a partial subtotal, never labeled the complete total.
+
+## Deterministic validation and actual raw verification
+
+Before each DOGFOOD session, the company output passed the fixed output schema.
+B01 exact test/file membership: zero invalid IDs, all four failures covered once.
+B02 exact identifier/signature/timestamp membership: zero invalid IDs; all required
+timeout request IDs, later success and recovery identifiers covered. Semantic
+causal ordering/completeness remains a blind-review item. B03 passed the existing
+**A4 ContextPacket parser** and source/locator membership, with zero invalid IDs.
+No mechanical validation was delegated to measured Codex reasoning. Company output
+bytes (successful attempts) were B01 1,444, B02 2,661, B03 1,353. Initial prompt
+bytes were CONTROL/DOGFOOD: B01 2,033/3,175; B02 2,043/4,573; B03 2,187/3,136.
+Thus delegation did not shorten the initial prompt in these particular fixtures;
+bytes are context descriptors and were never converted into tokens.
+
+Each DOGFOOD made exactly **one** successful bounded `evidence_reader.py` tool call:
+
+| Fixture | Raw bytes available | Raw bytes actually returned to Codex | Inclusive lines | Byte range, end exclusive |
+|---|---:|---:|---|---|
+| B01 | 1,309 | 1,309 | 1–15 | [0, 1309) |
+| B02 | 1,254 | 1,254 | 1–13 | [0, 1254) |
+| B03 | 1,387 | 1,387 | 1–11 | [0, 1387) |
+
+Read evidence comes from the actual completed `command_execution` items (exit 0),
+not a model's self-report: metadata digest matched fixture bytes, and the complete
+excerpt appeared in tool output. Exact commands and ranges are retained in
+results.json. All relevant raw evidence was returned before final answers; no
+DOGFOOD pair skipped required raw access. CONTROL's raw bytes were delivered in
+its initial prompt; its tool-read count of zero does not mean no raw input.
+
+Adoption/override is recorded conservatively as observable structural reuse:
+B01 retained company group category/test/file structure but rewrote all top-level
+fields; B02 retained exactly `error_signatures` and `strong_review_reasons`; B03
+rewrote all top-level fields. This is not an independent semantic adoption verdict.
+Final derived claims versus raw evidence, and whether rewrites corrected/introduced
+errors, remain blind-review work. No reasoning transcript is used as evidence.
+
+## Quality grading and remaining gate
+
+Frozen-gold deterministic comparison:
+
+- B01 CONTROL and DOGFOOD: all schema/membership/group/once-only coverage/unknown
+  literal checks PASS.
+- B02 CONTROL and DOGFOOD: all schema/membership/signature/event coverage/timeline,
+  repeated-pattern and unknown literal checks PASS.
+- B03 both: schema/A4 parser/source membership PASS. DOGFOOD passes all gold literal
+  checks; CONTROL fails `required_facts_terms_literal`. The three unmatched term
+  conjunctions are `queue_depth + 12`, `queue_depth + 4`, and `consumer_count + 2`.
+  That observation is retained exactly. Whether paraphrase is semantically equivalent
+  is **BLIND_REVIEW_REQUIRED**; it is not repaired by changing gold or rerunning.
+
+Causal claims, command recommendations, unsupported fact promotion and statement/
+source equivalence cannot be established by these literal checks. Their verdicts
+are **BLIND_REVIEW_REQUIRED**, rather than guessed PASS. Quality parity is unknown.
+
+Six randomly labeled outputs **B01-A/B, B02-A/B, B03-A/B** are available in
+[the blind grading package](token_benchmark/20261006/blind_grading/README.md).
+The private variant mapping stays only in the local runtime directory. To preserve
+blinding, give a reviewer only that package plus frozen fixtures/gold/schema/task,
+not this report/results/token metrics/company outputs, until their verdict is fixed.
+If a reviewer has already read variant-identifying evidence, disclose compromised
+blinding rather than claiming a blind result. No independent semantic review has
+been executed in this round.
+
+## Scope, validation and interpretation limits
+
+- Raw JSONL, prompt files, stderr logs and private A/B mapping remain only in the
+  ordinary temporary measurement directory
+  `/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-token-pilot-20261006-pw8zyn1s`.
+  No repository copy/worktree was created there. Only safe extracted metrics/digests
+  and synthetic anonymous final outputs are committed.
+- Production/config/tests/CI and historical review reports are unchanged. Existing
+  unrelated benchmark/reasoning artifacts and `case.*` directories are preserved.
+- Documentation/helper validation checks immutable digests, JSON/schema/parser
+  acceptance, grade reproducibility, actual usage/turn/read evidence and whitespace.
+  Validation result: **PASS** for the evidence/document checks above and
+  `git diff --check`. The separate frozen quality literal miss is not hidden by
+  that evidence-validation PASS. No application suite was required or run for
+  this reports-only pilot.
+- Preparation, orchestration, report-writing and future independent-review premium
+  tokens are not exposed by these measured exec usage events and are **unknown**.
+  Company calls were launched by the coordinator as separate llmtool invocations;
+  their coordinator tool/token overhead is outside the six measured sessions.
+  This is a bounded analysis-session comparison, not complete end-to-end ROI.
+- Small 1.2–1.4 KiB fixtures and substantial Codex/tool context overhead limit
+  generalization. The cache differences and fixed run order are reported, not
+  corrected post hoc. Tool-caused requests remain actual counted consumption.
+- n = 1 per fixture: **PRELIMINARY / DESCRIPTIVE PILOT** only. No material/statistical
+  savings, cost/compute/energy claim, routing threshold, company-first production
+  policy, budget enforcement, A11b.2 or A11c work is authorized or inferred.
+- Final publication SHA/PR/exact-head checks are recorded once in the PR/final reply;
+  runtime evidence remains bound to the immutable pre-registration SHA above.
+- No merge and no second repetition. Stop for independent blind review.
+
+```text
+B01 Codex saving: -19065 tokens / -103.32% / provisional mechanical comparison
+B02 Codex saving: -21712 tokens / -123.49% / provisional mechanical comparison
+B03 Codex saving: INVALID — frozen CONTROL literal fact check unresolved
+
+Overall comparable control Codex tokens: 36034 (B01+B02; mechanical eligibility only)
+Overall comparable dogfood Codex tokens: 76811 (B01+B02; mechanical eligibility only)
+Overall Codex tokens saved: -40777 (provisional; no quality-approved savings aggregate)
+Overall Codex saving %: -113.16% (provisional)
+
+Company LLM tokens: unknown total; 13797 known successful-call subtotal; 2 failed attempts unknown
+Mixed token-volume delta: unknown
+
+Valid pairs: 2 mechanically eligible; 0 fully quality-approved
+Invalid pairs: 1 for savings claim pending blind resolution (B03)
+Quality parity: unknown — BLIND_REVIEW_REQUIRED
+Blind review pending: 6 anonymous outputs / 3 pairs
+
+Can claim preliminary Codex token savings: NO
+```
+
+## Historical preflight and accounting review checkpoint
+
+The following sections preserve the earlier report and its cutoff state. Their
+NOT RUN/zero-call statements describe that earlier checkpoint, not the executed
+pilot above. The accepted mapping remains unchanged.
+
+
 Status: **ACCOUNTING PREFLIGHT UNBLOCKED; B01–B03 PILOT NOT YET EXECUTED**.
 
 This is a preflight blocker report. The planned pilot remains **NOT EXECUTED**;
@@ -202,3 +487,11 @@ The publication commit/PR and exact-head check status are recorded in the PR/fin
 response rather than creating a recursive commit to embed this report's own SHA.
 
 **ACCOUNTING PREFLIGHT UNBLOCKED — Pilot NOT RUN — Can claim token savings: NO.**
+
+## Current verdict after the historical checkpoint
+
+The first six measured sessions are now executed. B01/B02 show negative provisional
+Codex deltas; B03 is excluded pending the frozen literal-check/semantic review.
+All company attempts are retained, including two unknown-usage failures.
+**BLIND_REVIEW_REQUIRED — Can claim preliminary Codex token savings: NO.**
+No second repetition, production change, A11b.2/A11c work or merge was performed.

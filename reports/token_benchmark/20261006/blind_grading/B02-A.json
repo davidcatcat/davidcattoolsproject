@@ -1,0 +1,36 @@
+{
+  "summary": "synthetic-reader recorded three UPSTREAM_TIMEOUT events at 2000 ms each, followed by req-04 succeeding at 1000 ms and RECOVERY_OBSERVED with prior_timeouts=3. Timeout cause and recovery mechanism remain unknown.",
+  "error_signatures": [
+    "UPSTREAM_TIMEOUT: request=req-01, request=req-02, request=req-03; elapsed_ms=2000 each."
+  ],
+  "timeline": [
+    "[E01] 2026-10-06T09:00:00Z REQUEST_START request=req-01.",
+    "[E02] 2026-10-06T09:00:02Z UPSTREAM_TIMEOUT request=req-01 elapsed_ms=2000.",
+    "[E03] 2026-10-06T09:00:05Z REQUEST_START request=req-02.",
+    "[E04] 2026-10-06T09:00:07Z UPSTREAM_TIMEOUT request=req-02 elapsed_ms=2000.",
+    "[E05] 2026-10-06T09:00:10Z REQUEST_START request=req-03.",
+    "[E06] 2026-10-06T09:00:12Z UPSTREAM_TIMEOUT request=req-03 elapsed_ms=2000.",
+    "[E07] 2026-10-06T09:00:20Z REQUEST_START request=req-04.",
+    "[E08] 2026-10-06T09:00:21Z REQUEST_SUCCESS request=req-04 elapsed_ms=1000.",
+    "[E09] 2026-10-06T09:00:22Z RECOVERY_OBSERVED prior_timeouts=3."
+  ],
+  "repeated_patterns": [
+    "req-01, req-02, and req-03 each show REQUEST_START followed two seconds later by UPSTREAM_TIMEOUT with elapsed_ms=2000."
+  ],
+  "evidence": [
+    "Source: synthetic-service.log, synthetic pre-redacted fixture B02.",
+    "[E01–E06] Correlated starts and timeouts for req-01, req-02, and req-03.",
+    "[E07–E08] Correlated start and success for req-04.",
+    "[E09] RECOVERY_OBSERVED reports prior_timeouts=3.",
+    "[E10–E12] Explicitly state causal unknowns and limits of the excerpt."
+  ],
+  "unknowns": [
+    "The cause of UPSTREAM_TIMEOUT is not established by this log.",
+    "The mechanism behind RECOVERY_OBSERVED is not established by this log.",
+    "No deployment, route, resource, retry policy, or provider internals are shown.",
+    "Later success is not proof of a fix or retry."
+  ],
+  "strong_review_reasons": [
+    "Three repeated timeouts precede the observed success and recovery, while their cause and the recovery mechanism remain unestablished."
+  ]
+}
