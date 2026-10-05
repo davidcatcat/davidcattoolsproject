@@ -1,0 +1,51 @@
+{
+  "summary": "Four failed tests form three groups: timeout, assertion, and unknown. Root causes are not established.",
+  "failure_groups": [
+    {
+      "category": "timeout",
+      "tests": [
+        "test_cache_first_timeout",
+        "test_cache_second_timeout"
+      ],
+      "files": [
+        "tests/test_cache.py"
+      ],
+      "evidence": [
+        "test_cache_first_timeout: wait_for_cache exceeded timeout_ms=200; cache_ready=false.",
+        "test_cache_second_timeout: wait_for_cache exceeded timeout_ms=200; cache_ready=false.",
+        "The repeated cache timeout observation supports one timeout group; it does not establish a common root cause."
+      ]
+    },
+    {
+      "category": "assertion",
+      "tests": [
+        "test_formatter_count"
+      ],
+      "files": [
+        "tests/test_formatter.py"
+      ],
+      "evidence": [
+        "test_formatter_count: assert rendered_count == 3; observed rendered_count=2."
+      ]
+    },
+    {
+      "category": "unknown",
+      "tests": [
+        "test_worker_exit"
+      ],
+      "files": [
+        "tests/test_worker.py"
+      ],
+      "evidence": [
+        "test_worker_exit: worker exited without an error message; exit_reason=unknown."
+      ]
+    }
+  ],
+  "unknowns": [
+    "Why cache_ready remained false is not established by this excerpt.",
+    "Why worker exited is not established by this excerpt.",
+    "No source implementation, stack trace, resource telemetry, or rerun result was supplied.",
+    "A deadlock, defective timeout value, missing cache dependency, or wrong assertion is not demonstrated."
+  ],
+  "strong_review_reasons": []
+}

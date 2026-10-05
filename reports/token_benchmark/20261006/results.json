@@ -1,0 +1,910 @@
+{
+  "status": "FIRST PILOT EXECUTED; BLIND QUALITY REVIEW PENDING",
+  "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+  "accepted_mapping": "input_tokens + output_tokens",
+  "preregistration_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+  "run_order": [
+    [
+      "B01",
+      "control"
+    ],
+    [
+      "B01",
+      "dogfood"
+    ],
+    [
+      "B02",
+      "dogfood"
+    ],
+    [
+      "B02",
+      "control"
+    ],
+    [
+      "B03",
+      "control"
+    ],
+    [
+      "B03",
+      "dogfood"
+    ]
+  ],
+  "measured_codex_sessions": [
+    {
+      "fixture": "B01_test_triage",
+      "phase": "control",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B01_test_triage/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 2033,
+      "prompt_sha256": "66af057969ba9bfb34c63d124b58362185292b13afddd1610c5b6cfce51df722",
+      "exit": 0,
+      "wall_clock_seconds": 18.263,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 17984,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 468,
+        "reasoning_output_tokens": 94
+      },
+      "tool_call_count": 0,
+      "tool_item_types": [],
+      "jsonl_sha256": "4a2f713463cde3c87ac3c195523774c0b385c11397cc784c8131edfafc9f1171",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "expected_groups": true,
+          "all_failure_tests_once": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": true,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "Unknowns retain lack of causal evidence, rather than stating a cause.",
+          "No demonstrated root cause, fix recommendation, or assertion-correctness verdict.",
+          "Every group evidence matches its member tests."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1309,
+      "raw_fixture_bytes_read_by_codex": 0,
+      "raw_fixture_ranges_read": [],
+      "codex_comparable_total": 18452,
+      "accounting_valid": true,
+      "raw_verification_recorded": true
+    },
+    {
+      "fixture": "B01_test_triage",
+      "phase": "dogfood",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B01_test_triage/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 3175,
+      "prompt_sha256": "526b772d6c40a98ce6d2192b235eb851385271493aed6b7457f504e14e4c418d",
+      "exit": 0,
+      "wall_clock_seconds": 24.3,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 37000,
+        "cached_input_tokens": 18048,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 517,
+        "reasoning_output_tokens": 82
+      },
+      "tool_call_count": 1,
+      "tool_item_types": [
+        "command_execution"
+      ],
+      "jsonl_sha256": "31e60b2e1d1011f6e09718dd8012ffbff2611ee0e46830be6a26d610364007e0",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "expected_groups": true,
+          "all_failure_tests_once": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": true,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "Unknowns retain lack of causal evidence, rather than stating a cause.",
+          "No demonstrated root cause, fix recommendation, or assertion-correctness verdict.",
+          "Every group evidence matches its member tests."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1309,
+      "raw_fixture_bytes_read_by_codex": 1309,
+      "raw_fixture_ranges_read": [
+        {
+          "bytes": 1309,
+          "end_byte_exclusive": 1309,
+          "first_line": 1,
+          "fixture": "B01_test_triage",
+          "last_line": 15,
+          "sha256": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+          "start_byte": 0
+        }
+      ],
+      "codex_comparable_total": 37517,
+      "accounting_valid": true,
+      "raw_verification_recorded": true,
+      "verified_tool_commands": [
+        "/bin/zsh -lc 'tools/llmtool/.venv/bin/python -B reports/token_benchmark/20261006/evidence_reader.py B01_test_triage 1 15'"
+      ]
+    },
+    {
+      "fixture": "B02_log_triage",
+      "phase": "control",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B02_log_triage/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 2043,
+      "prompt_sha256": "ba9913f67385985d9442f412d28ace28439224940437c547726448cd4b581c2f",
+      "exit": 0,
+      "wall_clock_seconds": 28.332,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 16748,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 834,
+        "reasoning_output_tokens": 205
+      },
+      "tool_call_count": 0,
+      "tool_item_types": [],
+      "jsonl_sha256": "5e8eb63cabe0c9946349be71552a3f834f975831fd46ce7ea479a3aa256fdda6",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "required_signatures": true,
+          "event_coverage": true,
+          "required_timeline_terms_literal": true,
+          "required_repeated_terms_literal": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": true,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "Timeline preserves order and exact observations.",
+          "Repeated count may be written as a number or word; literal checks can leave semantic review pending.",
+          "No cause, retry, deployed fix, or completeness beyond the supplied excerpt is claimed.",
+          "No command recommendation."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1254,
+      "raw_fixture_bytes_read_by_codex": 0,
+      "raw_fixture_ranges_read": [],
+      "codex_comparable_total": 17582,
+      "accounting_valid": true,
+      "raw_verification_recorded": true
+    },
+    {
+      "fixture": "B02_log_triage",
+      "phase": "dogfood",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B02_log_triage/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 4573,
+      "prompt_sha256": "21b546a09bef44f18b7d8e57224a51a8a7f14a7a263c6b7cb173cb378382eb7c",
+      "exit": 0,
+      "wall_clock_seconds": 33.46,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 38167,
+        "cached_input_tokens": 18560,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 1127,
+        "reasoning_output_tokens": 61
+      },
+      "tool_call_count": 1,
+      "tool_item_types": [
+        "command_execution"
+      ],
+      "jsonl_sha256": "dd055bf8c7d682f1cecd68d6731088f754f98fd4300f37e3d1661ef7bada704e",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "required_signatures": true,
+          "event_coverage": true,
+          "required_timeline_terms_literal": true,
+          "required_repeated_terms_literal": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": true,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "Timeline preserves order and exact observations.",
+          "Repeated count may be written as a number or word; literal checks can leave semantic review pending.",
+          "No cause, retry, deployed fix, or completeness beyond the supplied excerpt is claimed.",
+          "No command recommendation."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1254,
+      "raw_fixture_bytes_read_by_codex": 1254,
+      "raw_fixture_ranges_read": [
+        {
+          "bytes": 1254,
+          "end_byte_exclusive": 1254,
+          "first_line": 1,
+          "fixture": "B02_log_triage",
+          "last_line": 13,
+          "sha256": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+          "start_byte": 0
+        }
+      ],
+      "codex_comparable_total": 39294,
+      "accounting_valid": true,
+      "raw_verification_recorded": true,
+      "verified_tool_commands": [
+        "/bin/zsh -lc 'tools/llmtool/.venv/bin/python -B reports/token_benchmark/20261006/evidence_reader.py B02_log_triage 1 13'"
+      ]
+    },
+    {
+      "fixture": "B03_context_pack",
+      "phase": "control",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B03_context_pack/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 2187,
+      "prompt_sha256": "906c64450e1e0c44734f02a2d0e4858c337dd58b770f1305bd03b1e72f64c929",
+      "exit": 0,
+      "wall_clock_seconds": 25.397,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 18026,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 789,
+        "reasoning_output_tokens": 117
+      },
+      "tool_call_count": 0,
+      "tool_item_types": [],
+      "jsonl_sha256": "56a7cfbc716c1e3a40258ffd8af7edd3dec4886cbbe89f305ca97659b4d60730",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "evidence_sources": true,
+          "required_facts_terms_literal": false,
+          "required_inference_terms_literal": true,
+          "required_hypothesis_terms_literal": true,
+          "required_verify_next_terms_literal": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": false,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "No configuration change recorded is scoped to supplied note; it does not prove none occurred.",
+          "Queue decrease/net-draining inference is separate from an unobserved cause.",
+          "Producer slowdown remains unsupported hypothesis and cannot be promoted to facts/inferences.",
+          "Evidence references support the corresponding statements."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1387,
+      "raw_fixture_bytes_read_by_codex": 0,
+      "raw_fixture_ranges_read": [],
+      "codex_comparable_total": 18815,
+      "accounting_valid": true,
+      "raw_verification_recorded": true
+    },
+    {
+      "fixture": "B03_context_pack",
+      "phase": "dogfood",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B03_context_pack/output_schema.json",
+        "-"
+      ],
+      "prompt_bytes": 3136,
+      "prompt_sha256": "c09fab2d562a7fba9739dfac2d8447d4de630dfab06cfc07da57d46a4e74c7e3",
+      "exit": 0,
+      "wall_clock_seconds": 28.988,
+      "measurement_source": "codex exec --json / turn.completed",
+      "turn_started_count": 1,
+      "thread_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 34412,
+        "cached_input_tokens": 29184,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 921,
+        "reasoning_output_tokens": 127
+      },
+      "tool_call_count": 1,
+      "tool_item_types": [
+        "command_execution"
+      ],
+      "jsonl_sha256": "3061bcaa27b57a427331ed2edf9fada448bca60c4eca544354ba597fcf56af96",
+      "deterministic_grade": {
+        "checks": {
+          "identifier_membership": true,
+          "evidence_sources": true,
+          "required_facts_terms_literal": true,
+          "required_inference_terms_literal": true,
+          "required_hypothesis_terms_literal": true,
+          "required_verify_next_terms_literal": true,
+          "required_unknown_terms_literal": true
+        },
+        "deterministic_checks_all_pass": true,
+        "semantic_result": "BLIND_REVIEW_REQUIRED",
+        "semantic_review_items": [
+          "No configuration change recorded is scoped to supplied note; it does not prove none occurred.",
+          "Queue decrease/net-draining inference is separate from an unobserved cause.",
+          "Producer slowdown remains unsupported hypothesis and cannot be promoted to facts/inferences.",
+          "Evidence references support the corresponding statements."
+        ],
+        "note": "Literal misses are retained; semantic equivalence must be decided independently, never by the measured session."
+      },
+      "output_schema_valid": true,
+      "raw_fixture_bytes_available": 1387,
+      "raw_fixture_bytes_read_by_codex": 1387,
+      "raw_fixture_ranges_read": [
+        {
+          "bytes": 1387,
+          "end_byte_exclusive": 1387,
+          "first_line": 1,
+          "fixture": "B03_context_pack",
+          "last_line": 11,
+          "sha256": "1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce",
+          "start_byte": 0
+        }
+      ],
+      "codex_comparable_total": 35333,
+      "accounting_valid": true,
+      "raw_verification_recorded": true,
+      "verified_tool_commands": [
+        "/bin/zsh -lc 'tools/llmtool/.venv/bin/python -B reports/token_benchmark/20261006/evidence_reader.py B03_context_pack 1 11'"
+      ]
+    }
+  ],
+  "company_attempts": [
+    {
+      "fixture": "B01_test_triage",
+      "phase": "company",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/llmtool",
+        "ask",
+        "--provider",
+        "default",
+        "--base-url",
+        "http://10.29.7.58:4000",
+        "--model",
+        "gw",
+        "--file",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B01_test_triage/fixture.txt",
+        "--verbose",
+        "--timeout",
+        "30",
+        "--skill",
+        "test-triage"
+      ],
+      "exit": 1,
+      "wall_clock_seconds": 8.934,
+      "usage_source": "llmtool --verbose / provider Reply.metadata",
+      "provider_metadata": {},
+      "provider_attempt_count": 1,
+      "retry_count": 0,
+      "output_bytes": 0,
+      "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "validation": {
+        "schema_valid": false,
+        "provider_call_failed": true
+      },
+      "attempt_index": 1,
+      "attempt_role": "initial",
+      "failure_code": "MODEL_OUTPUT_INCOMPLETE",
+      "run_id": "0f9ddd77605ee2718a46c9569e36ac78",
+      "trace": "not-saved",
+      "usage": "unknown"
+    },
+    {
+      "fixture": "B01_test_triage",
+      "phase": "company-retry",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/llmtool",
+        "ask",
+        "--provider",
+        "default",
+        "--base-url",
+        "http://10.29.7.58:4000",
+        "--model",
+        "gw",
+        "--file",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B01_test_triage/fixture.txt",
+        "--verbose",
+        "--timeout",
+        "60",
+        "--max-tokens",
+        "4096",
+        "--skill",
+        "test-triage"
+      ],
+      "exit": 0,
+      "wall_clock_seconds": 12.505,
+      "usage_source": "llmtool --verbose / provider Reply.metadata",
+      "provider_metadata": {
+        "prompt_tokens": 827,
+        "completion_tokens": 2871,
+        "total_tokens": 3698,
+        "elapsed_seconds": 12.08,
+        "model": "qwen3.6-35b-a3b"
+      },
+      "provider_attempt_count": 1,
+      "retry_count": 0,
+      "output_bytes": 1444,
+      "output_sha256": "223fdd36a18816874e80d7277923e88917f894ae98e08ddf297fc85889726e1e",
+      "validation": {
+        "schema_valid": true,
+        "invalid_identifiers": [],
+        "semantic_correctness": "NOT ESTABLISHED BY THESE CHECKS",
+        "missing_failure_tests": [],
+        "duplicate_failure_tests": [],
+        "failure_coverage_complete": true,
+        "identifier_invalid_count": 0
+      },
+      "attempt_index": 2,
+      "attempt_role": "manual_retry"
+    },
+    {
+      "fixture": "B02_log_triage",
+      "phase": "company",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/llmtool",
+        "ask",
+        "--provider",
+        "default",
+        "--base-url",
+        "http://10.29.7.58:4000",
+        "--model",
+        "gw",
+        "--file",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B02_log_triage/fixture.txt",
+        "--verbose",
+        "--timeout",
+        "60",
+        "--max-tokens",
+        "4096",
+        "--skill",
+        "log-triage"
+      ],
+      "exit": 1,
+      "wall_clock_seconds": 17.53,
+      "usage_source": "llmtool --verbose / provider Reply.metadata",
+      "provider_metadata": {},
+      "provider_attempt_count": 1,
+      "retry_count": 0,
+      "output_bytes": 0,
+      "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "validation": {
+        "schema_valid": false,
+        "provider_call_failed": true
+      },
+      "attempt_index": 1,
+      "attempt_role": "initial",
+      "failure_code": "MODEL_OUTPUT_INCOMPLETE",
+      "run_id": "618c00958a0191aceaf88d394924b56c",
+      "trace": "not-saved",
+      "usage": "unknown"
+    },
+    {
+      "fixture": "B02_log_triage",
+      "phase": "company-retry",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/llmtool",
+        "ask",
+        "--provider",
+        "default",
+        "--base-url",
+        "http://10.29.7.58:4000",
+        "--model",
+        "gw",
+        "--file",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B02_log_triage/fixture.txt",
+        "--verbose",
+        "--timeout",
+        "60",
+        "--max-tokens",
+        "8192",
+        "--skill",
+        "log-triage"
+      ],
+      "exit": 0,
+      "wall_clock_seconds": 20.201,
+      "usage_source": "llmtool --verbose / provider Reply.metadata",
+      "provider_metadata": {
+        "prompt_tokens": 1052,
+        "completion_tokens": 4762,
+        "total_tokens": 5814,
+        "elapsed_seconds": 19.723,
+        "model": "qwen3.6-35b-a3b"
+      },
+      "provider_attempt_count": 1,
+      "retry_count": 0,
+      "output_bytes": 2661,
+      "output_sha256": "1b15ee207f3085aa9ba09144bff33d60a668919d5d1db4750436ff6f69b2ed81",
+      "validation": {
+        "schema_valid": true,
+        "invalid_identifiers": [],
+        "semantic_correctness": "NOT ESTABLISHED BY THESE CHECKS",
+        "missing_coverage_identifiers": [],
+        "event_identifier_coverage_complete": true,
+        "signature_timestamp_membership": true,
+        "completeness_claim_semantics": "BLIND_REVIEW_REQUIRED; membership is not semantic proof",
+        "identifier_invalid_count": 0
+      },
+      "attempt_index": 2,
+      "attempt_role": "manual_retry"
+    },
+    {
+      "fixture": "B03_context_pack",
+      "phase": "company",
+      "repo_sha": "f85413b55ab4f92d0988fdfb39082afebf68a2c4",
+      "fixture_sha256": "1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce",
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/llmtool",
+        "context-pack",
+        "--provider",
+        "default",
+        "--base-url",
+        "http://10.29.7.58:4000",
+        "--model",
+        "gw",
+        "--file",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006/B03_context_pack/fixture.txt",
+        "--verbose",
+        "--timeout",
+        "60",
+        "--max-tokens",
+        "8192",
+        "--json"
+      ],
+      "exit": 0,
+      "wall_clock_seconds": 14.851,
+      "usage_source": "llmtool --verbose / provider Reply.metadata",
+      "provider_metadata": {
+        "prompt_tokens": 857,
+        "completion_tokens": 3428,
+        "total_tokens": 4285,
+        "elapsed_seconds": 14.423,
+        "model": "qwen3.6-35b-a3b"
+      },
+      "provider_attempt_count": 1,
+      "retry_count": 0,
+      "output_bytes": 1353,
+      "output_sha256": "292c9a8e5f5708bcdfb8e4f1f1b7a57be4c407e3fae4ec6ebc74389deab8de4f",
+      "validation": {
+        "schema_valid": true,
+        "invalid_identifiers": [],
+        "semantic_correctness": "NOT ESTABLISHED BY THESE CHECKS",
+        "a4_context_packet_parser": "PASS",
+        "source_locator_membership": true,
+        "identifier_invalid_count": 0
+      },
+      "attempt_index": 1,
+      "attempt_role": "initial"
+    }
+  ],
+  "pairs": [
+    {
+      "fixture": "B01_test_triage",
+      "accounting_and_raw_verification_valid": true,
+      "mechanically_eligible": true,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
+      "control_total": 18452,
+      "dogfood_total": 37517,
+      "company_total_all_attempts": null,
+      "company_known_subtotal": 3698,
+      "company_attempt_count": 2,
+      "manual_retry_count": 1,
+      "codex_tokens_saved_provisional": -19065,
+      "codex_savings_pct_provisional": -103.32213310210274,
+      "mixed_token_volume_delta": null,
+      "adoption_evidence": {
+        "exact_fields_retained": [],
+        "b01_group_structure_retained": true,
+        "semantic_adoption_override": "NOT INDEPENDENTLY GRADED; final output revised after raw read, as reflected by exact-field differences"
+      }
+    },
+    {
+      "fixture": "B02_log_triage",
+      "accounting_and_raw_verification_valid": true,
+      "mechanically_eligible": true,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
+      "control_total": 17582,
+      "dogfood_total": 39294,
+      "company_total_all_attempts": null,
+      "company_known_subtotal": 5814,
+      "company_attempt_count": 2,
+      "manual_retry_count": 1,
+      "codex_tokens_saved_provisional": -21712,
+      "codex_savings_pct_provisional": -123.48993288590604,
+      "mixed_token_volume_delta": null,
+      "adoption_evidence": {
+        "exact_fields_retained": [
+          "error_signatures",
+          "strong_review_reasons"
+        ],
+        "b01_group_structure_retained": null,
+        "semantic_adoption_override": "NOT INDEPENDENTLY GRADED; final output revised after raw read, as reflected by exact-field differences"
+      }
+    },
+    {
+      "fixture": "B03_context_pack",
+      "accounting_and_raw_verification_valid": true,
+      "mechanically_eligible": false,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
+      "control_total": 18815,
+      "dogfood_total": 35333,
+      "company_total_all_attempts": 4285,
+      "company_known_subtotal": 4285,
+      "company_attempt_count": 1,
+      "manual_retry_count": 0,
+      "codex_tokens_saved_provisional": -16518,
+      "codex_savings_pct_provisional": -87.79165559394102,
+      "mixed_token_volume_delta": null,
+      "adoption_evidence": {
+        "exact_fields_retained": [],
+        "b01_group_structure_retained": null,
+        "semantic_adoption_override": "NOT INDEPENDENTLY GRADED; final output revised after raw read, as reflected by exact-field differences"
+      },
+      "semantic_resolution": "Blind review PASS; deterministic literal miss preserved but judged semantically equivalent."
+    }
+  ],
+  "provisional_aggregate_mechanically_eligible_only": {
+    "fixture_count": 2,
+    "control": 36034,
+    "dogfood": 76811,
+    "saved": -40777,
+    "savings_pct": -113.16256868513071
+  },
+  "quality_approved_aggregate": {
+    "fixture_count": 3,
+    "control": 54849,
+    "dogfood": 112144,
+    "saved": -57295,
+    "savings_pct": -104.45951612609163,
+    "interpretation": "DOGFOOD_INCREASED_CODEX_USAGE",
+    "descriptive_only": true,
+    "n_per_fixture": 1
+  },
+  "quality_approved_pairs": 3,
+  "mechanically_ineligible_pairs": 1,
+  "company_total_all_attempts": null,
+  "company_known_subtotal": 13797,
+  "company_calls": 5,
+  "company_manual_retries": 2,
+  "can_claim_preliminary_codex_token_savings": "NO_POSITIVE_SAVINGS; QUALITY_APPROVED_NEGATIVE_RESULT",
+  "independent_blind_review": {
+    "report": "reports/llmtool_token_savings_pilot_review_20261006.md",
+    "status": "PASS",
+    "reviewer_blinding": "Primary reviewer had seen PR/token information and did not grade outputs; an independent subagent read only the permitted anonymous grading package plus frozen fixture/gold/schema/task files.",
+    "output_verdicts": {
+      "B01-A": "PASS",
+      "B01-B": "PASS",
+      "B02-A": "PASS",
+      "B02-B": "PASS",
+      "B03-A": "PASS",
+      "B03-B": "PASS"
+    },
+    "pair_parity": {
+      "B01_test_triage": "EQUIVALENT",
+      "B02_log_triage": "EQUIVALENT",
+      "B03_context_pack": "EQUIVALENT"
+    },
+    "b03_literal_miss_resolution": "Frozen deterministic literal miss preserved; blind semantic review judged the output equivalent to the frozen gold. No fixture/gold/output/session was changed.",
+    "completed": true
+  },
+  "post_review_note": "Mechanical eligibility remains distinct from blind semantic quality approval; B03's deterministic literal miss is preserved."
+}

@@ -1,0 +1,73 @@
+{
+  "facts": [
+    "Queue depth was 12 at 09:00:00Z and 4 at 09:00:10Z.",
+    "Consumer count was 2 in both observed samples.",
+    "No configuration change was recorded in the supplied run note."
+  ],
+  "evidence": [
+    {
+      "statement": "queue_depth=12 at 09:00:00Z.",
+      "source": "synthetic-metrics.txt",
+      "locator": "sample-1"
+    },
+    {
+      "statement": "queue_depth=4 at 09:00:10Z.",
+      "source": "synthetic-metrics.txt",
+      "locator": "sample-2"
+    },
+    {
+      "statement": "consumer_count=2 in both samples.",
+      "source": "synthetic-run-note.txt",
+      "locator": "observation-1"
+    },
+    {
+      "statement": "No configuration change was recorded in the supplied note.",
+      "source": "synthetic-run-note.txt",
+      "locator": "observation-2"
+    },
+    {
+      "statement": "Queue depth decreased between the two observed samples, consistent with net draining during that interval without proving its cause.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "inference-1"
+    },
+    {
+      "statement": "An unobserved producer slowdown might explain the decrease; producer telemetry does not support this hypothesis.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "hypothesis-1"
+    },
+    {
+      "statement": "Producer rate between the samples is unknown.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "unknown-1"
+    },
+    {
+      "statement": "The cause of the queue decrease is unknown.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "unknown-2"
+    },
+    {
+      "statement": "Collect producer-rate measurements for the same interval before testing the slowdown hypothesis.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "verify-1"
+    },
+    {
+      "statement": "No observation of producer slowdown, scaling, or a deployed fix is supplied; none may be promoted into an observed fact.",
+      "source": "synthetic-analysis-note.txt",
+      "locator": "constraint-1"
+    }
+  ],
+  "inferences": [
+    "Queue depth decreased by 8 between the two samples, 10 seconds apart.",
+    "The observed decrease is consistent with net draining during that interval, without establishing its cause or a trend outside that interval."
+  ],
+  "hypotheses": [
+    "An unobserved producer slowdown might explain the decrease; this hypothesis is unsupported by producer telemetry."
+  ],
+  "unknowns": [
+    "Producer rate between 09:00:00Z and 09:00:10Z.",
+    "The cause of the observed queue decrease."
+  ],
+  "verify_next": [
+    "Collect producer-rate measurements covering 09:00:00Z–09:00:10Z before testing the producer-slowdown hypothesis."
+  ]
+}
