@@ -67,6 +67,14 @@ security isolation. This runtime directory is NOT a project checkout and must
 not contain a Git clone, worktree, or copy of the repository. Do not modify
 `codex_cli.py` merely to eliminate this runtime isolation.
 
+For llmtool development on the actual Mac with company VPN, follow
+[development-time cost-aware dogfood](tools/llmtool/WORKFLOW.md#development-time-cost-aware-dogfood-available-now).
+Use deterministic evidence first, prefer `llmtool git --json` for the local read-only
+Git snapshot it already covers, and use the company LLM only through llmtool for
+bounded triage/summarization of permitted data. This engineering dogfood does not
+authorize automatic routing, code mutation, security sign-off, merge approval, or
+A11c production behavior.
+
 ## Git permissions and safety
 
 If the Codex sandbox prevents writing `.git`, for example `.git/index.lock`,
@@ -110,8 +118,10 @@ When a gate finds a real defect, preserve its reproducer/evidence, fix through t
 implementation workflow, and re-run the affected gate. Do not start the next milestone
 while a required gate is unresolved.
 
-For llmtool after A11a, the current pre-A11b sequence is QG-S1 Security Baseline /
-Threat Model, then QG-QA1 Formal A11a QA. A11b remains NOT STARTED until both pass.
+For llmtool, QG-S1 passed with required A11b design controls and the QG-QA1
+required blockers were closed before PR #31 merged to main. A11b.1 is now under
+targeted external re-review in Draft PR #32. Do not start A11b.2, merge A11b.1,
+or treat A11b/A11c as complete until their remaining review/merge gates are resolved.
 
 ## Default Cloud agent roles
 
