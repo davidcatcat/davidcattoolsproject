@@ -798,8 +798,8 @@
       "fixture": "B01_test_triage",
       "accounting_and_raw_verification_valid": true,
       "mechanically_eligible": true,
-      "quality_parity": "BLIND_REVIEW_REQUIRED",
-      "quality_approved_for_savings_claim": false,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
       "control_total": 18452,
       "dogfood_total": 37517,
       "company_total_all_attempts": null,
@@ -819,8 +819,8 @@
       "fixture": "B02_log_triage",
       "accounting_and_raw_verification_valid": true,
       "mechanically_eligible": true,
-      "quality_parity": "BLIND_REVIEW_REQUIRED",
-      "quality_approved_for_savings_claim": false,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
       "control_total": 17582,
       "dogfood_total": 39294,
       "company_total_all_attempts": null,
@@ -843,22 +843,23 @@
       "fixture": "B03_context_pack",
       "accounting_and_raw_verification_valid": true,
       "mechanically_eligible": false,
-      "quality_parity": "BLIND_REVIEW_REQUIRED",
-      "quality_approved_for_savings_claim": false,
+      "quality_parity": "EQUIVALENT",
+      "quality_approved_for_savings_claim": true,
       "control_total": 18815,
       "dogfood_total": 35333,
       "company_total_all_attempts": 4285,
       "company_known_subtotal": 4285,
       "company_attempt_count": 1,
       "manual_retry_count": 0,
-      "codex_tokens_saved_provisional": null,
-      "codex_savings_pct_provisional": null,
+      "codex_tokens_saved_provisional": -16518,
+      "codex_savings_pct_provisional": -87.79165559394102,
       "mixed_token_volume_delta": null,
       "adoption_evidence": {
         "exact_fields_retained": [],
         "b01_group_structure_retained": null,
         "semantic_adoption_override": "NOT INDEPENDENTLY GRADED; final output revised after raw read, as reflected by exact-field differences"
-      }
+      },
+      "semantic_resolution": "Blind review PASS; deterministic literal miss preserved but judged semantically equivalent."
     }
   ],
   "provisional_aggregate_mechanically_eligible_only": {
@@ -868,12 +869,42 @@
     "saved": -40777,
     "savings_pct": -113.16256868513071
   },
-  "quality_approved_aggregate": null,
-  "quality_approved_pairs": 0,
+  "quality_approved_aggregate": {
+    "fixture_count": 3,
+    "control": 54849,
+    "dogfood": 112144,
+    "saved": -57295,
+    "savings_pct": -104.45951612609163,
+    "interpretation": "DOGFOOD_INCREASED_CODEX_USAGE",
+    "descriptive_only": true,
+    "n_per_fixture": 1
+  },
+  "quality_approved_pairs": 3,
   "mechanically_ineligible_pairs": 1,
   "company_total_all_attempts": null,
   "company_known_subtotal": 13797,
   "company_calls": 5,
   "company_manual_retries": 2,
-  "can_claim_preliminary_codex_token_savings": "NO"
+  "can_claim_preliminary_codex_token_savings": "NO_POSITIVE_SAVINGS; QUALITY_APPROVED_NEGATIVE_RESULT",
+  "independent_blind_review": {
+    "report": "reports/llmtool_token_savings_pilot_review_20261006.md",
+    "status": "PASS",
+    "reviewer_blinding": "Primary reviewer had seen PR/token information and did not grade outputs; an independent subagent read only the permitted anonymous grading package plus frozen fixture/gold/schema/task files.",
+    "output_verdicts": {
+      "B01-A": "PASS",
+      "B01-B": "PASS",
+      "B02-A": "PASS",
+      "B02-B": "PASS",
+      "B03-A": "PASS",
+      "B03-B": "PASS"
+    },
+    "pair_parity": {
+      "B01_test_triage": "EQUIVALENT",
+      "B02_log_triage": "EQUIVALENT",
+      "B03_context_pack": "EQUIVALENT"
+    },
+    "b03_literal_miss_resolution": "Frozen deterministic literal miss preserved; blind semantic review judged the output equivalent to the frozen gold. No fixture/gold/output/session was changed.",
+    "completed": true
+  },
+  "post_review_note": "Mechanical eligibility remains distinct from blind semantic quality approval; B03's deterministic literal miss is preserved."
 }
