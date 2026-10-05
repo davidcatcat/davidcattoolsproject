@@ -126,11 +126,12 @@ class SkillTests(unittest.TestCase):
         for name in ('log-triage', 'test-triage'):
             with self.subTest(name=name):
                 skill = load_skill(name)
+                text = ' '.join(skill.instructions.split())
                 self.assertEqual(skill.version, 1)
-                self.assertIn('Use only the supplied', skill.instructions)
-                self.assertIn('Do not state a root cause as fact', skill.instructions)
-                self.assertIn('Do not declare PASS, SAFE, DONE, VERIFIED, merge-ready or release-ready', skill.instructions)
-                self.assertIn('The caller must compare this derived summary with original', skill.instructions)
+                self.assertIn('Use only the supplied', text)
+                self.assertIn('Do not state a root cause as fact', text)
+                self.assertIn('Do not declare PASS, SAFE, DONE, VERIFIED, merge-ready or release-ready', text)
+                self.assertIn('The caller must compare this derived summary with original', text)
 
 
 class SkillCLITests(unittest.TestCase):
