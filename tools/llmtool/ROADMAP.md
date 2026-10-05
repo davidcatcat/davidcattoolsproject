@@ -598,6 +598,42 @@ provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost
 否則 dogfood unavailable 不得偽裝成產品 failure，也不得直接繞過 llmtool 呼叫內網 gateway
 來取得委派結果。Direct endpoint probe 只留給明確的 connectivity/runtime validation 對照。
 
+### Development-time Token Savings Benchmark / Dogfood ROI — measurement required
+
+Dogfood「可行」不等於已證明節省 Codex token。從下一輪 Mac + VPN 開發開始，任何
+「省 token / 省成本」結論都必須來自可比較的 paired measurement，而不是任務間猜測。
+
+至少分開報告兩個指標：
+
+- **Premium-model / Codex token saving**：
+  `control_codex_total - dogfood_codex_total`。這回答公司 LLM 幫 Codex 少消耗多少。
+- **Whole-system token delta**：
+  `control_codex_total - (dogfood_codex_total + company_llm_total)`。這回答總 token
+  是否真的下降，還是只是從 Codex 移到 company provider。
+
+只有 control/dogfood 的必要 token totals 都是同一 measurement contract 下的已知值時
+才能計算百分比；任何一項 unknown/null 時，saving amount/rate 也必須是 unknown/null，
+不得以 bytes、quota percentage、credits 或模型估算值冒充 exact token saving。
+
+Paired benchmark 必須固定：同一 fixture/input、同 repo/test revision、同 Codex model、
+reasoning effort/speed、同 acceptance criteria，control 與 dogfood 各用 fresh Codex session，
+不得讓 control 看過 dogfood summary 或答案。每筆記錄 measurement source 與精度
+(`exact` / `reported aggregate` / `unknown`)。Codex 的 cached/reasoning 等 breakdown
+若是 total 的子欄位只作分析，不得重複加總。
+
+第一輪 pilot 只做少量 bounded fixtures，避免 benchmark 本身大量燒 token：
+
+1. test failure triage；
+2. log triage；
+3. context/evidence compression。
+
+每個 fixture 至少一組 control + dogfood pair；若結果接近、品質不同或 variance 明顯，
+再增加 paired repetitions。除 token 外同時記 latency、quality/acceptance result、
+company result adopted/overridden、schema/identifier validity；**省 token 但品質下降不算成功**。
+
+正式 A11c routing 前再用多次 paired samples 建立可重複的 routing ROI；目前這只是
+development measurement，不新增 automatic cost router、budget enforcement 或 milestone。
+
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
