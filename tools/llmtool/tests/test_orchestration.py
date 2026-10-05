@@ -482,7 +482,9 @@ class OrchestrationProfileIntegrationTests(unittest.TestCase):
             context.__exit__ = Mock(return_value=False)
             return context
 
-        def codex(executable, prompt, runtime):
+        def codex(executable, prompt, runtime, lifecycle):
+            self.assertEqual(lifecycle.component, 'provider.codex-cli')
+            self.assertIsNone(lifecycle.process)
             calls.append(("codex", prompt))
             return "SECOND_OUTPUT", 0.02
 

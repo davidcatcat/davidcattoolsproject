@@ -2,7 +2,6 @@
 
 import os
 import re
-import signal
 import tempfile
 import selectors
 import shutil
@@ -12,6 +11,7 @@ from pathlib import Path
 
 from ..errors import LLMToolError, coded_error
 from .base import ProviderCapabilities, Reply
+from .cli_lifecycle import CLIProcessLifecycle, terminate
 
 OUTPUT_LIMIT = 1024 * 1024
 READ_SIZE = 8192
@@ -81,17 +81,7 @@ class CodexCLIProvider:
 
     @staticmethod
     def _kill(process):
-        # Kill the entire invocation, including descendants holding pipe handles.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except PermissionError:
-            try:
-                process.kill()
-            except (ProcessLookupError, PermissionError):
-                pass
-        process.wait()
+        terminate(process)
 
     @staticmethod
     def _child_environment(runtime):
@@ -171,18 +161,20 @@ class CodexCLIProvider:
         argv.append("-")
         return argv
 
-    def _invoke(self, executable, prompt, runtime):
+    def _invoke(self, executable, prompt, runtime, lifecycle):
         try:
             input_bytes = prompt.encode("utf-8")
         except UnicodeError:
             raise LLMToolError("invalid conversation input") from None
         try:
+            lifecycle.check()
             process = subprocess.Popen(
                 self._argv(executable, runtime), stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
                 close_fds=True, start_new_session=True, cwd=runtime,
                 env=self._child_environment(runtime),
             )
+            lifecycle.own(process)
         except FileNotFoundError:
             raise coded_error(
                 "Codex CLI executable is not available; install codex on PATH",
@@ -216,6 +208,7 @@ class CodexCLIProvider:
             selector.register(process.stdin, selectors.EVENT_WRITE, ("stdin", None))
 
             while selector.get_map():
+                lifecycle.check()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     self._kill(process)
@@ -262,23 +255,24 @@ class CodexCLIProvider:
             if remaining <= 0:
                 self._kill(process)
                 raise coded_error("Codex CLI timed out", 'PROVIDER_TIMEOUT', 'provider.codex-cli', retryable=True)
-            try:
-                returncode = process.wait(timeout=remaining)
-            except subprocess.TimeoutExpired:
-                self._kill(process)
-                raise coded_error(
-                    "Codex CLI timed out",
-                    'PROVIDER_TIMEOUT',
-                    'provider.codex-cli',
-                    retryable=True,
-                ) from None
+            while True:
+                lifecycle.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._kill(process)
+                    raise coded_error("Codex CLI timed out", 'PROVIDER_TIMEOUT',
+                                      'provider.codex-cli', retryable=True)
+                try:
+                    returncode = process.wait(timeout=min(remaining, 0.1))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
         finally:
             selector.close()
             for stream in (process.stdin, process.stdout, process.stderr):
                 if not stream.closed:
                     stream.close()
-            if process.poll() is None:
-                self._kill(process)
+            lifecycle.stop()
 
         if returncode != 0:
             raise coded_error(
@@ -313,8 +307,12 @@ class CodexCLIProvider:
             )
         prompt = self._prompt(messages)
         try:
-            with self._temporary_directory() as directory:
-                content, elapsed = self._invoke(executable, prompt, str(Path(directory).resolve()))
+            with CLIProcessLifecycle(self.TYPE) as lifecycle:
+                with self._temporary_directory() as directory:
+                    try:
+                        content, elapsed = self._invoke(executable, prompt, str(Path(directory).resolve()), lifecycle)
+                    finally:
+                        lifecycle.stop()
         except OSError:
             raise coded_error(
                 "Codex CLI isolated runtime failed",

@@ -301,7 +301,7 @@ else:
                 self.complete()
 
     def test_killpg_permission_error_falls_back_without_replacing_timeout(self):
-        process = Mock()
+        process = Mock(returncode=None)
         process.pid = 1234
         with patch("llmtool.providers.codex_cli.os.killpg", side_effect=PermissionError):
             CodexCLIProvider._kill(process)
