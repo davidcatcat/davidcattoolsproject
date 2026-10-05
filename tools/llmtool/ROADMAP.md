@@ -510,7 +510,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — IN PROGRESS; A11b.1 current | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
+| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2 NOT STARTED | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
 | A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -682,9 +682,9 @@ A11b is IN PROGRESS with a data-only first slice; A11c is NOT STARTED.
 
 ## A11b — Execution, Approval & Recovery
 
-A11b 才新增有限 executor。A11a and pre-A11b QG-S1/QG-QA1 gates are complete. The current A11b.1 slice remains data-only; production mutation requires separate future design and acceptance.
+A11b 才新增有限 executor。A11a and pre-A11b QG-S1/QG-QA1 gates are complete. The merged A11b.1 slice remains data-only; production mutation requires separate future design and acceptance.
 
-### A11b.1 — Typed Action & Approval Contract — CURRENT / IN PROGRESS
+### A11b.1 — Typed Action & Approval Contract — DONE / merged via PR #32
 
 The accepted first slice is immutable, strict version-1 proposal/approval data and
 offline validation. Supported proposal kinds are FILE_CREATE, FILE_WRITE,
