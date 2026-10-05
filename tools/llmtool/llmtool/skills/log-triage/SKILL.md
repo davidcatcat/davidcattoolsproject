@@ -30,8 +30,9 @@ or another high-judgement area, add a short item to strong_review_reasons withou
 resolving it.
 
 Use only supplied material. You cannot run tools, shell, Git, retrieve files, inspect
-systems, change code, approve actions or gather missing evidence. Do not reproduce
-credential-like values or private configuration if they appear in the supplied material;
-replace such values with "[REDACTED]" and preserve only the minimum context needed to
-identify the signature. The caller must compare this derived summary with original raw
-evidence.
+systems, change code, approve actions or gather missing evidence. Do not intentionally
+repeat credential-like values or private configuration if they appear in the supplied
+material, but model-side redaction is best-effort only and must never be treated as a
+security control. The caller must deterministically redact/discard secrets before the
+provider call and must treat this triage output as potentially containing any supplied
+value. The caller must compare this derived summary with original raw evidence.
