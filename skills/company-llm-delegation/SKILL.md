@@ -58,10 +58,13 @@ Use the already configured company profile explicitly. For example:
 ```sh
 llmtool ask --provider PROFILE_NAME --skill test-triage --file BOUNDED_EVIDENCE_FILE --verbose
 llmtool ask --provider PROFILE_NAME --skill log-triage --file BOUNDED_EVIDENCE_FILE --verbose
-llmtool ask --provider PROFILE_NAME --skill context-pack --file BOUNDED_EVIDENCE_FILE --verbose
+llmtool context-pack --provider PROFILE_NAME --file BOUNDED_EVIDENCE_FILE --json --verbose
 ```
 
-The profile name and evidence file are placeholders. Do not hardcode the example
+The profile name and evidence file are placeholders. `context-pack` uses its existing
+structural parser; `test-triage` and `log-triage` are prompt-only in this first
+dogfood slice, so record whether their returned JSON actually matches the requested
+schema rather than treating prompt compliance as enforced. Do not hardcode the example
 deployment endpoint into engineering workflows. Do not call the company gateway
 directly for delegated engineering work; direct probes belong to explicit
 `validate-runtime` connectivity/runtime validation.
