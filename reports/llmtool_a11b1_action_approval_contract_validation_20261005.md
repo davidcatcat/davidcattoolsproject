@@ -355,3 +355,162 @@ MERGED: NO
 
 TOCTOU PRECONDITION CONTRACT PASS means supplied synthetic snapshots are bound
 and mismatches reject; actual fresh-state/TOCTOU protection is not implemented.
+
+## PR #32 R-1/R-2 repair round 2 — pinned Task Contract
+
+Task `A11b1-PR32-R1-R2-20261005`, version 1, narrows the authorized repair to the two findings
+in the preserved [Claude review](llmtool_a11b1_action_approval_contract_review_20261005.md).
+Starting implementation is `34383043b76cded9348a4587aa264286f7670f43` on
+`feat/a11b1-action-approval-contract-20261005`, base
+`7be031c2f8004143d56116717ada5c8599d47d3f`, in the clean configured Cloud checkout
+`/workspace/davidcattoolsproject`, origin `davidcatcat/davidcattoolsproject`.
+
+Allowed changes: the offline CLI adapter, permanent CLI regressions, this report
+and minimal input-path documentation. R-1 must flush stdout and silence a real
+closed OS pipe, returning 0 without shutdown diagnostics for action/approval,
+human/JSON. R-2 must separate bounded literal POSIX input spelling from conservative
+Action target rules, accepting ordinary legal components (including spaces, `+`,
+`@`, `~`, leading `-`, sensitive target names and `./action.json`) without expansion.
+Reject explicit `..` before normalization, controls/invisible formats/invalid path
+UTF-8, non-JSON suffix, special filesystem roots, links, special/oversized/changing
+inputs; preserve anchored no-follow reads and 64 KiB single-link regular-file bounds.
+Path/filesystem/read UTF-8 errors must produce ACTION_INPUT_INVALID; malformed
+JSON/schema/content must remain ACTION_CONTRACT_INVALID, both with empty stdout
+and sanitized stderr. Invalid read UTF-8 is checked at the reader boundary.
+
+Schema, Action kinds/targets, digests, state, nonce/expiry, trusted-context rules,
+authorized=false and audit semantics are unchanged. No executor, mutation,
+provider, replay/sandbox/recovery or A11b.2 work is authorized. Preserve all earlier
+evidence and the historical Claude report. Required Cloud evidence: permanent
+failing regressions before production edits, log/patch digest, focused CLI/API and
+public OS-pipe/input matrix, canonical check, fresh installed offline smoke,
+diff/documentation checks and frozen-file manifest for independent review, followed
+by coordinator-owned publication and exact-head Python 3.9/3.14 CI.
+MAC REQUIRED: NONE; live provider/auth/VPN and real executor checks: NOT REQUIRED.
+Requested Developer model/effort: gpt-6.1-sol/high; actual runtime attestation:
+UNVERIFIED. Developer writes source/tests/docs only; coordinator owns Git writes.
+
+The contract text above is preserved in `/tmp/a11b1-r12-task-contract.txt` with
+SHA-256 `075b845d0cba0a808bb1154cdc7d4c772ec6843f7fe8655d8b2f016da1ee88bb`.
+This round concerns external **R-1** (broken pipe) and **R-2** (input paths/error
+classification); the earlier internal **R1** schema_version repair remains historical.
+
+### Fail-first and repaired evidence
+
+Before any production edit, six permanent CLI regression methods ran against
+`34383043` and failed in 15.188 s, exit 1, with 141 failed subcases. The preserved
+`/tmp/a11b1-r12-beforefix.log` has SHA-256
+`16160a0c88f1101fcd3afb4daf56ebc354ca47692e7db96936f7baa5efcc81ff`;
+the test/report patch `/tmp/a11b1-r12-beforefix.patch` has SHA-256
+`4988e275d11a40c1e19b8faa71e3507ab610133921d62ee00df171a1c861d2e3`.
+The pipe assertions were then reordered to preserve the observed return code too,
+still before production edits: one method/four cases failed in 0.420 s, each with
+rc120 and `Exception ignored`/BrokenPipeError shutdown output. That log is
+`/tmp/a11b1-r12-beforefix-pipe.log`, SHA-256
+`e555bae1c027219b1aa59c60d1ca0b71a7f9451731c0463ea180b088b15ffcb5`;
+its patch is `/tmp/a11b1-r12-beforefix-pipe.patch`, SHA-256
+`4c09c51c8a05e9a45a9f1f1bc86be7c69263fe78b3c3ba3542e63b5be34775f0`.
+Confirmed bugs in the authorized repair scope: **2**.
+
+R-1 now flushes after stdout write and calls the existing `silence_broken_pipe`
+helper before returning 0 on BrokenPipeError. R-2 replaces target `_path` reuse
+with an input-only bounded spelling policy and uses reader exceptions classified
+as ACTION_INPUT_INVALID. UTF-8 decoding remains at the read boundary; the pure
+parser and conservative Action target policy are unchanged. Anchored no-follow
+ancestor/leaf opens, nonblocking reads, regular/single-link/64 KiB checks and
+before/after descriptor/leaf identity comparisons are preserved.
+
+| Round-2 check | Developer result / artifact |
+| --- | --- |
+| Contract API/public CLI focused suite | **39 tests PASS**, 16.344 s, no skips; `/tmp/a11b1-r12-contract.log` |
+| Canonical syntax + regression suite | **1020 tests PASS**, 68.916 s, no skips; `/tmp/a11b1-r12-canonical.log` |
+| R-1 public real OS pipes | **4 PASS**: action/approval × human/JSON; reader closed before child starts; rc0 and empty stderr |
+| Ordinary input spelling | **45 public child cases PASS**: 11 directory spellings × action/approval × human/JSON, plus `./action.json`; all four file switches exercised |
+| Rejection/error boundary | **68 public child cases PASS**: 17 invalid inputs × four switches; **36 cli.main cases PASS**: nine unsafe spellings × four switches |
+| Malformed content / unchanged target policy | **9 public child cases PASS**: legal spaced input with malformed JSON through four switches; five forbidden Action targets |
+| Existing filesystem constraints | **PASS**: leaf/ancestor symlink, hardlink (including original alias), directory/FIFO/device, oversized/invalid UTF-8, exact 64 KiB and changing-file regressions retained; reader error assertions tightened |
+| Fresh wheel/installed console | **40 cases PASS**, including five requested directory spellings, all four switches, malformed content, invalid read UTF-8, five forbidden Action targets and four real pipes; `/tmp/a11b1-r12-installed-smoke.log` |
+| Wheel/installed production identity | **PASS**: action_contract.py, action_contract_cli.py, cli.py and terminal.py equal repository bytes |
+| Diff/docs/unchanged historical evidence | **PASS**, scoped to four files; freeze manifest `/tmp/a11b1-r12-freeze.json` |
+
+Subcase totals are separate coverage measures, not additive unittest method counts.
+All new subprocess tests run the public module launcher with bounded timeouts,
+synthetic inputs and isolated HOME/absent product state. Pipes are real OS pipes,
+not mocked streams. Accepted input names additionally cover `.git`, `.aws`,
+`key.pem`, literal `$HOME`/`;` and Unicode; no expansion or execution occurs.
+Rejected spellings include explicit traversal before normalization, NUL/C0/C1/DEL/Cf,
+surrogate invalid UTF-8, byte/depth bounds and non-JSON suffixes. Special-root probes
+fail before opening `/dev`, `/proc` or `/sys` files. `a b.py`, `$HOME/file`,
+`file;touch`, `.git/config` and `key.pem` remain invalid Action targets.
+
+The tested production/test diff `/tmp/a11b1-r12-tested-code.patch` has SHA-256
+`b7fde3e72072b29ea25929925ac2d3e4a375260e1b9b08d68debbb17685f251f`.
+Focused and canonical log SHA-256 are respectively
+`f8551aeab6bf712337588f3f843063fcc0da35d9fe27148e41dc80b257ffae85` and
+`0b71dc70f08efd92b312b48e3f8b010213c380ff1f3b630078f4508566abeeb4`.
+Fresh wheel SHA-256 is
+`d4d7016b27c7add3666e5908d394c5576e94524539972cc62572871ff60929cc`.
+The starting Action contract source remains byte-identical, SHA-256
+`1e38d2acfd68b3d237c58f0b425410125ff2f22283a962579b1f2311d0676f9e`.
+
+Commands run from the configured checkout:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tools/llmtool/tests:tools/llmtool \
+  tools/llmtool/.venv/bin/python -m unittest -v test_action_contract test_action_contract_cli
+make -C tools/llmtool check PYTHON=/workspace/davidcattoolsproject/tools/llmtool/.venv/bin/python
+tools/llmtool/.venv/bin/python -m pip wheel --no-index --no-build-isolation \
+  --no-deps --wheel-dir /tmp/a11b1-r12-wheels ./tools/llmtool
+tools/llmtool/.venv/bin/python -m venv /tmp/a11b1-r12-installed-venv
+/tmp/a11b1-r12-installed-venv/bin/python -m pip install --no-index --no-deps \
+  /tmp/a11b1-wheels/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+  /tmp/a11b1-r12-wheels/llmtool-0.1.0-py3-none-any.whl
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tools/llmtool/tests:tools/llmtool \
+  tools/llmtool/.venv/bin/python /tmp/a11b1-r12-installed-smoke.py
+git diff --check
+```
+
+All repaired checks above exited 0. Canonical tests used authorized network access
+for existing local loopback mocks and `/var/tmp` empty fake-Codex runtime fixtures;
+no live provider was used. The installed smoke invokes only the fresh console
+script, clears PYTHONPATH in its child environment, and uses synthetic temporary
+fixtures; no project checkout is copied. Cloud Python is 3.12.14. All required
+runtime checks for this repair are CLOUD CAPABLE; MAC REQUIRED: NONE.
+
+### Deferred execution design and handoff status
+
+- **D-1 — case-insensitive path identity: DEFERRED.** No target canonicalization or
+  case-folding redesign is introduced in this data-only slice.
+- **D-2 — Git metadata / .gitattributes: DEFERRED TO A11b.2.** Input filename
+  acceptance grants no Git execution authority; future Git operations need their
+  own reviewed metadata, hooks/config/helpers and attribute controls.
+- **D-3 — actual fresh state / replay / audit: DEFERRED.** Supplied synthetic state
+  checks are unchanged; there is no real preflight, durable consumed ledger or
+  audit-before-mutation implementation.
+- **D-4 — parent-directory identity: REQUIRED BEFORE REAL FILE EXECUTOR.** Before
+  any real filesystem executor is introduced, fresh execution preflight must
+  bind/verify parent-directory identity or hold anchored directory descriptors so
+  an approved path cannot be redirected by ancestor replacement.
+
+The existing input-reader checks cover their bounded descriptor/leaf matrix;
+neither those checks nor synthetic approval binding establish full TOCTOU safety
+for a future executor. No real filesystem executor is introduced here.
+
+```text
+R-1: FIXED; DEVELOPER REGRESSION PASS; INDEPENDENT REVIEW PENDING
+R-2: FIXED; DEVELOPER REGRESSION PASS; INDEPENDENT REVIEW PENDING
+SCHEMA: UNCHANGED
+ACTION TARGET POLICY: PASS; BYTE-IDENTICAL
+REAL MUTATION CAPABILITY ADDED: NO
+AUTHORIZED: ALWAYS FALSE
+READY FOR INDEPENDENT REVIEW: YES
+INDEPENDENT R-1/R-2 REVIEW: PENDING
+EXACT-HEAD PYTHON 3.9/3.14 CI: PENDING
+MERGED: NO
+```
+
+The coordinator will record the exact independently reviewed implementation SHA
+once after the implementation commit and review. Publication SHA and current CI
+belong in the PR/final handoff. Earlier PASS/CI tables remain historical evidence,
+not substituted proof for this round. Developer stops writing at the frozen-file
+handoff; coordinator is the sole Git writer. No publication or merge is claimed.

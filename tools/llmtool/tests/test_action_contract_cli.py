@@ -273,7 +273,7 @@ class ContractCLITests(unittest.TestCase):
             with self.subTest(path=path.name):
                 result, output, error, _=self.invoke(['action','validate','--file',str(path),'--json'],tripwires=False)
                 self.assertEqual((result,output),(1,''))
-                self.assertIn('details omitted',error)
+                self.assertEqual(error,'llmtool: ACTION_INPUT_INVALID; details omitted\n')
 
     def test_input_at_limit_is_read_and_parsed_without_truncation(self):
         raw=self.action.to_json().encode()
@@ -291,8 +291,118 @@ class ContractCLITests(unittest.TestCase):
                 return os.stat_result(values)
             return result
         with patch('os.fstat',side_effect=changed):
-            result,output,_,_=self.invoke(['action','validate','--file',str(self.action_file)],tripwires=False)
+            result,output,error,_=self.invoke(['action','validate','--file',str(self.action_file)],tripwires=False)
         self.assertEqual((result,output),(1,''))
+        self.assertEqual(error,'llmtool: ACTION_INPUT_INVALID; details omitted\n')
+
+    def launch(self, args, *, cwd=None, stdout=subprocess.PIPE):
+        repo = Path(__file__).resolve().parents[3]
+        env = {'HOME':str(self.home), 'LLMTOOL_HOME':str(self.state_home),
+               'PATH':str(self.root/'absent-bin'), 'PYTHONDONTWRITEBYTECODE':'1',
+               'PYTHONPATH':str(repo/'tools'/'llmtool')}
+        return subprocess.run([sys.executable, '-m', 'llmtool', *args],
+            cwd=cwd or repo, env=env, stdout=stdout, stderr=subprocess.PIPE,
+            text=True, timeout=10)
+
+    def test_real_closed_pipe_action_approval_human_json(self):
+        before = self.snapshot()
+        for args in (['action','validate','--file',str(self.action_file)], self.approval_args()):
+            for extra in ([], ['--json']):
+                with self.subTest(command=args[0], json=bool(extra)):
+                    reader, writer = os.pipe()
+                    os.close(reader)  # No reader exists before the child writes.
+                    try:
+                        result = self.launch([*args, *extra], stdout=writer)
+                    finally:
+                        os.close(writer)
+                    self.assertEqual((result.returncode, result.stderr), (0, ''))
+                    self.assertNotIn('Traceback', result.stderr)
+                    self.assertNotIn('Exception ignored', result.stderr)
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.state_home.exists())
+
+    def test_public_input_ordinary_posix_components_all_four_switches(self):
+        # Input names are literal filesystem data; Action target vocabulary stays strict.
+        for name in ('My Projects', 'dir+name', '@inputs', '~archive', '-dash',
+                     '.git', '.aws', 'key.pem', '$HOME', 'file;touch', 'café'):
+            directory = self.root/name; directory.mkdir()
+            paths = [directory/'action.json', directory/'approval.json', directory/'state.json']
+            for path, contract in zip(paths, (self.action, self.approval, self.action.expected_state)):
+                path.write_text(contract.to_json())
+            before = self.snapshot()
+            for extra in ([], ['--json']):
+                cases = [(['action','validate','--file',str(paths[0]),*extra], 'PROPOSED'),
+                    (['approval','validate','--action',str(paths[0]),'--approval',str(paths[1]),
+                      '--state',str(paths[2]),'--nonce','8'*64,'--now','150',*extra], 'NOT_AUTHORIZED')]
+                for args, status in cases:
+                    with self.subTest(name=name, command=args[0], json=bool(extra)):
+                        result = self.launch(args)
+                        self.assertEqual((result.returncode,result.stderr), (0,''))
+                        if extra:
+                            data = json.loads(result.stdout)
+                            self.assertEqual(data['status'], status)
+                            self.assertFalse(data['authorized'])
+                        else:
+                            self.assertIn(status, result.stdout)
+                            self.assertIn('authorized=false', result.stdout)
+                        self.assertNotIn(str(self.root), result.stdout)
+            self.assertEqual(before, self.snapshot())
+        result = self.launch(['action','validate','--file','./action.json','--json'], cwd=self.root)
+        self.assertEqual((result.returncode,result.stderr), (0,''))
+        self.assertFalse(json.loads(result.stdout)['authorized'])
+        self.assertFalse(self.state_home.exists())
+
+    def input_cases(self, filename):
+        yield ['action','validate','--file',filename,'--json']
+        for switch in ('--action','--approval','--state'):
+            args = self.approval_args('--json')
+            args[args.index(switch)+1] = filename
+            yield args
+
+    def test_public_input_rejection_classification_all_four_switches(self):
+        directory = self.root/'directory.json'; directory.mkdir()
+        leaf = self.root/'leaf.json'; leaf.symlink_to(self.action_file)
+        ancestor = self.root/'ancestor'; ancestor.symlink_to(self.root, target_is_directory=True)
+        hard = self.root/'hard.json'; os.link(self.write('hard-source.json', b'{}'), hard)
+        fifo = self.root/'fifo.json'; os.mkfifo(fifo)
+        unsafe = [str(self.root/'missing.json'), str(directory), str(leaf),
+            str(ancestor/'action.json'), str(hard), str(fifo),
+            str(self.write('large.json',b'x'*(c.JSON_LIMIT+1))),
+            str(self.write('binary.json',b'\xffPRIVATE')), str(self.write('non-json.txt',b'{}')),
+            str(self.root/'absent'/'..'/'action.json'), str(self.root/'..'/self.root.name/'action.json'),
+            '/dev/action.json', '/proc/action.json', '/sys/action.json',
+            '/dev/null', '/proc/self/environ', '/sys/kernel/uevent_seqnum']
+        for filename in unsafe:
+            for args in self.input_cases(filename):
+                with self.subTest(filename=filename, switch=args):
+                    result = self.launch(args)
+                    self.assertEqual((result.returncode,result.stdout,result.stderr),
+                        (1,'','llmtool: ACTION_INPUT_INVALID; details omitted\n'))
+        # Invalid spellings cannot be passed through execve (NUL), so use cli.main.
+        for filename in ('PRIVATE\0.json', 'PRIVATE\n.json', 'PRIVATE\x7f.json',
+                         'PRIVATE\x85.json', 'PRIVATE\u200b.json', 'PRIVATE\u202e.json',
+                         'PRIVATE\udcff.json', 'x'*1025+'.json', 'x/'*32+'action.json'):
+            for args in self.input_cases(filename):
+                with self.subTest(spelling=filename, switch=args):
+                    result, output, error, _ = self.invoke(args, tripwires=False)
+                    self.assertEqual((result,output,error),
+                        (1,'','llmtool: ACTION_INPUT_INVALID; details omitted\n'))
+        self.assertFalse(self.state_home.exists())
+
+    def test_public_legal_input_malformed_content_and_target_rules_unchanged(self):
+        directory = self.root/'My Projects'; directory.mkdir()
+        malformed = directory/'malformed.json'; malformed.write_text('{PRIVATE')
+        for args in self.input_cases(str(malformed)):
+            result = self.launch(args)
+            self.assertEqual((result.returncode,result.stdout,result.stderr),
+                (1,'','llmtool: ACTION_CONTRACT_INVALID; details omitted\n'))
+        for target in ('a b.py', '$HOME/file', 'file;touch', '.git/config', 'key.pem'):
+            raw = fixtures.changed_leaf(self.action.to_dict(), ('payload','target','path'), target)
+            raw['scope'] = [target]
+            self.action_file.write_text(json.dumps(raw))
+            result = self.launch(['action','validate','--file',str(self.action_file),'--json'])
+            self.assertEqual((result.returncode,result.stdout,result.stderr),
+                (1,'','llmtool: ACTION_CONTRACT_INVALID; details omitted\n'))
 
     def test_unexpected_internal_errors_sanitized_and_no_traceback(self):
         with patch.object(adapter,'parse_action',side_effect=RuntimeError('PRIVATE_EXCEPTION')):

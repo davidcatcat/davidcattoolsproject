@@ -4,11 +4,13 @@ import json
 import os
 import stat
 import sys
+import unicodedata
 from pathlib import Path
 
-from .action_contract import (JSON_LIMIT, _path, parse_action, parse_approval,
+from .action_contract import (JSON_LIMIT, MAX_PATH_BYTES, MAX_PATH_COMPONENTS, parse_action, parse_approval,
     parse_repository_state, validate_approval, proposal_audit, approval_audit)
 from .errors import LLMToolError
+from .terminal import silence_broken_pipe
 
 
 def add_action_contract_parsers(sub):
@@ -35,18 +37,31 @@ def _identity(info):
             info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_nlink)
 
 
+def _input_spelling(filename):
+    """Bound literal POSIX input names separately from proposed Action targets."""
+    if (type(filename) is not str or not filename or len(filename) > MAX_PATH_BYTES or
+            len(filename.encode('utf-8')) > MAX_PATH_BYTES or
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 or
+                unicodedata.category(char) == 'Cf' for char in filename)):
+        raise ValueError('invalid input spelling')
+    parts = filename[1:].split('/') if filename.startswith('/') else filename.split('/')
+    if (not 1 <= len(parts) <= MAX_PATH_COMPONENTS or
+            any(not part or part == '..' for part in parts)):
+        raise ValueError('invalid input components')
+
+
 def read_contract_file(filename):
     """POSIX physical explicit .json files; never resolve links or discover inputs."""
     if os.name != 'posix' or not all(hasattr(os, name) for name in
                                    ('O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK')):
-        raise LLMToolError('action input unsupported platform')
+        raise ValueError('action input unsupported platform')
     # Validate original spelling BEFORE abspath can erase a traversal component.
-    _path(filename, absolute=filename.startswith('/'))
+    _input_spelling(filename)
     path = Path(os.path.abspath(filename))
-    _path(str(path), absolute=True)
+    _input_spelling(str(path))
     if (not path.name.endswith('.json') or
             path.parts[1] in ('dev', 'proc', 'sys')):
-        raise LLMToolError('action input requires an explicit regular JSON file')
+        raise ValueError('action input requires an explicit regular JSON file')
     directory = descriptor = None
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -59,7 +74,7 @@ def read_contract_file(filename):
                              dir_fd=directory)
         before = os.fstat(descriptor)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > JSON_LIMIT:
-            raise LLMToolError('action input requires a bounded single-link regular file')
+            raise ValueError('action input requires a bounded single-link regular file')
         with os.fdopen(descriptor, 'rb') as stream:
             descriptor = None
             raw = stream.read(JSON_LIMIT + 1)
@@ -67,7 +82,7 @@ def read_contract_file(filename):
         current = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
         if (len(raw) > JSON_LIMIT or _identity(before) != _identity(after) or
                 _identity(before) != _identity(current)):
-            raise LLMToolError('action input changed or exceeded its bound')
+            raise ValueError('action input changed or exceeded its bound')
         return raw.decode('utf-8')
     finally:
         if descriptor is not None:
@@ -102,11 +117,13 @@ def run_action_contract(args):
         rendered = json.dumps(output, sort_keys=True, ensure_ascii=True,
                               separators=(',', ':'), allow_nan=False) if args.json else line
         sys.stdout.write(rendered + '\n')
+        sys.stdout.flush()
         return result
     except LLMToolError:
         print('llmtool: ACTION_CONTRACT_INVALID; details omitted', file=sys.stderr)
         return 1
     except BrokenPipeError:
+        silence_broken_pipe(sys.stdout)
         return 0
     except (OSError, UnicodeError, ValueError):
         print('llmtool: ACTION_INPUT_INVALID; details omitted', file=sys.stderr)

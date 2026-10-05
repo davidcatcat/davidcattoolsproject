@@ -2066,9 +2066,18 @@ persisted/durable/authenticated evidence and has no executed/rollback/resume flo
 
 Paths reject absolute targets, dot/parent traversal, empty components, leading-dash
 components, shell punctuation/expansions, backslashes, globs and obvious credential/
-Git storage paths. Input files require explicit .json physical POSIX paths, no-follow
+Git storage paths. Explicit input files use a separate literal POSIX spelling policy:
+spaces, `+`, `@`, `~`, leading `-`, and ordinary legal components (including names
+forbidden as Action targets) are accepted without shell/environment/home expansion.
+`./action.json` is accepted; explicit `..`, empty components, controls/invisible
+formats and invalid UTF-8 spelling are rejected before normalization. Original and
+absolute input paths are bounded to 1024 UTF-8 bytes and 32 components. Inputs require
+a `.json` suffix, physical paths outside `/dev`, `/proc` and `/sys`, no-follow
 ancestor/leaf opens, single-link regular files and bounded before/after identity checks;
-symlinks, FIFO/device paths, oversize and changed inputs fail safely. Normal read access
+symlinks, FIFO/device paths, oversize and changed inputs fail safely. Path/filesystem
+and read UTF-8 failures return `ACTION_INPUT_INVALID`; malformed JSON/schema/content
+returns `ACTION_CONTRACT_INVALID`, both with empty stdout and sanitized stderr.
+Closed stdout pipes return 0 without shutdown diagnostics. Normal read access
 can update OS atime; no product write operation is performed. Unsupported input-reader
 platforms fail closed. The pure contract API itself performs no filesystem access.
 
