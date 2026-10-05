@@ -1,0 +1,1 @@
+Cluster the supplied failed tests by supported failure category. Preserve exact test/file identifiers, concise raw evidence and important unknowns. Cover all supplied failures without inventing root causes or fixes. Return the specified test-triage JSON schema; no extra prose. Do not grade your own answer.

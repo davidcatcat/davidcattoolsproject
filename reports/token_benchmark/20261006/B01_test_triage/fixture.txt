@@ -1,0 +1,15 @@
+Synthetic test-run evidence; fixture B01. Source: synthetic-test-run.txt.
+[L01] Run result: four failed tests. Successful tests are outside this bounded excerpt.
+[L02] TEST test_cache_first_timeout FILE tests/test_cache.py CATEGORY timeout
+[L03] test_cache_first_timeout: wait_for_cache exceeded timeout_ms=200; cache_ready=false.
+[L04] TEST test_cache_second_timeout FILE tests/test_cache.py CATEGORY timeout
+[L05] test_cache_second_timeout: wait_for_cache exceeded timeout_ms=200; cache_ready=false.
+[L06] TEST test_formatter_count FILE tests/test_formatter.py CATEGORY assertion
+[L07] test_formatter_count: assert rendered_count == 3; observed rendered_count=2.
+[L08] TEST test_worker_exit FILE tests/test_worker.py CATEGORY unknown
+[L09] test_worker_exit: worker exited without an error message; exit_reason=unknown.
+[L10] The repeated cache timeout observation supports one timeout group; it does not establish a common root cause.
+[L11] Unknown: why cache_ready remained false is not established by this excerpt.
+[L12] Unknown: why worker exited is not established by this excerpt.
+[L13] No source implementation, stack trace, resource telemetry, or rerun result was supplied.
+[L14] Do not claim a deadlock, defective timeout value, missing cache dependency, or wrong assertion as a demonstrated cause.

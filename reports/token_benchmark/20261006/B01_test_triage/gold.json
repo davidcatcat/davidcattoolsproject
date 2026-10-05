@@ -1,0 +1,65 @@
+{
+  "expected_groups": [
+    {
+      "category": "timeout",
+      "tests": [
+        "test_cache_first_timeout",
+        "test_cache_second_timeout"
+      ],
+      "files": [
+        "tests/test_cache.py"
+      ]
+    },
+    {
+      "category": "assertion",
+      "tests": [
+        "test_formatter_count"
+      ],
+      "files": [
+        "tests/test_formatter.py"
+      ]
+    },
+    {
+      "category": "unknown",
+      "tests": [
+        "test_worker_exit"
+      ],
+      "files": [
+        "tests/test_worker.py"
+      ]
+    }
+  ],
+  "allowed_test_identifiers": [
+    "test_cache_first_timeout",
+    "test_cache_second_timeout",
+    "test_formatter_count",
+    "test_worker_exit"
+  ],
+  "allowed_file_identifiers": [
+    "tests/test_cache.py",
+    "tests/test_formatter.py",
+    "tests/test_worker.py"
+  ],
+  "required_unknown_terms": [
+    [
+      "cache",
+      "false"
+    ],
+    [
+      "worker",
+      "exit"
+    ]
+  ],
+  "coverage_expectation": "Every listed failed test exactly once; grouped by supplied category. All file identifiers must be supplied.",
+  "forbidden_root_cause_claims": [
+    "deadlock established",
+    "timeout value defective",
+    "missing cache dependency established",
+    "assertion is wrong"
+  ],
+  "semantic_review": [
+    "Unknowns retain lack of causal evidence, rather than stating a cause.",
+    "No demonstrated root cause, fix recommendation, or assertion-correctness verdict.",
+    "Every group evidence matches its member tests."
+  ]
+}

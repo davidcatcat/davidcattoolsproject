@@ -1,0 +1,11 @@
+Synthetic mixed evidence; fixture B03. Every source below is supplied, not retrieved.
+[S01] source=synthetic-metrics.txt locator=sample-1: queue_depth=12 at 09:00:00Z.
+[S02] source=synthetic-metrics.txt locator=sample-2: queue_depth=4 at 09:00:10Z.
+[S03] source=synthetic-run-note.txt locator=observation-1: consumer_count=2 in both samples.
+[S04] source=synthetic-run-note.txt locator=observation-2: no configuration change was recorded in the supplied note.
+[S05] source=synthetic-analysis-note.txt locator=inference-1: queue depth decreased between the two observed samples; this is consistent with net draining during that interval, without proving its cause.
+[S06] source=synthetic-analysis-note.txt locator=hypothesis-1: an unobserved producer slowdown might explain the decrease; this hypothesis is unsupported by producer telemetry.
+[S07] source=synthetic-analysis-note.txt locator=unknown-1: producer rate between the samples is unknown.
+[S08] source=synthetic-analysis-note.txt locator=unknown-2: the cause of the queue decrease is unknown.
+[S09] source=synthetic-analysis-note.txt locator=verify-1: collect producer-rate measurements for the same interval before testing the slowdown hypothesis.
+[S10] source=synthetic-analysis-note.txt locator=constraint-1: do not promote producer slowdown, scaling, or a deployed fix into an observed fact; no such observation is supplied.

@@ -1,0 +1,88 @@
+{
+  "task_contract_id": "TOKEN-PILOT-20261006-v1",
+  "authorization": "User requests first n=1 paired pilot; approved Codex 0.159.2 mapping input+output; remaining profile preflight required.",
+  "base_sha": "1024ebf87dfadb93df3ce0b34e3cb915e0b81704",
+  "run_order": [
+    [
+      "B01",
+      "control"
+    ],
+    [
+      "B01",
+      "dogfood"
+    ],
+    [
+      "B02",
+      "dogfood"
+    ],
+    [
+      "B02",
+      "control"
+    ],
+    [
+      "B03",
+      "control"
+    ],
+    [
+      "B03",
+      "dogfood"
+    ]
+  ],
+  "codex": {
+    "version": "codex-cli 0.159.2",
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "high",
+    "service_tier": "default",
+    "approval": "never",
+    "sandbox": "read-only",
+    "ephemeral": true,
+    "ignore_user_config": true,
+    "ignore_rules": true,
+    "expected_usage_fields": [
+      "cache_write_input_tokens",
+      "cached_input_tokens",
+      "input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens"
+    ],
+    "expected_turn_completed_count": 1,
+    "comparable_total": "input_tokens + output_tokens"
+  },
+  "scope": "Synthetic evidence only; no production/config edits; no A11b.2/A11c/router/fallback/merge. Gold immutable after this commit.",
+  "quality": "Deterministic schema/membership/coverage/literal checks; semantic remainder BLIND_REVIEW_REQUIRED. Measured Codex cannot self-grade.",
+  "raw_verification": "Dogfood must use the bounded evidence_reader for relevant line ranges before adopting claims; completed successful tool output is the read evidence. Full bounded read allowed; count unique raw bytes and record ranges. Any other read route is unverified until explicitly extracted from actual tool evidence.",
+  "fixtures": {
+    "B01_test_triage": {
+      "fixture.txt": "d167062ecde0000ab8ece6a6050254eddec2ba28bd05c099c903e564c548712e",
+      "gold.json": "753f9f2c017335cce722912033bea08e3dc626f279cde593b07e875819bc96a6",
+      "output_schema.json": "47aab9f4fdca549c25739a4e91d1d6409366be4bef05a91ea70e744e87673b81",
+      "task.txt": "0179142c58ecfe4185161bc515c9ba3cac63991600aed7b90d91ab86350e2ac0"
+    },
+    "B02_log_triage": {
+      "fixture.txt": "d57a38f250d83c0bc4edfbc736c43643c6ddcab0e4f653a870d504ef9167ad5c",
+      "gold.json": "d7b5498eec78fd34a603d00e569053f2a9aa4d1c52aed1f8b041abe10c48ac0b",
+      "output_schema.json": "84b962835edee1203a8903e4303059bca8548a1e209acd4d8e11799b5ba46e92",
+      "task.txt": "0f19ba5c3e8e8b586d8b62015cdc79eac082316e0878fd8ca8c43734a3a31b5f"
+    },
+    "B03_context_pack": {
+      "fixture.txt": "1cfb2f95c008f32c4b14c0d1cef79fe3449fd9d126195f556cfb16b794f848ce",
+      "gold.json": "d8dce3a1437f8495ada044d9ac35d53fa3e6fe1a896a7050b9477a633a8cc977",
+      "output_schema.json": "d39aad685d57453b1773710b6b1f9f57b4fd36fed36ba38ce00d5c21a6e255a1",
+      "task.txt": "b296540035cc7d054851b827c4db35295807e15bdb14616b0084659a546d1344"
+    }
+  },
+  "company": {
+    "profile": "default",
+    "base_url": "http://10.29.7.58:4000",
+    "model": "gw",
+    "selection": "User-authorized explicit CLI overrides on existing default profile; no config mutation.",
+    "vpn_route": "utun4 observed on actual Mac; route does not prove inference readiness.",
+    "all_attempts_recorded": true,
+    "manual_retries_planned": 0,
+    "permission_basis": "User-authorized synthetic non-sensitive fixture only."
+  },
+  "helper_digests": {
+    "evidence_reader.py": "c5f858ecfeccbf111e8cb28d5de2649bf2dd81839b933068281234c2ec93eedb",
+    "validation.py": "b66675afeb8c3a4b9d8d29d50328e2bf6a33ba0927d5acb3f07643e53021abec"
+  }
+}

@@ -1,0 +1,13 @@
+Synthetic pre-redacted operational log; fixture B02. Source: synthetic-service.log.
+[E01] 2026-10-06T09:00:00Z service=synthetic-reader event=REQUEST_START request=req-01
+[E02] 2026-10-06T09:00:02Z service=synthetic-reader signature=UPSTREAM_TIMEOUT request=req-01 elapsed_ms=2000
+[E03] 2026-10-06T09:00:05Z service=synthetic-reader event=REQUEST_START request=req-02
+[E04] 2026-10-06T09:00:07Z service=synthetic-reader signature=UPSTREAM_TIMEOUT request=req-02 elapsed_ms=2000
+[E05] 2026-10-06T09:00:10Z service=synthetic-reader event=REQUEST_START request=req-03
+[E06] 2026-10-06T09:00:12Z service=synthetic-reader signature=UPSTREAM_TIMEOUT request=req-03 elapsed_ms=2000
+[E07] 2026-10-06T09:00:20Z service=synthetic-reader event=REQUEST_START request=req-04
+[E08] 2026-10-06T09:00:21Z service=synthetic-reader event=REQUEST_SUCCESS request=req-04 elapsed_ms=1000
+[E09] 2026-10-06T09:00:22Z service=synthetic-reader event=RECOVERY_OBSERVED prior_timeouts=3
+[E10] Unknown: the cause of UPSTREAM_TIMEOUT is not established by this log.
+[E11] Unknown: the mechanism behind RECOVERY_OBSERVED is not established by this log.
+[E12] No deployment, route, resource, retry policy, or provider internals are shown. Later success is not proof of a fix or retry.

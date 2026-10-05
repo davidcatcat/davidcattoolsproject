@@ -1,0 +1,80 @@
+{
+  "required_signatures": [
+    "UPSTREAM_TIMEOUT"
+  ],
+  "required_repeated_terms": [
+    [
+      "UPSTREAM_TIMEOUT",
+      "3"
+    ]
+  ],
+  "required_timeline_terms": [
+    [
+      "09:00:02",
+      "req-01"
+    ],
+    [
+      "09:00:07",
+      "req-02"
+    ],
+    [
+      "09:00:12",
+      "req-03"
+    ],
+    [
+      "09:00:21",
+      "req-04"
+    ],
+    [
+      "09:00:22",
+      "RECOVERY_OBSERVED"
+    ]
+  ],
+  "allowed_identifiers": [
+    "synthetic-reader",
+    "req-01",
+    "req-02",
+    "req-03",
+    "req-04",
+    "UPSTREAM_TIMEOUT",
+    "REQUEST_START",
+    "REQUEST_SUCCESS",
+    "RECOVERY_OBSERVED",
+    "E01",
+    "E02",
+    "E03",
+    "E04",
+    "E05",
+    "E06",
+    "E07",
+    "E08",
+    "E09",
+    "E10",
+    "E11",
+    "E12"
+  ],
+  "required_unknown_terms": [
+    [
+      "cause",
+      "UPSTREAM_TIMEOUT"
+    ],
+    [
+      "RECOVERY_OBSERVED"
+    ]
+  ],
+  "coverage_expectation": "Preserve all three timeout request identifiers, later success and later recovery, with their supplied order. Do not assert absence of other events outside the excerpt.",
+  "forbidden_root_cause_claims": [
+    "network outage established",
+    "deployment fixed the issue",
+    "timeout proves deadlock"
+  ],
+  "forbidden_command_recommendations": [
+    "Any proposed shell/system command or NEXT_COMMANDS."
+  ],
+  "semantic_review": [
+    "Timeline preserves order and exact observations.",
+    "Repeated count may be written as a number or word; literal checks can leave semantic review pending.",
+    "No cause, retry, deployed fix, or completeness beyond the supplied excerpt is claimed.",
+    "No command recommendation."
+  ]
+}

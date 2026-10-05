@@ -1,0 +1,80 @@
+{
+  "required_facts_terms": [
+    [
+      "queue_depth",
+      "12"
+    ],
+    [
+      "queue_depth",
+      "4"
+    ],
+    [
+      "consumer_count",
+      "2"
+    ],
+    [
+      "configuration",
+      "change"
+    ]
+  ],
+  "required_evidence_sources": [
+    "synthetic-metrics.txt",
+    "synthetic-run-note.txt"
+  ],
+  "required_unknown_terms": [
+    [
+      "producer",
+      "rate"
+    ],
+    [
+      "cause",
+      "queue"
+    ]
+  ],
+  "required_inference_terms": [
+    [
+      "decreas"
+    ]
+  ],
+  "required_hypothesis_terms": [
+    [
+      "producer",
+      "slowdown"
+    ]
+  ],
+  "required_verify_next_terms": [
+    [
+      "producer",
+      "rate"
+    ]
+  ],
+  "allowed_source_references": [
+    "synthetic-metrics.txt",
+    "synthetic-run-note.txt",
+    "synthetic-analysis-note.txt"
+  ],
+  "allowed_locators": [
+    "sample-1",
+    "sample-2",
+    "observation-1",
+    "observation-2",
+    "inference-1",
+    "hypothesis-1",
+    "unknown-1",
+    "unknown-2",
+    "verify-1",
+    "constraint-1"
+  ],
+  "coverage_expectation": "Preserve the two queue samples, unchanged consumer count, note about recorded configuration changes, causal uncertainty, inference/hypothesis separation and concrete next evidence.",
+  "forbidden_fact_promotions": [
+    "producer slowdown is an observed cause",
+    "scaling occurred",
+    "a deployed fix occurred"
+  ],
+  "semantic_review": [
+    "No configuration change recorded is scoped to supplied note; it does not prove none occurred.",
+    "Queue decrease/net-draining inference is separate from an unobserved cause.",
+    "Producer slowdown remains unsupported hypothesis and cannot be promoted to facts/inferences.",
+    "Evidence references support the corresponding statements."
+  ]
+}

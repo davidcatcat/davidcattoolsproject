@@ -1,0 +1,1 @@
+Summarize supplied error signatures, repeated patterns, ordered timeline and evidence. Preserve exact correlation identifiers and causal unknowns. Cover the supplied timeout/success/recovery events. Do not invent causes, retries, fixes, commands or completeness beyond the excerpt. Return the specified log-triage JSON schema; no extra prose. Do not grade your own answer.
