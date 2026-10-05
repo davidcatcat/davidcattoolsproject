@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**, with current **A11b.1 Typed Action & Approval Contract** (data-only; no executor or mutation). A11c Integration/Real-world Acceptance remains NOT STARTED.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**, still data-only with no executor or mutation; A11b.2 is NOT STARTED. A11c Integration/Real-world Acceptance remains NOT STARTED. Development-time cost-aware dogfood may use deterministic checks first and the company LLM through llmtool for bounded QA/log triage; this is engineering practice, not A11c production integration.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -72,7 +72,7 @@ are never treated as the same claim.
 | A11a — Observability & Diagnostics | **DONE** | Structured diagnostics, opt-in safe metadata store, runs/trace/doctor, failure handling |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 current** | Typed proposal/approval contract only; execution remains deferred |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged; A11b.2 NOT STARTED** | Typed proposal/approval contract delivered; execution remains deferred |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate company-first workflow, independent verification and real task acceptance |
 
 A11a final acceptance merged through PR #25 (`e3869828`). The independent full bug
@@ -91,8 +91,9 @@ passed with required future design controls. DG-1 lifecycle fixes and independen
 re-review merged through PR #29. [Formal QA round 2](../../reports/llmtool_qg_qa1_targeted_rereview_round2_20261005.md)
 closed Q-BUG-1, F1 and D-34b with APPROVE; PR #31 merged as `7be031c2`.
 QG-S1 and QG-QA1 are PASS/CLOSED. Historical FAIL/pending wording remains intact.
-A11b.1 is now the current data-only contract slice. A11b as a whole is incomplete;
-future executor work must still meet QG-S1 R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD.
+A11b.1 is DONE/merged via PR #32 (`e5525f18`) as a data-only contract slice.
+A11b.2 is NOT STARTED; A11b as a whole is incomplete. Future executor work must still
+meet QG-S1 R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD.
 
 Detailed milestone scope and retained limitations are in [ROADMAP](ROADMAP.md).
 Engineering execution/review rules are in [WORKFLOW](WORKFLOW.md). Root repository

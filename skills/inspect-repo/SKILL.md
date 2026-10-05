@@ -9,7 +9,9 @@ Build a concrete map before proposing changes.
 
 ## Process
 
-1. Inspect repository status and top-level structure.
+1. Inspect repository status and top-level structure. For llmtool, prefer the existing
+   A5 `llmtool git --json` snapshot when it covers the required local Git facts; it
+   does not replace fetch/upstream/PR/CI checks that require remote state.
 2. Read applicable guidance files such as `CLAUDE.md`, `AGENTS.md`, README, ROADMAP, CONTRIBUTING, current Task Contract, and local instructions. Distinguish current status from historical validation reports.
 3. Locate the code, tests, schemas, configs, and workflows relevant to the task.
 4. Find at least one existing analogous implementation when available.

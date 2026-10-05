@@ -18,7 +18,12 @@ Find the first meaningful failure, reproduce it, and make the smallest correct f
 7. Apply the minimum change that fixes the root cause.
 8. Re-run the narrow failing check, then the broader canonical validation suite.
 9. Review the final diff for accidental changes.
-10. Use `safe-git` only if the user asks to commit or push.
+10. For llmtool on the actual Mac + company VPN, the
+    [development-time dogfood workflow](../../tools/llmtool/WORKFLOW.md#development-time-cost-aware-dogfood-available-now)
+    may send only bounded permitted failure evidence through llmtool to the company
+    LLM for clustering/summarization. The original command/exit/raw failure remains
+    authoritative; root cause and fixes remain with the strong developer/reviewer.
+11. Use `safe-git` only if the user asks to commit or push.
 
 ## Rules
 
