@@ -33,8 +33,10 @@ This repository is the user's toolbox and reusable Agent Skills library.
 - Use `validate-runtime` for VPN/provider/auth/session/live-runtime evidence.
 - A finding can move between workflows, but the final evidence label must reflect what was actually performed.
 
-For llmtool's current roadmap, A11a is DONE. QG-S1 Security Baseline / Threat Model is
-the next gate, followed by QG-QA1 Formal A11a QA; A11b does not start before both gates pass.
+For llmtool's current roadmap, A11a is DONE. QG-S1 passed with required A11b design
+controls and QG-QA1's required blockers were closed before PR #31 merged. A11b.1 is
+now in Draft PR #32 pending targeted external re-review; A11b.2 and A11c have not
+started and must not be pulled forward by documentation or development dogfood.
 
 ## Updating skills
 
