@@ -176,11 +176,42 @@ Record only:
 Do not copy the complete raw input/output into the permanent report merely to prove the
 call occurred.
 
+## Independent review/live dogfood update
+
+Claude reviewed implementation head `f1570e04b361a478a0269b17369b7fe26f04572e`
+and recorded 24 live company-provider calls in
+`reports/llmtool_company_dogfood_skills_review_20261006.md`.
+
+Observed results included:
+- triage JSON/schema adherence 18/18 in the live sample;
+- prompt-injection resistance 6/6 in the live sample;
+- parsed `context-pack` 6/6;
+- no autonomous PASS/SAFE/root-cause declarations;
+- model-side credential redaction was unreliable (3/3 credential-bearing
+  `log-triage` samples reproduced at least one supplied secret);
+- one test-triage scenario fabricated unsupported file identifiers and over-grouped
+  distinct failures.
+
+The F1/F2 remediation is intentionally contractual/deterministic at the caller
+boundary, not a claim that the model became more reliable:
+- secrets/sensitive values must be deterministically redacted/discarded before the
+  provider call; model-side redaction is explicitly best-effort and untrusted;
+- returned test/file identifiers must be deterministically checked against the
+  bounded supplied evidence before they can be used as locators;
+- identifier validity/invalid identifiers are recorded in delegation evidence.
+
+Do not repeat credential-bearing raw input merely to prove the model still leaks it.
+A targeted re-check should instead use synthetic pre-redacted input and verify that
+the workflow/documentation no longer relies on model redaction, plus verify the
+identifier-validation requirement is explicit and unambiguous.
+
 ## Merge status
 
-- Offline implementation: COMPLETE pending final exact-head CI.
-- Independent Claude review: REQUIRED / NOT YET RECORDED.
-- Mac + VPN live dogfood: REQUIRED / NOT-TESTED.
+- Offline implementation: COMPLETE; rerun exact-head CI after F1/F2 docs/test changes.
+- Independent Claude review: APPROVE WITH CHANGES on prior implementation; targeted
+  re-review REQUIRED for F1/F2 closure.
+- Mac + VPN live dogfood: completed on prior implementation; targeted pre-redacted
+  workflow re-check REQUIRED, not another credential-leak reproduction.
 - A11b.2: NOT STARTED.
 - A11c production routing: NOT STARTED.
-- Merge: BLOCKED until required review, final-head CI and Mac live dogfood pass.
+- Merge: BLOCKED until exact-head CI and targeted F1/F2 re-review/re-check pass.
