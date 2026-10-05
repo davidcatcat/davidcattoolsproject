@@ -70,7 +70,7 @@ class OrchestrationPlan:
     steps: tuple
 
     def __post_init__(self):
-        steps = _items(self.steps, MAX_STEPS)
+        steps = _items(self.steps, MAX_STEPS, context='orchestration plan')
         if not steps:
             raise LLMToolError("orchestration plan requires at least one step")
         if any(type(step) is not RoleBinding for step in steps):
@@ -88,11 +88,11 @@ class OrchestrationPlan:
 
 
 def parse_orchestration_plan(text):
-    data = _parse(text)
-    _schema(data, ("steps",))
+    data = _parse(text, context='orchestration plan')
+    _schema(data, ("steps",), context='orchestration plan')
     steps = []
-    for raw in _items(data["steps"], MAX_STEPS):
-        _schema(raw, ("role", "provider"))
+    for raw in _items(data["steps"], MAX_STEPS, context='orchestration plan'):
+        _schema(raw, ("role", "provider"), context='orchestration plan step')
         steps.append(RoleBinding(raw["role"], raw["provider"]))
     return OrchestrationPlan(steps)
 
@@ -125,7 +125,7 @@ class OrchestrationResult:
     steps: tuple
 
     def __post_init__(self):
-        steps = _items(self.steps, MAX_STEPS)
+        steps = _items(self.steps, MAX_STEPS, context='orchestration result')
         if not steps or any(type(step) is not AgentStepResult for step in steps):
             raise LLMToolError("orchestration result requires completed typed steps")
         if len({step.role for step in steps}) != len(steps):

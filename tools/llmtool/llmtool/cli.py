@@ -124,6 +124,7 @@ def _run_ask(args):
     from .diagnostics_runtime import RunContext
     from .diagnostics_settings import resolve_diagnostics_settings
     from .errors import coded_error
+    from .providers.cli_lifecycle import CLIHostTermination
 
     mode = (d.DiagnosticMode.DEBUG if args.debug else
             d.DiagnosticMode.VERBOSE if args.verbose else d.DiagnosticMode.NORMAL)
@@ -246,6 +247,12 @@ def _run_ask(args):
     except EOFError:
         return failure(coded_error('input ended before configuration was complete',
                                   'USER_INPUT_ERROR', 'input'))
+    except CLIHostTermination as exc:
+        if exc.code in (129, 143):
+            observe('finish', 'interrupted')
+            store_warning()
+            observe('display', sys.stderr)
+        raise  # Only tagged owned-CLI cancellation; never normalize SystemExit.
     except KeyboardInterrupt:
         observe('finish', 'interrupted')
         print('llmtool: interrupted', file=sys.stderr)
@@ -261,10 +268,10 @@ def _run_ask(args):
 
 
 def main(argv=None):
-    args = parser_for_cli().parse_args(argv)
-    if args.command == 'ask':
-        return _run_ask(args)
     try:
+        args = parser_for_cli().parse_args(argv)
+        if args.command == 'ask':
+            return _run_ask(args)
         if args.command == 'doctor':
             from .doctor import run_doctor
             return run_doctor()

@@ -357,6 +357,11 @@ python tools/llmtool/llmtool.py --help
 避免自行實作不完整的 YAML parser。HTTP、CLI 與測試使用 Python 標準函式庫。
 setuptools 僅用於打包。離線環境需事先備妥套件 wheel／內部套件來源。
 
+Console, module and direct launchers share a thin startup entrypoint. Once inside
+its guard, Ctrl-C during CLI import, parser construction or argument parsing returns
+130 with fixed `llmtool: interrupted` stderr. Python interpreter/site initialization
+before that boundary remains a platform limitation; it is not controlled by llmtool.
+
 ## 設定
 
 ```sh
@@ -749,7 +754,12 @@ holding exclusive root/run locks, then charges actual bytes. Unsafe, unknown,
 malformed or incomplete records retain conservative capacity accounting.
 Readers must require the summary as the completion marker;
 the two files are published individually. Ask interrupts finalize with status
-`interrupted`; broken output pipes finalize with `output_closed`. A crash or store
+`interrupted`, including handled CLI-provider TERM/HUP cancellation (exits 143/129).
+Healthy persistence publishes the completed interrupted summary before the signal
+exit, freeing the run for normal capacity eviction immediately. Diagnostics failures
+remain secondary and do not change those exit codes. HTTP TERM/HUP retains the default
+OS disposition and can leave an incomplete run. Broken output pipes finalize with
+`output_closed`. A crash or store
 failure can leave a partial trace or a trace without summary. Cleanup only occurs
 on enabled start: age, count
 and byte limits evict validated eligible runs, active locks prevent deletion, and
