@@ -1,11 +1,13 @@
 # llmtool Token Savings / Dogfood ROI pilot — 2026-10-06
 
-Status: **FIRST n=1 PAIRED PILOT EXECUTED — BLIND QUALITY REVIEW PENDING**.
+Status: **FIRST n=1 PAIRED PILOT COMPLETE — INDEPENDENT BLIND QUALITY REVIEW PASS**.
 
-**No preliminary Codex token-savings claim.** The two mechanically eligible pairs
-both consumed more Codex tokens with dogfood. B03 has a frozen literal-check miss
-and is excluded from the provisional eligible-pair calculation. No executing
-measured session graded itself; semantic quality parity remains unknown.
+**No positive Codex token-savings claim.** Independent blind grading judged all six
+anonymous outputs PASS and all three control/dogfood pairs quality-equivalent. Under
+the pre-registered primary KPI, dogfood consumed **57,295 more Codex tokens** across
+all three quality-approved pairs: CONTROL 54,849 vs DOGFOOD 112,144, a
+**−104.46% saving / +104.46% consumption** result. This is a valid negative,
+descriptive n=1 result, not a routing-policy conclusion.
 
 ## Current execution provenance and contract
 
@@ -55,17 +57,19 @@ repetition was performed.
 
 | Fixture | Control Codex | Dogfood Codex | Company, all attempts | Codex saved | Saving % | Mixed delta | Quality |
 |---|---:|---:|---:|---:|---:|---:|---|
-| B01 | 18,452 | 37,517 | unknown (known subtotal 3,698) | −19,065 | −103.32% | unknown | Mechanical checks PASS; blind review required |
-| B02 | 17,582 | 39,294 | unknown (known subtotal 5,814) | −21,712 | −123.49% | unknown | Mechanical checks PASS; blind review required |
-| B03 | 18,815 | 35,333 | 4,285 | INVALID for claim | INVALID | INVALID | CONTROL literal fact predicate failed; blind review required |
-| **B01+B02 mechanically eligible subtotal** | **36,034** | **76,811** | **unknown** | **−40,777** | **−113.16%** | **unknown** | **Provisional only; no quality-approved pairs yet** |
+| B01 | 18,452 | 37,517 | unknown (known subtotal 3,698) | −19,065 | −103.32% | unknown | Blind PASS; pair EQUIVALENT |
+| B02 | 17,582 | 39,294 | unknown (known subtotal 5,814) | −21,712 | −123.49% | unknown | Blind PASS; pair EQUIVALENT |
+| B03 | 18,815 | 35,333 | 4,285 | −16,518 | −87.79% | unknown | Blind PASS; literal miss judged semantically equivalent |
+| **All 3 quality-approved pairs** | **54,849** | **112,144** | **unknown** | **−57,295** | **−104.46%** | **unknown** | **6/6 PASS; 3/3 EQUIVALENT** |
 
-B01/B02 arithmetic is comparable under the pinned version/session/raw-verification
-rules and frozen mechanical checks. It is **not** a semantic quality PASS. There
-are **zero fully quality-approved pairs**, so the quality-approved savings aggregate
-remains unknown pending independent review. B03 is not included in the provisional
-subtotal. Its measured usage is retained; no unfavorable or failed observation was
-removed. These numbers do not support a positive savings claim.
+All three pairs are accounting-comparable and quality-approved under the pinned
+version/session/raw-verification rules. Independent blind grading, performed by a
+reviewer that only read the anonymous grading package plus frozen fixture/gold/schema/
+task files, returned **6/6 PASS and B01/B02/B03 pair parity EQUIVALENT**. The B03
+CONTROL literal miss remains preserved in deterministic evidence but was judged
+semantically equivalent to the frozen gold; the gold was not changed and the session
+was not rerun. These numbers therefore support a quality-approved **negative** Codex
+saving observation for this n=1 small-evidence pilot.
 
 Company known usage subtotal for all successful calls is **13,797** tokens. The
 all-attempt company total is **unknown**, because two length-rejected attempts did
@@ -227,6 +231,63 @@ If a reviewer has already read variant-identifying evidence, disclose compromise
 blinding rather than claiming a blind result. No independent semantic review has
 been executed in this round.
 
+## Independent blind quality review result
+
+Independent review is recorded in
+[the pilot review](llmtool_token_savings_pilot_review_20261006.md).
+
+The primary reviewer had already seen variant-identifying PR/token information and did
+not grade the anonymous outputs directly. A separate subagent was restricted to the
+blind grading package plus frozen fixture/gold/schema/task files and stated that it read
+only the permitted files.
+
+Results:
+
+- B01-A/B: PASS/PASS; pair EQUIVALENT.
+- B02-A/B: PASS/PASS; pair EQUIVALENT.
+- B03-A/B: PASS/PASS; pair EQUIVALENT.
+- B03's frozen literal `required_facts_terms_literal=false` remains recorded. Blind
+  semantic review judged the natural-language statements semantically equivalent to
+  the frozen gold; no gold/output/session was changed.
+
+Quality-approved primary-KPI aggregate:
+
+```text
+control Codex total:  54,849
+dogfood Codex total: 112,144
+codex_tokens_saved:  -57,295
+codex_savings_pct:   -104.46%
+
+Equivalent interpretation:
+dogfood used 104.46% more Codex tokens than control in this n=1 small-evidence pilot.
+```
+
+This is not a positive savings claim. It is a quality-approved negative descriptive
+result.
+
+### Interpretation findings carried forward
+
+- **P1 — fixed/tool-request overhead dominates small evidence.** Fixtures are only
+  about 1.2–1.4 KiB. Every DOGFOOD session performed one required raw-evidence tool
+  read, causing another Responses request and resending substantial base context. All
+  three DOGFOOD sessions read **100% of the raw fixture**, so there was no selective
+  raw-read compression benefit in this pilot.
+- **P2 — company thinking was not pinned off.** The benchmark used the default company
+  provider behavior rather than an explicit `enable_thinking=false`. Independent
+  diagnostic calls on the same synthetic B01 fixture showed materially lower company
+  completion usage/latency with thinking disabled. Therefore company token/latency/
+  retry observations from this pilot are not representative of the intended cheap
+  bounded-triage lane. This does not change the measured Codex primary KPI.
+- **P3 — cache/order effects are material.** Cached input differed substantially across
+  runs. Any future secondary non-cached/cost-relevant metric must be pre-registered and
+  evaluated with counterbalanced repeated pairs; it cannot be retroactively substituted
+  for the primary KPI here.
+- **P4 — B02 literal gold check is weak.** A future round should use structured
+  discrimination rather than ambiguous substring matching.
+
+These findings motivate a separate large-evidence follow-up; they do not rewrite this
+pilot's result.
+
 ## Scope, validation and interpretation limits
 
 - Raw JSONL, prompt files, stderr logs and private A/B mapping remain only in the
@@ -258,24 +319,25 @@ been executed in this round.
 - No merge and no second repetition. Stop for independent blind review.
 
 ```text
-B01 Codex saving: -19065 tokens / -103.32% / provisional mechanical comparison
-B02 Codex saving: -21712 tokens / -123.49% / provisional mechanical comparison
-B03 Codex saving: INVALID — frozen CONTROL literal fact check unresolved
+B01 Codex saving: -19065 tokens / -103.32% / quality-approved negative result
+B02 Codex saving: -21712 tokens / -123.49% / quality-approved negative result
+B03 Codex saving: -16518 tokens / -87.79% / quality-approved negative result
 
-Overall comparable control Codex tokens: 36034 (B01+B02; mechanical eligibility only)
-Overall comparable dogfood Codex tokens: 76811 (B01+B02; mechanical eligibility only)
-Overall Codex tokens saved: -40777 (provisional; no quality-approved savings aggregate)
-Overall Codex saving %: -113.16% (provisional)
+Overall comparable control Codex tokens: 54849
+Overall comparable dogfood Codex tokens: 112144
+Overall Codex tokens saved: -57295
+Overall Codex saving %: -104.46%
 
 Company LLM tokens: unknown total; 13797 known successful-call subtotal; 2 failed attempts unknown
 Mixed token-volume delta: unknown
 
-Valid pairs: 2 mechanically eligible; 0 fully quality-approved
-Invalid pairs: 1 for savings claim pending blind resolution (B03)
-Quality parity: unknown — BLIND_REVIEW_REQUIRED
-Blind review pending: 6 anonymous outputs / 3 pairs
+Valid pairs: 3/3 accounting-comparable and quality-approved
+Invalid pairs: 0 after blind semantic resolution of B03 literal miss
+Quality parity: 3/3 EQUIVALENT; 6/6 anonymous outputs PASS
+Blind review pending: none for this pilot
 
-Can claim preliminary Codex token savings: NO
+Can claim positive preliminary Codex token savings: NO
+Observed quality-approved result: DOGFOOD INCREASED Codex usage by 104.46% (n=1, descriptive)
 ```
 
 ## Historical preflight and accounting review checkpoint
