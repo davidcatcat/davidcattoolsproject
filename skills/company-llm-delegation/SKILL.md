@@ -106,6 +106,26 @@ For each delegation record only bounded metadata/reference data:
 Do not paste raw secrets or a full sensitive log into the report. Use a safe reference,
 small redacted excerpt, or digest when raw evidence must remain elsewhere.
 
+## Token-savings benchmark
+
+Ordinary delegation telemetry is not enough to claim Codex token savings. When the goal
+is to quantify savings, use a paired benchmark:
+
+- same bounded fixture, repo/test revision, Codex model, reasoning effort/speed and
+  acceptance criteria;
+- fresh independent Codex session for control and dogfood variants;
+- control analyzes the original bounded evidence without company-model help;
+- dogfood uses this skill and the configured company provider;
+- record actual Codex usage for each variant and company-provider usage with an explicit
+  measurement source;
+- if exact/reported comparable Codex totals are unavailable, report savings as
+  `unknown`; do not convert bytes, quota percentage, credits or estimates into tokens;
+- record quality result, latency and adopt/override alongside token usage.
+
+Report both Codex-only savings and whole-system token delta. A negative result is valid.
+Do not select only favorable pairs or declare savings when the two variants did not
+solve the same task to comparable quality.
+
 ## Completion criteria
 
 - Deterministic work was not needlessly delegated.
