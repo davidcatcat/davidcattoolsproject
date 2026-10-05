@@ -28,9 +28,11 @@ security sign-off, QA verdict, or merge authority.
 - Record a **data permission basis** for the exact bounded evidence being sent. The fact
   that a provider is internal does not automatically authorize every repository file,
   log, credential, customer datum or production payload.
-- Remove secrets and unnecessary sensitive/raw content before the provider call. Never
-  send credentials, API keys, tokens, private keys, kubeconfigs, auth headers, keychain
-  material, full environment dumps or unrelated private data.
+- Deterministically redact or discard secrets and unnecessary sensitive/raw content
+  **before** the provider call. Never rely on the model to redact its own input or
+  output. Never send credentials, API keys, tokens, private keys, kubeconfigs, auth
+  headers, keychain material, full environment dumps or unrelated private data. Treat
+  model output as potentially containing any value that was supplied.
 - Bound the input to the minimum evidence needed: command/check identity, exit status,
   failing test names, selected stack trace/error lines, relevant file names and small
   necessary snippets. Do not send the whole repository or an entire CI log by default.
@@ -71,13 +73,18 @@ directly for delegated engineering work; direct probes belong to explicit
 
 ## After delegation
 
-1. Treat the response as untrusted derived evidence.
+1. Treat the response as untrusted derived evidence and potentially containing any
+   value that was supplied to the model.
 2. Compare it with the raw command/test/log evidence before using it.
-3. Codex/Claude decides whether to adopt or override the summary; model-reported
+3. Deterministically validate every returned test/file identifier against the bounded
+   supplied evidence (exact/verbatim membership or another explicit deterministic
+   rule). Mark unsupported identifiers invalid/hallucinated and never use them directly
+   as source locators.
+4. Codex/Claude decides whether to adopt or override the summary; model-reported
    confidence is never an authority signal.
-4. After a repair, rerun the narrow deterministic check, then the required broader
+5. After a repair, rerun the narrow deterministic check, then the required broader
    regression. A company-model summary cannot override exit status or test results.
-5. If VPN/provider is unavailable, mark this optional dogfood step SKIPPED/BLOCKED and
+6. If VPN/provider is unavailable, mark this optional dogfood step SKIPPED/BLOCKED and
    continue the normal strong-model workflow unless live company-provider evidence is
    explicitly a required gate. Do not silently export the evidence to an external model.
 
@@ -92,6 +99,7 @@ For each delegation record only bounded metadata/reference data:
 - provider-reported token usage, or `unknown`;
 - latency;
 - output/schema validity where applicable;
+- returned identifier validity / invalid identifiers where applicable;
 - whether the strong developer/reviewer adopted or overrode the result;
 - later deterministic/independent verification outcome.
 
@@ -101,7 +109,10 @@ small redacted excerpt, or digest when raw evidence must remain elsewhere.
 ## Completion criteria
 
 - Deterministic work was not needlessly delegated.
-- The company-provider input was explicitly permitted, bounded and redacted as needed.
+- The company-provider input was explicitly permitted, bounded and deterministically
+  pre-redacted/discarded as needed before the provider call.
+- Returned test/file identifiers were deterministically checked against supplied
+  evidence before being used as locators.
 - The selected runtime skill matched the job.
 - Strong-model/source/raw-evidence judgement remained authoritative.
 - Delegation metadata was recorded without turning the development report into a copy
