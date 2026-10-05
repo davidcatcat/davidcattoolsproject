@@ -150,7 +150,7 @@ class SkillCLITests(unittest.TestCase):
                 if '--json' in args:
                     self.assertEqual([s['name'] for s in json.loads(first[1])], ['analyze-log', 'context-pack', 'log-triage', 'review-diff', 'test-triage'])
                 else:
-                    self.assertEqual([line.split()[0] for line in first[1].splitlines()], ['analyze-log', 'context-pack', 'review-diff'])
+                    self.assertEqual([line.split()[0] for line in first[1].splitlines()], ['analyze-log', 'context-pack', 'log-triage', 'review-diff', 'test-triage'])
 
     def test_show_offline(self):
         with patch('llmtool.cli.resolve_config', side_effect=AssertionError), patch('llmtool.cli.create_client', side_effect=AssertionError):
