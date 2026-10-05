@@ -1088,8 +1088,11 @@ NEXT_COMMANDS guard described above; A3 resource loading itself stays declarativ
 The packaged skills `analyze-log`, `review-diff`, `context-pack`,
 `test-triage` and `log-triage` use only supplied evidence. The two triage skills
 are intentionally weaker than a final reviewer: they do not decide root cause, fixes,
-test correctness, security/QA PASS or merge readiness. Sensitive input must be bounded
-and permitted before any provider call. READ-ONLY != SAFE-TO-DISPLAY.
+test correctness, security/QA PASS or merge readiness. Sensitive input must be bounded,
+permitted and deterministically pre-redacted/discarded before any provider call.
+Model-side redaction is best-effort only and must never be relied on. Returned test/file
+identifiers must be checked deterministically against the supplied evidence before use
+as locators. READ-ONLY != SAFE-TO-DISPLAY.
 
 Historical A3 framework validation: 18 targeted A3 tests PASS; canonical syntax check
 and 207 tests PASS (exact commands in the
