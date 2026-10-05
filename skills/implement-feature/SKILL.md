@@ -39,9 +39,8 @@ Deliver a working change, not just code generation.
 
 For llmtool work in Codex Cloud or on the actual Mac, follow
 [the development workflow](../../tools/llmtool/WORKFLOW.md). On Mac + company VPN,
-the development-time dogfood path may use deterministic checks/A5 Git snapshot first
-and the company LLM through llmtool for bounded triage; strong-model/source/raw-evidence
-review still owns root cause, code changes, security and acceptance decisions.
+use [company-llm-delegation](../company-llm-delegation/SKILL.md) when bounded
+development-time triage would help; do not duplicate its routing/data rules here.
 Classify required checks before implementation; complete Cloud-capable work and
 publish an exact-revision handoff for Mac-only checks. Treat implementation complete,
 required verification complete and merge ready as separate claims.
