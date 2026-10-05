@@ -55,6 +55,19 @@ state instead of passing verbose `git`/`gh`/CI output to a model. Company-eligib
 task classes must be evaluated against fixed fixtures and independent labels before
 automatic routing; model self-confidence must not choose the lane.
 
+## Integration order
+
+PR #33 intentionally overlaps PR #32 in repository-guidance/status documentation
+(`AGENTS.md`, `CLAUDE.md`, READMEs, ROADMAP and WORKFLOW). That overlap is expected
+because PR #33 documents the current A11b.1 state while PR #32 owns the frozen A11b.1
+implementation/review evidence.
+
+Do **not** merge PR #33 before PR #32 is adjudicated. After PR #32 is reviewed and
+merged or otherwise resolved, synchronize PR #33 with the resulting main using a
+normal non-history-rewriting integration, reconcile the overlapping status text, and
+re-run the documentation/review gate against the new exact head. PR #33 must not
+change PR #32's frozen source/test evidence to avoid the conflict.
+
 ## Claude review checklist
 
 Please verify independently that:
