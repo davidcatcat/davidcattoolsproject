@@ -134,7 +134,7 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 Security Baseline / Threat Model is next, then QG-QA1 Formal QA before A11b. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) for the authoritative current milestone snapshot and the [workflow](tools/llmtool/WORKFLOW.md) for engineering gates.
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 and QG-QA1 are PASS/CLOSED. A11b is IN PROGRESS with A11b.1 Typed Action & Approval Contract (data-only, no execution); A11c is NOT STARTED and A12 remains future optional. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) for the authoritative current milestone snapshot and the [workflow](tools/llmtool/WORKFLOW.md) for engineering gates.
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
