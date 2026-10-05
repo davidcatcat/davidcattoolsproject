@@ -514,3 +514,82 @@ once after the implementation commit and review. Publication SHA and current CI
 belong in the PR/final handoff. Earlier PASS/CI tables remain historical evidence,
 not substituted proof for this round. Developer stops writing at the frozen-file
 handoff; coordinator is the sole Git writer. No publication or merge is claimed.
+
+### Round-2 final independent review — coordinator checkpoint
+
+The exact repair implementation is
+`0d3669f258d6d8c0966a310bddbbea2849a2cb52`, based on previous PR HEAD
+`34383043b76cded9348a4587aa264286f7670f43`; main/base remains
+`7be031c2f8004143d56116717ada5c8599d47d3f`. The earlier round-2 authoring
+cutoff above remains historical. No historical Claude conclusion was changed.
+
+Developer `/root/a11b1_r12_developer` and original read-only Reviewer
+`/root/a11b1_r12_reviewer` were requested as `gpt-6.1-sol/high`. The original
+Reviewer was interrupted by a usage limit and supplies **no review PASS**.
+Resumed independent Reviewer `/root/a11b1_r12_review_resume`, also requested as
+`gpt-6.1-sol/high`, completed review on the clean frozen repair implementation.
+Actual runtime model/reasoning attestation is **UNVERIFIED** for these agents.
+The requested Git model is unavailable; coordinator remains the sole Git writer.
+
+The resumed Reviewer read the full production/test/README repair diff before
+Developer evidence, then independently checked public behavior and the appended
+report. Final disposition: **PASS; CONFIRMED BUG COUNT: 0; blockers: 0**.
+The Action contract module, dispatcher, terminal helper and historical Claude
+review are byte-identical to the repair base. Existing race/security assertions
+are preserved; two reader tests have stronger error-code assertions.
+
+| Independent check | Result |
+| --- | --- |
+| Contract API / CLI focused suite | **39 PASS**, 16.618 s, exit 0, no skips |
+| Public child-process probes | **197 PASS**: 92 accepted, 80 input rejection, 13 contract rejection, 12 real closed-pipe cases |
+| Invalid spelling through cli.main | **24 PASS** |
+| Real pipes | Module/script/installed launcher × action/approval × human/JSON: all **rc0 / empty stderr** |
+| Frozen / unchanged manifests and artifacts | PASS; tested code/test patch digest matches `b7fde3e72072b29ea25929925ac2d3e4a375260e1b9b08d68debbb17685f251f` |
+| Wheel / installed production bytes | All four checked modules match frozen repository bytes |
+| Documentation and whitespace | 38 local links and diff check PASS; link-check evidence is transcript-only |
+
+Independent commands, run from `/workspace/davidcattoolsproject`:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tools/llmtool \
+  tools/llmtool/.venv/bin/python /tmp/a11b1-r12-resume-review.py \
+  > /tmp/a11b1-r12-resume-review.log 2>&1
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=tools/llmtool/tests:tools/llmtool \
+  tools/llmtool/.venv/bin/python -m unittest -v \
+  test_action_contract test_action_contract_cli \
+  > /tmp/a11b1-r12-resume-focused.log 2>&1
+git diff --check 34383043b76cded9348a4587aa264286f7670f43..HEAD
+```
+
+The independent probe script SHA-256 is
+`33b7105c22bff068607df24ceb8fa6f85d6ef9fe08b17e38e11fb2e24323efb1`;
+probe log SHA-256 is
+`fc9701c53fa6d55970ea53e67e545c6947d30b4d999e0338fb3664393d4d64c9`;
+focused log SHA-256 is
+`f33a63523111e8d8c9aeb6d5160f94375aced95dfc823d7ff5089b4b09aa96a5`.
+Developer's **1020-test canonical PASS** remains separately attributed; Reviewer
+verified the original log, artifact digests and matching tested bytes without
+claiming an independent full-suite rerun. All checks are Cloud-capable; Mac-required
+checks are **NONE**. No live provider/auth/VPN or real executor result is claimed.
+
+```text
+R-1 BROKEN PIPE: CLOSED
+R-2 INPUT PATH POLICY: CLOSED
+ACTION TARGET PATH POLICY REGRESSION: PASS
+ACTION CONTRACT SCHEMA: UNCHANGED
+APPROVAL CONTRACT SCHEMA: UNCHANGED
+REAL MUTATION CAPABILITY ADDED: NO
+D-1: DEFERRED
+D-2: DEFERRED TO A11b.2
+D-3: DEFERRED
+D-4 PARENT DIRECTORY IDENTITY: REQUIRED BEFORE REAL FILE EXECUTOR
+INDEPENDENT R-1/R-2 REVIEW: PASS
+EXACT PUBLICATION-HEAD CI: PENDING AT THIS CHECKPOINT
+MERGED: NO
+```
+
+This coordinator update records results only; production/tests/README remain
+unchanged from the independently reviewed implementation. The final report-only
+commit's exact HEAD, existing PR #32 URL and Python 3.9/3.14 CI will be recorded
+once in the PR/final handoff, avoiding a self-referential SHA commit loop. External
+Claude targeted re-review remains a separate gate. Do not merge or start A11b.2.
