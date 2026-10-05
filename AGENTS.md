@@ -110,8 +110,11 @@ When a gate finds a real defect, preserve its reproducer/evidence, fix through t
 implementation workflow, and re-run the affected gate. Do not start the next milestone
 while a required gate is unresolved.
 
-For llmtool after A11a, the current pre-A11b sequence is QG-S1 Security Baseline /
-Threat Model, then QG-QA1 Formal A11a QA. A11b remains NOT STARTED until both pass.
+For llmtool, A11a is DONE; QG-S1 and QG-QA1 are PASS/CLOSED based on the merged
+security report and formal QA round-2 APPROVE. A11b is IN PROGRESS: current
+A11b.1 Typed Action & Approval Contract is data-only and grants no execution or
+mutation capability. QG-S1 future execution controls remain required. A11c is
+NOT STARTED; A12 is future optional.
 
 ## Default Cloud agent roles
 

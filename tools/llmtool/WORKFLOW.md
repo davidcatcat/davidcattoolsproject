@@ -141,16 +141,13 @@ Not every change needs every gate. The pinned Task Contract/milestone declares w
 are required. A confirmed finding is fixed via normal implementation with a permanent
 regression test where appropriate, then the affected gate is re-run.
 
-Current llmtool sequence after A11a:
-
-```text
-A11a DONE
-  -> QG-S1 security-review / threat model
-  -> confirmed security fixes + re-review if needed
-  -> QG-QA1 qa-validation
-  -> confirmed QA regressions + regression if needed
-  -> A11b design and implementation
-```
+Current llmtool state: A11a DONE; QG-S1 PASS/CLOSED (required future design
+controls retained), QG-QA1 PASS/CLOSED through merged PR #31 and formal QA
+round-2 APPROVE. A11b is IN PROGRESS with current A11b.1 Typed Action & Approval
+Contract, a data-only slice with offline validation and no execution/mutation.
+A11c is NOT STARTED; A12 is future optional. Historical reports retain their
+original checkpoint status. Any later executor requires the separate QG-S1
+sandbox, authority, replay, durable-audit and state-recheck controls.
 
 QG-S1 and QG-QA1 are quality gates, not new product milestone numbers.
 

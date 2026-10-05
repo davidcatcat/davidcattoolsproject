@@ -20,12 +20,19 @@ current roadmap.
 | Track | Current state | Next gate |
 | --- | --- | --- |
 | A0–A10 | **DONE and merged** (A2.3 Anthropic HTTP API remains a planned provider gap, not a blocker to the completed mainline) | Maintain regression/security boundaries |
-| A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed; post-merge Python 3.9/3.14 CI PASS | QG-S1 Security Baseline / Threat Model, then QG-QA1 Formal QA |
-| QG-S1 — Security Baseline / Threat Model | **NEXT / NOT STARTED** | Threat model current A11a and define security requirements that A11b must satisfy |
-| QG-QA1 — Formal A11a QA | **NOT STARTED** | Public-interface smoke/functional/failure/concurrency/cross-environment QA; fix confirmed regressions |
-| A11b — Execution, Approval & Recovery | **NOT STARTED** | May start only after QG-S1 and QG-QA1 are accepted |
+| A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed; post-merge Python 3.9/3.14 CI PASS | Maintain merged security/QA regressions |
+| QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
+| QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 current** | Typed Action & Approval Contract only; no executor/mutation |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
+
+Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
+PASS WITH REQUIRED A11b DESIGN CONTROLS; [QA round 2](../../reports/llmtool_qg_qa1_targeted_rereview_round2_20261005.md)
+APPROVE, required Q-BUG-1/F1/D-34b closed, merged PR #31 `7be031c2`.
+Original FAIL and pending reports are historical. DG-1 is fixed; DG-2/DG-3,
+TR-1–TR-3, DA-3 and other deferred limitations remain bounded by their reports.
+QG-S1 future R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD controls are retained.
 
 Quality gates are not product milestones and do not renumber A11. They exist to keep
 bug discovery, security assessment and QA distinct from feature implementation.
@@ -470,7 +477,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a DONE; pre-A11b quality gates next
+## A11 — Production Workflow & Diagnostics — A11a DONE; A11b.1 current
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -493,15 +500,15 @@ post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d404c49c8beb08ec28`；
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
-A11b/A11c 與後續 execution milestones 尚未啟動。Execution 契約仍為規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A11b is IN PROGRESS with A11b.1 Typed Action & Approval Contract (data-only). A11c remains NOT STARTED. Execution remains future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
-| QG-S1 — NEXT | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
-| QG-QA1 — NOT STARTED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — NOT STARTED | Task Contract enforcement、有限 executor、action approval、verification gates、bounded recovery | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
+| QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
+| QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
+| A11b — IN PROGRESS; A11b.1 current | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
 | A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -591,7 +598,7 @@ leave conservative empty eviction/staging artifacts; M2/M4/M5, doctor P1–P4, N
 platform/native-publication constraints and documented reader limits remain deferred.
 None authorizes automatic deletion/repair of unknown data.
 
-### QG-S1 — Security Baseline / Threat Model — NEXT
+### QG-S1 — Security Baseline / Threat Model — PASS/CLOSED
 
 This is a **quality gate, not a new product milestone**. It does not modify runtime
 behavior. Review A11a's current attack surface and define the security requirements
@@ -612,7 +619,7 @@ Minimum scope:
 Output: dated threat-model/security-review report with confirmed findings separated
 from design requirements, theoretical risks and accepted limitations.
 
-### QG-QA1 — Formal A11a QA — AFTER QG-S1
+### QG-QA1 — Formal A11a QA — PASS/CLOSED
 
 Formal QA tests the product through public/user-facing interfaces, not by reading
 implementation internals. It is distinct from code review, bug hunt and security review.
@@ -635,14 +642,24 @@ must finish cleanly before A11b implementation starts.
 
 A11a's implementation, independent review, final acceptance, post-acceptance bug hunt,
 B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. This does
-**not** mean A11 as a whole is complete: QG-S1/QG-QA1 remain pre-A11b gates, and
-A11b/A11c are not implemented.
+**not** mean A11 as a whole is complete: QG-S1/QG-QA1 are closed pre-A11b gates, and
+A11b is IN PROGRESS with a data-only first slice; A11c is NOT STARTED.
 
 ## A11b — Execution, Approval & Recovery
 
-A11b 才新增有限 executor。A11a 已完成，但在 QG-S1 Security Baseline / Threat Model 與 QG-QA1 Formal QA 通過前，不開始 production mutation。
+A11b 才新增有限 executor。A11a and pre-A11b QG-S1/QG-QA1 gates are complete. The current A11b.1 slice remains data-only; production mutation requires separate future design and acceptance.
 
-### A11b.1 — Execution Sandbox & Policy
+### A11b.1 — Typed Action & Approval Contract — CURRENT / IN PROGRESS
+
+The accepted first slice is immutable, strict version-1 proposal/approval data and
+offline validation. Supported proposal kinds are FILE_CREATE, FILE_WRITE,
+FILE_DELETE and GIT_OPERATION ADD only. COMMAND and COMMIT are deferred. It has
+no executor, sandbox, mutation, approval UI/issuer, durable audit or replay ledger.
+Structural approval binding never proves authentic USER issuance; public CLI
+results remain NOT_AUTHORIZED. A11b is not DONE. Future execution must satisfy
+the retained controls below before introducing any side effect.
+
+### Future execution sandbox & policy — NOT IMPLEMENTED
 
 - 固定 Task Contract：task ID、version/digest、goal、authorized scope、forbidden scope、
   acceptance criteria、required evidence。任何模型（含 reviewer）不能自行改寫、忽略或
