@@ -10,6 +10,10 @@ class _Cancelled(BaseException):
     """Unwind collection without being normalized as a provider timeout/error."""
 
 
+class CLIHostTermination(SystemExit):
+    """Owned CLI cancellation after process/runtime cleanup; preserve Unix exit."""
+
+
 def terminate(process):
     # Never poll/reap before signalling: an unreaped owned child pins its PID/PGID.
     # Once wait has reaped it, a stale PGID must not be used (TR-3 is separate).
@@ -97,4 +101,4 @@ class CLIProcessLifecycle:
                 if self.signum == signal.SIGINT:
                     raise KeyboardInterrupt() from None
                 if self.signum is not None:
-                    raise SystemExit(128 + self.signum) from None
+                    raise CLIHostTermination(128 + self.signum) from None

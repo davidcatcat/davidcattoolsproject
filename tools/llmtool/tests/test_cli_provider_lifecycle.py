@@ -123,7 +123,8 @@ class CLIProviderLifecycleTests(unittest.TestCase):
             # evidence/user artifacts. This cleanup also contains baseline leaks.
             shutil.rmtree(self.evidence['cwd'], ignore_errors=True)
 
-    def launch(self, provider, mode='waiting', timeout=20, phase=None, ignored=None):
+    def launch(self, provider, mode='waiting', timeout=20, phase=None, ignored=None,
+               diagnostics=None, flags=()):
         executable = self.bin / provider.split('-')[0]
         executable.write_text(FAKE.format(python=sys.executable, mode=mode,
             starts=str(self.starts), capture=str(self.capture),
@@ -131,12 +132,17 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         executable.chmod(0o700)
         config = self.home / '.config/llmtool/config.yaml'
         config.parent.mkdir(parents=True)
-        config.write_text(yaml.safe_dump({'active_provider': 'synthetic', 'providers': {
-            'synthetic': {'type': provider, 'timeout_seconds': timeout, 'model': 'test-model'}}}))
+        values = {'active_provider': 'synthetic', 'providers': {
+            'synthetic': {'type': provider, 'timeout_seconds': timeout, 'model': 'test-model'}}}
+        if diagnostics is not None:
+            values['diagnostics'] = diagnostics
+        config.write_text(yaml.safe_dump(values))
         environment = {'HOME': str(self.home), 'PATH': str(self.bin) + ':/usr/bin:/bin',
             'PYTHONPATH': os.pathsep.join((str(ROOT / 'tools/llmtool'),
                                          str(Path(yaml.__file__).resolve().parent.parent))),
             'PYTHONDONTWRITEBYTECODE': '1', 'OPENAI_API_KEY': SECRET}
+        environment['LLMTOOL_HOME'] = str((self.directory / 'state').resolve())
+        self.environment = environment
         bootstrap = 'from llmtool.cli import main; raise SystemExit(main())'
         if phase:
             bootstrap = '''
@@ -194,7 +200,7 @@ import os, signal, sys
 signal.signal(%r, signal.SIG_IGN)
 os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
 ''' % (int(ignored), body, PROMPT)
-        self.process = subprocess.Popen([sys.executable, '-c', bootstrap, 'ask', PROMPT],
+        self.process = subprocess.Popen([sys.executable, '-c', bootstrap, 'ask', PROMPT, *flags],
             cwd=ROOT, env=environment, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         deadline = time.monotonic() + 10
