@@ -268,10 +268,10 @@ def _run_ask(args):
 
 
 def main(argv=None):
-    args = parser_for_cli().parse_args(argv)
-    if args.command == 'ask':
-        return _run_ask(args)
     try:
+        args = parser_for_cli().parse_args(argv)
+        if args.command == 'ask':
+            return _run_ask(args)
         if args.command == 'doctor':
             from .doctor import run_doctor
             return run_doctor()
