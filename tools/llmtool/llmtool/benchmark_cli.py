@@ -33,7 +33,7 @@ def add_benchmark_parser(sub, add_options):
 
 
 def _spec(filename, is_spec=False):
-    text = read_feedback_text(filename)
+    text = read_feedback_text(filename, context='benchmark spec' if is_spec else 'benchmark case')
     if is_spec:
         return parse_benchmark_spec(text)
     # Manifests permit either exact schema; malformed data still fails closed.
@@ -69,7 +69,7 @@ def collect_live_benchmark(spec, options):
 
 def run_benchmark(args):
     if args.action == 'suite':
-        suite = parse_benchmark_suite(read_feedback_text(args.manifest))
+        suite = parse_benchmark_suite(read_feedback_text(args.manifest, context='benchmark suite'))
         base = Path(args.manifest).absolute().parent
         results = []
         ids = set()
@@ -79,7 +79,8 @@ def run_benchmark(args):
             if spec.regression.id in ids:
                 raise LLMToolError('benchmark suite contains duplicate case identifiers')
             ids.add(spec.regression.id)
-            result = evaluate_benchmark(spec, read_feedback_text(base / entry.output_file), entry.runtime)
+            result = evaluate_benchmark(spec, read_feedback_text(base / entry.output_file,
+                                        context='benchmark output'), entry.runtime)
             size += len(result.to_json().encode('utf-8'))
             if size > JSON_LIMIT:
                 raise LLMToolError('benchmark suite result exceeds 1 MiB')
@@ -90,8 +91,9 @@ def run_benchmark(args):
         if args.action == 'live':
             result = collect_live_benchmark(spec, vars(args))
         else:
-            runtime = parse_benchmark_runtime(read_feedback_text(args.runtime_file)) if args.runtime_file else None
-            result = evaluate_benchmark(spec, read_feedback_text(args.output_file), runtime)
+            runtime = parse_benchmark_runtime(read_feedback_text(args.runtime_file,
+                                             context='benchmark runtime')) if args.runtime_file else None
+            result = evaluate_benchmark(spec, read_feedback_text(args.output_file, context='benchmark output'), runtime)
     # Complete validation/serialization before touching stdout, including suite failures.
     output = result.to_json() if args.json else human_output(format_benchmark(result), sys.stdout)
     print(output)

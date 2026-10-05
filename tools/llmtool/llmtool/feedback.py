@@ -461,13 +461,13 @@ class RegressionResult:
         return _json(self.to_dict())
 
 
-def evaluate_regression(case, output):
+def evaluate_regression(case, output, *, context='feedback'):
     """Evaluate supplied output only. Input is provenance, not a prompt to a provider."""
     if type(case) is not RegressionCase:
         raise LLMToolError('regression requires a RegressionCase')
     if load_skill(case.skill).version < case.minimum_skill_version:
         raise LLMToolError('regression requires a newer packaged skill version')
-    _text(output, empty=True, limit=JSON_LIMIT)
+    _text(output, empty=True, limit=JSON_LIMIT, context=context)
     packet = validation = None
     structured_error = False
     try:

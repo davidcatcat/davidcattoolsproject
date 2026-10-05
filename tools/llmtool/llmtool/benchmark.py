@@ -294,7 +294,7 @@ class BenchmarkResult:
 def evaluate_benchmark(spec, output, runtime=None):
     _typed(spec, BenchmarkSpec)
     runtime = BenchmarkRuntime() if runtime is None else _typed(runtime, BenchmarkRuntime)
-    regression = evaluate_regression(spec.regression, output)
+    regression = evaluate_regression(spec.regression, output, context='benchmark output')
     packet = validation = None
     try:
         packet = parse_context_packet(output)

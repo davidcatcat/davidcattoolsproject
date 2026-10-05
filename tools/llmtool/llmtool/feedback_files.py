@@ -11,14 +11,14 @@ from .feedback import FeedbackCase, JSON_LIMIT, parse_feedback_case
 
 
 @contextmanager
-def _parent(filename):
+def _parent(filename, *, context='feedback'):
     """Anchor all operations to directory descriptors; reject symlink components."""
     path = Path(filename)
     if '..' in path.parts:
-        raise LLMToolError('feedback file paths cannot contain parent traversal')
+        raise LLMToolError(context + ' file paths cannot contain parent traversal')
     path = Path(os.path.abspath(path))
     if not path.name:
-        raise LLMToolError('feedback requires an explicit file')
+        raise LLMToolError(context + ' requires an explicit file')
     descriptor = None
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -29,32 +29,33 @@ def _parent(filename):
             descriptor = child
         yield descriptor, path.name
     except (OSError, ValueError):
-        raise LLMToolError('feedback file operation failed; details omitted') from None
+        raise LLMToolError(context + ' file operation failed; details omitted') from None
     finally:
         if descriptor is not None:
             os.close(descriptor)
 
 
-def _read(directory, name):
+def _read(directory, name, *, context='feedback'):
     descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
     with os.fdopen(descriptor, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise LLMToolError('feedback input requires a regular file')
+            raise LLMToolError(context + ' input requires a regular file')
         if info.st_size > JSON_LIMIT:
-            raise LLMToolError('feedback file exceeds 1 MiB')
+            raise LLMToolError(context + ' file exceeds 1 MiB')
         raw = stream.read(JSON_LIMIT + 1)
     if len(raw) > JSON_LIMIT:
-        raise LLMToolError('feedback file exceeds 1 MiB')
+        raise LLMToolError(context + ' file exceeds 1 MiB')
     try:
         return raw.decode('utf-8'), info
     except UnicodeError:
-        raise LLMToolError('feedback file must be UTF-8') from None
+        raise LLMToolError(context + ' file must be UTF-8') from None
 
 
-def read_feedback_text(filename):
-    with _parent(filename) as (directory, name):
-        return _read(directory, name)[0]
+def read_feedback_text(filename, *, context='feedback'):
+    # Domain labels are fixed caller-owned constants, never filename/input data.
+    with _parent(filename, context=context) as (directory, name):
+        return _read(directory, name, context=context)[0]
 
 
 def read_feedback_file(filename):

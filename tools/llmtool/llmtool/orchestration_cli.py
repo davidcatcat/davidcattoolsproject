@@ -24,7 +24,7 @@ def add_orchestration_parser(sub):
 
 
 def run_orchestration(args):
-    plan = parse_orchestration_plan(read_feedback_text(args.plan))
+    plan = parse_orchestration_plan(read_feedback_text(args.plan, context='orchestration plan'))
     if args.dry_run:
         if args.text is not None or args.file is not None:
             raise LLMToolError("orchestration dry-run accepts the plan only")
