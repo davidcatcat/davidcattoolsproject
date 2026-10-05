@@ -22,46 +22,6 @@ Do not copy Mac auth files/Keychain material into Cloud, expose an internal endp
 or change VPN/routes to bypass a missing prerequisite. Fake-runtime tests remain useful
 Cloud evidence but are never called real provider validation.
 
-## Development-time cost-aware dogfood — available now
-
-This is an engineering workflow for the actual Mac when the company VPN/provider is
-available. It dogfoods existing llmtool capabilities while developing llmtool; it is
-**not** A11c production routing, does not add an executor, and does not authorize
-automatic retry/fallback/repair, code mutation, Git mutation or merge.
-
-Use this order:
-
-1. **Deterministic first.** Run tests/lint/typecheck/build/schema checks directly and
-   keep command/exit/result as source evidence. For local repository inspection,
-   prefer the existing A5 `llmtool git --json` snapshot when it covers the needed
-   branch/HEAD/status/diff/recent-commit facts. Use direct Git/GitHub/CI commands only
-   for facts the snapshot does not provide, and prefer bounded/structured output over
-   repeatedly feeding verbose command output back to Codex.
-2. **Company LLM only for bounded triage.** When data policy permits and the actual
-   Mac/VPN can reach the configured company profile, call it **through llmtool** for
-   test/log summarization, failure clustering, stack-trace extraction, simple failure
-   classification, baseline/result comparison, or checklist presence. Do not call
-   the gateway directly to perform delegated engineering work; a direct endpoint probe
-   is reserved for explicit runtime/connectivity comparison.
-3. **Strong verifier for judgement.** Codex/Claude/human must inspect source plus raw
-   evidence for root cause, code changes, architecture, security/auth/permission,
-   concurrency/race, data-corruption, test correctness and acceptance/merge decisions.
-   Company-model confidence or prose cannot establish PASS, SAFE, DONE or merge-ready.
-4. **Repair loop stays evidence-driven.** Re-run the narrow deterministic failing check
-   after a fix, then the required broader regression. Company triage may be repeated on
-   newly bounded failure evidence, but it never overrides a command exit/test result.
-5. **Record delegation evidence.** For each company-model delegation, capture task type,
-   provider/profile, bounded input scope/bytes, usage tokens when reported (otherwise
-   unknown), latency, schema validity, whether Codex adopted/overrode the result, and
-   the later deterministic/independent verification outcome. Keep this in a development
-   report; it is not a new diagnostics persistence schema.
-
-If VPN/company provider is unavailable, mark the optional dogfood step skipped/blocked
-and continue with the normal strong-model workflow unless the milestone explicitly
-requires live company-provider evidence. Never weaken acceptance criteria to make the
-cheap path usable, and never export data to an external provider merely because the
-company path failed.
-
 ## 1. Establish repository and scope
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
@@ -181,20 +141,15 @@ Not every change needs every gate. The pinned Task Contract/milestone declares w
 are required. A confirmed finding is fixed via normal implementation with a permanent
 regression test where appropriate, then the affected gate is re-run.
 
-Current llmtool sequence:
+Current llmtool state: A11a DONE; QG-S1 PASS/CLOSED (required future design
+controls retained), QG-QA1 PASS/CLOSED through merged PR #31 and formal QA
+round-2 APPROVE. A11b is IN PROGRESS with current A11b.1 Typed Action & Approval
+Contract, a data-only slice with offline validation and no execution/mutation.
+A11c is NOT STARTED; A12 is future optional. Historical reports retain their
+original checkpoint status. Any later executor requires the separate QG-S1
+sandbox, authority, replay, durable-audit and state-recheck controls.
 
-```text
-A11a DONE
-  -> QG-S1 PASS with required A11b design controls
-  -> QG-QA1 required blockers closed / PR #31 merged
-  -> A11b.1 Draft PR #32 targeted external re-review
-  -> A11b.2+ only after the A11b.1 review/merge gate
-  -> A11c only after A11b DONE
-```
-
-QG-S1 and QG-QA1 are quality gates, not new product milestone numbers. Development-time
-company-LLM dogfood above is allowed as engineering assistance and does not advance
-or satisfy A11b/A11c product gates by itself.
+QG-S1 and QG-QA1 are quality gates, not new product milestone numbers.
 
 ## 2. Plan verification before implementation
 

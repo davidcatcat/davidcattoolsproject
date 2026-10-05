@@ -20,12 +20,19 @@ current roadmap.
 | Track | Current state | Next gate |
 | --- | --- | --- |
 | A0–A10 | **DONE and merged** (A2.3 Anthropic HTTP API remains a planned provider gap, not a blocker to the completed mainline) | Maintain regression/security boundaries |
-| A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed | Maintain regression/security boundaries |
-| QG-S1 — Security Baseline / Threat Model | **PASS with required A11b design controls** | Controls remain binding on A11b |
-| QG-QA1 — Formal A11a QA | **ENTRY GATE SATISFIED**; required blockers closed, targeted re-QA PASS, PR #31 merged | Keep non-blocking limitations tracked |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS**; A11b.1 validation-only Draft PR #32 pending targeted external re-review; no real mutation capability | Finish A11b.1 review/merge adjudication; do not start A11b.2 early |
+| A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed; post-merge Python 3.9/3.14 CI PASS | Maintain merged security/QA regressions |
+| QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
+| QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 current** | Typed Action & Approval Contract only; no executor/mutation |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
+
+Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
+PASS WITH REQUIRED A11b DESIGN CONTROLS; [QA round 2](../../reports/llmtool_qg_qa1_targeted_rereview_round2_20261005.md)
+APPROVE, required Q-BUG-1/F1/D-34b closed, merged PR #31 `7be031c2`.
+Original FAIL and pending reports are historical. DG-1 is fixed; DG-2/DG-3,
+TR-1–TR-3, DA-3 and other deferred limitations remain bounded by their reports.
+QG-S1 future R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD controls are retained.
 
 Quality gates are not product milestones and do not renumber A11. They exist to keep
 bug discovery, security assessment and QA distinct from feature implementation.
@@ -470,7 +477,7 @@ Path selection may miss relevant evidence；scopes/denylist do not prove secret 
 完整 bounds、data handling、CLI/security limitations 見 README A10 section；
 validation 見 [A10 report](../../reports/llmtool_a10_dynamic_context_retrieval_validation_20261002.md)。
 
-## A11 — Production Workflow & Diagnostics — A11a DONE; pre-A11b quality gates next
+## A11 — Production Workflow & Diagnostics — A11a DONE; A11b.1 current
 
 A11 的目標不只是讓 llmtool 能執行 production workflow，也必須讓每次執行在失敗時
 能回答三件事：**發生什麼、哪一層失敗、去哪裡查**。Diagnostics 是 execution 的前置
@@ -493,17 +500,15 @@ post-merge main CI 37167325001 的 Python 3.9/3.14 SUCCESS。
 A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d404c49c8beb08ec28`；
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
-QG-S1 與 QG-QA1 的 A11b entry gates 已完成；A11b.1 目前在 Draft PR #32 做 validation-only
-action/approval contract review，尚未加入 real mutation capability，A11b.2/A11c 尚未開始。
-Execution 契約的未合併部分仍是規劃，不表示目前已提供。A2.3 Anthropic HTTP API 仍未實作，
-不能被「A0–A10 完成」的主線摘要解讀為已交付。
+A11b is IN PROGRESS with A11b.1 Typed Action & Approval Contract (data-only). A11c remains NOT STARTED. Execution remains future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
 | --- | --- | --- |
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
-| QG-S1 — PASS | Security baseline + threat model；required A11b design controls recorded | Gate satisfied; controls remain binding |
-| QG-QA1 — ENTRY GATE SATISFIED | Public-interface formal QA；required blockers closed and PR #31 merged | Targeted re-QA PASS; non-blocking limitations tracked |
-| A11b — IN PROGRESS | A11b.1 validation-only action/approval contract in Draft PR #32；no real mutation capability | Targeted external re-review + merge adjudication before A11b.2 |
+| QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
+| QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
+| A11b — IN PROGRESS; A11b.1 current | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
 | A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -556,43 +561,10 @@ Context budget 與 cost routing 留待後續設計，不是本次可用的 confi
 provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost 記為 unknown/null，
 不填零。只知部分消耗時標示 partial，不能把 partial subtotal 當總成本或宣稱已節省。
 
-### Development-time cost-aware dogfood — available now, not A11c implementation
-
-在實際 Mac + 公司 VPN 的開發階段，可以立即用現有 llmtool provider 做受限 dogfood，
-目的只是減少昂貴模型處理機械性輸出與大量 log 的負擔；這不是 A11c runtime/router 的
-提前實作，也不授權 executor、自動 fallback/retry、mutation 或 merge。
-
-處理順序固定為 **deterministic first → bounded company-LLM triage → strong-model judgement**：
-
-1. 能由程式確定的工作不送任何 LLM：tests/lint/typecheck/build、exit code、schema check、
-   A5 `llmtool git --json` local snapshot，以及必要的 Git/GitHub/CI structured queries。
-   A5 已覆蓋的 branch/HEAD/status/diff/recent-commit evidence，優先用單一 snapshot，避免
-   Codex 反覆執行與閱讀多個等價 `git status/diff/log` tool turns。
-2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence，適合做 test/log
-   summary、failure clustering、stack-trace extraction、簡單 category classification、
-   baseline-vs-current 差異整理與 QA checklist presence。原始 command/exit/raw evidence
-   保留，摘要不能取代 ground truth。
-3. Root-cause-as-fact、production code 修改、architecture、security/auth/permission、
-   concurrency/race、data-corruption、test-correctness、acceptance/merge verdict 仍由 Codex/
-   Claude/人工等較強 verifier 對照 source + raw evidence 判斷。Company model 的 confidence
-   不能授權升級、完成、修碼或 PASS。
-4. GitHub/CI 機械性狀態應先 normalise 成最小欄位（例如 PR/head/CI/mergeability）再交給
-   strong model；只有真的需要語意判讀時才送 LLM。未來若加入 repo/CI collector，必須是
-   deterministic helper，不把基本 shell/API 操作包成另一個 LLM agent。
-5. 每次 company delegation 產生 bounded development report：task type、provider/profile、
-   input scope/bytes、usage tokens（若 provider 有回報；否則 unknown）、latency、output schema
-   validity、Codex 是否採用/覆寫、以及後續 deterministic/independent verification 結果。
-   這些資料用來建立未來 routing policy 的實測基線，不把「被採用」等同「正確」。
-
-若 company provider/VPN 不可用，這個開發輔助路徑可以標記 BLOCKED/SKIPPED 並由 Codex
-繼續正常開發；除非某 milestone 明定 live company-provider evidence 為 required gate，
-否則 dogfood unavailable 不得偽裝成產品 failure，也不得直接繞過 llmtool 呼叫內網 gateway
-來取得委派結果。Direct endpoint probe 只留給明確的 connectivity/runtime validation 對照。
-
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 entry gates satisfied；A11b.1 is in Draft PR #32 targeted re-review；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 precede A11b；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE
@@ -626,7 +598,7 @@ leave conservative empty eviction/staging artifacts; M2/M4/M5, doctor P1–P4, N
 platform/native-publication constraints and documented reader limits remain deferred.
 None authorizes automatic deletion/repair of unknown data.
 
-### QG-S1 — Security Baseline / Threat Model — NEXT
+### QG-S1 — Security Baseline / Threat Model — PASS/CLOSED
 
 This is a **quality gate, not a new product milestone**. It does not modify runtime
 behavior. Review A11a's current attack surface and define the security requirements
@@ -647,7 +619,7 @@ Minimum scope:
 Output: dated threat-model/security-review report with confirmed findings separated
 from design requirements, theoretical risks and accepted limitations.
 
-### QG-QA1 — Formal A11a QA — AFTER QG-S1
+### QG-QA1 — Formal A11a QA — PASS/CLOSED
 
 Formal QA tests the product through public/user-facing interfaces, not by reading
 implementation internals. It is distinct from code review, bug hunt and security review.
@@ -669,18 +641,25 @@ must finish cleanly before A11b implementation starts.
 ### A11a Definition of Done — satisfied
 
 A11a's implementation, independent review, final acceptance, post-acceptance bug hunt,
-B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. QG-S1 and
-QG-QA1 subsequently satisfied the A11b entry gates. This still does **not** mean A11
-as a whole is complete: A11b.1 is only in Draft PR #32 targeted re-review, A11b.2+
-and A11c are not implemented.
+B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. This does
+**not** mean A11 as a whole is complete: QG-S1/QG-QA1 are closed pre-A11b gates, and
+A11b is IN PROGRESS with a data-only first slice; A11c is NOT STARTED.
 
 ## A11b — Execution, Approval & Recovery
 
-A11b 才新增有限 executor。QG-S1/QG-QA1 entry gates 已滿足；A11b.1 目前仍是 validation-only
-contract/approval work（Draft PR #32），沒有 real mutation capability。A11b.2 以前不得把
-開發 dogfood 或 provider capability 解讀成 production mutation 授權。
+A11b 才新增有限 executor。A11a and pre-A11b QG-S1/QG-QA1 gates are complete. The current A11b.1 slice remains data-only; production mutation requires separate future design and acceptance.
 
-### A11b.1 — Execution Sandbox & Policy
+### A11b.1 — Typed Action & Approval Contract — CURRENT / IN PROGRESS
+
+The accepted first slice is immutable, strict version-1 proposal/approval data and
+offline validation. Supported proposal kinds are FILE_CREATE, FILE_WRITE,
+FILE_DELETE and GIT_OPERATION ADD only. COMMAND and COMMIT are deferred. It has
+no executor, sandbox, mutation, approval UI/issuer, durable audit or replay ledger.
+Structural approval binding never proves authentic USER issuance; public CLI
+results remain NOT_AUTHORIZED. A11b is not DONE. Future execution must satisfy
+the retained controls below before introducing any side effect.
+
+### Future execution sandbox & policy — NOT IMPLEMENTED
 
 - 固定 Task Contract：task ID、version/digest、goal、authorized scope、forbidden scope、
   acceptance criteria、required evidence。任何模型（含 reviewer）不能自行改寫、忽略或
@@ -804,20 +783,6 @@ normalization、初步規劃與第一輪 review，條件是 provider 已授權�
 不可用時如實記錄 environment/auth 限制，再依 objective escalation 與 trust policy 處理；
 不默認切到昂貴外部模型。沒有成本資料時這是 routing preference，不是成本節省證據。
 Schema validation 只確認結構，內容仍需原始 source/evidence 比對與獨立驗證。
-
-A11c production router 應延續 development dogfood 的三層順序，但正式化為可驗證 policy：
-**deterministic/no-model lane → authorized company-LLM lane → strong verifier lane**。能由
-deterministic helper 取得的 repo/GitHub/CI/test state 不應消耗模型推理；公司 LLM 只處理
-需要語意但 bounded/低風險的分類與壓縮；security/auth/concurrency/root-cause/merge 等
-高判斷工作以及 objective escalation 交給較強 verifier。不得以 model self-confidence
-選 lane。正式 routing 前先用固定 fixtures + independent labels 評估各 task class 的
-classification/grouping/important-error recall、schema validity、latency/usage 與 override
-rate；不足的 class 直接不授權 company lane。
-
-GitHub/CI integration 若需要新增 collector，應輸出 bounded structured state（例如 repo/
-branch/head/ahead-behind/dirty、PR/head/mergeability、required CI checks）而不是把整段
-`gh`/CI raw output塞給模型。這個 collector 是 deterministic capability，不是新的 agent，
-也不因資料收集成功而授權 Git mutation。
 
 工作 context 可壓縮，但每次 handoff 固定三層：不可縮寫取代的 pinned contract、可壓縮
 working context、可追溯的 structured evidence。摘要必須保留 source/revision 引用、unknown、
