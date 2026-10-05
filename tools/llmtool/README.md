@@ -1091,10 +1091,15 @@ are intentionally weaker than a final reviewer: they do not decide root cause, f
 test correctness, security/QA PASS or merge readiness. Sensitive input must be bounded
 and permitted before any provider call. READ-ONLY != SAFE-TO-DISPLAY.
 
-Validation: 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS (exact commands
-in the [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md)).
-No live model inference is required or claimed. A3 does not add roles,
-orchestration, retrieval, an A4 context schema, A5 Git collection, or A6 validation.
+Historical A3 framework validation: 18 targeted A3 tests PASS; canonical syntax check
+and 207 tests PASS (exact commands in the
+[A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md)).
+Those historical counts predate `test-triage` and `log-triage`; do not cite them as
+validation of the new dogfood resources. Current offline and Mac+VPN validation for
+those additions is tracked separately in
+[the dogfood skills handoff](../../reports/llmtool_company_dogfood_skills_validation_20261006.md).
+A3 itself does not add roles, orchestration, retrieval, an A4 context schema, A5 Git
+collection, or A6 validation.
 
 ## A3.5 — Interactive Chat Shell
 
