@@ -40,10 +40,26 @@ No company LLM call is allowed.
 
 ### Dogfood
 
-The same bounded fixture is deterministically prepared/redacted, delegated through
+The same bounded fixture is deterministically prepared/redacted and delegated through
 `company-llm-delegation` to the configured company provider using the specified
-runtime skill, and the derived result is returned to Codex. Codex still owns strong
-judgement and final verification.
+runtime skill.
+
+Codex initially receives:
+- the company-derived summary/packet;
+- deterministic schema/identifier-validation results;
+- a reference to the original bounded fixture, which remains available for selective
+  raw-evidence verification.
+
+The complete raw fixture is **not** automatically injected into Codex context. However,
+before Codex relies on any company-derived claim in its final answer/judgement, it must
+compare that claim with the relevant original raw evidence. Codex may read only the
+required referenced ranges or may read the whole bounded fixture; actual raw bytes/ranges
+read must be recorded. If required verification is skipped, the pair is invalid for a
+token-savings claim.
+
+Identifier/schema checks should be performed deterministically outside model reasoning
+and their result supplied to Codex. This keeps mechanical validation out of the Codex
+reasoning budget without weakening the existing company-LLM delegation contract.
 
 ## Pilot fixtures
 
@@ -54,8 +70,12 @@ failure. No secrets.
 
 Dogfood skill: `test-triage`.
 
-Acceptance: identify the supported failure groups without inventing identifiers; final
-answer must preserve unknowns and not claim unsupported root cause.
+Before execution, commit a gold manifest that fixes the expected group membership,
+allowed test/file identifiers, required unknowns and forbidden unsupported root-cause
+claims. Gold data and fixture digest must be fixed before either variant runs.
+
+Acceptance: deterministic comparison to the gold manifest where possible; any semantic
+remainder is graded by an independent reviewer blinded to control/dogfood identity.
 
 ### B02 — log triage
 
@@ -64,8 +84,11 @@ line. Pre-redacted before either variant. No real credentials.
 
 Dogfood skill: `log-triage`.
 
-Acceptance: identify signatures/patterns/timeline supported by the log; no unsupported
-root-cause or command recommendation.
+Before execution, commit a gold manifest for required signatures/patterns/timeline facts,
+required unknowns and forbidden unsupported root-cause/command claims.
+
+Acceptance: deterministic comparison to the gold manifest where possible; semantic
+remainder is graded blind to variant identity.
 
 ### B03 — evidence compression
 
@@ -74,8 +97,11 @@ verify-next separation.
 
 Dogfood path: parsed `llmtool context-pack --json`.
 
-Acceptance: A4 parser success plus equivalent required facts/unknowns preserved for the
-final Codex judgement.
+Before execution, commit a gold manifest containing the required facts/evidence,
+required unknowns, forbidden promotions to fact and minimum required source references.
+
+Acceptance: A4 parser success plus deterministic gold comparison where possible; any
+remaining semantic equivalence is graded by a blinded independent reviewer.
 
 ## Per-run record
 
@@ -106,9 +132,15 @@ company_completion_tokens:
 company_total_tokens:
 
 input_bytes_to_codex:
+raw_fixture_bytes_available:
+raw_fixture_bytes_read_by_codex:
+raw_fixture_ranges_read:
 input_bytes_to_company:
 company_output_bytes:
-tool_call_count:
+codex_tool_call_count:
+company_call_count_all_attempts:
+company_retry_count:
+run_order:
 wall_clock_seconds:
 
 schema_valid:
@@ -135,33 +167,53 @@ codex_tokens_saved
 codex_savings_pct
   = codex_tokens_saved / control.codex_total_tokens * 100
 
-dogfood_system_total
+dogfood_mixed_token_volume
   = dogfood.codex_total_tokens + dogfood.company_total_tokens
 
-whole_system_tokens_saved
-  = control.codex_total_tokens - dogfood_system_total
+mixed_token_volume_delta
+  = control.codex_total_tokens - dogfood_mixed_token_volume
 
-whole_system_savings_pct
-  = whole_system_tokens_saved / control.codex_total_tokens * 100
+mixed_token_volume_delta_pct
+  = mixed_token_volume_delta / control.codex_total_tokens * 100
 ```
 
 If any required value is unknown, the dependent result is also unknown.
 
-## Pilot execution size
+The mixed-token-volume calculation adds token counts from different model/tokenizer
+families. It is a descriptive volume indicator only, **not** a cost, compute or energy
+metric. Always show Codex and company totals separately. Any monetary comparison requires
+trusted per-model pricing/version data and must be calculated separately.
+
+## Pilot execution size and order
 
 Start with one control/dogfood pair for B01–B03: six fresh Codex sessions total.
-This deliberately limits benchmark overhead. If a fixture has a small apparent margin,
-quality mismatch, anomalous usage or inconsistent accounting source, do not generalize
-from it; add paired repetitions later.
+Pre-register and record the run order before execution. The pilot is descriptive only:
+n=1 per fixture cannot establish a stable routing threshold or a statistically reliable
+saving rate.
+
+Record **every** company call for the dogfood variant, including failed attempts and
+manual retries, plus Codex tool-call overhead. Do not report only the successful company
+call.
+
+If a fixture has a small apparent margin, quality mismatch, anomalous usage, order/cache
+concern or inconsistent accounting source, do not generalize from it; add counterbalanced
+paired repetitions later.
+
+This pilot does not label any saving as "material". Any future routing threshold must be
+pre-registered before the repeated benchmark used to evaluate that threshold; do not
+choose the threshold after seeing the result.
 
 ## Summary table
 
-| Fixture | Control Codex | Dogfood Codex | Company | Codex saved | Codex saving % | Whole-system saved | Quality parity |
+| Fixture | Control Codex | Dogfood Codex | Company | Codex saved | Codex saving % | Mixed token-volume delta* | Quality parity |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | B01 test triage | pending | pending | pending | pending | pending | pending | pending |
 | B02 log triage | pending | pending | pending | pending | pending | pending | pending |
 | B03 context pack | pending | pending | pending | pending | pending | pending | pending |
 | **Overall comparable pairs** | pending | pending | pending | pending | pending | pending | pending |
+
+*Mixed token-volume delta combines different tokenizers and is descriptive only, not a
+cost/compute metric.
 
 Do not aggregate pairs with unknown Codex totals into token-saving percentages.
 
