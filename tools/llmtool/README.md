@@ -1055,6 +1055,9 @@ llmtool skills --json
 llmtool skill show analyze-log
 llmtool ask --skill analyze-log "supplied log evidence"
 llmtool ask --skill review-diff --file supplied.diff
+llmtool ask --provider PROFILE_NAME --skill test-triage --file bounded-test-failure.txt --verbose
+llmtool ask --provider PROFILE_NAME --skill log-triage --file bounded-log.txt --verbose
+llmtool ask --provider PROFILE_NAME --skill context-pack --file bounded-evidence.txt --verbose
 ```
 
 Listing/show are offline and bypass config, credentials, and providers. Text and
@@ -1068,7 +1071,11 @@ llmtool rules, then task instructions, then (for explicit `ask --skill`) a label
 skill name/version and its body. A separate user message preserves supplied text
 exactly. All providers continue receiving the same list of role/content mappings;
 provider clients contain no skill logic. The generic ask instruction remains in
-code; the three reusable task instructions are now versioned resources.
+code. The legacy task instructions and the development-time triage instructions are
+versioned resources. `test-triage` and `log-triage` are provider-agnostic prompt
+resources: they add no routing, parser, tools or authority. General evidence
+normalization reuses the existing `context-pack` skill instead of creating a duplicate
+`evidence-summary` skill.
 
 Skills cannot define command/executable/hooks/pre_run/post_run/shell/Git/tools
 fields. Loading uses strict SafeLoader-based text parsing, never imports skill
@@ -1078,9 +1085,11 @@ provider transports and explicit config writes retain their existing boundaries.
 Model-returned command text remains only text; prompt instructions are not an
 output validator. Current analyze-log CLI additionally uses the Post-A9 narrow
 NEXT_COMMANDS guard described above; A3 resource loading itself stays declarative.
-The samples `analyze-log`, `review-diff`, and `context-pack` use
-only supplied evidence and warn against exposing credentials/private configuration.
-READ-ONLY != SAFE-TO-DISPLAY.
+The packaged skills `analyze-log`, `review-diff`, `context-pack`,
+`test-triage` and `log-triage` use only supplied evidence. The two triage skills
+are intentionally weaker than a final reviewer: they do not decide root cause, fixes,
+test correctness, security/QA PASS or merge readiness. Sensitive input must be bounded
+and permitted before any provider call. READ-ONLY != SAFE-TO-DISPLAY.
 
 Validation: 18 targeted A3 tests PASS; canonical syntax check and 207 tests PASS (exact commands
 in the [A3 validation report](../../reports/llmtool_a3_skill_framework_validation_20260930.md)).
