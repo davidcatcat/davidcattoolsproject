@@ -16,6 +16,7 @@ This repository currently provides:
 - `qa-validation` — exercise public/user-facing behavior with explicit PASS/FAIL/BLOCKED/NOT-TESTED evidence.
 - `safe-git` — safely fetch, synchronize, commit, and push Git changes.
 - `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
+- `company-llm-delegation` — route deterministic work away from LLMs and delegate only bounded permitted triage through llmtool to the configured company provider.
 
 Each skill is stored at:
 
