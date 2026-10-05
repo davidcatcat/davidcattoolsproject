@@ -132,6 +132,10 @@ class SkillTests(unittest.TestCase):
                 self.assertIn('Do not state a root cause as fact', text)
                 self.assertIn('Do not declare PASS, SAFE, DONE, VERIFIED, merge-ready or release-ready', text)
                 self.assertIn('The caller must compare this derived summary with original', text)
+                if name == 'log-triage':
+                    self.assertIn('model-side redaction is best-effort only', text)
+                    self.assertIn('deterministically redact/discard secrets before the provider call', text)
+                    self.assertIn('potentially containing any supplied value', text)
 
 
 class SkillCLITests(unittest.TestCase):
