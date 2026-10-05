@@ -102,7 +102,8 @@ Use `inspect-repo` for investigation, `implement-feature` for implementation,
 `debug-ci` for failing checks, `review-change` for ordinary diff review,
 `bug-hunt` for reproducible defect discovery, `security-review` for threat/security
 assessment, `qa-validation` for public-interface QA, `validate-runtime` for live
-runtime evidence, and `safe-git` for Git operations. These evidence gates are not
+runtime evidence, `company-llm-delegation` for bounded Mac+VPN company-model dogfood,
+and `safe-git` for Git operations. These evidence gates are not
 interchangeable. Keep one shared workflow per skill; Codex interface metadata belongs
 in the skill's `agents/openai.yaml`.
 
@@ -119,10 +120,10 @@ implementation workflow, and re-run the affected gate. Do not start the next mil
 while a required gate is unresolved.
 
 For llmtool, A11a is DONE; QG-S1 and QG-QA1 are PASS/CLOSED based on the merged
-security report and formal QA round-2 APPROVE. A11b is IN PROGRESS: current
-A11b.1 Typed Action & Approval Contract is data-only and grants no execution or
-mutation capability. QG-S1 future execution controls remain required. A11c is
-NOT STARTED; A12 is future optional.
+security report and formal QA round-2 APPROVE. A11b is IN PROGRESS: A11b.1 Typed
+Action & Approval Contract is DONE/merged via PR #32 and remains data-only with no
+execution or mutation capability; A11b.2 is NOT STARTED. QG-S1 future execution
+controls remain required. A11c is NOT STARTED; A12 is future optional.
 
 ## Default Cloud agent roles
 
