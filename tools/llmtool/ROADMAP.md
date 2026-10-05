@@ -607,9 +607,11 @@ Dogfood「可行」不等於已證明節省 Codex token。從下一輪 Mac + VPN
 
 - **Premium-model / Codex token saving**：
   `control_codex_total - dogfood_codex_total`。這回答公司 LLM 幫 Codex 少消耗多少。
-- **Whole-system token delta**：
-  `control_codex_total - (dogfood_codex_total + company_llm_total)`。這回答總 token
-  是否真的下降，還是只是從 Codex 移到 company provider。
+- **Mixed token-volume delta**：
+  `control_codex_total - (dogfood_codex_total + company_llm_total)`。這只是把不同
+  model/tokenizer 的 reported token counts 並列後做的描述性 volume 指標，**不是**
+  成本、compute 或 energy saving。Codex 與 company totals 必須分開顯示；貨幣成本比較
+  只能在每個 model 的可信 pricing/version 已知時另外計算。
 
 只有 control/dogfood 的必要 token totals 都是同一 measurement contract 下的已知值時
 才能計算百分比；任何一項 unknown/null 時，saving amount/rate 也必須是 unknown/null，
@@ -617,9 +619,18 @@ Dogfood「可行」不等於已證明節省 Codex token。從下一輪 Mac + VPN
 
 Paired benchmark 必須固定：同一 fixture/input、同 repo/test revision、同 Codex model、
 reasoning effort/speed、同 acceptance criteria，control 與 dogfood 各用 fresh Codex session，
-不得讓 control 看過 dogfood summary 或答案。每筆記錄 measurement source 與精度
-(`exact` / `reported aggregate` / `unknown`)。Codex 的 cached/reasoning 等 breakdown
-若是 total 的子欄位只作分析，不得重複加總。
+不得讓 control 看過 dogfood summary 或答案。fixture digest 與 gold labels/forbidden claims
+必須在執行前固定；可 deterministic grading 的部分先 deterministic 比對，剩餘 semantic
+部分由不知道 variant identity 的獨立 reviewer 評分。
+
+Dogfood Codex 初始只取得 company-derived summary/packet、deterministic schema/identifier
+validation 結果與 raw fixture reference；完整 fixture 不自動塞入 context。但 final 使用的
+company-derived claim 必須回查相關 raw evidence，並記錄實際讀取的 raw ranges/bytes；
+跳過 required raw verification 的 pair 不得用來宣稱 token saving。
+
+每筆記錄 measurement source 與精度 (`exact` / `reported aggregate` / `unknown`)；
+所有 company call（含失敗/重試）與 Codex tool overhead 都要計入。Codex 的
+cached/reasoning 等 breakdown 若是 total 的子欄位只作分析，不得重複加總。
 
 第一輪 pilot 只做少量 bounded fixtures，避免 benchmark 本身大量燒 token：
 
@@ -627,9 +638,13 @@ reasoning effort/speed、同 acceptance criteria，control 與 dogfood 各用 fr
 2. log triage；
 3. context/evidence compression。
 
-每個 fixture 至少一組 control + dogfood pair；若結果接近、品質不同或 variance 明顯，
-再增加 paired repetitions。除 token 外同時記 latency、quality/acceptance result、
-company result adopted/overridden、schema/identifier validity；**省 token 但品質下降不算成功**。
+每個 fixture 先做一組 control + dogfood pair；這個 n=1 pilot 只提供描述性數字，不建立
+穩定 routing threshold。執行順序需事先記錄；若結果接近、品質不同、cache/order effect
+或 variance 明顯，再增加 counterbalanced paired repetitions。未來若要用「material saving」
+作 routing gate，threshold 必須在看到 repeated benchmark 結果前預先登記。
+
+除 token 外同時記 latency、quality/acceptance result、company result adopted/overridden、
+schema/identifier validity；**省 token 但品質下降不算成功**。
 
 正式 A11c routing 前再用多次 paired samples 建立可重複的 routing ROI；目前這只是
 development measurement，不新增 automatic cost router、budget enforcement 或 milestone。
