@@ -1,0 +1,4 @@
+interface:
+  display_name: "Company LLM Delegation"
+  short_description: "Delegate bounded low-risk engineering triage through llmtool"
+  default_prompt: "Use $company-llm-delegation to keep deterministic work out of LLMs, delegate only bounded permitted triage to the configured company provider through llmtool, and retain strong-model/raw-evidence authority."
