@@ -33,9 +33,12 @@ security sign-off, QA verdict, or merge authority.
   output. Never send credentials, API keys, tokens, private keys, kubeconfigs, auth
   headers, keychain material, full environment dumps or unrelated private data. Treat
   model output as potentially containing any value that was supplied.
-- Bound the input to the minimum evidence needed: command/check identity, exit status,
-  failing test names, selected stack trace/error lines, relevant file names and small
-  necessary snippets. Do not send the whole repository or an entire CI log by default.
+- For ordinary development triage, bound the input to the minimum evidence needed:
+  command/check identity, exit status, failing test names, selected stack trace/error
+  lines, relevant file names and small necessary snippets. Do not send the whole
+  repository or an entire CI log by default. **Do not infer token savings from this
+  ordinary bounded-input mode**; the positive L01 result used a different large-input
+  benchmark pipeline described below.
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
 
@@ -44,10 +47,14 @@ security sign-off, QA verdict, or merge authority.
 Routing evidence is task-specific; a provider PASS in one skill does not authorize
 another skill.
 
-- **`test-triage` — VALIDATED on the measured synthetic L01 fixture.** Two independent
-  run orderings preserved equivalent quality while reducing Codex tokens by 39.82% and
-  37.55%. Treat these as separate observations on the same fixture, not a universal
-  savings rate.
+- **`test-triage` — only the L01 benchmark pipeline is VALIDATED for savings.** Two
+  independent run orderings preserved equivalent quality while reducing Codex tokens by
+  39.82% and 37.55%. The validated pipeline used ~48 KiB canonical `FAILURE id=` raw
+  output, complete deterministic failure-ID coverage, a ±2-line excerpt selector capped
+  at `min(32 KiB, 20%)`, and direct injection of selected raw text so Codex made 0 tool
+  calls and did not re-read the full output. Plain `ask --skill test-triage` has no
+  positive savings evidence; Round-1 B01's small-evidence configuration measured
+  −103.32% and first hit a length failure at the default output budget.
 - **`log-triage` — EXPERIMENTAL for savings/reliability claims.** Round 3 produced one
   PASS and one `finish_reason=length` failure. It may still be used as bounded
   development assistance, but do not call it a validated savings route.
@@ -63,12 +70,40 @@ For a new or redesigned route, require a pre-registered **Company-only reliabili
 Phase 0** before authorizing any paired Codex benchmark. If the Company-only gate fails
 or accounting is incomplete, stop; do not spend Codex tokens trying to measure savings.
 
+## L01 token-saving pipeline preconditions
+
+The positive 39.82% / 37.55% observations apply only to the frozen research pipeline,
+not to ordinary runtime skill invocation. A future reproducible/productionized version
+must preserve all of these conditions before inheriting the savings claim:
+
+1. Raw test output is large enough to justify delegation. The measured fixture was
+   approximately 48 KiB and used canonical `FAILURE id=` records. Small evidence is
+   not assumed beneficial; Round-1 B01 measured −103.32%.
+2. The company model receives the complete bounded raw test output needed for the
+   triage task, after deterministic permission/redaction checks.
+3. Returned failure IDs are checked for **complete set equality** against all expected
+   FAILURE IDs in the bounded fixture—no missing and no extra IDs.
+4. A deterministic selector extracts only the anchored original text (historically
+   ±2 lines), with a hard cap of `min(32 KiB, 20%)` of the original raw input.
+5. The strong model receives the company summary plus the selected original excerpts
+   inline and does **not** re-read the full raw output. Re-reading the full raw input
+   invalidates the historical savings comparison.
+6. Historical generation settings were temperature 0, `enable_thinking=false`,
+   `max_tokens=4096`, timeout 120. Ordinary llmtool defaults are not equivalent.
+7. Current coverage/selector code is frozen benchmark code and only supports the
+   canonical research format. Real pytest/unittest output has not passed this gate.
+
+Until a deterministic real-format selector and Company-only Phase 0 are implemented,
+ordinary `test-triage` remains useful for bounded triage but is **UNVALIDATED for
+token-saving claims**.
+
 ## Runtime skill selection
 
 Use the smallest applicable llmtool runtime skill:
 
-- `test-triage` — preferred company-delegation route when the task matches the validated
-  bounded test-failure triage pattern; still requires raw/deterministic verification.
+- `test-triage` — bounded development aid for test failures. Do not call the ordinary
+  runtime skill a validated token-saving route. The savings claim applies only when the
+  L01 benchmark-pipeline preconditions below are reproduced.
 - `log-triage` — bounded development aid for log compression only; EXPERIMENTAL for
   token-saving/reliability claims.
 - `context-pack` — existing evidence-first Context Packet for general evidence
@@ -91,7 +126,11 @@ llmtool context-pack --provider PROFILE_NAME --file BOUNDED_EVIDENCE_FILE --json
 The profile name and evidence file are placeholders. `context-pack` uses its existing
 structural parser; `test-triage` and `log-triage` are prompt-only in this first
 dogfood slice, so record whether their returned JSON actually matches the requested
-schema rather than treating prompt compliance as enforced. Do not hardcode the example
+schema rather than treating prompt compliance as enforced. The plain example above is
+ordinary development triage, **not** the validated savings pipeline. Historical L01
+measurement used an explicit 4096 output-token budget plus temperature 0 and
+`enable_thinking=false` in the resolved company profile; the normal default
+`max_tokens=2000` is not equivalent. Do not hardcode the example
 deployment endpoint into engineering workflows. Do not call the company gateway
 directly for delegated engineering work; direct probes belong to explicit
 `validate-runtime` connectivity/runtime validation.
@@ -100,10 +139,14 @@ directly for delegated engineering work; direct probes belong to explicit
 
 1. Treat the response as untrusted derived evidence and potentially containing any
    value that was supplied to the model.
-2. Compare it with the raw command/test/log evidence before using it.
+2. For ordinary development triage, compare relevant claims with raw command/test/log
+   evidence before using them. For the validated L01 savings pipeline, deterministic
+   complete-ID coverage and excerpt selection happen before the strong model; the strong
+   model may inspect the selected raw excerpts but must not re-read the full raw input.
 3. Deterministically validate every returned test/file identifier against the bounded
    supplied evidence (exact/verbatim membership or another explicit deterministic
-   rule). Mark unsupported identifiers invalid/hallucinated and never use them directly
+   rule). For a savings claim, test-triage FAILURE IDs require complete-set coverage,
+   not membership-only validation. Mark unsupported identifiers invalid/hallucinated and never use them directly
    as source locators.
 4. Codex/Claude decides whether to adopt or override the summary; model-reported
    confidence is never an authority signal.
@@ -121,7 +164,10 @@ For each delegation record only bounded metadata/reference data:
 - provider/profile;
 - data permission basis;
 - input scope and bytes;
-- provider-reported token usage, or `unknown`;
+- provider-reported token usage from success **or a safely parseable failure** when P1
+  exposes a validated triplet; use `unknown` when usage is absent/invalid or the failure
+  occurs before a safe response envelope (for example transport, invalid JSON or
+  oversized response);
 - latency;
 - output/schema validity where applicable;
 - returned identifier validity / invalid identifiers where applicable;
@@ -134,7 +180,8 @@ small redacted excerpt, or digest when raw evidence must remain elsewhere.
 ## Token-savings benchmark
 
 Ordinary delegation telemetry is not enough to claim Codex token savings. Existing
-validated savings evidence is limited to the L01/test-triage fixture described above.
+positive savings evidence is limited to the full L01 research pipeline described above;
+the ordinary test-triage skill invocation itself is not validated for savings.
 For any **new or redesigned route**, do not start with a paired benchmark: first pass a
 pre-registered Company-only reliability Phase 0. Only after that PASS may a paired
 benchmark be authorized. When a paired benchmark is actually allowed:
