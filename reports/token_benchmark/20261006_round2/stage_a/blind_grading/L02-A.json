@@ -1,0 +1,50 @@
+{
+  "summary": "Three UPSTREAM_TIMEOUT observations occurred 30 seconds apart, followed 30 seconds later by RECOVERY_OBSERVED for a later request completing with status=200 and latency_ms=84. Inventory warnings and errors are unrelated background entries, not canonical timeout events.",
+  "signature_counts": [
+    {
+      "signature": "UPSTREAM_TIMEOUT",
+      "occurrences": 3
+    },
+    {
+      "signature": "RECOVERY_OBSERVED",
+      "occurrences": 1
+    }
+  ],
+  "events": [
+    {
+      "event_id": "EVT-T01",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:20Z"
+    },
+    {
+      "event_id": "EVT-T02",
+      "request_id": "REQ-18",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:50Z"
+    },
+    {
+      "event_id": "EVT-T03",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:01:20Z"
+    },
+    {
+      "event_id": "EVT-R01",
+      "request_id": "REQ-19",
+      "signature": "RECOVERY_OBSERVED",
+      "ts": "2026-10-06T08:01:50Z"
+    }
+  ],
+  "repeated_patterns": [
+    "The three UPSTREAM_TIMEOUT observations are separated by 30 seconds; the supplied company result's 20-second interval claim contradicts the timestamps.",
+    "Each timeout has DETAIL phase=wait_for_response duration_ms=2000 observed=deadline_exceeded.",
+    "REQ-17 appears in EVT-T01 and EVT-T03, with REQ-18 in the intervening timeout observation.",
+    "RECOVERY_OBSERVED is a distinct later observation for REQ-19, occurring 30 seconds after EVT-T03."
+  ],
+  "unknowns": [
+    "Upstream state and the causal chain were not captured; the timeout root cause and responsible upstream component are unknown.",
+    "The repeated REQ-17 label does not establish retry or causal identity, and observation order does not establish a retry chain.",
+    "The recovery cause is unobserved; the later successful request does not explain the earlier timeouts or establish sustained recovery."
+  ]
+}

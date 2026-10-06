@@ -1,0 +1,63 @@
+{
+  "facts": [
+    "Upload p95 was 80 ms at 08:00Z.",
+    "Upload p95 was 240 ms at 08:10Z under the same measurement definition.",
+    "Release R17 completed at 08:05Z; no causal measurement is recorded."
+  ],
+  "inferences": [
+    "The observed p95 increased threefold; this comparison establishes no cause.",
+    "Inventory counts and paths are background and do not explain upload-window latency."
+  ],
+  "hypotheses": [
+    "A cache policy change might explain the increase; no cache measurement confirms this."
+  ],
+  "unknowns": [
+    "Traffic mix, cache hit rate and queue depth during the window are unknown.",
+    "Whether R17 caused the increase is unestablished; temporal proximity does not establish causation."
+  ],
+  "verify_next": [
+    "Compare traffic mix, cache hit rate and queue depth using the same window boundaries."
+  ],
+  "evidence": [
+    {
+      "statement": "record_id=REC-F01 reports baseline upload p95 of 80 ms at 08:00Z.",
+      "source": "metrics-baseline",
+      "locator": "row-17"
+    },
+    {
+      "statement": "record_id=REC-F02 reports upload p95 of 240 ms at 08:10Z under the same measurement definition.",
+      "source": "metrics-current",
+      "locator": "row-23"
+    },
+    {
+      "statement": "record_id=REC-F03 records R17 completion at 08:05Z and explicitly lacks causal measurement, leaving release causality unestablished.",
+      "source": "release-notes",
+      "locator": "line-42"
+    },
+    {
+      "statement": "record_id=REC-I01 supports the threefold-increase inference without causal attribution.",
+      "source": "analysis-note",
+      "locator": "note-3"
+    },
+    {
+      "statement": "record_id=INV-0-00000 exemplifies background inventory counts and paths, supplying no upload latency or causal measurement.",
+      "source": "inventory-10",
+      "locator": "row-1"
+    },
+    {
+      "statement": "record_id=REC-H01 proposes the cache-policy explanation as a hypothesis without confirming cache measurement.",
+      "source": "incident-notes",
+      "locator": "note-9"
+    },
+    {
+      "statement": "record_id=REC-U01 identifies traffic mix, cache hit rate and queue depth as unknown during the window.",
+      "source": "incident-notes",
+      "locator": "note-10"
+    },
+    {
+      "statement": "record_id=REC-V01 directs comparison of traffic mix, cache hit rate and queue depth using identical window boundaries.",
+      "source": "incident-notes",
+      "locator": "note-11"
+    }
+  ]
+}

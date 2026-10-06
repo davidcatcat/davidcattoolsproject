@@ -1,0 +1,69 @@
+{
+  "summary": "4 canonical FAILURE records grouped into 3 observed signatures: 2 assertion failures, 1 timeout failure, and 1 import error.",
+  "failure_count": 4,
+  "group_count": 3,
+  "groups": [
+    {
+      "signature": "DUPLICATE_ACCEPTED",
+      "category": "assertion",
+      "tests": [
+        "tests/test_manifest.py::test_reject_duplicate_name",
+        "tests/test_manifest.py::test_reject_duplicate_alias"
+      ],
+      "files": [
+        "tests/test_manifest.py"
+      ],
+      "kinds": [
+        "FAILED"
+      ],
+      "occurrences": 2,
+      "evidence": [
+        "FAILURE test_id=tests/test_manifest.py::test_reject_duplicate_name file=tests/test_manifest.py kind=FAILED signature=DUPLICATE_ACCEPTED",
+        "E assertion: expected duplicate rejection; observed accepted result",
+        "FAILURE test_id=tests/test_manifest.py::test_reject_duplicate_alias file=tests/test_manifest.py kind=FAILED signature=DUPLICATE_ACCEPTED",
+        "E assertion: expected alias duplicate rejection; observed accepted result"
+      ]
+    },
+    {
+      "signature": "WAIT_TIMEOUT",
+      "category": "timeout",
+      "tests": [
+        "tests/test_worker.py::test_wait_deadline"
+      ],
+      "files": [
+        "tests/test_worker.py"
+      ],
+      "kinds": [
+        "FAILED"
+      ],
+      "occurrences": 1,
+      "evidence": [
+        "FAILURE test_id=tests/test_worker.py::test_wait_deadline file=tests/test_worker.py kind=FAILED signature=WAIT_TIMEOUT",
+        "E TimeoutError: worker result not available within synthetic 2.0 s bound"
+      ]
+    },
+    {
+      "signature": "OPTIONAL_IMPORT_MISSING",
+      "category": "import",
+      "tests": [
+        "tests/test_plugin.py::test_load_optional"
+      ],
+      "files": [
+        "tests/test_plugin.py"
+      ],
+      "kinds": [
+        "ERROR"
+      ],
+      "occurrences": 1,
+      "evidence": [
+        "FAILURE test_id=tests/test_plugin.py::test_load_optional file=tests/test_plugin.py kind=ERROR signature=OPTIONAL_IMPORT_MISSING",
+        "E ModuleNotFoundError: synthetic_optional_plugin is unavailable during collection"
+      ]
+    }
+  ],
+  "unknowns": [
+    "UNKNOWN duplicate cause: validator branch and reproduction history are not supplied",
+    "UNKNOWN timeout cause: scheduling history and worker progress are not supplied",
+    "UNKNOWN import cause: intended dependency policy and installation state are not supplied"
+  ]
+}

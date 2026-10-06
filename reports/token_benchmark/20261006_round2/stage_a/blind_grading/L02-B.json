@@ -1,0 +1,49 @@
+{
+  "summary": "Three canonical UPSTREAM_TIMEOUT observations are followed by one RECOVERY_OBSERVED event for a later successful request. Inventory warnings and errors are unrelated observations. The log does not establish a root cause or retry chain.",
+  "signature_counts": [
+    {
+      "signature": "UPSTREAM_TIMEOUT",
+      "occurrences": 3
+    },
+    {
+      "signature": "RECOVERY_OBSERVED",
+      "occurrences": 1
+    }
+  ],
+  "events": [
+    {
+      "event_id": "EVT-T01",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:20Z"
+    },
+    {
+      "event_id": "EVT-T02",
+      "request_id": "REQ-18",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:50Z"
+    },
+    {
+      "event_id": "EVT-T03",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:01:20Z"
+    },
+    {
+      "event_id": "EVT-R01",
+      "request_id": "REQ-19",
+      "signature": "RECOVERY_OBSERVED",
+      "ts": "2026-10-06T08:01:50Z"
+    }
+  ],
+  "repeated_patterns": [
+    "EVT-T01, EVT-T02 and EVT-T03 each report wait_for_response, duration_ms=2000 and observed=deadline_exceeded; their timestamps are 30 seconds apart.",
+    "REQ-17 appears in EVT-T01 and EVT-T03; the repeated request label does not establish a retry or causal identity.",
+    "EVT-R01 records a later request completing with status=200 and latency_ms=84, distinct from the preceding timeout observations."
+  ],
+  "unknowns": [
+    "Upstream state and the causal chain behind the timeouts were not captured.",
+    "Timestamp order and repeated request labels do not establish a root cause, retry chain or causal relationship among the events.",
+    "The recovery cause is unobserved; the later success does not explain earlier timeouts or establish that earlier requests recovered."
+  ]
+}
