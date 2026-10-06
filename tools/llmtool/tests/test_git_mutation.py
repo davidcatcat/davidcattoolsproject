@@ -2,6 +2,7 @@
 import ast
 import errno
 import hashlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ import stat
 import unicodedata
 import unittest
 from dataclasses import FrozenInstanceError, replace
+from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
 
 from llmtool import action_contract as c
@@ -107,6 +109,76 @@ class GitPreflightTests(unittest.TestCase):
     def test_include_rejected_without_following(self):
         self.git('config', 'include.path', '/PRIVATE_MARKER/not-present')
         self.assertEqual(self.reject(), 'unsafe config')
+
+    def test_external_excludes_file_rejected_before_other_queries(self):
+        action = self.action()
+        external = '/PRIVATE_MARKER'
+        self.git('config', 'core.excludesFile', external)
+        original = g._Reads.query
+        queries = []
+        def observe(reads, which):
+            queries.append(which)
+            self.assertIs(which, g._Read.CONFIG)
+            return original(reads, which)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(g._Reads, 'query', observe), \
+                patch.object(g.subprocess, 'Popen', wraps=g.subprocess.Popen) as spawn, \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                g.preflight_git_add(action)
+        self.assertEqual(str(caught.exception), 'Git ADD preflight rejected: unsafe config')
+        self.assertEqual(queries, [g._Read.CONFIG])
+        self.assertEqual(spawn.call_count, 1)
+        self.assertIn('--no-includes', spawn.call_args.args[0])
+        self.assertNotIn(external, repr(spawn.call_args))
+        self.assertNotIn(external, repr(caught.exception))
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(stderr.getvalue(), '')
+
+    def test_excludes_file_key_is_case_insensitively_rejected(self):
+        for key in (b'core.excludesfile', b'CoRe.ExClUdEsFiLe', b'CORE.EXCLUDESFILE'):
+            with self.subTest(key=key):
+                with self.assertRaises(g.GitPreflightError) as caught:
+                    g._check_config(key + b'\n/PRIVATE_MARKER\0')
+                self.assertEqual(caught.exception.category, 'unsafe config')
+                self.assertNotIn('PRIVATE_MARKER', str(caught.exception))
+
+    def test_excludes_fifo_never_followed(self):
+        action = self.action()
+        # Separate synthetic runtime data, outside the bound repository.
+        with tempfile.TemporaryDirectory(prefix='llmtool-excludes-') as adjacent:
+            fifo = Path(adjacent)/'PRIVATE_MARKER.fifo'
+            os.mkfifo(fifo)
+            self.git('config', 'core.excludesFile', str(fifo))
+            original = g._Reads.query
+            queries = []
+            def observe(reads, which):
+                queries.append(which)
+                # Deterministic non-following proof; never let a buggy ignore
+                # query reach the FIFO and turn this regression into a hang.
+                self.assertIs(which, g._Read.CONFIG)
+                return original(reads, which)
+            with patch.object(g._Reads, 'query', observe), \
+                    patch.object(g.subprocess, 'Popen', wraps=g.subprocess.Popen) as spawn:
+                self.assertEqual(self.reject(action), 'unsafe config')
+            self.assertEqual(queries, [g._Read.CONFIG])
+            self.assertEqual(spawn.call_count, 1)
+            self.assertIn('--no-includes', spawn.call_args.args[0])
+            self.assertNotIn(str(fifo), repr(spawn.call_args))
+            self.assertTrue(stat.S_ISFIFO(fifo.stat().st_mode))
+
+    def test_excludes_null_pin_in_all_reads_and_future_plan(self):
+        action = self.action()
+        with patch.object(g.subprocess, 'Popen', wraps=g.subprocess.Popen) as spawn:
+            result = g.preflight_git_add(action)
+        self.assertGreater(spawn.call_count, 1)
+        argvs = [call.args[0] for call in spawn.call_args_list]
+        self.assertTrue(any('ls-files' in argv for argv in argvs))
+        for argv in argvs + [result.future_add_argv]:
+            with self.subTest(argv=argv):
+                self.assertIn('core.excludesFile=/dev/null', argv)
+                pin = argv.index('core.excludesFile=/dev/null')
+                self.assertEqual(argv[pin-1], '-c')
 
     def test_index_lock_preserved(self):
         lock = self.root/'.git/index.lock'
@@ -249,6 +321,16 @@ class GitPreflightTests(unittest.TestCase):
     def test_tracked_target_ignored_pattern_remains_supported(self):
         (self.root/'.gitignore').write_text('target.txt\n')
         g.preflight_git_add(self.action())
+
+    def test_info_exclude_ignored_untracked_target_rejected(self):
+        (self.root/'.git/info/exclude').write_text('new.txt\n')
+        (self.root/'new.txt').write_bytes(b'ignored')
+        self.assertEqual(self.reject(self.action(('new.txt',))), 'file/path mismatch')
+
+    def test_tracked_target_info_exclude_pattern_remains_supported(self):
+        (self.root/'.git/info/exclude').write_text('target.txt\n')
+        result = g.preflight_git_add(self.action())
+        self.assertEqual(result.paths, ('target.txt',))
 
     def test_staged_rename_and_copy_rejected(self):
         self.git('mv', 'other.txt', 'renamed.txt')

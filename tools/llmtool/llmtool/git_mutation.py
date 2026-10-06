@@ -28,7 +28,8 @@ STDERR_LIMIT = 65536
 GIT_TIMEOUT = 10
 SAFE_CONFIG = (
     'core.fsmonitor=false', 'core.hooksPath=/dev/null', 'core.untrackedCache=false',
-    'core.attributesFile=/dev/null', 'core.pager=cat', 'color.ui=false',
+    'core.attributesFile=/dev/null', 'core.excludesFile=/dev/null',
+    'core.pager=cat', 'color.ui=false',
     'status.renames=false', 'core.autocrlf=false', 'core.safecrlf=false',
     'add.ignoreErrors=false', 'diff.external=', 'diff.submodule=short',
     'diff.algorithm=myers', 'diff.indentHeuristic=false', 'diff.orderFile=/dev/null',
@@ -397,7 +398,8 @@ def _check_config(raw):
         key = key.lower()
         if re.fullmatch(rb'filter\..*\.(clean|smudge|process|required)', key):
             _reject('unsafe filter')
-        if (key in (b'include.path', b'core.worktree') or key.startswith(b'includeif.')
+        if (key in (b'include.path', b'core.worktree', b'core.excludesfile')
+                or key.startswith(b'includeif.')
                 or (key.startswith(b'extensions.') and key != b'extensions.objectformat')
                 or re.fullmatch(rb'remote\..*\.promisor', key)):
             _reject('unsafe config')
