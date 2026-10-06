@@ -135,9 +135,28 @@ Keep the skill focused, define a clear process, and end with checkable completio
 
 ## Tools
 
-- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 and QG-QA1 are PASS/CLOSED. A11b is IN PROGRESS: A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`), while A11b.2 is NOT STARTED and no execution/mutation capability exists yet. A11c is NOT STARTED and A12 remains future optional. Development-time dogfood may use deterministic checks first and the company LLM through llmtool for bounded triage without changing A11 runtime gates. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md).
+- [`tools/llmtool`](tools/llmtool/README.md) — Generic, portable LLM CLI and orchestration foundation. A0–A10 and A11a are DONE/merged; QG-S1 and QG-QA1 are PASS/CLOSED. A11b is IN PROGRESS: A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`), while A11b.2 is NOT STARTED and no execution/mutation capability exists yet. P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`). A11c is NOT STARTED and now uses route-by-task evidence rather than a blanket company-first assumption. A12 remains future optional. A2.3 Anthropic HTTP API remains planned. See the [roadmap](tools/llmtool/ROADMAP.md) and [workflow](tools/llmtool/WORKFLOW.md).
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
+
+## Company LLM delegation evidence
+
+Round-2/Round-3 dogfood changed the routing policy from a generic "cheap-first" idea to
+**route-by-task evidence**:
+
+- `test-triage`: **VALIDATED for the measured synthetic large-test-output fixture**. Two
+  independent orderings preserved equivalent quality while reducing Codex tokens by
+  39.82% and 37.55%. These are separate observations on the same fixture, not a
+  generalized savings guarantee.
+- `log-triage`: **EXPERIMENTAL for token-saving claims**. Round 3 produced one PASS and
+  one `finish_reason=length` failure; reliability was insufficient for paired Codex work.
+- `context-pack`: **EXPERIMENTAL for token-saving claims**. Round 3 replay showed clean
+  provenance but only 3/7 target-record recall, with an instruction/gate semantic mismatch.
+
+For any new company-LLM delegation route, run a **Company-only reliability Phase 0**
+first. Do not spend Codex tokens on a paired benchmark until that route passes its
+pre-registered Company-only gate. P1 now preserves validated usage metadata on parseable
+provider failures, but it does not turn failed model output into a successful result.
 
 ## Company LLM benchmark
 

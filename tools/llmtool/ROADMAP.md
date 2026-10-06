@@ -21,10 +21,11 @@ current roadmap.
 | --- | --- | --- |
 | A0–A10 | **DONE and merged** (A2.3 Anthropic HTTP API remains a planned provider gap, not a blocker to the completed mainline) | Maintain regression/security boundaries |
 | A11a — Observability & Diagnostics | **DONE and merged** through PR #26 `2761ce10`; B1–B7 post-acceptance fixes closed; post-merge Python 3.9/3.14 CI PASS | Maintain merged security/QA regressions |
+| P1 — Failure Usage Preservation | **DONE and merged** via PR #39 `56799527`; safe validated usage survives parseable provider failures without changing failure semantics | Use as observability/accounting foundation; no historical benchmark recomputation |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2 NOT STARTED** | Next product slice remains gated; no executor/mutation |
-| A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates |
+| A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
@@ -511,7 +512,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
 | A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2 NOT STARTED | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
-| A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
+| A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -563,6 +564,32 @@ Context budget 與 cost routing 留待後續設計，不是本次可用的 confi
 provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost 記為 unknown/null，
 不填零。只知部分消耗時標示 partial，不能把 partial subtotal 當總成本或宣稱已節省。
 
+### Evidence-derived company delegation policy — Round 3 closed
+
+The Round-2/Round-3 benchmark programme changed the design assumption from generic
+"company-first" routing to **route-by-task evidence**.
+
+| Runtime route | Evidence state | Policy |
+| --- | --- | --- |
+| `test-triage` | **VALIDATED on the measured synthetic L01 fixture** | Only currently evidence-backed token-saving company route. Stage A reduced Codex 39.82%; reverse-order Stage B reduced Codex 37.55%, with equivalent independent quality. Treat as two separate observations, not a universal rate. |
+| `log-triage` | **EXPERIMENTAL** | Round 3 saw one PASS and one `finish_reason=length` failure. Do not claim reliable savings or authorize paired Codex work from current evidence. |
+| `context-pack` | **EXPERIMENTAL** | Structured provenance was clean, but target-record recall was 3/7 and the instruction's "support" wording did not exactly match the gate's record-citation requirement. Redesign before a new reliability claim. |
+
+P1 is now merged: parseable non-success OpenAI-compatible responses may retain a safe,
+validated usage triplet. P1 improves accounting only; it does not convert incomplete or
+invalid output into PASS and does not authorize retry/fallback.
+
+**New-route gate:** before a new company delegation route may consume Codex tokens in a
+paired benchmark, it must first pass a pre-registered **Company-only reliability Phase 0**
+with exact task contract, repeated trials, deterministic/independent quality checks and
+complete/valid usage accounting. If that gate FAILs or accounting is incomplete, stop.
+Do not start the paired Codex benchmark.
+
+Round 4 is optional/deferred research, not an A11b blocker. If explicitly approved later,
+it starts Company-only after a new preregistration: L02 must bound output; L03 must align
+instruction and record-citation gate semantics; three trials per lane remain the minimum
+reliability check. Paired Codex work remains conditional on that Company-only PASS.
+
 ### Development-time cost-aware dogfood — available now, not A11c implementation
 
 在實際 Mac + 公司 VPN 的開發階段，可以立即用現有 llmtool provider 做受限 dogfood，
@@ -575,12 +602,12 @@ provider calls/input/output tokens 與可信 pricing/version；未知 usage/cost
    A5 `llmtool git --json` local snapshot，以及必要的 Git/GitHub/CI structured queries。
    A5 已覆蓋的 branch/HEAD/status/diff/recent-commit evidence，優先用單一 snapshot，避免
    Codex 反覆執行與閱讀多個等價 `git status/diff/log` tool turns。
-2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence，適合做 test/log
-   summary、failure clustering、stack-trace extraction、簡單 category classification、
-   baseline-vs-current 差異整理與 QA checklist presence。原始 command/exit/raw evidence
-   保留，摘要不能取代 ground truth。Repo-level `company-llm-delegation` skill 統一這個
-   decision/data boundary；runtime 使用 provider-agnostic `test-triage`、`log-triage`
-   或既有 `context-pack`，不重複建立 evidence-summary。
+2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence。**`test-triage`
+   是目前唯一有 token-saving 實證的 route**；`log-triage` 與 `context-pack` 仍可作 bounded
+   development aid，但其 savings/reliability 狀態是 EXPERIMENTAL。原始 command/exit/raw
+   evidence 保留，摘要不能取代 ground truth。Repo-level `company-llm-delegation` skill 統一
+   decision/data boundary；runtime skills 保持 provider-agnostic，不因 routing evidence 改寫
+   skill 本身的語意。
 3. Root-cause-as-fact、production code 修改、architecture、security/auth/permission、
    concurrency/race、data-corruption、test-correctness、acceptance/merge verdict 仍由 Codex/
    Claude/人工等較強 verifier 對照 source + raw evidence 判斷。Company model 的 confidence
@@ -632,27 +659,22 @@ company-derived claim 必須回查相關 raw evidence，並記錄實際讀取的
 所有 company call（含失敗/重試）與 Codex tool overhead 都要計入。Codex 的
 cached/reasoning 等 breakdown 若是 total 的子欄位只作分析，不得重複加總。
 
-第一輪 pilot 只做少量 bounded fixtures，避免 benchmark 本身大量燒 token：
+Round-2/Round-3 pilot 已完成，結論不得重設為未執行：`test-triage` 的 L01 fixture 有兩次
+quality-approved savings observations；`log-triage` 與 `context-pack` 尚未通過可靠性 gate。
+後續研究不再預設三個 route 都進 paired benchmark。
 
-1. test failure triage；
-2. log triage；
-3. context/evidence compression。
+任何新 route／重新設計的 L02/L03 先跑 **Company-only Phase 0**；只有 reliability/quality
+與 usage accounting gate PASS 才能 preregister paired Codex work。這個順序是用來避免
+benchmark 本身先大量消耗 Codex。除 token 外仍記 latency、quality/acceptance result、
+company result adopted/overridden、schema/identifier validity；**省 token 但品質下降不算成功**。
 
-每個 fixture 先做一組 control + dogfood pair；這個 n=1 pilot 只提供描述性數字，不建立
-穩定 routing threshold。執行順序需事先記錄；若結果接近、品質不同、cache/order effect
-或 variance 明顯，再增加 counterbalanced paired repetitions。未來若要用「material saving」
-作 routing gate，threshold 必須在看到 repeated benchmark 結果前預先登記。
-
-除 token 外同時記 latency、quality/acceptance result、company result adopted/overridden、
-schema/identifier validity；**省 token 但品質下降不算成功**。
-
-正式 A11c routing 前再用多次 paired samples 建立可重複的 routing ROI；目前這只是
-development measurement，不新增 automatic cost router、budget enforcement 或 milestone。
+正式 A11c routing 只承認通過該 route 自己 evidence gate 的能力，不以 provider 品牌或
+其他 route 的 PASS 推廣。這仍不新增 automatic cost router、budget enforcement 或 milestone。
 
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；A11b.2 NOT STARTED；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2 NOT STARTED；A11c adopts route-by-task evidence；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE
@@ -866,20 +888,27 @@ STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 
 ### A11c.1 — Production Workflow Integration
 
-規劃 company LLM first（cheap-first）：優先做 context 整理、保留來源的摘要、分類、log
-normalization、初步規劃與第一輪 review，條件是 provider 已授權可用且資料可送該 profile。
-不可用時如實記錄 environment/auth 限制，再依 objective escalation 與 trust policy 處理；
-不默認切到昂貴外部模型。沒有成本資料時這是 routing preference，不是成本節省證據。
-Schema validation 只確認結構，內容仍需原始 source/evidence 比對與獨立驗證。
+A11c 不採 blanket `company-first`。正式 integration 使用 **route-by-task evidence**：
+每個 task class 都要有自己的 reliability/quality/usage evidence，不能因同一 provider 在另一個
+route PASS 就推廣授權。
 
-A11c production router 應延續 development dogfood 的三層順序，但正式化為可驗證 policy：
-**deterministic/no-model lane → authorized company-LLM lane → strong verifier lane**。能由
-deterministic helper 取得的 repo/GitHub/CI/test state 不應消耗模型推理；公司 LLM 只處理
-需要語意但 bounded/低風險的分類與壓縮；security/auth/concurrency/root-cause/merge 等
-高判斷工作以及 objective escalation 交給較強 verifier。不得以 model self-confidence
-選 lane。正式 routing 前先用固定 fixtures + independent labels 評估各 task class 的
-classification/grouping/important-error recall、schema validity、latency/usage 與 override
-rate；不足的 class 直接不授權 company lane。
+目前只有 `test-triage` 在 synthetic L01 fixture 上有 quality-approved token-saving evidence；
+`log-triage` 與 `context-pack` 仍是 EXPERIMENTAL。後兩者可以作 bounded development aid，
+但在新的 Company-only gate PASS 前不能成為 A11c token-saving production route。
+
+A11c production router 延續三層順序並正式化為可驗證 policy：
+**deterministic/no-model lane → route-authorized company-LLM lane → strong verifier lane**。能由
+deterministic helper 取得的 repo/GitHub/CI/test state 不應消耗模型推理；只有已通過該 task
+class 自己 gate 的 bounded/低風險分類與壓縮才能進 company lane。security/auth/concurrency/
+root-cause/merge 等高判斷工作以及 objective escalation 交給較強 verifier。不得以 model
+self-confidence 選 lane，也不得用 token 價格低作為 capability/authorization 證據。
+
+新 route 的 A11c 前置 gate 固定為：Company-only repeated Phase 0 → deterministic/independent
+quality PASS + complete valid usage → 才允許 paired strong-model measurement。Gate FAIL、
+incomplete output 或 accounting unknown 都停止，不得先燒 Codex 再補 reliability evidence。
+Provider 不可用時如實記錄 environment/auth 限制，再依 objective escalation 與 trust policy
+處理；不默認切到昂貴外部模型。Schema validation 只確認結構，內容仍需原始 source/evidence
+比對與獨立驗證。
 
 GitHub/CI integration 若需要新增 collector，應輸出 bounded structured state（例如 repo/
 branch/head/ahead-behind/dirty、PR/head/mergeability、required CI checks）而不是把整段
@@ -930,8 +959,8 @@ trace（不依賴原開發者記憶）即可定位一個失敗 run 的主要 fai
 任何 production workflow 失敗都有 stable error code + unique run ID；normal mode 知道
 發生什麼與去哪查；trace 能定位 component/provider/tool；可恢復錯誤依 policy
 retry/fallback/repair，不可恢復錯誤 fail closed；AI 成功聲明經 deterministic validation；
-diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。驗收還需證明 company-first
-handoff 保留 pinned contract/source/unknown/evidence，獨立 verification 不接受無證據 claim，
+diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。驗收還需證明 route-authorized
+company handoff 保留 pinned contract/source/unknown/evidence，獨立 verification 不接受無證據 claim，
 且客觀升級與 bounded repair 不降低驗收標準。Coverage limitations 與 unknown cost 如實記錄；
 不宣稱所有語意正確，也不以尚未設計的 cost router 宣告成本最佳化完成。
 
