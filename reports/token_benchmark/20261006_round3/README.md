@@ -35,8 +35,8 @@ No new benchmark fixture or gold is generated.
 | `evaluate_l03_anchors_without_gold` | `RawStdout` and complete records; A4 parsing and structured anchors |
 | `evaluate_l03_target_recall_after_freeze` | Frozen anchor result and a deferred grading-metadata loader |
 | `RawStdout` | Immutable raw bytes; immediate SHA-256, then secret-marker scan |
-| `observe_request_without_mutation` | Already-built Request-shaped object; checks only, never sends |
-| `Phase0Accounting` | Pure fixed-order admission/recording state, no transport or retry |
+| `observe_request_without_mutation` | Already-built Request-shaped object; returns frozen `RequestObservation`; checks only, never sends |
+| `Phase0Accounting` | Pure fixed-order admission/recording state; accepts only typed RequestObservation and final FrozenEvaluation, no transport or retry |
 
 L02 company output follows the existing `log-triage` JSON schema. Required coverage
 uses the **entire** parsed EVENT universe, not a signature/gold whitelist. A company
@@ -94,8 +94,11 @@ gate evaluation, and this offline helper writes no raw artifacts.
 ## Fixed accounting
 
 Order is `L02-1, L03-1, L02-2, L03-2, L02-3, L03-3`. `begin_next()` admits or records
-an explicit skipped slot; `mark_request_emitted()` records one observation at most;
-`complete()` freezes that trial's verdict and reported usage. A pre-construction
+an explicit skipped slot; `mark_request_emitted()` accepts one frozen `RequestObservation`
+at most. `complete_evaluation()` accepts only the lane-matching **final** `FrozenEvaluation`
+(L03 must already be `phase0_l03_target_recall`) and derives failure reasons from that
+immutable result; callers cannot supply or erase failure reasons. Pre-output transport or
+model-incomplete failures use the separate bounded `complete_pre_output_failure()` path. A pre-construction
 failure records no request/proof/usage. No retry method/state exists.
 
 An L02 failure skips later L02 slots while L03 continues; an L03 failure skips later
@@ -121,3 +124,27 @@ emitted request, transport/length attribution before adapter evaluation, provide
 usage/latency metadata, and secret-scanned verbatim stdout retention. Offline fake
 Request checks prove helper behavior only; they do not prove a live Request was sent
 with thinking disabled. No live runner is included here.
+
+
+## Independent-review remediation status
+
+The independent implementation review found two before-live blockers and both have now
+been remediated in the helper/tests, pending a fresh Python 3.9 rerun:
+
+- **C1:** accounting is now cryptographically/procedurally tied to final frozen adapter
+  verdicts. L03 anchor-stage results are rejected; only post-freeze 7/7 recall results may
+  complete an L03 logical trial. Request proof is a frozen `RequestObservation`, not an
+  arbitrary dict.
+- **C2:** L02 canonical-looking detection now keys on canonical field assignments
+  (`event_id/request_id/signature/ts` with `:` or `=`) or `EVENT event_id`, not the
+  standalone word EVENT. Fixture-namespace EVT-/REQ- references in evidence/timeline
+  prose are treated as invalid provenance references rather than harmless extras.
+
+New counterexamples cover colon-form fabricated claims, benign EVENT prose, fixture
+comment prose, namespace-ID prose, anchor-stage/accounting seam, wrong-lane evaluations,
+failed-evaluation override attempts, forged dict request proof, and the 3/7 accounting
+false-PASS case.
+
+The historical offline validation report remains valid only for its exact tested head
+`29bd0dd92db203532f119a3b4c77be476454ab87`. The remediated implementation must be
+retested before any new PASS claim or live wrapper authorization.
