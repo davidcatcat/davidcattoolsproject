@@ -1,7 +1,7 @@
 {
   "stage": "B",
   "fixture": "L01",
-  "status": "MEASURED_PAIR_COMPLETE; BLIND_REVIEW_REQUIRED",
+  "status": "MEASURED_PAIR_COMPLETE; INDEPENDENT_BLIND_QUALITY_REVIEW_COMPLETE",
   "order": [
     [
       "L01",
@@ -492,9 +492,23 @@
       "tests/test_plugin.py::test_load_optional": true
     }
   },
-  "semantic_status": "BLIND_REVIEW_REQUIRED",
-  "blind_review": "PENDING",
-  "confirmation_validity": "PENDING BLIND REVIEW",
+  "semantic_status": "BLIND_REVIEW_COMPLETE",
+  "blind_review": {
+    "report": "reports/llmtool_token_savings_large_evidence_stage_b_review_20261006.md",
+    "graders": 2,
+    "verdicts": {
+      "L01-C": "PASS",
+      "L01-D": "PASS"
+    },
+    "pair_parity": "EQUIVALENT",
+    "agreement": "2/2 verdicts; 1/1 parity; no tie-break",
+    "provenance_terms_present": false,
+    "limitations": [
+      "Grader #2 read only target-adjacent fixture lines while grader #1 read the full permitted fixture; both reached the same verdict.",
+      "This is a selected-positive reverse-order confirmation and remains subject to winner's curse/selection bias."
+    ]
+  },
+  "confirmation_validity": "QUALITY_APPROVED_REVERSE_ORDER_CONFIRMATION",
   "flags": [],
   "stage_b_ceiling": 200000,
   "stage_b_measured_codex_total": 53400,
@@ -527,8 +541,18 @@
     "new security/QA gate",
     "Round 3"
   ],
-  "interpretation": "provisional reverse-order confirmation of selected positive synthetic L01; winner’s curse/selection bias; n=1 confirmation; never pooled/unbiased/stable/routing evidence",
+  "interpretation": "quality-approved reverse-order confirmation for selected positive synthetic L01; direction consistent with Stage A; never pooled/unbiased/stable/routing evidence",
   "publication_head": "commit containing these artifacts; verify final Git/PR head at publication",
   "raw_trace_retention": "temporary local measurement directory outside repository; full JSONL/prompts/company outputs/mapping not committed",
-  "whole_workflow_ROI": "unknown; setup/coordinator/review token usage not fully measured; no monetary saving claim"
+  "whole_workflow_ROI": "unknown; setup/coordinator/review token usage not fully measured; no monetary saving claim",
+  "quality_approved": true,
+  "stage_b_confirmation": {
+    "stage_a_saving_pct": 39.81597780049657,
+    "stage_b_saving_pct": 37.5467737519394,
+    "direction_consistent": true,
+    "magnitude_descriptively_similar": true,
+    "pooled_estimate": false,
+    "stable_rate_claim": false,
+    "generalized_claim": false
+  }
 }
