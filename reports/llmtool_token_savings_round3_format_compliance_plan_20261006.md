@@ -96,11 +96,25 @@ For each company output:
 
 - parse all exact canonical EVENT lines from evidence/timeline;
 - require every required canonical EVENT exactly once in evidence;
-- require the canonical timeline subset to preserve fixture timestamp/source order;
-- compute signature counts from canonical EVENT objects only;
+- require **complete canonical timeline coverage**: after unrelated extras are separated,
+  the required canonical timeline sequence must equal the full fixture-derived expected
+  EVENT sequence exactly once per required event, ordered by timestamp with source-line
+  tie-break;
+- apply duplicate checks separately to evidence and timeline; one required occurrence in
+  each array is expected and is not a cross-array duplicate;
+- compute signature counts **once from the validated evidence subset only**; never
+  double-count timeline copies or prose/extras;
 - require all required canonical signatures/counts;
-- reject fabricated or field-mismatched canonical EVENT lines;
-- reject duplicate required canonical event IDs.
+- validate the entire canonical tuple (event_id, request_id, signature, timestamp)
+  against the frozen fixture before counting or anchoring;
+- reject fabricated, unknown, wrong-field or duplicate required canonical EVENT claims
+  in either evidence or timeline;
+- classify each returned item before counting it as exactly one of:
+  1. validated required canonical EVENT;
+  2. invalid canonical-looking claim; or
+  3. genuinely noncanonical extra;
+- malformed/partial/prose EVENT-looking items cannot satisfy or repair required
+  coverage.
 
 Noncanonical evidence/timeline items:
 - are recorded in `company_extra_items`;
@@ -142,6 +156,51 @@ resolution.
 
 Mechanical structured anchoring still does **not** prove semantic completeness.
 
+### L03 Phase-0 semantic-readiness floor
+
+A nonempty set of valid structured anchors is necessary but not sufficient.
+
+For this frozen L03 fixture, Phase 0 additionally preregisters a post-output target
+recall requirement of **7/7 frozen target records**.
+
+The company model never receives the gold/target list. The sequence is fixed:
+
+1. company output completes;
+2. parse/validate A4 output;
+3. freeze the exact company output digest;
+4. derive structured source+locator anchors from fixture bytes only;
+5. freeze the adapter decision/anchors;
+6. only then load grading metadata to compute target recall.
+
+Target recall is evaluation-only. It may fail the logical trial, but it must never:
+- repair the company output;
+- add or replace anchors;
+- change selection;
+- modify the prompt/instructions;
+- trigger a semantic retry.
+
+Each L03 logical trial passes only if:
+- parser/schema PASS;
+- validated structured anchor set is nonempty;
+- unknown structured anchors = 0;
+- ambiguous structured anchors = 0;
+- duplicate mapped anchors = 0;
+- **target recall = 7/7**.
+
+Round-3 L03 company instructions are frozen before live execution and explicitly
+require evidence provenance for every substantive category item:
+
+- each fact, inference, hypothesis, unknown and verify-next item must have corresponding
+  evidence in the A4 evidence array;
+- each such evidence item must use the exact source and locator text present in the
+  supplied fixture;
+- do not invent/fuzzy-normalize source or locator;
+- the evidence statement need not contain record_id and free-text record_id is ignored
+  for anchoring.
+
+This is a benchmark-specific instruction, not a production A4 schema/runtime change.
+
+
 ## Hard stop before Codex
 
 This rule is mandatory for all future Round-3 paired benchmarks:
@@ -161,30 +220,81 @@ If selector/cap validation fails:
 This prevents the Round-2 L03 failure mode where roughly 20k Codex tokens were consumed
 despite zero selected evidence.
 
-## Phase 0 repetitions
+## Phase 0 repetitions, order and request accounting
 
-Run company-only probes:
+Phase 0 uses **six logical trials and exactly six maximum physical company requests**.
+There are **no retries** in Phase 0, including transport retries. This resolves the
+logical-trial/request-attempt ambiguity and keeps the gate cheap.
 
-- R3-L02: 3 independent fresh invocations.
-- R3-L03: 3 independent fresh invocations.
+Frozen order:
 
-Total planned company calls: **6**.
+```text
+1. R3-L02 trial 1
+2. R3-L03 trial 1
+3. R3-L02 trial 2
+4. R3-L03 trial 2
+5. R3-L02 trial 3
+6. R3-L03 trial 3
+```
+
+Each logical trial may emit at most one company request.
 
 Use the exact same fixture/instruction/config for repeats of a fixture.
 Do not change prompts between repeats.
 
-Record every attempt, including failure.
+For every trial/request record:
+- logical trial ID;
+- whether a Request was actually emitted;
+- exact prompt/input digest;
+- config digest;
+- actual-request observation/proof when a Request was emitted;
+- exit/failure category;
+- elapsed time;
+- provider usage when available;
+- raw stdout artifact/digest after secret-marker scan.
 
-No retry for format/coverage failure.
-At most one same-config retry only for a transient transport error; both attempts remain
-recorded.
+A transport failure counts as a failed logical trial. It does not permit a retry.
+Failures before Request construction are recorded separately and do not fabricate
+Request proof or usage.
+
+Because the Phase-0 gate is strict 3/3 for both fixtures, **the first failed logical
+trial makes the overall gate impossible to pass**. After such a failure, remaining
+planned trials are not executed and are recorded as
+`NOT_STARTED_EARLY_FORMAT_GATE_FAIL`. This is a preregistered cost-saving stop rule,
+not a reliability estimator.
+
+### Phase-0 company-token ceiling
+
+Hard ceiling for provider-reported company tokens: **300,000 total tokens** across all
+emitted Phase-0 requests.
+
+This ceiling is independent of later Codex budgets.
+
+After each completed request:
+- add its reported company total tokens;
+- before starting the next logical trial, require the known cumulative total to remain
+  below the 300,000 ceiling.
+
+If a consumed/emitted request may have usage but provider usage is unavailable:
+- record usage as `unknown`, never zero;
+- the complete company-token total becomes unknown;
+- STOP remaining trials with `COMPANY_TOKEN_ACCOUNTING_UNKNOWN`.
+
+If the next planned request would violate a separately preregistered hard ceiling based
+on known accounting, do not start it and record `COMPANY_TOKEN_CEILING_NOT_STARTED`.
+
+The 300,000 ceiling is a Phase-0 experiment budget, not a production routing threshold.
 
 ## Phase 0 pass gate
 
 Proceed to an expensive paired benchmark only if:
 
 - L02 adapter contract PASS = **3/3** fresh invocations;
-- L03 structured-anchor contract PASS = **3/3** fresh invocations;
+- L03 structured-anchor contract PASS = **3/3** logical trials;
+- every L03 trial has a **nonempty** validated unique anchor set;
+- every L03 trial has zero unknown/ambiguous/duplicate mapped anchors;
+- every L03 trial reaches the preregistered **7/7 target-recall floor** after output
+  and anchors are frozen;
 - all six calls have actual-request proof of thinking=false;
 - no length failure;
 - no parser/schema failure;
@@ -210,7 +320,9 @@ Common:
 - elapsed time;
 - schema/parser status;
 - actual-request thinking=false proof;
-- output digest.
+- output digest;
+- **raw company stdout** for synthetic-only replay, stored verbatim only after a
+  deterministic secret-marker scan passes.
 
 L02:
 - required event recall;
@@ -234,6 +346,23 @@ L03:
 
 Gold/target recall is never used to construct prompts or repair output.
 
+## Raw company output retention and replay
+
+Each emitted Phase-0 request retains the complete raw company stdout in a dedicated
+probe artifact alongside its SHA-256.
+
+Before commit:
+- run a deterministic secret-marker/credential-pattern scan;
+- because inputs are synthetic, any unexpected credential-like marker is treated as a
+  publication blocker;
+- never redact or edit the output and then use the edited version for the Phase-0 gate.
+
+The live adapter decision must use the exact frozen pre-live implementation.
+
+Retained raw stdout may later be replayed offline to diagnose or test a **future**
+adapter version, but replay cannot retroactively alter this Phase-0 verdict and cannot
+replace a new live validation when the prompt/model/config contract changes.
+
 ## Deliverables
 
 Create under:
@@ -242,6 +371,7 @@ Create under:
 
 - `format_probe.py`
 - `format_probe_results.json`
+- `raw_outputs/` with one immutable stdout artifact per emitted request
 - `README.md`
 
 Create report:
@@ -259,21 +389,45 @@ The probe helper must have deterministic offline tests covering:
 
 L02:
 - required subset PASS with extra noncanonical items;
+- complete evidence plus empty timeline FAIL;
+- complete evidence plus proper-subsequence timeline FAIL;
 - missing required event FAIL;
-- duplicate required event FAIL;
+- duplicate required event in evidence FAIL;
+- duplicate required event in timeline FAIL;
 - fabricated canonical event FAIL;
-- wrong field FAIL;
+- wrong request/signature/timestamp field FAIL;
 - reordered canonical timeline FAIL;
-- extra signature recorded but not fatal.
+- malformed/partial canonical-looking item cannot satisfy coverage;
+- extra signature/prose recorded but not fatal and cannot alter canonical counts;
+- correct full canonical evidence/timeline plus unrelated extras PASS.
 
 L03:
 - exact source+locator unique match PASS;
-- absent locator FAIL;
+- valid A4 empty evidence FAILS Phase-0 usable-anchor gate;
+- absent/null locator FAIL;
 - unknown pair FAIL;
 - ambiguous pair FAIL;
 - duplicate mapped anchor recorded/fails uniqueness gate;
 - statement with no record_id still maps successfully;
-- statement with misleading record_id cannot override source+locator.
+- statement with misleading record_id cannot override source+locator;
+- actual frozen-fixture multimap collision counts are preserved (no last-writer-wins);
+- 3/7 target recall FAIL;
+- 7/7 target recall PASS;
+- facts-only evidence that omits inference/hypothesis/unknown/verify-next support FAILS
+  the 7/7 readiness floor.
+
+Accounting/isolation:
+- one physical request maximum per logical trial;
+- transport failure receives no retry;
+- first failed trial triggers preregistered early-stop/not-started states;
+- raw stdout is retained byte-for-byte and secret-marker scanned;
+- unknown consumed-attempt usage remains unknown and blocks further execution;
+- 300,000 company-token ceiling accounting is deterministic;
+- fake Request observer proves thinking=false/model/temp/max_tokens/no Authorization while
+  leaving the Request unchanged;
+- prompt/adapter/retry/gate paths cannot read gold;
+- post-output target-recall grading cannot alter output, anchors, retry or trial result
+  construction.
 
 No live call before these tests PASS.
 
@@ -281,8 +435,10 @@ No live call before these tests PASS.
 
 A Phase-0 PASS proves only:
 
-- deterministic adapters can consume the current company output reliably on these frozen
-  synthetic fixtures.
+- the deterministic adapters achieved the preregistered observed compliance gate on
+  these frozen synthetic fixtures. Three identical temperature-zero trials primarily
+  probe reproducibility/backend nondeterminism; they are **not** a statistical
+  reliability estimate.
 
 It does not prove:
 - token savings;
@@ -291,12 +447,34 @@ It does not prove:
 - production routing safety;
 - generalized company reliability.
 
+## Economic decision gate before any paired Round-3 benchmark
+
+Phase 0 is about format/admission readiness only.
+
+Before authorizing any new measured Codex pair, obtain a trustworthy unit-cost basis for
+the Codex path and the company model path, or explicitly document that company-model
+usage is treated as effectively internal/fixed-cost for the decision.
+
+Round 2 showed negative mixed token-volume deltas despite lower Codex usage. Therefore a
+future paired benchmark should proceed only if its decision purpose is clear:
+- monetary/API cost reduction;
+- scarce Codex quota reduction;
+- latency/throughput;
+- or another explicitly named objective.
+
+Different tokenizers remain non-comparable as raw compute/cost without pricing.
+
 ## If Phase 0 passes
 
 Create a **new preregistered Round-3 benchmark step**, not an automatic continuation.
 
-That later benchmark should:
-- include at least one noncanonical/realistic-format fixture;
+That later benchmark **must**:
+- include at least one independently constructed realistic-format log fixture **and**
+  one independently constructed realistic mixed-evidence fixture;
+- ensure those realistic fixtures do not depend on canonical EVENT/RECORD lines as the
+  sole route to evidence anchors;
+- freeze multi-line/prose cases, repeated/ambiguous source-locator cases, negative cases,
+  locator rules, gold and coverage expectations before live execution;
 - retain hard stop before Codex on coverage failure;
 - keep Stage-A/confirmation results separate;
 - use multiple repetitions if the expected design difference is only a few percent;
@@ -309,7 +487,8 @@ Allowed now:
 - draft PR.
 
 Not yet allowed:
-- live company Phase-0 calls;
+- live company Phase-0 calls until this amended plan and offline probe/self-tests receive
+  targeted independent review;
 - measured Codex calls;
 - production runtime changes;
 - skill changes;
