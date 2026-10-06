@@ -32,8 +32,8 @@ EVENT = re.compile(r'EVENT event_id=(' + TOKEN + r') request_id=(' + TOKEN
                    + r') signature=(' + TOKEN + r') ts=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)')
 RECORD = re.compile(r'RECORD record_id=(' + TOKEN + r') source=(' + TOKEN
                     + r') locator=(' + TOKEN + r') .+')
-CANONICAL_LOOKING = re.compile(r'(?i)(?:\\bEVENT\\s+event_id\\b|\\b(?:event_id|request_id|signature|ts)\\s*[:=])')
-NAMESPACE_REFERENCE = re.compile(r'\\b(?:EVT|REQ)-[A-Za-z0-9_.:/-]+\\b')
+CANONICAL_LOOKING = re.compile(r'(?i)(?:\bEVENT\s+event_id\b|\b(?:event_id|request_id|signature|ts)\s*[:=])')
+NAMESPACE_REFERENCE = re.compile(r'\b(?:EVT|REQ)-[A-Za-z0-9_.:/-]+\b')
 LOG_FIELDS = ('summary', 'error_signatures', 'timeline', 'repeated_patterns',
               'evidence', 'unknowns', 'strong_review_reasons')
 SECRET_PATTERNS = (
