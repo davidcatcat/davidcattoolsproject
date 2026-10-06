@@ -2,7 +2,7 @@
 
 ## Status
 
-**PREPARED FOR FINAL REVIEW — NOT YET AUTHORIZED TO EXECUTE LIVE.**
+**FINAL-REVIEW DRIVER HARDENED — NOT YET EXECUTED LIVE.**
 
 This document defines the exact first real Company-only Round-3 Phase-0 run.
 
@@ -292,11 +292,14 @@ assert not STATE.exists()
 
 runner = w.Phase0Wrapper(expected_manifest_sha256=PIN)
 
-def snapshot(run_status, error_type=None):
+ORDER = ("L02-1","L03-1","L02-2","L03-2","L02-3","L03-3")
+
+def snapshot(run_status, error_type=None, next_trial=None):
     records = [asdict(r) for r in runner.accounting.records]
     payload = {
         "run_status": run_status,
         "error_type": error_type,
+        "next_trial": next_trial,
         "pinned_manifest_sha256": PIN,
         "gate_passed": runner.accounting.gate_passed,
         "known_cumulative": runner.accounting.known_cumulative,
@@ -304,32 +307,37 @@ def snapshot(run_status, error_type=None):
         "halted": runner.halted,
         "records": records,
     }
-    tmp = STATE.with_suffix(".json.tmp")
+    tmp = OUT / (".phase0_state.%d.tmp" % os.getpid())
     data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, STATE)
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        # Atomic replacement: never unlink the previous durable state first.
+        os.replace(tmp, STATE)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
     return payload
 
 try:
-    for expected in ("L02-1","L03-1","L02-2","L03-2","L02-3","L03-3"):
+    snapshot("READY", next_trial=ORDER[0])
+
+    for index, expected in enumerate(ORDER):
+        # Durable intent record before a possibly consuming Company request.
+        snapshot("BEFORE_TRIAL", next_trial=expected)
+
         record = runner.run_next(OUT)
         assert record.trial_id == expected
-        if STATE.exists():
-            STATE.unlink()
-        snapshot("RUNNING")
 
-    if STATE.exists():
-        STATE.unlink()
-    final = snapshot("COMPLETED")
+        following = ORDER[index + 1] if index + 1 < len(ORDER) else None
+        snapshot("RUNNING", next_trial=following)
+
+    final = snapshot("COMPLETED", next_trial=None)
     print(json.dumps(final, indent=2, sort_keys=True))
 except BaseException as exc:
-    if STATE.exists():
-        STATE.unlink()
-
     emitted_started = any(
         r.request_emitted and r.status == "STARTED"
         for r in runner.accounting.records
@@ -339,8 +347,19 @@ except BaseException as exc:
         if emitted_started
         else "INTEGRITY_OR_EXECUTION_HALT"
     )
-    final = snapshot(status, type(exc).__name__)
-    print(json.dumps(final, indent=2, sort_keys=True))
+
+    try:
+        final = snapshot(status, type(exc).__name__)
+        print(json.dumps(final, indent=2, sort_keys=True))
+    except BaseException as snapshot_exc:
+        # Keep the previous durable STATE intact; do not mask the original error.
+        print(json.dumps({
+            "run_status": "STATE_SNAPSHOT_FAILURE",
+            "original_error_type": type(exc).__name__,
+            "snapshot_error_type": type(snapshot_exc).__name__,
+            "pinned_manifest_sha256": PIN,
+        }, sort_keys=True), file=sys.stderr)
+
     raise
 PY
 ```
@@ -373,6 +392,25 @@ Do not report `known_cumulative` as the complete token total.
 
 Do not resume this run.
 Do not create run2 without a new explicit decision.
+
+### Hard process interruption / power-loss rule
+
+The driver writes a durable `BEFORE_TRIAL` state **before every potentially consuming
+trial** and atomically replaces the prior state without unlinking it first.
+
+If the Python process disappears without reaching its exception handler (for example
+SIGKILL, terminal loss with forced kill, OS crash, or power loss) and the private raw
+directory exists:
+
+- do not rerun or resume;
+- inspect the last `phase0_state.json` only;
+- if its `run_status` is `BEFORE_TRIAL`, conservatively treat that named
+  `next_trial` as possibly emitted/consumed;
+- classify the run as `ACCOUNTING INCOMPLETE / UNKNOWN`;
+- do not use `known_cumulative` as a complete total;
+- do not create run2 without a new explicit coordinator decision.
+
+This conservative rule applies even if no `*.stdout` exists for the interrupted trial.
 
 ## Normal semantic/format failure is not a manual retry condition
 
