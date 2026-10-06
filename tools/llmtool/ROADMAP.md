@@ -512,7 +512,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
 | A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2 NOT STARTED | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
-| A11c — NOT STARTED | company-first integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；validation report + external review |
+| A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -959,8 +959,8 @@ trace（不依賴原開發者記憶）即可定位一個失敗 run 的主要 fai
 任何 production workflow 失敗都有 stable error code + unique run ID；normal mode 知道
 發生什麼與去哪查；trace 能定位 component/provider/tool；可恢復錯誤依 policy
 retry/fallback/repair，不可恢復錯誤 fail closed；AI 成功聲明經 deterministic validation；
-diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。驗收還需證明 company-first
-handoff 保留 pinned contract/source/unknown/evidence，獨立 verification 不接受無證據 claim，
+diagnostics/audit 不洩漏 secrets；resource/retention budgets 有界。驗收還需證明 route-authorized
+company handoff 保留 pinned contract/source/unknown/evidence，獨立 verification 不接受無證據 claim，
 且客觀升級與 bounded repair 不降低驗收標準。Coverage limitations 與 unknown cost 如實記錄；
 不宣稱所有語意正確，也不以尚未設計的 cost router 宣告成本最佳化完成。
 
