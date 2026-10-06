@@ -39,16 +39,41 @@ security sign-off, QA verdict, or merge authority.
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
 
+## Evidence status by route
+
+Routing evidence is task-specific; a provider PASS in one skill does not authorize
+another skill.
+
+- **`test-triage` — VALIDATED on the measured synthetic L01 fixture.** Two independent
+  run orderings preserved equivalent quality while reducing Codex tokens by 39.82% and
+  37.55%. Treat these as separate observations on the same fixture, not a universal
+  savings rate.
+- **`log-triage` — EXPERIMENTAL for savings/reliability claims.** Round 3 produced one
+  PASS and one `finish_reason=length` failure. It may still be used as bounded
+  development assistance, but do not call it a validated savings route.
+- **`context-pack` — EXPERIMENTAL for savings/reliability claims.** Round 3 replay had
+  clean structured provenance but only 3/7 target-record recall, and exposed an
+  instruction/gate semantic mismatch.
+
+P1 provider accounting is merged and can preserve a valid usage triplet on parseable
+failure responses. That improves telemetry only; the original model failure remains a
+failure.
+
+For a new or redesigned route, require a pre-registered **Company-only reliability
+Phase 0** before authorizing any paired Codex benchmark. If the Company-only gate fails
+or accounting is incomplete, stop; do not spend Codex tokens trying to measure savings.
+
 ## Runtime skill selection
 
 Use the smallest applicable llmtool runtime skill:
 
-- `test-triage` — cluster and classify supplied test failures without deciding root cause.
-- `log-triage` — compress supplied logs into signatures, timeline/patterns and unknowns
-  without root-cause or command recommendations.
-- `context-pack` — reuse the existing evidence-first Context Packet when the job is
-  general evidence normalization/summarization. Do not create a duplicate evidence-summary
-  skill.
+- `test-triage` — preferred company-delegation route when the task matches the validated
+  bounded test-failure triage pattern; still requires raw/deterministic verification.
+- `log-triage` — bounded development aid for log compression only; EXPERIMENTAL for
+  token-saving/reliability claims.
+- `context-pack` — existing evidence-first Context Packet for general evidence
+  normalization/summarization; EXPERIMENTAL for token-saving/reliability claims. Do not
+  create a duplicate evidence-summary skill.
 
 Do not use `review-diff` as the cheap final reviewer for code correctness merely because
 it exists. Required independent review stays independent and strong.
@@ -108,8 +133,11 @@ small redacted excerpt, or digest when raw evidence must remain elsewhere.
 
 ## Token-savings benchmark
 
-Ordinary delegation telemetry is not enough to claim Codex token savings. When the goal
-is to quantify savings, use a paired benchmark:
+Ordinary delegation telemetry is not enough to claim Codex token savings. Existing
+validated savings evidence is limited to the L01/test-triage fixture described above.
+For any **new or redesigned route**, do not start with a paired benchmark: first pass a
+pre-registered Company-only reliability Phase 0. Only after that PASS may a paired
+benchmark be authorized. When a paired benchmark is actually allowed:
 
 - same bounded fixture, repo/test revision, Codex model, reasoning effort/speed and
   acceptance criteria;
