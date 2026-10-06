@@ -1,0 +1,623 @@
+============================= synthetic pytest session ==============================
+platform synthetic -- Python 3.x; noise tests are ordinary passes and warnings
+tests/test_inventory_09.py:13: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_00.py::test_partition_621 PASSED [  1%] duration=0.621s
+tests/test_inventory_06.py::test_partition_060 PASSED [  2%] duration=0.060s
+tests/test_inventory_12.py::test_partition_903 PASSED [  3%] duration=0.903s
+tests/test_inventory_10.py::test_partition_820 PASSED [  4%] duration=0.820s
+tests/test_inventory_24.py::test_partition_726 PASSED [  5%] duration=0.726s
+tests/test_inventory_00.py::test_partition_891 PASSED [  6%] duration=0.891s
+tests/test_inventory_06.py::test_partition_897 PASSED [  7%] duration=0.897s
+tests/test_inventory_00.py::test_partition_324 PASSED [  8%] duration=0.324s
+tests/test_inventory_12.py::test_partition_606 PASSED [  9%] duration=0.606s
+tests/test_inventory_20.py::test_partition_803 PASSED [ 10%] duration=0.803s
+tests/test_inventory_05.py:36: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_09.py::test_partition_036 PASSED [ 12%] duration=0.036s
+tests/test_inventory_22.py::test_partition_319 PASSED [ 13%] duration=0.319s
+tests/test_inventory_03.py::test_partition_462 PASSED [ 14%] duration=0.462s
+tests/test_inventory_21.py::test_partition_831 PASSED [ 15%] duration=0.831s
+tests/test_inventory_11.py::test_partition_875 PASSED [ 16%] duration=0.875s
+tests/test_inventory_15.py::test_partition_366 PASSED [ 17%] duration=0.366s
+tests/test_inventory_02.py::test_partition_704 PASSED [ 18%] duration=0.704s
+tests/test_inventory_02.py::test_partition_974 PASSED [ 19%] duration=0.974s
+tests/test_inventory_16.py::test_partition_934 PASSED [ 20%] duration=0.934s
+tests/test_inventory_13.py::test_partition_256 PASSED [ 21%] duration=0.256s
+tests/test_inventory_01.py:89: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_095 PASSED [ 23%] duration=0.095s
+tests/test_inventory_08.py::test_partition_467 PASSED [ 24%] duration=0.467s
+tests/test_inventory_22.py::test_partition_481 PASSED [  0%] duration=0.481s
+tests/test_inventory_12.py::test_partition_849 PASSED [  1%] duration=0.849s
+tests/test_inventory_18.py::test_partition_126 PASSED [  2%] duration=0.126s
+tests/test_inventory_25.py::test_partition_133 PASSED [  3%] duration=0.133s
+tests/test_inventory_10.py::test_partition_712 PASSED [  4%] duration=0.712s
+tests/test_inventory_21.py::test_partition_399 PASSED [  5%] duration=0.399s
+tests/test_inventory_13.py::test_partition_904 PASSED [  6%] duration=0.904s
+tests/test_inventory_08.py::test_partition_116 PASSED [  7%] duration=0.116s
+tests/test_inventory_23.py:81: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_03.py::test_partition_570 PASSED [  9%] duration=0.570s
+tests/test_inventory_08.py::test_partition_359 PASSED [ 10%] duration=0.359s
+tests/test_inventory_07.py::test_partition_628 PASSED [ 11%] duration=0.628s
+tests/test_inventory_00.py::test_partition_837 PASSED [ 12%] duration=0.837s
+tests/test_inventory_10.py::test_partition_118 PASSED [ 13%] duration=0.118s
+tests/test_inventory_18.py::test_partition_693 PASSED [ 14%] duration=0.693s
+tests/test_inventory_04.py::test_partition_868 PASSED [ 15%] duration=0.868s
+tests/test_inventory_21.py::test_partition_858 PASSED [ 16%] duration=0.858s
+tests/test_inventory_23.py::test_partition_212 PASSED [ 17%] duration=0.212s
+tests/test_inventory_26.py::test_partition_890 PASSED [ 18%] duration=0.890s
+tests/test_inventory_04.py:49: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_07.py::test_partition_196 PASSED [ 20%] duration=0.196s
+tests/test_inventory_19.py::test_partition_829 PASSED [ 21%] duration=0.829s
+tests/test_inventory_26.py::test_partition_350 PASSED [ 22%] duration=0.350s
+tests/test_inventory_21.py::test_partition_048 PASSED [ 23%] duration=0.048s
+tests/test_inventory_08.py::test_partition_791 PASSED [ 24%] duration=0.791s
+tests/test_inventory_16.py::test_partition_664 PASSED [  0%] duration=0.664s
+tests/test_inventory_17.py::test_partition_638 PASSED [  1%] duration=0.638s
+tests/test_inventory_22.py::test_partition_697 PASSED [  2%] duration=0.697s
+tests/test_inventory_03.py::test_partition_678 PASSED [  3%] duration=0.678s
+tests/test_inventory_18.py::test_partition_936 PASSED [  4%] duration=0.936s
+tests/test_inventory_24.py:17: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_20.py::test_partition_398 PASSED [  6%] duration=0.398s
+tests/test_inventory_14.py::test_partition_419 PASSED [  7%] duration=0.419s
+tests/test_inventory_00.py::test_partition_000 PASSED [  8%] duration=0.000s
+tests/test_inventory_01.py::test_partition_595 PASSED [  9%] duration=0.595s
+tests/test_inventory_11.py::test_partition_713 PASSED [ 10%] duration=0.713s
+tests/test_inventory_13.py::test_partition_175 PASSED [ 11%] duration=0.175s
+tests/test_inventory_03.py::test_partition_597 PASSED [ 12%] duration=0.597s
+tests/test_inventory_01.py::test_partition_676 PASSED [ 13%] duration=0.676s
+tests/test_inventory_18.py::test_partition_045 PASSED [ 14%] duration=0.045s
+tests/test_inventory_15.py::test_partition_852 PASSED [ 15%] duration=0.852s
+tests/test_inventory_09.py:83: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_635 PASSED [ 17%] duration=0.635s
+tests/test_inventory_20.py::test_partition_587 PASSED [ 18%] duration=0.587s
+tests/test_inventory_21.py::test_partition_156 PASSED [ 19%] duration=0.156s
+tests/test_inventory_20.py::test_partition_047 PASSED [ 20%] duration=0.047s
+tests/test_inventory_11.py::test_partition_065 PASSED [ 21%] duration=0.065s
+tests/test_inventory_20.py::test_partition_560 PASSED [ 22%] duration=0.560s
+tests/test_inventory_23.py::test_partition_212 PASSED [ 23%] duration=0.212s
+tests/test_inventory_06.py::test_partition_033 PASSED [ 24%] duration=0.033s
+tests/test_inventory_19.py::test_partition_478 PASSED [  0%] duration=0.478s
+tests/test_inventory_21.py::test_partition_615 PASSED [  1%] duration=0.615s
+tests/test_inventory_25.py:13: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_09.py::test_partition_171 PASSED [  3%] duration=0.171s
+tests/test_inventory_04.py::test_partition_733 PASSED [  4%] duration=0.733s
+tests/test_inventory_03.py::test_partition_894 PASSED [  5%] duration=0.894s
+tests/test_inventory_24.py::test_partition_915 PASSED [  6%] duration=0.915s
+tests/test_inventory_10.py::test_partition_469 PASSED [  7%] duration=0.469s
+tests/test_inventory_01.py::test_partition_919 PASSED [  8%] duration=0.919s
+tests/test_inventory_24.py::test_partition_348 PASSED [  9%] duration=0.348s
+tests/test_inventory_23.py::test_partition_131 PASSED [ 10%] duration=0.131s
+tests/test_inventory_19.py::test_partition_559 PASSED [ 11%] duration=0.559s
+tests/test_inventory_24.py::test_partition_213 PASSED [ 12%] duration=0.213s
+tests/test_inventory_03.py:56: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_12.py::test_partition_876 PASSED [ 14%] duration=0.876s
+tests/test_inventory_11.py::test_partition_065 PASSED [ 15%] duration=0.065s
+tests/test_inventory_16.py::test_partition_988 PASSED [ 16%] duration=0.988s
+tests/test_inventory_05.py::test_partition_653 PASSED [ 17%] duration=0.653s
+tests/test_inventory_23.py::test_partition_104 PASSED [ 18%] duration=0.104s
+tests/test_inventory_01.py::test_partition_028 PASSED [ 19%] duration=0.028s
+tests/test_inventory_24.py::test_partition_375 PASSED [ 20%] duration=0.375s
+tests/test_inventory_22.py::test_partition_859 PASSED [ 21%] duration=0.859s
+tests/test_inventory_10.py::test_partition_226 PASSED [ 22%] duration=0.226s
+tests/test_inventory_20.py::test_partition_452 PASSED [ 23%] duration=0.452s
+tests/test_inventory_26.py:11: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_03.py::test_partition_624 PASSED [  0%] duration=0.624s
+tests/test_inventory_13.py::test_partition_013 PASSED [  1%] duration=0.013s
+tests/test_inventory_26.py::test_partition_701 PASSED [  2%] duration=0.701s
+tests/test_inventory_19.py::test_partition_829 PASSED [  3%] duration=0.829s
+tests/test_inventory_18.py::test_partition_774 PASSED [  4%] duration=0.774s
+tests/test_inventory_26.py::test_partition_863 PASSED [  5%] duration=0.863s
+tests/test_inventory_15.py::test_partition_474 PASSED [  6%] duration=0.474s
+tests/test_inventory_01.py::test_partition_460 PASSED [  7%] duration=0.460s
+tests/test_inventory_07.py::test_partition_682 PASSED [  8%] duration=0.682s
+tests/test_inventory_16.py::test_partition_151 PASSED [  9%] duration=0.151s
+tests/test_inventory_26.py:71: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_068 PASSED [ 11%] duration=0.068s
+tests/test_inventory_19.py::test_partition_532 PASSED [ 12%] duration=0.532s
+tests/test_inventory_18.py::test_partition_423 PASSED [ 13%] duration=0.423s
+tests/test_inventory_08.py::test_partition_035 PASSED [ 14%] duration=0.035s
+tests/test_inventory_13.py::test_partition_310 PASSED [ 15%] duration=0.310s
+tests/test_inventory_00.py::test_partition_432 PASSED [ 16%] duration=0.432s
+tests/test_inventory_03.py::test_partition_003 PASSED [ 17%] duration=0.003s
+tests/test_inventory_09.py::test_partition_495 PASSED [ 18%] duration=0.495s
+tests/test_inventory_26.py::test_partition_053 PASSED [ 19%] duration=0.053s
+tests/test_inventory_17.py::test_partition_800 PASSED [ 20%] duration=0.800s
+tests/test_inventory_01.py:97: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_03.py::test_partition_462 PASSED [ 22%] duration=0.462s
+tests/test_inventory_04.py::test_partition_706 PASSED [ 23%] duration=0.706s
+tests/test_inventory_12.py::test_partition_498 PASSED [ 24%] duration=0.498s
+tests/test_inventory_02.py::test_partition_353 PASSED [  0%] duration=0.353s
+tests/test_inventory_23.py::test_partition_428 PASSED [  1%] duration=0.428s
+tests/test_inventory_18.py::test_partition_747 PASSED [  2%] duration=0.747s
+tests/test_inventory_00.py::test_partition_891 PASSED [  3%] duration=0.891s
+tests/test_inventory_26.py::test_partition_674 PASSED [  4%] duration=0.674s
+tests/test_inventory_00.py::test_partition_108 PASSED [  5%] duration=0.108s
+tests/test_inventory_03.py::test_partition_084 PASSED [  6%] duration=0.084s
+tests/test_inventory_05.py:39: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_11.py::test_partition_281 PASSED [  8%] duration=0.281s
+tests/test_inventory_26.py::test_partition_080 PASSED [  9%] duration=0.080s
+tests/test_inventory_20.py::test_partition_209 PASSED [ 10%] duration=0.209s
+tests/test_inventory_26.py::test_partition_296 PASSED [ 11%] duration=0.296s
+tests/test_inventory_00.py::test_partition_270 PASSED [ 12%] duration=0.270s
+tests/test_inventory_21.py::test_partition_615 PASSED [ 13%] duration=0.615s
+tests/test_inventory_07.py::test_partition_952 PASSED [ 14%] duration=0.952s
+tests/test_inventory_19.py::test_partition_856 PASSED [ 15%] duration=0.856s
+tests/test_inventory_08.py::test_partition_575 PASSED [ 16%] duration=0.575s
+tests/test_inventory_09.py::test_partition_090 PASSED [ 17%] duration=0.090s
+tests/test_inventory_21.py:82: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_01.py::test_partition_082 PASSED [ 19%] duration=0.082s
+tests/test_inventory_16.py::test_partition_853 PASSED [ 20%] duration=0.853s
+tests/test_inventory_25.py::test_partition_565 PASSED [ 21%] duration=0.565s
+tests/test_inventory_00.py::test_partition_945 PASSED [ 22%] duration=0.945s
+tests/test_inventory_25.py::test_partition_160 PASSED [ 23%] duration=0.160s
+FAILURE test_id=tests/test_manifest.py::test_reject_duplicate_name file=tests/test_manifest.py kind=FAILED signature=DUPLICATE_ACCEPTED
+E assertion: expected duplicate rejection; observed accepted result
+UNKNOWN duplicate cause: validator branch and reproduction history are not supplied
+tests/test_inventory_05.py:104: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_19.py::test_partition_154 PASSED [ 26%] duration=0.154s
+tests/test_inventory_15.py::test_partition_528 PASSED [ 27%] duration=0.528s
+tests/test_inventory_07.py::test_partition_385 PASSED [ 28%] duration=0.385s
+tests/test_inventory_18.py::test_partition_099 PASSED [ 29%] duration=0.099s
+tests/test_inventory_07.py::test_partition_385 PASSED [ 30%] duration=0.385s
+tests/test_inventory_09.py::test_partition_252 PASSED [ 31%] duration=0.252s
+tests/test_inventory_01.py::test_partition_190 PASSED [ 32%] duration=0.190s
+tests/test_inventory_09.py::test_partition_954 PASSED [ 33%] duration=0.954s
+tests/test_inventory_15.py::test_partition_123 PASSED [ 34%] duration=0.123s
+tests/test_inventory_11.py::test_partition_578 PASSED [ 35%] duration=0.578s
+tests/test_inventory_03.py:53: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_15.py::test_partition_852 PASSED [ 37%] duration=0.852s
+tests/test_inventory_14.py::test_partition_932 PASSED [ 38%] duration=0.932s
+tests/test_inventory_01.py::test_partition_082 PASSED [ 39%] duration=0.082s
+tests/test_inventory_26.py::test_partition_107 PASSED [ 40%] duration=0.107s
+tests/test_inventory_03.py::test_partition_435 PASSED [ 41%] duration=0.435s
+tests/test_inventory_17.py::test_partition_422 PASSED [ 42%] duration=0.422s
+tests/test_inventory_01.py::test_partition_838 PASSED [ 43%] duration=0.838s
+tests/test_inventory_01.py::test_partition_433 PASSED [ 44%] duration=0.433s
+tests/test_inventory_18.py::test_partition_315 PASSED [ 45%] duration=0.315s
+tests/test_inventory_24.py::test_partition_402 PASSED [ 46%] duration=0.402s
+tests/test_inventory_16.py:77: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_23.py::test_partition_833 PASSED [ 48%] duration=0.833s
+tests/test_inventory_22.py::test_partition_994 PASSED [ 49%] duration=0.994s
+tests/test_inventory_14.py::test_partition_824 PASSED [ 25%] duration=0.824s
+tests/test_inventory_06.py::test_partition_519 PASSED [ 26%] duration=0.519s
+tests/test_inventory_02.py::test_partition_677 PASSED [ 27%] duration=0.677s
+tests/test_inventory_09.py::test_partition_549 PASSED [ 28%] duration=0.549s
+tests/test_inventory_02.py::test_partition_623 PASSED [ 29%] duration=0.623s
+tests/test_inventory_10.py::test_partition_685 PASSED [ 30%] duration=0.685s
+tests/test_inventory_11.py::test_partition_524 PASSED [ 31%] duration=0.524s
+tests/test_inventory_13.py::test_partition_175 PASSED [ 32%] duration=0.175s
+tests/test_inventory_07.py:17: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_18.py::test_partition_207 PASSED [ 34%] duration=0.207s
+tests/test_inventory_03.py::test_partition_813 PASSED [ 35%] duration=0.813s
+tests/test_inventory_18.py::test_partition_963 PASSED [ 36%] duration=0.963s
+tests/test_inventory_12.py::test_partition_984 PASSED [ 37%] duration=0.984s
+tests/test_inventory_03.py::test_partition_327 PASSED [ 38%] duration=0.327s
+tests/test_inventory_23.py::test_partition_752 PASSED [ 39%] duration=0.752s
+tests/test_inventory_16.py::test_partition_934 PASSED [ 40%] duration=0.934s
+tests/test_inventory_19.py::test_partition_073 PASSED [ 41%] duration=0.073s
+tests/test_inventory_06.py::test_partition_465 PASSED [ 42%] duration=0.465s
+tests/test_inventory_02.py::test_partition_137 PASSED [ 43%] duration=0.137s
+tests/test_inventory_17.py:89: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_13.py::test_partition_472 PASSED [ 45%] duration=0.472s
+tests/test_inventory_20.py::test_partition_587 PASSED [ 46%] duration=0.587s
+tests/test_inventory_20.py::test_partition_992 PASSED [ 47%] duration=0.992s
+tests/test_inventory_16.py::test_partition_394 PASSED [ 48%] duration=0.394s
+tests/test_inventory_04.py::test_partition_976 PASSED [ 49%] duration=0.976s
+tests/test_inventory_24.py::test_partition_726 PASSED [ 25%] duration=0.726s
+tests/test_inventory_22.py::test_partition_994 PASSED [ 26%] duration=0.994s
+tests/test_inventory_14.py::test_partition_014 PASSED [ 27%] duration=0.014s
+tests/test_inventory_18.py::test_partition_585 PASSED [ 28%] duration=0.585s
+tests/test_inventory_02.py::test_partition_245 PASSED [ 29%] duration=0.245s
+tests/test_inventory_16.py:20: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_13.py::test_partition_688 PASSED [ 31%] duration=0.688s
+tests/test_inventory_18.py::test_partition_909 PASSED [ 32%] duration=0.909s
+tests/test_inventory_09.py::test_partition_414 PASSED [ 33%] duration=0.414s
+tests/test_inventory_09.py::test_partition_441 PASSED [ 34%] duration=0.441s
+tests/test_inventory_10.py::test_partition_550 PASSED [ 35%] duration=0.550s
+tests/test_inventory_18.py::test_partition_153 PASSED [ 36%] duration=0.153s
+tests/test_inventory_08.py::test_partition_035 PASSED [ 37%] duration=0.035s
+tests/test_inventory_23.py::test_partition_185 PASSED [ 38%] duration=0.185s
+tests/test_inventory_02.py::test_partition_920 PASSED [ 39%] duration=0.920s
+tests/test_inventory_03.py::test_partition_651 PASSED [ 40%] duration=0.651s
+tests/test_inventory_00.py:18: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_18.py::test_partition_342 PASSED [ 42%] duration=0.342s
+tests/test_inventory_16.py::test_partition_529 PASSED [ 43%] duration=0.529s
+tests/test_inventory_05.py::test_partition_194 PASSED [ 44%] duration=0.194s
+tests/test_inventory_19.py::test_partition_802 PASSED [ 45%] duration=0.802s
+tests/test_inventory_08.py::test_partition_548 PASSED [ 46%] duration=0.548s
+tests/test_inventory_16.py::test_partition_340 PASSED [ 47%] duration=0.340s
+tests/test_inventory_13.py::test_partition_850 PASSED [ 48%] duration=0.850s
+tests/test_inventory_05.py::test_partition_977 PASSED [ 49%] duration=0.977s
+tests/test_inventory_16.py::test_partition_070 PASSED [ 25%] duration=0.070s
+tests/test_inventory_14.py::test_partition_986 PASSED [ 26%] duration=0.986s
+tests/test_inventory_22.py:26: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_24.py::test_partition_240 PASSED [ 28%] duration=0.240s
+tests/test_inventory_08.py::test_partition_845 PASSED [ 29%] duration=0.845s
+tests/test_inventory_09.py::test_partition_738 PASSED [ 30%] duration=0.738s
+tests/test_inventory_16.py::test_partition_151 PASSED [ 31%] duration=0.151s
+tests/test_inventory_16.py::test_partition_394 PASSED [ 32%] duration=0.394s
+tests/test_inventory_12.py::test_partition_228 PASSED [ 33%] duration=0.228s
+tests/test_inventory_02.py::test_partition_812 PASSED [ 34%] duration=0.812s
+tests/test_inventory_07.py::test_partition_817 PASSED [ 35%] duration=0.817s
+tests/test_inventory_21.py::test_partition_237 PASSED [ 36%] duration=0.237s
+tests/test_inventory_10.py::test_partition_361 PASSED [ 37%] duration=0.361s
+tests/test_inventory_19.py:29: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_03.py::test_partition_435 PASSED [ 39%] duration=0.435s
+tests/test_inventory_24.py::test_partition_807 PASSED [ 40%] duration=0.807s
+tests/test_inventory_04.py::test_partition_409 PASSED [ 41%] duration=0.409s
+tests/test_inventory_05.py::test_partition_788 PASSED [ 42%] duration=0.788s
+tests/test_inventory_20.py::test_partition_479 PASSED [ 43%] duration=0.479s
+tests/test_inventory_19.py::test_partition_181 PASSED [ 44%] duration=0.181s
+tests/test_inventory_19.py::test_partition_613 PASSED [ 45%] duration=0.613s
+tests/test_inventory_14.py::test_partition_014 PASSED [ 46%] duration=0.014s
+tests/test_inventory_24.py::test_partition_753 PASSED [ 47%] duration=0.753s
+tests/test_inventory_24.py::test_partition_645 PASSED [ 48%] duration=0.645s
+tests/test_inventory_23.py:89: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_608 PASSED [ 25%] duration=0.608s
+tests/test_inventory_02.py::test_partition_866 PASSED [ 26%] duration=0.866s
+tests/test_inventory_16.py::test_partition_718 PASSED [ 27%] duration=0.718s
+tests/test_inventory_09.py::test_partition_144 PASSED [ 28%] duration=0.144s
+tests/test_inventory_08.py::test_partition_332 PASSED [ 29%] duration=0.332s
+tests/test_inventory_15.py::test_partition_582 PASSED [ 30%] duration=0.582s
+tests/test_inventory_01.py::test_partition_568 PASSED [ 31%] duration=0.568s
+tests/test_inventory_07.py::test_partition_628 PASSED [ 32%] duration=0.628s
+tests/test_inventory_18.py::test_partition_261 PASSED [ 33%] duration=0.261s
+tests/test_inventory_11.py::test_partition_551 PASSED [ 34%] duration=0.551s
+tests/test_inventory_21.py:74: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_19.py::test_partition_181 PASSED [ 36%] duration=0.181s
+tests/test_inventory_11.py::test_partition_497 PASSED [ 37%] duration=0.497s
+tests/test_inventory_07.py::test_partition_439 PASSED [ 38%] duration=0.439s
+tests/test_inventory_23.py::test_partition_725 PASSED [ 39%] duration=0.725s
+tests/test_inventory_12.py::test_partition_930 PASSED [ 40%] duration=0.930s
+tests/test_inventory_02.py::test_partition_353 PASSED [ 41%] duration=0.353s
+tests/test_inventory_26.py::test_partition_620 PASSED [ 42%] duration=0.620s
+tests/test_inventory_07.py::test_partition_223 PASSED [ 43%] duration=0.223s
+tests/test_inventory_13.py::test_partition_499 PASSED [ 44%] duration=0.499s
+tests/test_inventory_18.py::test_partition_369 PASSED [ 45%] duration=0.369s
+tests/test_inventory_20.py:11: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_17.py::test_partition_395 PASSED [ 47%] duration=0.395s
+tests/test_inventory_15.py::test_partition_663 PASSED [ 48%] duration=0.663s
+tests/test_inventory_16.py::test_partition_961 PASSED [ 49%] duration=0.961s
+tests/test_inventory_08.py::test_partition_224 PASSED [ 25%] duration=0.224s
+tests/test_inventory_20.py::test_partition_965 PASSED [ 26%] duration=0.965s
+tests/test_inventory_12.py::test_partition_012 PASSED [ 27%] duration=0.012s
+tests/test_inventory_20.py::test_partition_533 PASSED [ 28%] duration=0.533s
+tests/test_inventory_03.py::test_partition_165 PASSED [ 29%] duration=0.165s
+tests/test_inventory_26.py::test_partition_755 PASSED [ 30%] duration=0.755s
+tests/test_inventory_22.py::test_partition_346 PASSED [ 31%] duration=0.346s
+tests/test_inventory_03.py:10: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_25.py::test_partition_673 PASSED [ 33%] duration=0.673s
+tests/test_inventory_06.py::test_partition_249 PASSED [ 34%] duration=0.249s
+tests/test_inventory_21.py::test_partition_345 PASSED [ 35%] duration=0.345s
+tests/test_inventory_10.py::test_partition_037 PASSED [ 36%] duration=0.037s
+tests/test_inventory_08.py::test_partition_062 PASSED [ 37%] duration=0.062s
+tests/test_inventory_15.py::test_partition_717 PASSED [ 38%] duration=0.717s
+tests/test_inventory_12.py::test_partition_147 PASSED [ 39%] duration=0.147s
+tests/test_inventory_00.py::test_partition_864 PASSED [ 40%] duration=0.864s
+tests/test_inventory_11.py::test_partition_875 PASSED [ 41%] duration=0.875s
+tests/test_inventory_06.py::test_partition_600 PASSED [ 42%] duration=0.600s
+tests/test_inventory_10.py:71: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_04.py::test_partition_328 PASSED [ 44%] duration=0.328s
+tests/test_inventory_15.py::test_partition_501 PASSED [ 45%] duration=0.501s
+tests/test_inventory_08.py::test_partition_035 PASSED [ 46%] duration=0.035s
+tests/test_inventory_19.py::test_partition_316 PASSED [ 47%] duration=0.316s
+tests/test_inventory_25.py::test_partition_673 PASSED [ 48%] duration=0.673s
+tests/test_inventory_23.py::test_partition_320 PASSED [ 49%] duration=0.320s
+tests/test_inventory_15.py::test_partition_312 PASSED [ 25%] duration=0.312s
+tests/test_inventory_12.py::test_partition_741 PASSED [ 26%] duration=0.741s
+tests/test_inventory_21.py::test_partition_183 PASSED [ 27%] duration=0.183s
+FAILURE test_id=tests/test_manifest.py::test_reject_duplicate_alias file=tests/test_manifest.py kind=FAILED signature=DUPLICATE_ACCEPTED
+E assertion: expected alias duplicate rejection; observed accepted result
+UNKNOWN duplicate cause: validator branch and reproduction history are not supplied
+tests/test_inventory_10.py:90: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_24.py::test_partition_807 PASSED [ 51%] duration=0.807s
+tests/test_inventory_04.py::test_partition_301 PASSED [ 52%] duration=0.301s
+tests/test_inventory_24.py::test_partition_564 PASSED [ 53%] duration=0.564s
+tests/test_inventory_10.py::test_partition_388 PASSED [ 54%] duration=0.388s
+tests/test_inventory_02.py::test_partition_947 PASSED [ 55%] duration=0.947s
+tests/test_inventory_25.py::test_partition_268 PASSED [ 56%] duration=0.268s
+tests/test_inventory_00.py::test_partition_108 PASSED [ 57%] duration=0.108s
+tests/test_inventory_18.py::test_partition_828 PASSED [ 58%] duration=0.828s
+tests/test_inventory_20.py::test_partition_641 PASSED [ 59%] duration=0.641s
+tests/test_inventory_00.py::test_partition_783 PASSED [ 60%] duration=0.783s
+tests/test_inventory_03.py:58: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_13.py::test_partition_148 PASSED [ 62%] duration=0.148s
+tests/test_inventory_12.py::test_partition_795 PASSED [ 63%] duration=0.795s
+tests/test_inventory_04.py::test_partition_139 PASSED [ 64%] duration=0.139s
+tests/test_inventory_21.py::test_partition_723 PASSED [ 65%] duration=0.723s
+tests/test_inventory_17.py::test_partition_692 PASSED [ 66%] duration=0.692s
+tests/test_inventory_16.py::test_partition_664 PASSED [ 67%] duration=0.664s
+tests/test_inventory_11.py::test_partition_902 PASSED [ 68%] duration=0.902s
+tests/test_inventory_04.py::test_partition_436 PASSED [ 69%] duration=0.436s
+tests/test_inventory_04.py::test_partition_544 PASSED [ 70%] duration=0.544s
+tests/test_inventory_13.py::test_partition_904 PASSED [ 71%] duration=0.904s
+tests/test_inventory_02.py:63: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_15.py::test_partition_366 PASSED [ 73%] duration=0.366s
+tests/test_inventory_22.py::test_partition_994 PASSED [ 74%] duration=0.994s
+tests/test_inventory_05.py::test_partition_086 PASSED [ 50%] duration=0.086s
+tests/test_inventory_13.py::test_partition_148 PASSED [ 51%] duration=0.148s
+tests/test_inventory_07.py::test_partition_007 PASSED [ 52%] duration=0.007s
+tests/test_inventory_16.py::test_partition_205 PASSED [ 53%] duration=0.205s
+tests/test_inventory_08.py::test_partition_656 PASSED [ 54%] duration=0.656s
+tests/test_inventory_05.py::test_partition_950 PASSED [ 55%] duration=0.950s
+tests/test_inventory_06.py::test_partition_951 PASSED [ 56%] duration=0.951s
+tests/test_inventory_04.py::test_partition_895 PASSED [ 57%] duration=0.895s
+tests/test_inventory_16.py:39: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_03.py::test_partition_273 PASSED [ 59%] duration=0.273s
+tests/test_inventory_19.py::test_partition_883 PASSED [ 60%] duration=0.883s
+tests/test_inventory_17.py::test_partition_422 PASSED [ 61%] duration=0.422s
+tests/test_inventory_02.py::test_partition_272 PASSED [ 62%] duration=0.272s
+tests/test_inventory_01.py::test_partition_001 PASSED [ 63%] duration=0.001s
+tests/test_inventory_08.py::test_partition_926 PASSED [ 64%] duration=0.926s
+tests/test_inventory_22.py::test_partition_697 PASSED [ 65%] duration=0.697s
+tests/test_inventory_03.py::test_partition_057 PASSED [ 66%] duration=0.057s
+tests/test_inventory_10.py::test_partition_307 PASSED [ 67%] duration=0.307s
+tests/test_inventory_06.py::test_partition_249 PASSED [ 68%] duration=0.249s
+tests/test_inventory_15.py:100: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_932 PASSED [ 70%] duration=0.932s
+tests/test_inventory_26.py::test_partition_809 PASSED [ 71%] duration=0.809s
+tests/test_inventory_03.py::test_partition_597 PASSED [ 72%] duration=0.597s
+tests/test_inventory_05.py::test_partition_464 PASSED [ 73%] duration=0.464s
+tests/test_inventory_09.py::test_partition_711 PASSED [ 74%] duration=0.711s
+tests/test_inventory_03.py::test_partition_165 PASSED [ 50%] duration=0.165s
+tests/test_inventory_06.py::test_partition_465 PASSED [ 51%] duration=0.465s
+tests/test_inventory_23.py::test_partition_860 PASSED [ 52%] duration=0.860s
+tests/test_inventory_18.py::test_partition_423 PASSED [ 53%] duration=0.423s
+tests/test_inventory_23.py::test_partition_968 PASSED [ 54%] duration=0.968s
+tests/test_inventory_20.py:27: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_21.py::test_partition_831 PASSED [ 56%] duration=0.831s
+tests/test_inventory_15.py::test_partition_042 PASSED [ 57%] duration=0.042s
+tests/test_inventory_03.py::test_partition_597 PASSED [ 58%] duration=0.597s
+tests/test_inventory_06.py::test_partition_951 PASSED [ 59%] duration=0.951s
+tests/test_inventory_11.py::test_partition_308 PASSED [ 60%] duration=0.308s
+tests/test_inventory_22.py::test_partition_670 PASSED [ 61%] duration=0.670s
+tests/test_inventory_19.py::test_partition_262 PASSED [ 62%] duration=0.262s
+tests/test_inventory_09.py::test_partition_198 PASSED [ 63%] duration=0.198s
+tests/test_inventory_25.py::test_partition_484 PASSED [ 64%] duration=0.484s
+tests/test_inventory_21.py::test_partition_075 PASSED [ 65%] duration=0.075s
+tests/test_inventory_21.py:79: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_14.py::test_partition_041 PASSED [ 67%] duration=0.041s
+tests/test_inventory_26.py::test_partition_971 PASSED [ 68%] duration=0.971s
+tests/test_inventory_23.py::test_partition_887 PASSED [ 69%] duration=0.887s
+tests/test_inventory_15.py::test_partition_609 PASSED [ 70%] duration=0.609s
+tests/test_inventory_05.py::test_partition_788 PASSED [ 71%] duration=0.788s
+tests/test_inventory_23.py::test_partition_968 PASSED [ 72%] duration=0.968s
+tests/test_inventory_04.py::test_partition_085 PASSED [ 73%] duration=0.085s
+tests/test_inventory_01.py::test_partition_622 PASSED [ 74%] duration=0.622s
+tests/test_inventory_10.py::test_partition_199 PASSED [ 50%] duration=0.199s
+tests/test_inventory_13.py::test_partition_607 PASSED [ 51%] duration=0.607s
+tests/test_inventory_18.py:79: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_18.py::test_partition_855 PASSED [ 53%] duration=0.855s
+tests/test_inventory_11.py::test_partition_038 PASSED [ 54%] duration=0.038s
+tests/test_inventory_21.py::test_partition_939 PASSED [ 55%] duration=0.939s
+tests/test_inventory_05.py::test_partition_977 PASSED [ 56%] duration=0.977s
+tests/test_inventory_21.py::test_partition_237 PASSED [ 57%] duration=0.237s
+tests/test_inventory_10.py::test_partition_118 PASSED [ 58%] duration=0.118s
+tests/test_inventory_00.py::test_partition_486 PASSED [ 59%] duration=0.486s
+tests/test_inventory_05.py::test_partition_113 PASSED [ 60%] duration=0.113s
+tests/test_inventory_07.py::test_partition_655 PASSED [ 61%] duration=0.655s
+tests/test_inventory_00.py::test_partition_486 PASSED [ 62%] duration=0.486s
+tests/test_inventory_26.py:100: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_25.py::test_partition_457 PASSED [ 64%] duration=0.457s
+tests/test_inventory_16.py::test_partition_367 PASSED [ 65%] duration=0.367s
+tests/test_inventory_17.py::test_partition_368 PASSED [ 66%] duration=0.368s
+tests/test_inventory_26.py::test_partition_593 PASSED [ 67%] duration=0.593s
+tests/test_inventory_11.py::test_partition_902 PASSED [ 68%] duration=0.902s
+tests/test_inventory_19.py::test_partition_046 PASSED [ 69%] duration=0.046s
+tests/test_inventory_10.py::test_partition_550 PASSED [ 70%] duration=0.550s
+tests/test_inventory_03.py::test_partition_219 PASSED [ 71%] duration=0.219s
+tests/test_inventory_21.py::test_partition_804 PASSED [ 72%] duration=0.804s
+tests/test_inventory_16.py::test_partition_502 PASSED [ 73%] duration=0.502s
+tests/test_inventory_21.py:22: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_07.py::test_partition_196 PASSED [ 50%] duration=0.196s
+tests/test_inventory_06.py::test_partition_249 PASSED [ 51%] duration=0.249s
+tests/test_inventory_08.py::test_partition_224 PASSED [ 52%] duration=0.224s
+tests/test_inventory_08.py::test_partition_899 PASSED [ 53%] duration=0.899s
+tests/test_inventory_12.py::test_partition_876 PASSED [ 54%] duration=0.876s
+tests/test_inventory_06.py::test_partition_330 PASSED [ 55%] duration=0.330s
+tests/test_inventory_19.py::test_partition_937 PASSED [ 56%] duration=0.937s
+tests/test_inventory_25.py::test_partition_052 PASSED [ 57%] duration=0.052s
+tests/test_inventory_02.py::test_partition_974 PASSED [ 58%] duration=0.974s
+tests/test_inventory_10.py::test_partition_010 PASSED [ 59%] duration=0.010s
+tests/test_inventory_17.py:54: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_01.py::test_partition_352 PASSED [ 61%] duration=0.352s
+tests/test_inventory_14.py::test_partition_392 PASSED [ 62%] duration=0.392s
+tests/test_inventory_24.py::test_partition_618 PASSED [ 63%] duration=0.618s
+tests/test_inventory_20.py::test_partition_317 PASSED [ 64%] duration=0.317s
+tests/test_inventory_22.py::test_partition_508 PASSED [ 65%] duration=0.508s
+tests/test_inventory_26.py::test_partition_431 PASSED [ 66%] duration=0.431s
+tests/test_inventory_24.py::test_partition_645 PASSED [ 67%] duration=0.645s
+tests/test_inventory_24.py::test_partition_672 PASSED [ 68%] duration=0.672s
+tests/test_inventory_08.py::test_partition_656 PASSED [ 69%] duration=0.656s
+tests/test_inventory_04.py::test_partition_274 PASSED [ 70%] duration=0.274s
+tests/test_inventory_26.py:87: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_08.py::test_partition_683 PASSED [ 72%] duration=0.683s
+tests/test_inventory_16.py::test_partition_448 PASSED [ 73%] duration=0.448s
+tests/test_inventory_21.py::test_partition_831 PASSED [ 74%] duration=0.831s
+tests/test_inventory_23.py::test_partition_104 PASSED [ 50%] duration=0.104s
+tests/test_inventory_22.py::test_partition_913 PASSED [ 51%] duration=0.913s
+tests/test_inventory_08.py::test_partition_575 PASSED [ 52%] duration=0.575s
+tests/test_inventory_16.py::test_partition_853 PASSED [ 53%] duration=0.853s
+tests/test_inventory_22.py::test_partition_994 PASSED [ 54%] duration=0.994s
+tests/test_inventory_24.py::test_partition_699 PASSED [ 55%] duration=0.699s
+tests/test_inventory_19.py::test_partition_154 PASSED [ 56%] duration=0.154s
+tests/test_inventory_19.py:15: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_18.py::test_partition_639 PASSED [ 58%] duration=0.639s
+tests/test_inventory_12.py::test_partition_660 PASSED [ 59%] duration=0.660s
+tests/test_inventory_22.py::test_partition_103 PASSED [ 60%] duration=0.103s
+tests/test_inventory_23.py::test_partition_779 PASSED [ 61%] duration=0.779s
+tests/test_inventory_22.py::test_partition_697 PASSED [ 62%] duration=0.697s
+tests/test_inventory_08.py::test_partition_926 PASSED [ 63%] duration=0.926s
+tests/test_inventory_23.py::test_partition_401 PASSED [ 64%] duration=0.401s
+tests/test_inventory_20.py::test_partition_803 PASSED [ 65%] duration=0.803s
+tests/test_inventory_08.py::test_partition_926 PASSED [ 66%] duration=0.926s
+tests/test_inventory_17.py::test_partition_314 PASSED [ 67%] duration=0.314s
+tests/test_inventory_22.py:77: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_11.py::test_partition_605 PASSED [ 69%] duration=0.605s
+tests/test_inventory_07.py::test_partition_601 PASSED [ 70%] duration=0.601s
+tests/test_inventory_01.py::test_partition_676 PASSED [ 71%] duration=0.676s
+tests/test_inventory_18.py::test_partition_396 PASSED [ 72%] duration=0.396s
+tests/test_inventory_16.py::test_partition_124 PASSED [ 73%] duration=0.124s
+tests/test_inventory_13.py::test_partition_256 PASSED [ 74%] duration=0.256s
+tests/test_inventory_02.py::test_partition_974 PASSED [ 50%] duration=0.974s
+tests/test_inventory_19.py::test_partition_181 PASSED [ 51%] duration=0.181s
+tests/test_inventory_01.py::test_partition_082 PASSED [ 52%] duration=0.082s
+FAILURE test_id=tests/test_worker.py::test_wait_deadline file=tests/test_worker.py kind=FAILED signature=WAIT_TIMEOUT
+E TimeoutError: worker result not available within synthetic 2.0 s bound
+UNKNOWN timeout cause: scheduling history and worker progress are not supplied
+tests/test_inventory_22.py:48: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_16.py::test_partition_151 PASSED [ 76%] duration=0.151s
+tests/test_inventory_22.py::test_partition_670 PASSED [ 77%] duration=0.670s
+tests/test_inventory_22.py::test_partition_724 PASSED [ 78%] duration=0.724s
+tests/test_inventory_24.py::test_partition_186 PASSED [ 79%] duration=0.186s
+tests/test_inventory_12.py::test_partition_660 PASSED [ 80%] duration=0.660s
+tests/test_inventory_16.py::test_partition_016 PASSED [ 81%] duration=0.016s
+tests/test_inventory_05.py::test_partition_788 PASSED [ 82%] duration=0.788s
+tests/test_inventory_02.py::test_partition_920 PASSED [ 83%] duration=0.920s
+tests/test_inventory_02.py::test_partition_299 PASSED [ 84%] duration=0.299s
+tests/test_inventory_23.py::test_partition_266 PASSED [ 85%] duration=0.266s
+tests/test_inventory_07.py:73: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_16.py::test_partition_907 PASSED [ 87%] duration=0.907s
+tests/test_inventory_14.py::test_partition_527 PASSED [ 88%] duration=0.527s
+tests/test_inventory_20.py::test_partition_803 PASSED [ 89%] duration=0.803s
+tests/test_inventory_02.py::test_partition_164 PASSED [ 90%] duration=0.164s
+tests/test_inventory_21.py::test_partition_642 PASSED [ 91%] duration=0.642s
+tests/test_inventory_26.py::test_partition_728 PASSED [ 92%] duration=0.728s
+tests/test_inventory_13.py::test_partition_094 PASSED [ 93%] duration=0.094s
+tests/test_inventory_16.py::test_partition_907 PASSED [ 94%] duration=0.907s
+tests/test_inventory_16.py::test_partition_367 PASSED [ 95%] duration=0.367s
+tests/test_inventory_18.py::test_partition_882 PASSED [ 96%] duration=0.882s
+tests/test_inventory_09.py:16: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_16.py::test_partition_043 PASSED [ 98%] duration=0.043s
+tests/test_inventory_04.py::test_partition_868 PASSED [ 99%] duration=0.868s
+tests/test_inventory_22.py::test_partition_508 PASSED [ 75%] duration=0.508s
+tests/test_inventory_26.py::test_partition_458 PASSED [ 76%] duration=0.458s
+tests/test_inventory_07.py::test_partition_250 PASSED [ 77%] duration=0.250s
+tests/test_inventory_07.py::test_partition_979 PASSED [ 78%] duration=0.979s
+tests/test_inventory_05.py::test_partition_275 PASSED [ 79%] duration=0.275s
+tests/test_inventory_05.py::test_partition_977 PASSED [ 80%] duration=0.977s
+tests/test_inventory_18.py::test_partition_666 PASSED [ 81%] duration=0.666s
+tests/test_inventory_05.py::test_partition_869 PASSED [ 82%] duration=0.869s
+tests/test_inventory_12.py:67: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_06.py::test_partition_762 PASSED [ 84%] duration=0.762s
+tests/test_inventory_18.py::test_partition_747 PASSED [ 85%] duration=0.747s
+tests/test_inventory_18.py::test_partition_234 PASSED [ 86%] duration=0.234s
+tests/test_inventory_02.py::test_partition_407 PASSED [ 87%] duration=0.407s
+tests/test_inventory_04.py::test_partition_571 PASSED [ 88%] duration=0.571s
+tests/test_inventory_01.py::test_partition_001 PASSED [ 89%] duration=0.001s
+tests/test_inventory_26.py::test_partition_674 PASSED [ 90%] duration=0.674s
+tests/test_inventory_08.py::test_partition_224 PASSED [ 91%] duration=0.224s
+tests/test_inventory_09.py::test_partition_522 PASSED [ 92%] duration=0.522s
+tests/test_inventory_13.py::test_partition_094 PASSED [ 93%] duration=0.094s
+tests/test_inventory_21.py:25: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_15.py::test_partition_123 PASSED [ 95%] duration=0.123s
+tests/test_inventory_05.py::test_partition_923 PASSED [ 96%] duration=0.923s
+tests/test_inventory_05.py::test_partition_545 PASSED [ 97%] duration=0.545s
+tests/test_inventory_04.py::test_partition_949 PASSED [ 98%] duration=0.949s
+tests/test_inventory_06.py::test_partition_978 PASSED [ 99%] duration=0.978s
+tests/test_inventory_14.py::test_partition_284 PASSED [ 75%] duration=0.284s
+tests/test_inventory_05.py::test_partition_005 PASSED [ 76%] duration=0.005s
+tests/test_inventory_02.py::test_partition_704 PASSED [ 77%] duration=0.704s
+tests/test_inventory_10.py::test_partition_145 PASSED [ 78%] duration=0.145s
+tests/test_inventory_05.py::test_partition_896 PASSED [ 79%] duration=0.896s
+tests/test_inventory_07.py:19: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_08.py::test_partition_305 PASSED [ 81%] duration=0.305s
+tests/test_inventory_21.py::test_partition_048 PASSED [ 82%] duration=0.048s
+tests/test_inventory_23.py::test_partition_077 PASSED [ 83%] duration=0.077s
+tests/test_inventory_01.py::test_partition_973 PASSED [ 84%] duration=0.973s
+tests/test_inventory_14.py::test_partition_419 PASSED [ 85%] duration=0.419s
+tests/test_inventory_26.py::test_partition_971 PASSED [ 86%] duration=0.971s
+tests/test_inventory_18.py::test_partition_450 PASSED [ 87%] duration=0.450s
+tests/test_inventory_04.py::test_partition_355 PASSED [ 88%] duration=0.355s
+tests/test_inventory_23.py::test_partition_563 PASSED [ 89%] duration=0.563s
+tests/test_inventory_07.py::test_partition_736 PASSED [ 90%] duration=0.736s
+tests/test_inventory_15.py:35: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_16.py::test_partition_340 PASSED [ 92%] duration=0.340s
+tests/test_inventory_04.py::test_partition_436 PASSED [ 93%] duration=0.436s
+tests/test_inventory_18.py::test_partition_423 PASSED [ 94%] duration=0.423s
+tests/test_inventory_04.py::test_partition_004 PASSED [ 95%] duration=0.004s
+tests/test_inventory_21.py::test_partition_075 PASSED [ 96%] duration=0.075s
+tests/test_inventory_00.py::test_partition_351 PASSED [ 97%] duration=0.351s
+tests/test_inventory_07.py::test_partition_412 PASSED [ 98%] duration=0.412s
+tests/test_inventory_18.py::test_partition_990 PASSED [ 99%] duration=0.990s
+tests/test_inventory_07.py::test_partition_061 PASSED [ 75%] duration=0.061s
+tests/test_inventory_10.py::test_partition_037 PASSED [ 76%] duration=0.037s
+tests/test_inventory_13.py:109: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_00.py::test_partition_918 PASSED [ 78%] duration=0.918s
+tests/test_inventory_20.py::test_partition_695 PASSED [ 79%] duration=0.695s
+tests/test_inventory_22.py::test_partition_832 PASSED [ 80%] duration=0.832s
+tests/test_inventory_03.py::test_partition_813 PASSED [ 81%] duration=0.813s
+tests/test_inventory_13.py::test_partition_472 PASSED [ 82%] duration=0.472s
+tests/test_inventory_25.py::test_partition_673 PASSED [ 83%] duration=0.673s
+tests/test_inventory_09.py::test_partition_549 PASSED [ 84%] duration=0.549s
+tests/test_inventory_14.py::test_partition_851 PASSED [ 85%] duration=0.851s
+tests/test_inventory_05.py::test_partition_302 PASSED [ 86%] duration=0.302s
+tests/test_inventory_22.py::test_partition_292 PASSED [ 87%] duration=0.292s
+tests/test_inventory_20.py:78: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_12.py::test_partition_417 PASSED [ 89%] duration=0.417s
+tests/test_inventory_07.py::test_partition_520 PASSED [ 90%] duration=0.520s
+tests/test_inventory_16.py::test_partition_691 PASSED [ 91%] duration=0.691s
+tests/test_inventory_21.py::test_partition_912 PASSED [ 92%] duration=0.912s
+tests/test_inventory_17.py::test_partition_260 PASSED [ 93%] duration=0.260s
+tests/test_inventory_03.py::test_partition_624 PASSED [ 94%] duration=0.624s
+tests/test_inventory_09.py::test_partition_657 PASSED [ 95%] duration=0.657s
+tests/test_inventory_00.py::test_partition_000 PASSED [ 96%] duration=0.000s
+tests/test_inventory_12.py::test_partition_579 PASSED [ 97%] duration=0.579s
+tests/test_inventory_23.py::test_partition_212 PASSED [ 98%] duration=0.212s
+tests/test_inventory_07.py:92: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_08.py::test_partition_305 PASSED [ 75%] duration=0.305s
+tests/test_inventory_11.py::test_partition_281 PASSED [ 76%] duration=0.281s
+tests/test_inventory_17.py::test_partition_152 PASSED [ 77%] duration=0.152s
+tests/test_inventory_26.py::test_partition_242 PASSED [ 78%] duration=0.242s
+tests/test_inventory_08.py::test_partition_953 PASSED [ 79%] duration=0.953s
+tests/test_inventory_04.py::test_partition_814 PASSED [ 80%] duration=0.814s
+tests/test_inventory_02.py::test_partition_569 PASSED [ 81%] duration=0.569s
+tests/test_inventory_14.py::test_partition_554 PASSED [ 82%] duration=0.554s
+tests/test_inventory_04.py::test_partition_004 PASSED [ 83%] duration=0.004s
+tests/test_inventory_09.py::test_partition_468 PASSED [ 84%] duration=0.468s
+tests/test_inventory_08.py:55: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_04.py::test_partition_355 PASSED [ 86%] duration=0.355s
+tests/test_inventory_16.py::test_partition_988 PASSED [ 87%] duration=0.988s
+tests/test_inventory_26.py::test_partition_863 PASSED [ 88%] duration=0.863s
+tests/test_inventory_26.py::test_partition_377 PASSED [ 89%] duration=0.377s
+tests/test_inventory_08.py::test_partition_278 PASSED [ 90%] duration=0.278s
+tests/test_inventory_00.py::test_partition_675 PASSED [ 91%] duration=0.675s
+tests/test_inventory_06.py::test_partition_816 PASSED [ 92%] duration=0.816s
+tests/test_inventory_11.py::test_partition_038 PASSED [ 93%] duration=0.038s
+tests/test_inventory_19.py::test_partition_019 PASSED [ 94%] duration=0.019s
+tests/test_inventory_11.py::test_partition_632 PASSED [ 95%] duration=0.632s
+tests/test_inventory_11.py:58: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_12.py::test_partition_795 PASSED [ 97%] duration=0.795s
+tests/test_inventory_02.py::test_partition_272 PASSED [ 98%] duration=0.272s
+tests/test_inventory_23.py::test_partition_428 PASSED [ 99%] duration=0.428s
+tests/test_inventory_23.py::test_partition_050 PASSED [ 75%] duration=0.050s
+tests/test_inventory_14.py::test_partition_041 PASSED [ 76%] duration=0.041s
+tests/test_inventory_22.py::test_partition_184 PASSED [ 77%] duration=0.184s
+tests/test_inventory_14.py::test_partition_284 PASSED [ 78%] duration=0.284s
+tests/test_inventory_06.py::test_partition_141 PASSED [ 79%] duration=0.141s
+tests/test_inventory_10.py::test_partition_550 PASSED [ 80%] duration=0.550s
+tests/test_inventory_02.py::test_partition_920 PASSED [ 81%] duration=0.920s
+tests/test_inventory_08.py:42: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_26.py::test_partition_728 PASSED [ 83%] duration=0.728s
+tests/test_inventory_13.py::test_partition_850 PASSED [ 84%] duration=0.850s
+tests/test_inventory_11.py::test_partition_281 PASSED [ 85%] duration=0.281s
+tests/test_inventory_19.py::test_partition_370 PASSED [ 86%] duration=0.370s
+tests/test_inventory_11.py::test_partition_335 PASSED [ 87%] duration=0.335s
+tests/test_inventory_24.py::test_partition_915 PASSED [ 88%] duration=0.915s
+tests/test_inventory_04.py::test_partition_787 PASSED [ 89%] duration=0.787s
+tests/test_inventory_19.py::test_partition_127 PASSED [ 90%] duration=0.127s
+tests/test_inventory_14.py::test_partition_500 PASSED [ 91%] duration=0.500s
+tests/test_inventory_19.py::test_partition_208 PASSED [ 92%] duration=0.208s
+tests/test_inventory_15.py:30: DeprecationWarning: synthetic adapter uses legacy marker
+tests/test_inventory_23.py::test_partition_482 PASSED [ 94%] duration=0.482s
+tests/test_inventory_13.py::test_partition_229 PASSED [ 95%] duration=0.229s
+tests/test_inventory_06.py::test_partition_060 PASSED [ 96%] duration=0.060s
+tests/test_inventory_02.py::test_partition_137 PASSED [ 97%] duration=0.137s
+tests/test_inventory_01.py::test_partition_028 PASSED [ 98%] duration=0.028s
+tests/test_inventory_01.py::test_partition_244 PASSED [ 99%] duration=0.244s
+tests/test_inventory_20.py::test_partition_830 PASSED [ 75%] duration=0.830s
+tests/test_inventory_08.py::test_partition_791 PASSED [ 76%] duration=0.791s
+tests/test_inventory_05.py::test_partition_869 PASSED [ 77%] duration=0.869s
+FAILURE test_id=tests/test_plugin.py::test_load_optional file=tests/test_plugin.py kind=ERROR signature=OPTIONAL_IMPORT_MISSING
+E ModuleNotFoundError: synthetic_optional_plugin is unavailable during collection
+UNKNOWN import cause: intended dependency policy and installation state are not supplied
+#.............................................................................................................................................................................................................................................................................................................................................................................................................

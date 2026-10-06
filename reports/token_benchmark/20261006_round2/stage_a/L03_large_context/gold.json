@@ -1,0 +1,122 @@
+{
+  "grading_only": true,
+  "target_ids": [
+    "REC-F01",
+    "REC-F02",
+    "REC-F03",
+    "REC-I01",
+    "REC-H01",
+    "REC-U01",
+    "REC-V01"
+  ],
+  "required_facts": [
+    {
+      "record_id": "REC-F01",
+      "statement": "Baseline upload p95 was 80 ms at 08:00Z.",
+      "source": "metrics-baseline",
+      "locator": "row-17"
+    },
+    {
+      "record_id": "REC-F02",
+      "statement": "Upload p95 was 240 ms at 08:10Z under the same measurement definition.",
+      "source": "metrics-current",
+      "locator": "row-23"
+    },
+    {
+      "record_id": "REC-F03",
+      "statement": "Release R17 completed at 08:05Z without a causal measurement.",
+      "source": "release-notes",
+      "locator": "line-42"
+    }
+  ],
+  "supported_inferences": [
+    {
+      "record_id": "REC-I01",
+      "statement": "The two observed values imply a threefold increase without causal attribution.",
+      "source": "analysis-note",
+      "locator": "note-3"
+    }
+  ],
+  "hypotheses": [
+    {
+      "record_id": "REC-H01",
+      "statement": "A cache policy change is an unconfirmed explanation.",
+      "source": "incident-notes",
+      "locator": "note-9"
+    }
+  ],
+  "required_unknowns": [
+    {
+      "record_id": "REC-U01",
+      "statement": "Traffic mix, cache hit rate and queue depth during the window are unknown.",
+      "source": "incident-notes",
+      "locator": "note-10"
+    }
+  ],
+  "verify_next": [
+    {
+      "record_id": "REC-V01",
+      "statement": "Compare traffic mix, cache hit rate and queue depth on the same window boundaries.",
+      "source": "incident-notes",
+      "locator": "note-11"
+    }
+  ],
+  "citation_requirement": {
+    "minimum_unique_target_citations": 7,
+    "all_target_ids_required": true,
+    "source_and_locator_exact": true,
+    "unknown_citations_forbidden": true,
+    "duplicate_citations_forbidden": true
+  },
+  "forbidden_fact_promotions": [
+    "The release caused the p95 increase.",
+    "A cache policy change caused the increase.",
+    "Unknown traffic/cache/queue metrics have been measured."
+  ],
+  "coverage_expectation": "Gold checks category content and all seven target citations after selection is frozen. Mechanical L03 coverage alone never claims completeness.",
+  "grading_contract": {
+    "deterministic": [
+      "Exact record/source/locator citation triples, no duplicate or unknown citation; cited targets and category field presence."
+    ],
+    "blind_semantic": [
+      "Three direct facts preserved; supported inference remains inference; unconfirmed hypothesis never a fact; unknown/verify-next fidelity and evidence support."
+    ]
+  },
+  "target_line_ranges": [
+    {
+      "identifier": "REC-F01",
+      "start_line": 96,
+      "end_line": 96
+    },
+    {
+      "identifier": "REC-F02",
+      "start_line": 192,
+      "end_line": 192
+    },
+    {
+      "identifier": "REC-F03",
+      "start_line": 288,
+      "end_line": 288
+    },
+    {
+      "identifier": "REC-I01",
+      "start_line": 383,
+      "end_line": 383
+    },
+    {
+      "identifier": "REC-H01",
+      "start_line": 479,
+      "end_line": 479
+    },
+    {
+      "identifier": "REC-U01",
+      "start_line": 575,
+      "end_line": 575
+    },
+    {
+      "identifier": "REC-V01",
+      "start_line": 670,
+      "end_line": 670
+    }
+  ]
+}

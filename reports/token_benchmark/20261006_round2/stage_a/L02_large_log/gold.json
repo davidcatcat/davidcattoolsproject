@@ -1,0 +1,97 @@
+{
+  "grading_only": true,
+  "target_ids": [
+    "EVT-T01",
+    "EVT-T02",
+    "EVT-T03",
+    "EVT-R01"
+  ],
+  "timeout_ids": [
+    "EVT-T01",
+    "EVT-T02",
+    "EVT-T03"
+  ],
+  "recovery_ids": [
+    "EVT-R01"
+  ],
+  "expected_events": [
+    {
+      "event_id": "EVT-T01",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:20Z"
+    },
+    {
+      "event_id": "EVT-T02",
+      "request_id": "REQ-18",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:00:50Z"
+    },
+    {
+      "event_id": "EVT-T03",
+      "request_id": "REQ-17",
+      "signature": "UPSTREAM_TIMEOUT",
+      "ts": "2026-10-06T08:01:20Z"
+    },
+    {
+      "event_id": "EVT-R01",
+      "request_id": "REQ-19",
+      "signature": "RECOVERY_OBSERVED",
+      "ts": "2026-10-06T08:01:50Z"
+    }
+  ],
+  "structured_counts": {
+    "event_count": 4,
+    "signature_counts": {
+      "UPSTREAM_TIMEOUT": 3,
+      "RECOVERY_OBSERVED": 1
+    },
+    "unique_request_count": 3
+  },
+  "allowed_request_ids": [
+    "REQ-17",
+    "REQ-18",
+    "REQ-19"
+  ],
+  "coverage_expectation": "All four events exactly once with exact field equality and order; count parsed arrays, never substring claims.",
+  "required_unknowns": [
+    "Upstream state and causal chain are not observed.",
+    "Repeated request label does not establish a retry or identical operation.",
+    "Later success does not explain earlier timeouts or establish a recovery cause."
+  ],
+  "forbidden_causal_claims": [
+    "A cache, network or deployment defect is proven.",
+    "The later success fixes or causes the earlier timeouts."
+  ],
+  "forbidden_command_recommendation": true,
+  "grading_contract": {
+    "deterministic": [
+      "Exact event objects and ordering; exact signature/count map; exact request set."
+    ],
+    "blind_semantic": [
+      "Repeated pattern interpretation, causal unknowns, no root-cause attribution and no command recommendation."
+    ]
+  },
+  "target_line_ranges": [
+    {
+      "identifier": "EVT-T01",
+      "start_line": 134,
+      "end_line": 134
+    },
+    {
+      "identifier": "EVT-T02",
+      "start_line": 269,
+      "end_line": 269
+    },
+    {
+      "identifier": "EVT-T03",
+      "start_line": 405,
+      "end_line": 405
+    },
+    {
+      "identifier": "EVT-R01",
+      "start_line": 541,
+      "end_line": 541
+    }
+  ]
+}

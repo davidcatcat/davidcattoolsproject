@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "failure_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "group_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "assertion",
+              "timeout",
+              "import",
+              "config",
+              "network",
+              "auth",
+              "syntax",
+              "fixture",
+              "resource",
+              "unknown"
+            ]
+          },
+          "tests": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "FAILED",
+                "ERROR"
+              ]
+            }
+          },
+          "occurrences": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "signature",
+          "category",
+          "tests",
+          "files",
+          "kinds",
+          "occurrences",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "required": [
+    "summary",
+    "failure_count",
+    "group_count",
+    "groups",
+    "unknowns"
+  ],
+  "additionalProperties": false
+}

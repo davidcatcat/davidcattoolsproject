@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "signature_counts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          },
+          "occurrences": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "signature",
+          "occurrences"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1
+          },
+          "ts": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "event_id",
+          "request_id",
+          "signature",
+          "ts"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "repeated_patterns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  },
+  "required": [
+    "summary",
+    "signature_counts",
+    "events",
+    "repeated_patterns",
+    "unknowns"
+  ],
+  "additionalProperties": false
+}
