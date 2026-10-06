@@ -144,17 +144,22 @@ Keep the skill focused, define a clear process, and end with checkable completio
 Round-2/Round-3 dogfood changed the routing policy from a generic "cheap-first" idea to
 **route-by-task evidence**:
 
-- `test-triage`: **VALIDATED for the measured synthetic large-test-output fixture**. Two
-  independent orderings preserved equivalent quality while reducing Codex tokens by
-  39.82% and 37.55%. These are separate observations on the same fixture, not a
-  generalized savings guarantee.
+- `test-triage`: **the benchmark pipeline is VALIDATED, not the ordinary skill invocation**.
+  The positive L01 result used a ~48 KiB canonical synthetic test output, complete
+  deterministic FAILURE-ID coverage, an exact excerpt selector (±2 lines, capped at
+  `min(32 KiB, 20%)`), and direct injection of the selected raw excerpt so Codex did
+  not re-read the full output. Under that pipeline, two independent orderings reduced
+  Codex tokens by 39.82% and 37.55%. Plain `llmtool ask --skill test-triage` has no
+  positive savings evidence; the small-evidence Round-1 B01 configuration measured
+  −103.32%.
 - `log-triage`: **EXPERIMENTAL for token-saving claims**. Round 3 produced one PASS and
   one `finish_reason=length` failure; reliability was insufficient for paired Codex work.
 - `context-pack`: **EXPERIMENTAL for token-saving claims**. Round 3 replay showed clean
   provenance but only 3/7 target-record recall, with an instruction/gate semantic mismatch.
 
-For any new company-LLM delegation route, run a **Company-only reliability Phase 0**
-first. Do not spend Codex tokens on a paired benchmark until that route passes its
+For any new company-LLM delegation route—or any attempt to turn the L01 research
+pipeline into normal dogfood—run a **Company-only reliability Phase 0** first. Do not
+spend Codex tokens on a paired benchmark until that exact route/pipeline passes its
 pre-registered Company-only gate. P1 now preserves validated usage metadata on parseable
 provider failures, but it does not turn failed model output into a successful result.
 
