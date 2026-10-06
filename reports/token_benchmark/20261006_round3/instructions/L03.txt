@@ -1,0 +1,15 @@
+Use the existing context-pack/A4 schema: exactly the six fields facts, evidence,
+inferences, hypotheses, unknowns, verify_next. Return one JSON object with no
+Markdown fence, extra prose, or hidden reasoning. Analyze the upload-window topic
+using only the supplied mixed evidence. Inventory records are background noise:
+no inventory evidence or inventory citations. Keep facts, supported inferences,
+unsupported hypotheses, unknowns, and verify_next distinct. Every substantive
+category item must have support in one or more evidence entries. One record, one
+evidence item at most: the same fixture record must never appear as two evidence
+items. One evidence item may support multiple semantic categories. Every evidence
+item must use the exact source and exact locator from its supplied RECORD line.
+Do not trim, case-fold, fuzzy-normalize, or invent provenance. Whether a statement
+contains record_id text does not affect anchoring; it is optional and ignored.
+Do not promote release/cache hypotheses into facts. Do not self-grade. No tools,
+file reads, commands, external verification, or invented evidence. Use only the
+existing six-field A4 JSON schema, with evidence statement/source/locator.

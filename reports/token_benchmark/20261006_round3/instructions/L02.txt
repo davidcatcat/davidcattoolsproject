@@ -1,0 +1,13 @@
+Use the existing log-triage schema with exactly summary, error_signatures, timeline,
+repeated_patterns, evidence, unknowns, and strong_review_reasons. Use only supplied
+material. Return exactly one JSON object, no Markdown fence or extra prose.
+In evidence include every canonical line beginning EVENT event_id= exactly once.
+Each array item must be the verbatim complete original EVENT line. Do not add any
+prefix, suffix, annotation, or commentary. In timeline include the same full EVENT
+lines verbatim, exactly once, in observed chronological order (source-line order
+breaks equal timestamp ties). error_signatures must contain only canonical observed
+signature names, without prose. Put explanatory prose ONLY in summary,
+repeated_patterns, unknowns, or strong_review_reasons. Never put explanatory prose
+containing EVT-/REQ- identifiers, or event_id:, request_id:, signature:, ts: (or
+those labels with =), in evidence or timeline. No root-cause claim, recommendation,
+command, self-grade, hidden reasoning, tools, or external verification.
