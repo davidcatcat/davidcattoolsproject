@@ -88,8 +88,8 @@ This spec concretizes the A11b requirements from the merged security baseline:
 - R-EXEC: deterministic argv, no shell strings, bounded environment/time/output,
   process-tree containment, no privilege escalation;
 - R-FS: canonical repo/scope, symlink/hardlink/race handling, no cross-repo path;
-- R-GIT: A5 hardening for every Git call, mutation-specific neutralization, fail closed
-  on unexpected repo state, no push;
+- R-GIT: A5 hardening for every Git call, mutation-specific reject/pin rules for
+  staging semantics, fail closed on unexpected repo state, no push;
 - R-APR: approval/action/state binding remains mandatory later; A11b.2 does not fake it;
 - R-INJ: repo/model text is data and cannot choose Git actions or bypass policy;
 - R-AUD: mutation audit must eventually be durable-before-action; because A11b.2 has no
@@ -136,8 +136,12 @@ Recommended public-internal API:
 ```python
 @dataclass(frozen=True)
 class GitAddPreflight:
+    action_digest: str
     repository_root: str
+    root_device: int
+    root_inode: int
     head: str
+    object_format: str
     index_sha256: str
     paths: tuple[str, ...]
     state_digest: str
@@ -147,7 +151,16 @@ class GitAddResult:
     before: GitAddPreflight
     after_index_sha256: str
     staged_paths: tuple[str, ...]
+    post_verify_code: str
     exit_code: int
+
+@dataclass(frozen=True)
+class GitAddFailure:
+    before: GitAddPreflight
+    after_index_sha256: Optional[str]
+    observed_staged_paths: tuple[str, ...]
+    failure_code: str
+    post_verify_code: str
 
 def preflight_git_add(action: Action) -> GitAddPreflight:
     ...
@@ -308,8 +321,8 @@ git
 Paths are sorted deterministically unless preserving contract order is required by the
 schema; choose one rule and test it.
 
-Mandatory mutation-specific hardening must include A5 settings plus neutralization of
-configuration that could execute helpers or alter staging semantics.
+Mandatory mutation-specific hardening must include A5 settings plus fail-closed
+rejection/pinning of configuration that could execute helpers or alter staging semantics.
 
 At minimum review and pin:
 
@@ -516,6 +529,9 @@ Do not start A11b.3 automatically after merge.
 Use disposable fixture repositories only. No real user repository mutation in tests.
 
 ### Contract/scope tests
+- import/AST boundary: outside tests, no production CLI/entrypoint/chat/orchestration/
+  benchmark module imports or exposes the mutation module;
+- primitive API does not accept/read `ApprovalValidationResult`;
 - reject non-GIT_OPERATION;
 - reject future/unknown Git operation;
 - accept only ADD;
@@ -550,6 +566,13 @@ Use disposable fixture repositories only. No real user repository mutation in te
 
 ### Git config / helper injection
 Fixture configs attempting:
+- encrypting clean filter (git-crypt style): reject, index unchanged;
+- driverless `filter=lfs` target attribute: reject, index unchanged;
+- `text`/`eol`/`ident`/`working-tree-encoding`: reject;
+- included config containing filter or `core.worktree`: reject;
+- `core.worktree` redirection: reject;
+- `core.fileMode=false`: reject;
+- `post-index-change` hook: prove it is not executed;
 - fsmonitor helper;
 - hooks;
 - clean filter;
@@ -568,8 +591,12 @@ Fixture configs attempting:
 Prove no helper runs.
 
 ### Path/filesystem
-- path beginning with dash stays a literal after `--`;
-- spaces/Unicode within A11b.1 grammar where permitted;
+- a path component beginning with dash is rejected by the A11b.1 contract; `--` remains
+  defence in depth for all accepted paths;
+- spaces are not permitted by the current A11b.1 grammar; Unicode alnum inside that
+  grammar is tested where the host supports it;
+- parent directory not owned by euid or group/world-writable: reject;
+- exact directory-entry byte-name mismatch from case-fold/NFC/NFD alias: reject;
 - parent symlink;
 - target symlink;
 - hardlink nlink>1;
@@ -579,12 +606,20 @@ Prove no helper runs.
 - case-fold/normalization collision where host supports it.
 
 ### Index/TOCTOU
+- missing index: reject;
+- pre-existing index.lock: reject and preserve it;
+- split/shared/sparse index: reject;
+- skip-worktree / assume-unchanged / intent-to-add anywhere: reject;
 - wrong expected index hash;
 - index changed after preflight;
 - index inode replacement;
 - race injected immediately before spawn;
 - exact pre-index unchanged on rejected mutation;
 - post-index hash changes on successful add;
+- staged blob OID equals the Git object hash of exact bound bytes and staged mode matches
+  the bound executable bit;
+- unrelated stat/cache refresh with unchanged semantic entry still PASS;
+- concurrent unrelated OID/path/mode mutation causes post-verify failure;
 - only requested paths become staged.
 
 ### Process/error
@@ -593,8 +628,10 @@ Prove no helper runs.
 - timeout;
 - stderr flood;
 - stdout flood if applicable;
+- leader exits while a descendant remains: cleanup still attempts the process group;
 - child spawns descendant; timeout kills group;
-- SIGTERM/SIGHUP/KeyboardInterrupt cleanup probes;
+- real SIGTERM/SIGHUP/KeyboardInterrupt delivered to parent route through cleanup and
+  restore prior signal handlers;
 - raw hostile stderr never appears in public exception.
 
 ### Regression
