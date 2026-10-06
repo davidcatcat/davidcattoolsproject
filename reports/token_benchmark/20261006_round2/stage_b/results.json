@@ -1,0 +1,534 @@
+{
+  "stage": "B",
+  "fixture": "L01",
+  "status": "MEASURED_PAIR_COMPLETE; BLIND_REVIEW_REQUIRED",
+  "order": [
+    [
+      "L01",
+      "DOGFOOD"
+    ],
+    [
+      "L01",
+      "CONTROL"
+    ]
+  ],
+  "repository": "davidcatcat/davidcattoolsproject",
+  "canonical_root": "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+  "branch": "bench/llmtool-token-savings-large-evidence-20261006",
+  "tested_repo_sha": "bfa314c3d3b10587fac7e1adaf423c48ad61f44b",
+  "direct_contract": "reports/llmtool_token_savings_large_evidence_stage_b_handoff_20261006.md",
+  "handoff_sha256": "c56a8f8d3fd12bade2004c913899e1d38e255400211a9c6cca049dd223f1cb99",
+  "preregistration_sha256": "6ee3ddc5a9b015510bc4d5051a050bcd714d4771af6512c429b50a8de73d9683",
+  "frozen_artifact_sha256": {
+    "generator.py": "86cd42f0a926a513f406b0965409cc48aa635fd34705cc82b5573be9fd864399",
+    "coverage.py": "a222e0ca52441552962e4ffce9cb6bab46dd9270c26c2e34b6b442e8f1a2e671",
+    "selector.py": "dac86deb765d360b867eef524b74b6ffddde963e3a99de688c95979ff4ecd24e",
+    "self_check.py": "63ea7632968d332225655f6c76ce7503c4d944708c690904d2a9e391f1d8317b",
+    "L01_large_test/fixture.txt": "4daf6bb797a23ececd1baedaafc71e939c6c11527901fc8fbc37ea742485d956",
+    "L01_large_test/gold.json": "63994d36ff33d42636f286b5fa134d09472f35e9fff48d20cce1790b1ba12c67",
+    "L01_large_test/output_schema.json": "a81a6c0b9ac030be8143c92ffec600316dcc10d9c1bf09c38e1e49852a38aac0",
+    "L01_large_test/task.txt": "c99bad7effd637088c53529a4adbf5f6f85715eca95caf0424192bef49804763",
+    "L02_large_log/fixture.txt": "859effa1e4d6e978372f4914aca8c53e4af2953f3850ceaad2a68732060892da",
+    "L02_large_log/gold.json": "38d38a7f5246f1ee7a39f6d4ab6bb53ef076c36956e1fc36799325d01a47a1b4",
+    "L02_large_log/output_schema.json": "b7bdda40b1787958a8fae4afb34bb5efd207d9cf43b2f8ad9e60c19ea0d138c4",
+    "L02_large_log/task.txt": "b25c3bde260a0606a34344ce9af11048cc0c5e88834b334831eb43dc5a17179c",
+    "L03_large_context/fixture.txt": "44caecfb4fc77e639d471710b6fc190ca2e1145ae94a22396c5cdcc487dd88ce",
+    "L03_large_context/gold.json": "0e54eb372345ba64105512744c09a7cb60027fbebeebd04fd7834f51bbf2e8d8",
+    "L03_large_context/output_schema.json": "66dff524408f1924c7346110f7823d86dae0f40bf8c25b708710756da9eb55a0",
+    "L03_large_context/task.txt": "f9cad3ed4c8d9856a43338199bc38fb9706253339d9232b13c9a2dd176c93fb4"
+  },
+  "stage_b_adapter_sha256": "fc86a05d94fbca9ba1cbdc026bf57b2ba05e9e766b925704003960bdf4c0a004",
+  "stage_a_execution_helper_sha256": "30e279993e1fba6f60447b64d0d5a4e156a9d050dbe1ea879a61d9ba1f08f483",
+  "stage_a_grading_helper_sha256": "6b8b72f8297d03676c00831077a35307c6028dff53516790d864ae4c94a97684",
+  "codex_config": {
+    "cli_version": "codex-cli 0.159.2",
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "high",
+    "service_tier": "default",
+    "approval_policy": "never",
+    "sandbox": "read-only",
+    "json": true,
+    "ephemeral": true,
+    "fresh_thread": true,
+    "single_turn": true,
+    "resume": false,
+    "ignore_user_config": true,
+    "ignore_rules": true,
+    "thread_started_count": 1,
+    "turn_started_count": 1,
+    "turn_completed_count": 1,
+    "usage_fields": [
+      "input_tokens",
+      "cached_input_tokens",
+      "cache_write_input_tokens",
+      "output_tokens",
+      "reasoning_output_tokens"
+    ],
+    "drift_policy": "STOP on version/schema/turn-shape drift; missing usage is unknown, never zero; no comparable claim"
+  },
+  "model_identity": "explicitly requested model/config; backend model identity not attested by JSONL",
+  "usage_source": "codex exec --json / turn.completed.usage",
+  "primary": "input_tokens + output_tokens",
+  "secondary": "(input_tokens - cached_input_tokens) + output_tokens; descriptive only, never substitutes primary",
+  "company_config": {
+    "isolated_temporary_HOME": true,
+    "modify_real_config": false,
+    "active_provider": "company-round2",
+    "providers": {
+      "company-round2": {
+        "type": "openai-compatible",
+        "base_url": "http://10.29.7.58:4000",
+        "model": "gw",
+        "timeout_seconds": 120,
+        "api_key": null,
+        "api_key_env": null,
+        "provider_options": {
+          "enable_thinking": false
+        }
+      }
+    },
+    "generation": {
+      "temperature": 0,
+      "max_tokens": 4096
+    },
+    "llmtool_only": true,
+    "thinking_proof": "Inspect narrow actual request field chat_template_kwargs.enable_thinking=false, unchanged transport, no Authorization; stop DOGFOOD before measured Codex if not proven",
+    "attempt_policy": "One initial attempt; at most one same-config manual retry only for transient transport; retain every attempt and unknown usage. No retry on length or raised max_tokens. No fallback."
+  },
+  "company_usage_source": "llmtool --verbose provider metadata",
+  "company_attempts": [
+    {
+      "fixture": "L01",
+      "attempt": 1,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "<local-runtime>/company_observer.py",
+        "ask",
+        "--skill",
+        "test-triage",
+        "--provider",
+        "company-round2",
+        "--file",
+        "<local-runtime>/company-L01-1/input.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "started_epoch": 1791266241.2454531,
+      "ended_epoch": 1791266244.441275,
+      "wall_seconds": 3.196,
+      "wrapper_timeout": false,
+      "input_bytes": 49444,
+      "input_sha256": "6372075dce2626ccfd96c0aea5ef07563a2f1ec3007fb1b24aa071f3011241d1",
+      "fixture_bytes": 49152,
+      "config_sha256": "17a21fe7fe23b8aa230732b4b272d725693ec5d3655fd58f2103aeea7afb1b1f",
+      "observer_sha256": "f1a3a8fd063f90ded8b5218098a8f63ebbc25747b9f750660443673bcea33d20",
+      "request_observations": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "model": "gw",
+          "observer_changed_request": false,
+          "request_body_sha256": "6b564d2976dec0665d9d175d0547f6f740b34722d7ab35f891629623f8384482",
+          "resolved_profile_matches": true,
+          "temperature": 0,
+          "user_message_sha256": "6372075dce2626ccfd96c0aea5ef07563a2f1ec3007fb1b24aa071f3011241d1"
+        }
+      ],
+      "outgoing_request_count": 1,
+      "thinking_false_verified": true,
+      "metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 19179,
+        "completion_tokens": 489,
+        "total_tokens": 19668,
+        "elapsed_seconds": 2.617
+      },
+      "safe_error_code": null,
+      "transient_transport_failure": false,
+      "stdout_sha256": "f5f80249d9e1bf0e1c0eeddad3f8ba6645002d9a70e0b03c04e5c0c9aeace220",
+      "schema_valid": true,
+      "coverage": {
+        "scope": "canonical failure ID and file membership only; no root-cause judgement",
+        "fixture_failure_ids": [
+          "tests/test_manifest.py::test_reject_duplicate_name",
+          "tests/test_manifest.py::test_reject_duplicate_alias",
+          "tests/test_worker.py::test_wait_deadline",
+          "tests/test_plugin.py::test_load_optional"
+        ],
+        "company_validated_failure_ids": [
+          "tests/test_manifest.py::test_reject_duplicate_alias",
+          "tests/test_manifest.py::test_reject_duplicate_name",
+          "tests/test_plugin.py::test_load_optional",
+          "tests/test_worker.py::test_wait_deadline"
+        ],
+        "missing_failure_ids": [],
+        "duplicate_failure_ids": [],
+        "unexpected_failure_ids": [],
+        "file_membership_errors": [],
+        "failure_id_coverage_complete": true,
+        "validated_anchors": [
+          {
+            "lane": "L01",
+            "identifier": "tests/test_manifest.py::test_reject_duplicate_alias"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_manifest.py::test_reject_duplicate_name"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_plugin.py::test_load_optional"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_worker.py::test_wait_deadline"
+          }
+        ]
+      },
+      "coverage_valid": true,
+      "flags": [],
+      "selection": {
+        "fixture_sha256": "4daf6bb797a23ececd1baedaafc71e939c6c11527901fc8fbc37ea742485d956",
+        "validated_anchors": [
+          {
+            "lane": "L01",
+            "identifier": "tests/test_manifest.py::test_reject_duplicate_alias"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_manifest.py::test_reject_duplicate_name"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_plugin.py::test_load_optional"
+          },
+          {
+            "lane": "L01",
+            "identifier": "tests/test_worker.py::test_wait_deadline"
+          }
+        ],
+        "pre_merge_range_count": 4,
+        "selected_ranges": [
+          {
+            "start_line": 150,
+            "end_line": 154,
+            "start_byte": 11638,
+            "end_byte_exclusive": 12080
+          },
+          {
+            "start_line": 306,
+            "end_line": 310,
+            "start_byte": 23862,
+            "end_byte_exclusive": 24311
+          },
+          {
+            "start_line": 462,
+            "end_line": 466,
+            "start_byte": 36094,
+            "end_byte_exclusive": 36518
+          },
+          {
+            "start_line": 618,
+            "end_line": 622,
+            "start_byte": 48300,
+            "end_byte_exclusive": 48753
+          }
+        ],
+        "selected_raw_bytes": 1768,
+        "selected_percentage": 3.5970052083333335,
+        "raw_cap_bytes": 9830,
+        "selected_raw_sha256": "1c07ebe297fc3420928c85034e4b39b01692e43f11fba1e3735d8edea8fa87f4",
+        "manifest_sha256": "fc24d9fc57811f8bfeb0e196b0a1f1ce0c7795915d19bb24e1a0c57daededf8f"
+      },
+      "selector_valid": true,
+      "selection_frozen_epoch": 1791266244.460719
+    }
+  ],
+  "company_tokens": 19668,
+  "company_request_count": 1,
+  "company_retry_count": 0,
+  "company_failed_request_count": 0,
+  "codex_sessions": [
+    {
+      "fixture": "L01",
+      "variant": "DOGFOOD",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006_round2/stage_a/L01_large_test/output_schema.json",
+        "-"
+      ],
+      "repo_sha": "bfa314c3d3b10587fac7e1adaf423c48ad61f44b",
+      "helper_sha256": "30e279993e1fba6f60447b64d0d5a4e156a9d050dbe1ea879a61d9ba1f08f483",
+      "prompt_bytes": 9681,
+      "prompt_sha256": "694e39452f98ab5dd9233d7948fe6c5ce77c4430b700dd0b89ce4858ee02df96",
+      "cache_background": {
+        "prior_measured_session_id": "01a10fac-ce89-7b31-b9ed-bc5ebfe2627e",
+        "prior_fixture": "L03",
+        "prior_variant": "DOGFOOD",
+        "elapsed_seconds_since_previous_codex_session": 1885.051,
+        "cached_input_tokens": 0,
+        "prior_stage": "A",
+        "prior_session_scope": "last recorded benchmark session; intervening unmeasured traffic unknown"
+      },
+      "exit": 0,
+      "started_epoch": 1791266265.7826262,
+      "ended_epoch": 1791266284.8703418,
+      "wall_seconds": 19.088,
+      "wrapper_timeout": false,
+      "session_id": "01a10fca-1b4f-7c60-ad83-d865c25c2bdd",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 19968,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 561,
+        "reasoning_output_tokens": 122
+      },
+      "comparable_total": 20529,
+      "non_cached_total": 20529,
+      "tool_call_count": 0,
+      "tool_item_types": [],
+      "jsonl_sha256": "50d861382ab412f692a30bcfebfcdf0acd12c574d6ed95a5f3eef8988486b422",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "shape_valid": true,
+      "final_schema_validation": {
+        "valid": true,
+        "error_paths": []
+      },
+      "stage_b_adapter_sha256": "fc86a05d94fbca9ba1cbdc026bf57b2ba05e9e766b925704003960bdf4c0a004"
+    },
+    {
+      "fixture": "L01",
+      "variant": "CONTROL",
+      "codex_version": "codex-cli 0.159.2",
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "--output-schema",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/reports/token_benchmark/20261006_round2/stage_a/L01_large_test/output_schema.json",
+        "-"
+      ],
+      "repo_sha": "bfa314c3d3b10587fac7e1adaf423c48ad61f44b",
+      "helper_sha256": "30e279993e1fba6f60447b64d0d5a4e156a9d050dbe1ea879a61d9ba1f08f483",
+      "prompt_bytes": 52333,
+      "prompt_sha256": "99fb388b2960c1228c70d214c4c50f72d41c4616c31d1e31f2fb781e30d6b6f4",
+      "cache_background": {
+        "prior_measured_session_id": "01a10fca-1b4f-7c60-ad83-d865c25c2bdd",
+        "prior_fixture": "L01",
+        "prior_variant": "DOGFOOD",
+        "elapsed_seconds_since_previous_codex_session": 14.668,
+        "cached_input_tokens": 0,
+        "prior_stage": "B"
+      },
+      "exit": 0,
+      "started_epoch": 1791266299.539247,
+      "ended_epoch": 1791266320.957865,
+      "wall_seconds": 21.419,
+      "wrapper_timeout": false,
+      "session_id": "01a10fca-9f1f-76f0-b9ab-01697a6313e9",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 32209,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 662,
+        "reasoning_output_tokens": 101
+      },
+      "comparable_total": 32871,
+      "non_cached_total": 32871,
+      "tool_call_count": 0,
+      "tool_item_types": [],
+      "jsonl_sha256": "ee478704ccafbd50631ba265455a94d658a66920386da40859a2f8c82ceb6ee9",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "shape_valid": true,
+      "final_schema_validation": {
+        "valid": true,
+        "error_paths": []
+      },
+      "stage_b_adapter_sha256": "fc86a05d94fbca9ba1cbdc026bf57b2ba05e9e766b925704003960bdf4c0a004"
+    }
+  ],
+  "dogfood_codex_total": 20529,
+  "control_codex_total": 32871,
+  "provisional_tokens_saved": 12342,
+  "provisional_saving_pct": 37.5467737519394,
+  "dogfood_non_cached_total": 20529,
+  "control_non_cached_total": 32871,
+  "descriptive_mixed_token_volume_delta": -7326,
+  "mixed_metric_is_cost_compute_energy": false,
+  "full_fixture_bytes": 49152,
+  "selected_raw_bytes": 1768,
+  "selected_raw_percent": 3.5970052083333335,
+  "selected_range_manifest": {
+    "fixture_sha256": "4daf6bb797a23ececd1baedaafc71e939c6c11527901fc8fbc37ea742485d956",
+    "validated_anchors": [
+      {
+        "lane": "L01",
+        "identifier": "tests/test_manifest.py::test_reject_duplicate_alias"
+      },
+      {
+        "lane": "L01",
+        "identifier": "tests/test_manifest.py::test_reject_duplicate_name"
+      },
+      {
+        "lane": "L01",
+        "identifier": "tests/test_plugin.py::test_load_optional"
+      },
+      {
+        "lane": "L01",
+        "identifier": "tests/test_worker.py::test_wait_deadline"
+      }
+    ],
+    "pre_merge_range_count": 4,
+    "selected_ranges": [
+      {
+        "start_line": 150,
+        "end_line": 154,
+        "start_byte": 11638,
+        "end_byte_exclusive": 12080
+      },
+      {
+        "start_line": 306,
+        "end_line": 310,
+        "start_byte": 23862,
+        "end_byte_exclusive": 24311
+      },
+      {
+        "start_line": 462,
+        "end_line": 466,
+        "start_byte": 36094,
+        "end_byte_exclusive": 36518
+      },
+      {
+        "start_line": 618,
+        "end_line": 622,
+        "start_byte": 48300,
+        "end_byte_exclusive": 48753
+      }
+    ],
+    "selected_raw_bytes": 1768,
+    "selected_percentage": 3.5970052083333335,
+    "raw_cap_bytes": 9830,
+    "selected_raw_sha256": "1c07ebe297fc3420928c85034e4b39b01692e43f11fba1e3735d8edea8fa87f4",
+    "manifest_sha256": "fc24d9fc57811f8bfeb0e196b0a1f1ce0c7795915d19bb24e1a0c57daededf8f"
+  },
+  "coverage": "PASS",
+  "selector": "PASS",
+  "delivery": "PASS",
+  "raw_tool_calls": 0,
+  "deterministic_grade": {
+    "DOGFOOD": {
+      "status": "PASS",
+      "misses": [],
+      "scope": "schema and structured exact counts/IDs/groups/events/citations only; not semantic quality",
+      "semantic_status": "BLIND_REVIEW_REQUIRED"
+    },
+    "CONTROL": {
+      "status": "PASS",
+      "misses": [],
+      "scope": "schema and structured exact counts/IDs/groups/events/citations only; not semantic quality",
+      "semantic_status": "BLIND_REVIEW_REQUIRED"
+    },
+    "selected_target_line_coverage": {
+      "tests/test_manifest.py::test_reject_duplicate_name": true,
+      "tests/test_manifest.py::test_reject_duplicate_alias": true,
+      "tests/test_worker.py::test_wait_deadline": true,
+      "tests/test_plugin.py::test_load_optional": true
+    }
+  },
+  "semantic_status": "BLIND_REVIEW_REQUIRED",
+  "blind_review": "PENDING",
+  "confirmation_validity": "PENDING BLIND REVIEW",
+  "flags": [],
+  "stage_b_ceiling": 200000,
+  "stage_b_measured_codex_total": 53400,
+  "stage_b_remaining": 146600,
+  "budget_scope": "independent Stage B; Stage-A remaining budget not used",
+  "stage_a_context": "L01 qualified per independent Stage-A review; selected positive candidate; do not average or pool",
+  "stage_a_rerun": false,
+  "L02_or_L03_measured": false,
+  "can_claim_stable_generalized_savings": false,
+  "verification": {
+    "frozen_artifacts_verified": 16,
+    "self_check_python": "3.9.6",
+    "self_check_tests": 20,
+    "self_check_before_and_after": "PASS",
+    "raw_jsonl_prompt_request_selection_reconciliation": "PASS",
+    "company_user_input_and_actual_request_digest_match_stage_a_L01": true,
+    "selection_frozen_before_measured_dogfood_and_gold_grading": true,
+    "anonymous_answers_byte_identical": true,
+    "mapping_private_outside_git": true,
+    "anonymous_identity_term_screen": "PASS (limited mechanical screen, not semantic blinding adjudication)",
+    "real_config_metadata_before": null,
+    "real_config_metadata_after": null,
+    "real_config_mutation": false,
+    "nonce_or_cache_manipulation": false
+  },
+  "cache_limit": "prior background identifies last recorded benchmark session, not all possible intervening/unmeasured model traffic",
+  "NOT_TESTED": [
+    "Stage-B blind semantic grading",
+    "application canonical suite (unchanged runtime; benchmark/report scope)",
+    "new security/QA gate",
+    "Round 3"
+  ],
+  "interpretation": "provisional reverse-order confirmation of selected positive synthetic L01; winner’s curse/selection bias; n=1 confirmation; never pooled/unbiased/stable/routing evidence",
+  "publication_head": "commit containing these artifacts; verify final Git/PR head at publication",
+  "raw_trace_retention": "temporary local measurement directory outside repository; full JSONL/prompts/company outputs/mapping not committed",
+  "whole_workflow_ROI": "unknown; setup/coordinator/review token usage not fully measured; no monetary saving claim"
+}
