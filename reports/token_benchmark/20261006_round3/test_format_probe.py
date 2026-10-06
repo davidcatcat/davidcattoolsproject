@@ -552,7 +552,7 @@ class AccountingTests(unittest.TestCase):
 
     def test_missing_request_proof_rejected(self):
         state = probe.Phase0Accounting(); trial = state.begin_next()
-        with self.assertRaises(ValueError): state.mark_request_emitted(trial.trial_id, {})
+        with self.assertRaises(TypeError): state.mark_request_emitted(trial.trial_id, {})
 
     def test_boolean_coercion_cannot_forge_observer_proof(self):
         state = probe.Phase0Accounting(); trial = state.begin_next()
