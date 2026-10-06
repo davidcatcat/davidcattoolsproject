@@ -185,6 +185,51 @@ class LifecycleTests(unittest.TestCase):
 
 
 class AskTests(unittest.TestCase):
+    def test_failed_provider_usage_event_keeps_failure_exit_and_safe_display(self):
+        usage = {'prompt_tokens': 100, 'completion_tokens': 4096, 'total_tokens': 4196}
+        for mode in ([], ['--verbose'], ['--debug']):
+            for code, status in (('MODEL_OUTPUT_INCOMPLETE', 'incomplete'),
+                                 ('MODEL_RESPONSE_INVALID', 'error')):
+                with self.subTest(mode=mode, code=code):
+                    exc = coded_error('safe original message', code, 'provider.openai-compatible',
+                                      provider_metadata=usage)
+                    rc, out, err, client, runs, *_ = self.invoke(['ask', PROMPT, *mode], fail=exc)
+                    self.assertEqual(rc, 1)
+                    self.assertEqual(out, '')
+                    self.assertTrue(err.startswith('llmtool: safe original message\n'))
+                    self.assertIn('code=' + code, err)
+                    self.assertIn('trace=not-saved', err)
+                    self.assertEqual(runs[0].final_status, status)
+                    events = runs[0].events
+                    self.assertEqual([e.type.value for e in events],
+                                     ['run.start', 'provider.request', 'provider.response', 'error', 'run.end'])
+                    response = events[2].data
+                    self.assertTrue(response['token_usage_available'])
+                    for name, value in usage.items():
+                        self.assertEqual(response[name], value)
+                        if mode:
+                            self.assertIn(name + '=' + str(value), err)
+                        else:
+                            self.assertNotIn(name + '=', err)
+                    self.assertNotIn(PROMPT, err + ''.join(e.to_json() for e in events))
+                    self.assertNotIn('Traceback', err)
+                    client.complete.assert_called_once()
+
+    def test_failure_usage_observer_error_is_secondary(self):
+        exc = coded_error('safe original message', 'MODEL_OUTPUT_INCOMPLETE',
+                          'provider.openai-compatible', provider_metadata={
+                              'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3})
+        with patch.object(RunContext, 'response', side_effect=ValueError(MARKER)):
+            rc, out, err, client, runs, *_ = self.invoke(fail=exc)
+        self.assertEqual(rc, 1)
+        self.assertEqual(out, '')
+        self.assertIn('code=MODEL_OUTPUT_INCOMPLETE', err)
+        self.assertEqual(runs[0].final_status, 'incomplete')
+        self.assertEqual(runs[0].final_error_code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+        self.assertGreater(runs[0].dropped_event_count, 0)
+        self.assertNotIn(MARKER, err)
+        client.complete.assert_called_once()
+
     def invoke(self, argv=None, *, metadata=None, fail=None, configure_fail=None, input_stream=None,
                reply=None):
         out, err = io.StringIO(), io.StringIO()

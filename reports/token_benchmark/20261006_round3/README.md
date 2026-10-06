@@ -148,3 +148,33 @@ false-PASS case.
 The historical offline validation report remains valid only for its exact tested head
 `29bd0dd92db203532f119a3b4c77be476454ab87`. The remediated implementation must be
 retested before any new PASS claim or live wrapper authorization.
+
+
+## Historical reproduction notice after P1
+
+This Round-3 Phase-0 package is a **frozen historical experiment**. Its sealed
+preregistration manifest pins the production/runtime artifact bytes that existed at the
+Round-3 implementation baseline. PR #39 (P1 failure-usage preservation) changes three
+of those pinned production files:
+
+- `tools/llmtool/llmtool/diagnostics.py`
+- `tools/llmtool/llmtool/errors.py`
+- `tools/llmtool/llmtool/providers/openai_compatible.py`
+
+Therefore, after P1 is merged, running `test_live_wrapper.py` against the newer
+`main` is expected to fail closed with manifest/artifact drift. That is the intended
+integrity behavior, **not** a new Round-3 regression.
+
+To reproduce the frozen Round-3 live-wrapper tests, checkout the historical repository
+state at merge commit:
+
+`59ef2b7faca481a6e40f6d535960032547ce1c6a`
+
+(or the exact earlier implementation/review SHA named by the dated Round-3 report being
+reproduced), and run the historical commands there.
+
+Do **not** regenerate `phase0_preregistration.json`, update its artifact hashes, or edit
+the frozen Round-3 tests merely to make them pass on a newer production revision.
+Doing so would destroy the experiment's recorded integrity. Any future experiment
+(Round 4 or later) must create a new preregistration/manifest against its own reviewed
+production revision.

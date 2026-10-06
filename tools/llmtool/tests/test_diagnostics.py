@@ -1,6 +1,7 @@
 """Offline diagnostics foundation contracts; no live providers or store writers."""
 
 import ast
+import copy
 import importlib
 import io
 import json
@@ -13,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool import diagnostics as d
-from llmtool.errors import LLMToolError
+from llmtool.errors import LLMToolError, coded_error
 
 MARKER = 'SUPER_SECRET_A11A1_MARKER'
 
@@ -117,6 +118,76 @@ class IdentityTests(unittest.TestCase):
 
 
 class ErrorCompatibilityTests(unittest.TestCase):
+    def test_provider_usage_is_detached_readonly_and_never_in_error_text(self):
+        usage = {'prompt_tokens': 100, 'completion_tokens': 4096, 'total_tokens': 4196}
+        exc = coded_error('safe original message', 'MODEL_OUTPUT_INCOMPLETE',
+                          'provider.openai-compatible', provider_metadata=usage)
+        usage['total_tokens'] = 999
+        self.assertEqual(dict(exc.provider_metadata),
+                         {'prompt_tokens': 100, 'completion_tokens': 4096, 'total_tokens': 4196})
+        with self.assertRaises(TypeError):
+            exc.provider_metadata['total_tokens'] = 999
+        with self.assertRaises(AttributeError):
+            exc.provider_metadata = {'total_tokens': 999}
+        self.assertEqual(str(exc), 'safe original message')
+        self.assertEqual(repr(exc), "LLMToolError('safe original message')")
+        self.assertEqual(exc.diagnostic.code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+        self.assertNotIn('4196', exc.diagnostic.to_json())
+
+    def test_provider_usage_validation_closed_keys_types_bounds_and_arithmetic(self):
+        valid = {'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5}
+        invalid = (None, [], {}, {'prompt_tokens': 2}, dict(valid, raw_response=MARKER),
+                   dict(valid, model=MARKER), dict(valid, prompt=MARKER),
+                   {1: 2, 'completion_tokens': 3, 'total_tokens': 5})
+        for item in invalid:
+            with self.subTest(type=type(item)), self.assertRaises(ValueError):
+                d.validate_provider_usage(item)
+        for field in valid:
+            for bad in (True, False, None, -1, d.MAX_TOKEN_COUNT + 1, 1.0, '1', MARKER, object()):
+                with self.subTest(field=field, type=type(bad)), self.assertRaises(ValueError):
+                    d.validate_provider_usage(dict(valid, **{field: bad}))
+        with self.assertRaises(ValueError):
+            d.validate_provider_usage(dict(valid, total_tokens=6))
+        for item in ({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
+                     {'prompt_tokens': d.MAX_TOKEN_COUNT, 'completion_tokens': 0,
+                      'total_tokens': d.MAX_TOKEN_COUNT}):
+            self.assertEqual(dict(d.validate_provider_usage(item)), item)
+
+    def test_invalid_provider_usage_drops_without_altering_primary_error(self):
+        for metadata in ({'total_tokens': True}, {'raw_body': MARKER}, object()):
+            exc = coded_error('safe original message', 'MODEL_OUTPUT_INCOMPLETE',
+                              'provider.openai-compatible', provider_metadata=metadata)
+            self.assertIsNone(exc.provider_metadata)
+            self.assertEqual(exc.diagnostic.code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+            self.assertEqual(exc.args, ('safe original message',))
+            self.assertFalse(getattr(exc, 'diagnostic_dropped', False))
+        with patch.object(d, 'validate_provider_usage', side_effect=ValueError(MARKER)):
+            exc = coded_error('safe original message', 'MODEL_RESPONSE_INVALID',
+                              'provider.openai-compatible', provider_metadata={})
+        self.assertIsNone(exc.provider_metadata)
+        self.assertEqual(exc.diagnostic.code, d.ErrorCode.MODEL_RESPONSE_INVALID)
+
+    def test_provider_usage_independent_of_diagnostic_construction_failure(self):
+        usage = {'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3}
+        with patch.object(d, 'DiagnosticError', side_effect=ValueError(MARKER)):
+            exc = coded_error('safe original message', 'MODEL_OUTPUT_INCOMPLETE',
+                              'provider.openai-compatible', provider_metadata=usage)
+        self.assertTrue(exc.diagnostic_dropped)
+        self.assertEqual(exc.diagnostic_code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+        self.assertEqual(dict(exc.provider_metadata), usage)
+        self.assertEqual(str(exc), 'safe original message')
+
+    def test_legacy_copy_and_coded_transfer_contract_unchanged(self):
+        legacy = LLMToolError('safe legacy', 2)
+        for cloned in (copy.deepcopy(legacy), pickle.loads(pickle.dumps(legacy))):
+            self.assertEqual(cloned.args, legacy.args)
+            self.assertIsNone(cloned.diagnostic)
+            self.assertIsNone(cloned.provider_metadata)
+        coded = coded_error('safe message', 'MODEL_OUTPUT_INCOMPLETE', 'provider.openai-compatible')
+        for transform in (copy.deepcopy, pickle.dumps):
+            with self.assertRaises(TypeError):
+                transform(coded)
+
     def test_legacy_constructor_string_args_and_catching(self):
         for args in ((), ('gateway request timed out',), ('safe', 2)):
             with self.subTest(args=args):

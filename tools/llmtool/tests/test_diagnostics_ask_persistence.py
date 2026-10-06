@@ -219,6 +219,30 @@ class PersistedAskTests(unittest.TestCase):
                 self.assertEqual(summary.final_error_code.value, code)
                 self.assertEqual([e['type'] for e in events], ['run.start', 'provider.request', 'error', 'run.end'])
 
+    def test_saved_provider_failure_retains_only_safe_usage(self):
+        usage = dict(prompt_tokens=100, completion_tokens=4096, total_tokens=4196)
+        for code, status in (('MODEL_OUTPUT_INCOMPLETE', 'incomplete'),
+                             ('MODEL_RESPONSE_INVALID', 'error')):
+            with self.subTest(code=code):
+                self.state = self.base / code
+                exc = coded_error('safe provider failure', code, 'provider.openai-compatible',
+                                  provider_metadata=usage)
+                result, out, err, client, *_ = self.invoke(['--save-diagnostics', '--debug'], fail=exc)
+                self.assertEqual((result, out), (1, ''))
+                self.assertTrue(err.startswith('llmtool: safe provider failure\n'))
+                self.assertIn('trace=saved', err)
+                self.assertIn('diagnostics_persisted=true', err)
+                client.complete.assert_called_once()
+                summary, events, raw = self.record()
+                self.assertEqual(summary.status, status)
+                self.assertEqual(summary.final_error_code.value, code)
+                self.assertEqual([e['type'] for e in events],
+                                 ['run.start', 'provider.request', 'provider.response', 'error', 'run.end'])
+                self.assertEqual(events[2]['data'], dict(usage, token_usage_available=True))
+                for marker in (PROMPT, CONTENT, SECRET, RAW, 'reasoning_content'):
+                    self.assertNotIn(marker.encode(), raw)
+                    self.assertNotIn(marker, err)
+
     def test_saved_input_conflict_has_no_credential_or_provider_calls(self):
         status, out, err, client, factory, credential = self.invoke(
             argv=['ask', 'x', '--file', 'x', '--save-diagnostics'])

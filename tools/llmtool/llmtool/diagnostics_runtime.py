@@ -240,6 +240,14 @@ class RunContext:
 
     def error(self, exc, default_code, component):
         """Only the CLI's safe expected errors enter this boundary."""
+        from .errors import LLMToolError
+        try:
+            # Only our typed error contract can add a failed-response usage event.
+            # Revalidate before observing; error code/message handling is separate.
+            if type(exc) is LLMToolError and exc.provider_metadata is not None:
+                self.response(dict(d.validate_provider_usage(exc.provider_metadata)))
+        except Exception:
+            self.drop()
         code = default_code
         try:
             diagnostic = exc.diagnostic
