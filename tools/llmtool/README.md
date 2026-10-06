@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**, still data-only with no executor or mutation; A11b.2 is NOT STARTED. A11c Integration/Real-world Acceptance remains NOT STARTED. Development-time cost-aware dogfood may use deterministic checks first and the company LLM through llmtool for bounded QA/log triage; this is engineering practice, not A11c production integration.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**, still data-only with no executor or mutation; A11b.2 is NOT STARTED. **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: test-triage is the only currently validated token-saving delegation path; log-triage/context-pack remain experimental for savings claims.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -73,7 +73,30 @@ are never treated as the same claim.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged; A11b.2 NOT STARTED** | Typed proposal/approval contract delivered; execution remains deferred |
-| A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate company-first workflow, independent verification and real task acceptance |
+| A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate route-by-task delegation, independent verification and real task acceptance; no blanket company-first policy |
+
+### Company-LLM routing evidence after Round 3
+
+Round 3 is closed as an experiment record; PR #38 is merged. P1 from PR #39 is also
+merged and preserves a validated `prompt_tokens/completion_tokens/total_tokens` triplet
+on parseable provider failures without changing failure semantics.
+
+Current routing evidence:
+
+| Route | Evidence state | Current policy |
+| --- | --- | --- |
+| `test-triage` | **VALIDATED on the measured synthetic L01 fixture** | Allowed as the only currently evidence-backed token-saving company delegation path; strong/raw-evidence verification still required |
+| `log-triage` | **EXPERIMENTAL** | May assist bounded triage, but do not claim token savings or authorize A11c routing from current evidence |
+| `context-pack` | **EXPERIMENTAL** | May assist bounded evidence normalization, but Round-3 3/7 target recall and instruction/gate mismatch must be redesigned before routing claims |
+
+The two quality-approved L01 observations reduced Codex usage by 39.82% and 37.55%
+under opposite run order on the same synthetic fixture. They are not pooled into a
+generalized savings rate.
+
+A new delegation route must pass a pre-registered **Company-only reliability Phase 0**
+before any paired Codex benchmark is authorized. A failed or incomplete Company-only
+gate stops the paired benchmark. Round 4 remains optional/deferred research and does
+not block A11b.2.
 
 A11a final acceptance merged through PR #25 (`e3869828`). The independent full bug
 hunt then found seven confirmed diagnostics defects; Codex reproduced each one,
