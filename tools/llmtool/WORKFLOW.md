@@ -24,6 +24,22 @@ Cloud evidence but are never called real provider validation.
 
 ## Development-time cost-aware dogfood — available now
 
+### Current route evidence
+
+Development dogfood is not a blanket company-first policy.
+
+- `test-triage`: **VALIDATED on the measured synthetic L01 fixture** for the current
+  token-saving claim; two separate quality-approved observations reduced Codex tokens by
+  39.82% and 37.55%.
+- `log-triage`: **EXPERIMENTAL** for savings/reliability claims.
+- `context-pack`: **EXPERIMENTAL** for savings/reliability claims.
+
+For any new/redesigned route, Company-only repeated Phase 0 is the first model gate.
+Do not authorize a paired Codex benchmark unless that route first passes reliability,
+quality and complete-usage accounting. P1 failure-usage preservation improves accounting
+but does not turn incomplete/invalid model output into PASS.
+
+
 This is an engineering workflow for the actual Mac when the company VPN/provider is
 available. It dogfoods existing llmtool capabilities while developing llmtool; it is
 **not** A11c production routing, does not add an executor, and does not authorize
@@ -37,14 +53,13 @@ Use this order:
    branch/HEAD/status/diff/recent-commit facts. Use direct Git/GitHub/CI commands only
    for facts the snapshot does not provide, and prefer bounded/structured output over
    repeatedly feeding verbose command output back to Codex.
-2. **Company LLM only for bounded triage.** When data policy permits and the actual
-   Mac/VPN can reach the configured company profile, first deterministically redact or
-   discard secrets/sensitive values; model-side redaction is not a security control.
-   Then call it **through llmtool** for test/log summarization, failure clustering,
-   stack-trace extraction, simple failure classification, baseline/result comparison,
-   or checklist presence. Do not call
-   the gateway directly to perform delegated engineering work; a direct endpoint probe
-   is reserved for explicit runtime/connectivity comparison.
+2. **Company LLM only for bounded, route-aware triage.** When data policy permits and
+   the actual Mac/VPN can reach the configured company profile, first deterministically
+   redact or discard secrets/sensitive values; model-side redaction is not a security
+   control. Prefer `test-triage` when the task matches the validated route. `log-triage`
+   and `context-pack` remain experimental aids and must not inherit test-triage's savings
+   claim. Do not call the gateway directly to perform delegated engineering work; a
+   direct endpoint probe is reserved for explicit runtime/connectivity comparison.
 3. **Strong verifier for judgement.** Codex/Claude/human must inspect source plus raw
    evidence for root cause, code changes, architecture, security/auth/permission,
    concurrency/race, data-corruption, test correctness and acceptance/merge decisions.
