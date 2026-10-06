@@ -42,8 +42,11 @@ controls remain required. A11c is NOT STARTED and A12 is future optional.
 
 On the actual Mac with company VPN, use `company-llm-delegation` for the
 cost-aware dogfood path: deterministic evidence first, bounded permitted company
-LLM triage through llmtool second, and strong verifier judgement last. Company
-model output cannot authorize code changes, security/QA PASS or merge.
+LLM triage through llmtool second, and strong verifier judgement last. Routing evidence
+is route/pipeline-specific; read that skill's "Evidence status by route" before assuming
+a token-saving claim. In particular, the L01 benchmark pipeline—not plain
+`test-triage` invocation—is what has positive savings evidence. Company model output
+cannot authorize code changes, security/QA PASS or merge.
 
 ## Updating skills
 

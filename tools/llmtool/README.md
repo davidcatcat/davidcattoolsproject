@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**, still data-only with no executor or mutation; A11b.2 is NOT STARTED. **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: test-triage is the only currently validated token-saving delegation path; log-triage/context-pack remain experimental for savings claims.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**, still data-only with no executor or mutation; A11b.2 is NOT STARTED. **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -85,13 +85,15 @@ Current routing evidence:
 
 | Route | Evidence state | Current policy |
 | --- | --- | --- |
-| `test-triage` | **VALIDATED on the measured synthetic L01 fixture** | Allowed as the only currently evidence-backed token-saving company delegation path; strong/raw-evidence verification still required |
+| `test-triage` | **BENCHMARK PIPELINE VALIDATED; ordinary skill use UNVALIDATED for savings** | Positive evidence requires the frozen L01-style pipeline: ~48 KiB canonical raw output, complete FAILURE-ID coverage, deterministic ±2-line excerpt selector capped at `min(32 KiB, 20%)`, inline selected raw, and no full-raw re-read by Codex |
 | `log-triage` | **EXPERIMENTAL** | May assist bounded triage, but do not claim token savings or authorize A11c routing from current evidence |
 | `context-pack` | **EXPERIMENTAL** | May assist bounded evidence normalization, but Round-3 3/7 target recall and instruction/gate mismatch must be redesigned before routing claims |
 
 The two quality-approved L01 observations reduced Codex usage by 39.82% and 37.55%
 under opposite run order on the same synthetic fixture. They are not pooled into a
-generalized savings rate.
+generalized savings rate and do not validate plain `llmtool ask --skill test-triage`.
+Round-1 B01 used small bounded evidence plus a Codex tool read and measured −103.32%;
+its first default-budget attempt also hit `MODEL_OUTPUT_INCOMPLETE`.
 
 A new delegation route must pass a pre-registered **Company-only reliability Phase 0**
 before any paired Codex benchmark is authorized. A failed or incomplete Company-only

@@ -28,9 +28,11 @@ Cloud evidence but are never called real provider validation.
 
 Development dogfood is not a blanket company-first policy.
 
-- `test-triage`: **VALIDATED on the measured synthetic L01 fixture** for the current
-  token-saving claim; two separate quality-approved observations reduced Codex tokens by
-  39.82% and 37.55%.
+- `test-triage`: **only the measured L01 benchmark pipeline is validated for the
+  token-saving claim**. It used ~48 KiB canonical raw output, complete FAILURE-ID
+  coverage, a deterministic ±2-line excerpt selector capped at `min(32 KiB, 20%)`,
+  inline selected raw, and no full-raw re-read by Codex. Plain skill invocation is not
+  validated for savings; Round-1 small-evidence B01 measured −103.32%.
 - `log-triage`: **EXPERIMENTAL** for savings/reliability claims.
 - `context-pack`: **EXPERIMENTAL** for savings/reliability claims.
 
@@ -56,9 +58,11 @@ Use this order:
 2. **Company LLM only for bounded, route-aware triage.** When data policy permits and
    the actual Mac/VPN can reach the configured company profile, first deterministically
    redact or discard secrets/sensitive values; model-side redaction is not a security
-   control. Prefer `test-triage` when the task matches the validated route. `log-triage`
-   and `context-pack` remain experimental aids and must not inherit test-triage's savings
-   claim. Do not call the gateway directly to perform delegated engineering work; a
+   control. `test-triage` may still be used as a bounded development aid, but do not
+   inherit the L01 savings claim unless the validated benchmark mechanics (large raw
+   input, complete coverage, deterministic selector, excerpt-only Codex consumption and
+   validated generation settings) are actually present. `log-triage` and
+   `context-pack` remain experimental aids. Do not call the gateway directly to perform delegated engineering work; a
    direct endpoint probe is reserved for explicit runtime/connectivity comparison.
 3. **Strong verifier for judgement.** Codex/Claude/human must inspect source plus raw
    evidence for root cause, code changes, architecture, security/auth/permission,
@@ -177,7 +181,7 @@ This section is engineering guidance and future A11b/A11c design; it does not
 implement a task engine, hooks, automatic routing, retry, fallback or escalation.
 Current A9/A10 fail-fast contracts and A11a metadata-only diagnostics are unchanged.
 The [roadmap](ROADMAP.md#architecture-refinement--planning-only) assigns runtime
-Task Contract enforcement/execution gates to A11b and cheap-first integration,
+Task Contract enforcement/execution gates to A11b and route-by-task integration,
 independent verification and bounded repair to A11c. Context budgets and cost
 routing require later design. No new milestone or implementation is authorized here.
 

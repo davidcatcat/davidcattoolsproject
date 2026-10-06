@@ -71,9 +71,11 @@ For llmtool development on the actual Mac with company VPN, follow
 [development-time cost-aware dogfood](tools/llmtool/WORKFLOW.md#development-time-cost-aware-dogfood-available-now).
 Use deterministic evidence first, prefer `llmtool git --json` for the local read-only
 Git snapshot it already covers, and use the company LLM only through llmtool for
-bounded triage/summarization of permitted data. This engineering dogfood does not
-authorize automatic routing, code mutation, security sign-off, merge approval, or
-A11c production behavior.
+bounded triage/summarization of permitted data. Routing evidence is route/pipeline-
+specific; read `skills/company-llm-delegation/SKILL.md` before making savings claims.
+The positive L01 result belongs to its benchmark pipeline, not plain test-triage usage.
+This engineering dogfood does not authorize automatic routing, code mutation,
+security sign-off, merge approval, or A11c production behavior.
 
 ## Git permissions and safety
 
