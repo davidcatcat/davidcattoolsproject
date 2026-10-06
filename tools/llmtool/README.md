@@ -663,6 +663,17 @@ model output ends as incomplete. End severity is INFO for success/output_closed,
 ERROR for error, WARNING for interrupted/incomplete. Exit status remains 0/1/2/130;
 BrokenPipe keeps 0. Argparse failures do not create a run.
 
+Safely parsed OpenAI-compatible failures can also emit provider.response before
+error when the response supplies a complete, valid usage triplet. The typed
+`LLMToolError.provider_metadata` property holds a detached, read-only mapping of
+`prompt_tokens`, `completion_tokens`, and `total_tokens`, or `None` when unavailable.
+Each count must be an integer (not a boolean) between 0 and 10^12, and total must
+equal prompt plus completion. Invalid or partial failure usage is omitted without
+changing the original error message, code, exit status, or retryability. Invalid
+JSON, oversized responses, and transport failures have no usage metadata. This
+numeric metadata follows the existing verbose/debug and explicit persistence
+settings; it never includes response text and never makes a failed request succeed.
+
 Events are bounded to 16 KiB each, 32 per run and 64 KiB total. Construction or
 adapter failure drops observation, counts it, and attempts at most one fixed
 DIAGNOSTICS_EVENT_DROPPED warning before finalization. Warning failure never

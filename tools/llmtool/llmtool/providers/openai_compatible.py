@@ -152,11 +152,23 @@ class OpenAICompatibleClient:
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
             )
+        # Only safely decoded envelopes can provide failure accounting. Select
+        # numeric fields before handing metadata to the typed-error boundary.
+        provider_usage = None
+        usage = obj.get('usage')
+        if type(usage) is dict:
+            try:
+                from ..diagnostics import PROVIDER_USAGE_FIELDS, validate_provider_usage
+                provider_usage = validate_provider_usage(
+                    {name: usage.get(name) for name in PROVIDER_USAGE_FIELDS})
+            except Exception:
+                pass  # Preserve failure classification even if accounting is invalid.
         if obj.get("error") is not None:
             raise coded_error(
                 "gateway returned an API error; response body omitted",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
@@ -164,6 +176,7 @@ class OpenAICompatibleClient:
                 "gateway response is missing valid choices",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         choice = choices[0]
         if choice.get("finish_reason") == "length":
@@ -171,12 +184,14 @@ class OpenAICompatibleClient:
                 "incomplete result (finish_reason=length); increase max_tokens",
                 'MODEL_OUTPUT_INCOMPLETE',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         if choice.get("finish_reason") != "stop":
             raise coded_error(
                 "gateway response did not finish normally (expected finish_reason=stop)",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         message = choice.get("message")
         if not isinstance(message, dict) or message.get("tool_calls") or message.get("function_call"):
@@ -184,6 +199,7 @@ class OpenAICompatibleClient:
                 "gateway returned an invalid or tool-call message",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
@@ -191,6 +207,7 @@ class OpenAICompatibleClient:
                 "gateway returned empty or invalid final content",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             )
         content = content.strip()
         try:
@@ -200,6 +217,7 @@ class OpenAICompatibleClient:
                 "gateway returned invalid Unicode content",
                 'MODEL_RESPONSE_INVALID',
                 'provider.openai-compatible',
+                provider_metadata=provider_usage,
             ) from None
         # No reasoning fields or raw response are retained in Reply.
         metadata = {"elapsed_seconds": round(time.monotonic() - start, 3)}

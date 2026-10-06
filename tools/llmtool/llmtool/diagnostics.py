@@ -28,6 +28,7 @@ MODEL_MAX_CHARS = 128
 PROFILE_MAX_CHARS = 64
 MAX_DURATION_MS = 2**31 - 1
 MAX_TOKEN_COUNT = 10**12
+PROVIDER_USAGE_FIELDS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
 MAX_EVENT_ID = 2**63 - 1
 MAX_JSON_DEPTH = 3
 MAX_JSON_ITEMS = 64
@@ -177,6 +178,26 @@ def _identifier(value):
 def _integer(value, minimum, maximum):
     if type(value) is not int or not minimum <= value <= maximum:
         raise ValueError('diagnostic integer is outside supported bounds')
+
+
+def validate_provider_usage(value):
+    """Detach/freeze one complete numeric usage triplet; never accept raw JSON.
+
+    Unknown fields, partial usage and inconsistent totals are rejected. Reuse
+    diagnostic integer/byte bounds; callers may drop metadata without changing
+    the primary provider failure. No missing value is estimated or filled in.
+    """
+    if (type(value) not in _MAPPING_TYPES or len(value) != len(PROVIDER_USAGE_FIELDS)
+            or any(type(key) is not str for key in value)
+            or set(value) != set(PROVIDER_USAGE_FIELDS)):
+        raise ValueError('provider usage requires exactly the numeric triplet')
+    result = {name: value[name] for name in PROVIDER_USAGE_FIELDS}
+    for count in result.values():
+        _integer(count, 0, MAX_TOKEN_COUNT)
+    if result['total_tokens'] != result['prompt_tokens'] + result['completion_tokens']:
+        raise ValueError('provider usage total is inconsistent')
+    diagnostic_json(result, PROVIDER_METADATA_MAX_BYTES)
+    return MappingProxyType(result)
 
 
 def validate_run_id(value):

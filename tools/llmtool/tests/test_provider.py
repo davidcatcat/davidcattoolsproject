@@ -5,10 +5,11 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
 
 from llmtool.config import DEFAULTS, resolve_config, user_config_path
+from llmtool import diagnostics as d
 from llmtool.errors import LLMToolError
 from llmtool.prompts import TEMPLATES, messages_for
 from llmtool.providers import create_client
@@ -50,6 +51,10 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.content, "final answer")
         self.assertEqual(reply.metadata["model"], "qwen3.6-35b-a3b")
         self.assertEqual(reply.metadata["prompt_tokens"], 20)
+        self.assertEqual(reply.metadata["completion_tokens"], 5)
+        self.assertEqual(reply.metadata["total_tokens"], 25)
+        self.assertEqual(list(reply.metadata),
+                         ['elapsed_seconds', 'model', 'prompt_tokens', 'completion_tokens', 'total_tokens'])
         self.assertNotIn("private-reasoning-marker", repr(reply))
         self.assertNotIn("also-private", repr(reply))
 
@@ -90,6 +95,136 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, "incomplete result") as caught:
             self.answer(obj)
         self.assertNotIn("partial-sensitive-content", str(caught.exception))
+
+    def test_failure_usage_length_preserves_triplet_and_original_error(self):
+        body = success("partial-sensitive-content")
+        body["choices"][0]["finish_reason"] = "length"
+        body["usage"] = {"prompt_tokens": 100, "completion_tokens": 4096, "total_tokens": 4196}
+        with self.assertRaises(LLMToolError) as caught:
+            self.answer(body)
+        exc = caught.exception
+        self.assertEqual(getattr(exc, 'provider_metadata', None), body["usage"])
+        self.assertEqual(exc.diagnostic.code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+        self.assertEqual(str(exc), "incomplete result (finish_reason=length); increase max_tokens")
+        self.assertFalse(exc.diagnostic.retryable)
+        self.assertFalse(exc.diagnostic.fallback_allowed)
+        self.open.assert_called_once()
+        for value in ("partial-sensitive-content", "4096", "4196"):
+            self.assertNotIn(value, str(exc))
+            self.assertNotIn(value, repr(exc))
+            self.assertNotIn(value, exc.diagnostic.to_json())
+
+    def test_failure_usage_missing_partial_invalid_remains_unavailable(self):
+        invalid = (None, {}, [], {"prompt_tokens": 20},
+                   {"prompt_tokens": 20, "completion_tokens": 5},
+                   {"prompt_tokens": True, "completion_tokens": 5, "total_tokens": 6},
+                   {"prompt_tokens": -1, "completion_tokens": 5, "total_tokens": 4},
+                   {"prompt_tokens": "20", "completion_tokens": 5, "total_tokens": 25},
+                   {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 26},
+                   {"prompt_tokens": d.MAX_TOKEN_COUNT + 1, "completion_tokens": 0,
+                    "total_tokens": d.MAX_TOKEN_COUNT + 1})
+        for usage in invalid:
+            with self.subTest(usage=usage):
+                body = success()
+                body["choices"][0]["finish_reason"] = "length"
+                body["usage"] = usage
+                self.open.reset_mock()
+                with self.assertRaises(LLMToolError) as caught:
+                    self.answer(body)
+                self.assertIsNone(caught.exception.provider_metadata)
+                self.assertEqual(caught.exception.diagnostic.code, d.ErrorCode.MODEL_OUTPUT_INCOMPLETE)
+                self.open.assert_called_once()
+        body.pop("usage")
+        with self.assertRaises(LLMToolError) as caught:
+            self.answer(body)
+        self.assertIsNone(caught.exception.provider_metadata)
+
+    def test_failure_usage_parseable_invalid_responses_preserve_triplet(self):
+        cases = [success(""), success([]), success("\ud800")]
+        for reason in ("unexpected", "tool_calls", None):
+            body = success()
+            body["choices"][0]["finish_reason"] = reason
+            cases.append(body)
+        for field in ("tool_calls", "function_call"):
+            body = success()
+            body["choices"][0]["message"][field] = {"private": "RAW_TOOL_MARKER"}
+            cases.append(body)
+        for choices in ([], {}, [None], [{"finish_reason": "stop", "message": []}]):
+            cases.append(dict(success(), choices=choices))
+        cases.append(dict(success(), error={"message": "RAW_ERROR_MARKER"}))
+        for index, body in enumerate(cases):
+            with self.subTest(case=index):
+                self.open.reset_mock()
+                with self.assertRaises(LLMToolError) as caught:
+                    self.answer(body)
+                self.assertEqual(dict(caught.exception.provider_metadata), body["usage"])
+                self.assertEqual(caught.exception.diagnostic.code, d.ErrorCode.MODEL_RESPONSE_INVALID)
+                self.assertFalse(caught.exception.diagnostic.retryable)
+                self.open.assert_called_once()
+
+    def test_failure_usage_validation_failure_preserves_primary_error(self):
+        for reason, code in (('length', d.ErrorCode.MODEL_OUTPUT_INCOMPLETE),
+                             ('unexpected', d.ErrorCode.MODEL_RESPONSE_INVALID)):
+            with self.subTest(reason=reason):
+                body = success()
+                body['choices'][0]['finish_reason'] = reason
+                self.open.reset_mock()
+                with patch.object(d, 'validate_provider_usage', side_effect=ValueError('PRIVATE_MARKER')), \
+                        self.assertRaises(LLMToolError) as caught:
+                    self.answer(body)
+                self.assertIsNone(caught.exception.provider_metadata)
+                self.assertEqual(caught.exception.diagnostic.code, code)
+                self.assertNotIn('PRIVATE_MARKER', str(caught.exception))
+                self.open.assert_called_once()
+
+    def test_failure_usage_invalid_json_and_nondict_have_no_metadata(self):
+        for raw in (b'not JSON', b'{"usage":{"total_tokens":123}} trailing', b'[]', b'null'):
+            with self.subTest(raw=raw), self.assertRaises(LLMToolError) as caught:
+                self.answer(raw)
+            self.assertEqual(caught.exception.diagnostic.code, d.ErrorCode.MODEL_RESPONSE_INVALID)
+            self.assertIsNone(caught.exception.provider_metadata)
+
+    def test_failure_usage_oversize_body_is_never_decoded(self):
+        with patch('llmtool.providers.openai_compatible.RESPONSE_LIMIT', 16), \
+                patch('llmtool.providers.openai_compatible.json.loads') as decode, \
+                self.assertRaises(LLMToolError) as caught:
+            self.answer(b'x' * 17)
+        self.assertEqual(caught.exception.diagnostic.code, d.ErrorCode.MODEL_RESPONSE_TOO_LARGE)
+        self.assertIsNone(caught.exception.provider_metadata)
+        decode.assert_not_called()
+
+    def test_failure_usage_http_network_timeout_do_not_parse_body(self):
+        for failure, code, retryable in (
+                (socket.timeout('PRIVATE_TIMEOUT'), d.ErrorCode.PROVIDER_TIMEOUT, True),
+                (URLError('PRIVATE_NETWORK'), d.ErrorCode.NETWORK_PROVIDER_UNREACHABLE, True),
+                (OSError('PRIVATE_IO'), d.ErrorCode.PROVIDER_RUNTIME_ERROR, False),
+                (HTTPError('http://private', 401, 'PRIVATE_HTTP', {}, io.BytesIO(b'RAW_BODY')),
+                 d.ErrorCode.AUTH_PROVIDER_REJECTED, False)):
+            with self.subTest(code=code):
+                self.open.reset_mock()
+                self.open.side_effect = failure
+                with self.assertRaises(LLMToolError) as caught:
+                    self.client.complete([])
+                self.assertIsNone(caught.exception.provider_metadata)
+                self.assertEqual(caught.exception.diagnostic.code, code)
+                self.assertEqual(caught.exception.diagnostic.retryable, retryable)
+                self.open.assert_called_once()
+
+    def test_failure_usage_cannot_carry_raw_content_or_credentials(self):
+        self.client.key = 'SYNTHETIC_CREDENTIAL_MARKER'
+        body = success('RAW_CONTENT_MARKER')
+        body['model'] = 'MODEL_TEXT_MARKER'
+        body['choices'][0]['finish_reason'] = 'length'
+        body['usage']['raw_body'] = 'RAW_USAGE_MARKER'
+        with self.assertRaises(LLMToolError) as caught:
+            self.answer(body)
+        exc = caught.exception
+        self.assertEqual(dict(exc.provider_metadata),
+                         {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25})
+        rendered = str(exc) + repr(exc) + repr(exc.provider_metadata) + exc.diagnostic.to_json()
+        for marker in ('SYNTHETIC_CREDENTIAL_MARKER', 'RAW_CONTENT_MARKER', 'MODEL_TEXT_MARKER',
+                       'RAW_USAGE_MARKER', 'private-reasoning-marker', 'Authorization', 'test evidence'):
+            self.assertNotIn(marker, rendered)
 
     def test_missing_choices_or_invalid_shapes(self):
         for obj in ({}, [], None, {"choices": []}, {"choices": {}}, {"choices": [None]},

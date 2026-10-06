@@ -11,7 +11,7 @@ class LLMToolError(Exception):
     Legacy uncoded exception pickle behavior is preserved.
     """
 
-    def __init__(self, *args, diagnostic=None):
+    def __init__(self, *args, diagnostic=None, provider_metadata=None):
         if diagnostic is not None:
             # Lazy import keeps every uncoded legacy path unchanged and avoids
             # pulling a diagnostics framework into provider/config initialization.
@@ -23,16 +23,31 @@ class LLMToolError(Exception):
             args = (diagnostic.message,)
         super().__init__(*args)
         self.diagnostic = diagnostic
+        self._provider_metadata = None
+        if provider_metadata is not None:
+            try:
+                from .diagnostics import validate_provider_usage
+                self._provider_metadata = validate_provider_usage(provider_metadata)
+            except Exception:
+                pass  # Secondary metadata cannot replace the original task error.
+
+    @property
+    def provider_metadata(self):
+        """Validated immutable usage triplet, or None when unavailable.
+
+        Never part of args/str/repr or DiagnosticError's closed error schema.
+        """
+        return self._provider_metadata
 
 
 def coded_error(message, code, component, *, retryable=False, user_action_required=False,
-                safe_cause=None):
+                safe_cause=None, provider_metadata=None):
     """Add optional diagnostics at a known failure site without losing legacy text.
 
     Construction is secondary: if it fails, the original task error still wins.
     The ask observer accounts for that drop; uninstrumented callers keep str/args.
     """
-    exc = LLMToolError(message)
+    exc = LLMToolError(message, provider_metadata=provider_metadata)
     fixed_code = None
     try:
         from .diagnostics import DiagnosticError, ErrorCode
