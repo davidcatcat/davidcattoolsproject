@@ -1,6 +1,6 @@
 # llmtool Round-2 Stage B — L01 reverse-order confirmation (2026-10-06)
 
-**MEASURED PAIR COMPLETE / PROVISIONAL REVERSE-ORDER CONFIRMATION.** L01 DOGFOOD then CONTROL ran once each. Mechanical gates and deterministic grading pass. Semantic quality remains **BLIND_REVIEW_REQUIRED**, so confirmation validity is **PENDING BLIND REVIEW**. No Stage-A/Stage-B average, pooled estimate or stable/generalized savings claim.
+**MEASURED PAIR COMPLETE / QUALITY-APPROVED REVERSE-ORDER CONFIRMATION.** L01 DOGFOOD then CONTROL ran once each. Mechanical gates and deterministic grading passed, and two independent blind graders both judged the pair EQUIVALENT. Stage B observed +12,342 Codex tokens saved / 37.547%, separately from Stage A's +39.816%. No Stage-A/Stage-B average, pooled estimate or stable/generalized savings claim.
 
 ## Task contract and provenance
 
@@ -91,7 +91,7 @@ After both variants completed, the unchanged deterministic grader checked final 
 
 [Stage-B grading package](token_benchmark/20261006_round2/stage_b/blind_grading/README.md) contains new **L01-C.json / L01-D.json** and reviewer instructions. Fresh private random C/D assignment is kept outside Git with mode 0600. Neither mapping nor per-variant final-answer digest/length is published as a key to anonymous files. Both files are byte-identical to extracted final answers.
 
-A limited mechanical screen found no Control/Dogfood/company/token/model identity terms in either answer. This is not a semantic blinding guarantee. Two independent graders must later see only anonymous answers + frozen L01 fixture/gold/schema/task, never metrics/company outputs/PR/reports/Stage-A answers or mapping. Preserve misses; disagreement requires independent tie-break. **No Stage-B blind grader ran. BLIND_REVIEW_REQUIRED / PENDING.**
+A limited mechanical screen found no Control/Dogfood/company/token/model identity terms in either answer. This is not a semantic blinding guarantee. Two independent graders must later see only anonymous answers + frozen L01 fixture/gold/schema/task, never metrics/company outputs/PR/reports/Stage-A answers or mapping. Preserve misses; disagreement requires independent tie-break. Independent Stage-B blind grading is complete: two graders both marked L01-C PASS and L01-D PASS, with pair parity EQUIVALENT. No provenance identity terms were present in either answer; no tie-break was required.
 
 ## Independent 200k accounting and interpretation
 
@@ -136,16 +136,56 @@ DOGFOOD deterministic grade: PASS
 CONTROL deterministic grade: PASS
 
 Blind review:
-PENDING
+2/2 graders PASS/PASS; pair EQUIVALENT
 
 Stage-B measured Codex total: 53,400
 Stage-B remaining 200k: 146,600
 
 Confirmation validity:
-PENDING BLIND REVIEW
+QUALITY_APPROVED_REVERSE_ORDER_CONFIRMATION
 
 Can claim stable/generalized savings:
 NO
 ```
 
 Normal commit/push to existing Draft PR #37, then STOP for independent Stage-B review. No additional measured pair, blind grader, Round 3, production change, A11b.2/A11c or merge.
+
+
+## Independent Stage-B blind quality review
+
+Review source: [Stage-B review](llmtool_token_savings_large_evidence_stage_b_review_20261006.md).
+
+Two independent blind graders evaluated the separate C/D package before reading the
+Stage-B measurement report:
+
+- L01-C: PASS / PASS
+- L01-D: PASS / PASS
+- pair parity: EQUIVALENT / EQUIVALENT
+- tie-break: not required
+- provenance identity terms in answers: none
+
+Grader #1 read the full permitted L01 fixture and confirmed only the four canonical
+FAILURE targets exist. Grader #2 read target-adjacent permitted fixture lines and
+reached the same result. Both graders were limited to the anonymous answers plus the
+frozen L01 fixture/gold/schema/task.
+
+Stage-B confirmation is therefore quality-approved:
+
+- DOGFOOD: **20,529**
+- CONTROL: **32,871**
+- Codex tokens saved: **12,342**
+- primary saving: **37.547%**
+- company tokens: **19,668**
+- selected raw: **1,768 bytes / 3.597%**
+- quality: **EQUIVALENT**
+
+This confirms the positive direction observed in Stage A under reversed execution
+order:
+
+- Stage A L01 (CONTROL -> DOGFOOD): **39.816%**
+- Stage B L01 (DOGFOOD -> CONTROL): **37.547%**
+
+These values are deliberately not averaged or pooled. Stage B is a selected-positive
+confirmation subject to winner's curse, and the evidence remains limited to one
+synthetic canonical 48 KiB test-output fixture. It does not establish a stable 40%
+rate, generalized savings, or a production routing threshold.
