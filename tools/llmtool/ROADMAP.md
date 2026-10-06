@@ -571,7 +571,7 @@ The Round-2/Round-3 benchmark programme changed the design assumption from gener
 
 | Runtime route | Evidence state | Policy |
 | --- | --- | --- |
-| `test-triage` | **VALIDATED on the measured synthetic L01 fixture** | Only currently evidence-backed token-saving company route. Stage A reduced Codex 39.82%; reverse-order Stage B reduced Codex 37.55%, with equivalent independent quality. Treat as two separate observations, not a universal rate. |
+| `test-triage` | **L01 BENCHMARK PIPELINE VALIDATED; ordinary skill use UNVALIDATED for savings** | Positive evidence exists only for ~48 KiB canonical raw output + complete FAILURE-ID coverage + deterministic ±2-line selector capped at `min(32 KiB, 20%)` + inline selected raw with no full-raw re-read. Stage A reduced Codex 39.82%; reverse-order Stage B 37.55%. Round-1 small-evidence B01 measured −103.32%. |
 | `log-triage` | **EXPERIMENTAL** | Round 3 saw one PASS and one `finish_reason=length` failure. Do not claim reliable savings or authorize paired Codex work from current evidence. |
 | `context-pack` | **EXPERIMENTAL** | Structured provenance was clean, but target-record recall was 3/7 and the instruction's "support" wording did not exactly match the gate's record-citation requirement. Redesign before a new reliability claim. |
 
@@ -579,16 +579,27 @@ P1 is now merged: parseable non-success OpenAI-compatible responses may retain a
 validated usage triplet. P1 improves accounting only; it does not convert incomplete or
 invalid output into PASS and does not authorize retry/fallback.
 
-**New-route gate:** before a new company delegation route may consume Codex tokens in a
-paired benchmark, it must first pass a pre-registered **Company-only reliability Phase 0**
-with exact task contract, repeated trials, deterministic/independent quality checks and
-complete/valid usage accounting. If that gate FAILs or accounting is incomplete, stop.
-Do not start the paired Codex benchmark.
+**New-route/pipeline gate:** before a new company delegation route—or a productionized
+version of the L01 research pipeline—may consume Codex tokens in a paired benchmark, it
+must first pass a pre-registered **Company-only reliability Phase 0** with exact task
+contract, repeated trials, deterministic/independent quality checks and complete/valid
+usage accounting. If that gate FAILs or accounting is incomplete, stop. Do not start
+the paired Codex benchmark.
+
+The validated L01 research mechanics are not currently a normal runtime feature:
+coverage and excerpt selection live only in frozen Round-2 benchmark code and support
+canonical `FAILURE id=` data. A future deterministic real-test-format selector is a
+separate work item. Until pytest/unittest-style real output passes its own Company-only
+gate, A11c must not advertise ordinary `test-triage` as a production token-saving
+route.
 
 Round 4 is optional/deferred research, not an A11b blocker. If explicitly approved later,
 it starts Company-only after a new preregistration: L02 must bound output; L03 must align
 instruction and record-citation gate semantics; three trials per lane remain the minimum
-reliability check. Paired Codex work remains conditional on that Company-only PASS.
+reliability check. Any Round-4 wrapper must explicitly consume validated failure usage
+from `LLMToolError.provider_metadata` (or the corresponding safe diagnostics event);
+otherwise P1 will not improve failed-call accounting. Paired Codex work remains
+conditional on that Company-only PASS.
 
 ### Development-time cost-aware dogfood — available now, not A11c implementation
 
@@ -602,10 +613,10 @@ reliability check. Paired Codex work remains conditional on that Company-only PA
    A5 `llmtool git --json` local snapshot，以及必要的 Git/GitHub/CI structured queries。
    A5 已覆蓋的 branch/HEAD/status/diff/recent-commit evidence，優先用單一 snapshot，避免
    Codex 反覆執行與閱讀多個等價 `git status/diff/log` tool turns。
-2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence。**`test-triage`
-   是目前唯一有 token-saving 實證的 route**；`log-triage` 與 `context-pack` 仍可作 bounded
-   development aid，但其 savings/reliability 狀態是 EXPERIMENTAL。原始 command/exit/raw
-   evidence 保留，摘要不能取代 ground truth。Repo-level `company-llm-delegation` skill 統一
+2. Company LLM 只透過 llmtool 接收 bounded、permitted、必要的 evidence。**只有 L01
+   test-triage benchmark pipeline 有正向 token-saving 實證**；一般 `test-triage` skill
+   invocation 沒有 savings 證據，`log-triage` 與 `context-pack` 也仍是 EXPERIMENTAL。
+   原始 command/exit/raw evidence 保留，摘要不能取代 ground truth。Repo-level `company-llm-delegation` skill 統一
    decision/data boundary；runtime skills 保持 provider-agnostic，不因 routing evidence 改寫
    skill 本身的語意。
 3. Root-cause-as-fact、production code 修改、architecture、security/auth/permission、
