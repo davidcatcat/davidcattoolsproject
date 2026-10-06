@@ -141,7 +141,9 @@ Use the existing validated A4 EvidenceItem fields:
 Deterministic mapping:
 
 1. Parse the frozen fixture RECORD universe.
-2. Build an index from exact `(source, locator)` to fixture record.
+2. Build a **multimap over the complete fixture universe** from exact
+   `(source, locator)` to all matching fixture records; never use last-writer-wins and
+   never build the index from gold targets only.
 3. A company evidence item is anchorable only if:
    - source is nonempty;
    - locator is nonempty;
@@ -166,11 +168,18 @@ recall requirement of **7/7 frozen target records**.
 The company model never receives the gold/target list. The sequence is fixed:
 
 1. company output completes;
-2. parse/validate A4 output;
-3. freeze the exact company output digest;
+2. immediately SHA-256 the **raw stdout bytes** before parsing;
+3. parse/validate A4 output;
 4. derive structured source+locator anchors from fixture bytes only;
 5. freeze the adapter decision/anchors;
 6. only then load grading metadata to compute target recall.
+
+Target recall is defined exactly as:
+
+`validated_unique_anchor_record_ids ∩ frozen_target_record_ids`
+
+divided by the seven frozen target record IDs. Statement text and free-text record_id
+mentions do not contribute to recall.
 
 Target recall is evaluation-only. It may fail the logical trial, but it must never:
 - repair the company output;
@@ -188,15 +197,26 @@ Each L03 logical trial passes only if:
 - **target recall = 7/7**.
 
 Round-3 L03 company instructions are frozen before live execution and explicitly
-require evidence provenance for every substantive category item:
+require evidence provenance for every substantive category item, with a non-duplicating
+evidence contract:
 
-- each fact, inference, hypothesis, unknown and verify-next item must have corresponding
-  evidence in the A4 evidence array;
-- each such evidence item must use the exact source and locator text present in the
-  supplied fixture;
+- every fact, inference, hypothesis, unknown and verify-next item must be supportable by
+  one or more entries in the A4 evidence array;
+- **each unique fixture record may appear at most once in the evidence array**;
+- the same single evidence item may support multiple semantic category items;
+- each evidence item must use the exact source and locator text present in the supplied
+  fixture;
 - do not invent/fuzzy-normalize source or locator;
 - the evidence statement need not contain record_id and free-text record_id is ignored
-  for anchoring.
+  for anchoring;
+- do **not** create facts/inferences/hypotheses/evidence entries from the inventory
+  background records; they are fixture noise for this benchmark;
+- if the model wishes to mention inventory irrelevance, it may do so only in summary
+  prose and without creating an inventory evidence citation.
+
+This keeps duplicate mapped anchors = 0 compatible with complete provenance: one record,
+one evidence item, reusable across categories. It also prevents the fixture's known
+ambiguous inventory source+locator pairs from becoming a benchmark-artifact failure.
 
 This is a benchmark-specific instruction, not a production A4 schema/runtime change.
 
@@ -257,11 +277,20 @@ A transport failure counts as a failed logical trial. It does not permit a retry
 Failures before Request construction are recorded separately and do not fabricate
 Request proof or usage.
 
-Because the Phase-0 gate is strict 3/3 for both fixtures, **the first failed logical
-trial makes the overall gate impossible to pass**. After such a failure, remaining
-planned trials are not executed and are recorded as
-`NOT_STARTED_EARLY_FORMAT_GATE_FAIL`. This is a preregistered cost-saving stop rule,
-not a reliability estimator.
+Because the Phase-0 gate is strict 3/3 **per fixture**, early stop is also per fixture:
+
+- the first failed L02 logical trial stops later L02 trials only;
+- the first failed L03 logical trial stops later L03 trials only;
+- the other fixture continues according to the frozen order, skipping stopped-fixture
+  slots.
+
+Skipped same-fixture trials are recorded as
+`NOT_STARTED_EARLY_FORMAT_GATE_FAIL`.
+
+The overall Round-3 gate still fails if either fixture is below 3/3. This stop policy
+cannot make the result more favorable because a failed fixture can no longer recover to
+3/3; it only avoids redundant requests while preserving diagnostic coverage of the
+other failure mode.
 
 ### Phase-0 company-token ceiling
 
@@ -271,9 +300,20 @@ emitted Phase-0 requests.
 This ceiling is independent of later Codex budgets.
 
 After each completed request:
-- add its reported company total tokens;
-- before starting the next logical trial, require the known cumulative total to remain
-  below the 300,000 ceiling.
+- add its reported company total tokens.
+
+Before starting each request, require:
+
+`known_cumulative_company_tokens + preregistered_trial_upper_bound <= 300000`
+
+Conservative per-request upper bounds are frozen as:
+
+- L02: **35,000 company tokens**
+- L03: **59,000 company tokens**
+
+These bounds cover the Round-2 observed prompt sizes plus the current instruction
+delta and the full 4,096 completion allowance. They are experiment-admission bounds,
+not expected usage and not production thresholds.
 
 If a consumed/emitted request may have usage but provider usage is unavailable:
 - record usage as `unknown`, never zero;
@@ -307,6 +347,28 @@ If either fixture is below 3/3:
 Stop before any measured Codex pair.
 
 The purpose is to fail cheaply.
+
+### Phase-0 failure attribution
+
+Every logical trial records exactly one primary failure stage plus all secondary
+diagnostics.
+
+Primary failure precedence:
+
+1. `TRANSPORT_OR_REQUEST_FAILURE`
+2. `MODEL_OUTPUT_INCOMPLETE`
+3. `SCHEMA_OR_PARSE_FAILURE`
+4. `INVALID_CANONICAL_COVERAGE` (L02)
+5. `UNKNOWN_STRUCTURED_ANCHOR` (L03)
+6. `AMBIGUOUS_STRUCTURED_ANCHOR` (L03)
+7. `DUPLICATE_STRUCTURED_ANCHOR` (L03)
+8. `EMPTY_VALIDATED_ANCHOR_SET` (L03)
+9. `TARGET_RECALL_BELOW_7_OF_7` (L03)
+10. `PASS`
+
+The report also retains all secondary counters/details. This makes it possible to
+distinguish provider/format failures from benchmark-contract failures without repairing
+the output.
 
 ## Probe metrics
 
@@ -414,15 +476,23 @@ L03:
 - 3/7 target recall FAIL;
 - 7/7 target recall PASS;
 - facts-only evidence that omits inference/hypothesis/unknown/verify-next support FAILS
-  the 7/7 readiness floor.
+  the 7/7 readiness floor;
+- one evidence item reused as support for multiple semantic categories PASS;
+- two evidence items mapping to the same unique record FAIL duplicate gate;
+- ambiguous inventory citation is rejected by the benchmark instruction/gate and cannot
+  be used to satisfy target recall;
+- a compliant output with no inventory evidence and seven unique target evidence records
+  PASS.
 
 Accounting/isolation:
 - one physical request maximum per logical trial;
 - transport failure receives no retry;
-- first failed trial triggers preregistered early-stop/not-started states;
+- first failed trial stops later trials for the **same fixture only** and records
+  preregistered not-started states while the other fixture can continue;
 - raw stdout is retained byte-for-byte and secret-marker scanned;
 - unknown consumed-attempt usage remains unknown and blocks further execution;
-- 300,000 company-token ceiling accounting is deterministic;
+- 300,000 company-token ceiling accounting uses the frozen 35k L02 / 59k L03
+  pre-request bounds;
 - fake Request observer proves thinking=false/model/temp/max_tokens/no Authorization while
   leaving the Request unchanged;
 - prompt/adapter/retry/gate paths cannot read gold;
