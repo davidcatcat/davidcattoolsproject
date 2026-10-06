@@ -1,0 +1,92 @@
+{
+  "artifacts": {
+    "reports/token_benchmark/20261006_round3/format_probe.py": "500fb8bd990d3a5bdb6e18779619ca87a21af964a84682f88a10741b4fee87a3",
+    "reports/token_benchmark/20261006_round3/live_wrapper.py": "5cd51bbf0f44d4c8d8fe652d6dabc644155b54bc33c08d47e056d16266ccdeaa",
+    "reports/token_benchmark/20261006_round3/test_format_probe.py": "80e62df3140e10b34cfe6cf22188e219e53ca0aac0568d08602e0e4169cefd79",
+    "reports/token_benchmark/20261006_round3/test_live_wrapper.py": "3243c348d582ddda7e843290b5e89948d7d172af279a6d6c5d54d8a80c7be2be",
+    "tools/llmtool/llmtool/cli.py": "7e510422b30f9c626e1849dce1f98e38d631877be5359c86fb155beefb0d47d4",
+    "tools/llmtool/llmtool/config.py": "6826276af9e24246e679636cef3e65dec339547cdb4ebdc353414c43c7c6011c",
+    "tools/llmtool/llmtool/context.py": "dc22eaaa11f12747534c6f1f1c076b0f6e309bf5700803ce3e1288db5086ee8e",
+    "tools/llmtool/llmtool/diagnostics.py": "7983badadec932d27df41bd2211f5d90c940c8c28f8c1b16349d08651830a5e1",
+    "tools/llmtool/llmtool/entrypoint.py": "d72bce5b56cf9613db4e83a6d73a1c089db417f960eefb0b894b2367c1e05156",
+    "tools/llmtool/llmtool/errors.py": "af7c7f90946b75214a618791949c4d275f9d41d315d1fe4dd403d6f32f0ebb97",
+    "tools/llmtool/llmtool/inputs.py": "f71178ba31de3073583829a552e89ef484ed604f8f2abe3fac1d1cac699e4b2f",
+    "tools/llmtool/llmtool/prompts.py": "2fb7bf25b03151eb71c301cfca0ea1e3bce006bf222702ab90666df09fc9757c",
+    "tools/llmtool/llmtool/providers/__init__.py": "57c74453f8ba303d9b057487d03c8a5f2501980cfdeb78d966ce88791b25fae8",
+    "tools/llmtool/llmtool/providers/base.py": "51729ac91fdf3a52106477b8865fca2226f0b816706666473fb6e80ddc2bf7f7",
+    "tools/llmtool/llmtool/providers/openai_compatible.py": "97c13ce3958027e267a9759a0f725480a47bca6b446a37ff8b0f61e5ddedfc9a",
+    "tools/llmtool/llmtool/skills.py": "ca8721c908c898b7618b1681066b95b6e309528edb89b7b653c7bdd0962036a1",
+    "tools/llmtool/llmtool/terminal.py": "294fcb363546ef17ec5e92d35c07f3031b4d9ad88833d8792916056f0a78d75c"
+  },
+  "ceiling": 300000,
+  "config_sha256": "2482b927cc91ebcbde20325bda4574db48ed5987fa7a1e8ff7c7079405bfd790",
+  "contract": "ROUND3_C3_A_V1",
+  "l03_evaluation_metadata_sha256": "0e54eb372345ba64105512744c09a7cb60027fbebeebd04fd7834f51bbf2e8d8",
+  "lanes": {
+    "L02": {
+      "allowed_body_fields": [
+        "chat_template_kwargs",
+        "max_tokens",
+        "messages",
+        "model",
+        "temperature"
+      ],
+      "captured_requests": 1,
+      "config_sha256": "2482b927cc91ebcbde20325bda4574db48ed5987fa7a1e8ff7c7079405bfd790",
+      "endpoint": "http://10.29.7.58:4000/v1/chat/completions",
+      "fixture_sha256": "859effa1e4d6e978372f4914aca8c53e4af2953f3850ceaad2a68732060892da",
+      "instruction_sha256": "690e22577b3f4c4d8b39dee5a9bd68fa713ec3d9c7736182a7d73d3b5573168e",
+      "message_count": 2,
+      "method": "POST",
+      "network_calls": 0,
+      "ordered_roles": [
+        "system",
+        "user"
+      ],
+      "request_body_sha256": "cc3c79f8e9a55356b1f8c1a464ecef5dcf4a45646a1eb7c07cf59315ec4e360f",
+      "skill_sha256": "92881dde1c5aed76d0d189902fc523e129c9069ed633048493e5a92063b880b0",
+      "socket_opens": 0,
+      "user_message_sha256": "e0194460028b4d7a08b6607141285da5352f0c71a4cff0d8a4f57fe2686a22ac"
+    },
+    "L03": {
+      "allowed_body_fields": [
+        "chat_template_kwargs",
+        "max_tokens",
+        "messages",
+        "model",
+        "temperature"
+      ],
+      "captured_requests": 1,
+      "config_sha256": "2482b927cc91ebcbde20325bda4574db48ed5987fa7a1e8ff7c7079405bfd790",
+      "endpoint": "http://10.29.7.58:4000/v1/chat/completions",
+      "fixture_sha256": "44caecfb4fc77e639d471710b6fc190ca2e1145ae94a22396c5cdcc487dd88ce",
+      "instruction_sha256": "f59de65889933c342cd0c9d30cb29c314a7c56fb25f5b75d1c049dc49a513d12",
+      "message_count": 2,
+      "method": "POST",
+      "network_calls": 0,
+      "ordered_roles": [
+        "system",
+        "user"
+      ],
+      "request_body_sha256": "6c1f7b77db218ae9962a78bae46190cab38c0c5277a4b952a967bc8eaac7cdf0",
+      "skill_sha256": "a53a6e48373cfd0a1b688b17aaad4644e550c8b52a4b27e8320ecd77c60a8809",
+      "socket_opens": 0,
+      "user_message_sha256": "3b94f0d8ba02b4e1d206beeb184a2d50553d2e1d48efcac87a069030513645e2"
+    }
+  },
+  "live_authorization": "C3-B REQUIRED",
+  "max_requests_per_trial": 1,
+  "order": [
+    "L02-1",
+    "L03-1",
+    "L02-2",
+    "L03-2",
+    "L02-3",
+    "L03-3"
+  ],
+  "retry": false,
+  "upper_bounds": {
+    "L02": 35000,
+    "L03": 59000
+  }
+}
