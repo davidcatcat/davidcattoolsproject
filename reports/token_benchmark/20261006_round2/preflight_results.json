@@ -1,0 +1,1572 @@
+{
+  "purpose": "NON-SEMANTIC SIZE-FEASIBILITY PREFLIGHT ONLY",
+  "canonical_root": "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+  "branch": "bench/llmtool-token-savings-large-evidence-20261006",
+  "tested_repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+  "origin_main_sha": "65df4094df1737facc30f6b02d19bdd8f31f068c",
+  "handoff_sha256": "8cc05974c7d499436783f7c1110e4e539446972013844e039afb56ecfbd28c2d",
+  "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+  "codex_version": "codex-cli 0.159.2",
+  "expected_usage_fields": [
+    "cache_write_input_tokens",
+    "cached_input_tokens",
+    "input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens"
+  ],
+  "codex_requested_settings": {
+    "model": "gpt-6.1-sol",
+    "reasoning_effort": "high",
+    "service_tier": "default",
+    "approval_policy": "never",
+    "sandbox": "read-only",
+    "ephemeral": true,
+    "ignore_user_config": true,
+    "ignore_rules": true
+  },
+  "company_config_yaml": "active_provider: company-preflight\nproviders:\n  company-preflight:\n    type: openai-compatible\n    base_url: http://10.29.7.58:4000\n    model: gw\n    timeout_seconds: 120\n    api_key: null\n    api_key_env: null\n    provider_options:\n      enable_thinking: false\ngeneration:\n  temperature: 0\n  max_tokens: 4096\n",
+  "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+  "company_observer_sha256": "2e4611f44314085e42ac8e1837d68504d7bef7bb8d19fac632541dcbb3adf144",
+  "filler_algorithm": "Repeated 117-byte line: alphabet doubled, 8-byte slices starting at offsets 0,2,...,24, joined by spaces and newline; repeat and truncate to exact requested bytes. No semantic records or future benchmark identifiers.",
+  "fixed_task_prefix": "Return exactly SIZE_PREFLIGHT_OK. Do not analyze or summarize the filler. Do not use tools, read files, or perform any other task.\nFILLER_BEGIN\n",
+  "fixed_task_suffix": "\nFILLER_END\nReturn exactly SIZE_PREFLIGHT_OK.\n",
+  "candidate_sizes_kib": [
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256
+  ],
+  "execution_order": {
+    "company": [
+      32,
+      48,
+      64,
+      96,
+      128,
+      192,
+      256
+    ],
+    "codex": [
+      32,
+      48,
+      64,
+      96,
+      128,
+      192,
+      256
+    ],
+    "lane_order": "company first, then codex; no simultaneous requests"
+  },
+  "attempts": [
+    {
+      "lane": "company",
+      "size_kib": 32,
+      "attempt": 1,
+      "requested_bytes": 32768,
+      "actual_bytes": 32768,
+      "filler_sha256": "5d0a9fba519f334f1b8109fd5a1bc5ab358220b262cd435a83c8fc6e92fd22b3",
+      "prompt_bytes": 32958,
+      "prompt_sha256": "2b0c772a85f6b6b7d624703d099022a084e5d63cf8665df979594450fd4f6376",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "628ebe78ab3e41211179605a9c4732a40546fe31cd3c90ce775c0efb232d8ccc",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "2b0c772a85f6b6b7d624703d099022a084e5d63cf8665df979594450fd4f6376"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 11652,
+        "completion_tokens": 5,
+        "total_tokens": 11657,
+        "elapsed_seconds": 0.748
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-32.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 1.184,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 48,
+      "attempt": 1,
+      "requested_bytes": 49152,
+      "actual_bytes": 49152,
+      "filler_sha256": "85e9d203abb02b516e61b2c28bb28f74fcb65203062a55f02abb01f4434336cd",
+      "prompt_bytes": 49342,
+      "prompt_sha256": "90dd1d92a201b62a164f3b6223833c60a7c5ba7f69684b52fd71561f7e862170",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "48e268d015549e1d7c672e8c0a827eb7a1b5fd7a4511d70871c271d8b09fe394",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "90dd1d92a201b62a164f3b6223833c60a7c5ba7f69684b52fd71561f7e862170"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 17394,
+        "completion_tokens": 5,
+        "total_tokens": 17399,
+        "elapsed_seconds": 0.796
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-48.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 1.186,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 64,
+      "attempt": 1,
+      "requested_bytes": 65536,
+      "actual_bytes": 65536,
+      "filler_sha256": "8a8b221b7cf1079e17dcd1740d09959e606f860f790d2e6ee348968180720671",
+      "prompt_bytes": 65726,
+      "prompt_sha256": "cebab9ca8d6d0a0108b6203260ec6b2d67eee4859b73cc7df26ccf9125c5627b",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "d79e7614edd5931876d253477e4275fe2c508f95be6a9f715f7e3fdab35aee90",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "cebab9ca8d6d0a0108b6203260ec6b2d67eee4859b73cc7df26ccf9125c5627b"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 23135,
+        "completion_tokens": 5,
+        "total_tokens": 23140,
+        "elapsed_seconds": 0.802
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-64.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 1.129,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 96,
+      "attempt": 1,
+      "requested_bytes": 98304,
+      "actual_bytes": 98304,
+      "filler_sha256": "27937570fe36a04cc278d8be5c111b000d69eaf7a19bf07f2381999bc946a890",
+      "prompt_bytes": 98494,
+      "prompt_sha256": "ff2e9f40299fbf07bdf15a56b3924cde71ffe524038c14e6ca5905e32d457ce6",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "fe95f1aaa158af37c0459c7ff9dd6cd9aa3263a00ea87df340a14aea67728b25",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "ff2e9f40299fbf07bdf15a56b3924cde71ffe524038c14e6ca5905e32d457ce6"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 34619,
+        "completion_tokens": 5,
+        "total_tokens": 34624,
+        "elapsed_seconds": 1.217
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-96.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 1.522,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 128,
+      "attempt": 1,
+      "requested_bytes": 131072,
+      "actual_bytes": 131072,
+      "filler_sha256": "50deabd8f0c525d99f4e621fc304295e458447463788a6d0530829bc0c07c600",
+      "prompt_bytes": 131262,
+      "prompt_sha256": "2d4d83697baecab66b2a3e5c8985ff379797a55dc7c1ab4d826292016640c026",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "f1169f45a2d2528c5106d8519fd6af6534f8491f6a64a76ceadec747224765bd",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "2d4d83697baecab66b2a3e5c8985ff379797a55dc7c1ab4d826292016640c026"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 46101,
+        "completion_tokens": 5,
+        "total_tokens": 46106,
+        "elapsed_seconds": 1.37
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-128.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 1.666,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 192,
+      "attempt": 1,
+      "requested_bytes": 196608,
+      "actual_bytes": 196608,
+      "filler_sha256": "a32aa35f4fef34b803bee7f4da201e48ab08facadab537271f679ec7b63cce8e",
+      "prompt_bytes": 196798,
+      "prompt_sha256": "7e129f9e370de5e73b3e6388f5bc24cf130f46e396513e79485d62ba2c4a3486",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "130e8989e244c31a6902ba2679465090987c0fc8ae4d855d0f38eb76e7424f67",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "7e129f9e370de5e73b3e6388f5bc24cf130f46e396513e79485d62ba2c4a3486"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 69067,
+        "completion_tokens": 5,
+        "total_tokens": 69072,
+        "elapsed_seconds": 2.499
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-192.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 2.828,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "company",
+      "size_kib": 256,
+      "attempt": 1,
+      "requested_bytes": 262144,
+      "actual_bytes": 262144,
+      "filler_sha256": "530f8587754ef52a400c87ea9f350af602e2c20d1af09856da093502ef3957b3",
+      "prompt_bytes": 262334,
+      "prompt_sha256": "e27a29719904fcbefc0875c03a373e76c93481e651df60bfae46f50e0e1abad8",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "temporary_config_sha256": "82a5bd737ffe5af2bf7bc280bb4f8dc12db8f281282fa17b36ee7751e83995e4",
+      "request_audit": [
+        {
+          "actual_payload_field": "chat_template_kwargs.enable_thinking",
+          "authorization_header_present": false,
+          "enable_thinking": false,
+          "max_tokens": 4096,
+          "observer_changed_request": false,
+          "request_body_sha256": "3c0dc1b5daf2865560fece278b85e967a8750abdc8ddaa74422afb2be190b2ce",
+          "request_model": "gw",
+          "resolved_profile_matches": true,
+          "temperature": 0.0,
+          "user_message_sha256": "e27a29719904fcbefc0875c03a373e76c93481e651df60bfae46f50e0e1abad8"
+        }
+      ],
+      "enable_thinking_false_verified": true,
+      "marker_exact": true,
+      "provider_metadata": {
+        "model": "qwen3.6-35b-a3b",
+        "prompt_tokens": 92033,
+        "completion_tokens": 5,
+        "total_tokens": 92038,
+        "elapsed_seconds": 3.103
+      },
+      "usage_source": "llmtool --verbose / normalized Reply.metadata",
+      "usage_unknown": false,
+      "stdout_sha256": "bc9a0289978894438786a1ca91c05d558f2bb1086c87045c820afe273531a00a",
+      "safe_error_code": null,
+      "argv": [
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/tools/llmtool/.venv/bin/python",
+        "-B",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/company_observer.py",
+        "ask",
+        "--provider",
+        "company-preflight",
+        "--file",
+        "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk/prompt-256.txt",
+        "--verbose"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 3.413,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 32,
+      "attempt": 1,
+      "requested_bytes": 32768,
+      "actual_bytes": 32768,
+      "filler_sha256": "5d0a9fba519f334f1b8109fd5a1bc5ab358220b262cd435a83c8fc6e92fd22b3",
+      "prompt_bytes": 32958,
+      "prompt_sha256": "2b0c772a85f6b6b7d624703d099022a084e5d63cf8665df979594450fd4f6376",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 28397,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "eae53046c2359b4c70f102cef95b79710009b11ddf1a218b74f7deefa7cfdfa2",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 28405,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 8.927,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 48,
+      "attempt": 1,
+      "requested_bytes": 49152,
+      "actual_bytes": 49152,
+      "filler_sha256": "85e9d203abb02b516e61b2c28bb28f74fcb65203062a55f02abb01f4434336cd",
+      "prompt_bytes": 49342,
+      "prompt_sha256": "90dd1d92a201b62a164f3b6223833c60a7c5ba7f69684b52fd71561f7e862170",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 32523,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "417ec893449c19db5437aad9bb44eb4db5c625155923cc63cebce3f177685a92",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 32531,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 7.466,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 64,
+      "attempt": 1,
+      "requested_bytes": 65536,
+      "actual_bytes": 65536,
+      "filler_sha256": "8a8b221b7cf1079e17dcd1740d09959e606f860f790d2e6ee348968180720671",
+      "prompt_bytes": 65726,
+      "prompt_sha256": "cebab9ca8d6d0a0108b6203260ec6b2d67eee4859b73cc7df26ccf9125c5627b",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 37984,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "2325bea4adf701fd4eef81b0e5beb15779379fed85b82ce40ca4bb71fd81ddd5",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 37992,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 7.241,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 96,
+      "attempt": 1,
+      "requested_bytes": 98304,
+      "actual_bytes": 98304,
+      "filler_sha256": "27937570fe36a04cc278d8be5c111b000d69eaf7a19bf07f2381999bc946a890",
+      "prompt_bytes": 98494,
+      "prompt_sha256": "ff2e9f40299fbf07bdf15a56b3924cde71ffe524038c14e6ca5905e32d457ce6",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 50244,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "68b032400d43f18723f3cedeeacb8fa66971dbf1875e59d694df4534bd96d884",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 50252,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 11.615,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 128,
+      "attempt": 1,
+      "requested_bytes": 131072,
+      "actual_bytes": 131072,
+      "filler_sha256": "50deabd8f0c525d99f4e621fc304295e458447463788a6d0530829bc0c07c600",
+      "prompt_bytes": 131262,
+      "prompt_sha256": "2d4d83697baecab66b2a3e5c8985ff379797a55dc7c1ab4d826292016640c026",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 59830,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "77618829248d0c2ab37b4ddd542e33eb44780fe5ac06aa1c300a8f446d4e3db5",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 59838,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 8.057,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 192,
+      "attempt": 1,
+      "requested_bytes": 196608,
+      "actual_bytes": 196608,
+      "filler_sha256": "a32aa35f4fef34b803bee7f4da201e48ab08facadab537271f679ec7b63cce8e",
+      "prompt_bytes": 196798,
+      "prompt_sha256": "7e129f9e370de5e73b3e6388f5bc24cf130f46e396513e79485d62ba2c4a3486",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 81676,
+        "cached_input_tokens": 59648,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "05b6942565816e3ab2e902c04c9e74ff3b5d10e3c54ee9c8ae7d67dfb41b161e",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 81684,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 12.405,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    },
+    {
+      "lane": "codex",
+      "size_kib": 256,
+      "attempt": 1,
+      "requested_bytes": 262144,
+      "actual_bytes": 262144,
+      "filler_sha256": "530f8587754ef52a400c87ea9f350af602e2c20d1af09856da093502ef3957b3",
+      "prompt_bytes": 262334,
+      "prompt_sha256": "e27a29719904fcbefc0875c03a373e76c93481e651df60bfae46f50e0e1abad8",
+      "repo_sha": "53869998f4a06fa3cdda76c579de7bb6a3e207fd",
+      "helper_sha256": "c25325886dd64b7e4872156b08b63864691923a1dc2cf03ab06407293d4650dc",
+      "codex_version": "codex-cli 0.159.2",
+      "thread_started_count": 1,
+      "turn_started_count": 1,
+      "turn_completed_count": 1,
+      "usage_fields": [
+        "cache_write_input_tokens",
+        "cached_input_tokens",
+        "input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens"
+      ],
+      "usage": {
+        "input_tokens": 103521,
+        "cached_input_tokens": 12288,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 8,
+        "reasoning_output_tokens": 0
+      },
+      "tool_call_count": 0,
+      "marker_exact": true,
+      "jsonl_sha256": "12531891321cf0c0c5908a04ad3ff4ab765ff1bc5d4bbf17473efcc629a7b2a7",
+      "measurement_source": "codex exec --json / turn.completed.usage",
+      "comparable_total": 103529,
+      "argv": [
+        "codex",
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--model",
+        "gpt-6.1-sol",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "--config",
+        "service_tier=\"default\"",
+        "--config",
+        "approval_policy=\"never\"",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+        "-"
+      ],
+      "exit": 0,
+      "wrapper_elapsed_seconds": 7.941,
+      "result": "PASS",
+      "failure_category": null,
+      "wrapper_timeout": false
+    }
+  ],
+  "failures": [],
+  "retries": [],
+  "not_tested_sizes": {
+    "codex": [],
+    "company": []
+  },
+  "company_enable_thinking_false_verified": true,
+  "real_user_config_stat_unchanged": true,
+  "real_user_config_contents_inspected": false,
+  "joint_pass_sizes_kib": [
+    32,
+    48,
+    64,
+    96,
+    128,
+    192,
+    256
+  ],
+  "largest_joint_pass_kib": 256,
+  "largest_capacity_tiers_before_budget": {
+    "L01": 64,
+    "L02": 128,
+    "L03": 256
+  },
+  "budget_ceiling": 400000,
+  "initial_stage_a_forecast": 604077,
+  "budget_adjustment_path": [
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 256
+      },
+      "total_payload_kib": 448,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 103529
+      },
+      "forecast": 604077,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 192
+      },
+      "total_payload_kib": 384,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 81684
+      },
+      "forecast": 538542,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 128
+      },
+      "total_payload_kib": 320,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 59838
+      },
+      "forecast": 473004,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 96,
+        "L03": 128
+      },
+      "total_payload_kib": 288,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 50252,
+        "L03": 59838
+      },
+      "forecast": 444246,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 64,
+        "L03": 128
+      },
+      "total_payload_kib": 256,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 37992,
+        "L03": 59838
+      },
+      "forecast": 407466,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 64,
+        "L03": 128
+      },
+      "total_payload_kib": 240,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 37992,
+        "L03": 59838
+      },
+      "forecast": 391083,
+      "budget_pass": true
+    }
+  ],
+  "budget_legal_combinations": [
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 256
+      },
+      "total_payload_kib": 448,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 103529
+      },
+      "forecast": 604077,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 192
+      },
+      "total_payload_kib": 384,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 81684
+      },
+      "forecast": 538542,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 128
+      },
+      "total_payload_kib": 320,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 59838
+      },
+      "forecast": 473004,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 128,
+        "L03": 96
+      },
+      "total_payload_kib": 288,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 59838,
+        "L03": 50252
+      },
+      "forecast": 444246,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 96,
+        "L03": 256
+      },
+      "total_payload_kib": 416,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 50252,
+        "L03": 103529
+      },
+      "forecast": 575319,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 96,
+        "L03": 192
+      },
+      "total_payload_kib": 352,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 50252,
+        "L03": 81684
+      },
+      "forecast": 509784,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 96,
+        "L03": 128
+      },
+      "total_payload_kib": 288,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 50252,
+        "L03": 59838
+      },
+      "forecast": 444246,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 96,
+        "L03": 96
+      },
+      "total_payload_kib": 256,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 50252,
+        "L03": 50252
+      },
+      "forecast": 415488,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 64,
+        "L03": 256
+      },
+      "total_payload_kib": 384,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 37992,
+        "L03": 103529
+      },
+      "forecast": 538539,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 64,
+        "L03": 192
+      },
+      "total_payload_kib": 320,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 37992,
+        "L03": 81684
+      },
+      "forecast": 473004,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 64,
+        "L03": 128
+      },
+      "total_payload_kib": 256,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 37992,
+        "L03": 59838
+      },
+      "forecast": 407466,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 64,
+        "L02": 64,
+        "L03": 96
+      },
+      "total_payload_kib": 224,
+      "selected_codex_totals": {
+        "L01": 37992,
+        "L02": 37992,
+        "L03": 50252
+      },
+      "forecast": 378708,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 128,
+        "L03": 256
+      },
+      "total_payload_kib": 432,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 59838,
+        "L03": 103529
+      },
+      "forecast": 587694,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 128,
+        "L03": 192
+      },
+      "total_payload_kib": 368,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 59838,
+        "L03": 81684
+      },
+      "forecast": 522159,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 128,
+        "L03": 128
+      },
+      "total_payload_kib": 304,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 59838,
+        "L03": 59838
+      },
+      "forecast": 456621,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 128,
+        "L03": 96
+      },
+      "total_payload_kib": 272,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 59838,
+        "L03": 50252
+      },
+      "forecast": 427863,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 96,
+        "L03": 256
+      },
+      "total_payload_kib": 400,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 50252,
+        "L03": 103529
+      },
+      "forecast": 558936,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 96,
+        "L03": 192
+      },
+      "total_payload_kib": 336,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 50252,
+        "L03": 81684
+      },
+      "forecast": 493401,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 96,
+        "L03": 128
+      },
+      "total_payload_kib": 272,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 50252,
+        "L03": 59838
+      },
+      "forecast": 427863,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 96,
+        "L03": 96
+      },
+      "total_payload_kib": 240,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 50252,
+        "L03": 50252
+      },
+      "forecast": 399105,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 64,
+        "L03": 256
+      },
+      "total_payload_kib": 368,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 37992,
+        "L03": 103529
+      },
+      "forecast": 522156,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 64,
+        "L03": 192
+      },
+      "total_payload_kib": 304,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 37992,
+        "L03": 81684
+      },
+      "forecast": 456621,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 64,
+        "L03": 128
+      },
+      "total_payload_kib": 240,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 37992,
+        "L03": 59838
+      },
+      "forecast": 391083,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 48,
+        "L02": 64,
+        "L03": 96
+      },
+      "total_payload_kib": 208,
+      "selected_codex_totals": {
+        "L01": 32531,
+        "L02": 37992,
+        "L03": 50252
+      },
+      "forecast": 362325,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 128,
+        "L03": 256
+      },
+      "total_payload_kib": 416,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 59838,
+        "L03": 103529
+      },
+      "forecast": 575316,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 128,
+        "L03": 192
+      },
+      "total_payload_kib": 352,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 59838,
+        "L03": 81684
+      },
+      "forecast": 509781,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 128,
+        "L03": 128
+      },
+      "total_payload_kib": 288,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 59838,
+        "L03": 59838
+      },
+      "forecast": 444243,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 128,
+        "L03": 96
+      },
+      "total_payload_kib": 256,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 59838,
+        "L03": 50252
+      },
+      "forecast": 415485,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 96,
+        "L03": 256
+      },
+      "total_payload_kib": 384,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 50252,
+        "L03": 103529
+      },
+      "forecast": 546558,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 96,
+        "L03": 192
+      },
+      "total_payload_kib": 320,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 50252,
+        "L03": 81684
+      },
+      "forecast": 481023,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 96,
+        "L03": 128
+      },
+      "total_payload_kib": 256,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 50252,
+        "L03": 59838
+      },
+      "forecast": 415485,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 96,
+        "L03": 96
+      },
+      "total_payload_kib": 224,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 50252,
+        "L03": 50252
+      },
+      "forecast": 386727,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 64,
+        "L03": 256
+      },
+      "total_payload_kib": 352,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 37992,
+        "L03": 103529
+      },
+      "forecast": 509778,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 64,
+        "L03": 192
+      },
+      "total_payload_kib": 288,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 37992,
+        "L03": 81684
+      },
+      "forecast": 444243,
+      "budget_pass": false
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 64,
+        "L03": 128
+      },
+      "total_payload_kib": 224,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 37992,
+        "L03": 59838
+      },
+      "forecast": 378705,
+      "budget_pass": true
+    },
+    {
+      "tiers_kib": {
+        "L01": 32,
+        "L02": 64,
+        "L03": 96
+      },
+      "total_payload_kib": 192,
+      "selected_codex_totals": {
+        "L01": 28405,
+        "L02": 37992,
+        "L03": 50252
+      },
+      "forecast": 349947,
+      "budget_pass": true
+    }
+  ],
+  "budget_selection_rule": "Maximize sum of declared joint-PASS payload sizes subject to forecast <=400000; ties prefer larger L03, then L02, then L01. This resolves budget fallback, not semantic design.",
+  "selected": {
+    "tiers_kib": {
+      "L01": 48,
+      "L02": 64,
+      "L03": 128
+    },
+    "total_payload_kib": 240,
+    "selected_codex_totals": {
+      "L01": 32531,
+      "L02": 37992,
+      "L03": 59838
+    },
+    "forecast": 391083,
+    "budget_pass": true
+  },
+  "fixture_preregistration_may_proceed": true,
+  "formal_fixture_generated": false,
+  "formal_gold_generated": false,
+  "stage_a_executed": false,
+  "preflight_codex_usage_sum": 394231,
+  "preflight_company_total_tokens_sum": 294036,
+  "raw_artifacts_runtime_directory": "/var/folders/y_/xqy1pg553h19l7z9zjmshvb80000gn/T/llmtool-round2-size-preflight-uiitrngk",
+  "notes": [
+    "Forecast is exactly 3*S using observed filler calls, not a semantic benchmark KPI or guarantee for different token density/schema/answer length.",
+    "Wire audit proves llmtool sent thinking=false; backend internal implementation is not independently inspected.",
+    "Unknown values would be null/unknown, never guessed as zero; this round has no failed request/missing usage."
+  ]
+}
