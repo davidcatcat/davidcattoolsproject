@@ -1,0 +1,21 @@
+{
+  "facts": [],
+  "inferences": [
+    "If the company-reported p95 values are confirmed and comparable, 80 ms at 08:00Z and 240 ms at 08:10Z imply a threefold increase. Temporal proximity to R17 does not establish causation."
+  ],
+  "hypotheses": [
+    "A cache-policy change might explain the reported increase; no confirming cache measurement is supplied."
+  ],
+  "unknowns": [
+    "The raw selection is empty and no record_id values are supplied, preventing exact-record citations for substantive claims or verification steps.",
+    "The reported p95 readings, measurement comparability and R17 completion at 08:05Z remain unverified against raw records.",
+    "Traffic mix, cache hit rate, queue depth and the cause of the reported increase remain unknown.",
+    "Citation membership failed; semantic completeness was not evaluated."
+  ],
+  "verify_next": [
+    "Obtain upload-window records containing record_id and exact source/locator values for both p95 readings and R17 completion.",
+    "Compare traffic mix, cache hit rate and queue depth over matching window boundaries; obtain causal evidence before attributing an effect to R17.",
+    "Validate exact-record citations and independently assess upload-window semantic coverage; inventory background does not establish upload behavior."
+  ],
+  "evidence": []
+}

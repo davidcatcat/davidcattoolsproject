@@ -1,0 +1,108 @@
+{
+  "grading_only": true,
+  "target_ids": [
+    "tests/test_manifest.py::test_reject_duplicate_name",
+    "tests/test_manifest.py::test_reject_duplicate_alias",
+    "tests/test_worker.py::test_wait_deadline",
+    "tests/test_plugin.py::test_load_optional"
+  ],
+  "allowed_files": [
+    "tests/test_manifest.py",
+    "tests/test_worker.py",
+    "tests/test_plugin.py"
+  ],
+  "expected_groups": [
+    {
+      "signature": "DUPLICATE_ACCEPTED",
+      "category": "assertion",
+      "tests": [
+        "tests/test_manifest.py::test_reject_duplicate_name",
+        "tests/test_manifest.py::test_reject_duplicate_alias"
+      ],
+      "files": [
+        "tests/test_manifest.py"
+      ],
+      "kinds": [
+        "FAILED"
+      ],
+      "occurrences": 2
+    },
+    {
+      "signature": "WAIT_TIMEOUT",
+      "category": "timeout",
+      "tests": [
+        "tests/test_worker.py::test_wait_deadline"
+      ],
+      "files": [
+        "tests/test_worker.py"
+      ],
+      "kinds": [
+        "FAILED"
+      ],
+      "occurrences": 1
+    },
+    {
+      "signature": "OPTIONAL_IMPORT_MISSING",
+      "category": "import",
+      "tests": [
+        "tests/test_plugin.py::test_load_optional"
+      ],
+      "files": [
+        "tests/test_plugin.py"
+      ],
+      "kinds": [
+        "ERROR"
+      ],
+      "occurrences": 1
+    }
+  ],
+  "structured_counts": {
+    "failure_count": 4,
+    "group_count": 3,
+    "kind_counts": {
+      "FAILED": 3,
+      "ERROR": 1
+    }
+  },
+  "coverage_expectation": "Every target ID once; no other test ID in failure groups. Files match group membership exactly.",
+  "required_unknowns": [
+    "Duplicate rejection cause/validator branch is not observed.",
+    "Timeout scheduling history and worker progress are not supplied.",
+    "Optional dependency policy and installation state are not supplied."
+  ],
+  "forbidden_unsupported_claims": [
+    "A specific validator implementation is the proven cause.",
+    "The timeout proves a deadlock or infrastructure failure.",
+    "The optional plugin must be installed or a test must be changed."
+  ],
+  "grading_contract": {
+    "deterministic": [
+      "Exact test/file membership, grouping by signature and categories, kinds and integer counts; list ordering does not matter."
+    ],
+    "blind_semantic": [
+      "Unknown preservation, evidence fidelity and absence of unsupported cause/repair claims."
+    ]
+  },
+  "target_line_ranges": [
+    {
+      "identifier": "tests/test_manifest.py::test_reject_duplicate_name",
+      "start_line": 152,
+      "end_line": 152
+    },
+    {
+      "identifier": "tests/test_manifest.py::test_reject_duplicate_alias",
+      "start_line": 308,
+      "end_line": 308
+    },
+    {
+      "identifier": "tests/test_worker.py::test_wait_deadline",
+      "start_line": 464,
+      "end_line": 464
+    },
+    {
+      "identifier": "tests/test_plugin.py::test_load_optional",
+      "start_line": 620,
+      "end_line": 620
+    }
+  ]
+}
