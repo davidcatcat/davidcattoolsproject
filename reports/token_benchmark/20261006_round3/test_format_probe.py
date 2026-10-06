@@ -70,6 +70,24 @@ class FakeRequest:
 PROOF = probe.observe_request_without_mutation(FakeRequest())
 
 
+def final_evaluation_for_trial(trial_id, failure_reason=None):
+    lane = trial_id.split('-')[0]
+    if lane == 'L02':
+        value = log_output()
+        if failure_reason == 'INVALID_CANONICAL_COVERAGE':
+            value['timeline'] = []
+        elif failure_reason not in (None,):
+            raise ValueError('unsupported synthetic L02 failure')
+        return probe.evaluate_l02_without_gold(stdout(value), EVENTS)
+    if lane == 'L03':
+        records = NON_INVENTORY[:3] if failure_reason == 'TARGET_RECALL_BELOW_7_OF_7' else NON_INVENTORY
+        if failure_reason not in (None, 'TARGET_RECALL_BELOW_7_OF_7'):
+            raise ValueError('unsupported synthetic L03 failure')
+        anchors = probe.evaluate_l03_anchors_without_gold(stdout(packet_output(records)), RECORDS)
+        return probe.evaluate_l03_target_recall_after_freeze(anchors, load_metadata)
+    raise ValueError('unsupported lane')
+
+
 class L02Tests(unittest.TestCase):
     def evaluate(self, value, records=EVENTS):
         return probe.evaluate_l02_without_gold(stdout(value), records).to_dict()
@@ -86,6 +104,42 @@ class L02Tests(unittest.TestCase):
         self.assertTrue(result['passed'])
         self.assertEqual(result['evidence_extras'], value['evidence'][-1:])
         self.assertEqual(result['timeline_extras'], value['timeline'][:1])
+
+    def test_colon_form_canonical_fields_are_not_harmless_extras(self):
+        value = log_output()
+        value['evidence'].append('event_id: EVT-T99 signature: UPSTREAM_TIMEOUT')
+        result = self.evaluate(value)
+        self.assert_coverage_fail(result)
+        self.assertEqual(result['invalid_canonical_claims'][-1]['reason'],
+                         'MALFORMED_OR_PARTIAL_EVENT')
+
+    def test_benign_event_word_prose_is_extra(self):
+        value = log_output()
+        prose = 'Four EVENT lines were observed; no later EVENT lines.'
+        value['evidence'].append(prose)
+        result = self.evaluate(value)
+        self.assertTrue(result['passed'])
+        self.assertIn(prose, result['evidence_extras'])
+
+    def test_fixture_event_comment_is_extra_not_canonical_claim(self):
+        comment = next(line for line in L02_BYTES.decode().splitlines()
+                       if 'Canonical EVENT' in line)
+        value = log_output(); value['evidence'].append(comment)
+        result = self.evaluate(value)
+        self.assertTrue(result['passed'])
+        self.assertIn(comment, result['evidence_extras'])
+
+    def test_namespace_identifier_reference_in_extra_fails(self):
+        for prose in ('EVT-T09 UPSTREAM_TIMEOUT on REQ-99 at 08:02:20Z',
+                      'EVT-T01 REQ-17 timed out at 09:30:00Z',
+                      'event EVT-T01 repeated'):
+            with self.subTest(prose=prose):
+                value = log_output(); value['evidence'].append(prose)
+                result = self.evaluate(value)
+                self.assert_coverage_fail(result)
+                self.assertEqual(result['invalid_canonical_claims'][-1]['reason'],
+                                 'NAMESPACE_IDENTIFIER_REFERENCE_IN_EXTRA')
+                self.assertTrue(result['unknown_identifier_references'])
 
     def test_round2_recorded_extra_shape_is_nonfatal(self):
         # Not replay of unavailable raw stdout: fixture canonical lines plus the
@@ -384,7 +438,16 @@ class AccountingTests(unittest.TestCase):
         return trial
 
     def complete(self, state, trial, reasons=(), usage=100):
-        return state.complete(trial.trial_id, reasons, usage)
+        if reasons:
+            primary = probe.primary_failure(reasons)
+            if primary in ('TRANSPORT_OR_REQUEST_FAILURE', 'MODEL_OUTPUT_INCOMPLETE'):
+                return state.complete_pre_output_failure(trial.trial_id, primary, usage)
+            if primary in ('INVALID_CANONICAL_COVERAGE', 'TARGET_RECALL_BELOW_7_OF_7'):
+                evaluation = final_evaluation_for_trial(trial.trial_id, primary)
+                return state.complete_evaluation(trial.trial_id, evaluation, usage)
+            raise ValueError('unsupported synthetic accounting failure')
+        evaluation = final_evaluation_for_trial(trial.trial_id)
+        return state.complete_evaluation(trial.trial_id, evaluation, usage)
 
     def test_frozen_order_and_six_request_max(self):
         state = probe.Phase0Accounting()
@@ -472,7 +535,7 @@ class AccountingTests(unittest.TestCase):
 
     def test_pre_request_failure_preserves_unknown_without_global_stop(self):
         state = probe.Phase0Accounting(); trial = state.begin_next()
-        record = state.complete(trial.trial_id, ('TRANSPORT_OR_REQUEST_FAILURE',))
+        record = state.complete_pre_output_failure(trial.trial_id, 'TRANSPORT_OR_REQUEST_FAILURE')
         self.assertFalse(record.request_emitted)
         self.assertIsNone(record.request_proof_json)
         self.assertIsNone(record.usage_total)
@@ -480,11 +543,11 @@ class AccountingTests(unittest.TestCase):
 
     def test_unemitted_success_rejected(self):
         state = probe.Phase0Accounting(); trial = state.begin_next()
-        with self.assertRaises(ValueError): state.complete(trial.trial_id)
+        with self.assertRaises(ValueError): state.complete_evaluation(trial.trial_id, final_evaluation_for_trial(trial.trial_id))
 
     def test_out_of_order_completion_rejected(self):
         state = probe.Phase0Accounting(); self.start(state)
-        with self.assertRaises(ValueError): state.complete('L03-1', (), 100)
+        with self.assertRaises(ValueError): state.complete_evaluation('L03-1', final_evaluation_for_trial('L03-1'), 100)
         with self.assertRaises(ValueError): state.begin_next()
 
     def test_missing_request_proof_rejected(self):
@@ -493,7 +556,7 @@ class AccountingTests(unittest.TestCase):
 
     def test_boolean_coercion_cannot_forge_observer_proof(self):
         state = probe.Phase0Accounting(); trial = state.begin_next()
-        proof = dict(PROOF); proof['enable_thinking'] = 0
+        proof = dataclasses.replace(PROOF, enable_thinking=0)
         with self.assertRaises(ValueError): state.mark_request_emitted(trial.trial_id, proof)
 
     def test_invalid_usage_does_not_mutate_accounting(self):
@@ -510,11 +573,61 @@ class AccountingTests(unittest.TestCase):
         self.assertFalse(state.gate_passed)
 
     def test_failure_precedence_keeps_secondary(self):
-        reasons = ('SCHEMA_OR_PARSE_FAILURE', 'MODEL_OUTPUT_INCOMPLETE', 'TRANSPORT_OR_REQUEST_FAILURE')
-        state = probe.Phase0Accounting(); trial = self.start(state)
-        record = self.complete(state, trial, reasons)
-        self.assertEqual(record.primary_failure_reason, 'TRANSPORT_OR_REQUEST_FAILURE')
-        self.assertEqual(set(record.secondary_diagnostics), set(reasons))
+        reasons = ('SCHEMA_OR_PARSE_FAILURE', 'MODEL_OUTPUT_INCOMPLETE',
+                   'TRANSPORT_OR_REQUEST_FAILURE')
+        self.assertEqual(probe.primary_failure(reasons), 'TRANSPORT_OR_REQUEST_FAILURE')
+
+    def test_accounting_rejects_anchor_stage_l03_evaluation(self):
+        state = probe.Phase0Accounting()
+        self.complete(state, self.start(state))
+        trial = self.start(state)
+        anchors = probe.evaluate_l03_anchors_without_gold(
+            stdout(packet_output(NON_INVENTORY[:3])), RECORDS)
+        self.assertTrue(anchors.to_dict()['passed'])
+        with self.assertRaisesRegex(ValueError, 'final L03 post-freeze recall'):
+            state.complete_evaluation(trial.trial_id, anchors, 100)
+
+    def test_accounting_rejects_wrong_lane_evaluation(self):
+        state = probe.Phase0Accounting()
+        trial = self.start(state)
+        wrong = probe.evaluate_l03_target_recall_after_freeze(
+            probe.evaluate_l03_anchors_without_gold(stdout(packet_output()), RECORDS),
+            load_metadata)
+        with self.assertRaisesRegex(ValueError, 'lane'):
+            state.complete_evaluation(trial.trial_id, wrong, 100)
+
+    def test_accounting_cannot_override_failed_evaluation_with_empty_reasons(self):
+        state = probe.Phase0Accounting()
+        self.complete(state, self.start(state))
+        trial = self.start(state)
+        failed = final_evaluation_for_trial(trial.trial_id, 'TARGET_RECALL_BELOW_7_OF_7')
+        record = state.complete_evaluation(trial.trial_id, failed, 100)
+        self.assertEqual(record.status, 'FAIL')
+        self.assertEqual(record.primary_failure_reason, 'TARGET_RECALL_BELOW_7_OF_7')
+        self.assertFalse(state.gate_passed)
+
+    def test_request_proof_must_be_typed_observation_not_dict(self):
+        state = probe.Phase0Accounting(); trial = state.begin_next()
+        forged = dataclasses.asdict(PROOF)
+        with self.assertRaises(TypeError):
+            state.mark_request_emitted(trial.trial_id, forged)
+
+    def test_three_of_seven_cannot_make_accounting_gate_pass(self):
+        state = probe.Phase0Accounting()
+        while len(state.records) < len(probe.TRIAL_ORDER):
+            trial = self.start(state)
+            if trial.status != 'STARTED':
+                continue
+            if trial.trial_id.startswith('L03'):
+                evaluation = final_evaluation_for_trial(
+                    trial.trial_id, 'TARGET_RECALL_BELOW_7_OF_7')
+            else:
+                evaluation = final_evaluation_for_trial(trial.trial_id)
+            state.complete_evaluation(trial.trial_id, evaluation, 100)
+        self.assertFalse(state.gate_passed)
+        self.assertTrue(any(
+            r.primary_failure_reason == 'TARGET_RECALL_BELOW_7_OF_7'
+            for r in state.records))
 
 
 class RawObserverIsolationTests(unittest.TestCase):
@@ -558,9 +671,9 @@ class RawObserverIsolationTests(unittest.TestCase):
         request = FakeRequest(); before = copy.deepcopy(vars(request))
         proof = probe.observe_request_without_mutation(request)
         self.assertEqual(vars(request), before)
-        self.assertEqual(proof['request_body_sha256'], hashlib.sha256(request.data).hexdigest())
-        self.assertIs(proof['enable_thinking'], False)
-        self.assertFalse(proof['authorization_header_present'])
+        self.assertEqual(proof.request_body_sha256, hashlib.sha256(request.data).hexdigest())
+        self.assertIs(proof.enable_thinking, False)
+        self.assertFalse(proof.authorization_header_present)
 
     def test_observer_rejects_each_wrong_body_field_without_mutation(self):
         for change in ({'model': 'other'}, {'temperature': 1}, {'temperature': False},
@@ -590,11 +703,13 @@ class RawObserverIsolationTests(unittest.TestCase):
 
     def test_adapter_source_guard_no_gold_io_or_execution(self):
         tree = ast.parse((HERE / 'format_probe.py').read_text())
-        disallowed_imports = ('socket', 'subprocess', 'urllib', 'requests', 'http', 'pathlib', 'os')
+        allowed_top_level = {'hashlib', 'json', 're', 'collections', 'dataclasses', 'datetime',
+                             'llmtool'}
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 modules = [x.name for x in node.names] if isinstance(node, ast.Import) else [node.module]
-                self.assertFalse(any(m.split('.')[0] in disallowed_imports for m in modules))
+                for module in modules:
+                    self.assertIn(module.split('.')[0], allowed_top_level)
                 self.assertFalse(any('provider' in m for m in modules))
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Name): self.assertNotIn(node.func.id, ('open', 'exec', 'eval'))
