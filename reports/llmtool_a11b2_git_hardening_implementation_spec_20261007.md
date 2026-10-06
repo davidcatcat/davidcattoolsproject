@@ -72,7 +72,7 @@ Reuse or exactly mirror A5's security boundary:
 - disable pager/color;
 - disable protocol access;
 - disable maintenance/gc auto side effects;
-- detect configured clean/smudge/process filters and neutralize them;
+- detect configured clean/smudge/process filters; for mutation, reject any configured filter driver instead of neutralizing it;
 - reject partial/promisor repositories;
 - bounded stdout/stderr;
 - wall-clock timeout;
@@ -181,9 +181,12 @@ Before any mutation:
 6. Reject execution when effective UID is 0/root.
 7. Reject a root that is itself a symlink.
 8. Reject nested/alternate repository resolution that differs from the bound root.
-9. Reject linked worktree / alternate git-dir arrangements unless explicitly proven safe
-   in this slice. Default: support ordinary non-bare working-tree repositories only.
-10. Reject bare repositories.
+9. Reject linked worktrees, gitfiles, alternate git dirs, `commondir`, object alternates,
+   `core.worktree`, config includes/includeIf, split/sparse index, alternate index and
+   sparse checkout. A11b.2 supports only one ordinary non-bare working-tree repository
+   with a real `<root>/.git` directory and one ordinary `<root>/.git/index`.
+10. Every Git subprocess must use program-generated absolute `GIT_DIR=<root>/.git` and
+    `GIT_WORK_TREE=<root>`; reject `core.bare=true`. Reject bare repositories.
 
 Any mismatch is fail closed before mutation.
 
@@ -199,8 +202,7 @@ Immediately before staging:
 - unresolved conflicts: reject;
 - partial/promisor repository: reject;
 - submodule paths in the action scope: reject;
-- sparse checkout: reject for A11b.2 unless implementation review proves deterministic
-  path semantics; default fail closed;
+- sparse checkout or sparse index: reject unconditionally in A11b.2;
 - repository administrative state that implies an in-progress Git operation: reject.
 
 A dirty working tree is **not globally forbidden** because ADD necessarily stages existing
@@ -208,6 +210,8 @@ working-tree changes. Instead, A11b.2 must enforce a stronger exact-scope rule:
 
 - unrelated staged changes: reject;
 - unrelated conflicted paths: reject;
+- target already staged, intent-to-add, assume-unchanged, skip-worktree, rename/copy, deletion, ignored-untracked, sparse, or gitlink/submodule state: reject;
+- disable rename detection in mutation preflight;
 - action-target paths must match their bound FileExpectation exactly;
 - unrelated unstaged/untracked files may remain untouched and must not be staged,
   deleted, reset, cleaned or rewritten;
@@ -228,8 +232,11 @@ For each path:
 - prepend `--` before path arguments;
 - never use pathspec globbing/magic;
 - use `GIT_LITERAL_PATHSPECS=1`;
-- resolve parent directories without following symlinks;
-- reject if any path component between repo root and target is a symlink;
+- walk parent directories from an already-open root dir-fd using `O_DIRECTORY|O_NOFOLLOW`-style semantics;
+- each parent must be owned by euid and must not be group- or world-writable;
+- reject if any component is a symlink;
+- open the target with `O_NOFOLLOW`; use the same fd for `fstat` and SHA-256 hashing;
+- require exact directory-entry name bytes to match the contract path, rejecting case-fold/NFC/NFD aliases;
 - target must exist and be a regular file;
 - target must not be a symlink;
 - target must have `st_nlink == 1`;
@@ -249,14 +256,15 @@ A11b.1 binds `expected_index_sha256`.
 
 A11b.2 must define one canonical index-hash algorithm and reuse it everywhere.
 
-Recommended:
-- locate the active Git index only through the reviewed repository layout;
-- ordinary repository only for this slice;
-- open the index with no-follow semantics where supported;
-- require regular file / nlink=1;
-- hash exact bytes with SHA-256;
-- absent index is represented by a separately reviewed canonical sentinel only if A11b.1
-  can bind it safely; otherwise reject repositories without an index in this slice.
+Normative index subset:
+- active index is exactly `<root>/.git/index`; no alternate index is supported;
+- open with no-follow semantics; require regular file and `nlink=1`;
+- hash exact raw bytes with SHA-256 using one A11b.2.1 function reused by future Action construction;
+- missing index: reject;
+- existing `<root>/.git/index.lock`: reject and never delete it;
+- split/shared index: reject (`core.splitIndex=true`, `sharedindex.*`, or index `link` extension);
+- sparse index/checkout: reject (`index.sparse`, `core.sparseCheckout`, `info/sparse-checkout`, or `sdir` extension);
+- any skip-worktree, assume-unchanged, or intent-to-add entry anywhere: reject.
 
 Before mutation:
 - current index hash must equal `payload.expected_index_sha256`;
@@ -274,11 +282,14 @@ This second pre-spawn verification is the A11b.2 TOCTOU gate.
 
 After `git add`:
 - recompute index hash;
-- collect hardened staged-status evidence;
-- prove only the requested paths changed staging state;
-- prove unrelated staged entries remain absent;
-- if post-state cannot be proven, return failure and leave evidence for later recovery;
-  do not run reset/restore/clean automatically in A11b.2.
+- compare pre/post stage-0 entries semantically as `(exact path bytes, mode, object OID, stage, skip-worktree/intent-to-add flags)`;
+- expected post-state is the complete pre-entry set with only authorized target entries replaced;
+- every unrelated semantic entry must remain identical and no new path may appear;
+- for each target, compute the Git blob OID from the A11b.1-bound original bytes using the repository object format and require the staged OID to match;
+- staged mode (100644/100755) must match the bound execute bit;
+- exact target path bytes must match; case/Unicode normalization substitution fails;
+- raw index SHA remains evidence for race/accounting binding but is not used as proof that unrelated semantic entries changed, because Git may refresh stat/cache bytes;
+- if post-state cannot be proven, return typed failure evidence and do not run reset/restore/clean.
 
 ## 9. Hardened Git ADD argv
 
@@ -325,14 +336,21 @@ commit.gpgSign=false
 tag.gpgSign=false
 ```
 
-Filter keys discovered by the hardened preflight must be neutralized exactly as A5 does:
-- `filter.*.clean=`
-- `filter.*.smudge=`
-- `filter.*.process=`
-- `filter.*.required=false`
+**Mutation-specific rule: reject, do not neutralize, transforming filters/attributes.**
 
-Implementation review must verify whether additional Git config can cause `git add` to
-execute external processes or transform content. If so, fail closed or neutralize it.
+Preflight rejects if any effective repository config defines
+`filter.<driver>.(clean|smudge|process|required)` or if any target path's `filter`
+attribute is set to a driver/value, even when that driver has no config.
+
+For every target, use fixed hardened `git check-attr -z` queries and reject any
+content-transforming attribute that is not `unspecified` or `unset`: `filter`, `text`,
+`eol`, `crlf`, `ident`, `working-tree-encoding`.
+
+Pin `core.autocrlf=false`, `core.safecrlf=false`, and `add.ignoreErrors=false`.
+Reject effective `core.fileMode=false`. Keep `core.hooksPath=/dev/null` and explicitly
+test `post-index-change`. Repository `include.path` / `includeIf` is rejected in this
+slice. Credential/SSH/GPG pins may remain defence in depth, but they are not the
+primary `git add` control.
 
 Do not set `safe.directory=*`.
 Do not trust repository config to authorize the repository.
@@ -678,3 +696,51 @@ NONE / details
 May implement A11b.2.1:
 YES / NO
 ```
+
+## 20. Security-review addendum — normative resolutions
+
+This section resolves the blockers in `reports/llmtool_a11b2_git_hardening_spec_review_20261007.md`.
+Where an earlier section conflicts with this addendum, this addendum is authoritative.
+
+### B1 — CLOSED in spec
+
+For mutation, configured filters and target `filter` attributes are rejected, not neutralized.
+This prevents git-crypt plaintext or full LFS content from being staged.
+
+### B2 — CLOSED in spec
+
+Transforming attributes are rejected; autocrlf/safecrlf/add.ignoreErrors are pinned; `core.fileMode=false` is rejected.
+Post-verification must prove staged blob OID equals the Git object hash of the exact A11b.1-bound bytes and staged mode matches the bound execute bit.
+
+### B3 — CLOSED in spec
+
+A11b.2 supports only a real non-symlink root with a real `.git` directory, explicit `GIT_DIR`/`GIT_WORK_TREE`, one ordinary index, no gitfile/commondir/alternates/config includes/core.worktree, and no split/sparse/special index modes.
+`index.lock` pre-existence is a hard reject and is never deleted.
+
+### B4 — CLOSED in spec
+
+Post-verification is semantic index-entry equality, not raw-index byte equality.
+Exact path bytes/mode/OID/stage/flags are compared; unrelated stat/cache refresh is tolerated only when semantic identity is unchanged.
+
+### B5 — A11b.2.2 gate only
+
+A11b.2.1 may implement deterministic preflight before B5 is closed.
+Before mutation code (A11b.2.2) starts, targeted security review must approve:
+- unconditional process-group cleanup even after the Git leader exits;
+- scoped SIGTERM/SIGHUP/SIGINT handlers that route through cleanup and restore previous handlers;
+- the macOS parent-SIGKILL strategy: supervisor/parent-death equivalent, or an explicitly accepted residual risk detected through index/semantic post-state recovery evidence;
+- the premise that filters/hooks/fsmonitor/helpers are rejected/disabled, so the expected child tree is only Git.
+
+### R5–R10 — required additions
+
+- R5: add an import/AST/CLI boundary test proving no production CLI/entrypoint/chat/orchestration/benchmark path imports or exposes the mutation module.
+- R6: the primitive does not accept or read `ApprovalValidationResult`; authorization remains an external caller precondition.
+- R7: preflight/result/failure evidence includes action digest, root dev/inode, object format, `Action.expected_state.digest`, pre/post index SHA, exact paths, exit/failure code and post-verify code.
+- R8: add adversarial cases for encrypting clean filters, driverless filter attrs, text/eol/ident/encoding attrs, post-index-change hook, included config/core.worktree, gitfile/commondir/alternates, index.lock, split/sparse/special index flags, case/NFD aliases, stat-only unrelated refresh, parent directory mode, real signals, and production import boundary.
+- R9: a malicious same-UID concurrent process is outside the preventable isolation boundary; pre/post verification detects accidental/residual races but is not an OS sandbox against the same user.
+- R10: QG-S1 OS sandbox requirements for executing repository code do not apply to this ADD-only subset only if tests prove all repo-code execution vectors (filters/transforming attrs/hooks/fsmonitor/helpers/alternate worktree) are rejected or disabled.
+
+### Updated authorization
+
+A11b.2.1 remains NOT AUTHORIZED until this addendum passes the requested targeted follow-up review.
+A11b.2.2 remains additionally blocked on B5 even if A11b.2.1 is authorized.
