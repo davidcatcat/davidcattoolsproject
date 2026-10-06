@@ -295,6 +295,14 @@ class OfflineTests(unittest.TestCase):
                      'PROVIDER_HTTP_ERROR', 'PROVIDER_RATE_LIMITED', 'AUTH_PROVIDER_REJECTED'):
             self.assertEqual(wrapper.failure_reason(code), 'TRANSPORT_OR_REQUEST_FAILURE')
 
+    def test_model_response_invalid_mapping(self):
+        self.assertEqual(wrapper.failure_reason('MODEL_RESPONSE_INVALID'),
+                         'TRANSPORT_OR_REQUEST_FAILURE')
+
+    def test_model_response_too_large_mapping(self):
+        self.assertEqual(wrapper.failure_reason('MODEL_RESPONSE_TOO_LARGE'),
+                         'TRANSPORT_OR_REQUEST_FAILURE')
+
     def test_model_length_mapping(self):
         self.assertEqual(wrapper.failure_reason('MODEL_OUTPUT_INCOMPLETE'), 'MODEL_OUTPUT_INCOMPLETE')
 
@@ -553,8 +561,11 @@ class OfflineTests(unittest.TestCase):
 
     def test_future_runner_fake_length_unknown_halts(self):
         runner, record = self.run_fake('L03', {'choices': [{'finish_reason': 'length'}]})
+        self.assertTrue(record.request_emitted)
+        self.assertEqual(record.status, 'FAIL')
         self.assertEqual(record.primary_failure_reason, 'MODEL_OUTPUT_INCOMPLETE')
         self.assertIsNone(record.usage_total)
+        self.assertIsNone(runner.accounting.complete_total)
         self.assertEqual(runner.accounting.begin_next().primary_failure_reason, 'COMPANY_TOKEN_ACCOUNTING_UNKNOWN')
 
     def test_future_runner_fake_inconsistent_usage_unknown(self):
@@ -592,6 +603,106 @@ class OfflineTests(unittest.TestCase):
             self.assertFalse(runner.accounting.records[-1].request_emitted)
             with self.assertRaises(wrapper.WrapperIntegrityFailure):
                 runner.run_next(directory)
+
+    def assert_provider_failure_accounted(self, lane, raw_response, safe_code,
+                                         logical_reason='TRANSPORT_OR_REQUEST_FAILURE'):
+        """Real CLI/client/admission, with ONLY an in-memory instance opener."""
+        from llmtool.providers.openai_compatible import OpenAICompatibleClient as Client
+        original_init = Client.__init__
+        original_invoke = wrapper.invoke_cli
+        class Response(io.BytesIO):
+            status = 200
+        runner = wrapper.Phase0Wrapper(self.registration)
+        if lane == 'L03':
+            state, trial = self.emitted('L02')
+            state.complete_evaluation(trial.trial_id, wrapper.evaluate_raw('L02', log_raw()), 10)
+            runner.accounting = state
+        calls, outcomes = [], []
+
+        def initialize(client, *args, **kwargs):
+            original_init(client, *args, **kwargs)
+            def fake(request, **options):
+                calls.append((request, options))
+                return Response(raw_response)
+            client.opener.open = fake
+
+        def capture_outcome(*args, **kwargs):
+            outcome = original_invoke(*args, **kwargs)
+            outcomes.append(outcome)
+            return outcome
+
+        with patch.object(Client, '__init__', initialize), \
+                patch.object(wrapper, 'invoke_cli', capture_outcome), \
+                tempfile.TemporaryDirectory() as directory:
+            try:
+                record = runner.run_next(directory)
+            except wrapper.WrapperIntegrityFailure:
+                self.assertEqual(outcomes[0]['safe_error_code'], safe_code)
+                self.fail('provider failure left emitted trial STARTED instead of terminal FAIL')
+            self.assertEqual(len(outcomes), 1)
+            self.assertEqual(outcomes[0]['safe_error_code'], safe_code)
+            self.assertEqual(outcomes[0]['exit'], 1)
+            self.assertEqual(outcomes[0]['raw_stdout'], b'')
+            self.assertIsNone(outcomes[0]['metadata'])
+            self.assertTrue(record.request_emitted)
+            self.assertEqual(record.status, 'FAIL')
+            self.assertEqual(record.primary_failure_reason, logical_reason)
+            self.assertIsNone(record.usage_total)
+            self.assertIsNone(runner.accounting.complete_total)
+            self.assertIn('COMPANY_TOKEN_ACCOUNTING_UNKNOWN', record.secondary_diagnostics)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], {'timeout': 120})
+            self.assertEqual(json.loads(calls[0][0].data)['max_tokens'], 4096)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+            # Exercise the runner, not just begin_next: EVERY later logical trial
+            # must be recorded as not started, without a second delegation.
+            remaining = len(probe.TRIAL_ORDER) - len(runner.accounting.records)
+            for _ in range(remaining):
+                skipped = runner.run_next(directory)
+                self.assertEqual(skipped.status, 'NOT_STARTED')
+                self.assertEqual(skipped.primary_failure_reason, 'COMPANY_TOKEN_ACCOUNTING_UNKNOWN')
+                self.assertIsNone(skipped.usage_total)
+                self.assertFalse(skipped.request_emitted)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(outcomes), 1)
+            self.assertFalse(runner.accounting.gate_passed)
+
+    def test_provider_invalid_json_terminal_accounting(self):
+        for lane in ('L02', 'L03'):
+            with self.subTest(lane=lane):
+                self.assert_provider_failure_accounted(lane, b'not valid json', 'MODEL_RESPONSE_INVALID')
+
+    def test_provider_invalid_finish_reason_terminal_accounting(self):
+        raw = json.dumps({'choices': [{'finish_reason': 'unexpected'}]}).encode()
+        for lane in ('L02', 'L03'):
+            with self.subTest(lane=lane):
+                self.assert_provider_failure_accounted(lane, raw, 'MODEL_RESPONSE_INVALID')
+
+    def test_provider_invalid_message_terminal_accounting(self):
+        for lane in ('L02', 'L03'):
+            for message in (
+                    {'content': 'synthetic', 'tool_calls': [{'type': 'function'}]},
+                    {'content': 'synthetic', 'function_call': {'name': 'synthetic'}},
+                    {'content': ''}, {'content': []}):
+                with self.subTest(lane=lane, message=message):
+                    raw = json.dumps({'choices': [{'finish_reason': 'stop', 'message': message}]}).encode()
+                    self.assert_provider_failure_accounted(lane, raw, 'MODEL_RESPONSE_INVALID')
+
+    def test_provider_response_too_large_terminal_accounting(self):
+        from llmtool.providers import openai_compatible as provider
+        # Exercise the real bound check without allocating >16 MiB. Only the
+        # test-local response limit changes; Request/config/source bytes do not.
+        with patch.object(provider, 'RESPONSE_LIMIT', 64):
+            for lane in ('L02', 'L03'):
+                with self.subTest(lane=lane):
+                    self.assert_provider_failure_accounted(lane, b'x' * 65, 'MODEL_RESPONSE_TOO_LARGE')
+
+    def test_provider_length_terminal_accounting_still_distinct(self):
+        raw = json.dumps({'choices': [{'finish_reason': 'length'}]}).encode()
+        for lane in ('L02', 'L03'):
+            with self.subTest(lane=lane):
+                self.assert_provider_failure_accounted(lane, raw, 'MODEL_OUTPUT_INCOMPLETE',
+                                                       'MODEL_OUTPUT_INCOMPLETE')
 
 
 if __name__ == '__main__':

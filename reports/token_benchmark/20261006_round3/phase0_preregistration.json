@@ -1,9 +1,9 @@
 {
   "artifacts": {
     "reports/token_benchmark/20261006_round3/format_probe.py": "500fb8bd990d3a5bdb6e18779619ca87a21af964a84682f88a10741b4fee87a3",
-    "reports/token_benchmark/20261006_round3/live_wrapper.py": "9a8db0770fff71417ae9ad2bf324d657803964f764273ae2eabf51a83c2cc94b",
+    "reports/token_benchmark/20261006_round3/live_wrapper.py": "3429c09cc56c5be7e973c1d71b35ce6f2a027dfe0dbecb3e7cc6ab1e18f70360",
     "reports/token_benchmark/20261006_round3/test_format_probe.py": "80e62df3140e10b34cfe6cf22188e219e53ca0aac0568d08602e0e4169cefd79",
-    "reports/token_benchmark/20261006_round3/test_live_wrapper.py": "ca0975a08df18de11b8f7bc7f59ba8eccd7c8e0455e9c3f1a97d5b8c4b765864",
+    "reports/token_benchmark/20261006_round3/test_live_wrapper.py": "a666e0d45648a9d0836af0556eaa64e10e3905b4e9ad05d4282f69e0f5177378",
     "tools/llmtool/llmtool/cli.py": "7e510422b30f9c626e1849dce1f98e38d631877be5359c86fb155beefb0d47d4",
     "tools/llmtool/llmtool/config.py": "6826276af9e24246e679636cef3e65dec339547cdb4ebdc353414c43c7c6011c",
     "tools/llmtool/llmtool/context.py": "dc22eaaa11f12747534c6f1f1c076b0f6e309bf5700803ce3e1288db5086ee8e",

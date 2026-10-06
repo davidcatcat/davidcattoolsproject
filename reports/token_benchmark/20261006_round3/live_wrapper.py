@@ -292,7 +292,8 @@ def failure_reason(safe_code):
     if safe_code == 'MODEL_OUTPUT_INCOMPLETE':
         return safe_code
     if safe_code in ('NETWORK_PROVIDER_UNREACHABLE', 'PROVIDER_TIMEOUT', 'PROVIDER_RUNTIME_ERROR',
-                     'PROVIDER_HTTP_ERROR', 'PROVIDER_RATE_LIMITED', 'AUTH_PROVIDER_REJECTED'):
+                     'PROVIDER_HTTP_ERROR', 'PROVIDER_RATE_LIMITED', 'AUTH_PROVIDER_REJECTED',
+                     'MODEL_RESPONSE_INVALID', 'MODEL_RESPONSE_TOO_LARGE'):
         return 'TRANSPORT_OR_REQUEST_FAILURE'
     raise WrapperIntegrityFailure()
 
