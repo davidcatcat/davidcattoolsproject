@@ -189,3 +189,25 @@ publication response; they are not represented by this report's implementation S
 Independent review is pending. Do not merge or begin Round 4 from these results.
 
 Ready for independent review: **YES**, subject to exact-head CI confirmation.
+
+
+## Historical frozen-benchmark compatibility
+
+P1 intentionally changes production bytes that the already-merged Round-3 Phase-0
+preregistration pinned. Specifically, the frozen manifest includes
+`diagnostics.py`, `errors.py`, and `providers/openai_compatible.py`.
+
+After P1 is merged to `main`, the historical
+`reports/token_benchmark/20261006_round3/test_live_wrapper.py` suite is therefore
+expected to fail closed during manifest/artifact verification when run directly on the
+newer `main`. This is expected behavior of the sealed experiment and must not be
+classified as a P1 production regression.
+
+Round-3 frozen-wrapper reproduction belongs on historical merge commit
+`59ef2b7faca481a6e40f6d535960032547ce1c6a` (or the exact earlier implementation SHA
+named by the relevant dated report). The frozen Round-3 manifest/tests must **not** be
+regenerated or edited to follow P1. A future Round-4 experiment must create a new
+manifest against its own reviewed production revision.
+
+This compatibility note changes no historical Round-3 result: the previously unknown
+L02-2 usage remains unknown, and P1 does not retroactively recover it.
