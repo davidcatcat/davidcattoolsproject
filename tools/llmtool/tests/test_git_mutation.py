@@ -274,6 +274,15 @@ class GitPreflightTests(unittest.TestCase):
         result = g.preflight_git_add(self.action())
         self.assertEqual(result.bound_blobs[0].mode, 0o100755)
 
+    def test_git_mode_uses_owner_execute_not_group_or_other_execute(self):
+        (self.root/'target.txt').chmod(0o645)
+        result = g.preflight_git_add(self.action())
+        # Native Git in this disposable fixture provides the reference mode.
+        self.git('add','target.txt')
+        actual_mode = int(self.git('ls-files','--stage','--','target.txt').split()[0],8)
+        self.assertEqual(actual_mode,0o100644)
+        self.assertEqual(result.bound_blobs[0].mode,actual_mode)
+
     def test_submodule_gitlink_rejected(self):
         self.git('update-index', '--add', '--cacheinfo', '160000',
                  self.git('rev-parse','HEAD').decode().strip(), 'module')

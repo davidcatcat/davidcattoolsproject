@@ -432,7 +432,7 @@ def _target(rootfd, expectation, object_format):
                 or hashlib.sha256(raw).hexdigest() != expectation.state.content_sha256):
             _reject('file/path mismatch')
         return BoundBlob(expectation.path, git_blob_oid(raw, object_format),
-                         0o100755 if md.mode & 0o111 else 0o100644)
+                         0o100755 if md.mode & 0o100 else 0o100644)
 
 
 def _attribute_sources(rootfd, paths):
