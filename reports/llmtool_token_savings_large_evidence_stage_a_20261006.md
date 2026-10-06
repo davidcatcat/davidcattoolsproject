@@ -1,6 +1,6 @@
 # llmtool Round-2 Stage-A measured benchmark — 2026-10-06
 
-**STAGE A EXECUTED / PRELIMINARY DESCRIPTIVE PILOT.** Six Codex sessions and three company requests completed. L01 passes the mechanical gates, pending independent semantic quality review. L02 and L03 are **INVALID_FOR_SAVINGS_CLAIM**. No quality-approved aggregate or Round-2 savings claim is available.
+**STAGE A EXECUTED / INDEPENDENT BLIND QUALITY REVIEW COMPLETE.** Six Codex sessions and three company requests completed. L01 is the only quality-approved valid pair: CONTROL 34,235 vs DOGFOOD 20,604, a descriptive n=1 reduction of 13,631 Codex tokens (39.816%). L02 and L03 remain **INVALID_FOR_SAVINGS_CLAIM**. This does not establish a generalized Round-2 or production-routing savings claim.
 
 ## Execution contract and provenance
 
@@ -134,7 +134,7 @@ Raw JSONL usage/digests, fixed command settings/order, six distinct thread IDs, 
 
 **Blinding limitation:** L02 DOGFOOD mentions the supplied company result; L03 DOGFOOD mentions company-reported values. Those original answer words can reveal provenance even with random filenames. They have not been edited to conceal identity. Therefore the anonymous package does **not** establish full blinding for these two already-invalid pairs. Independent reviewers must address this constraint before accepting a blind-review conclusion. L01 has no such identity terms in its answer.
 
-Two independent semantic graders must receive only anonymous output + fixture/gold/schema/task, excluding metrics/company outputs/mapping/PR reports. Preserve every deterministic miss. Disagreement blocks quality approval until an independently documented tie-break. **BLIND_REVIEW_REQUIRED / PENDING** for all pairs. No quality-approved aggregate.
+Two independent semantic graders must receive only anonymous output + fixture/gold/schema/task, excluding metrics/company outputs/mapping/PR reports. Preserve every deterministic miss. Disagreement blocks quality approval until an independently documented tie-break. Independent blind grading is complete. Two graders agreed 6/6 on individual outputs and 3/3 on pair parity; no tie-break was needed. L01 is EQUIVALENT and fully blind. L02 is EQUIVALENT but remains mechanically invalid. L03 is A BETTER with the DOGFOOD-side answer failing quality, consistent with its deterministic failure. Provenance wording weakens blinding for L02/L03, but both are already invalid for a savings claim.
 
 ## Scope, publication and limitations
 
@@ -149,7 +149,7 @@ Two independent semantic graders must receive only anonymous output + fixture/go
 ## Required execution summary
 
 ```text
-Stage A execution status: EXECUTED; independent quality review pending
+Stage A execution status: EXECUTED; independent blind quality review complete
 
 L01
 CONTROL Codex: 34,235
@@ -158,8 +158,8 @@ Provisional Codex saving: +13,631 / 39.816% (arithmetic only)
 Company tokens: 19,675
 Selected raw bytes/%: 1,768 / 3.597%
 Deterministic grade: CONTROL PASS / DOGFOOD PASS
-Blind review: PENDING
-Validity: MECHANICAL_GATES_PASS; BLIND_QUALITY_PENDING
+Blind review: 2/2 graders PASS/PASS; pair EQUIVALENT
+Validity: QUALITY_APPROVED_VALID_PAIR
 
 L02
 CONTROL Codex: 40,253
@@ -168,7 +168,7 @@ Provisional Codex saving: +18,562 / 46.113% (arithmetic only)
 Company tokens: 31,639
 Selected raw bytes/%: 1,892 / 2.887%
 Deterministic grade: CONTROL PASS / DOGFOOD PASS
-Blind review: PENDING
+Blind review: 2/2 graders PASS/PASS; pair EQUIVALENT
 Validity: INVALID_FOR_SAVINGS_CLAIM
 
 L03
@@ -178,7 +178,7 @@ Provisional Codex saving: +38,971 / 65.883% (arithmetic only)
 Company tokens: 54,075
 Selected raw bytes/%: 0 / 0.000%
 Deterministic grade: CONTROL PASS / DOGFOOD FAIL
-Blind review: PENDING
+Blind review: 2/2 graders: A PASS / B FAIL; pair A BETTER
 Validity: INVALID_FOR_SAVINGS_CLAIM
 
 Measured Codex Stage-A total: 196,116
@@ -189,10 +189,48 @@ Pairs not started: 0
 Pairs invalid: 2 (L02/L03)
 
 Quality-approved aggregate:
-NOT AVAILABLE — blind review pending
+L01 only — CONTROL 34,235 vs DOGFOOD 20,604; +13,631 Codex tokens saved (+39.816%), n=1 descriptive
 
-Can claim Round-2 Codex savings:
-NO — blind quality review pending
+Can claim generalized Round-2 Codex savings:
+NO — only one valid quality-approved synthetic pair; L02/L03 are invalid
 ```
 
 Stop after normal publication to existing Draft PR #37. No Stage B, semantic reruns, artifact amendments, quality-approved claim or merge.
+
+
+## Independent blind quality review result
+
+Review source: [Stage-A review](llmtool_token_savings_large_evidence_stage_a_review_20261006.md).
+
+Two independent graders agreed on all six anonymous output verdicts and all three pair
+parity judgments; no tie-break was required:
+
+| Fixture | Grader 1 | Grader 2 | Pair parity | Savings validity |
+|---|---|---|---|---|
+| L01 | A PASS / B PASS | A PASS / B PASS | EQUIVALENT | **QUALITY_APPROVED_VALID_PAIR** |
+| L02 | A PASS / B PASS | A PASS / B PASS | EQUIVALENT | INVALID: COMPANY_TRIAGE_COVERAGE_MISS |
+| L03 | A PASS / B FAIL | A PASS / B FAIL | A BETTER | INVALID: coverage miss + quality failure |
+
+Only L01 enters the quality-approved aggregate:
+
+- CONTROL: **34,235**
+- DOGFOOD: **20,604**
+- Codex tokens saved: **13,631**
+- Primary saving: **39.816%**
+- sample size: **n=1**
+- interpretation: descriptive evidence for this frozen synthetic canonical 48 KiB
+  test-output fixture only.
+
+L02's semantic output quality was equivalent, but the preregistered company coverage
+contract failed, so its 46.113% arithmetic difference remains invalid for a savings
+claim. L03's 65.883% arithmetic difference is invalid because company citation coverage
+failed, zero raw evidence was selected, and DOGFOOD quality failed.
+
+Blinding caveat: L02/L03 answers contain provenance wording that can weaken anonymity;
+those pairs were already invalid. L01 contained no provenance wording and retained the
+intended blind comparison. Grader #2 disclosed one read-only shell inspection of the
+permitted L03 fixture only; no forbidden files were read.
+
+The preregistered Stage-B trigger is met for **L01 only**. Stage B remains NOT STARTED
+and requires separate explicit authorization. Its result must remain separate from
+Stage A and cannot be pooled as an unbiased estimate.
