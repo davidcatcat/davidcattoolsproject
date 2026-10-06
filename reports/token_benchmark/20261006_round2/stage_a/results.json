@@ -1,6 +1,6 @@
 {
-  "status": "STAGE_A_EXECUTED; QUALITY_REVIEW_PENDING",
-  "interpretation": "n=1 pair per fixture; preliminary descriptive observations only",
+  "status": "STAGE_A_EXECUTED; INDEPENDENT_BLIND_QUALITY_REVIEW_COMPLETE",
+  "interpretation": "n=1 descriptive Stage-A pilot; one quality-approved valid pair (L01); no generalized routing/savings claim",
   "repository": "davidcatcat/davidcattoolsproject",
   "canonical_root": "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
   "environment": "actual Mac; company VPN route utun4",
@@ -983,7 +983,7 @@
         "pre_merge_range_count": 0,
         "selected_ranges": [],
         "selected_raw_bytes": 0,
-        "selected_percentage": 0.0,
+        "selected_percentage": 0,
         "raw_cap_bytes": 26214,
         "selected_raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
         "manifest_sha256": "bf7d5de5fedc759331281905d5780631b351b582bc4b839f37d863727b7b5165"
@@ -1091,14 +1091,15 @@
           "tests/test_plugin.py::test_load_optional": true
         }
       },
-      "semantic_status": "BLIND_REVIEW_REQUIRED",
-      "blind_review": "PENDING",
+      "semantic_status": "BLIND_REVIEW_COMPLETE",
+      "blind_review": "2/2 GRADERS: PASS/PASS; PAIR EQUIVALENT",
       "blinding_limitation": false,
       "flags": [],
-      "validity": "MECHANICAL_GATES_PASS; BLIND_QUALITY_PENDING",
+      "validity": "QUALITY_APPROVED_VALID_PAIR",
       "pair_actual_usage": 54839,
       "remaining_budget_after_pair": 345161,
-      "company_adopted_overridden": "Exact returned failure IDs/signature groups retained in final structured answers; semantics pending."
+      "company_adopted_overridden": "Exact returned failure IDs/signature groups retained in final structured answers; semantics pending.",
+      "quality_approved": true
     },
     {
       "fixture": "L02",
@@ -1176,8 +1177,8 @@
           "EVT-R01": true
         }
       },
-      "semantic_status": "BLIND_REVIEW_REQUIRED",
-      "blind_review": "PENDING",
+      "semantic_status": "BLIND_REVIEW_COMPLETE",
+      "blind_review": "2/2 GRADERS: PASS/PASS; PAIR EQUIVALENT",
       "blinding_limitation": true,
       "flags": [
         "COMPANY_TRIAGE_COVERAGE_MISS"
@@ -1185,7 +1186,8 @@
       "validity": "INVALID_FOR_SAVINGS_CLAIM",
       "pair_actual_usage": 61944,
       "remaining_budget_after_pair": 283217,
-      "company_adopted_overridden": "Final output retains canonical event tuples/counts and omits noncanonical extras; semantic quality pending."
+      "company_adopted_overridden": "Final output retains canonical event tuples/counts and omits noncanonical extras; semantic quality pending.",
+      "quality_approved": false
     },
     {
       "fixture": "L03",
@@ -1203,7 +1205,7 @@
       "mixed_scope": "descriptive across different tokenizers, not cost/compute/energy",
       "full_fixture_bytes": 131072,
       "selected_raw_bytes": 0,
-      "selected_raw_percent": 0.0,
+      "selected_raw_percent": 0,
       "range_count": 0,
       "pre_merge_range_count": 0,
       "selected_ranges": [],
@@ -1255,8 +1257,8 @@
           "REC-V01": false
         }
       },
-      "semantic_status": "BLIND_REVIEW_REQUIRED",
-      "blind_review": "PENDING",
+      "semantic_status": "BLIND_REVIEW_COMPLETE",
+      "blind_review": "2/2 GRADERS: A PASS / B FAIL; PAIR A_BETTER",
       "blinding_limitation": true,
       "flags": [
         "COMPANY_TRIAGE_COVERAGE_MISS",
@@ -1265,7 +1267,8 @@
       "validity": "INVALID_FOR_SAVINGS_CLAIM",
       "pair_actual_usage": 79333,
       "remaining_budget_after_pair": 203884,
-      "company_adopted_overridden": "Final DOGFOOD facts/evidence empty; company statements remain unverified. No raw anchors supplied."
+      "company_adopted_overridden": "Final DOGFOOD facts/evidence empty; company statements remain unverified. No raw anchors supplied.",
+      "quality_approved": false
     }
   ],
   "budget": {
@@ -1329,9 +1332,21 @@
     "L02",
     "L03"
   ],
-  "quality_approved_aggregate": null,
+  "quality_approved_aggregate": {
+    "fixture_count": 1,
+    "fixtures": [
+      "L01"
+    ],
+    "control": 34235,
+    "dogfood": 20604,
+    "saved": 13631,
+    "savings_pct": 39.81597780049657,
+    "interpretation": "DOGFOOD_REDUCED_CODEX_USAGE_FOR_ONE_QUALITY_APPROVED_VALID_N1_PAIR",
+    "descriptive_only": true,
+    "generalized_claim": false
+  },
   "can_claim_round2_codex_savings": false,
-  "claim_reason": "blind quality review pending; L02/L03 mechanically invalid; intrinsic blinding limitation preserved",
+  "claim_reason": "L01 is a quality-approved valid n=1 observation (+13,631 / +39.82% Codex savings), but L02/L03 are invalid and the synthetic canonical design does not support a generalized Round-2/routing claim.",
   "verification": {
     "frozen_artifacts_verified": 16,
     "python39_self_check": {
@@ -1378,5 +1393,49 @@
     "company_tokens": 294036
   },
   "whole_workflow_cost": "unknown: coordinator and review usage not measured here; no monetary/compute/energy claim",
-  "publication_head": "read final branch/PR head; do not create self-referential report commits"
+  "publication_head": "read final branch/PR head; do not create self-referential report commits",
+  "independent_blind_review": {
+    "report": "reports/llmtool_token_savings_large_evidence_stage_a_review_20261006.md",
+    "status": "PASS_FOR_L01_VALID_PAIR",
+    "graders": 2,
+    "grader_agreement": {
+      "output_verdicts": "6/6",
+      "pair_parity": "3/3",
+      "tie_break_required": false
+    },
+    "output_verdicts": {
+      "L01-A": "PASS",
+      "L01-B": "PASS",
+      "L02-A": "PASS",
+      "L02-B": "PASS",
+      "L03-A": "PASS",
+      "L03-B": "FAIL"
+    },
+    "pair_parity": {
+      "L01": "EQUIVALENT",
+      "L02": "EQUIVALENT",
+      "L03": "A_BETTER"
+    },
+    "limitations": [
+      "L02/L03 anonymous answers contain provenance wording that may weaken blinding; both pairs were already invalid for a savings claim.",
+      "L01 answers contain no provenance wording; L01 blinding remained intact.",
+      "Grader #2 disclosed one read-only shell inspection of the permitted L03 fixture only; no forbidden files were read."
+    ]
+  },
+  "stage_b_trigger": {
+    "L01": {
+      "met": true,
+      "reason": "quality EQUIVALENT; accounting/delivery valid; primary savings 39.82% >=10%"
+    },
+    "L02": {
+      "met": false,
+      "reason": "INVALID_FOR_SAVINGS_CLAIM: COMPANY_TRIAGE_COVERAGE_MISS"
+    },
+    "L03": {
+      "met": false,
+      "reason": "INVALID_FOR_SAVINGS_CLAIM: COMPANY_TRIAGE_COVERAGE_MISS + QUALITY_PARITY_FAIL"
+    },
+    "authorization_required": true,
+    "started": false
+  }
 }
