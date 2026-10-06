@@ -74,6 +74,46 @@ If the gateway/profile cannot prove that the request used the intended
 `enable_thinking=false` benchmark configuration, STOP that fixture before its measured
 DOGFOOD Codex session.
 
+## Size-feasibility gate before fixture preregistration
+
+The 64/128/256 KiB targets are hypotheses, not guaranteed runtime capacities.
+
+Before generating/finalizing the measured fixtures, run a **non-semantic capability
+preflight** for both lanes:
+
+1. **Codex control-lane feasibility:** verify the pinned Codex CLI/model/session shape
+   can accept a synthetic payload at each target byte size plus the fixed task/schema
+   envelope without context/transport rejection.
+2. **Company-lane feasibility:** verify the pinned company profile
+   (`enable_thinking=false`, temperature 0, max_tokens 4096) can accept a synthetic
+   non-benchmark payload at each target byte size without context/transport/length
+   rejection.
+
+These calls are capability preflights only:
+- use generated filler distinct from all benchmark fixtures;
+- do not contain benchmark identifiers/gold/answers;
+- do not count in Stage A token totals;
+- record version/config, byte size, success/failure and any reported context error;
+- do not use their output to tune benchmark answers or selector behavior.
+
+A target size is eligible only if **both** lanes pass.
+
+If 256 KiB fails but a smaller target passes, do not silently choose an arbitrary size.
+Use the largest pre-declared fallback tier below that passes both lanes:
+
+```text
+L01 tiers: 64 KiB -> 48 KiB -> 32 KiB
+L02 tiers: 128 KiB -> 96 KiB -> 64 KiB
+L03 tiers: 256 KiB -> 192 KiB -> 128 KiB -> 96 KiB
+```
+
+Record the chosen tier before fixture/gold generation and commit it in preregistration.
+If no tier for a fixture passes both lanes, mark that fixture
+`TARGET_SIZE_NOT_FEASIBLE` and do not run its measured pair.
+
+This gate prevents a mid-experiment size change while avoiding unsupported assumptions
+about deployment/model context limits.
+
 ## Large synthetic fixtures
 
 All fixtures/gold/schema/generator output are pre-registered and committed before the
@@ -135,18 +175,27 @@ Gold is committed before execution and contains:
 - expected target record/test/event identifiers;
 - expected target raw line ranges.
 
+**Gold is grading-only. It must never influence company prompting, identifier selection,
+range selection, range expansion, merge decisions or cap allocation.** The selector may
+use only the frozen raw fixture, frozen selector rules and the company output.
+
 Company output does not need to invent byte/line locators.
 
 Instead:
 
 1. validate returned identifiers/signatures/sources against the raw fixture;
-2. map validated identifiers deterministically to raw line ranges;
-3. merge nearby ranges deterministically;
+2. map **only those validated company-returned identifiers** deterministically to raw
+   line ranges;
+3. apply the pre-registered context-padding and merge rules;
 4. produce one bounded evidence-reader request containing all selected ranges;
-5. prove gold target coverage mechanically where possible.
+5. freeze the selected-range artifact and digest;
+6. only **after selection is frozen**, compare it with gold to measure target coverage.
 
-This avoids trusting company-generated locations and avoids one Codex model round-trip
-per range.
+If gold later shows a missed target, the selector must not be repaired or widened for
+that run. The miss remains evidence and can invalidate the pair.
+
+This avoids answer leakage, avoids trusting company-generated locations and avoids one
+Codex model round-trip per range.
 
 ## Selective-read contract
 
@@ -164,6 +213,17 @@ DOGFOOD initial context:
 
 DOGFOOD may perform **one evidence-reader tool call** that returns all preselected raw
 ranges in one invocation.
+
+Pre-registered selector rules must be frozen before any measured run:
+
+- exact-match validated identifier anchors only;
+- context padding: **2 lines before + 2 lines after** each matched anchor;
+- merge ranges when their padded line intervals overlap or are separated by **<= 2
+  lines**;
+- order ranges by source line number;
+- no semantic/manual range expansion;
+- max selected ranges before merge: **32**;
+- after merge, selected bytes must satisfy the raw-read cap below.
 
 Pre-registered raw-read cap:
 
@@ -283,6 +343,13 @@ same immutable fixture/gold/config.
 This trigger is pre-registered before any Stage A result is observed. It is an
 experiment-efficiency rule, not a production routing threshold.
 
+Because Stage B selectively confirms only positive Stage-A candidates, its estimates
+are subject to selection bias / winner's curse. Stage-B results must therefore:
+- be reported per fixture, paired with the original Stage-A observation;
+- **not** be pooled with Stage A as an unbiased overall saving estimate;
+- not be used to claim a stable saving percentage or threshold;
+- be described only as reverse-order confirmation evidence for a selected candidate.
+
 If no fixture qualifies, Stage B is skipped.
 
 ## Interpretation
@@ -323,7 +390,11 @@ separated from company token totals.
 STOP before measured execution if:
 - Codex CLI version/schema changed;
 - exact company `enable_thinking=false` configuration cannot be established;
+- target-size feasibility gate has not passed for both Codex and company lanes;
 - fixtures/gold are not committed first;
+- selector rules/range artifact/digests are not deterministic and frozen before
+  gold coverage grading;
+- gold data is used to influence selected ranges;
 - raw-read cap/coverage tooling is not deterministic;
 - branch/repository identity is wrong.
 
