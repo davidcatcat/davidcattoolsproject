@@ -165,6 +165,52 @@ Dogfood path: `context-pack`.
 
 Exact byte size and SHA-256 are fixed in preregistration.
 
+Each fixture is produced by a committed deterministic generator:
+- generator source is committed before measured execution;
+- seed is fixed in preregistration;
+- generator version/source SHA-256 is recorded;
+- generator inputs/config are committed;
+- regenerated output must byte-match the committed fixture SHA-256.
+
+The generator must not read gold during evidence placement or noise generation. Gold is
+derived/frozen as a separate grading artifact and cannot feed back into generation after
+the fixture is committed.
+
+## Benchmark budget gate
+
+Round 2 is intentionally bounded because large-control prompts can consume substantial
+premium-model usage.
+
+The size-feasibility preflight must record source-reported Codex usage for each candidate
+payload tier. Before fixture generation, preregistration records a conservative Stage-A
+usage budget derived from those preflight observations.
+
+Hard experiment ceiling:
+
+```text
+Stage-A measured Codex comparable-token budget <= 400,000 tokens total
+Stage-B additional measured Codex comparable-token budget <= 200,000 tokens total
+```
+
+These are experiment spending ceilings, not KPI normalization and not production
+routing thresholds.
+
+Before Stage A:
+- sum the preflight-observed comparable totals for the chosen three CONTROL-size
+  payloads;
+- add a conservative 2x allowance for the three DOGFOOD sessions;
+- if that forecast exceeds 400,000, STOP and choose only among the already-declared
+  smaller feasible tiers before fixture generation.
+
+During execution:
+- never stop a measured pair based on whether its result looks favorable;
+- after each complete pair, update cumulative measured usage;
+- do not start the next pair if its pre-registered conservative allowance would exceed
+  the remaining ceiling.
+
+Stage B is separately capped at 200,000 and retains its pre-registered trigger.
+Unstarted fixtures are reported as `BUDGET_CEILING_NOT_STARTED`, never as zero usage.
+
 ## Gold and deterministic locator design
 
 Gold is committed before execution and contains:
@@ -194,8 +240,105 @@ Instead:
 If gold later shows a missed target, the selector must not be repaired or widened for
 that run. The miss remains evidence and can invalidate the pair.
 
-This avoids answer leakage, avoids trusting company-generated locations and avoids one
-Codex model round-trip per range.
+This avoids answer leakage and avoids trusting company-generated locations.
+
+## Gold-independent deterministic coverage contract
+
+Coverage is computed by a committed, frozen `coverage.py` that **must not read,
+import, open or receive any gold file/path/content**. Its source, regex/config and
+SHA-256 are committed before measured execution.
+
+Fixture syntax is also frozen before generation so coverage can be mechanical.
+
+### L01 coverage
+
+Generated failure records use canonical lines:
+
+```text
+FAILURE test_id=<TEST_ID> file=<PATH> kind=<FAILED|ERROR> signature=<SIGNATURE>
+```
+
+`coverage.py` extracts the fixture failure universe with an anchored regex over only
+these canonical `FAILURE` lines. It compares that universe against validated
+company-returned test IDs.
+
+Coverage fields:
+- `fixture_failure_ids`;
+- `company_validated_failure_ids`;
+- `missing_failure_ids`;
+- `duplicate_failure_ids`;
+- `unexpected_failure_ids`;
+- `failure_id_coverage_complete`.
+
+A completeness claim is mechanically allowed only when missing/duplicate/unexpected
+sets are empty. No gold is used.
+
+### L02 coverage
+
+Canonical target log events use:
+
+```text
+EVENT event_id=<EVENT_ID> request_id=<REQUEST_ID> signature=<SIGNATURE> ts=<ISO8601>
+```
+
+The frozen coverage configuration declares which **syntactic signature classes** are
+mechanically coverable, e.g. `UPSTREAM_TIMEOUT` and `RECOVERY_OBSERVED`. It does
+not declare which individual generated events are semantically important.
+
+`coverage.py` extracts from the raw fixture:
+- event IDs/request IDs for each coverable signature;
+- occurrence counts;
+- timestamp ordering.
+
+It compares these only with validated company-returned identifiers/signatures.
+
+Coverage fields:
+- `fixture_signature_counts`;
+- `company_signature_counts`;
+- `missing_event_ids`;
+- `unexpected_event_ids`;
+- `signature_count_match`;
+- `timeline_identifier_order_valid`.
+
+This proves syntactic coverage/order only, never causal correctness.
+
+### L03 coverage
+
+Canonical mixed-evidence records use:
+
+```text
+RECORD record_id=<RECORD_ID> source=<SOURCE_ID> locator=<LOCATOR> ...
+```
+
+For L03, deterministic coverage is intentionally limited to **citation existence and
+membership**:
+- every company-cited record/source/locator exists verbatim in the raw fixture;
+- no duplicate/unknown citation identifier is introduced;
+- selected ranges contain the cited canonical records.
+
+It must **not** claim that all facts, inferences, hypotheses or unknowns were
+semantically covered. Those remain deterministic gold checks after selection and blind
+semantic grading after measured execution.
+
+### Coverage/selection ordering
+
+For every fixture:
+
+```text
+raw fixture + company output
+  -> validate identifiers/signatures
+  -> run gold-independent coverage.py
+  -> deterministic range selection
+  -> freeze range manifest + digest
+  -> inject frozen raw bytes into DOGFOOD prompt
+  -> measured Codex run
+  -> only afterwards run gold grading
+```
+
+If the later gold grade exposes a missed required target, do not repair or rerun the
+selector. Preserve the miss and classify it separately from cap insufficiency.
+
+
 
 ## Selective-read contract
 
@@ -207,12 +350,28 @@ CONTROL:
 DOGFOOD initial context:
 - company summary/packet;
 - deterministic validation/coverage result;
-- selected raw ranges/reference;
+- the **verbatim raw bytes from the already-frozen selected ranges**;
+- selected-range metadata/digest;
 - same task/output schema;
 - DOES NOT contain the complete raw fixture.
 
-DOGFOOD may perform **one evidence-reader tool call** that returns all preselected raw
-ranges in one invocation.
+**Round 2 pins zero evidence-reader tool calls in measured DOGFOOD Codex sessions.**
+The selected raw bytes are injected directly into the initial prompt after deterministic
+selection is frozen. This is still raw-evidence verification: Codex sees the original
+fixture bytes, not a company paraphrase.
+
+Record for every DOGFOOD run:
+- `selected_raw_bytes_injected`;
+- `selected_raw_ranges`;
+- SHA-256 of the concatenated injected raw bytes;
+- selected-range manifest SHA-256.
+
+If a measured DOGFOOD Codex session performs any additional raw-evidence read/tool call,
+retain the usage but mark the pair `DELIVERY_CONTRACT_VIOLATION` for the Round-2
+selective-injection hypothesis.
+
+This choice intentionally removes Round 1's extra-request confounder. Round 2 therefore
+tests selective raw-evidence injection, not tool-based retrieval.
 
 Pre-registered selector rules must be frozen before any measured run:
 
@@ -241,11 +400,11 @@ If deterministic gold coverage cannot be achieved under the cap:
 - record the fixture as SELECTIVE_READ_CAP_INSUFFICIENT;
 - the pair is invalid for a selective-read savings claim.
 
-If Codex reads the whole fixture or exceeds the cap, retain the usage but mark the pair
-invalid for the selective-read hypothesis.
+If the frozen selected bytes equal the whole fixture or exceed the cap, retain the
+usage but mark the pair invalid for the selective-injection hypothesis.
 
-Completeness claims must use deterministic coverage evidence, not require Codex to scan
-the entire raw fixture.
+Completeness claims must use the frozen gold-independent deterministic coverage rules,
+not require Codex to scan the entire raw fixture.
 
 ## Run order
 
@@ -291,13 +450,13 @@ This secondary metric must never be substituted for the primary result.
 
 Record:
 - full fixture bytes;
-- dogfood raw bytes read;
-- raw-read percentage;
+- dogfood selected raw bytes injected;
+- selected-raw percentage of full fixture;
 - selected range count;
 - target coverage;
 - company output bytes;
 - initial prompt bytes;
-- Codex tool-call count;
+- Codex tool-call count (expected 0 for measured DOGFOOD raw verification);
 - company attempts/retries;
 - company prompt/completion/total tokens;
 - latency.
@@ -306,8 +465,14 @@ Record:
 
 As before:
 - deterministic gold checks first;
+- literal substring checks are not sufficient for structured counts/IDs; use parsed
+  structured fields and exact counts where possible;
 - executing Codex cannot self-grade;
 - remaining semantic parity uses anonymous blind review;
+- use **two independent blind graders** when semantic grading is required;
+- record per-output verdicts and inter-grader agreement/disagreement;
+- if graders disagree on pair parity, quality remains unresolved until a separately
+  documented tie-break review; do not count the pair in a quality-approved aggregate;
 - original deterministic misses remain preserved.
 
 ## Company-call policy
@@ -326,6 +491,17 @@ If it fails due to `finish_reason=length` under max_tokens=4096:
 - mark company triage failed for that fixture.
 
 This prevents Round 1's post-start output-limit changes from becoming another confounder.
+
+Failure classification must distinguish at least:
+- `COMPANY_TRIAGE_COVERAGE_MISS`: company output omitted fixture identifiers/events
+  required by the gold-independent syntactic coverage contract;
+- `SELECTIVE_READ_CAP_INSUFFICIENT`: company identifiers were adequate, but the frozen
+  selector could not include required selected evidence within the pre-registered cap;
+- `DELIVERY_CONTRACT_VIOLATION`: measured DOGFOOD session performed unplanned raw
+  retrieval beyond the frozen injected ranges;
+- `QUALITY_PARITY_FAIL`: blind/deterministic grading found non-equivalent quality.
+
+These flags are not interchangeable and must be reported separately.
 
 ## Stage B confirmation trigger
 
@@ -392,8 +568,11 @@ STOP before measured execution if:
 - exact company `enable_thinking=false` configuration cannot be established;
 - target-size feasibility gate has not passed for both Codex and company lanes;
 - fixtures/gold are not committed first;
-- selector rules/range artifact/digests are not deterministic and frozen before
-  gold coverage grading;
+- selector/coverage rules or range artifact/digests are not deterministic and frozen
+  before gold grading;
+- coverage implementation can access gold;
+- selected raw bytes are not injected directly into the initial DOGFOOD prompt or the
+  run requires an unplanned evidence-reader call;
 - gold data is used to influence selected ranges;
 - raw-read cap/coverage tooling is not deterministic;
 - branch/repository identity is wrong.
