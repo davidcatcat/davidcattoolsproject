@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import urllib.request
@@ -46,7 +47,9 @@ generation:
   max_tokens: 4096
 '''
 RUNTIME_FILES = ('cli.py', 'entrypoint.py', 'inputs.py', 'prompts.py', 'config.py',
-                 'skills.py', 'context.py', 'providers/openai_compatible.py')
+                 'skills.py', 'context.py', 'providers/openai_compatible.py',
+                 'errors.py', 'diagnostics.py', 'terminal.py',
+                 'providers/base.py', 'providers/__init__.py')
 
 
 class WrapperIntegrityFailure(BaseException):
@@ -259,6 +262,7 @@ def verify_registration(registration):
 
 def load_preregistration(expected_sha256):
     """Future handoff must pin this manifest digest from independent review."""
+    require(type(expected_sha256) is str and re.fullmatch('[0-9a-f]{64}', expected_sha256))
     raw = (HERE / 'phase0_preregistration.json').read_bytes()
     require(sha(raw) == expected_sha256)
     registration = probe._json(raw)
@@ -266,13 +270,16 @@ def load_preregistration(expected_sha256):
     return registration
 
 
-def admitted_open(request, original_open, options, lane, registration, state, trial_id):
+def admitted_open(request, original_open, options, lane, expected_manifest_sha256, state, trial_id):
     """FUTURE live observer; tests delegate to in-memory fake responses only."""
-    verify_registration(registration)
+    registration = load_preregistration(expected_manifest_sha256)
     require(options == {'timeout': 120})
     require(lane == trial_id.split('-')[0])
     user = user_message(lane, registration['lanes'][lane])
     _, observation = validate_request(request, user, registration['lanes'][lane])
+    # Re-pin at the last admission boundary, including any drift during observer
+    # validation. No caller-provided registration can authorize delegation.
+    require(load_preregistration(expected_manifest_sha256) == registration)
     state.mark_request_emitted(trial_id, observation)  # no retry / before potential consumption
     return original_open(request, **options)
 
@@ -341,25 +348,38 @@ class Phase0Wrapper:
     live authorization are required. C3-A tests use fake delegates exclusively.
     """
 
-    def __init__(self, registration):
-        self.registration = json.loads(json.dumps(registration))
+    def __init__(self, expected_manifest_sha256):
+        registration = load_preregistration(expected_manifest_sha256)
+        self._expected_manifest_sha256 = expected_manifest_sha256
+        self._registration = registration
         self.accounting = probe.Phase0Accounting()
         self.halted = False
+
+    @property
+    def expected_manifest_sha256(self):
+        return self._expected_manifest_sha256
+
+    @property
+    def registration(self):
+        # Inspection gets a detached copy, never an execution authority input.
+        return json.loads(json.dumps(self._registration))
 
     def run_next(self, output_directory):
         require(not self.halted)
         try:
-            verify_registration(self.registration)
+            pin = self._expected_manifest_sha256
+            registration = load_preregistration(pin)
+            self._registration = registration
             trial = self.accounting.begin_next()
             if trial.status == 'NOT_STARTED':
                 return trial
             lane = trial.trial_id.split('-')[0]
 
             def observe(req, original, options):
-                return admitted_open(req, original, options, lane, self.registration,
+                return admitted_open(req, original, options, lane, pin,
                                      self.accounting, trial.trial_id)
 
-            outcome = invoke_cli(lane, user_message(lane, self.registration['lanes'][lane]), observe)
+            outcome = invoke_cli(lane, user_message(lane, registration['lanes'][lane]), observe)
             usage = validated_usage(outcome['metadata'])
             total = None if usage is None else usage['total_tokens']
             if outcome['exit'] != 0:

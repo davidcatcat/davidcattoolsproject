@@ -43,6 +43,8 @@ class OfflineTests(unittest.TestCase):
         cls.guard = wrapper.offline_guard()
         cls.guard.__enter__()
         cls.registration = wrapper.build_preregistration()
+        cls.manifest_bytes = (wrapper.HERE / 'phase0_preregistration.json').read_bytes()
+        cls.manifest_pin = wrapper.sha(cls.manifest_bytes)
 
     @classmethod
     def tearDownClass(cls):
@@ -81,7 +83,7 @@ class OfflineTests(unittest.TestCase):
         calls = []
         with self.assertRaises(wrapper.WrapperIntegrityFailure):
             wrapper.admitted_open(request, lambda *a, **k: calls.append(a), {'timeout': 120},
-                                  lane, self.registration, state, trial.trial_id)
+                                  lane, self.manifest_pin, state, trial.trial_id)
         self.assertEqual(calls, [])
         self.assertFalse(state.records[-1].request_emitted)
 
@@ -199,13 +201,13 @@ class OfflineTests(unittest.TestCase):
         before = (request.data, tuple(request.header_items()), request.full_url)
         calls = []
         outcome = wrapper.admitted_open(request, lambda req, **k: calls.append(req) or 'fake',
-                                        {'timeout': 120}, 'L02', self.registration, state, trial.trial_id)
+                                        {'timeout': 120}, 'L02', self.manifest_pin, state, trial.trial_id)
         self.assertEqual(outcome, 'fake'); self.assertEqual(len(calls), 1)
         self.assertEqual(before, (request.data, tuple(request.header_items()), request.full_url))
         self.assertTrue(state.records[-1].request_emitted)
         with self.assertRaises(ValueError):
             wrapper.admitted_open(request, lambda *a, **k: calls.append(a), {'timeout': 120},
-                                  'L02', self.registration, state, trial.trial_id)
+                                  'L02', self.manifest_pin, state, trial.trial_id)
         self.assertEqual(len(calls), 1)
 
     def test_instructions(self):
@@ -520,7 +522,7 @@ class OfflineTests(unittest.TestCase):
         def initialize(client, *args, **kwargs):
             original_init(client, *args, **kwargs)
             client.opener.open = lambda req, **kw: calls.append(req) or Response(response)
-        runner = wrapper.Phase0Wrapper(self.registration)
+        runner = wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
         with patch.object(OpenAICompatibleClient, '__init__', initialize), tempfile.TemporaryDirectory() as directory:
             record = runner.run_next(directory)
             self.assertEqual(record.status, 'PASS'); self.assertEqual(record.usage_total, 10)
@@ -534,7 +536,7 @@ class OfflineTests(unittest.TestCase):
         original_init = Client.__init__
         class Response(io.BytesIO):
             status = 200
-        runner = wrapper.Phase0Wrapper(self.registration)
+        runner = wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
         if lane == 'L03':
             state, trial = self.emitted('L02')
             state.complete_evaluation(trial.trial_id, wrapper.evaluate_raw('L02', log_raw()), 10)
@@ -592,10 +594,14 @@ class OfflineTests(unittest.TestCase):
         self.assertFalse(runner.accounting.gate_passed)
 
     def test_future_runner_integrity_failure_halts_before_transport(self):
-        altered = copy.deepcopy(self.registration)
-        altered['lanes']['L02']['request_body_sha256'] = '0' * 64
-        runner = wrapper.Phase0Wrapper(altered)
-        with tempfile.TemporaryDirectory() as directory:
+        runner = wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
+        original = wrapper.invoke_cli
+        def tampered_request(lane, user, observer):
+            def corrupt(req, opener, options):
+                req.data += b' '
+                return observer(req, opener, options)
+            return original(lane, user, corrupt)
+        with patch.object(wrapper, 'invoke_cli', tampered_request), tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(wrapper.WrapperIntegrityFailure):
                 runner.run_next(directory)
             self.assertEqual(list(Path(directory).iterdir()), [])
@@ -603,6 +609,188 @@ class OfflineTests(unittest.TestCase):
             self.assertFalse(runner.accounting.records[-1].request_emitted)
             with self.assertRaises(wrapper.WrapperIntegrityFailure):
                 runner.run_next(directory)
+
+    def test_plain_dict_constructor_rejected(self):
+        with self.assertRaises(wrapper.WrapperIntegrityFailure):
+            wrapper.Phase0Wrapper(self.registration)
+
+    def test_wrong_constructor_pin_before_decode(self):
+        with patch.object(probe, '_json', side_effect=AssertionError('must not decode')) as decode:
+            with self.assertRaises(wrapper.WrapperIntegrityFailure):
+                wrapper.Phase0Wrapper('0' * 64)
+            decode.assert_not_called()
+
+    def test_correct_constructor_pin(self):
+        runner = wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
+        self.assertEqual(runner.expected_manifest_sha256, self.manifest_pin)
+        self.assertEqual(runner.registration, self.registration)
+        self.assertEqual(runner.accounting.records, ())
+
+    def test_committed_manifest_matches_real_freeze(self):
+        self.assertEqual(json.loads(self.manifest_bytes), self.registration)
+        self.assertEqual(wrapper.load_preregistration(self.manifest_pin), self.registration)
+
+    def test_pin_property_cannot_be_reassigned(self):
+        runner = wrapper.Phase0Wrapper(self.manifest_pin)
+        with self.assertRaises(AttributeError):
+            runner.expected_manifest_sha256 = '0' * 64
+
+    def test_registration_inspection_cannot_authorize_changes(self):
+        runner = wrapper.Phase0Wrapper(self.manifest_pin)
+        view = runner.registration
+        view['lanes']['L03']['request_body_sha256'] = '0' * 64
+        self.assertEqual(runner.registration, self.registration)
+        with self.assertRaises(AttributeError):
+            runner.registration = view
+
+    def assert_mid_run_drift_blocked(self, path):
+        runner = wrapper.Phase0Wrapper(self.manifest_pin)
+        original = Path.read_bytes
+        def drift(filename):
+            raw = original(filename)
+            return raw + b' ' if filename == path else raw
+        with patch.object(Path, 'read_bytes', drift), \
+                patch.object(wrapper, 'invoke_cli', side_effect=AssertionError('must not construct request')) as invoke, \
+                tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(wrapper.WrapperIntegrityFailure):
+                runner.run_next(directory)
+            self.assertEqual(runner.accounting.records, ())
+            self.assertTrue(runner.halted)
+            invoke.assert_not_called()
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_mid_run_manifest_drift(self):
+        self.assert_mid_run_drift_blocked(wrapper.HERE / 'phase0_preregistration.json')
+
+    def test_mid_run_instruction_drift(self):
+        for lane in ('L02', 'L03'):
+            with self.subTest(lane=lane):
+                self.assert_mid_run_drift_blocked(wrapper.HERE / 'instructions' / (lane + '.txt'))
+
+    def test_mid_run_artifact_drift(self):
+        self.assert_mid_run_drift_blocked(wrapper.ROOT / 'tools/llmtool/llmtool/errors.py')
+
+    def assert_toctou_drift_blocked(self, path, during_observation=False):
+        runner = wrapper.Phase0Wrapper(self.manifest_pin)
+        original_invoke = wrapper.invoke_cli
+        original_read = Path.read_bytes
+        active = []
+        delegates = []
+
+        def drift(filename):
+            raw = original_read(filename)
+            return raw + b' ' if active and filename == path else raw
+
+        def between_run_and_open(lane, user, observer):
+            # A real CLI Request is constructed; its fake opener marks drift
+            # before passing it to the runner's real admission observer.
+            def at_open(req, original, options):
+                active.append(True)
+                return observer(req, lambda *a, **k: delegates.append(a), options)
+            return original_invoke(lane, user, at_open)
+
+        original_observe = probe.observe_request_without_mutation
+        def observation_then_drift(request):
+            result = original_observe(request)
+            active.append(True)
+            return result
+
+        def invoke_during_observation(lane, user, observer):
+            def at_open(req, original, options):
+                return observer(req, lambda *a, **k: delegates.append(a), options)
+            with patch.object(probe, 'observe_request_without_mutation', observation_then_drift):
+                return original_invoke(lane, user, at_open)
+
+        intercepted = invoke_during_observation if during_observation else between_run_and_open
+        with patch.object(Path, 'read_bytes', drift), \
+                patch.object(wrapper, 'invoke_cli', intercepted), tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(wrapper.WrapperIntegrityFailure):
+                runner.run_next(directory)
+            self.assertTrue(active)
+            self.assertEqual(delegates, [])
+            self.assertFalse(runner.accounting.records[-1].request_emitted)
+            self.assertTrue(runner.halted)
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_toctou_manifest_drift_before_opener(self):
+        self.assert_toctou_drift_blocked(wrapper.HERE / 'phase0_preregistration.json')
+
+    def test_toctou_instruction_drift_before_opener(self):
+        self.assert_toctou_drift_blocked(wrapper.HERE / 'instructions/L03.txt')
+
+    def test_toctou_artifact_drift_before_opener(self):
+        self.assert_toctou_drift_blocked(wrapper.ROOT / 'tools/llmtool/llmtool/diagnostics.py')
+
+    def test_drift_during_request_observation_before_emission(self):
+        for path in (wrapper.HERE / 'phase0_preregistration.json',
+                     wrapper.HERE / 'instructions/L03.txt',
+                     wrapper.ROOT / 'tools/llmtool/llmtool/terminal.py'):
+            with self.subTest(path=path.name):
+                self.assert_toctou_drift_blocked(path, during_observation=True)
+
+    def test_every_run_next_reloads_pinned_manifest(self):
+        runner, record = self.run_fake('L02', transport=True)
+        self.assertEqual(record.status, 'FAIL')
+        # Even after an emitted failure, a later call must reload the manifest
+        # before deciding that the next trial will be skipped for unknown usage.
+        original = Path.read_bytes
+        manifest = wrapper.HERE / 'phase0_preregistration.json'
+        def drift(path):
+            raw = original(path)
+            return raw + b' ' if path == manifest else raw
+        with patch.object(Path, 'read_bytes', drift), tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(wrapper.WrapperIntegrityFailure):
+                runner.run_next(directory)
+        self.assertEqual(len(runner.accounting.records), 1)
+
+    def test_admitted_open_rejects_dict_authority(self):
+        state, trial = self.started()
+        request = self.capture()
+        delegated = []
+        with self.assertRaises(wrapper.WrapperIntegrityFailure):
+            wrapper.admitted_open(request, lambda *a, **k: delegated.append(a), {'timeout': 120},
+                                  'L02', self.registration, state, trial.trial_id)
+        self.assertFalse(state.records[-1].request_emitted)
+        self.assertEqual(delegated, [])
+
+    def test_expanded_artifact_pins(self):
+        required = {'errors.py', 'diagnostics.py', 'terminal.py',
+                    'providers/base.py', 'providers/__init__.py'}
+        for filename in required:
+            path = wrapper.ROOT / 'tools/llmtool/llmtool' / filename
+            self.assertEqual(self.registration['artifacts'][str(path.relative_to(wrapper.ROOT))],
+                             wrapper.sha(path.read_bytes()))
+
+    def test_self_consistent_forged_manifest_blocked(self):
+        original = Path.read_bytes
+        instruction = wrapper.HERE / 'instructions/L03.txt'
+        manifest = wrapper.HERE / 'phase0_preregistration.json'
+        altered_instruction = original(instruction) + b'\nUnreviewed synthetic instruction.'
+
+        def drift(path):
+            return altered_instruction if path == instruction else original(path)
+
+        with patch.object(Path, 'read_bytes', drift):
+            forged = copy.deepcopy(self.registration)
+            forged['lanes']['L03'] = wrapper.dry_run('L03')
+            self.assertNotEqual(forged['lanes']['L03']['instruction_sha256'],
+                                self.registration['lanes']['L03']['instruction_sha256'])
+            self.assertNotEqual(forged['lanes']['L03']['user_message_sha256'],
+                                self.registration['lanes']['L03']['user_message_sha256'])
+            self.assertNotEqual(forged['lanes']['L03']['request_body_sha256'],
+                                self.registration['lanes']['L03']['request_body_sha256'])
+            wrapper.verify_registration(forged)  # old consistency check accepts it
+            forged_bytes = (json.dumps(forged, sort_keys=True, indent=2) + '\n').encode()
+            self.assertNotEqual(wrapper.sha(forged_bytes), self.manifest_pin)
+
+            def forged_files(path):
+                return forged_bytes if path == manifest else drift(path)
+
+            with patch.object(Path, 'read_bytes', forged_files), \
+                    patch.object(probe, '_json', side_effect=AssertionError('reject pin before decode')) as decode:
+                with self.assertRaises(wrapper.WrapperIntegrityFailure):
+                    wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
+                decode.assert_not_called()
 
     def assert_provider_failure_accounted(self, lane, raw_response, safe_code,
                                          logical_reason='TRANSPORT_OR_REQUEST_FAILURE'):
@@ -612,7 +800,7 @@ class OfflineTests(unittest.TestCase):
         original_invoke = wrapper.invoke_cli
         class Response(io.BytesIO):
             status = 200
-        runner = wrapper.Phase0Wrapper(self.registration)
+        runner = wrapper.Phase0Wrapper(expected_manifest_sha256=self.manifest_pin)
         if lane == 'L03':
             state, trial = self.emitted('L02')
             state.complete_evaluation(trial.trial_id, wrapper.evaluate_raw('L02', log_raw()), 10)
