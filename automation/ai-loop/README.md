@@ -147,3 +147,10 @@ When enabled by `publish_decision_checkpoint: true`, a valid initial Codex NEEDS
 Publication errors preserve the original NEEDS_DECISION and local report. Raw provider streams, prompts and private logs stay on the Mac. Source changes, later repair decisions, invalid results, auth/CLI/scope/test errors are outside this narrow automatic publication path. They are not silently uploaded. A stopped task still requires explicit coordinator recovery.
 
 The current run already stopped using the older runner. Its report was imported from David's attachment: [F3 stop checkpoint](../../reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md). Do not rerun the current task until the continuity decision and recovery contract are ready.
+
+
+## Current F3 recovery handoff — 2026-10-07
+
+The first A11b.2.2.1 Mac run stopped before implementation on the F3 process-group continuity question. The coordinator accepted that stop and issued a recovery contract. The old local branch `feat/llmtool-a11b2-2-1-containment-20261007` and its local decision report are preserved as checkpoint evidence; do not delete/reset/reuse them. The current task uses the fresh branch `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007` from the same pinned main.
+
+The accepted F3 topology uses the supervisor itself as the owned process-group anchor: supervisor starts a new session (`PID=PGID=SID`), fake children stay in that group, and the parent never reaps its owned supervisor before the group-cleanup decision. This removes the snapshot-only PGID reuse gap while keeping the task inside A11b.2.2.1. Mandatory Mac probes, both Python full suites and later independent security review remain unchanged. Real product Git ADD and A11b.2.2.2 remain prohibited.
