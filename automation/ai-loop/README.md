@@ -1,3 +1,30 @@
+# CURRENT A11b recovery after merged flaky-test fix — 2026-10-08
+
+PR #47 was squash-merged to main at
+`63e232e22a769f409e381e34dfe0ef1add766d8e`. The stopped A11b candidate remains
+local and unpublished at `474679ecda36da610a96e7ec84da39a5dd3ae33b` from run
+`20261007T183516Z-7365`.
+
+The helper now supports this exact stopped-failure recovery across one separately
+merged upstream fix. It requires the old/new base SHAs, candidate HEAD, original
+control/evidence hashes, `SUMMARY_TOO_LONG` classifier rejection, resolved Mac
+fixture cleanup, and an exact upstream path set. It refuses overlapping or additional
+main changes. It snapshots the candidate, merges the pinned new main with a
+two-parent merge, verifies every stopped A11b byte is unchanged, then validates
+against the new base. The first recovery round calls no Codex: related/full/native
+gates are rerun first. Any new blocking failure re-enters the bounded
+failure->Claude classification->Git recommendation->Codex repair loop.
+
+Current no-token preflight:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T183516Z-7365 --check
+```
+
+Do not use the older 96025 command or manually rebase/cherry-pick the candidate.
+See CURRENT task.md for exact pins and stopping rules.
+
 # CURRENT autonomous collaboration — 2026-10-08
 
 David starts one canonical Mac invocation. The script publishes ordinary failures,
