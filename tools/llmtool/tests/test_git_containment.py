@@ -1276,6 +1276,7 @@ class Probe:
             stderr=subprocess.DEVNULL, env=wire.fresh_environment(), cwd=str(HOST.parents[3]))
         self.buffer, self.rows = bytearray(), []
         self.supervisor = None
+        self.reported_unresolved_supervisor = None
         self.host_identity = None
         self.members = {}
         self.unbound_supervisor_pid = None
@@ -1303,7 +1304,18 @@ class Probe:
                     raise AssertionError('probe event count limit')
                 self.rows.append(row)
                 if row.get('supervisor'):
-                    self.supervisor = kernel.Identity.parse(row['supervisor'])
+                    reported = kernel.Identity.parse(row['supervisor'])
+                    if self.supervisor is None:
+                        self.supervisor = reported  # Normally the authoritative READY identity.
+                    elif any(getattr(reported, key) != getattr(self.supervisor, key)
+                             for key in ('pid', 'pgid', 'sid', 'uid', 'ppid', 'seconds')):
+                        raise AssertionError('probe supervisor identity mismatch')
+                    elif row['event'] != 'unresolved' and reported != self.supervisor:
+                        raise AssertionError('probe supervisor identity mismatch')
+                    # F1 reports its deliberately faulted anchor. Preserve the
+                    # real launch binding for fresh identity checks/inventory.
+                    if row['event'] == 'unresolved':
+                        self.reported_unresolved_supervisor = reported
                     self.unbound_supervisor_pid = None
                 if row['event'] == 'spawn':
                     self.unbound_supervisor_pid = row['supervisor_pid']
@@ -1522,6 +1534,7 @@ class ProbeDiagnosticsTests(unittest.TestCase):
         probe.process.stdout = Mock()
         probe.host_identity = kernel.Identity(123, 123, 123, os.geteuid(), os.getpid(), 1, 2)
         probe.supervisor = None
+        probe.reported_unresolved_supervisor = None
         probe.rows = [{'event': 'terminal', 'primary': 'complete',
                        'unreviewed': 'SYNTHETIC_SECRET'}]
         probe.timing, probe.signal_number = 'ordinary', int(signal.SIGINT)
@@ -1530,6 +1543,63 @@ class ProbeDiagnosticsTests(unittest.TestCase):
         probe.subcase, probe.fixture_cleanup = 'closed_status', None
         probe.members, probe.unbound_supervisor_pid = {}, None
         return probe
+
+    @staticmethod
+    def feed(probe, *rows):
+        probe.buffer = bytearray(b''.join(wire.canonical(row)+b'\n' for row in rows))
+        with patch.object(sys.modules[__name__], 'heartbeat'):
+            return [probe.next(time.monotonic()+1, allow_unresolved=True) for _ in rows]
+
+    def test_ready_binding_and_inventory_survive_unresolved_anchor_fault(self):
+        probe = self.probe()
+        probe.rows = []
+        bound = kernel.Identity(456, 456, 456, os.geteuid(), 123, 1, 999999)
+        faulted = replace(bound, micros=(bound.micros+1) % 1000000)
+        ready = {'event': 'ready', 'supervisor': bound.data()}
+        terminal = {'event': 'terminal', 'supervisor': bound.data()}
+        unresolved = {'event': 'unresolved', 'supervisor': faulted.data()}
+        self.assertEqual(self.feed(probe, ready, terminal, unresolved), [ready, terminal, unresolved])
+        self.assertEqual(probe.supervisor, bound)
+        self.assertEqual(probe.reported_unresolved_supervisor, faulted)
+        self.assertEqual(probe.inventory()['supervisor'], bound.data())
+        self.assertEqual(probe.rows, [ready, terminal, unresolved])
+        probe.process.wait.assert_not_called()
+
+    def test_terminal_and_result_keep_ready_identity_and_reject_micros_drift(self):
+        bound = kernel.Identity(456, 456, 456, os.geteuid(), 123, 1, 3)
+        for event in ('terminal', 'result', 'ready'):
+            with self.subTest(event=event):
+                probe = self.probe()
+                self.feed(probe, {'event': 'ready', 'supervisor': bound.data()},
+                          {'event': event, 'supervisor': bound.data()})
+                self.assertEqual(probe.supervisor, bound)
+                self.assertIsNone(probe.reported_unresolved_supervisor)
+                with self.assertRaisesRegex(AssertionError, 'probe supervisor identity mismatch'):
+                    self.feed(probe, {'event': event,
+                                     'supervisor': replace(bound, micros=4).data()})
+                self.assertEqual(probe.inventory()['supervisor'], bound.data())
+
+    def test_later_supervisor_rows_reject_non_micros_identity_drift(self):
+        bound = kernel.Identity(456, 456, 456, os.geteuid(), 123, 1, 3)
+        for event in ('unresolved', 'terminal', 'result'):
+            for key in ('pid', 'pgid', 'sid', 'uid', 'ppid', 'seconds'):
+                with self.subTest(event=event, key=key):
+                    probe = self.probe()
+                    self.feed(probe, {'event': 'ready', 'supervisor': bound.data()})
+                    drifted = replace(bound, **{key: getattr(bound, key)+1})
+                    with self.assertRaisesRegex(AssertionError, 'probe supervisor identity mismatch'):
+                        self.feed(probe, {'event': event, 'supervisor': drifted.data()})
+                    self.assertEqual(probe.supervisor, bound)
+                    self.assertEqual(probe.inventory()['supervisor'], bound.data())
+                    self.assertIsNone(probe.reported_unresolved_supervisor)
+
+    def test_first_supervisor_row_still_binds_without_ready(self):
+        probe = self.probe()
+        bound = kernel.Identity(456, 456, 456, os.geteuid(), 123, 1, 3)
+        self.feed(probe, {'event': 'unresolved', 'supervisor': bound.data()})
+        self.assertEqual(probe.supervisor, bound)
+        self.assertEqual(probe.reported_unresolved_supervisor, bound)
+        self.assertEqual(probe.inventory()['supervisor'], bound.data())
 
     def test_primary_signal_path_error_survives_cleanup_and_monitor_errors(self):
         probe = self.probe()
@@ -1684,6 +1754,24 @@ class ControllerCleanupTests(unittest.TestCase):
             yield note, host_signal, group_signal
         probe.process.poll.assert_not_called()
         probe.process.communicate.assert_not_called()
+
+    def test_unresolved_fault_keeps_real_identity_in_frozen_cleanup_inventory(self):
+        bound = self.probe.supervisor
+        self.probe.supervisor = None
+        self.probe.rows = []
+        faulted = replace(bound, micros=bound.micros+1)
+        ProbeDiagnosticsTests.feed(self.probe,
+            {'event': 'ready', 'supervisor': bound.data()},
+            {'event': 'unresolved', 'supervisor': faulted.data()})
+        with self.model() as (_, host_signal, group_signal):
+            cleanup = self.probe.cleanup()
+        self.assertEqual(cleanup['status'], 'RESOLVED')
+        self.assertEqual(cleanup['original_owned_processes'][0]['supervisor'], bound.data())
+        self.assertEqual(self.probe.supervisor, bound)
+        self.assertEqual(self.probe.reported_unresolved_supervisor, faulted)
+        self.assertEqual(self.events[:4], ['verify', 'verify', 'signal', 'reap'])
+        host_signal.assert_called_once_with(123, signal.SIGKILL)
+        group_signal.assert_not_called()
 
     def test_original_assertion_inventory_and_subcase_survive_owned_host_cleanup(self):
         primary = AssertionError('containment acceptance assertion failed')
@@ -2011,6 +2099,10 @@ class AcceptanceScenarios:
             self.check(not any(event['event'] in ('result', 'handlers_restored')
                                for event in probe.rows))
             self.check(kernel.identity(probe.supervisor.pid) == probe.supervisor)
+            reported = probe.reported_unresolved_supervisor
+            self.check(reported is not None)
+            self.check(replace(reported, micros=probe.supervisor.micros) == probe.supervisor)
+            self.check(reported.micros == (probe.supervisor.micros+1) % 1000000)
             self.check(not kernel.absent(terminal['child']['pid']))
         finally:
             # This is bounded external resolution of the intentionally unresolved

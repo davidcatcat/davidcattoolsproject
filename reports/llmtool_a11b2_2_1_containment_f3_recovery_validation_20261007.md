@@ -898,3 +898,104 @@ native probe, provider call or process cleanup ran in this repair call. No stage
 commit, push, merge, worktree, alternate checkout, task change or scope expansion
 occurred. The outer runner must rerun every pinned gate on changed bytes and
 append truthful final evidence; no earlier PASS is inherited by this repair.
+
+## CURRENT evidence-bound mandatory-final controller identity repair — 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — ALL CHANGED-BYTE RUNNER CHECKS PENDING**.
+All historical failure and validation evidence above remains preserved.
+
+### Authorization and entry evidence
+
+- Canonical Mac cwd/Git root and repository identity verified:
+  `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`,
+  `davidcatcat/davidcattoolsproject`.
+- Existing branch unchanged:
+  `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+  Entry/reviewed HEAD: `be6bc892ba8fefc7e8c8cb708dc91787b8829021`;
+  base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+  Tracked/index state was clean at entry; unrelated untracked artifacts remain
+  untouched. No fetch or remote synchronization claim is made.
+- Phase: `mandatory-final`; run: `20261007T183516Z-7365`, failed round 1.
+  The preserved local `failure-1.json` SHA-256 was independently read and matches
+  the supplied classification:
+  `fb7a4eabbb008ad2aa5aa1928b500f46ebbf0db36c538fee0e2502229e282769`.
+- Disposition: **REPAIR / TEST_BUG**, blocking High in
+  `tools/llmtool/tests/test_git_containment.py`. The local publication records
+  identify structured review commit `f0f7a1b4e361ad9e3de136b69115ee0ec61a0b04`
+  and disposition commit `eab32e59d353a1111ded4017a8b6d6c7cacdd2a7` on the
+  reports-only diagnostics branch. These records were inspected locally;
+  this call did not independently verify remote publication.
+
+The original native command exited 1 at `hung_supervisor / unresolved` on Mac
+15.7.9 / Python 3.13.3. The retained primary assertion compared the fresh kernel
+supervisor identity with the controller's overwritten identity. The fixed F1
+fault deliberately alters `anchor.bound.micros` by one modulo 1,000,000; the probe
+host reports that anchor in its unresolved event. `Probe.next` previously replaced
+its supervisor binding on every supervisor-bearing row, corrupting both the
+assertion input and the original cleanup inventory's supervisor start identity.
+
+On those historical bytes, completed subcases were hung, closed_status,
+malformed_status, lost_before_identity, registration_failure, drain_failure,
+missing_ACK, output, stderr_output and wait. The native stdout records one status-2
+closed-status transition followed by two SZOMB=5 rows. The original failure JSON
+records controller cleanup RESOLVED, host-only SIGKILL, verified host pin, decision
+before reap, and host/supervisor/group/member absence with empty owned_processes.
+This is external fixture resolution, not a production F1 containment PASS.
+The fixture-failure/ambiguous-identity subcases and nine later scenarios, including
+both x20 parent-SIGKILL variants, did not run and remain unverified.
+
+### In-scope test repair
+
+`Probe.next` now retains the authoritative READY supervisor identity through
+terminal/result events. Later supervisor-bearing rows must match PID, PGID, SID,
+UID, PPID and start seconds. Ordinary rows also require matching micros.
+An unresolved row records its reported anchor separately in
+`reported_unresolved_supervisor`; it cannot overwrite an existing launch binding.
+The existing first-identity behavior remains when no supervisor is yet bound.
+Consequently `inventory()` and frozen cleanup inventory keep the true launch
+identity while the collected event rows retain the original fault evidence.
+
+The native unresolved acceptance keeps the original fresh-kernel identity equality
+assertion. Additional assertions prove the separately reported anchor matches all
+other fields and has exactly the injected micros+1 modulo 1,000,000 value.
+Deterministic regressions feed READY/terminal/unresolved events through the actual
+controller parser, including micros wraparound; verify binding and inventory
+retention; reject later field drift; preserve first-identity fallback; and verify
+the frozen original cleanup inventory retains the real supervisor identity with
+the existing host-only signal-before-reap order. These tests are added, NOT RUN here.
+
+Only the allowlisted test file and this report change. Production fault injection,
+F1 ownership/handler retention, probe host, containment architecture, protocol,
+signal policy, original assertions, two-second F1 cleanup bound and six-second
+controller cleanup bound remain unchanged.
+
+### Pending changed-byte gates and stopping state
+
+| Required gate / disposition | Status for this repair |
+| --- | --- |
+| Syntax and related containment / Git mutation / A5 / Action checks | PENDING outer runner |
+| New parser/binding/inventory regressions and existing primary-error/cleanup assertions | PENDING outer runner |
+| Both full suites: current venv and `/usr/bin/python3` | PENDING outer runner |
+| Private harness/supervisor, FD inheritance and exec boundaries | PENDING runner/native |
+| Real SIGINT / SIGTERM / SIGHUP timing and repeated signals | PENDING actual Mac runner |
+| Hung escalation, intentional closed-status EOF, missing ACK, unresolved F1 and failed-fixture cleanup | PENDING actual Mac runner |
+| Leader/descendant cleanup, PID/PGID reuse, kernel identity and non-reaping kqueue | PENDING runner/native |
+| Protocol framing, code/runtime binding and public/import boundaries | PENDING runner/native |
+| All fourteen native scenarios with zero skips | PENDING outer runner |
+| Parent SIGKILL plain x20 and Popen x20, each <=2 seconds | PENDING actual Mac runner |
+| Fresh byte hashes and independent original-inventory PID-absence guard | PENDING outer runner |
+| Independent preliminary/final ordinary review and BLOCKER/HIGH disposition | PENDING outer runner |
+| Exact final-HEAD CI, same Draft PR and READY_FOR_FINAL_REVIEW | PENDING outer runner; readiness not reached |
+| Independent security review and coordinator/functional acceptance | PENDING; no approval claimed |
+| Merge | NOT authorized |
+| Real product Git ADD, public mutation, approval issuer, audit bypass | None introduced or executed |
+| A11b.2.2.2/.3, A11b.3, A11c and A12 | Not started or authorized |
+
+Codex read the pinned local contract, classification, original failure evidence,
+bounded original native stdout, applicable guidance and source, then reviewed this
+repair diff. No deterministic test, syntax command, full suite, native probe,
+acceptance generator, provider call or process cleanup ran in this call. No stage,
+commit, push, merge, worktree, alternate checkout, task change or scope expansion
+occurred. The outer runner must rerun every pinned gate on changed bytes and append
+truthful final evidence. No historical PASS is inherited and no failed criterion
+is waived; independent security/functional acceptance and merge remain separate.
