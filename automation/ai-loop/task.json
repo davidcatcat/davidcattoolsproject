@@ -121,5 +121,6 @@
       "{mac_evidence}"
     ]
   ],
-  "mac_evidence": "mac-containment"
+  "mac_evidence": "mac-containment",
+  "publish_decision_checkpoint": true
 }

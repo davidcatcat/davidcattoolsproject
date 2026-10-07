@@ -164,7 +164,7 @@ def load_task(root, control_sha):
                 'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
-                'pr_title', 'acceptance_report'}
+                'pr_title', 'acceptance_report', 'publish_decision_checkpoint'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -211,6 +211,12 @@ def load_task(root, control_sha):
     if 'acceptance_report' in metadata and (metadata['acceptance_report'] not in metadata['allowed_files']
             or not metadata['acceptance_report'].startswith('reports/') or not metadata['acceptance_report'].endswith('.md')):
         raise Stop('invalid acceptance report path')
+    if 'publish_decision_checkpoint' in metadata:
+        if type(metadata['publish_decision_checkpoint']) is not bool:
+            raise Stop('invalid decision checkpoint publication setting')
+        if metadata['publish_decision_checkpoint'] and (metadata['mode'] != 'implement_new_pr'
+                or not metadata.get('acceptance_report')):
+            raise Stop('decision checkpoint publication requires a new task and explicit report')
     if 'mac_evidence' in metadata:
         if metadata['mac_evidence'] != 'mac-containment' or not metadata.get('mandatory_tests'):
             raise Stop('invalid Mac evidence gate')
@@ -221,6 +227,86 @@ def load_task(root, control_sha):
 
 def save_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def publish_decision_checkpoint(root, logs, task, result, original, head, control_sha, round_no):
+    """Publish only an initial report-only decision; never local source/index/logs."""
+    if not task.get('publish_decision_checkpoint') or task['mode'] != 'implement_new_pr' or round_no != 0:
+        return None
+    if result['status'] != 'NEEDS_DECISION':
+        return None
+    report_rel = task['acceptance_report']
+    if head != task['base_sha'] or check_scope(root, task, original, task['branch'], head) != [report_rel]:
+        raise Stop('decision publication requires unchanged base and report-only work')
+    report = root / report_rel
+    if (not report.is_file() or any(p.is_symlink() for p in [report, *report.parents])
+            or report.stat().st_size > 128 * 1024):
+        raise Stop('decision report is missing, oversized or a symlink')
+    raw = report.read_bytes()
+    if len(raw) > 128 * 1024:
+        raise Stop('decision report grew beyond its publication bound')
+    body = raw.decode('utf-8')
+    if '\0' in body or 'NEEDS_DECISION' not in body or len(result['summary'].encode('utf-8')) > 8192:
+        raise Stop('invalid bounded decision report')
+    run_id = logs.name
+    if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', run_id):
+        raise Stop('invalid checkpoint run identity')
+    path = 'reports/ai-loop/checkpoints/' + task['task_id'] + '-' + run_id + '.md'
+    content = ('# AI-loop decision checkpoint: ' + task['task_id'] + '\n\n'
+        + 'Status: **NEEDS_DECISION / STOPPED**. This is an unverified feasibility report, '
+        + 'not an implemented candidate, review PASS or merge-ready handoff.\n\n'
+        + '- Run: `' + run_id + '`\n- Pinned control: `' + control_sha + '`\n'
+        + '- Canonical Mac branch: `' + task['branch'] + '`\n- Unchanged starting HEAD: `' + head + '`\n'
+        + '- Source report: `' + report_rel + '`\n- Source report SHA-256: `' + hashlib.sha256(raw).hexdigest() + '`\n'
+        + '- Runner tests, containment probes and independent review: NOT RUN.\n'
+        + '- Implementation and feature PR: not published by this checkpoint.\n'
+        + '- No decision approval or automatic resume. Preserve local work for coordinator recovery.\n\n'
+        + '## Codex decision summary (not independently verified)\n\n' + result['summary']
+        + '\n\n## Codex-authored report (not independently verified)\n\n' + body)
+    api = 'repos/' + IDENTITY + '/git/'
+    ref = json.loads(run(['gh', 'api', api + 'ref/heads/automation/ai-loop'], root))
+    if ref['object']['sha'] != control_sha:
+        raise Stop('control branch changed; decision remains local for coordinator recovery')
+    tree = json.loads(run(['gh', 'api', api + 'trees/' + control_sha + '?recursive=1'], root))
+    if tree.get('truncated') is not False or any(e.get('path') == path for e in tree['tree']):
+        raise Stop('cannot prove checkpoint path is new')
+
+    def write_api(method, endpoint, payload, name):
+        request = logs / ('checkpoint-' + name + '-request.json')
+        save_json(request, payload)
+        return json.loads(run(['gh', 'api', '--method', method, endpoint, '--input', str(request)], root))
+
+    tree_reply = write_api('POST', api + 'trees', {'base_tree': control_sha, 'tree': [
+        {'path': path, 'mode': '100644', 'type': 'blob', 'content': content}]}, 'tree')
+    tree_sha = tree_reply['sha']
+    if not re.fullmatch(r'[0-9a-f]{40}', tree_sha):
+        raise Stop('invalid checkpoint tree identity')
+    commit = write_api('POST', api + 'commits', {'message': 'docs: record stopped ' + task['task_id'],
+        'parents': [control_sha], 'tree': tree_sha}, 'commit')['sha']
+    if not re.fullmatch(r'[0-9a-f]{40}', commit):
+        raise Stop('invalid checkpoint commit identity')
+    # Check again before publication. force=False rejects concurrent divergent updates.
+    latest = json.loads(run(['gh', 'api', api + 'ref/heads/automation/ai-loop'], root))
+    if latest['object']['sha'] != control_sha:
+        raise Stop('control branch changed before checkpoint publication')
+    if report.read_bytes() != raw:
+        raise Stop('decision report changed during publication')
+    if check_scope(root, task, original, task['branch'], head) != [report_rel]:
+        raise Stop('decision work changed during publication')
+    ref_reply = write_api('PATCH', api + 'refs/heads/automation/ai-loop', {'sha': commit, 'force': False}, 'ref')
+    if ref_reply.get('object', {}).get('sha') != commit:
+        raise Stop('checkpoint branch update is unconfirmed')
+    published = {'status': 'NEEDS_DECISION', 'control_sha': commit, 'path': path,
+                 'url': 'https://github.com/' + IDENTITY + '/blob/' + commit + '/' + path,
+                 'source_report_sha256': hashlib.sha256(raw).hexdigest()}
+    save_json(logs / 'published-checkpoint.json', published)
+    remote = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/contents/' + path + '?ref=' + commit], root))
+    encoded = content.encode('utf-8')
+    expected_blob = hashlib.sha1(b'blob ' + str(len(encoded)).encode('ascii') + b'\0' + encoded).hexdigest()
+    if remote.get('type') != 'file' or remote.get('sha') != expected_blob:
+        raise Stop('checkpoint remote content verification failed; inspect published-checkpoint.json')
+    print('[Checkpoint] NEEDS_DECISION published: ' + published['url'], flush=True)
+    return published
 
 
 def codex(root, logs, prompt, round_no, timeout):
@@ -581,6 +667,8 @@ def main():
         full_tested_bytes = None
         mandatory_tested_bytes = None
         mac = None
+        checkpoint = None
+        checkpoint_error = None
         try:
             initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
             if any(p and p not in task['allowed_files'] for p in initial_paths):
@@ -592,6 +680,14 @@ def main():
                                    round_no, task['timeout_seconds'])
                     check_scope(root, task, original, branch, head)
                     if result['status'] != 'PASS':
+                        if result['status'] == 'NEEDS_DECISION':
+                            try:
+                                checkpoint = publish_decision_checkpoint(root, logs, task, result,
+                                    original, head, args.control_sha, round_no)
+                            except (Stop, OSError, ValueError, KeyError, TypeError) as publication_error:
+                                checkpoint_error = str(publication_error)
+                                print('[Checkpoint] Publication not confirmed; local evidence preserved. '
+                                      + checkpoint_error, file=sys.stderr, flush=True)
                         raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
                 if any(not (root / p).is_file() or (root / p).is_symlink() for p in task.get('required_files', [])):
                     raise Stop('required implementation/test/report artifacts missing; no empty-suite PASS')
@@ -778,7 +874,8 @@ def main():
             print('\nREADY FOR FINAL REVIEW\n' + pr + '\nHEAD: ' + publication_head, flush=True)
         except BaseException as exc:
             save_json(logs / 'summary.json', {'status': 'STOPPED', 'reason': str(exc), 'branch': branch,
-                'head': git(root, 'rev-parse', 'HEAD'), 'history': history})
+                'head': git(root, 'rev-parse', 'HEAD'), 'history': history,
+                'decision_checkpoint': checkpoint, 'checkpoint_publication_error': checkpoint_error})
             print('STOPPED. Work preserved. Logs: ' + str(logs), file=sys.stderr, flush=True)
             raise
 

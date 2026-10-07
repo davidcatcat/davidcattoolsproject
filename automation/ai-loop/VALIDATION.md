@@ -24,7 +24,7 @@ A11b.2.2.1/.2/.3. The control branch is fetchable before PR #45 is merged.
 - `bash -n ai-loop-delivery/scripts/ai-loop.sh`: exit 0.
 - `python3 -m py_compile ai-loop-delivery/scripts/ai_loop.py`: exit 0.
 - `python3 -W error::ResourceWarning -m unittest discover -s ai-loop-delivery/scripts -p test_ai_loop.py -q`:
-  57 tests, PASS, no ResourceWarning.
+  69 tests, PASS, no ResourceWarning.
 - Task JSON parses and names the actual PR branch/head/report. Tests use
   tools/llmtool/.venv, root-discovery PYTHONPATH and the Mac system Python.
 
@@ -122,3 +122,11 @@ unmerged/wrong-repo/branch/base PRs, missing merge ancestry, differing trees and
 Git ancestry errors. 57 standalone fixtures and Bash/Python syntax checks PASS.
 No project code/checks or live model calls were run. New-task Mac execution remains
 pending; the stopped preflight left files preserved and had not created its branch.
+
+## Report-only NEEDS_DECISION checkpoint publication — 2026-10-07
+
+David's real Mac run `20261007T064116Z-68730` invoked Codex successfully and stopped at F3 NEEDS_DECISION with only the allowlisted report added. No candidate source/tests, containment probes or canonical suites ran. The coordinator imported his uploaded terminal transcript into `reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md`; this is a normalized transcription, not the original Mac bytes. Observations and design reasoning remain unverified claims, not PASS.
+
+The runner now supports opt-in `publish_decision_checkpoint` for an initial report-only new-task NEEDS_DECISION. It publishes one immutable curated checkpoint to the pinned control branch via GitHub API, checks both scope and report bytes again before ref update, rejects control drift/path collision/truncated tree, uses force=false, and verifies the remote blob. It does not modify the local feature branch/index or upload raw logs. API failures preserve the primary decision. All other stop types remain local. No approval/resume or alternative F3 design is introduced.
+
+69 standalone fixture tests PASS, including initial-decision publication and STOP without tests/review/PR, API failure preserving NEEDS_DECISION, opt-in/result/mode/repair guards, report-only/base guards, symlink and size/content rejection, ref drift/collision/race, report changes, private log exclusion, strict task setting and remote hash verification failure. Syntax/compilation and Bash launcher syntax PASS. This is helper authoring evidence; automatic publication by gh on David's Mac has NOT RUN. Actual containment, full suites, independent helper/security review and safe task recovery remain pending.

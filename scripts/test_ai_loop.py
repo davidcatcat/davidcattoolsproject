@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import os
 import copy
 
@@ -20,6 +20,173 @@ HEAD = 'a' * 40
 def result(status='PASS', findings=None):
     return {'status': status, 'summary': 'checked', 'reviewed_head': HEAD,
             'findings': findings or []}
+
+
+class DecisionCheckpointTests(unittest.TestCase):
+    @contextmanager
+    def fixture(self, **options):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '20261007T064116Z-68730'
+            logs.mkdir()
+            report = root / 'reports/validation.md'
+            report.parent.mkdir()
+            report.write_text('# Checkpoint\nNEEDS_DECISION: continuity unresolved.\n')
+            (logs / 'private.stdout.log').write_text('PRIVATE STREAM MUST STAY LOCAL')
+            task = {'task_id': 'fixture-task', 'mode': 'implement_new_pr', 'base_sha': HEAD,
+                    'branch': 'feat/fixture', 'acceptance_report': 'reports/validation.md',
+                    'publish_decision_checkpoint': True}
+            decision = {'status': 'NEEDS_DECISION', 'summary': 'Coordinator decision required.'}
+            calls, posted = [], {}
+            ref_reads = [0]
+            control = 'd' * 40
+
+            def fake_run(argv, cwd, **kwargs):
+                calls.append(argv)
+                if '--method' in argv:
+                    method, endpoint = argv[argv.index('--method') + 1:argv.index('--method') + 3]
+                    payload = json.loads(Path(argv[argv.index('--input') + 1]).read_text())
+                    posted[method + ' ' + endpoint] = payload
+                    if endpoint.endswith('/trees'):
+                        if options.get('change_report'):
+                            report.write_text('NEEDS_DECISION changed concurrently')
+                        return json.dumps({'sha': 'e' * 40})
+                    if endpoint.endswith('/commits'):
+                        return json.dumps({'sha': 'f' * 40})
+                    return json.dumps({'object': {'sha': 'f' * 40}})
+                endpoint = argv[2]
+                if endpoint.endswith('ref/heads/automation/ai-loop'):
+                    ref_reads[0] += 1
+                    if options.get('api_error'):
+                        raise loop.Stop('command failed (exit 1): gh; see local logs')
+                    drift = options.get('control_drift') or (options.get('race') and ref_reads[0] == 2)
+                    return json.dumps({'object': {'sha': 'c' * 40 if drift else control}})
+                if '/git/trees/' in endpoint:
+                    path = 'reports/ai-loop/checkpoints/fixture-task-' + logs.name + '.md'
+                    return json.dumps({'truncated': options.get('truncated', False),
+                        'tree': [{'path': path}] if options.get('collision') else []})
+                if '/contents/' in endpoint:
+                    content = next(v['tree'][0]['content'] for k, v in posted.items() if k.endswith('/trees'))
+                    raw = content.encode()
+                    sha = loop.hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+                    return json.dumps({'type': 'file', 'sha': '0' * 40 if options.get('bad_blob') else sha})
+                raise AssertionError(argv)
+
+            with patch.object(loop, 'run', side_effect=fake_run), \
+                 patch.object(loop, 'check_scope', return_value=options.get('scope', ['reports/validation.md'])):
+                yield root, logs, report, task, decision, calls, posted, control
+
+    def invoke(self, fixture, **kwargs):
+        root, logs, report, task, decision, calls, posted, control = fixture
+        return loop.publish_decision_checkpoint(root, logs, task, decision, {},
+            kwargs.get('head', HEAD), control, kwargs.get('round_no', 0))
+
+    def test_report_only_decision_publishes_control_checkpoint_without_local_git_or_logs(self):
+        with self.fixture() as f:
+            before = f[2].read_bytes()
+            value = self.invoke(f)
+            self.assertEqual(value['status'], 'NEEDS_DECISION')
+            self.assertIn('/blob/' + 'f' * 40 + '/', value['url'])
+            self.assertEqual(f[2].read_bytes(), before)
+            patch_payload = next(v for k, v in f[6].items() if k.startswith('PATCH '))
+            self.assertIs(patch_payload['force'], False)
+            content = next(v['tree'][0]['content'] for k, v in f[6].items() if k.endswith('/trees'))
+            self.assertIn('NOT RUN', content)
+            self.assertIn(before.decode(), content)
+            self.assertNotIn('PRIVATE STREAM MUST STAY LOCAL', content)
+            self.assertTrue(all(a[:2] == ['gh', 'api'] for a in f[5]))
+            self.assertTrue((f[1] / 'published-checkpoint.json').is_file())
+
+    def test_ineligible_results_modes_and_repairs_never_call_api(self):
+        for mode, enabled, status, round_no in [
+                ('implement_new_pr', False, 'NEEDS_DECISION', 0),
+                ('review_existing_pr', True, 'NEEDS_DECISION', 0),
+                ('implement_new_pr', True, 'FAIL', 0),
+                ('implement_new_pr', True, 'PASS', 0),
+                ('implement_new_pr', True, 'NEEDS_DECISION', 1)]:
+            with self.subTest(mode=mode, enabled=enabled, status=status, round_no=round_no), self.fixture() as f:
+                f[3].update(mode=mode, publish_decision_checkpoint=enabled)
+                f[4]['status'] = status
+                self.assertIsNone(self.invoke(f, round_no=round_no))
+                self.assertEqual(f[5], [])
+
+    def test_source_changes_or_changed_head_stop_before_api(self):
+        with self.fixture(scope=['reports/validation.md', 'source.py']) as f:
+            with self.assertRaises(loop.Stop):
+                self.invoke(f)
+            self.assertEqual(f[5], [])
+        with self.fixture() as f:
+            with self.assertRaises(loop.Stop):
+                self.invoke(f, head='b' * 40)
+            self.assertEqual(f[5], [])
+
+    def test_unsafe_oversized_or_invalid_report_stays_local(self):
+        for mutation in ('symlink', 'oversized', 'invalid'):
+            with self.subTest(mutation=mutation), self.fixture() as f:
+                if mutation == 'symlink':
+                    f[2].unlink()
+                    f[2].symlink_to(f[1] / 'private.stdout.log')
+                elif mutation == 'oversized':
+                    f[2].write_bytes(b'NEEDS_DECISION' + b'x' * (128 * 1024))
+                else:
+                    f[2].write_text('NEEDS_DECISION\0invalid')
+                with self.assertRaises(loop.Stop):
+                    self.invoke(f)
+                self.assertEqual(f[5], [])
+
+    def test_drift_collision_or_incomplete_tree_stops_before_object_writes(self):
+        for option in ('control_drift', 'collision', 'truncated'):
+            with self.subTest(option=option), self.fixture(**{option: True}) as f:
+                with self.assertRaises(loop.Stop):
+                    self.invoke(f)
+                self.assertEqual(f[6], {})
+
+    def test_concurrent_ref_or_report_change_never_updates_branch(self):
+        for option in ('race', 'change_report'):
+            with self.subTest(option=option), self.fixture(**{option: True}) as f:
+                with self.assertRaises(loop.Stop):
+                    self.invoke(f)
+                self.assertFalse(any(k.startswith('PATCH ') for k in f[6]))
+
+    def test_api_error_preserves_original_report(self):
+        with self.fixture(api_error=True) as f:
+            before = f[2].read_bytes()
+            with self.assertRaises(loop.Stop):
+                self.invoke(f)
+            self.assertEqual(f[2].read_bytes(), before)
+            self.assertEqual(f[6], {})
+
+    def test_remote_mismatch_cannot_claim_verified_publication(self):
+        with self.fixture(bad_blob=True) as f:
+            with self.assertRaisesRegex(loop.Stop, 'remote content verification'):
+                self.invoke(f)
+            self.assertTrue((f[1] / 'published-checkpoint.json').is_file())
+
+    def test_parent_directory_symlink_cannot_export_outside_report(self):
+        with self.fixture() as f:
+            parent = f[2].parent
+            moved = f[0] / 'outside-reports'
+            parent.rename(moved)
+            parent.symlink_to(moved, target_is_directory=True)
+            with self.assertRaises(loop.Stop):
+                self.invoke(f)
+            self.assertEqual(f[5], [])
+
+    def test_task_contract_requires_boolean_and_report_for_decision_publication(self):
+        metadata = json.loads((Path(__file__).parents[1] / 'automation/ai-loop/task.json').read_text())
+        def load(value):
+            with patch.object(loop, 'git', side_effect=lambda root, *args:
+                    json.dumps(value) if args[0] == 'show' and args[1].endswith('task.json') else ''):
+                return loop.load_task(Path('.'), 'd' * 40)[0]
+        self.assertTrue(load(metadata)['publish_decision_checkpoint'])
+        for mutation in ('non_boolean', 'missing_report'):
+            invalid = copy.deepcopy(metadata)
+            if mutation == 'non_boolean':
+                invalid['publish_decision_checkpoint'] = 'true'
+            else:
+                invalid.pop('acceptance_report')
+            with self.subTest(mutation=mutation), self.assertRaises(loop.Stop):
+                load(invalid)
 
 
 class ResultTests(unittest.TestCase):
@@ -462,8 +629,16 @@ class ExistingPRTests(unittest.TestCase):
     def test_publication_hook_cannot_change_tested_bytes_and_still_push(self):
         self.exercise_pipeline(hook_changes=True, should_stop=True)
 
+    def test_initial_decision_publishes_checkpoint_then_stops_without_tests_pr_or_resume(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, decision=True, should_stop=True), [])
+
+    def test_checkpoint_failure_keeps_primary_decision_and_local_work(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, decision=True,
+            checkpoint_failure=True, should_stop=True), [])
+
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
-                          new_task=False, mandatory_failure=False, hook_changes=False):
+                          new_task=False, mandatory_failure=False, hook_changes=False,
+                          decision=False, checkpoint_failure=False):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -477,6 +652,7 @@ class ExistingPRTests(unittest.TestCase):
                     require_local_full=True, mandatory_tests=[['fixture mandatory']],
                     required_files=['source.txt', 'reports/validation.md'], mac_evidence='mac-containment',
                     acceptance_report='reports/validation.md', pr_title='fixture title')
+                task['publish_decision_checkpoint'] = True
                 task['allowed_files'].append('reports/validation.md')
             current_head = [HEAD]
             dirty = [False]
@@ -544,6 +720,10 @@ class ExistingPRTests(unittest.TestCase):
                 return value
 
             def fake_codex(*args):
+                if decision:
+                    (root / 'reports').mkdir(exist_ok=True)
+                    (root / 'reports/validation.md').write_text('NEEDS_DECISION; no implementation.\n')
+                    return {'status': 'NEEDS_DECISION', 'summary': 'Continuity requires a decision.'}
                 dirty[0] = True
                 (root / 'source.txt').write_text('bounded repair ' + str(review_calls[0]))
                 if new_task:
@@ -574,6 +754,9 @@ class ExistingPRTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'tests', side_effect=fake_tests))
             stack.enter_context(patch.object(loop, 'claude', side_effect=fake_claude))
             codex = stack.enter_context(patch.object(loop, 'codex', side_effect=fake_codex))
+            checkpoint = stack.enter_context(patch.object(loop, 'publish_decision_checkpoint',
+                side_effect=loop.Stop('checkpoint API unavailable') if checkpoint_failure else None,
+                return_value={'url': 'https://github.com/fixture/checkpoint', 'status': 'NEEDS_DECISION'}))
             runner = stack.enter_context(patch.object(loop, 'run', side_effect=fake_run))
             stack.enter_context(patch.object(loop, 'wait_ci', return_value=[{'status': 'completed', 'conclusion': 'success'}]))
             stack.enter_context(patch.object(sys, 'argv', ['ai_loop.py', '--control-sha', 'd' * 40, '--' + test_mode]))
@@ -581,8 +764,17 @@ class ExistingPRTests(unittest.TestCase):
             os.chdir(root)
             try:
                 if should_stop:
-                    with self.assertRaises(loop.Stop):
+                    with self.assertRaises(loop.Stop) as stopped:
                         loop.main()
+                    if decision:
+                        self.assertIn('Codex reported NEEDS_DECISION', str(stopped.exception))
+                        self.assertEqual(checkpoint.call_count, 1)
+                        self.assertEqual(review_calls[0], 0)
+                        summary = json.loads(next((root / '.ai-loop').glob('*/summary.json')).read_text())
+                        self.assertEqual(summary['status'], 'STOPPED')
+                        self.assertEqual(summary['checkpoint_publication_error'],
+                            'checkpoint API unavailable' if checkpoint_failure else None)
+                        self.assertEqual((root / 'source.txt').read_text(), 'unchanged existing implementation')
                 else:
                     loop.main()
             finally:

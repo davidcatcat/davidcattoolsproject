@@ -121,3 +121,11 @@ GitHub identifies the same branch/repository and exact HEAD as a merged PR, and
 that PR's merge commit is an ancestor of pinned main. Equal content alone cannot
 approve an unpublished or empty local commit. Different trees, unmerged PRs,
 unknown merge ancestry and branch/PR collisions still stop with files preserved.
+
+## Decision checkpoints on Git
+
+When enabled by `publish_decision_checkpoint: true`, a valid initial Codex NEEDS_DECISION in a new task publishes a curated Markdown checkpoint under `reports/ai-loop/checkpoints/` on the control branch. The runner requires unchanged base HEAD and report-only edits, bounds the report, checks scope and remote path/control identity, uses a non-force API update, and verifies the exact remote blob. It never stages, commits or pushes the Mac feature branch in this path. Tests, probes, acceptance, approval and resume remain pending; no new feature PR is created. The displayed Git URL lets the coordinator read evidence without asking David to cat it.
+
+Publication errors preserve the original NEEDS_DECISION and local report. Raw provider streams, prompts and private logs stay on the Mac. Source changes, later repair decisions, invalid results, auth/CLI/scope/test errors are outside this narrow automatic publication path. They are not silently uploaded. A stopped task still requires explicit coordinator recovery.
+
+The current run already stopped using the older runner. Its report was imported from David's attachment: [F3 stop checkpoint](../../reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md). Do not rerun the current task until the continuity decision and recovery contract are ready.
