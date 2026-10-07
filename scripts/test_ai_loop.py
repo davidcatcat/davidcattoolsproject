@@ -144,11 +144,40 @@ class RuntimeTests(unittest.TestCase):
                     loop.wait_ci(Path('.'), HEAD, 'llmtool-ci.yml')
 
 
+class TestPhaseTests(unittest.TestCase):
+    def test_related_and_full_execute_the_configured_commands(self):
+        task = {'related_tests': [['related-command']], 'full_tests': [['full-command']],
+                'timeout_seconds': 60}
+        with tempfile.TemporaryDirectory() as runtime:
+            logs = Path(runtime)
+            for suite, expected in [('related', 'related-command'), ('full', 'full-command'),
+                                    ('full-final', 'full-command')]:
+                with patch.object(loop, 'command', return_value=(0, '', '')) as command:
+                    self.assertTrue(loop.tests(logs, logs, task, 0, suite))
+                    self.assertEqual(command.call_args.args[0], [expected])
+                rows = json.loads(loop.test_result_file(logs, 0, suite).read_text())
+                self.assertEqual(rows[0]['suite'], suite)
+                self.assertEqual(rows[0]['exit_code'], 0)
+
+    def test_failed_command_preserves_evidence_and_skips_later_commands(self):
+        task = {'related_tests': [['fails'], ['must-not-run']], 'timeout_seconds': 60}
+        with tempfile.TemporaryDirectory() as runtime:
+            logs = Path(runtime)
+            with patch.object(loop, 'command', return_value=(7, '', 'failure')) as command:
+                self.assertFalse(loop.tests(logs, logs, task, 2, 'related'))
+                self.assertEqual(command.call_count, 1)
+            rows = json.loads(loop.test_result_file(logs, 2, 'related').read_text())
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]['argv'], ['fails'])
+            self.assertEqual(rows[0]['exit_code'], 7)
+
+
 class ExistingPRTests(unittest.TestCase):
     def task(self):
         return {'task_id': 'pr46-review', 'mode': 'review_existing_pr', 'pr_number': 46,
                 'base_sha': 'b' * 40, 'expected_head': HEAD, 'branch': 'feat/existing',
-                'allowed_files': ['source.txt'], 'tests': [['fake-test']],
+                'allowed_files': ['source.txt'], 'related_tests': [['fake-related']],
+                'full_tests': [['fake-full']], 'default_test_mode': 'related',
                 'max_repairs': 2, 'timeout_seconds': 60, 'ci_workflow': 'llmtool-ci.yml'}
 
     def pr(self):
@@ -222,7 +251,20 @@ class ExistingPRTests(unittest.TestCase):
     def test_two_repairs_exhausted_stops_without_publication(self):
         self.exercise_pipeline(failures=3, should_stop=True)
 
-    def exercise_pipeline(self, failures=0, should_stop=False):
+    def test_full_mode_reuses_initial_full_pass_on_unchanged_bytes(self):
+        self.assertEqual(self.exercise_pipeline(test_mode='full'), ['full'])
+
+    def test_full_mode_repairs_with_related_then_runs_final_full(self):
+        self.assertEqual(self.exercise_pipeline(test_mode='full', failures=1), ['full', 'related', 'full-final'])
+
+    def test_related_mode_never_runs_local_full(self):
+        self.assertEqual(self.exercise_pipeline(failures=1), ['related', 'related'])
+
+    def test_final_full_failure_returns_to_bounded_repair(self):
+        self.assertEqual(self.exercise_pipeline(test_mode='full', failures=1, final_full_failures=1),
+                         ['full', 'related', 'full-final', 'related', 'full-final'])
+
+    def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -234,6 +276,8 @@ class ExistingPRTests(unittest.TestCase):
             current_head = [HEAD]
             dirty = [False]
             review_calls = [0]
+            final_full_calls = [0]
+            suites = []
             commands = []
 
             def fake_git(cwd, *args):
@@ -262,9 +306,15 @@ class ExistingPRTests(unittest.TestCase):
                         current_head[0] = 'c' * 40
                 return ''
 
-            def fake_tests(cwd, logs, metadata, round_no):
-                loop.save_json(logs / ('tests-%d.json' % round_no), [{'argv': ['fake-test'], 'exit_code': 0}])
-                return True
+            def fake_tests(cwd, logs, metadata, round_no, suite):
+                suites.append(suite)
+                passed = True
+                if suite == 'full-final':
+                    final_full_calls[0] += 1
+                    passed = final_full_calls[0] > final_full_failures
+                loop.save_json(loop.test_result_file(logs, round_no, suite),
+                               [{'argv': ['fake-' + suite], 'exit_code': 0 if passed else 1}])
+                return passed
 
             def fake_claude(*args):
                 review_calls[0] += 1
@@ -293,7 +343,7 @@ class ExistingPRTests(unittest.TestCase):
             codex = stack.enter_context(patch.object(loop, 'codex', side_effect=fake_codex))
             runner = stack.enter_context(patch.object(loop, 'run', return_value='version fixture'))
             stack.enter_context(patch.object(loop, 'wait_ci', return_value=[{'status': 'completed', 'conclusion': 'success'}]))
-            stack.enter_context(patch.object(sys, 'argv', ['ai_loop.py', '--control-sha', 'd' * 40]))
+            stack.enter_context(patch.object(sys, 'argv', ['ai_loop.py', '--control-sha', 'd' * 40, '--' + test_mode]))
             previous = Path.cwd()
             os.chdir(root)
             try:
@@ -304,7 +354,7 @@ class ExistingPRTests(unittest.TestCase):
                     loop.main()
             finally:
                 os.chdir(previous)
-            self.assertEqual(codex.call_count, min(failures, 2))
+            self.assertEqual(codex.call_count, min(failures + final_full_failures, 2))
             self.assertFalse(any(call.args[0][:3] == ['gh', 'pr', 'create'] for call in runner.call_args_list))
             self.assertEqual(any(call.args[0][:3] == ['gh', 'pr', 'edit'] for call in runner.call_args_list), not should_stop)
             self.assertEqual(any(a[:2] == ('push', '-u') for a in commands), not should_stop)
@@ -312,6 +362,7 @@ class ExistingPRTests(unittest.TestCase):
             if not failures:
                 self.assertEqual((root / 'source.txt').read_text(), 'unchanged existing implementation')
             self.assertEqual((gitdir / 'ai-loop/pr46-review.completed.json').is_file(), not should_stop)
+            return suites
 
 
 if __name__ == '__main__':

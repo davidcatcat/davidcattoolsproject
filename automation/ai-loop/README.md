@@ -9,10 +9,10 @@ Current task: **review and, only if necessary, repair existing PR #46**. A11b.2.
 is already implemented. The script does not repeat implementation, create a second
 feature PR or start 2.2.1.
 
-Download scripts/ai-loop.sh once, then run:
+Download scripts/ai-loop.sh once. From its directory, run:
 
 ```sh
-bash ~/Downloads/ai-loop.sh
+bash ai-loop.sh
 ```
 
 The launcher automatically selects the canonical repository, fetches the control
@@ -31,8 +31,37 @@ local state/dependencies without switching branches, calling models or editing
 source. The normal invocation already performs preflight before paid model work;
 a separate --check run is optional.
 
-Existing installations/logins for git, codex, claude, gh, make and Python 3.9+ are
-required. This task uses `tools/llmtool/.venv/bin/python` plus Mac `/usr/bin/python3`,
+Choose local test coverage:
+
+```sh
+bash ai-loop.sh --related  # default: related local tests; full canonical CI
+bash ai-loop.sh --full     # also require full local checks
+```
+
+`--test-mode related` and `--test-mode full` are equivalent alternatives. The
+default is in task.json. Related commands are explicitly selected for the task,
+not guessed from file names: this task covers syntax, Git-preflight, Git
+intelligence/A5 and Action contracts. Each command displays its position,
+PASS/FAIL and elapsed seconds; a failed command stops that phase immediately.
+
+Full mode initially runs the canonical checks with both Mac interpreters. Each
+repair runs related tests first. After review PASS, it runs final full checks if
+the tested bytes changed; an initial full PASS is reused only for identical bytes.
+A final full failure uses the same two-repair bound. Related mode runs no local
+full suite, and explicitly reports local full checks as NOT RUN. Both modes require
+the full canonical GitHub CI on the final publication HEAD, on Linux/Python 3.9
+and 3.14. That CI is separate from local Mac evidence.
+
+A running process keeps its pinned runner/task. Updates take effect at the next
+launch; do not run another writer alongside it. After this task completes, a rerun
+is a no-op. The coordinator must prepare a new contract for new work; changing test
+mode does not rerun a completed task or bypass a moved PR HEAD.
+
+Existing installations and usable authentication for git, codex, claude, gh, make
+and Python 3.9+ are required. Preflight verifies GitHub authentication, but CLI
+version/installation checks do not establish Codex or Claude login. A provider's
+authentication is exercised when that provider is called; successful review skips
+Codex. This task uses `tools/llmtool/.venv/bin/python` plus Mac `/usr/bin/python3`,
 matching PR #46's local validation layout. Targeted unittest discovery sets
 `PYTHONPATH=tools/llmtool`; canonical Makefile invocations use the correct cwd-relative
 venv path. No root .venv, new API key or new model configuration is assumed.
@@ -85,5 +114,6 @@ Official interfaces:
 - https://learn.chatgpt.com/docs/non-interactive-mode
 - https://code.claude.com/docs/en/cli-reference
 
-Authoring checks are standalone syntax/fixture checks; actual Mac CLI compatibility,
-authentication and the live loop remain pending. See VALIDATION.md.
+Authoring checks are standalone syntax/fixture checks. The earlier Mac run reached
+Claude completion, report publication and exact-head CI waiting; the new test-mode
+options have not yet been exercised on Mac. See VALIDATION.md.

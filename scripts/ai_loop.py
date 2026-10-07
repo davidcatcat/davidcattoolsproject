@@ -160,7 +160,8 @@ def load_task(root, control_sha):
     metadata = json.loads(git(root, 'show', control_sha + ':' + TASK_DIR + 'task.json'))
     text = git(root, 'show', control_sha + ':' + TASK_DIR + 'task.md')
     required = {'task_id', 'mode', 'pr_number', 'expected_head', 'base_sha', 'branch',
-                'allowed_files', 'tests', 'max_repairs', 'timeout_seconds', 'ci_workflow'}
+                'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
+                'max_repairs', 'timeout_seconds', 'ci_workflow'}
     if set(metadata) != required or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -179,11 +180,14 @@ def load_task(root, control_sha):
         raise Stop('invalid repair bound')
     if type(metadata['timeout_seconds']) is not int or not 60 <= metadata['timeout_seconds'] <= 3600:
         raise Stop('invalid timeout')
-    if not isinstance(metadata['tests'], list) or not metadata['tests']:
-        raise Stop('task needs deterministic tests')
-    for argv in metadata['tests']:
-        if not isinstance(argv, list) or not argv or any(not isinstance(a, str) for a in argv):
-            raise Stop('invalid test argv')
+    if metadata['default_test_mode'] not in ('related', 'full'):
+        raise Stop('invalid default test mode')
+    for suite in ('related_tests', 'full_tests'):
+        if not isinstance(metadata[suite], list) or not metadata[suite]:
+            raise Stop('task needs explicit related and full test commands')
+        for argv in metadata[suite]:
+            if not isinstance(argv, list) or not argv or any(not isinstance(a, str) for a in argv):
+                raise Stop('invalid test argv')
     if not isinstance(metadata['ci_workflow'], str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.yml', metadata['ci_workflow']):
         raise Stop('invalid CI workflow')
     return metadata, text
@@ -220,15 +224,30 @@ def claude(root, logs, prompt, round_no, timeout, head):
     return result
 
 
-def tests(root, logs, task, round_no):
+def test_commands(task, suite):
+    return task['full_tests' if suite in ('full', 'full-final') else 'related_tests']
+
+
+def test_result_file(logs, round_no, suite):
+    return logs / ('tests-%d-%s.json' % (round_no, suite))
+
+
+def tests(root, logs, task, round_no, suite='related'):
     results = []
-    for i, argv in enumerate(task['tests']):
-        print('[Tests] ' + ' '.join(argv), flush=True)
+    commands = test_commands(task, suite)
+    for i, argv in enumerate(commands):
+        label = '[Tests/%s] %d/%d' % (suite, i + 1, len(commands))
+        print(label + ' ' + ' '.join(argv), flush=True)
+        started = time.monotonic()
         rc, _, _ = command(argv, root, timeout=task['timeout_seconds'],
-                            stdout_path=logs / ('tests-%d-%d.stdout.log' % (round_no, i)),
-                            stderr_path=logs / ('tests-%d-%d.stderr.log' % (round_no, i)))
-        results.append({'argv': argv, 'exit_code': rc})
-    save_json(logs / ('tests-%d.json' % round_no), results)
+                            stdout_path=logs / ('tests-%d-%s-%d.stdout.log' % (round_no, suite, i)),
+                            stderr_path=logs / ('tests-%d-%s-%d.stderr.log' % (round_no, suite, i)))
+        elapsed = round(time.monotonic() - started, 1)
+        results.append({'suite': suite, 'argv': argv, 'exit_code': rc, 'seconds': elapsed})
+        print(label + (' PASS' if rc == 0 else ' FAIL') + ' (%ss)' % elapsed, flush=True)
+        if rc:
+            break
+    save_json(test_result_file(logs, round_no, suite), results)
     return all(r['exit_code'] == 0 for r in results)
 
 
@@ -288,6 +307,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--test-mode', choices=('related', 'full'), help='override task test mode')
+    mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
+    mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
     root = REPO.resolve()
     if Path.cwd().resolve() != root or git(root, 'rev-parse', '--show-toplevel') != str(root):
@@ -306,6 +329,7 @@ def main():
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
         task, text = load_task(root, args.control_sha)
+        test_mode = args.test_mode or task['default_test_mode']
         for executable in ('codex', 'claude', 'gh', 'make'):
             if not shutil.which(executable):
                 raise Stop(executable + ' is not installed/in PATH')
@@ -331,7 +355,8 @@ def main():
         branch, head = git(root, 'branch', '--show-current'), git(root, 'rev-parse', 'HEAD')
         pr_info = read_pr(root, task, task['expected_head'])
         prepare_existing_branch(root, task, check_only=args.check)
-        print('[Task] ' + task['task_id'] + '\n' + text, flush=True)
+        print('[Task] ' + task['task_id'] + ' / PR #' + str(task['pr_number']), flush=True)
+        print('[Mode] local ' + test_mode + ' tests; full canonical checks remain required in CI', flush=True)
         if args.check:
             print('PRECHECK PASS. No models started; no source changes.', flush=True)
             return
@@ -347,7 +372,7 @@ def main():
         save_json(logs / 'task.json', task)
         save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
-            'control_sha': args.control_sha, 'run_id': run_id,
+            'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
             'codex': run(['codex', '--version'], root), 'claude': run(['claude', '--version'], root),
             'venv_python': run(['tools/llmtool/.venv/bin/python', '--version'], root),
             'system_python': run(['/usr/bin/python3', '--version'], root)})
@@ -361,6 +386,7 @@ def main():
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
         repair_reason = None
+        full_tested_bytes = None
         try:
             initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
             if any(p and p not in task['allowed_files'] for p in initial_paths):
@@ -374,8 +400,9 @@ def main():
                     if result['status'] != 'PASS':
                         raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
                 tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
-                passed = tests(root, logs, task, round_no)
-                test_results = json.loads((logs / ('tests-%d.json' % round_no)).read_text())
+                suite = 'full' if test_mode == 'full' and round_no == 0 else 'related'
+                passed = tests(root, logs, task, round_no, suite)
+                test_results = json.loads(test_result_file(logs, round_no, suite).read_text())
                 touched = check_scope(root, task, original, branch, head)
                 after_tests = {p: digest(root / p) for p in tested_bytes if (root / p).exists()}
                 if after_tests != tested_bytes:
@@ -388,6 +415,8 @@ def main():
                         raise Stop('deterministic tests still fail after repair bound')
                     repair_reason = 'Repair only failures in the deterministic tests. Read test logs under ' + str(logs)
                     continue
+                if suite == 'full':
+                    full_tested_bytes = tested_bytes.copy()
                 if touched:
                     git(root, 'diff', '--check')
                     git(root, 'add', '--', *touched)
@@ -406,7 +435,8 @@ def main():
                     'Do not convert optional improvements into blockers. This is ordinary code review, '
                     'Your findings will be committed to Git: never include secrets, tokens, raw provider output or private logs. '
                     'not formal security/QA sign-off or merge approval. Reviewed_head must be ' + head + '\nTASK:\n'
-                    + text + '\nTEST RESULTS:\n' + (logs / ('tests-%d.json' % round_no)).read_text()
+                    + text + '\nLOCAL TEST MODE: ' + test_mode + '\nTEST RESULTS:\n'
+                    + test_result_file(logs, round_no, suite).read_text()
                     + '\nDIFF:\n' + patch)
                 snapshot = git(root, 'status', '--porcelain')
                 review = claude(root, logs, review_prompt, round_no, task['timeout_seconds'], head)
@@ -416,6 +446,21 @@ def main():
                 history.append({'round': round_no, 'head': head, 'developer': result, 'tests': 'PASS',
                                 'test_results': test_results, 'tested_sha256': tested_bytes, 'review': review})
                 if review['status'] == 'PASS':
+                    if test_mode == 'full' and full_tested_bytes != committed_bytes:
+                        final_passed = tests(root, logs, task, round_no, 'full-final')
+                        final_results = json.loads(test_result_file(logs, round_no, 'full-final').read_text())
+                        history[-1]['final_full'] = {'status': 'PASS' if final_passed else 'FAIL', 'results': final_results}
+                        if check_scope(root, task, original, branch, head):
+                            raise Stop('final full tests altered source state')
+                        after_full = {p: digest(root / p) for p in committed_bytes if (root / p).exists()}
+                        if after_full != committed_bytes:
+                            raise Stop('final full tests changed the reviewed bytes')
+                        if not final_passed:
+                            if round_no == task['max_repairs']:
+                                raise Stop('final full tests still fail after repair bound')
+                            repair_reason = 'Repair only final-full test failures. Read logs under ' + str(logs)
+                            continue
+                        full_tested_bytes = committed_bytes.copy()
                     break
                 if review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
                     raise Stop('Claude review needs a decision or exceeded repair bound')
@@ -430,7 +475,9 @@ def main():
             if report.exists() or report.parent.is_symlink():
                 raise Stop('report path collision or symlink')
             report.write_text('# AI loop: ' + task['task_id'] + '\n\n'
-                + 'Implementation/tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
+                + 'Local selected tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
+                + '- Local test mode: `' + test_mode + '`\n'
+                + '- Local full canonical suite: ' + ('PASS' if full_tested_bytes == committed_bytes else 'NOT RUN; required full suite remains in exact-head CI') + '\n'
                 + '- Existing PR: #' + str(task['pr_number']) + '\n- Starting PR HEAD: `' + task['expected_head'] + '`\n'
                 + '- Implementation HEAD: `' + head + '`\n- Control SHA: `' + args.control_sha + '`\n'
                 + '- Canonical Mac root: `' + str(root) + '`\n- Repair attempts used: ' + str(round_no) + '\n'
@@ -450,13 +497,14 @@ def main():
             body = logs / 'pr-body.md'
             body.write_text((pr_info.get('body') or '') + '\n\n## Automated independent review handoff\n\n'
                             + 'Review/repair contract: `automation/ai-loop/task.md` on control commit `'
-                            + args.control_sha + '`.\n\nCanonical Mac checks and independent ordinary Claude review passed. '
+                            + args.control_sha + '`.\n\nLocal ' + test_mode + ' checks and independent ordinary Claude review passed. '
                             + 'Exact publication-head CI passed. Final coordinator review is pending; no auto-merge.\n\n'
                             + 'Report: `' + report_rel + '`\n', encoding='utf-8')
             run(['gh', 'pr', 'edit', str(task['pr_number']), '--repo', IDENTITY, '--body-file', str(body)], root)
             pr = pr_info['html_url']
             summary = {'status': 'READY_FOR_FINAL_REVIEW', 'head': publication_head, 'branch': branch,
-                       'report': report_rel, 'pr': pr, 'ci': ci}
+                       'report': report_rel, 'pr': pr, 'ci': ci, 'local_test_mode': test_mode,
+                       'local_full': 'PASS' if full_tested_bytes == committed_bytes else 'NOT_RUN'}
             save_json(completed, summary)
             save_json(logs / 'summary.json', summary)
             print('\nREADY FOR FINAL REVIEW\n' + pr + '\nHEAD: ' + publication_head, flush=True)

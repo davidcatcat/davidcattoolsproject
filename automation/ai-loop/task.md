@@ -23,11 +23,15 @@ reset, stash, force-push or discard unrelated work.
 
 ## Run in this order
 
-1. Run deterministic Git-preflight tests and full canonical checks on the existing
-   implementation. Use `tools/llmtool/.venv/bin/python` and Mac `/usr/bin/python3`
-   as specified in task.json, from the canonical repository. Include
-   `PYTHONPATH=tools/llmtool` for root-based targeted unittest discovery. Do not
-   assume a root `.venv` exists or silently substitute a different interpreter.
+1. Select local test coverage from task.json. Default `--related` runs syntax,
+   Git-preflight, Git-intelligence/A5 and Action-contract tests using the existing
+   `tools/llmtool/.venv/bin/python`. Explicit `--full` runs the canonical checks
+   with both that interpreter and Mac `/usr/bin/python3`. Run from the canonical
+   repository, with `PYTHONPATH=tools/llmtool` for root-based unittest discovery.
+   Do not assume a root `.venv` or silently substitute a different interpreter.
+   Related mode requires the full canonical suite in final exact-head CI; it does
+   not claim a local full-suite PASS. This selection policy was requested by David
+   on 2026-10-07 to avoid full local checks in every repair round.
 2. Claude independently reviews the full cumulative base-to-current-HEAD diff,
    originating L1/L2 requirements, and current deterministic test evidence. It
    has read tools only. It does not modify files, run tests, write Git or merge.
@@ -37,13 +41,18 @@ reset, stash, force-push or discard unrelated work.
    the three allowed_files in task.json. Retain the actual error/test evidence.
    Update the validation report only to add truthful repair/verification evidence;
    preserve historical before-fix evidence and do not present old test results as
-   validation of changed bytes. Tests are run again, the runner commits, and
-   Claude re-reviews the full cumulative diff. At most two repairs in total.
+   validation of changed bytes. Related tests run after each repair, the runner
+   commits, and Claude re-reviews the full cumulative diff. In full mode, run the
+   final local full suite after review PASS if the tested bytes changed; reuse an
+   initial full PASS only when the same bytes remain. A final full failure returns
+   to bounded repair. At most two repairs in total, including such failures.
 5. Publish the dated automated review report and any tested repairs to the same
    PR #46 branch. Wait for applicable llmtool CI runs on the exact final publication
    HEAD. Report-only pushes may omit a push workflow due to path filters, so accept
    the applicable PR workflow at that exact HEAD; missing/old checks are not PASS.
-   Preserve the existing PR description and append links to this new handoff.
+   CI runs the full canonical suite on Linux/Python 3.9 and 3.14; this does not
+   substitute for Mac-specific evidence. Record local mode/results separately
+   from CI. Preserve the existing PR description and append this new handoff.
 6. Stop at READY_FOR_FINAL_REVIEW. Final coordinator/merge decisions remain pending.
 
 ## Review requirements

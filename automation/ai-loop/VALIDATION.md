@@ -24,7 +24,7 @@ A11b.2.2.1/.2/.3. The control branch is fetchable before PR #45 is merged.
 - `bash -n ai-loop-delivery/scripts/ai-loop.sh`: exit 0.
 - `python3 -m py_compile ai-loop-delivery/scripts/ai_loop.py`: exit 0.
 - `python3 -W error::ResourceWarning -m unittest discover -s ai-loop-delivery/scripts -p test_ai_loop.py -q`:
-  30 tests, PASS, no ResourceWarning.
+  36 tests, PASS, no ResourceWarning.
 - Task JSON parses and names the actual PR branch/head/report. Tests use
   tools/llmtool/.venv, root-discovery PYTHONPATH and the Mac system Python.
 
@@ -42,8 +42,26 @@ also exercise:
   report published on the existing branch, original PR edited and completion saved.
 - Blocking finding: one bounded Codex repair, tests and re-review, same-PR publication.
 - Two repairs exhausted: STOP, no publication/PR edit, preserved work/logs.
+- Related mode: related local tests only, including after repairs.
+- Full mode: reuse unchanged initial full PASS; repair with related checks and
+  run final full checks on changed bytes; final full failure returns to bounded
+  repair.
+- Test phases select the configured commands, retain per-command results and
+  stop at the first failure instead of spending time on remaining commands.
 
-## Pending actual Mac evidence
+David requested selectable local related/full modes on 2026-10-07. The task's
+default is related, with full canonical checks still mandatory in final exact-head
+CI. Full mode retains both Mac interpreter checks. Reports distinguish local
+full NOT RUN from a real local full PASS and from GitHub CI evidence.
+
+## Observed earlier run and pending new-mode evidence
+
+David's terminal output for the previously published runner shows both local
+canonical commands, Claude review, then waiting for CI at publication HEAD
+`91aebb12c25c63c1998caa85ad9fc5e15a4e993d`. GitHub confirms PR #46 at that SHA
+and an in-progress pull-request llmtool CI run when inspected. This is evidence
+of the earlier run reaching publication; it does not validate the new mode code
+or establish Codex authentication (the successful path skips Codex).
 
 - Bootstrap fetch/task download and safe branch handoff on the user's canonical repo.
 - Actual Codex/Claude flag compatibility and saved login/quota.
@@ -51,7 +69,7 @@ also exercise:
 - Live Claude → optional Codex repair → tests → Claude re-review.
 - Same-branch Git publication, exact-head remote CI and existing PR body update.
 
-These remain pending, not PASS. --check is an optional low-cost preflight; a normal
+Actual new-mode checks remain pending, not PASS. --check is an optional low-cost preflight; a normal
 launch performs the same preflight before model work. The helper itself has author
 self-review and offline fixtures only; independent helper review remains pending.
 Future ordinary Claude implementation reviews do not substitute for separate
