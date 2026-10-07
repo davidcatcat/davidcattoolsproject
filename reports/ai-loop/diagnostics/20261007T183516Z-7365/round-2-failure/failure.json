@@ -1,0 +1,48 @@
+{
+  "run_id": "20261007T183516Z-7365",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "round": 2,
+  "phase": "full-final",
+  "head": "474679ecda36da610a96e7ec84da39a5dd3ae33b",
+  "source_sha256": {
+    "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+    "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+    "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+    "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+    "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+    "tools/llmtool/tests/test_git_containment.py": "d047d204a8e998c96a78db076b692b0f0cb3c5ce384441b7091a6c0b8c295f2b",
+    "tools/llmtool/tests/run_containment_acceptance.py": "6d190d19a879ae9119ec0d0c6b2fc8155ac1f953c68c73056c5da3cdd1f8df24",
+    "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+    "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728",
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md": "6475c0da513377864bf8aa613214f8f610d97a444deeb77d553412b5f68cc2e3"
+  },
+  "status": "FAIL",
+  "gate_waived": false,
+  "evidence_sha256": "db07a8362b2349a0061637aaebd6782d3324640223e1ae52942a06a29841c585",
+  "failed_commands": [
+    {
+      "argv": [
+        "make",
+        "-C",
+        "tools/llmtool",
+        "check",
+        "PYTHON=.venv/bin/python"
+      ],
+      "exit_code": 0,
+      "suite": "full-final"
+    },
+    {
+      "argv": [
+        "make",
+        "-C",
+        "tools/llmtool",
+        "check",
+        "PYTHON=/usr/bin/python3"
+      ],
+      "exit_code": 2,
+      "suite": "full-final"
+    }
+  ],
+  "ci_runs": [],
+  "prior_review_status": null
+}
