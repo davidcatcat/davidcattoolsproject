@@ -22,8 +22,11 @@ Recovery requires unchanged stopped commit/source hashes, Git-pinned old task an
 failure records, a clean tracked/index state and no feature publication. It snapshots
 candidate files and failure JSON before models and preserves unrelated artifacts.
 If old probe PIDs still exist or inspection is ambiguous, it stops without signaling.
-If retained processes are reported, restart the Mac before repeating this command.
-Do not terminate a remembered PID or delete recovery markers. Preflight failure
+If retained processes are reported, inspect fresh state/arguments/parent-child
+relationships and obtain coordinator resolution for the confirmed test parent.
+Reboot is not required merely because a PID exists. A zombie is already exited;
+operator handling concerns its confirmed stuck parent, not a zombie signal or an
+unverified remembered process group. Do not delete recovery markers. Preflight failure
 does not consume the one-use continuation.
 
 At most two Codex repair calls; diagnostic preservation first, zombie identity cause

@@ -36,8 +36,12 @@ unrelated untracked artifacts are fingerprinted and preserved; their historical
 integrity is not retrospectively asserted. A read-only PID-presence check rejects
 retained old probe processes and ambiguous inspection before models/spawns. Never
 kill an old snapshot PID/PGID or delete a one-use marker to bypass it. If the runner
-reports retained processes, David must restart the Mac and run this command again;
-failed preflight does not consume the recovery. PID absence is not containment PASS.
+reports retained processes, inspect fresh process state, full executable/host path
+and parent-child relationship before operator resolution. Reboot is not a required
+step. Do not kill a remembered PID blindly or signal a zombie. The coordinator can
+authorize terminating only the confirmed stuck standalone fake-test parent; the OS
+then adopts its exited child for reaping. Failed preflight does not consume the
+recovery, and operator cleanup is not containment PASS.
 
 ## Current bounded repair requirements
 

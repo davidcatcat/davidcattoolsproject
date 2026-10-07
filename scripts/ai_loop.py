@@ -722,7 +722,7 @@ def ensure_failed_probe_pids_absent(root, evidence):
         if observed and all(re.fullmatch(r'[1-9][0-9]*', p)
                             and int(p) in pids for p in observed) and not err.strip():
             raise Stop('舊 Mac probe PID 仍存在：' + ', '.join(observed)
-                       + '。不會用舊 PID 清除；請重新啟動 Mac，再執行相同恢復命令。')
+                       + '。不會用舊 PID 清除；請先核對程序狀態，由協調者確認如何處理測試 parent。')
     raise Stop('cannot prove old probe PIDs absent; no model or new probe started')
 
 

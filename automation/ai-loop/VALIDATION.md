@@ -279,3 +279,14 @@ actual containment gates and independent review remain pending.
 - Python 3.9 grammar, task schema and whitespace checked on standalone helper files.
   Actual Mac new-heartbeat execution is pending. The current Mac process retains
   its old pinned runner and is not modified or restarted by this publication.
+
+## Operator guidance correction — 2026-10-07
+
+David supplied fresh full process arguments/state: the canonical standalone fake-test
+parent remained `Ss`, while its owned supervisor child was `Z / <defunct>`.
+The previous blanket reboot recommendation was unnecessary. The PID-presence guard
+still fails closed and sends no signal; its message now directs fresh state/identity
+inspection and coordinator resolution of the confirmed stuck test parent. Required
+Mac/native/identity gates and one-use recovery are unchanged. External operator
+fixture cleanup never becomes retrospective containment PASS. No Mac process action
+was performed from Work. The unchanged 127 helper fixtures pass after this correction.
