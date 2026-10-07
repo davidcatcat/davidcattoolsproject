@@ -9,9 +9,10 @@ ZIP. Native FD inheritance and SIGINT/SIGTERM/SIGHUP passed on the old bytes;
 
 A new bounded continuation is authorized in [task.md](task.md) and [the assessment](../../reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md).
 It pins candidate `a00eda49aa0f0c3486d27589148361d67e7bdb3e` and the exact failure
-hashes. It addresses strict non-reaping exit-transition observation and bounded
-supervisor diagnostics/genuine hung-stage proof. The early supervisor-loss cause
-is still unknown. No old PASS is inherited and acceptance thresholds stay intact.
+hashes. Fresh operator ps localizes the fault to the intentional `closed_status` subcase
+inside hung_supervisor. The new task addresses strict non-reaping exit-transition
+observation and exact bounded subcase diagnostics; it preserves intentional EOF
+and does not treat it as an unexplained crash. No old PASS is inherited and acceptance thresholds stay intact.
 
 Before resuming, inspect possible retained fixtures and show the coordinator:
 

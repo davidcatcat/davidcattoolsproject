@@ -12,8 +12,8 @@ Changes:
 - Recovery prompt names the explicitly assessed scenario instead of assuming
   SIGINT. Exact candidate/evidence/scope/PID/one-use checks remain intact.
 - CURRENT contract pins run 96025, candidate a00eda49 and original summary/native
-  digests; permits bounded non-reaping transition observation and supervisor
-  diagnostics/genuine hung-stage proof, retaining strict SZOMB/identity checks.
+  digests; permits bounded non-reaping transition observation and test subcase
+  diagnostics, retaining intentional closed-status EOF and strict SZOMB/identity checks.
 - Historical implementation requirements are retained verbatim. Task text was
   shortened by moving superseded recovery instructions to historical evidence.
 - Scope/allowlist/tests/budgets/acceptance gates outside the recovery policy are
@@ -32,9 +32,19 @@ Validation:
 - Python 3.9 grammar: PASS; no actual Python 3.9 runtime claim.
 - Bash launcher syntax, changed-file whitespace and retained contract bytes: PASS.
 - Mac/application containment repair or native tests here: NOT PERFORMED.
-- Exact native cause of pre-TERMINAL supervisor loss: UNRESOLVED.
+- Fresh operator/source evidence: failed probe is deliberate closed_status EOF.
+- Exact transient timing and corrected native cleanup: still PENDING Mac verification.
 - Application acceptance/security/merge/A11b.2.2.2: NOT APPROVED.
 
 Operator must freshly inspect possible retained host 5769/supervisor 5770 and
 resolve fixtures before one-use `--resume 20261007T162747Z-96025`. Saved numeric
 IDs do not authorize signals. No new launcher installation is needed.
+
+## Correction after fresh operator ps
+
+Fresh host argv identifies closed_status. Source verifies intentional writer close
+and self-group SIGKILL within the hung_supervisor acceptance scenario. The contract
+was narrowed before operator resume: no speculative exception/protocol diagnostic
+expansion, no TERMINAL requirement for intentional EOF. Existing 143 helper fixture
+results apply to unchanged helper code; this correction changes documentation only.
+Pinned recovery policy, candidate/evidence bytes and gates remain unchanged.

@@ -52,11 +52,17 @@ fix now returns rows and must be preserved.
 
 Apple XNU tag xnu-11417.140.69 posts NOTE_EXIT before final SZOMB assignment and
 allows exited-process references while p_stat still reflects an earlier state.
-This supports inspecting an exit transition; it does NOT prove the exact timing
-of this failed invocation or explain why the supervisor exited before TERMINAL.
-Do not label status 2 a zombie, accept it as continuity proof, or claim the
-unexpected supervisor exit has been diagnosed. Read the assessment's primary
-source links and the retained local recovery snapshots before editing.
+Fresh operator ps identifies the retained host as `--case closed_status`.
+`AcceptanceScenarios.hung_supervisor` first completes the hung probe, then runs
+closed_status before the other fault subcases. `_git_supervisor` intentionally
+closes the status FD and self-kills its owned group in closed_status. Thus EOF
+without TERMINAL is expected fault injection here, not proof of an unexplained
+supervisor crash. The source order plus matching retained-host command localizes
+this failure to closed_status; no separate completed-subcase evidence was captured.
+The entire hung_supervisor scenario is still FAIL and its later subcases remain
+unverified. Apple source supports observing the exit transition, not certainty
+about its duration in this invocation. Do not label status 2 a zombie or accept
+it as continuity proof. Read the latest assessment correction before editing.
 
 ## Bounded repair requirements
 
@@ -76,38 +82,36 @@ source links and the retained local recovery snapshots before editing.
    No poll/wait/communicate/consuming waitpid before the group-cleanup decision.
    Do not add threads, processes or a second anchor to the critical window.
 
-2. **Diagnose the pre-TERMINAL supervisor loss.** The existing supervisor catches
-   BaseException and self-kills its group without reporting the exception/phase;
-   parent stderr is discarded. Add bounded private phase/error evidence that
-   preserves the primary failure and can identify failure before the intentional
-   hung stage. Prefer a strictly schema-validated diagnostic field in the
-   existing versioned terminal/status flow; preserve message ordering, frame/FD
-   bounds and the post-START CANCEL-only control policy. Do not introduce a
-   public/debug entry, arbitrary error text, arbitrary argv or new diagnostic FD.
-   Update internal protocol/version, both validators and code/runtime binding
-   coherently if the schema changes. Whitelist compact phase/error categories
-   and bounded safe numeric facts; no environment, credentials, paths, prompts
-   or free-form exception dump. Diagnostic write failure must still enter
-   containment and retain the original error. If this cannot fit the reviewed
-   protocol/allowlist, return NEEDS_DECISION with the specific conflict.
+2. **Preserve the closed-status fault injection.** The failure is localized to
+   `closed_status`, a deliberate close(status_fd) followed by self-group SIGKILL.
+   Do not repair it by keeping the FD open, sending TERMINAL, disabling group
+   self-kill, or waiting for a normal completion message. The parent must retain
+   primary supervisor-lost/status-EOF, safely observe the owned exit transition,
+   decide group cleanup before any supervisor reap, then reap/confirm absence
+   within the existing bound. Unexpected exceptions are not established here;
+   do not add broad supervisor exception diagnostics or change protocol/version
+   merely to investigate the expected EOF. Preserve framing/binding/FD boundaries.
 
-3. **Prove the intended hung-supervisor test.** Investigate and fix the reproducible
-   pre-TERMINAL exception using the new evidence. The scenario must demonstrate
-   that the owned live supervisor actually entered the deterministic hung stage,
-   then hit the existing cancellation/ACK/bounded-wait policy, and that the parent
-   performed identity-bound group escalation before supervisor reap and proved
-   child/descendant/group disappearance. Unexpected early supervisor loss must
-   not be counted as hung-stage acceptance. Retain separate tests for unexpected
-   supervisor exit, malformed/closed status, missing ACK and failure before
-   child identity. If the next native run reveals a different design blocker,
-   STOP with evidence; do not guess a fix or broaden this contract.
+3. **Identify the exact acceptance subcase.** Add compact bounded subcase evidence
+   to the existing test diagnostics so the next failure names hung, closed_status,
+   malformed_status, lost_before_identity, registration_failure, drain_failure,
+   missing_ACK or the other fixed subcase actually executing. Preserve actual
+   completed checks without calling a partly completed scenario PASS. Retain the
+   genuine hung-stage, missing ACK, unexpected supervisor-loss and all later
+   acceptance assertions. Test-only diagnostic labeling must not add a production
+   FD/message/CLI, change the protocol flow or fabricate stage entry. The previous
+   first-hung probe progressed before closed_status according to source order,
+   but the full scenario must rerun on changed bytes. If further native evidence
+   exposes a different blocker or unexplained exit, STOP with exact subcase/error;
+   broad architecture or protocol changes require a new coordinator assessment.
 
 4. **Regression evidence.** Add deterministic tests for non-reaping status 2 to
    SZOMB 5 transition, already-zombie, latched NOTE_EXIT, shared deadline expiry,
    identity/start-time drift during transition, absent/short/permission rows,
-   external reap and no-signal rejection. Test strict bounded diagnostic schema,
-   unknown version/fields, primary-error preservation and diagnostic EPIPE.
-   Add native checks for transition observation and genuine hung-stage entry.
+   external reap and no-signal rejection. Test bounded subcase diagnostic labeling
+   and primary-error preservation; retain existing strict protocol version/schema,
+   unknown-field and EPIPE rejection coverage. Add native transition observations
+   while preserving genuine hung-stage evidence and intentional closed-status EOF.
    Preserve existing identity reuse, verification-to-signal race, FD, import/CLI
    boundaries, code-binding, negative and descendant containment assertions.
    Do not increase timeouts/cleanup budgets, skip assertions, catch-and-PASS,
