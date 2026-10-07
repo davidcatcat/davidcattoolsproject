@@ -1,3 +1,50 @@
+# CURRENT autonomous collaboration — 2026-10-08
+
+David starts one canonical Mac invocation. The script publishes ordinary failures,
+asks read-only Claude to classify and recommend repairs, publishes that recommendation,
+then calls Codex and revalidates. David does not relay routine reports/review prompts.
+
+| Role | Responsibility |
+| --- | --- |
+| Runner | Pins scope/bytes, runs tests, publishes reports, applies budget/progress/ownership checks, commits/pushes and checks CI |
+| Claude | Read-only ordinary review and separate failure classification; concrete in-scope repair or decision/blocked disposition |
+| Codex | Sole source/test writer in allowed_files; cannot stage/push, waive gates, expand scope or alter roadmap |
+| David / functional coordinator | Feature/roadmap/design/authorization decisions, blocked physical prerequisites, completed-stage functional review |
+
+Current run: `--resume 20261007T162747Z-96025`. The original candidate/failure hash
+pins remain unchanged. Existing launcher fetches the new runner/task; no reinstall.
+Resolve the previously identified old host 5769 fixture before this first resume
+as already instructed; the read-only old-PID guard stays in place. New candidate
+work must add failure cleanup in the owning test controller so ordinary subsequent
+probe failures do not routinely become orphan fixtures/manual cleanup handoffs.
+
+Related/full/native/developer/review/final-review/CI failures can enter Claude
+classification. REPAIR is accepted only for blocking CODE_BUG/TEST_BUG findings
+within allowed files, bound to exact HEAD and candidate/evidence hashes. Claude's
+recommendation goes to Git before Codex edits. No code/test change means no retry.
+Mac continuation requires a bound failure JSON and independently checked absence
+of all recorded old probe PIDs; the runner never kills by saved IDs. CI repairs
+update the same Draft PR with non-force Git and exact HEAD verification.
+
+Current budget: four Codex calls including the first continuation; four failure
+reviews; repeated same failure signature twice is stalled. Low/Note is deferred.
+Stalled/exhausted/unsafe/missing-evidence remains uncompleted, never waived PASS.
+Only a genuine scope/design/function/roadmap decision needs David's judgment;
+auth/quota/network/missing Mac capabilities can still block the physical workflow.
+No automatic login, privilege bypass, merge or next milestone.
+
+Per-round failure/recommendation/disposition reports are immutable on
+`automation/ai-loop-diagnostics`. Raw provider streams, candidate source and
+original deterministic logs stay local; structured Claude repair guidance is an
+intended published report. A final STOP still exports the visible ZIP and attempts
+its curated publication. Results reach Git automatically; Work has no automatic
+Mac callback and can read them when the completed/decision handoff is brought here.
+
+See [CURRENT task](task.md) and [autonomous-helper validation](../../reports/ai-loop/checkpoints/ai-loop-autonomous-coordination-validation-20261008.md).
+Earlier operator instructions below are historical except for original evidence,
+canonical path and the current 96025 command. CURRENT policy supersedes their
+old two-call/every-Mac-failure-stop rules.
+
 # Mac AI-loop development handoff
 
 ## CURRENT operator step — assess fixtures, then bounded hung-supervisor repair

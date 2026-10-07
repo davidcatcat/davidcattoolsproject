@@ -195,7 +195,7 @@ def load_task(root, control_sha):
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
                 'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
-                'acceptance_failure_recovery'}
+                'acceptance_failure_recovery', 'failure_triage'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -218,7 +218,7 @@ def load_task(root, control_sha):
     for path in metadata['allowed_files']:
         if not isinstance(path, str) or path.startswith(('/', '.git/')) or '..' in Path(path).parts:
             raise Stop('invalid allowed file')
-    if type(metadata['max_repairs']) is not int or not 0 <= metadata['max_repairs'] <= 2:
+    if type(metadata['max_repairs']) is not int or not 0 <= metadata['max_repairs'] <= (4 if metadata.get('failure_triage') else 2):
         raise Stop('invalid repair bound')
     if type(metadata['timeout_seconds']) is not int or not 60 <= metadata['timeout_seconds'] <= 3600:
         raise Stop('invalid timeout')
@@ -251,6 +251,13 @@ def load_task(root, control_sha):
         if metadata['publish_decision_checkpoint'] and (metadata['mode'] != 'implement_new_pr'
                 or not metadata.get('acceptance_report')):
             raise Stop('decision checkpoint publication requires a new task and explicit report')
+    if 'failure_triage' in metadata:
+        policy = metadata['failure_triage']
+        if (not isinstance(policy, dict) or set(policy) != {'max_reviews', 'repeat_limit', 'allow_mac_repair'}
+                or type(policy['max_reviews']) is not int or not 1 <= policy['max_reviews'] <= 4
+                or type(policy['repeat_limit']) is not int or not 2 <= policy['repeat_limit'] <= 4
+                or type(policy['allow_mac_repair']) is not bool or metadata['max_repairs'] < 1):
+            raise Stop('invalid bounded failure coordination policy')
     if 'mac_evidence' in metadata:
         if metadata['mac_evidence'] != 'mac-containment' or not metadata.get('mandatory_tests'):
             raise Stop('invalid Mac evidence gate')
@@ -769,6 +776,8 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     old_task, old_text = load_task(root, policy['control_sha'])
     variable = {'initial_quota_recovery', 'initial_timeout_recovery', 'acceptance_failure_recovery',
                 'codex_timeout_seconds', 'claude_timeout_seconds'}
+    if task.get('failure_triage'):
+        variable.update({'failure_triage', 'max_repairs'})
     if {k: v for k, v in task.items() if k not in variable} != {
             k: v for k, v in old_task.items() if k not in variable}:
         raise Stop('native recovery altered scope, tests or acceptance gates')
@@ -1034,19 +1043,34 @@ def diagnostic_api(root, logs, method, endpoint, payload=None, allow_missing=Fal
             request.unlink()
 
 
-def publish_diagnostics(root, logs):
+def publish_diagnostics(root, logs, files=None, batch=None):
     """Append an immutable report batch to a separate, reports-only branch."""
     if not shutil.which('gh'):
         raise Stop('gh is required to publish diagnostics')
-    files = diagnostic_payload(root, logs)
-    receipt = logs / 'published-diagnostics.json'
+    if files is None:
+        if batch is not None:
+            raise Stop('diagnostic batch requires explicit curated files')
+        files = diagnostic_payload(root, logs)
+    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition)', batch or '')
+            or not isinstance(files, dict) or not files or 'index.md' not in files
+            or set(files) != {'index.md', (batch or '').rsplit('-', 1)[-1] + '.json'}
+            or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
+            or logs != root / '.ai-loop' / logs.name
+            or any(p.is_symlink() for p in (logs, *logs.parents))
+            or any(not re.fullmatch(r'[A-Za-z0-9._-]+', n) or not isinstance(b, bytes)
+                   or len(b) > 128 * 1024 or b'\0' in b for n, b in files.items())
+            or sum(len(b) for b in files.values()) > 512 * 1024):
+        raise Stop('invalid bounded coordinator report batch')
+    for raw in files.values():
+        raw.decode('utf-8')
+    receipt = logs / ('published-' + batch + '.json' if batch else 'published-diagnostics.json')
     if receipt.is_symlink():
         raise Stop('diagnostic receipt is unsafe; preserved')
     if receipt.exists():
         previous_receipt = json.loads(receipt.read_bytes())
         if previous_receipt.get('status') != 'PUBLISHED' or previous_receipt.get('run_id') != logs.name:
             raise Stop('existing diagnostic receipt is unrelated; preserved')
-    prefix = 'reports/ai-loop/diagnostics/' + logs.name + '/'
+    prefix = 'reports/ai-loop/diagnostics/' + logs.name + '/' + (batch + '/' if batch else '')
     expected = {prefix + name: hashlib.sha1(b'blob ' + str(len(raw)).encode('ascii')
                 + b'\0' + raw).hexdigest() for name, raw in files.items()}
     api = 'repos/' + IDENTITY + '/git/'
@@ -1068,7 +1092,8 @@ def publish_diagnostics(root, logs):
     if previous:
         base_tree = read(api + 'commits/' + previous)['tree']['sha']
         old_rows = tree_rows(base_tree)
-    existing = {path: row for path, row in old_rows.items() if path.startswith(prefix)}
+    existing = {path: row for path, row in old_rows.items() if path.startswith(prefix)
+                and '/' not in path[len(prefix):]}
     desired = {path: (sha, '100644', 'blob') for path, sha in expected.items()}
     if existing and existing != desired:
         raise Stop('diagnostic run already differs remotely; never overwrite it')
@@ -1197,11 +1222,11 @@ def wait_ci(root, head, workflow):
     while time.monotonic() < deadline:
         raw = run(['gh', 'run', 'list', '--repo', IDENTITY, '--commit', head,
                    '--workflow', workflow, '--json',
-                   'headSha,status,conclusion,url', '--limit', '10'], root)
+                   'headSha,status,conclusion,url,databaseId', '--limit', '10'], root)
         matches = [r for r in json.loads(raw) if r['headSha'] == head]
         if matches and all(r['status'] == 'completed' for r in matches):
             if any(r['conclusion'] != 'success' for r in matches):
-                raise Stop('exact-head CI did not pass: ' + head)
+                raise CIFailure(head, matches)
             return matches
         print('[CI] Waiting for exact HEAD ' + head[:12], flush=True)
         time.sleep(20)
@@ -1237,6 +1262,222 @@ def install_launcher(root, control_sha):
     print('INSTALL ONLY COMPLETE. No task, model, test or branch switch performed.\n'
           'Future task entry point: bash scripts/ai-loop.sh\n'
           'Current stopped task still requires coordinator recovery.', flush=True)
+
+
+def failure_schema():
+    fields = {'decision': {'type': 'string', 'enum': ['REPAIR', 'NEEDS_DECISION', 'BLOCKED']},
+        'category': {'type': 'string', 'enum': ['CODE_BUG', 'TEST_BUG', 'SCOPE_OR_DESIGN', 'ENVIRONMENT']},
+        'reviewed_head': {'type': 'string'}, 'reviewed_evidence_sha256': {'type': 'string'},
+        'summary': {'type': 'string'}, 'findings': schema('review')['properties']['findings']}
+    return {'type': 'object', 'properties': fields, 'required': list(fields), 'additionalProperties': False}
+
+
+def validate_failure_review(value, task, head, evidence_sha):
+    if not isinstance(value, dict) or set(value) != set(failure_schema()['properties']):
+        raise Stop('invalid failure classification schema')
+    pairs = {'REPAIR': ('CODE_BUG', 'TEST_BUG'), 'NEEDS_DECISION': ('SCOPE_OR_DESIGN',),
+             'BLOCKED': ('ENVIRONMENT',)}
+    if (not isinstance(value.get('decision'), str) or value.get('decision') not in pairs
+            or value.get('category') not in pairs[value['decision']]
+            or value.get('reviewed_head') != head or value.get('reviewed_evidence_sha256') != evidence_sha
+            or not isinstance(value.get('summary'), str) or not value['summary'].strip()
+            or not 1 <= len(value['summary']) <= 2000
+            or not isinstance(value.get('findings'), list) or len(value['findings']) > 16):
+        raise Stop('invalid failure classification or evidence binding')
+    for finding in value['findings']:
+        if (not isinstance(finding, dict)
+                or set(finding) != {'severity', 'blocking', 'file', 'detail', 'evidence'}
+                or finding['severity'] not in ('Critical', 'High', 'Medium', 'Low')
+                or type(finding['blocking']) is not bool
+                or any(not isinstance(finding[k], str) or not finding[k].strip() or not 1 <= len(finding[k]) <= 2000
+                       for k in ('file', 'detail', 'evidence'))):
+            raise Stop('invalid bounded repair finding')
+        if value['decision'] == 'REPAIR' and finding['file'] not in task['allowed_files']:
+            raise Stop('failure repair exceeds allowed files')
+    if value['decision'] == 'REPAIR' and not any(f['blocking'] for f in value['findings']):
+        raise Stop('optional-only findings cannot trigger a repair')
+    return value
+
+
+def review_failure(root, logs, task, text, head, evidence_path, evidence_sha, round_no):
+    spec = logs / ('failure-%d-schema.json' % round_no)
+    output = logs / ('failure-%d-claude.raw.json' % round_no)
+    save_json(spec, failure_schema())
+    prompt = ('Read-only failure coordinator: read AGENTS.md, CLAUDE.md, task.md requirements below, '
+        'the exact failed evidence and referenced local test logs/source. Do not run commands/tests or edit. '
+        'Classify REPAIR only for a reproducible blocking CODE_BUG/TEST_BUG within allowed_files; '
+        'cite concrete file/test evidence and provide bounded repair guidance in detail. '
+        'NEEDS_DECISION is for scope/design/feature/roadmap/authorization changes. '
+        'BLOCKED is for auth/quota/environment or insufficient evidence; do not guess or retry providers. '
+        'Optional Low/Note is deferred and must not trigger repairs. No failing required gate may be waived, '
+        'no acceptance threshold/budget weakened, no stale-PID signaling or automatic merge. '
+        'The output is an intended Git report: no secrets, credentials, raw provider output or private logs. '
+        'Bind reviewed_head=' + head + ' and reviewed_evidence_sha256=' + evidence_sha
+        + '.\nEVIDENCE PATH: ' + str(evidence_path) + '\nTASK:\n' + text
+        + '\nCONTRACT:\n' + json.dumps(task) + '\nCUMULATIVE CURRENT DIFF:\n'
+        + git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha']))
+    label = '[Claude／失敗協調] 分類阻擋問題並提供修復建議（唯讀）'
+    print(label, flush=True)
+    run(['claude', '-p', '--output-format', 'json', '--json-schema', json.dumps(failure_schema()),
+         '--max-turns', '30', '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read', 'Glob', 'Grep',
+         '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+         '--settings', '{"disableAllHooks":true}', '--no-session-persistence'], root,
+        timeout=task.get('claude_timeout_seconds', task['timeout_seconds']), stdin=prompt,
+        progress=label, stdout_path=output, stderr_path=logs / ('failure-%d-claude.stderr.log' % round_no))
+    raw = json.loads(output.read_text())
+    if not isinstance(raw, dict) or raw.get('is_error') is not False or raw.get('subtype') != 'success':
+        raise Stop('Claude failure coordinator did not complete (auth/quota/format/turn limit)')
+    return validate_failure_review(raw.get('structured_output'), task, head, evidence_sha)
+
+
+class FailureCoordinator:
+    """In-scope, evidence-bound repairs. No model grants scope or process authority."""
+    def __init__(self, root, logs, task, text, original):
+        self.root, self.logs, self.task, self.text, self.original = root, logs, task, text, original
+        self.policy = task.get('failure_triage')
+        self.records = []
+        self.repeats = {}
+        self.required_change = None
+
+    def source_bytes(self):
+        return {p: digest(self.root / p) for p in self.task['allowed_files'] if (self.root / p).is_file()}
+
+    def require_changed_repair(self):
+        if self.required_change is not None and runtime_bytes(self.source_bytes()) == self.required_change:
+            raise Stop('repair made no source/test change; no blind test retry')
+        self.required_change = None
+
+    def publish(self, round_no, stage, value):
+        batch = 'round-%d-%s' % (round_no, stage)
+        encoded = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        files = {stage + '.json': encoded, 'index.md': ('# AI-loop ' + stage
+            + '\n\nEvidence/recommendation only. Required gates remain pending or failed.\n\n'
+            + '[Structured report](' + stage + '.json)\n').encode('utf-8')}
+        return publish_diagnostics(self.root, self.logs, files=files, batch=batch)
+
+    def assess(self, phase, head, evidence, round_no, last_round):
+        if not self.policy:
+            raise Stop('failure coordination is not enabled by the task')
+        before = self.source_bytes()
+        status = git(self.root, 'status', '--porcelain')
+        retained = self.logs / 'failure-inputs' / str(round_no)
+        if retained.exists() or any(p.is_symlink() for p in (retained, *retained.parents)):
+            raise Stop('failed-candidate snapshot collision/unsafe path')
+        retained.mkdir(parents=True)
+        total = 0
+        for name, expected in before.items():
+            source = self.root / name
+            if any(p.is_symlink() for p in (source, *source.parents)) or source.stat().st_size > 2 * 1024 * 1024:
+                raise Stop('failed-candidate snapshot unsafe/oversized')
+            raw = source.read_bytes()
+            total += len(raw)
+            if hashlib.sha256(raw).hexdigest() != expected or total > 16 * 1024 * 1024:
+                raise Stop('failed-candidate snapshot changed/oversized')
+            target = retained / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
+        report = {'run_id': self.logs.name, 'task_id': self.task['task_id'], 'round': round_no,
+                  'phase': phase, 'head': head, 'source_sha256': before, 'evidence': evidence,
+                  'test_log_paths': [str(p) for p in sorted(self.logs.glob('tests-%d-*.log' % round_no))],
+                  'status': 'FAIL', 'gate_waived': False, 'candidate_snapshot': str(retained)}
+        encoded = (json.dumps(report, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        if len(encoded) > 128 * 1024:
+            raise Stop('failure evidence exceeds bounded coordinator input')
+        path = self.logs / ('failure-%d.json' % round_no)
+        if path.exists() or path.is_symlink():
+            raise Stop('failure evidence collision; original preserved')
+        path.write_bytes(encoded)
+        evidence_sha = hashlib.sha256(encoded).hexdigest()
+        # Publish a safe projection first. Raw deterministic logs stay local for Read.
+        public = {k: v for k, v in report.items() if k not in ('test_log_paths', 'evidence', 'candidate_snapshot')}
+        public['evidence_sha256'] = evidence_sha
+        public['failed_commands'] = [{k: r[k] for k in ('argv', 'exit_code', 'suite') if k in r}
+                                     for r in evidence.get('results', [])]
+        public['ci_runs'] = [{k: r[k] for k in ('databaseId', 'headSha', 'status', 'conclusion', 'url') if k in r}
+                             for r in evidence.get('runs', [])]
+        native = evidence.get('mac')
+        if native is not None and not isinstance(native, dict):
+            raise Stop('invalid failed native evidence shape')
+        if native is not None:
+            public['mac'] = native  # Same native evidence already authorized for Git diagnostics.
+        public['prior_review_status'] = evidence.get('review', {}).get('status')
+        failure_url = self.publish(round_no, 'failure', public)
+        if len(self.records) >= self.policy['max_reviews']:
+            self.publish(round_no, 'disposition', {'round': round_no, 'phase': phase, 'head': head,
+                'evidence_sha256': evidence_sha, 'failure_url': failure_url,
+                'disposition': 'REPAIR_BUDGET_EXHAUSTED', 'classification': 'NOT_RUN', 'gate_waived': False})
+            raise Stop('failure coordination budget exhausted; failed gates remain blocked')
+        decision = review_failure(self.root, self.logs, self.task, self.text, head, path, evidence_sha, round_no)
+        validate_failure_review(decision, self.task, head, evidence_sha)
+        check_scope(self.root, self.task, self.original, self.task['branch'], head)
+        if (self.source_bytes() != before or git(self.root, 'status', '--porcelain') != status
+                or path.read_bytes() != encoded):
+            raise Stop('failure review changed candidate/evidence state')
+        save_json(self.logs / ('failure-%d-review.json' % round_no), decision)
+        review_url = self.publish(round_no, 'review', decision)
+        signature = json.dumps({'phase': phase, 'category': decision['category'],
+            'files': sorted(set(f['file'] for f in decision['findings'] if f['blocking'])),
+            'failed_commands': [[('{run-log-path}' if a.startswith(str(self.logs) + '/') else a)
+                                 for a in r.get('argv', [])]
+                                for r in evidence.get('results', []) if r.get('exit_code')],
+            'scenario': (native or {}).get('failure', {}).get('scenario'),
+            'exception_type': (native or {}).get('failure', {}).get('exception_type')}, sort_keys=True)
+        self.repeats[signature] = self.repeats.get(signature, 0) + 1
+        stop_reason = None
+        if decision['decision'] != 'REPAIR':
+            stop_reason = decision['decision']
+        elif round_no >= last_round:
+            stop_reason = 'REPAIR_BUDGET_EXHAUSTED'
+        elif self.repeats[signature] >= self.policy['repeat_limit']:
+            stop_reason = 'REPAIR_STALLED'
+        elif phase == 'mandatory-final':
+            if not self.policy['allow_mac_repair']:
+                stop_reason = 'MAC_REPAIR_NOT_AUTHORIZED'
+            elif (not isinstance(native, dict) or native.get('platform') != 'darwin'
+                    or type(native.get('schema_version')) is not int or native['schema_version'] != 1
+                    or not isinstance(native.get('failure'), dict)
+                    or native['failure'].get('status') != 'FAIL'
+                    or native['failure'].get('scenario') not in MAC_SCENARIOS
+                    or native.get('tested_sha256') != runtime_bytes(before)):
+                stop_reason = 'MAC_EVIDENCE_INCOMPLETE'
+            else:
+                owned = native.get('failure', {}).get('owned_processes')
+                if isinstance(owned, list) and owned:
+                    try:
+                        ensure_failed_probe_pids_absent(self.root, native)
+                    except Stop:
+                        stop_reason = 'OWNED_PROBE_CLEANUP_BLOCKED'
+                else:
+                    cleanup = native.get('failure', {}).get('fixture_cleanup', {})
+                    prior = cleanup.get('original_owned_processes') if isinstance(cleanup, dict) else None
+                    if (not isinstance(cleanup, dict) or owned != [] or cleanup.get('status') != 'RESOLVED'
+                            or not isinstance(prior, list) or not prior):
+                        stop_reason = 'OWNED_PROBE_CLEANUP_UNPROVEN'
+                    else:
+                        try:
+                            ensure_failed_probe_pids_absent(self.root, {'failure': {'owned_processes': prior}})
+                        except Stop:
+                            stop_reason = 'OWNED_PROBE_CLEANUP_BLOCKED'
+        row = {'round': round_no, 'phase': phase, 'head': head, 'evidence_sha256': evidence_sha,
+               'failure_url': failure_url, 'review_url': review_url, 'decision': decision,
+               'disposition': stop_reason or 'REPAIR', 'repeat_count': self.repeats[signature]}
+        self.records.append(row)
+        save_json(self.logs / 'repair-coordination.json', self.records)
+        self.publish(round_no, 'disposition', row)
+        if stop_reason:
+            raise Stop('failure coordinator: ' + stop_reason + '; ' + decision['summary']
+                       + '; required gates remain non-PASS; report: ' + review_url)
+        self.required_change = runtime_bytes(before)
+        print('[協調／自動修復] 建議已上 Git；交回 Codex，剩餘候選輪數 ' + str(last_round-round_no), flush=True)
+        return ('Repair only the evidence-bound blocking findings; preserve failed evidence and all gates. '
+                'Current phase=' + phase + ', candidate HEAD=' + head + '. Continue the same branch; '
+                'the outer runner owns any existing Draft PR and publication.\n' + json.dumps(decision))
+
+
+class CIFailure(Stop):
+    def __init__(self, head, runs):
+        super().__init__('exact-head CI failed: ' + head)
+        self.runs = runs
 
 
 def main():
@@ -1330,6 +1571,9 @@ def main():
         print('[Mode] local ' + test_mode + ' tests; full canonical checks remain required in CI', flush=True)
         if task.get('require_local_full'):
             print('[Required] Final local full checks and Mac containment probes cannot be skipped by --related.', flush=True)
+        if task.get('failure_triage'):
+            print('[協作模式] 失敗報告 → Claude 分類 → 建議上 Git → Codex 修復 → 重新驗證；候選上限 '
+                  + str(task['max_repairs']) + '，失敗審查上限 ' + str(task['failure_triage']['max_reviews']), flush=True)
         if args.check:
             print('PRECHECK PASS. No models started; no source changes.', flush=True)
             return
@@ -1394,11 +1638,13 @@ def main():
         mac = None
         checkpoint = None
         checkpoint_error = None
+        published_head = None
+        coordinator = FailureCoordinator(root, logs, task, text, original)
         try:
             initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
             if any(p and p not in task['allowed_files'] for p in initial_paths):
                 raise Stop('existing PR cumulative diff exceeds the pinned task scope')
-            last_round = task['max_repairs'] - 1 if native_recovery else task['max_repairs']
+            last_round = task['max_repairs'] - 1 if (native_recovery or coordinator.policy and new_task) else task['max_repairs']
             for round_no in range(last_round + 1):
                 result = None
                 if repair_reason is not None:
@@ -1406,6 +1652,9 @@ def main():
                                    round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
                     check_scope(root, task, original, branch, head)
                     if result['status'] != 'PASS':
+                        if coordinator.policy:
+                            repair_reason = coordinator.assess('developer', head, {'developer': result}, round_no, last_round)
+                            continue
                         if result['status'] == 'NEEDS_DECISION':
                             try:
                                 checkpoint = publish_decision_checkpoint(root, logs, task, result,
@@ -1415,6 +1664,7 @@ def main():
                                 print('[Checkpoint] Publication not confirmed; local evidence preserved. '
                                       + checkpoint_error, file=sys.stderr, flush=True)
                         raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
+                coordinator.require_changed_repair()
                 if any(not (root / p).is_file() or (root / p).is_symlink() for p in task.get('required_files', [])):
                     raise Stop('required implementation/test/report artifacts missing; no empty-suite PASS')
                 tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
@@ -1431,6 +1681,9 @@ def main():
                     history.append({'round': round_no, 'head': head, 'developer': result,
                                     'tests': 'FAIL', 'test_results': test_results,
                                     'review': None, 'tested_sha256': tested_bytes})
+                    if coordinator.policy:
+                        repair_reason = coordinator.assess(suite, head, {'results': test_results}, round_no, last_round)
+                        continue
                     if round_no == last_round:
                         raise Stop('deterministic tests still fail after repair bound')
                     repair_reason = 'Repair only failures in the deterministic tests. Read test logs under ' + str(logs)
@@ -1478,6 +1731,9 @@ def main():
                         if after_full != committed_bytes:
                             raise Stop('final full tests changed the reviewed bytes')
                         if not final_passed:
+                            if coordinator.policy:
+                                repair_reason = coordinator.assess('full-final', head, {'results': final_results}, round_no, last_round)
+                                continue
                             if round_no == last_round:
                                 raise Stop('final full tests still fail after repair bound')
                             repair_reason = 'Repair only final-full test failures. Read logs under ' + str(logs)
@@ -1495,6 +1751,11 @@ def main():
                         if {p: digest(root / p) for p in committed_bytes if (root / p).exists()} != committed_bytes:
                             raise Stop('required Mac checks changed reviewed bytes')
                         if not mandatory_passed:
+                            if coordinator.policy:
+                                native = json.loads(evidence_path.read_text()) if evidence_path.is_file() else None
+                                repair_reason = coordinator.assess('mandatory-final', head,
+                                    {'results': mandatory_results, 'mac': native}, round_no, last_round)
+                                continue
                             raise Stop('required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry')
                         if task.get('mac_evidence'):
                             mac = validate_mac_evidence(evidence_path, committed_bytes,
@@ -1527,83 +1788,111 @@ def main():
                         history[-1]['final_review'] = final_review
                         history[-1]['final_review_head'] = head
                         if final_review['status'] != 'PASS':
+                            if coordinator.policy:
+                                repair_reason = coordinator.assess('final-review', head, {'review': final_review}, round_no, last_round)
+                                continue
                             if final_review['status'] == 'NEEDS_DECISION' or round_no == last_round:
                                 raise Stop('final review needs a decision or exceeded repair bound')
                             repair_reason = 'Repair only final review blockers:\n' + json.dumps(final_review)
                             continue
-                    break
-                if review['status'] == 'NEEDS_DECISION' or round_no == last_round:
-                    raise Stop('Claude review needs a decision or exceeded repair bound')
-                repair_reason = ('Repair only these reproducible blocking findings. '
-                                 'Review is evidence, not permission to expand scope:\n' + json.dumps(review))
+                if review['status'] != 'PASS':
+                    if coordinator.policy:
+                        repair_reason = coordinator.assess('review', head, {'review': review}, round_no, last_round)
+                        continue
+                    if review['status'] == 'NEEDS_DECISION' or round_no == last_round:
+                        raise Stop('Claude review needs a decision or exceeded repair bound')
+                    repair_reason = ('Repair only these reproducible blocking findings. '
+                                     'Review is evidence, not permission to expand scope:\n' + json.dumps(review))
+                    continue
+                # Publish only curated results, never raw model streams or local logs.
+                report_rel = 'reports/ai-loop/' + task['task_id'] + '-' + run_id + ('-round-' + str(round_no) if published_head else '') + '.md'
+                report = root / report_rel
+                report.parent.mkdir(parents=True, exist_ok=True)
+                if report.exists() or report.parent.is_symlink():
+                    raise Stop('report path collision or symlink')
+                report.write_text('# AI loop: ' + task['task_id'] + '\n\n'
+                    + 'Local selected tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
+                    + '- Local test mode: `' + test_mode + '`\n'
+                    + '- Local full canonical suite: ' + ('PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT RUN; required full suite remains in exact-head CI') + '\n'
+                    + '- Required Mac containment: ' + ('PASS; independent security review pending' if mac else 'not a gate of this task') + '\n'
+                    + '- Task mode: `' + task['mode'] + '`\n- Starting HEAD: `'
+                    + json.loads((logs / 'provenance.json').read_text())['start_head'] + '`\n'
+                    + '- Implementation HEAD: `' + head + '`\n- Control SHA: `' + args.control_sha + '`\n'
+                    + '- Canonical Mac root: `' + str(root) + '`\n- Repair attempts used: ' + str(round_no) + '\n'
+                    + '- Exact publication-head CI is checked after this report commit; inspect GitHub checks.\n'
+                    + '- Raw prompts/provider output remain local in `.ai-loop/' + run_id + '/`.\n\n'
+                    + '## Execution provenance\n\n```json\n' + (logs / 'provenance.json').read_text() + '```\n\n'
+                    + '```json\n' + json.dumps({'rounds': history, 'failure_coordination': coordinator.records},
+                        ensure_ascii=False, indent=2) + '\n```\n', encoding='utf-8')
+                git(root, 'add', '--', report_rel)
+                git(root, 'commit', '-m', 'docs: record ' + task['task_id'] + ' automated handoff')
+                publication_head = git(root, 'rev-parse', 'HEAD')
+                if check_scope(root, task, original, branch, publication_head):
+                    raise Stop('publication hooks changed source; files preserved before push')
+                publication_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
+                if publication_bytes != committed_bytes:
+                    raise Stop('publication hooks changed reviewed/tested bytes; no push or inferred PASS')
+                git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
+                if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
+                    raise Stop('main changed before publication; refresh/recover without discarding work')
+                if new_task and published_head is None:
+                    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + branch], root):
+                        raise Stop('new branch was concurrently published; files preserved')
+                    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + branch], root)):
+                        raise Stop('a PR already exists for the new task; no duplicate publication')
+                else:
+                    read_pr(root, task, published_head or task['expected_head'])
+                git(root, 'push', '-u', 'origin', 'HEAD:refs/heads/' + branch)
+                if new_task and published_head is None:
+                    create_draft_pr(root, task, logs, publication_head, report_rel)
+                    pulls = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=open&head=davidcatcat:' + branch], root))
+                    if len(pulls) != 1 or pulls[0].get('draft') is not True:
+                        raise Stop('could not establish unique new Draft PR; published work preserved')
+                    task['pr_number'] = pulls[0]['number']
+                    read_pr(root, task, publication_head)
+                published_head = publication_head
+                try:
+                    ci = wait_ci(root, publication_head, task['ci_workflow'])
+                except CIFailure as failure:
+                    if not coordinator.policy:
+                        raise
+                    head = publication_head
+                    ci_logs = []
+                    for item in failure.runs:
+                        identifier = item.get('databaseId')
+                        if type(identifier) is int and identifier > 0 and item.get('conclusion') != 'success':
+                            target = logs / ('ci-%d-%d.failed.log' % (round_no, identifier))
+                            run(['gh', 'run', 'view', str(identifier), '--repo', IDENTITY, '--log-failed'], root,
+                                stdout_path=target, stderr_path=logs / ('ci-%d-%d.stderr.log' % (round_no, identifier)))
+                            ci_logs.append(str(target))
+                    repair_reason = coordinator.assess('ci', head, {'runs': failure.runs, 'local_log_paths': ci_logs}, round_no, last_round)
+                    continue
+                pr_info = read_pr(root, task, publication_head)
+                body = logs / 'pr-body.md'
+                body.write_text((pr_info.get('body') or '') + '\n\n## Automated independent review handoff\n\n'
+                                + 'Review/repair contract: `automation/ai-loop/task.md` on control commit `'
+                                + args.control_sha + '`.\n\nLocal ' + test_mode + ' checks and independent ordinary Claude review passed. '
+                                + 'Exact publication-head CI passed. Final coordinator review is pending; no auto-merge.\n\n'
+                                + 'Report: `' + report_rel + '`\n', encoding='utf-8')
+                run(['gh', 'pr', 'edit', str(task['pr_number']), '--repo', IDENTITY, '--body-file', str(body)], root)
+                pr = pr_info['html_url']
+                summary = {'status': 'READY_FOR_FINAL_REVIEW', 'head': publication_head, 'branch': branch,
+                           'report': report_rel, 'pr': pr, 'ci': ci, 'local_test_mode': test_mode,
+                           'local_full': 'PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT_RUN',
+                           'mac_containment': 'PASS' if mac else 'NOT_APPLICABLE',
+                           'independent_security_review': 'PENDING' if new_task else 'not established by ordinary review',
+                           'failure_coordination': coordinator.records}
+                save_json(completed, summary)
+                save_json(logs / 'summary.json', summary)
+                print('\nREADY FOR FINAL REVIEW\n' + pr + '\nHEAD: ' + publication_head, flush=True)
+                break
             else:
                 raise Stop('loop ended without PASS')
-            # Publish only curated results, never raw model streams or local logs.
-            report_rel = 'reports/ai-loop/' + task['task_id'] + '-' + run_id + '.md'
-            report = root / report_rel
-            report.parent.mkdir(parents=True, exist_ok=True)
-            if report.exists() or report.parent.is_symlink():
-                raise Stop('report path collision or symlink')
-            report.write_text('# AI loop: ' + task['task_id'] + '\n\n'
-                + 'Local selected tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
-                + '- Local test mode: `' + test_mode + '`\n'
-                + '- Local full canonical suite: ' + ('PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT RUN; required full suite remains in exact-head CI') + '\n'
-                + '- Required Mac containment: ' + ('PASS; independent security review pending' if mac else 'not a gate of this task') + '\n'
-                + '- Task mode: `' + task['mode'] + '`\n- Starting HEAD: `' + task['expected_head'] + '`\n'
-                + '- Implementation HEAD: `' + head + '`\n- Control SHA: `' + args.control_sha + '`\n'
-                + '- Canonical Mac root: `' + str(root) + '`\n- Repair attempts used: ' + str(round_no) + '\n'
-                + '- Exact publication-head CI is checked after this report commit; inspect GitHub checks.\n'
-                + '- Raw prompts/provider output remain local in `.ai-loop/' + run_id + '/`.\n\n'
-                + '## Execution provenance\n\n```json\n' + (logs / 'provenance.json').read_text() + '```\n\n'
-                + '```json\n' + json.dumps(history, ensure_ascii=False, indent=2) + '\n```\n', encoding='utf-8')
-            git(root, 'add', '--', report_rel)
-            git(root, 'commit', '-m', 'docs: record ' + task['task_id'] + ' automated handoff')
-            publication_head = git(root, 'rev-parse', 'HEAD')
-            if check_scope(root, task, original, branch, publication_head):
-                raise Stop('publication hooks changed source; files preserved before push')
-            publication_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
-            if publication_bytes != committed_bytes:
-                raise Stop('publication hooks changed reviewed/tested bytes; no push or inferred PASS')
-            git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
-            if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
-                raise Stop('main changed before publication; refresh/recover without discarding work')
-            if new_task:
-                if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + branch], root):
-                    raise Stop('new branch was concurrently published; files preserved')
-                if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + branch], root)):
-                    raise Stop('a PR already exists for the new task; no duplicate publication')
-            else:
-                read_pr(root, task, task['expected_head'])
-            git(root, 'push', '-u', 'origin', 'HEAD:refs/heads/' + branch)
-            if new_task:
-                create_draft_pr(root, task, logs, publication_head, report_rel)
-                pulls = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=open&head=davidcatcat:' + branch], root))
-                if len(pulls) != 1 or pulls[0].get('draft') is not True:
-                    raise Stop('could not establish unique new Draft PR; published work preserved')
-                task['pr_number'] = pulls[0]['number']
-                read_pr(root, task, publication_head)
-            ci = wait_ci(root, publication_head, task['ci_workflow'])
-            pr_info = read_pr(root, task, publication_head)
-            body = logs / 'pr-body.md'
-            body.write_text((pr_info.get('body') or '') + '\n\n## Automated independent review handoff\n\n'
-                            + 'Review/repair contract: `automation/ai-loop/task.md` on control commit `'
-                            + args.control_sha + '`.\n\nLocal ' + test_mode + ' checks and independent ordinary Claude review passed. '
-                            + 'Exact publication-head CI passed. Final coordinator review is pending; no auto-merge.\n\n'
-                            + 'Report: `' + report_rel + '`\n', encoding='utf-8')
-            run(['gh', 'pr', 'edit', str(task['pr_number']), '--repo', IDENTITY, '--body-file', str(body)], root)
-            pr = pr_info['html_url']
-            summary = {'status': 'READY_FOR_FINAL_REVIEW', 'head': publication_head, 'branch': branch,
-                       'report': report_rel, 'pr': pr, 'ci': ci, 'local_test_mode': test_mode,
-                       'local_full': 'PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT_RUN',
-                       'mac_containment': 'PASS' if mac else 'NOT_APPLICABLE',
-                       'independent_security_review': 'PENDING' if new_task else 'not established by ordinary review'}
-            save_json(completed, summary)
-            save_json(logs / 'summary.json', summary)
-            print('\nREADY FOR FINAL REVIEW\n' + pr + '\nHEAD: ' + publication_head, flush=True)
         except BaseException as exc:
             save_json(logs / 'summary.json', {'status': 'STOPPED', 'reason': str(exc), 'branch': branch,
                 'head': git(root, 'rev-parse', 'HEAD'), 'history': history,
-                'decision_checkpoint': checkpoint, 'checkpoint_publication_error': checkpoint_error})
+                'decision_checkpoint': checkpoint, 'checkpoint_publication_error': checkpoint_error,
+                'failure_coordination': coordinator.records})
             finish_diagnostics(root, logs, task)
             print('STOPPED. Work preserved. Logs: ' + str(logs), file=sys.stderr, flush=True)
             raise

@@ -469,3 +469,36 @@ canonical repo. All pinned task/preflight/acceptance gates still apply.
 The first containment run stopped correctly at F3 before source/test implementation. Preserve its local branch/report as decision evidence. The current ai-loop task uses a fresh recovery branch from the same pinned main, so no reset or deletion of the stopped branch is required.
 
 For this recovery, the supervisor itself is the parent-owned process-group anchor (`PID=PGID=SID`) and fake children remain in the supervisor group. Parent fallback signals that group only while the owned supervisor is live or unreaped and identity-bound; only then may it reap the supervisor. Parent death is handled by supervisor last-act group SIGKILL. This is still A11b.2.2.1, requires the original Mac/full/security gates, and does not authorize real Git ADD or 2.2.2.
+
+
+## Mac AI-loop autonomous failure coordination — David decision 2026-10-08
+
+For script-selected development, ordinary in-scope bugs are handled in one pinned
+invocation: freeze/publish failure evidence -> read-only Claude classification ->
+publish repair guidance -> Codex repair -> deterministic checks/ordinary review ->
+required full/native gates -> final review/publication/exact-head CI. CI code bugs
+may return to that loop while preserving the same Draft PR and branch.
+
+David is not the routine report/review/repair messenger. Ask him for concrete
+feature/roadmap/design/authorization decisions or deliver a completed stage for
+functional review. Explicit auth/quota/network/platform/unsafe ownership limits
+can still block execution; the script cannot bypass them. Work is not a connected
+Mac executor or callback service. Never claim its mock helper tests as Mac evidence.
+
+The versioned executable task policy bounds classification and repairs (current
+four candidate calls/four failure reviews, two-repeat stall). An unchanged repair
+cannot retry tests. Low/Note is deferred; required FAIL remains FAIL. A classifier
+cannot alter allowed files, acceptance thresholds, milestone or authorization.
+Failures/recommendations/dispositions are immutable reports on a separate diagnostics
+branch. Raw provider streams/local deterministic logs/candidate snapshots stay local.
+
+Probe failure cleanup belongs to the external test controller while it still owns
+unreaped Popen children and valid identity pins. Preserve production unresolved-
+containment behavior, original failures and all disappearance tests. The outer
+runner independently checks saved inventories for absence, never signals a saved
+PID/group, and blocks when cleanup evidence is missing or ambiguity persists.
+
+This section supersedes earlier helper language requiring manual coordinator
+handoff after every ordinary native failure. It does not waive security/Mac/merge
+gates, authorize real llmtool mutation, implement product orchestration/A11c/A12,
+or change roadmap/milestone state. Success stops at READY_FOR_FINAL_REVIEW.

@@ -29,7 +29,7 @@
     "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md"
   ],
   "acceptance_report": "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md",
-  "max_repairs": 2,
+  "max_repairs": 4,
   "timeout_seconds": 1800,
   "ci_workflow": "llmtool-ci.yml",
   "default_test_mode": "related",
@@ -132,5 +132,10 @@
     "summary_sha256": "28961634d78941ea3f80f81e457896bca8e4c8be8f23a2e75afe42301be8dce3",
     "evidence_sha256": "0bbb5aa95e3887bf2756fe275e1028c7dae1e1dd01f160f2ddd92c02ad3cf5a1",
     "failure_scenario": "hung_supervisor"
+  },
+  "failure_triage": {
+    "max_reviews": 4,
+    "repeat_limit": 2,
+    "allow_mac_repair": true
   }
 }

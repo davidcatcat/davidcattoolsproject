@@ -310,6 +310,16 @@ class NativeResumeTests(unittest.TestCase):
         bad['acceptance_failure_recovery']['extra'] = 'unreviewed'
         with self.assertRaises(loop.Stop): load(bad)
 
+    def test_new_auto_policy_budget_can_follow_old_failure_without_scope_or_gate_changes(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            task['failure_triage'] = {'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}
+            task['max_repairs'] = 4
+            _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            task['full_tests'] = [['weakened']]
+            rest[1].side_effect = ['[]', '']
+            with self.assertRaises(loop.Stop): loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
     def test_wrong_run_or_head_or_dirty_tree_stops(self):
         for fault in ('run', 'head', 'dirty'):
             with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, git_mock, *rest):
@@ -467,9 +477,9 @@ class DiagnosticPublicationTests(unittest.TestCase):
             stack.enter_context(patch.object(loop.shutil, 'which', return_value='/fake/gh'))
             yield root, logs, task
 
-    def fake_api(self, root, logs, existing=False, conflict=False, race=False, verify_bad=False):
-        selected = loop.diagnostic_payload(root, logs)
-        prefix = 'reports/ai-loop/diagnostics/'+logs.name+'/'
+    def fake_api(self, root, logs, existing=False, conflict=False, race=False, verify_bad=False, files=None, batch=None):
+        selected = loop.diagnostic_payload(root, logs) if files is None else files
+        prefix = 'reports/ai-loop/diagnostics/'+logs.name+'/' + (batch+'/' if batch else '')
         desired = {prefix+name: (hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),
                                   '100644', 'blob') for name, raw in selected.items()}
         old_rows = {'reports/older.md': ('d'*40, '100644', 'blob')}
@@ -509,6 +519,37 @@ class DiagnosticPublicationTests(unittest.TestCase):
                 state['head'] = payload['sha']; return {'object': {'sha': state['head']}}
             raise AssertionError((method, endpoint))
         return state, api
+
+    def test_custom_round_report_is_immutable_and_identical_repeat_is_read_only(self):
+        with self.fixture() as (root, logs, task):
+            files = {'index.md': b'# Failure\n', 'failure.json': b'{"status":"FAIL"}\n'}
+            state, api = self.fake_api(root, logs, files=files, batch='round-0-failure')
+            with patch.object(loop, 'diagnostic_api', side_effect=api):
+                loop.publish_diagnostics(root, logs, files=files, batch='round-0-failure')
+                state['calls'].clear()
+                loop.publish_diagnostics(root, logs, files=files, batch='round-0-failure')
+            self.assertTrue(all(c[0] == 'GET' for c in state['calls']))
+            self.assertTrue((logs/'published-round-0-failure.json').is_file())
+
+    def test_terminal_zip_publication_preserves_prior_round_reports(self):
+        with self.fixture() as (root, logs, task):
+            state, api = self.fake_api(root, logs, existing=True)
+            prefix = 'reports/ai-loop/diagnostics/'+logs.name+'/'
+            state['rows'] = {'reports/older.md': ('d'*40, '100644', 'blob'),
+                prefix+'round-0-review/review.json': ('e'*40, '100644', 'blob')}
+            with patch.object(loop, 'diagnostic_api', side_effect=api):
+                loop.publish_diagnostics(root, logs)
+            self.assertIn(prefix+'round-0-review/review.json', state['new_rows'])
+            self.assertIn(prefix+'index.md', state['new_rows'])
+
+    def test_bad_batch_arbitrary_file_and_size_fail_before_remote_write(self):
+        with self.fixture() as (root, logs, task), patch.object(loop, 'diagnostic_api') as api:
+            for files, batch in [({'index.md': b'index', 'failure.json': b'{}'}, '../failure'),
+                ({'index.md': b'index', 'source.py': b'private source'}, 'round-0-failure'),
+                ({'index.md': b'index', 'failure.json': b'x'*(128*1024+1)}, 'round-0-failure')]:
+                with self.subTest(batch=batch), self.assertRaises(loop.Stop):
+                    loop.publish_diagnostics(root, logs, files=files, batch=batch)
+            api.assert_not_called()
 
     def test_payload_is_frozen_and_excludes_sources_provider_streams_and_free_summaries(self):
         with self.fixture() as (root, logs, task):
@@ -1592,11 +1633,33 @@ class ExistingPRTests(unittest.TestCase):
         self.assertEqual(self.exercise_pipeline(new_task=True, decision=True,
             checkpoint_failure=True, should_stop=True), [])
 
+    def test_auto_related_failure_gets_claude_guidance_then_codex(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+            auto=True, related_failures=1), ['related', 'related', 'full-final', 'mandatory-final'])
+
+    def test_auto_full_failure_gets_claude_guidance_then_codex(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+            auto=True, final_full_failures=1), ['related', 'full-final', 'related', 'full-final', 'mandatory-final'])
+
+    def test_auto_mac_bug_is_repaired_then_all_gates_rerun(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+            auto=True, mac_failures=1), ['related', 'full-final', 'mandatory-final', 'related', 'full-final', 'mandatory-final'])
+
+    def test_repeated_mac_failure_stops_with_reports_and_no_feature_push(self):
+        self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+            auto=True, mandatory_failure=True, should_stop=True)
+
+    def test_auto_review_blocker_goes_through_failure_coordination(self):
+        self.exercise_pipeline(new_task=True, resume=True, native_resume=True, auto=True, failures=1)
+
+    def test_auto_exact_head_ci_bug_repairs_same_draft_pr(self):
+        self.exercise_pipeline(new_task=True, resume=True, native_resume=True, auto=True, ci_failures=1)
+
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
                           new_task=False, mandatory_failure=False, hook_changes=False,
                           decision=False, checkpoint_failure=False, resume=False, codex_timeout=None,
                           claude_timeout=None, native_resume=False, unchanged_repair=False,
-                          native_scenario=None):
+                          native_scenario=None, auto=False, related_failures=0, mac_failures=0, ci_failures=0):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -1620,10 +1683,16 @@ class ExistingPRTests(unittest.TestCase):
                 task['acceptance_failure_recovery'] = {'run_id': '20261007T075141Z-70725'}
                 if native_scenario:
                     task['acceptance_failure_recovery']['failure_scenario'] = native_scenario
+            if auto:
+                task['failure_triage'] = {'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}
+                task['max_repairs'] = 4
             current_head = [HEAD]
             dirty = [False]
             review_calls = [0]
             final_full_calls = [0]
+            related_calls = [0]
+            mac_calls = [0]
+            developer_calls = [0]
             suites = []
             commands = []
             committed = [{'source.txt': loop.digest(root / 'source.txt')}]
@@ -1670,8 +1739,19 @@ class ExistingPRTests(unittest.TestCase):
                 if suite == 'full-final':
                     final_full_calls[0] += 1
                     passed = final_full_calls[0] > final_full_failures
+                if suite == 'related':
+                    related_calls[0] += 1
+                    passed = related_calls[0] > related_failures
                 if suite == 'mandatory-final':
-                    passed = not mandatory_failure
+                    mac_calls[0] += 1
+                    passed = not mandatory_failure and mac_calls[0] > mac_failures
+                    if not passed and auto:
+                        loop.save_json(loop.mac_evidence_path(logs, round_no), {'schema_version': 1,
+                            'platform': 'darwin', 'tested_sha256': loop.runtime_bytes({
+                                p: loop.digest(root/p) for p in task['allowed_files'] if (root/p).is_file()}),
+                            'failure': {'status': 'FAIL', 'scenario': 'hung_supervisor', 'owned_processes': [],
+                                        'fixture_cleanup': {'status': 'RESOLVED', 'original_owned_processes': [
+                    {'pid': 321, 'host_identity': {'pid': 321}, 'supervisor': {'pid': 322}}]}}})
                 loop.save_json(loop.test_result_file(logs, round_no, suite),
                                [{'argv': ['fake-' + suite], 'exit_code': 0 if passed else 1}])
                 return passed
@@ -1686,13 +1766,14 @@ class ExistingPRTests(unittest.TestCase):
                 return value
 
             def fake_codex(*args):
+                developer_calls[0] += 1
                 if decision:
                     (root / 'reports').mkdir(exist_ok=True)
                     (root / 'reports/validation.md').write_text('NEEDS_DECISION; no implementation.\n')
                     return {'status': 'NEEDS_DECISION', 'summary': 'Continuity requires a decision.'}
                 dirty[0] = True
                 if not unchanged_repair:
-                    (root / 'source.txt').write_text('bounded repair ' + str(review_calls[0]))
+                    (root / 'source.txt').write_text('bounded repair ' + str(developer_calls[0] if auto else review_calls[0]))
                 if new_task:
                     (root / 'reports').mkdir(exist_ok=True)
                     (root / 'reports/validation.md').write_text('Candidate report; runner gates pending.\n')
@@ -1731,7 +1812,16 @@ class ExistingPRTests(unittest.TestCase):
                 return_value={'url': 'https://github.com/fixture/checkpoint', 'status': 'NEEDS_DECISION'}))
             runner = stack.enter_context(patch.object(loop, 'run', side_effect=fake_run))
             diagnostics = stack.enter_context(patch.object(loop, 'publish_diagnostics', return_value='https://github.com/diagnostics'))
-            stack.enter_context(patch.object(loop, 'wait_ci', return_value=[{'status': 'completed', 'conclusion': 'success'}]))
+            ci_success = [{'status': 'completed', 'conclusion': 'success'}]
+            stack.enter_context(patch.object(loop, 'wait_ci', side_effect=[
+                loop.CIFailure(HEAD, [{'databaseId': 7, 'conclusion': 'failure'}]) for _ in range(ci_failures)] + [ci_success]))
+            if auto:
+                stack.enter_context(patch.object(loop, 'ensure_failed_probe_pids_absent'))
+                def failure_review(cwd, logs, metadata, text, head, evidence_path, sha, round_no):
+                    value = FailureCoordinationTests().decision(head, sha)
+                    value['findings'][0]['file'] = 'source.txt'
+                    return value
+                stack.enter_context(patch.object(loop, 'review_failure', side_effect=failure_review))
             argv = ['ai_loop.py', '--control-sha', 'd' * 40, '--' + test_mode]
             if resume:
                 argv += ['--resume', '20261007T075141Z-70725']
@@ -1757,7 +1847,13 @@ class ExistingPRTests(unittest.TestCase):
                 os.chdir(previous)
             expected_calls = (1 if unchanged_repair else min(failures + final_full_failures + 1, 2)) if native_resume else (
                 min(failures + final_full_failures, 2) + int(new_task))
-            self.assertEqual(diagnostics.call_count, int(should_stop))
+            if auto:
+                expected_calls = 2 if should_stop and mandatory_failure else 1 + failures + final_full_failures + related_failures + mac_failures + ci_failures
+                self.assertEqual(sum(c.kwargs.get('batch', '').endswith('-failure') for c in diagnostics.call_args_list),
+                                 2 if should_stop and mandatory_failure else expected_calls-1)
+                self.assertEqual(sum(not c.kwargs.get('batch') for c in diagnostics.call_args_list), int(should_stop))
+            else:
+                self.assertEqual(diagnostics.call_count, int(should_stop))
             self.assertEqual(codex.call_count, expected_calls)
             if codex_timeout is not None:
                 self.assertEqual(codex.call_args.args[4], codex_timeout)
@@ -1768,7 +1864,7 @@ class ExistingPRTests(unittest.TestCase):
                 label = native_scenario or 'SIGINT'
                 expected_reason = 'coordinator-assessed ' + label + ' Mac failure' if native_resume and not failures else (
                     'Continue the existing partial implementation' if not native_resume else 'Repair only')
-                self.assertIn(expected_reason, codex.call_args.args[2])
+                self.assertIn('evidence-bound blocking' if auto and expected_calls > 1 else expected_reason, codex.call_args.args[2])
                 self.assertTrue(next((root / '.ai-loop').glob('*/recovery-inputs/source.txt')).is_file())
             self.assertEqual(sum(call.args[0][:3] == ['gh', 'pr', 'create'] for call in runner.call_args_list), int(new_task and not should_stop))
             if new_task and not should_stop:
@@ -1781,6 +1877,185 @@ class ExistingPRTests(unittest.TestCase):
                 self.assertEqual((root / 'source.txt').read_text(), 'unchanged existing implementation')
             self.assertEqual((gitdir / 'ai-loop/pr46-review.completed.json').is_file(), not should_stop)
             return suites
+
+
+class FailureCoordinationTests(unittest.TestCase):
+    def decision(self, head=HEAD, sha='a'*64, action='REPAIR'):
+        return {'decision': action, 'category': {'REPAIR': 'CODE_BUG', 'NEEDS_DECISION': 'SCOPE_OR_DESIGN',
+            'BLOCKED': 'ENVIRONMENT'}[action], 'reviewed_head': head, 'reviewed_evidence_sha256': sha,
+            'summary': 'Concrete bounded disposition', 'findings': [{'severity': 'High', 'blocking': True,
+                'file': 'source.py', 'detail': 'Correct the reproducible cleanup defect.',
+                'evidence': 'Failed assertion in the fixed regression case.'}] if action == 'REPAIR' else []}
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temp, ExitStack() as stack:
+            root = Path(temp); logs = root/'.ai-loop/20261008T000000Z-1'; logs.mkdir(parents=True)
+            (root/'source.py').write_text('original candidate')
+            task = {'task_id': 'fixture', 'branch': 'feat/fixture', 'base_sha': HEAD,
+                'allowed_files': ['source.py'], 'failure_triage': {'max_reviews': 4, 'repeat_limit': 2,
+                'allow_mac_repair': True}}
+            obj = loop.FailureCoordinator(root, logs, task, 'fixed scope', {})
+            stack.enter_context(patch.object(loop, 'git', return_value='fixed status'))
+            stack.enter_context(patch.object(loop, 'check_scope', return_value=[]))
+            publisher = stack.enter_context(patch.object(loop, 'publish_diagnostics', return_value='https://github.com/report'))
+            def decision(cwd, directory, metadata, text, head, path, sha, round_no):
+                return self.decision(head, sha)
+            reviewer = stack.enter_context(patch.object(loop, 'review_failure', side_effect=decision))
+            stack.enter_context(patch.object(loop, 'ensure_failed_probe_pids_absent'))
+            yield root, logs, task, obj, publisher, reviewer
+
+    def test_failure_then_review_then_disposition_are_published_before_repair(self):
+        with self.fixture() as (root, logs, task, obj, pub, review):
+            order = []
+            pub.side_effect = lambda *a, **kw: order.append(kw['batch']) or 'https://github.com/report'
+            original = review.side_effect
+            review.side_effect = lambda *a: order.append('CLAUDE') or original(*a)
+            reason = obj.assess('related', HEAD, {'results': [{'argv': ['test'], 'exit_code': 1}]}, 0, 3)
+            self.assertEqual(order, ['round-0-failure', 'CLAUDE', 'round-0-review', 'round-0-disposition'])
+            self.assertIn('Repair only', reason)
+            self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
+            self.assertEqual(json.loads((logs/'failure-0.json').read_text())['status'], 'FAIL')
+
+    def test_unchanged_code_cannot_retry_and_changed_code_can(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            obj.assess('related', HEAD, {}, 0, 3)
+            with self.assertRaises(loop.Stop): obj.require_changed_repair()
+            (root/'source.py').write_text('real source change')
+            obj.require_changed_repair()
+            self.assertIsNone(obj.required_change)
+
+    def test_failed_candidate_bytes_are_retained_before_next_writer(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            obj.assess('related', HEAD, {}, 0, 3)
+            (root/'source.py').write_text('new repaired bytes')
+            self.assertEqual((logs/'failure-inputs/0/source.py').read_text(), 'original candidate')
+            row = json.loads((logs/'failure-0.json').read_text())
+            self.assertEqual(row['source_sha256']['source.py'], loop.digest(logs/'failure-inputs/0/source.py'))
+
+    def test_native_log_output_paths_cannot_evade_repeated_failure_bound(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            obj.assess('related', HEAD, {'results': [{'argv': ['test', str(logs/'mac-containment-0.json')], 'exit_code': 1}]}, 0, 3)
+            (root/'source.py').write_text('candidate changed')
+            with self.assertRaisesRegex(loop.Stop, 'STALLED'):
+                obj.assess('related', HEAD, {'results': [{'argv': ['test', str(logs/'mac-containment-1.json')], 'exit_code': 1}]}, 1, 3)
+
+    def test_design_and_environment_decisions_stop_without_codex_instruction(self):
+        for action in ('NEEDS_DECISION', 'BLOCKED'):
+            with self.subTest(action=action), self.fixture() as (root, logs, task, obj, pub, review):
+                review.side_effect = lambda *a: self.decision(a[4], a[6], action)
+                with self.assertRaisesRegex(loop.Stop, action): obj.assess('related', HEAD, {}, 0, 3)
+                self.assertEqual(obj.records[0]['disposition'], action)
+                self.assertEqual(pub.call_count, 3)
+
+    def test_budget_and_repeat_limit_remain_non_pass(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            with self.assertRaisesRegex(loop.Stop, 'BUDGET_EXHAUSTED'):
+                obj.assess('related', HEAD, {}, 0, 0)
+        with self.fixture() as (root, logs, task, obj, *rest):
+            obj.assess('related', HEAD, {}, 0, 3)
+            (root/'source.py').write_text('changed once')
+            with self.assertRaisesRegex(loop.Stop, 'STALLED'):
+                obj.assess('related', HEAD, {}, 1, 3)
+            self.assertEqual(obj.records[-1]['repeat_count'], 2)
+
+    def test_malformed_optional_scope_and_wrong_evidence_are_rejected(self):
+        task = {'allowed_files': ['source.py']}
+        for fault in ('head', 'sha', 'scope', 'optional', 'unknown', 'type', 'oversize'):
+            with self.subTest(fault=fault):
+                value = self.decision()
+                if fault == 'head': value['reviewed_head'] = 'f'*40
+                if fault == 'sha': value['reviewed_evidence_sha256'] = 'f'*64
+                if fault == 'scope': value['findings'][0]['file'] = 'ROADMAP.md'
+                if fault == 'optional': value['findings'][0].update(severity='Low', blocking=False)
+                if fault == 'unknown': value['extra'] = 'scope authority'
+                if fault == 'type': value['decision'] = []
+                if fault == 'oversize': value['summary'] = 'x'*2001
+                with self.assertRaises(loop.Stop): loop.validate_failure_review(value, task, HEAD, 'a'*64)
+
+    def test_public_report_omits_raw_provider_and_deterministic_logs(self):
+        with self.fixture() as (root, logs, task, obj, pub, review):
+            (logs/'tests-0-related-0.stderr.log').write_text('PRIVATE_LOG_SENTINEL')
+            obj.assess('related', HEAD, {'provider': 'PRIVATE_PROVIDER_SENTINEL'}, 0, 3)
+            public = b''.join(raw for call in pub.call_args_list for raw in call.kwargs['files'].values())
+            self.assertNotIn(b'PRIVATE_LOG_SENTINEL', public)
+            self.assertNotIn(b'PRIVATE_PROVIDER_SENTINEL', public)
+            self.assertIn('PRIVATE_PROVIDER_SENTINEL', (logs/'failure-0.json').read_text())
+
+    def test_review_must_not_modify_source_or_failed_evidence(self):
+        for which in ('source', 'evidence'):
+            with self.subTest(which=which), self.fixture() as (root, logs, task, obj, pub, review):
+                original = review.side_effect
+                def mutate(*a):
+                    value = original(*a)
+                    (root/'source.py' if which == 'source' else a[5]).write_text('changed by review')
+                    return value
+                review.side_effect = mutate
+                with self.assertRaisesRegex(loop.Stop, 'changed candidate/evidence'):
+                    obj.assess('related', HEAD, {}, 0, 3)
+                self.assertEqual(pub.call_count, 1)
+
+    def test_upload_failure_does_not_launch_claude_or_codex(self):
+        with self.fixture() as (root, logs, task, obj, pub, review):
+            pub.side_effect = loop.Stop('Git unavailable')
+            with self.assertRaises(loop.Stop): obj.assess('related', HEAD, {}, 0, 3)
+            review.assert_not_called()
+
+    def test_missing_mac_proof_or_retained_pid_stops_without_any_signal(self):
+        for fault in ('missing', 'hash', 'retained', 'unproven', 'not_authorized'):
+            with self.subTest(fault=fault), self.fixture() as (root, logs, task, obj, pub, review), \
+                    patch.object(loop.os, 'kill') as kill, patch.object(loop.os, 'killpg') as killpg:
+                mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': loop.runtime_bytes(obj.source_bytes()),
+                       'failure': {'status': 'FAIL', 'scenario': 'hung_supervisor', 'owned_processes': [],
+                                   'fixture_cleanup': {'status': 'RESOLVED', 'original_owned_processes': [
+                    {'pid': 321, 'host_identity': {'pid': 321}, 'supervisor': {'pid': 322}}]}}}
+                if fault == 'missing': mac = None
+                elif fault == 'hash': mac['tested_sha256'] = {}
+                elif fault == 'retained': mac['failure']['owned_processes'] = [{'pid': 123}]
+                elif fault == 'unproven': mac['failure'].pop('fixture_cleanup')
+                else: task['failure_triage']['allow_mac_repair'] = False
+                with patch.object(loop, 'ensure_failed_probe_pids_absent', side_effect=loop.Stop('still present')):
+                    with self.assertRaises(loop.Stop): obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
+                kill.assert_not_called(); killpg.assert_not_called()
+
+    def test_mac_proven_clean_failure_can_repair_on_changed_bytes(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': loop.runtime_bytes(obj.source_bytes()),
+                   'failure': {'status': 'FAIL', 'scenario': 'hung_supervisor', 'owned_processes': [],
+                               'fixture_cleanup': {'status': 'RESOLVED', 'original_owned_processes': [
+                    {'pid': 321, 'host_identity': {'pid': 321}, 'supervisor': {'pid': 322}}]}}}
+            self.assertIn('Repair only', obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3))
+            self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
+
+    def test_failure_schema_and_policy_bounds_are_strict(self):
+        original = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        original['failure_triage'] = {'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}
+        original['max_repairs'] = 4
+        def load(task):
+            with patch.object(loop, 'git', side_effect=[json.dumps(task), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        load(original)
+        for key, value in (('max_reviews', True), ('max_reviews', 5), ('repeat_limit', 1), ('allow_mac_repair', 1), ('extra', 1)):
+            bad = copy.deepcopy(original); bad['failure_triage'][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(loop.Stop): load(bad)
+        bad = copy.deepcopy(original); bad.pop('failure_triage')
+        with self.assertRaises(loop.Stop): load(bad)
+
+    def test_failure_claude_uses_only_read_tools_and_validated_bound_result(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); logs = root/'logs'; logs.mkdir()
+            task = {'allowed_files': ['source.py'], 'base_sha': HEAD, 'timeout_seconds': 60}
+            path = logs/'failure.json'; path.write_text('{}')
+            def run(argv, cwd, **kw):
+                self.assertNotIn('Bash', argv)
+                self.assertIn('Read,Glob,Grep', argv)
+                self.assertIn('dontAsk', argv)
+                self.assertIn('--strict-mcp-config', argv)
+                loop.save_json(kw['stdout_path'], {'is_error': False, 'subtype': 'success',
+                    'structured_output': self.decision()})
+            with patch.object(loop, 'run', side_effect=run), patch.object(loop, 'git', return_value='fixed diff'):
+                value = loop.review_failure(root, logs, task, 'fixed contract', HEAD, path, 'a'*64, 0)
+            self.assertEqual(value['decision'], 'REPAIR')
 
 
 if __name__ == '__main__':

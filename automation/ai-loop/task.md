@@ -1,3 +1,101 @@
+# CURRENT autonomous failure coordination — David authorization 2026-10-08
+
+David authorized the Mac script to coordinate ordinary failures/bugs without using
+him as a report/review/repair messenger. This CURRENT policy supersedes older
+instructions requiring coordinator intervention after EVERY native failure, the
+old two-call bound and initial wording below. It does not weaken acceptance, expand
+allowed files, alter roadmap/milestones, authorize real Git ADD or approve merge.
+
+## Failure and repair workflow
+
+The same invocation handles:
+
+1. Freeze failed candidate hashes, phase/commands/exit status, exact native JSON and
+   evidence references. Publish a bounded immutable failure report to reports-only
+   automation/ai-loop-diagnostics; no failed feature source publication.
+2. Invoke a separate read-only Claude failure classification call. Bind its result
+   to exact HEAD plus failure-evidence SHA256, including uncommitted candidate
+   hashes. Read original local test logs/source. Do not classify by CLI exit zero.
+3. Publish Claude's structured diagnosis/repair recommendation and disposition to
+   Git BEFORE passing them to Codex. REPAIR requires concrete blocking evidence,
+   CODE_BUG/TEST_BUG and named files from the existing allowlist. Scope/design/
+   function/roadmap/authorization changes are NEEDS_DECISION. Auth/quota/environment
+   or insufficient evidence are BLOCKED; no blind provider retry.
+4. Codex repairs within the unchanged allowlist. A real source/test-byte change is
+   required before another test attempt. Re-run related tests and ordinary review;
+   run both full suites and ALL native gates on changed bytes before completion.
+5. Exact-head CI failures also go through classification. After an accepted local
+   repair, update the SAME Draft PR/branch using non-force Git and an exact-head
+   lease, then check the new exact CI HEAD; no duplicate PR or automatic merge.
+
+At most FOUR Codex candidate calls including this continuation's first call, at
+most FOUR failure classification calls. Two failures in the same phase with the
+same blocking file/command/native scenario signature stop as REPAIR_STALLED. Zero
+source/test progress, exhausted bounds or unreproducible/insufficient evidence
+stops as blocked/incomplete with published recommendations. Optional Low/Note
+findings are deferred; no zero-bug pursuit. A required failing test never becomes
+PASS/DONE merely because the AI elects to stop fixing.
+
+This is the script plus Claude coordinating the same task on David's Mac. Work
+cannot itself launch Mac processes or receive an automatic callback. David only
+needs to start the command, act on a genuine decision/blocked prerequisite or bring
+the completed stage to a ChatGPT functional review. Routine in-scope bug cycles
+need no repeated 'next step', 'review repo' or manual diagnostic upload.
+
+## Required test-controller fixture cleanup
+
+Implement this within existing allowed test files in this candidate BEFORE native
+acceptance, alongside the closed_status transition repair below. The acceptance
+controller must handle ordinary failed-probe fixtures itself while it is still
+the real parent and retains their owned Popen handles. Preserve the original
+assertion/primary error, source digests and exact failing subcase before cleanup.
+
+- Runtime production F1 retains unresolved ownership and cannot return normally;
+  do not weaken F1 just to terminate a test. The external test controller may
+  resolve its OWN synthetic host fixture by SIGKILL, as the earlier fixed F1 probe
+  already does. It holds the unreaped real child PID pin, verifies launch/current
+  PID/start identity/UID/parent relationship under the no-reaper premise, and kills
+  only that owned host. No remembered PID/PGID signaling after release.
+- Reap the controller-owned host after its cleanup decision. EOF must trigger the
+  supervisor's owned-group containment path where applicable. Preserve all group,
+  leader and descendant disappearance checks; do not signal a guessed group or
+  unrelated orphan. Actual hung/unresponsive/lost-group ambiguity remains blocked.
+- Keep a bounded `original_owned_processes` snapshot with host identity/supervisor
+  entries BEFORE cleanup. After actual checks establish cleanup, failed JSON may
+  record `failure.owned_processes: []` and `failure.fixture_cleanup` containing
+  `status: RESOLVED`, `original_owned_processes` and truthful cleanup evidence.
+  Nonempty owned_processes instead records unresolved/preserved fixtures. Do not
+  erase the inventory or fabricate RESOLVED to permit another native attempt.
+- The outer runner independently performs a read-only PID-absence check on the
+  retained/original inventory before accepting a Mac repair continuation. Missing
+  inventory/cleanup proof, retained PIDs, permission or inspection errors block
+  the next candidate; the runner never signals saved IDs. Operator cleanup of old
+  orphan fixtures is not a production containment PASS.
+- Add regression and native failure-path tests verifying assertion retention,
+  actual owned-host pin/identity, safe cleanup/reap order, no unrelated signal,
+  bounded cleanup, original inventory, absence proof and blocked ambiguous cases.
+  If safe cleanup requires a different containment architecture, Claude must return
+  NEEDS_DECISION. Do not guess, reap the production anchor early or lower deadlines.
+
+## Delivery and stopping states
+
+Published per-round reports: failure.json, review.json and disposition.json in
+immutable round subdirectories, with exact evidence hash/source hashes. Provider
+raw streams, source snapshots and original deterministic logs stay local; Claude's
+structured recommendations are intended Git reports. Upload failure preserves
+local evidence and stops, rather than silently proceeding without the handoff.
+
+Success still requires every pinned test/full/native/final ordinary review/CI gate
+and ends READY_FOR_FINAL_REVIEW with one Draft PR. Independent security review,
+coordinator/functional acceptance and merge remain pending. NEEDS_DECISION hands
+back the concrete requested change; BLOCKED/stalled/exhausted hands back an honest
+uncompleted report. Nothing starts 2.2.2 or changes the roadmap automatically.
+
+## Existing pinned recovery and containment requirements
+
+The following candidate/evidence pins and underlying containment restrictions
+remain authoritative, subject only to the CURRENT autonomous policy above.
+
 # A11b.2.2.1 — bounded hung-supervisor recovery
 
 ## CURRENT authorization — run 96025
@@ -31,9 +129,9 @@ absence of a published feature branch/PR, no active runner Codex writer and no
 retained failed probe host/supervisor PID. It preserves unrelated untracked
 artifacts and snapshots the failed evidence/candidate before the one-use recovery.
 A failed preflight does not consume the recovery. Never reset, stash, clean,
-force-push or bypass a PID guard. At most TWO Codex repair calls total for this
+force-push or bypass a PID guard. At most FOUR Codex repair calls total for this
 continuation, including the initial continuation call. Each provider has a three-
-hour limit. Any new mandatory native failure stops; no automatic repair/retry.
+hour limit. Native failures enter the CURRENT evidence-bound Claude classification policy below; no blind retry.
 
 ## Observed facts and limits
 
@@ -102,8 +200,9 @@ it as continuity proof. Read the latest assessment correction before editing.
    FD/message/CLI, change the protocol flow or fabricate stage entry. The previous
    first-hung probe progressed before closed_status according to source order,
    but the full scenario must rerun on changed bytes. If further native evidence
-   exposes a different blocker or unexplained exit, STOP with exact subcase/error;
-   broad architecture or protocol changes require a new coordinator assessment.
+   exposes another bug within the same allowed containment scope, the runner sends
+   it through evidence-bound Claude classification before another bounded Codex
+   repair. Scope/design/protocol expansion remains NEEDS_DECISION.
 
 4. **Regression evidence.** Add deterministic tests for non-reaping status 2 to
    SZOMB 5 transition, already-zombie, latched NOTE_EXIT, shared deadline expiry,
@@ -125,8 +224,9 @@ it as continuity proof. Read the latest assessment correction before editing.
    independent read-only Claude review, full current-venv and Mac system-Python
    suites, then ALL fourteen native scenarios including >=20 plain and >=20
    Popen parent-SIGKILL repetitions with <=2s group disappearance. No skipped
-   native scenario is PASS. A repeated mandatory failure immediately stops and
-   attempts curated diagnostics publication to the separate reports-only branch.
+   native scenario is PASS. A mandatory failure is published and classified by Claude under CURRENT policy.
+   Repeated failure/stagnation, exhausted bounds or unresolved fixture ownership
+   stops with curated diagnostics on the separate reports-only branch.
    Publication does not authorize recovery. No feature push/Draft PR until all
    required gates pass; final coordinator/security review and merge remain pending.
 
