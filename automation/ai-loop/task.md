@@ -1,3 +1,49 @@
+# CURRENT post-PR47 stopped-failure recovery — 2026-10-08
+
+Run `20261007T183516Z-7365` stopped on candidate
+`474679ecda36da610a96e7ec84da39a5dd3ae33b` after round-2
+`/usr/bin/python3` full-final failed in
+`test_diagnostics_failure_matrix.py`. The same targeted Mac Python 3.9 test then
+passed 3/3. Independent PR #47 isolated the test-only timing issue, retained the
+real timeout case at 0.2s, moved non-timeout CLI fixtures to a bounded 2s budget,
+passed Cloud targeted/full validation and exact-head CI, and was squash-merged to
+main as `63e232e22a769f409e381e34dfe0ef1add766d8e`.
+
+The old run's Claude failure classification was evidence-bound and otherwise
+schema-valid but was rejected because its summary was 2136 characters versus the
+2000-character contract. The helper now exposes that exact reason and constrains
+future classification output in the request schema. No failed gate was waived.
+
+The current recovery is pinned to:
+- old base `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`;
+- stopped HEAD `474679ecda36da610a96e7ec84da39a5dd3ae33b`;
+- original control `98b1871be51128da8dcdcf6eb32c27e2af89fa14`;
+- exact stopped summary/failure/Mac-cleanup hashes in `task.json`;
+- new main `63e232e22a769f409e381e34dfe0ef1add766d8e`;
+- the sole approved upstream path
+  `tools/llmtool/tests/test_diagnostics_failure_matrix.py`.
+
+The runner must prove those pins, prove prior synthetic Mac fixtures are absent,
+snapshot the stopped candidate, and create a two-parent merge of the exact new main
+without changing any stopped A11b source/test/report byte. After integration the
+diff against new main must contain only the existing A11b allowlist. Recovery starts
+with deterministic validation, not a Codex call. No historical PASS is inherited;
+both full suites and all fourteen Mac containment scenarios run again on the
+integrated bytes before publication.
+
+First operator action is read-only preflight only:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T183516Z-7365 --check
+```
+
+`--check` spends no model tokens and performs no merge/source/test change. Only
+after this exact preflight passes is the same resume without `--check` permitted.
+Do not rebase, cherry-pick, reset, stash, manually merge main, publish the feature
+branch, or restart from main. Previous 96025/77009/87533 operator commands are
+historical.
+
 # CURRENT autonomous failure coordination — David authorization 2026-10-08
 
 David authorized the Mac script to coordinate ordinary failures/bugs without using
