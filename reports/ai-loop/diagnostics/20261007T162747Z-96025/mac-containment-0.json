@@ -1,0 +1,279 @@
+{
+  "failure": {
+    "diagnostics": {
+      "cleanup_errors": [
+        {
+          "errno": null,
+          "exception_type": "IdentityUnknown",
+          "message": "probe host retained unresolved ownership",
+          "traceback": [
+            {
+              "file": "test_git_containment.py",
+              "function": "cleanup",
+              "line": 1232
+            }
+          ]
+        }
+      ],
+      "cleanup_outcome": "unresolved",
+      "event_rows": [
+        {
+          "event": "ready",
+          "supervisor": {
+            "micros": 794515,
+            "pgid": 5770,
+            "pid": 5770,
+            "ppid": 5769,
+            "seconds": 1791391690,
+            "sid": 5770,
+            "uid": 501
+          }
+        },
+        {
+          "child": {
+            "micros": 889384,
+            "pgid": 5770,
+            "pid": 5771,
+            "ppid": 5770,
+            "seconds": 1791391690,
+            "sid": 5770,
+            "uid": 501
+          },
+          "event": "child"
+        },
+        {
+          "child": {
+            "micros": 889384,
+            "pgid": 5770,
+            "pid": 5771,
+            "ppid": 5770,
+            "seconds": 1791391690,
+            "sid": 5770,
+            "uid": 501
+          },
+          "containment_confirmed": false,
+          "diagnostics": {
+            "anchor_verification": {
+              "kernel_rows": [
+                {
+                  "micros": 794515,
+                  "pgid": 5770,
+                  "pid": 5770,
+                  "ppid": 5769,
+                  "seconds": 1791391690,
+                  "status": 2,
+                  "uid": 501
+                },
+                {
+                  "micros": 794515,
+                  "pgid": 5770,
+                  "pid": 5770,
+                  "ppid": 5769,
+                  "seconds": 1791391690,
+                  "status": 2,
+                  "uid": 501
+                }
+              ],
+              "kernel_status": 2,
+              "mode": "unconfirmed-zombie",
+              "sid_query": "ESRCH",
+              "sid_source": "launch-continuity"
+            },
+            "cleanup_errors": [
+              {
+                "errno": null,
+                "exception_type": "IdentityUnknown",
+                "message": "owned zombie continuity unconfirmed",
+                "traceback": [
+                  {
+                    "file": "_git_containment.py",
+                    "function": "_run",
+                    "line": 328
+                  },
+                  {
+                    "file": "_git_process_identity.py",
+                    "function": "kill_group",
+                    "line": 242
+                  },
+                  {
+                    "file": "_git_process_identity.py",
+                    "function": "verify",
+                    "line": 228
+                  }
+                ]
+              }
+            ],
+            "cleanup_outcome": "unresolved",
+            "expected_event": "group-decision",
+            "failure_expected_event": "TERMINAL",
+            "primary_error": {
+              "errno": null,
+              "exception_type": "EOFError",
+              "message": "containment peer closed",
+              "traceback": [
+                {
+                  "file": "_git_containment.py",
+                  "function": "_run",
+                  "line": 217
+                },
+                {
+                  "file": "_git_containment_protocol.py",
+                  "function": "read",
+                  "line": 273
+                }
+              ]
+            },
+            "protocol_rows": [
+              {
+                "type": "READY"
+              },
+              {
+                "type": "CHILD_IDENTITY"
+              }
+            ],
+            "signal": null,
+            "timing": "ordinary"
+          },
+          "event": "unresolved",
+          "primary": "supervisor-lost",
+          "supervisor": {
+            "micros": 794515,
+            "pgid": 5770,
+            "pid": 5770,
+            "ppid": 5769,
+            "seconds": 1791391690,
+            "sid": 5770,
+            "uid": 501
+          },
+          "user_action_required": true
+        }
+      ],
+      "expected_event": "result",
+      "primary_error": {
+        "errno": null,
+        "exception_type": "AssertionError",
+        "message": "mandatory Mac capability unsupported or unresolved",
+        "traceback": [
+          {
+            "file": "test_git_containment.py",
+            "function": "probe_scope",
+            "line": 1301
+          },
+          {
+            "file": "test_git_containment.py",
+            "function": "completed",
+            "line": 1442
+          },
+          {
+            "file": "test_git_containment.py",
+            "function": "until",
+            "line": 1199
+          },
+          {
+            "file": "test_git_containment.py",
+            "function": "next",
+            "line": 1180
+          }
+        ]
+      },
+      "signal": null,
+      "timing": "ordinary"
+    },
+    "errno": null,
+    "exception_type": "AssertionError",
+    "message": "mandatory Mac capability unsupported or unresolved",
+    "owned_processes": [
+      {
+        "host_identity": {
+          "micros": 683107,
+          "pgid": 5769,
+          "pid": 5769,
+          "ppid": 5725,
+          "seconds": 1791391690,
+          "sid": 5769,
+          "uid": 501
+        },
+        "pid": 5769,
+        "supervisor": {
+          "micros": 794515,
+          "pgid": 5770,
+          "pid": 5770,
+          "ppid": 5769,
+          "seconds": 1791391690,
+          "sid": 5770,
+          "uid": 501
+        }
+      }
+    ],
+    "scenario": "hung_supervisor",
+    "status": "FAIL",
+    "traceback": [
+      {
+        "file": "run_containment_acceptance.py",
+        "function": "main",
+        "line": 82
+      },
+      {
+        "file": "test_git_containment.py",
+        "function": "hung_supervisor",
+        "line": 1507
+      },
+      {
+        "file": "test_git_containment.py",
+        "function": "completed",
+        "line": 1442
+      },
+      {
+        "file": "test_git_containment.py",
+        "function": "until",
+        "line": 1199
+      },
+      {
+        "file": "test_git_containment.py",
+        "function": "next",
+        "line": 1180
+      }
+    ]
+  },
+  "os_version": "15.7.9",
+  "platform": "darwin",
+  "python_version": "3.13.3",
+  "scenarios": {
+    "fd_inheritance": {
+      "checks": 9,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sighup": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sigint": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sigterm": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    }
+  },
+  "schema_version": 1,
+  "tested_sha256": {
+    "tools/llmtool/llmtool/_git_containment.py": "cea146bca4adeacb25f6846c09eb7406d4ee20d4cd58e52c14da8fa479b06722",
+    "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+    "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+    "tools/llmtool/llmtool/_git_process_identity.py": "033fe24e530101d853942658000f1d242d10cd6145f2e7fd5656a10d7314a2d8",
+    "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+    "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+    "tools/llmtool/tests/run_containment_acceptance.py": "527a0e3464a0b25cc876e9799e68fe7a6ff3196dbf0af7183ab2e9cde4b0f072",
+    "tools/llmtool/tests/test_git_containment.py": "fae8a8483c81a3e7605e51ee56981ad5d95e01c4517ff739e7ab962b67ee5f28",
+    "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728"
+  }
+}

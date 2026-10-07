@@ -1,0 +1,10 @@
+[1/14] fd_inheritance START
+[1/14] fd_inheritance PASS 1.341s
+[2/14] sigint START
+[2/14] sigint PASS 1.653s
+[3/14] sigterm START
+[3/14] sigterm PASS 1.449s
+[4/14] sighup START
+[4/14] sighup PASS 1.461s
+[5/14] hung_supervisor START
+hung_supervisor FAIL (AssertionError)
