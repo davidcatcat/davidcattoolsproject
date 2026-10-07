@@ -462,3 +462,10 @@ are preserved with STOP. A successful install does not resolve F3, authorize a
 blind rerun, merge the helper into main or provide a connected Mac executor.
 After coordinator recovery is ready, run `bash scripts/ai-loop.sh` from the
 canonical repo. All pinned task/preflight/acceptance gates still apply.
+
+
+## A11b.2.2.1 F3 recovery handoff — 2026-10-07
+
+The first containment run stopped correctly at F3 before source/test implementation. Preserve its local branch/report as decision evidence. The current ai-loop task uses a fresh recovery branch from the same pinned main, so no reset or deletion of the stopped branch is required.
+
+For this recovery, the supervisor itself is the parent-owned process-group anchor (`PID=PGID=SID`) and fake children remain in the supervisor group. Parent fallback signals that group only while the owned supervisor is live or unreaped and identity-bound; only then may it reap the supervisor. Parent death is handled by supervisor last-act group SIGKILL. This is still A11b.2.2.1, requires the original Mac/full/security gates, and does not authorize real Git ADD or 2.2.2.
