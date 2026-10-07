@@ -517,6 +517,29 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
 
+    def test_stopped_recovery_schema_is_strict_and_mutually_exclusive(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertIn('stopped_failure_recovery', load(task))
+        for fault in ('reason', 'path_overlap', 'two_policies', 'same_base'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task)
+                recovery = bad['stopped_failure_recovery']
+                if fault == 'reason':
+                    recovery['classification_rejection'] = 'OTHER'
+                elif fault == 'path_overlap':
+                    recovery['upstream_paths'] = [bad['allowed_files'][0]]
+                elif fault == 'two_policies':
+                    bad['acceptance_failure_recovery'] = {'run_id': self.run_id,
+                        'control_sha': '1'*40, 'expected_head': '2'*40,
+                        'summary_sha256': '3'*64, 'evidence_sha256': '4'*64}
+                else:
+                    recovery['old_base_sha'] = bad['base_sha']
+                with self.assertRaises(loop.Stop):
+                    load(bad)
+
     def test_integrate_recovery_base_creates_two_parent_merge_without_changing_candidate(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
