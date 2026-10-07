@@ -1828,6 +1828,7 @@ class ControllerCleanupTests(unittest.TestCase):
             with patch.object(sys, 'argv', ['run_containment_acceptance.py', '--output', str(output)]), \
                     patch.object(sys, 'platform', 'darwin'), \
                     patch.object(runner, 'CANONICAL', runner.ROOT), \
+                    patch.object(runner.Path, 'cwd', return_value=runner.ROOT), \
                     patch.object(kernel, 'host_check'), \
                     patch.object(runner, 'AcceptanceScenarios', return_value=scenarios), \
                     patch.object(runner, 'print', create=True):

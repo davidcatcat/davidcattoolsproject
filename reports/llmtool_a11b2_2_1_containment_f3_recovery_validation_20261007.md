@@ -832,3 +832,69 @@ global install, task/allowlist/roadmap change or unrelated artifact edit occurre
 The runner must bind fresh results to changed-byte hashes, execute every pinned
 gate, and append truthful final evidence. READY_FOR_FINAL_REVIEW, independent
 security acceptance, functional acceptance and merge remain separate pending states.
+
+## CURRENT evidence-bound full-final test repair — 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — ALL CHANGED-BYTE RUNNER CHECKS PENDING**.
+This append preserves all historical failure and implementation evidence above.
+
+### Repair authorization and provenance
+
+- Canonical Mac cwd/root and repository identity verified; the existing branch
+  remains `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+- Entry/reviewed HEAD: `ea3ef2e9819241643739b1fe521390b2f7b38ca0`.
+  Base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+  Tracked/index state was clean at entry; unrelated untracked artifacts remain
+  untouched. No remote synchronization is claimed.
+- Failure phase: `full-final`. The local preserved `failure-0.json` SHA-256
+  matches the read-only Claude classification:
+  `8c10b55e5fdab7161f1d652772d6f64407cf7393ce982b0a78680b8bb922ffa5`.
+- Accepted disposition: **REPAIR / TEST_BUG**, one blocking High finding in
+  `tools/llmtool/tests/test_git_containment.py`. Runner publication records bind
+  the structured diagnosis to commit
+  `b5000c20299848d29a615ae44d7ec8c9527c61af` and its disposition to
+  `bed1208ae429e61970fcb79acb6358f2805423a0` on the reports-only branch.
+  These are locally inspected publication records, not a new remote verification.
+
+### Bounded change and preserved assertions
+
+The preserved venv full-final log records 1235 tests, one failure, three skips
+and command exit 2. The related log records the same test passing when launched
+from the repository root. These results belong to the entry candidate only.
+The Makefile launches discovery from `tools/llmtool`, while the failure-export
+test previously mocked platform and canonical-root identity but left cwd real.
+Consequently the real acceptance writer rejected preflight before collecting
+source hashes or reaching the intended primary assertion.
+
+The test now also mocks `runner.Path.cwd()` to return `runner.ROOT` solely inside
+its existing failure-writer context. It does not change the process cwd and uses
+the existing Python-3.9-compatible mock API. All assertions remain, including
+the exact primary assertion message/traceback, source-hash inventory, failing
+subcase, empty resolved ownership list and original fixture inventory.
+The real acceptance runner's canonical-cwd/platform preflight, hash semantics,
+containment architecture, cleanup ordering and thresholds are unchanged.
+
+### Changed-byte verification and delivery status
+
+| Required gate / disposition | Status for this repair |
+| --- | --- |
+| Syntax, related containment/mutation/A5/Action checks | PENDING outer runner |
+| Failure-export regression from root and Makefile cwd on both Python versions | PENDING outer runner |
+| Full venv and `/usr/bin/python3` suites | PENDING outer runner |
+| All fourteen native scenarios, including FD, signals, hung/closed-status, leader/descendant, identity, kqueue, framing, binding and public boundaries | PENDING outer runner |
+| Parent SIGKILL plain x20 and Popen x20, each <=2 seconds | PENDING actual Mac runner |
+| Fresh source hashes and fixture original-inventory absence proof | PENDING outer runner |
+| Preliminary/final independent ordinary review and blocking-finding disposition | PENDING outer runner |
+| Exact final-HEAD CI, same Draft PR and READY_FOR_FINAL_REVIEW | PENDING outer runner; readiness not reached |
+| Independent security review and coordinator/functional acceptance | PENDING; no approval claimed |
+| Merge | NOT authorized |
+| Real Git ADD, public mutation, approval issuer or audit bypass | None introduced or executed |
+| A11b.2.2.2 and later slices | Not started or authorized |
+
+Codex inspected the original bounded failure-log excerpt, related result, local
+evidence digest, classification, contract, source and repair diff. Only the
+allowlisted test file and this report changed. No test, syntax command, suite,
+native probe, provider call or process cleanup ran in this repair call. No stage,
+commit, push, merge, worktree, alternate checkout, task change or scope expansion
+occurred. The outer runner must rerun every pinned gate on changed bytes and
+append truthful final evidence; no earlier PASS is inherited by this repair.
