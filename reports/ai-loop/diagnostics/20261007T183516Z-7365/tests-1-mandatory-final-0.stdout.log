@@ -1,0 +1,11 @@
+[1/14] fd_inheritance START
+[1/14] fd_inheritance PASS 0.451s
+[2/14] sigint START
+[2/14] sigint PASS 1.477s
+[3/14] sigterm START
+[3/14] sigterm PASS 1.465s
+[4/14] sighup START
+[4/14] sighup PASS 1.460s
+[5/14] hung_supervisor START
+closed_status native anchor {"kernel_rows":[{"micros":370560,"pgid":21996,"pid":21996,"ppid":21995,"seconds":1791401805,"status":5,"uid":501},{"micros":370560,"pgid":21996,"pid":21996,"ppid":21995,"seconds":1791401805,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":3,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[{"micros":370560,"pgid":21996,"pid":21996,"ppid":21995,"seconds":1791401805,"status":2,"uid":501}]}
+hung_supervisor FAIL (AssertionError)
