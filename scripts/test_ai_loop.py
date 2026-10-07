@@ -295,6 +295,10 @@ class NativeResumeTests(unittest.TestCase):
 
     def test_scenario_schema_is_bounded_and_legacy_sigint_still_loads(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('stopped_failure_recovery', None)
+        task['acceptance_failure_recovery'] = {'run_id': self.run_id, 'control_sha': '1'*40,
+            'expected_head': '2'*40, 'summary_sha256': '3'*64, 'evidence_sha256': '4'*64,
+            'failure_scenario': 'hung_supervisor'}
         def load(value):
             with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
                 return loop.load_task(Path('.'), HEAD)[0]
@@ -382,6 +386,9 @@ class NativeResumeTests(unittest.TestCase):
 
     def test_new_schema_binds_failure_and_allows_only_one_recovery_policy(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('stopped_failure_recovery', None)
+        task['acceptance_failure_recovery'] = {'run_id': self.run_id, 'control_sha': '1'*40,
+            'expected_head': '2'*40, 'summary_sha256': '3'*64, 'evidence_sha256': '4'*64}
         def load(value):
             with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
                 return loop.load_task(Path('.'), HEAD)[0]
