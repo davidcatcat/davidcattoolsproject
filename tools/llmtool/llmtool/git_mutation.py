@@ -287,6 +287,50 @@ class _Read(Enum):
     IGNORE = 7
 
 
+def _cleanup_read_process(process, selector):
+    """Release one owned read query; cleanup I/O faults remain secondary."""
+    clean = True
+    try:
+        if selector is not None:
+            try:
+                selector.close()
+            except OSError:
+                clean = False
+    finally:
+        try:
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError as error:
+                    if not isinstance(error, (ProcessLookupError, PermissionError)):
+                        clean = False
+                    # As in A5, an exited group can be unavailable on macOS.
+                    # Popen.kill handles an already-exited/reaped owned leader.
+                    try:
+                        process.kill()
+                    except ProcessLookupError:
+                        pass
+                    except OSError:
+                        clean = False
+        finally:
+            try:
+                process.wait()
+            except OSError:
+                clean = False
+            finally:
+                try:
+                    try:
+                        process.stdout.close()
+                    except OSError:
+                        clean = False
+                finally:
+                    try:
+                        process.stderr.close()
+                    except OSError:
+                        clean = False
+    return clean
+
+
 class _Reads:
     """Private fixed read queries. No arbitrary argv, env or subcommand seam."""
     def __init__(self, action):
@@ -313,9 +357,11 @@ class _Reads:
         except OSError:
             raise GitPreflightError('Git inspection unavailable') from None
         output, stderr_count = bytearray(), 0
-        selector = selectors.DefaultSelector()
-        deadline = time.monotonic() + GIT_TIMEOUT
+        selector = None
+        succeeded = False
         try:
+            selector = selectors.DefaultSelector()
+            deadline = time.monotonic() + GIT_TIMEOUT
             for stream, kind in ((process.stdout, 'out'), (process.stderr, 'err')):
                 os.set_blocking(stream.fileno(), False)
                 selector.register(stream, selectors.EVENT_READ, kind)
@@ -340,22 +386,15 @@ class _Reads:
             code = process.wait(timeout=max(0.001, deadline-time.monotonic()))
             if code != 0:
                 _reject('HEAD mismatch' if query in (_Read.HEAD, _Read.BRANCH) else 'Git inspection unavailable')
+            succeeded = True
             return bytes(output)
         except (OSError, subprocess.TimeoutExpired):
             raise GitPreflightError('Git inspection unavailable') from None
         finally:
-            selector.close()
             # Read-only slice, A5 process-group cleanup. Mutation-specific B5
             # (including host TERM/HUP/crash) remains a separate A11b.2.2 gate.
-            if process.returncode is None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                finally:
-                    process.wait()
-            process.stdout.close()
-            process.stderr.close()
+            if not _cleanup_read_process(process, selector) and succeeded:
+                _reject('Git inspection unavailable')
 
 
 def _metadata_snapshot(gitfd):
