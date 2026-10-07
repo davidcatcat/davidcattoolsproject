@@ -1,0 +1,17 @@
+{
+  "task_id": "A11b.2.2.0-cleanup-drift-20261007",
+  "base_sha": "18365bb079835f3b413dd135ea742213bb1a7724",
+  "branch": "feat/a11b2-2-0-cleanup-drift-ai-loop-20261007",
+  "allowed_files": [
+    "tools/llmtool/llmtool/git_mutation.py",
+    "tools/llmtool/tests/test_git_mutation.py",
+    "reports/llmtool_a11b2_2_0_cleanup_drift_validation_20261007.md"
+  ],
+  "tests": [
+    [".venv/bin/python", "-m", "unittest", "discover", "-s", "tools/llmtool/tests", "-p", "test_git_mutation.py", "-v"],
+    ["make", "-C", "tools/llmtool", "check", "PYTHON=../../.venv/bin/python"]
+  ],
+  "max_repairs": 2,
+  "timeout_seconds": 1800,
+  "ci_workflow": "llmtool-ci.yml"
+}
