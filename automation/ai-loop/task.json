@@ -123,10 +123,13 @@
   ],
   "mac_evidence": "mac-containment",
   "publish_decision_checkpoint": true,
-  "initial_timeout_recovery": {
-    "run_id": "20261007T113658Z-74880",
-    "control_sha": "01cd4757b23ce0ec03f6b2c1e0848f849ebda01a"
-  },
   "codex_timeout_seconds": 10800,
-  "claude_timeout_seconds": 10800
+  "claude_timeout_seconds": 10800,
+  "acceptance_failure_recovery": {
+    "run_id": "20261007T123142Z-77009",
+    "control_sha": "b75ea2e371fd4e8e6130a4b2be8a48e7256b25aa",
+    "expected_head": "ce29d4a6a7764e62dc993b76b33996db2fb3455b",
+    "summary_sha256": "b722cbfd422dc8e65b19c42db126de13d33fa56527013e4073a538efdde7363c",
+    "evidence_sha256": "c6dbdfccdefdb35de8efc4f4f20102217eb0a102f94bb1f5ea785cc982283c07"
+  }
 }

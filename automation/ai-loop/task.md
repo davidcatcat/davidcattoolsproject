@@ -1,3 +1,99 @@
+# A11b.2.2.1 — bounded recovery after native SIGINT failure
+
+## Current invocation and authorization — 2026-10-07
+
+David requested the next step after the coordinator assessed his uploaded native
+diagnostics. This authorizes ONE continuation of the committed candidate at
+`ce29d4a6a7764e62dc993b76b33996db2fb3455b`, on the existing unpublished branch
+`feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`. Do not create/switch a new
+branch, restart implementation, discard files, reset, stash or rewrite history.
+Pinned main/base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T123142Z-77009
+```
+
+This CURRENT section supersedes all historical fresh-branch, quota-run and timeout
+invocations below. The task ID is retained because the native acceptance helper
+pins it; the new control commit versions the revised recovery authorization. All
+original containment acceptance criteria, ten allowed files, required full/Mac/
+security gates and forbidden scopes remain authoritative. The code candidate is
+implemented but native acceptance FAILED; no old PASS is inherited for new bytes.
+
+Read the coordinator assessment copied by the runner into the new run's
+`coordinator-assessment.md`. Its control-branch source is
+`reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md`;
+do not assume that new control document already exists on the feature branch.
+The runner saves the original summary and Mac JSON under the new run's
+`recovery-evidence/`, and copies/hashes all ten original candidate files before
+Codex. Read them and `recovery.json` before editing. The original run is
+`20261007T123142Z-77009`, pinned control `b75ea2e371fd4e8e6130a4b2be8a48e7256b25aa`.
+
+Recovery preflight requires the exact stopped HEAD, unchanged tracked/index state,
+matching original failure/source hashes and no published feature branch/PR. Current
+unrelated untracked artifacts are fingerprinted and preserved; their historical
+integrity is not retrospectively asserted. A read-only PID-presence check rejects
+retained old probe processes and ambiguous inspection before models/spawns. Never
+kill an old snapshot PID/PGID or delete a one-use marker to bypass it. If the runner
+reports retained processes, David must restart the Mac and run this command again;
+failed preflight does not consume the recovery. PID absence is not containment PASS.
+
+## Current bounded repair requirements
+
+1. **Fix proven diagnostic loss first.** Preserve the primary signal/protocol/identity
+   exception separately from later cleanup failures. Record bounded exception type,
+   message and traceback/location, current signal timing variant, expected event,
+   collected protocol/event rows and cleanup outcome. Retain ownership on unresolved
+   containment; no new normal return or restored handlers while still unresolved.
+   Do not include environment values, credentials, provider output or arbitrary
+   process argv. Never hide the primary exception with a `finally` cleanup error.
+2. **Investigate the native zombie/SID risk; do not assume the root cause.**
+   `identity()` uses `os.getsid(pid)`; CANCEL can leave the supervisor exited but
+   unreaped before `Anchor.kill_group`. The preliminary Claude review explicitly
+   warned about this Darwin path. Keep a truthful distinction between source
+   inference and observed native evidence; the old JSON contains no traceback.
+3. Repair that path only with a defensible identity/continuity proof within the
+   accepted supervisor-as-group-anchor topology. An ordinary live-process identity
+   query must still reject mismatch/ambiguity. Any special handling of an owned
+   unreaped zombie must bind the direct-child/Popen ownership, PID=PGID=SID launch
+   anchor, UID/PPID/kernel start identity, fresh native zombie state and no-reaper
+   host premise. Do not turn ESRCH into automatic identity PASS; do not equate
+   terminal foreground group (`tpgid`) with session ID or use cached numbers for an
+   arbitrary process. If no safe supported proof exists, return NEEDS_DECISION/
+   NOT SUPPORTED instead of lowering identity requirements.
+4. Add focused deterministic regression coverage for primary-vs-cleanup error
+   retention and live/zombie identity continuity, including mismatch/reuse/race
+   rejection. Expand the actual-Mac zombie/non-reaping acceptance evidence where
+   needed; never mock or skip a native capability into PASS. Keep all fourteen
+   original scenarios, both >=20 parent-SIGKILL variants and <=2s disappearance.
+5. Preserve historical validation report content. Append this original SIGINT FAIL,
+   related/full/preliminary-review results as historical evidence only. Mark new
+   repair/native/full/security gates pending until the runner supplies exact-byte
+   evidence. The original failure remains FAIL even if a repaired run later passes.
+
+Codex may make at most **two repair calls in this continuation**, including its first
+call. It edits only existing allowed files; the outer runner owns tests and Git.
+Do not run suites, native process/signal probes, Git writes or global installs
+inside the Codex call. Return PASS only for a prepared repair candidate, not native
+containment approval. Diagnostic-only changes may be used if the native cause is
+not yet established; their next native result must remain truthful and fail closed.
+
+At least one source/test byte must change before a new test/probe attempt; unchanged
+or report-only candidates cannot trigger blind native retry. Then the runner runs
+related checks, read-only Claude review, both full Python suites, and all mandatory
+native gates on the repaired bytes. Another mandatory Mac failure stops immediately
+for coordinator assessment, with no automatic retry. A curated ZIP is written in
+the visible `ai-loop-diagnostics/` directory. If all required gates pass, the runner
+publishes ONE Draft PR from this same branch and waits for exact-HEAD CI, then stops
+at READY_FOR_FINAL_REVIEW. Independent security review and coordinator acceptance
+remain pending; no automatic merge and no A11b.2.2.2.
+
+## Historical implementation contract and original acceptance requirements
+
+The following records the originating scope and earlier recovery decisions. Its
+acceptance requirements still apply; its old startup/resume instructions do not.
+
 # A11b.2.2.1 — supervisor / fake-child containment harness — F3 recovery
 
 ## Authorization, revision and delivery

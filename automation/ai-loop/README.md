@@ -1,5 +1,46 @@
 # Mac AI-loop development handoff
 
+## Current command — native SIGINT failure recovery
+
+The Mac run `20261007T123142Z-77009` stopped at SIGINT native acceptance FAIL,
+at local candidate `ce29d4a6a7764e62dc993b76b33996db2fb3455b`. The coordinator
+assessed David's supplied diagnostics and authorized a bounded repair continuation
+on the same unpublished branch. See [the assessment](../../reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md)
+and the CURRENT section of [task.md](task.md).
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T123142Z-77009
+```
+
+The installed launcher downloads the new runner/task automatically. No repeated
+launcher installation is needed. Older quota/timeout resume commands below are
+historical and are not the current command. `--check` can be appended for preflight
+only; it spends no model tokens and does not consume the one-use authorization.
+
+Recovery requires unchanged stopped commit/source hashes, Git-pinned old task and
+failure records, a clean tracked/index state and no feature publication. It snapshots
+candidate files and failure JSON before models and preserves unrelated artifacts.
+If old probe PIDs still exist or inspection is ambiguous, it stops without signaling.
+If retained processes are reported, restart the Mac before repeating this command.
+Do not terminate a remembered PID or delete recovery markers. Preflight failure
+does not consume the one-use continuation.
+
+At most two Codex repair calls; diagnostic preservation first, zombie identity cause
+still unconfirmed. Related/Claude/two full suites/all fourteen Mac acceptance gates
+run afresh on changed bytes. A repeat native failure stops without automatic retry.
+Required security review, real ADD prohibition and merge/later-slice boundaries stay.
+
+On a stopped model/test run, the runner exports a curated diagnostic ZIP to the
+visible `ai-loop-diagnostics/` directory and prints its absolute path. It contains
+candidate files, summary/contract/provenance and bounded native evidence/logs;
+raw Codex/Claude streams and authentication files are excluded.
+Generated ZIPs are locally excluded from Git staging, while `.ai-loop` remains the
+internal run store. Existing unrelated files in the visible directory stay protected.
+ZIP collisions, unsafe paths and export failures preserve the original STOP reason.
+
+## Historical setup and earlier continuations
+
 This standalone development helper lives on the persistent `automation/ai-loop`
 control branch, available without merging its draft helper PR #45. It is independent
 of llmtool product execution, approval and A11b/A11c acceptance.

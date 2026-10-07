@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+import zipfile
 from datetime import datetime, timezone
 
 REPO = Path('/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
@@ -190,7 +191,8 @@ def load_task(root, control_sha):
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
-                'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds'}
+                'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
+                'acceptance_failure_recovery'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -251,7 +253,8 @@ def load_task(root, control_sha):
             raise Stop('invalid Mac evidence gate')
         if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
             raise Stop('Mac containment task must retain full local checks and report')
-    if 'initial_quota_recovery' in metadata and 'initial_timeout_recovery' in metadata:
+    if sum(k in metadata for k in ('initial_quota_recovery', 'initial_timeout_recovery',
+                                   'acceptance_failure_recovery')) > 1:
         raise Stop('only one explicit recovery can be active')
     for recovery_key in ('initial_quota_recovery', 'initial_timeout_recovery'):
         if recovery_key not in metadata:
@@ -262,6 +265,20 @@ def load_task(root, control_sha):
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or not re.fullmatch(r'[0-9a-f]{40}', recovery.get('control_sha', ''))):
             raise Stop('invalid initial recovery contract')
+    if 'acceptance_failure_recovery' in metadata:
+        recovery = metadata['acceptance_failure_recovery']
+        keys = {'run_id', 'control_sha', 'expected_head', 'summary_sha256', 'evidence_sha256'}
+        if (metadata['mode'] != 'implement_new_pr' or not metadata.get('mac_evidence')
+                or metadata['max_repairs'] < 1 or not isinstance(recovery, dict)
+                or set(recovery) != keys
+                or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
+                or any(not isinstance(recovery.get(k), str)
+                       or not re.fullmatch(r'[0-9a-f]{40}', recovery[k])
+                       for k in ('control_sha', 'expected_head'))
+                or any(not isinstance(recovery.get(k), str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', recovery[k])
+                       for k in ('summary_sha256', 'evidence_sha256'))):
+            raise Stop('invalid acceptance failure recovery contract')
     return metadata, text
 
 
@@ -679,6 +696,127 @@ def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=
         'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE'}
 
 
+def ensure_failed_probe_pids_absent(root, evidence):
+    """Conservative read-only gate. A snapshot never authorizes a PID signal."""
+    owned = evidence.get('failure', {}).get('owned_processes')
+    if not isinstance(owned, list) or not owned or len(owned) > 128:
+        raise Stop('failed Mac evidence lacks a bounded ownership inventory')
+    pids = set()
+    for row in owned:
+        if (not isinstance(row, dict) or type(row.get('pid')) is not int
+                or not 1 < row['pid'] < 2**31):
+            raise Stop('invalid failed probe PID inventory')
+        pids.add(row['pid'])
+        for key in ('host_identity', 'supervisor'):
+            item = row.get(key)
+            if (not isinstance(item, dict) or type(item.get('pid')) is not int
+                    or not 1 < item['pid'] < 2**31):
+                raise Stop('invalid failed probe identity inventory')
+            pids.add(item['pid'])
+    rc, out, err = command(['/bin/ps', '-ww', '-p', ','.join(map(str, sorted(pids))),
+                            '-o', 'pid='], root)
+    if rc == 1 and not out.strip() and not err.strip():
+        return  # Recovery prerequisite only, never native containment PASS.
+    if rc == 0:
+        observed = out.split()
+        if observed and all(re.fullmatch(r'[1-9][0-9]*', p)
+                            and int(p) in pids for p in observed) and not err.strip():
+            raise Stop('舊 Mac probe PID 仍存在：' + ', '.join(observed)
+                       + '。不會用舊 PID 清除；請重新啟動 Mac，再執行相同恢復命令。')
+    raise Stop('cannot prove old probe PIDs absent; no model or new probe started')
+
+
+def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_paths=()):
+    """One explicitly assessed native failure at an exact unpublished commit."""
+    policy = task.get('acceptance_failure_recovery')
+    if not policy or policy['run_id'] != run_id:
+        raise Stop('native failure recovery is not authorized for this run')
+    if tracked_paths or git(root, 'diff', '--cached', '--name-only'):
+        raise Stop('native failure recovery requires unchanged tracked/index state')
+    if (git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != policy['expected_head']):
+        raise Stop('native recovery requires the exact stopped branch/commit')
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY
+            + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('native recovery branch already has a PR')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('native recovery branch is already published')
+    if set(current_untracked).intersection(task['allowed_files']):
+        raise Stop('untracked candidate collision in committed native recovery')
+    cumulative = git(root, 'diff', '--name-only', '-z', task['base_sha'], policy['expected_head'])
+    if any(p and p not in task['allowed_files'] for p in cumulative.split('\0')):
+        raise Stop('native recovery cumulative diff exceeds task scope')
+    rc, _, _ = command(['git', 'merge-base', '--is-ancestor', task['base_sha'],
+                         policy['expected_head']], root)
+    if rc != 0:
+        raise Stop('native recovery candidate is not descended from pinned main')
+    old_logs = root / '.ai-loop' / run_id
+    def record(name, expected=None):
+        path = old_logs / name
+        if any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file():
+            raise Stop('native recovery evidence missing/unsafe: ' + name)
+        if path.stat().st_size > 1024 * 1024:
+            raise Stop('native recovery evidence oversized: ' + name)
+        raw = path.read_bytes()
+        if len(raw) > 1024 * 1024 or (expected and hashlib.sha256(raw).hexdigest() != expected):
+            raise Stop('native recovery evidence changed/oversized: ' + name)
+        return raw, json.loads(raw)
+    old_task, old_text = load_task(root, policy['control_sha'])
+    variable = {'initial_quota_recovery', 'initial_timeout_recovery', 'acceptance_failure_recovery',
+                'codex_timeout_seconds', 'claude_timeout_seconds'}
+    if {k: v for k, v in task.items() if k not in variable} != {
+            k: v for k, v in old_task.items() if k not in variable}:
+        raise Stop('native recovery altered scope, tests or acceptance gates')
+    if record('task.json')[1] != old_task:
+        raise Stop('stopped task JSON differs from its Git-pinned contract')
+    old_md = old_logs / 'task.md'
+    if (any(p.is_symlink() for p in (old_md, *old_md.parents)) or not old_md.is_file()
+            or old_md.stat().st_size > 1024 * 1024
+            or old_md.read_text(encoding='utf-8').strip() != old_text.strip()):
+        raise Stop('stopped task text differs from its Git-pinned contract')
+    provenance = record('provenance.json')[1]
+    summary_raw, summary = record('summary.json', policy['summary_sha256'])
+    mac_raw, mac = record('mac-containment-0.json', policy['evidence_sha256'])
+    history = summary.get('history')
+    if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
+            or provenance.get('base') != task['base_sha']
+            or provenance.get('control_sha') != policy['control_sha']
+            or summary.get('branch') != task['branch']
+            or summary.get('head') != policy['expected_head']
+            or summary.get('status') != 'STOPPED'
+            or summary.get('reason') != 'required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry'
+            or not isinstance(history, list) or len(history) != 1
+            or history[0].get('head') != policy['expected_head']
+            or history[0].get('mandatory', {}).get('status') != 'FAIL'
+            or mac.get('platform') != 'darwin'
+            or mac.get('failure', {}).get('scenario') != 'sigint'
+            or mac.get('failure', {}).get('status') != 'FAIL'):
+        raise Stop('stopped native failure does not match coordinator assessment')
+    tested = history[0].get('tested_sha256')
+    if (not isinstance(tested, dict) or set(tested) != set(task['allowed_files'])
+            or mac.get('tested_sha256') != runtime_bytes(tested)):
+        raise Stop('failed native source hashes do not bind the complete candidate')
+    total = 0
+    for name, expected in tested.items():
+        path = root / name
+        if (any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()
+                or path.stat().st_size > 2 * 1024 * 1024 or digest(path) != expected):
+            raise Stop('native recovery candidate changed/unsafe: ' + name)
+        total += path.stat().st_size
+    if total > 16 * 1024 * 1024:
+        raise Stop('native recovery candidate snapshot exceeds bound')
+    # Unrelated files may have been added by David since the stopped run. Bind
+    # current bytes, without claiming historical preservation we cannot prove.
+    ensure_no_active_runner_codex(root)
+    ensure_failed_probe_pids_absent(root, mac)
+    return current_untracked, {'from_run': run_id, 'kind': 'acceptance_failure',
+        'old_control_sha': policy['control_sha'], 'starting_head': policy['expected_head'],
+        'partial_files': tested, 'preserved_untracked': current_untracked,
+        'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE',
+        'evidence_files': {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
+                           'mac-containment-0.json': hashlib.sha256(mac_raw).hexdigest()}}
+
+
 def snapshot_recovery(root, logs, recovery):
     """Retain the partial candidate before another provider can change it."""
     for name, expected in recovery['partial_files'].items():
@@ -689,6 +827,17 @@ def snapshot_recovery(root, logs, recovery):
         if source.is_symlink() or hashlib.sha256(data).hexdigest() != expected:
             raise Stop('partial task changed before recovery snapshot')
         target = logs / 'recovery-inputs' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('xb') as output:
+            output.write(data)
+    for name, expected in recovery.get('evidence_files', {}).items():
+        source = root / '.ai-loop' / recovery['from_run'] / name
+        if any(p.is_symlink() for p in (source, *source.parents)) or not source.is_file():
+            raise Stop('native failure evidence changed before snapshot')
+        data = source.read_bytes()
+        if len(data) > 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
+            raise Stop('native failure evidence changed before snapshot')
+        target = logs / 'recovery-evidence' / name
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open('xb') as output:
             output.write(data)
@@ -704,6 +853,48 @@ def claim_initial_resume(state, recovery, run_id, control_sha):
                        'control_sha': control_sha}, output, indent=2)
     except FileExistsError:
         raise Stop('this recovery was already attempted; coordinator recovery required')
+
+
+def export_diagnostics(root, logs, task):
+    """Visible curated ZIP; never export provider streams or authentication files."""
+    folder = root / 'ai-loop-diagnostics'
+    if any(p.is_symlink() for p in (folder, *folder.parents)):
+        raise Stop('diagnostics export directory is unsafe')
+    folder.mkdir(exist_ok=True, mode=0o700)
+    destination = folder / (logs.name + '.zip')
+    if destination.exists() or destination.is_symlink():
+        raise Stop('diagnostics ZIP already exists; preserved')
+    entries = [(root / name, name) for name in task['allowed_files']]
+    for name in ('summary.json', 'task.json', 'provenance.json', 'recovery.json', 'coordinator-assessment.md'):
+        entries.append((logs / name, 'evidence/' + name))
+    for path in logs.glob('mac-containment-*.json'):
+        entries.append((path, 'evidence/' + path.name))
+    for path in logs.glob('tests-*-mandatory-final-*.log'):
+        entries.append((path, 'evidence/' + path.name))
+    for path in (logs / 'recovery-evidence').glob('*.json'):
+        entries.append((path, 'previous-failure/' + path.name))
+    selected, hashes, total = [], {}, 0
+    for source, name in entries:
+        if any(p.is_symlink() for p in (source, *source.parents)):
+            raise Stop('diagnostics input is unsafe: ' + name)
+        if not source.is_file():
+            continue
+        size = source.stat().st_size
+        total += size
+        if size > 2 * 1024 * 1024 or total > 16 * 1024 * 1024:
+            raise Stop('diagnostics input exceeds export bound')
+        raw = source.read_bytes()
+        if len(raw) != size:
+            raise Stop('diagnostics input changed during export')
+        hashes[name] = hashlib.sha256(raw).hexdigest()
+        selected.append((name, raw))
+    with destination.open('xb') as output:
+        os.chmod(destination, 0o600)
+        with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, raw in selected:
+                archive.writestr(name, raw)
+            archive.writestr('captured-sha256.json', json.dumps(hashes, indent=2) + '\n')
+    return destination
 
 
 def create_draft_pr(root, task, logs, publication_head, report_rel):
@@ -826,7 +1017,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
-    parser.add_argument('--resume', metavar='RUN_ID', help='resume a contract-authorized initial Codex quota/timeout stop')
+    parser.add_argument('--resume', metavar='RUN_ID', help='resume one explicitly contracted Codex/native acceptance stop')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -877,7 +1068,9 @@ def main():
         original = untracked(root)
         recovery = None
         if args.resume:
-            original, recovery = prepare_initial_resume(root, task, args.resume, original, tracked_paths)
+            prepare_resume = (prepare_acceptance_resume if task.get('acceptance_failure_recovery')
+                              else prepare_initial_resume)
+            original, recovery = prepare_resume(root, task, args.resume, original, tracked_paths)
             marker = state / ('resume-' + recovery['from_run'] + '.json')
             if marker.exists() or marker.is_symlink():
                 raise Stop('this recovery was already attempted; coordinator recovery required')
@@ -891,7 +1084,7 @@ def main():
         branch, head = git(root, 'branch', '--show-current'), git(root, 'rev-parse', 'HEAD')
         pr_info = None
         if recovery:
-            print('[Resume] Preserving partial candidate from ' + args.resume + '; all validation runs afresh.', flush=True)
+            print('[Resume] Preserving candidate from ' + args.resume + '; all validation runs afresh.', flush=True)
         elif new_task:
             prepare_new_branch(root, task, check_only=args.check)
         else:
@@ -911,11 +1104,15 @@ def main():
         logs.mkdir(parents=True, mode=0o700)
         exclude = Path(git(root, 'rev-parse', '--git-path', 'info/exclude'))
         with exclude.open('a') as f:
-            f.write('\n/.ai-loop/\n')
+            f.write('\n/.ai-loop/\n/ai-loop-diagnostics/' + run_id + '.zip\n')
         (logs / 'task.md').write_text(text + '\n', encoding='utf-8')
         save_json(logs / 'task.json', task)
         if recovery:
             snapshot_recovery(root, logs, recovery)
+            if recovery.get('kind') == 'acceptance_failure':
+                assessment = 'reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md'
+                (logs / 'coordinator-assessment.md').write_text(
+                    git(root, 'show', args.control_sha + ':' + assessment) + '\n', encoding='utf-8')
         save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
@@ -946,6 +1143,14 @@ def main():
                          'No previous tests/review are inherited. Recovery input hashes and retained copies: '
                          + str(logs / 'recovery.json')) if recovery else (
                          'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None)
+        native_recovery = recovery is not None and recovery.get('kind') == 'acceptance_failure'
+        if native_recovery:
+            repair_reason = ('Repair the existing committed candidate after the coordinator-assessed SIGINT Mac failure. '
+                'Preserve the original failure. Read recovery.json, recovery-evidence/summary.json and '
+                'recovery-evidence/mac-containment-0.json under ' + str(logs) + '. '
+                'First preserve primary errors and bounded diagnostic evidence. Zombie/SID handling is a '
+                'suspected cause, not an established runtime fact. Do not remove identity checks, guess SID, '
+                'reimplement the feature or rerun old probes. All validation starts afresh on changed bytes.')
         full_tested_bytes = None
         mandatory_tested_bytes = None
         mac = None
@@ -955,7 +1160,8 @@ def main():
             initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
             if any(p and p not in task['allowed_files'] for p in initial_paths):
                 raise Stop('existing PR cumulative diff exceeds the pinned task scope')
-            for round_no in range(task['max_repairs'] + 1):
+            last_round = task['max_repairs'] - 1 if native_recovery else task['max_repairs']
+            for round_no in range(last_round + 1):
                 result = None
                 if repair_reason is not None:
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
@@ -974,6 +1180,8 @@ def main():
                 if any(not (root / p).is_file() or (root / p).is_symlink() for p in task.get('required_files', [])):
                     raise Stop('required implementation/test/report artifacts missing; no empty-suite PASS')
                 tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
+                if native_recovery and round_no == 0 and runtime_bytes(tested_bytes) == runtime_bytes(recovery['partial_files']):
+                    raise Stop('native recovery requires changed source/test bytes; no blind probe retry')
                 suite = 'full' if test_mode == 'full' and round_no == 0 else 'related'
                 passed = tests(root, logs, task, round_no, suite)
                 test_results = json.loads(test_result_file(logs, round_no, suite).read_text())
@@ -985,7 +1193,7 @@ def main():
                     history.append({'round': round_no, 'head': head, 'developer': result,
                                     'tests': 'FAIL', 'test_results': test_results,
                                     'review': None, 'tested_sha256': tested_bytes})
-                    if round_no == task['max_repairs']:
+                    if round_no == last_round:
                         raise Stop('deterministic tests still fail after repair bound')
                     repair_reason = 'Repair only failures in the deterministic tests. Read test logs under ' + str(logs)
                     continue
@@ -1032,7 +1240,7 @@ def main():
                         if after_full != committed_bytes:
                             raise Stop('final full tests changed the reviewed bytes')
                         if not final_passed:
-                            if round_no == task['max_repairs']:
+                            if round_no == last_round:
                                 raise Stop('final full tests still fail after repair bound')
                             repair_reason = 'Repair only final-full test failures. Read logs under ' + str(logs)
                             continue
@@ -1081,12 +1289,12 @@ def main():
                         history[-1]['final_review'] = final_review
                         history[-1]['final_review_head'] = head
                         if final_review['status'] != 'PASS':
-                            if final_review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
+                            if final_review['status'] == 'NEEDS_DECISION' or round_no == last_round:
                                 raise Stop('final review needs a decision or exceeded repair bound')
                             repair_reason = 'Repair only final review blockers:\n' + json.dumps(final_review)
                             continue
                     break
-                if review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
+                if review['status'] == 'NEEDS_DECISION' or round_no == last_round:
                     raise Stop('Claude review needs a decision or exceeded repair bound')
                 repair_reason = ('Repair only these reproducible blocking findings. '
                                  'Review is evidence, not permission to expand scope:\n' + json.dumps(review))
@@ -1158,6 +1366,11 @@ def main():
             save_json(logs / 'summary.json', {'status': 'STOPPED', 'reason': str(exc), 'branch': branch,
                 'head': git(root, 'rev-parse', 'HEAD'), 'history': history,
                 'decision_checkpoint': checkpoint, 'checkpoint_publication_error': checkpoint_error})
+            try:
+                exported = export_diagnostics(root, logs, task)
+                print('[診斷 ZIP／Finder 可見] ' + str(exported), file=sys.stderr, flush=True)
+            except (Stop, OSError, ValueError) as export_error:
+                print('[診斷匯出未完成] ' + str(export_error), file=sys.stderr, flush=True)
             print('STOPPED. Work preserved. Logs: ' + str(logs), file=sys.stderr, flush=True)
             raise
 

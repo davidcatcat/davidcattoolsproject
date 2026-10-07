@@ -1,5 +1,49 @@
 # AI loop helper validation — 2026-10-07
 
+## Current: assessed Mac SIGINT recovery and visible diagnostics
+
+Authoring base: `f23be6ad79963e81282a3f9152a46a7a9157aaa2` on `automation/ai-loop`.
+Main remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`. These are helper/control
+changes through pinned GitHub APIs, not an application checkout or Mac execution.
+
+The new one-use `acceptance_failure_recovery` binds run `20261007T123142Z-77009`,
+old control `b75ea2e371fd4e8e6130a4b2be8a48e7256b25aa`, exact unpublished candidate
+`ce29d4a6a7764e62dc993b76b33996db2fb3455b` and SHA256 of the user-supplied summary
+and native JSON. It requires unchanged tracked/index files and all candidate hashes,
+old Git-pinned task/provenance, pinned main and branch/PR absence. Scope/commands/
+acceptance changes are rejected. Unrelated current artifacts are fingerprinted;
+historical integrity remains UNVERIFIED. Read-only inspection of retained probe PIDs
+stops on presence/ambiguity, without sending signals. Absence is a recovery
+prerequisite, never a retrospective containment or OS capability PASS.
+
+Before Codex, the runner snapshots all candidate files and both original failure
+records, and copies the coordinator assessment from the current Git-pinned control.
+All verification starts afresh. A native continuation allows at most two repair
+calls, requires changed source/test bytes and never automatically repeats a failed
+native gate. The original related/Claude/two full suites/all fourteen native gates
+and exact publication CI remain required; independent security review stays pending.
+
+Stopped runs now export a bounded visible ZIP under `ai-loop-diagnostics/` with
+candidate files and curated native evidence, excluding provider streams/auth files.
+Exclusive creation and symlink/size checks preserve existing artifacts. Only the
+generated ZIP path is added to local Git excludes; unrelated visible files are
+not hidden from the preserved-file inventory. Export failure does not replace STOP.
+
+Helper fixture validation: **127 tests PASS** (`python -m unittest discover -s
+scripts -p test_ai_loop.py -q`). Tests include wrong run/HEAD/contract, tampered or
+symlink evidence, stale candidate, published branch/PR, PID presence/inspection
+ambiguity with no signals, snapshot integrity, no inherited PASS, two-call bound,
+unchanged-byte rejection, no automatic Mac retry and visible/private-stream-safe
+ZIP export. Python 3.9 grammar and changed-file whitespace checks also PASS.
+Fixtures use synthetic files and mocked Git/provider/native outcomes; they do not
+establish actual Mac preflight, application test, live model or containment PASS.
+
+Application status remains **BLOCKED: Mac SIGINT FAIL**. Only fd_inheritance passed
+in the supplied native run; later scenarios were not run. Application repair and
+new native verification are pending execution on David's canonical Mac.
+
+## Historical helper validation
+
 ## Updated task and provenance
 
 The first helper contract targeted new A11b.2.2.0 implementation, but PR #46 was

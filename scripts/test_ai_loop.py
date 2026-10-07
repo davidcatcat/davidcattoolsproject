@@ -190,6 +190,192 @@ class ActiveRunnerProcessTests(unittest.TestCase):
                          + ' --output-last-message ' + self.output + '\n')
 
 
+class NativeResumeTests(unittest.TestCase):
+    run_id = '20261007T123142Z-77009'
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime)
+            old = root / '.ai-loop' / self.run_id
+            old.mkdir(parents=True)
+            (root / 'reports').mkdir()
+            (root / 'source.py').write_text('committed candidate\n')
+            (root / 'reports/validation.md').write_text('historical pending gates\n')
+            (root / 'user.txt').write_text('unrelated preserved\n')
+            baseline = {'mode': 'implement_new_pr', 'task_id': 'fixture', 'branch': 'feat/fixture',
+                'base_sha': HEAD, 'expected_head': HEAD, 'max_repairs': 2,
+                'allowed_files': ['source.py', 'reports/validation.md'], 'full_tests': [['full']],
+                'initial_timeout_recovery': {'run_id': '20261007T113658Z-74880', 'control_sha': 'c'*40}}
+            tested = {p: loop.digest(root/p) for p in baseline['allowed_files']}
+            mac = {'platform': 'darwin', 'tested_sha256': loop.runtime_bytes(tested),
+                   'failure': {'status': 'FAIL', 'scenario': 'sigint', 'owned_processes': [
+                       {'pid': 321, 'host_identity': {'pid': 321}, 'supervisor': {'pid': 322}}]}}
+            loop.save_json(old/'task.json', baseline)
+            (old/'task.md').write_text('original requirements\n')
+            loop.save_json(old/'provenance.json', {'root': str(root), 'run_id': self.run_id,
+                'base': HEAD, 'control_sha': 'b'*40})
+            loop.save_json(old/'summary.json', {'status': 'STOPPED', 'branch': baseline['branch'],
+                'head': 'e'*40, 'reason': 'required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry',
+                'history': [{'head': 'e'*40, 'mandatory': {'status': 'FAIL'}, 'tested_sha256': tested}]})
+            loop.save_json(old/'mac-containment-0.json', mac)
+            task = copy.deepcopy(baseline)
+            task.pop('initial_timeout_recovery')
+            task['acceptance_failure_recovery'] = {'run_id': self.run_id, 'control_sha': 'b'*40,
+                'expected_head': 'e'*40, 'summary_sha256': loop.digest(old/'summary.json'),
+                'evidence_sha256': loop.digest(old/'mac-containment-0.json')}
+            inventory = {'user.txt': loop.digest(root/'user.txt')}
+            def fake_git(cwd, *args):
+                if args == ('branch', '--show-current'): return task['branch']
+                if args == ('rev-parse', 'HEAD'): return 'e'*40
+                if args == ('diff', '--cached', '--name-only'): return ''
+                if args[:3] == ('diff', '--name-only', '-z'): return 'source.py\0reports/validation.md\0'
+                raise AssertionError(args)
+            def fake_command(argv, *args, **kw):
+                return (0, '', '') if argv[0] == 'git' else (1, '', '')
+            stack.enter_context(patch.object(loop, 'load_task', return_value=(baseline, 'original requirements')))
+            git_mock = stack.enter_context(patch.object(loop, 'git', side_effect=fake_git))
+            run_mock = stack.enter_context(patch.object(loop, 'run', side_effect=['[]', '']))
+            command = stack.enter_context(patch.object(loop, 'command', side_effect=fake_command))
+            yield root, old, task, inventory, git_mock, run_mock, command
+
+    def test_exact_committed_failure_continues_without_inheriting_pass(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            original, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            self.assertEqual(original, inventory)
+            self.assertEqual(recovery['kind'], 'acceptance_failure')
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            logs = root/'.ai-loop/new-run'
+            logs.mkdir()
+            loop.snapshot_recovery(root, logs, recovery)
+            self.assertEqual((logs/'recovery-inputs/source.py').read_bytes(), (root/'source.py').read_bytes())
+            self.assertEqual((logs/'recovery-evidence/mac-containment-0.json').read_bytes(),
+                             (old/'mac-containment-0.json').read_bytes())
+            self.assertEqual((logs/'recovery-evidence/summary.json').read_bytes(), (old/'summary.json').read_bytes())
+
+    def test_wrong_run_or_head_or_dirty_tree_stops(self):
+        for fault in ('run', 'head', 'dirty'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, git_mock, *rest):
+                if fault == 'head': task['acceptance_failure_recovery']['expected_head'] = 'f'*40
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, 'other' if fault == 'run' else self.run_id,
+                                                   inventory, ['source.py'] if fault == 'dirty' else [])
+
+    def test_changed_evidence_or_source_cannot_resume(self):
+        for name in ('summary.json', 'mac-containment-0.json', 'task.md', 'task.json', 'source.py'):
+            with self.subTest(name=name), self.fixture() as (root, old, task, inventory, *rest):
+                path = root/name if name == 'source.py' else old/name
+                path.write_text(path.read_text()+(' changed' if name == 'task.md' else ' '))
+                if name == 'task.json': path.write_text('{}')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+    def test_scope_or_gates_cannot_change(self):
+        for key, value in (('allowed_files', ['source.py']), ('full_tests', [['weaker']]), ('max_repairs', 1)):
+            with self.subTest(key=key), self.fixture() as (root, old, task, inventory, *rest):
+                task[key] = value
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+    def test_published_branch_or_pr_cannot_resume(self):
+        for replies in (['[{"number":47}]'], ['[]', 'published']):
+            with self.subTest(replies=replies), self.fixture() as (root, old, task, inventory, git_mock, run_mock, command):
+                run_mock.side_effect = replies
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+    def test_symlink_evidence_and_untracked_candidate_are_rejected(self):
+        for fault in ('symlink', 'collision'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, *rest):
+                if fault == 'symlink':
+                    path = old/'summary.json'
+                    raw = path.read_bytes(); path.unlink()
+                    target = root/'other.json'; target.write_bytes(raw); path.symlink_to(target)
+                else:
+                    inventory['source.py'] = loop.digest(root/'source.py')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+    def test_retained_pid_or_inspection_error_stops_without_signaling(self):
+        for reply in ((0, '321\n', ''), (2, '', 'failed'), (0, '999\n', ''), (0, '', '')):
+            with self.subTest(reply=reply), self.fixture() as (root, old, task, inventory, git_mock, run_mock, command):
+                command.side_effect = lambda argv, *a, **kw: reply if argv[0] == '/bin/ps' else (
+                    (0, '', '') if argv[0] == 'git' else (1, '', ''))
+                with patch.object(loop.os, 'kill') as kill, patch.object(loop.os, 'killpg') as killpg:
+                    with self.assertRaises(loop.Stop):
+                        loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+                    kill.assert_not_called(); killpg.assert_not_called()
+
+    def test_snapshot_rechecks_failure_bytes(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            (old/'mac-containment-0.json').write_text('{}')
+            logs = root/'.ai-loop/new-run'; logs.mkdir()
+            with self.assertRaises(loop.Stop): loop.snapshot_recovery(root, logs, recovery)
+
+    def test_new_schema_binds_failure_and_allows_only_one_recovery_policy(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertIn('acceptance_failure_recovery', load(task))
+        for fault in ('missing_hash', 'bad_head', 'two_policies', 'zero_repairs', 'wrong_mode'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task)
+                if fault == 'missing_hash': bad['acceptance_failure_recovery'].pop('evidence_sha256')
+                if fault == 'bad_head': bad['acceptance_failure_recovery']['expected_head'] = 'nope'
+                if fault == 'two_policies': bad['initial_quota_recovery'] = {'run_id': self.run_id, 'control_sha': HEAD}
+                if fault == 'zero_repairs': bad['max_repairs'] = 0
+                if fault == 'wrong_mode': bad.update(mode='review_existing_pr', pr_number=47)
+                with self.assertRaises(loop.Stop): load(bad)
+
+    def test_different_failure_or_provenance_does_not_gain_recovery(self):
+        for fault in ('scenario', 'reason', 'provenance'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, *rest):
+                name = 'mac-containment-0.json' if fault == 'scenario' else ('summary.json' if fault == 'reason' else 'provenance.json')
+                row = json.loads((old/name).read_text())
+                if fault == 'scenario': row['failure']['scenario'] = 'parent_sigkill_plain'
+                if fault == 'reason': row['reason'] = 'command timed out: codex'
+                if fault == 'provenance': row['control_sha'] = 'c'*40
+                loop.save_json(old/name, row)
+                # Even a coordinator repin of the byte digest cannot generalize
+                # this specific recovery to a different failure category.
+                key = 'evidence_sha256' if fault == 'scenario' else 'summary_sha256'
+                if fault != 'provenance': task['acceptance_failure_recovery'][key] = loop.digest(old/name)
+                with self.assertRaises(loop.Stop): loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+
+class DiagnosticsExportTests(unittest.TestCase):
+    def test_visible_zip_contains_curated_evidence_and_source_but_no_provider_streams(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime); logs = root/'.ai-loop/run'; logs.mkdir(parents=True)
+            (root/'source.py').write_text('candidate')
+            loop.save_json(logs/'summary.json', {'status': 'STOPPED'})
+            loop.save_json(logs/'mac-containment-0.json', {'failure': {'status': 'FAIL'}})
+            (logs/'codex-0.stderr.log').write_text('private provider data')
+            (logs/'claude-0.raw.json').write_text('private provider data')
+            (logs/'tests-0-mandatory-final-0.stderr.log').write_text('probe diagnostic')
+            path = loop.export_diagnostics(root, logs, {'allowed_files': ['source.py']})
+            self.assertEqual(path.parent.name, 'ai-loop-diagnostics')
+            with zipfile.ZipFile(path) as archive:
+                self.assertIn('source.py', archive.namelist())
+                self.assertIn('evidence/mac-containment-0.json', archive.namelist())
+                self.assertIn('captured-sha256.json', archive.namelist())
+                self.assertFalse(any('codex' in p or 'claude' in p for p in archive.namelist()))
+
+    def test_export_preserves_existing_zip_and_rejects_symlink_folder(self):
+        for fault in ('existing', 'symlink'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as runtime:
+                root = Path(runtime); logs = root/'.ai-loop/run'; logs.mkdir(parents=True)
+                target = root/'ai-loop-diagnostics'
+                if fault == 'symlink': target.symlink_to(logs, target_is_directory=True)
+                else:
+                    target.mkdir(); (target/'run.zip').write_bytes(b'preserved')
+                with self.assertRaises(loop.Stop): loop.export_diagnostics(root, logs, {'allowed_files': []})
+                if fault == 'existing': self.assertEqual((target/'run.zip').read_bytes(), b'preserved')
+
+
 class QuotaResumeTests(unittest.TestCase):
     run_id = '20261007T075141Z-70725'
 
@@ -1099,6 +1285,23 @@ class ExistingPRTests(unittest.TestCase):
         self.assertEqual(self.exercise_pipeline(new_task=True, resume=True,
             codex_timeout=10800, claude_timeout=10800), ['related', 'full-final', 'mandatory-final'])
 
+    def test_native_resume_repairs_existing_candidate_then_runs_all_gates(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True),
+                         ['related', 'full-final', 'mandatory-final'])
+
+    def test_native_resume_never_retries_failed_mac_gate_automatically(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+                         mandatory_failure=True, should_stop=True),
+                         ['related', 'full-final', 'mandatory-final'])
+
+    def test_native_resume_has_at_most_two_repair_calls(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+                         failures=2, should_stop=True), ['related', 'related'])
+
+    def test_native_resume_cannot_rerun_probes_on_unchanged_bytes(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+                         unchanged_repair=True, should_stop=True), [])
+
     def test_mac_failure_stops_new_task_without_push_pr_or_retry(self):
         self.exercise_pipeline(new_task=True, mandatory_failure=True, should_stop=True)
 
@@ -1118,7 +1321,7 @@ class ExistingPRTests(unittest.TestCase):
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
                           new_task=False, mandatory_failure=False, hook_changes=False,
                           decision=False, checkpoint_failure=False, resume=False, codex_timeout=None,
-                          claude_timeout=None):
+                          claude_timeout=None, native_resume=False, unchanged_repair=False):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -1138,6 +1341,8 @@ class ExistingPRTests(unittest.TestCase):
                     acceptance_report='reports/validation.md', pr_title='fixture title')
                 task['publish_decision_checkpoint'] = True
                 task['allowed_files'].append('reports/validation.md')
+            if native_resume:
+                task['acceptance_failure_recovery'] = {'run_id': '20261007T075141Z-70725'}
             current_head = [HEAD]
             dirty = [False]
             review_calls = [0]
@@ -1209,7 +1414,8 @@ class ExistingPRTests(unittest.TestCase):
                     (root / 'reports/validation.md').write_text('NEEDS_DECISION; no implementation.\n')
                     return {'status': 'NEEDS_DECISION', 'summary': 'Continuity requires a decision.'}
                 dirty[0] = True
-                (root / 'source.txt').write_text('bounded repair ' + str(review_calls[0]))
+                if not unchanged_repair:
+                    (root / 'source.txt').write_text('bounded repair ' + str(review_calls[0]))
                 if new_task:
                     (root / 'reports').mkdir(exist_ok=True)
                     (root / 'reports/validation.md').write_text('Candidate report; runner gates pending.\n')
@@ -1233,9 +1439,10 @@ class ExistingPRTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'prepare_existing_branch'))
             prepare_new = stack.enter_context(patch.object(loop, 'prepare_new_branch'))
             if resume:
-                stack.enter_context(patch.object(loop, 'prepare_initial_resume', return_value=({},
+                stack.enter_context(patch.object(loop, 'prepare_acceptance_resume' if native_resume else 'prepare_initial_resume', return_value=({},
                     {'from_run': '20261007T075141Z-70725', 'partial_files':
-                     {'source.txt': loop.digest(root / 'source.txt')}, 'inherited_validation': 'NONE'})))
+                     {'source.txt': loop.digest(root / 'source.txt')}, 'inherited_validation': 'NONE',
+                     'kind': 'acceptance_failure' if native_resume else 'initial'})))
             stack.enter_context(patch.object(loop, 'read_pr', return_value=self.pr()))
             stack.enter_context(patch.object(loop, 'check_scope', side_effect=fake_scope))
             stack.enter_context(patch.object(loop, 'validate_mac_evidence', return_value={'fixture': 'Mac evidence is mocked here'}))
@@ -1270,14 +1477,18 @@ class ExistingPRTests(unittest.TestCase):
                     loop.main()
             finally:
                 os.chdir(previous)
-            self.assertEqual(codex.call_count, min(failures + final_full_failures, 2) + int(new_task))
+            expected_calls = (1 if unchanged_repair else min(failures + final_full_failures + 1, 2)) if native_resume else (
+                min(failures + final_full_failures, 2) + int(new_task))
+            self.assertEqual(codex.call_count, expected_calls)
             if codex_timeout is not None:
                 self.assertEqual(codex.call_args.args[4], codex_timeout)
                 self.assertTrue(all(c.args[4] == task.get('claude_timeout_seconds', task['timeout_seconds'])
                                     for c in claude.call_args_list))
             if resume:
                 prepare_new.assert_not_called()
-                self.assertIn('Continue the existing partial implementation', codex.call_args.args[2])
+                expected_reason = 'coordinator-assessed SIGINT Mac failure' if native_resume and not failures else (
+                    'Continue the existing partial implementation' if not native_resume else 'Repair only')
+                self.assertIn(expected_reason, codex.call_args.args[2])
                 self.assertTrue(next((root / '.ai-loop').glob('*/recovery-inputs/source.txt')).is_file())
             self.assertEqual(sum(call.args[0][:3] == ['gh', 'pr', 'create'] for call in runner.call_args_list), int(new_task and not should_stop))
             if new_task and not should_stop:
