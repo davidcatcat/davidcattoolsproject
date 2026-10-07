@@ -1,0 +1,33 @@
+{
+  "round": 1,
+  "phase": "mandatory-final",
+  "head": "be6bc892ba8fefc7e8c8cb708dc91787b8829021",
+  "evidence_sha256": "fb7a4eabbb008ad2aa5aa1928b500f46ebbf0db36c538fee0e2502229e282769",
+  "failure_url": "https://github.com/davidcatcat/davidcattoolsproject/blob/a77056591f139eca4ac3ce841730194fca4283d7/reports/ai-loop/diagnostics/20261007T183516Z-7365/round-1-failure/index.md",
+  "review_url": "https://github.com/davidcatcat/davidcattoolsproject/blob/f0f7a1b4e361ad9e3de136b69115ee0ec61a0b04/reports/ai-loop/diagnostics/20261007T183516Z-7365/round-1-review/index.md",
+  "decision": {
+    "decision": "REPAIR",
+    "category": "TEST_BUG",
+    "reviewed_head": "be6bc892ba8fefc7e8c8cb708dc91787b8829021",
+    "reviewed_evidence_sha256": "fb7a4eabbb008ad2aa5aa1928b500f46ebbf0db36c538fee0e2502229e282769",
+    "summary": "The mandatory-final Mac acceptance failed in hung_supervisor, subcase 'unresolved', at test_git_containment.py:2013 (`kernel.identity(probe.supervisor.pid) == probe.supervisor`). The earlier blocker is fixed on these bytes. closed_status and the eight subcases after it passed, and the stdout log shows the closed_status anchor now proves owned-zombie continuity: one status-2 transition row, then two fresh SZOMB=5 rows. The new failure is in the test controller itself. For case 'unresolved', _git_containment.py:321 deliberately changes anchor.bound.micros by one (the fixed F1 fault). containment_probe_parent.py:49 then reports that changed anchor.bound in the 'unresolved' event. Probe.next (test_git_containment.py:1306) overwrites probe.supervisor from any row carrying 'supervisor', so the probe's record of the supervisor now holds the fault-injected identity instead of the real one from READY/TERMINAL. The fresh kernel identity therefore can't match. Production F1 behaved as specified: primary timeout, state-unknown, handlers and ownership retained. Controller cleanup recorded RESOLVED with a host-only SIGKILL, decision before reap, and absence of the host, supervisor, group and members. owned_processes is []. This is a reproducible, blocking test bug in an allowlisted test file. Note that the original_owned_processes inventory also records the falsified supervisor micros, which the same repair corrects. The remaining hung_supervisor subcases (fixture_failure_*, fixture_ambiguous_identity) and the nine later scenarios, including both x20 parent-SIGKILL variants, did not run and are not PASS.",
+    "findings": [
+      {
+        "severity": "High",
+        "blocking": true,
+        "file": "tools/llmtool/tests/test_git_containment.py",
+        "detail": "Probe.next lets the F1 'unresolved' event's deliberately changed anchor identity overwrite probe.supervisor, so unresolved_exit's fresh-identity check at line 2013 compares the live supervisor with a synthetic micros+1 identity and fails. Repair, limited to this test file: (1) In Probe.next, bind self.supervisor from the authoritative READY row (and keep it through terminal/result). For any later row with a 'supervisor' field, require pid/pgid/sid/uid/ppid/seconds to match the bound identity. Do not overwrite the binding from the 'unresolved' event; store that reported anchor separately, e.g. self.reported_unresolved_supervisor, so original_owned_processes records the true launch identity. If no supervisor is bound yet, keep the existing behaviour. (2) In unresolved_exit, keep the line-2013 check against the real supervisor identity, and add a check that the reported unresolved anchor differs from it only in micros (proving the fault was injected). (3) Add a deterministic ProbeDiagnosticsTests/ControllerCleanupTests regression: feed READY then an 'unresolved' row with changed micros, and assert probe.supervisor and inventory() keep the real identity. Do not change the _git_containment.py fault injection, F1 retention, containment_probe_parent.py, cleanup deadlines (2s F1 / 6s controller), signal policy or any other assertion. Do not remove or relax the line-2013 check. Source/test bytes must change, and the runner must rerun related checks, both full suites and all fourteen native scenarios.",
+        "evidence": "failure-1.json: scenario hung_supervisor, subcase 'unresolved', AssertionError 'containment acceptance assertion failed', traceback test_git_containment.py unresolved_exit line 2013 -> check line 1874. completed_subcases: hung … wait. stdout log line 10 shows closed_status owned-zombie proof with SZOMB rows; line 11 'hung_supervisor FAIL'. Source: _git_containment.py:321 `micros=(anchor.bound.micros+1) % 1000000` for case 'unresolved'; containment_probe_parent.py:49 `supervisor=anchor.bound.data()`; test_git_containment.py:1306 `self.supervisor = kernel.Identity.parse(row['supervisor'])` for every row; _git_containment.py:251 terminal row uses the unchanged `bound`. fixture_cleanup status RESOLVED, owned_processes []."
+      },
+      {
+        "severity": "Medium",
+        "blocking": false,
+        "file": "tools/llmtool/tests/test_git_containment.py",
+        "detail": "Because of the same overwrite, failure JSON original_owned_processes[0].supervisor (and members' cross-reference) records the fault-injected supervisor micros instead of the real kernel launch identity. The PID-absence guard uses PIDs, so it is unaffected. The fix in the blocking finding makes the inventory truthful; no separate change is needed.",
+        "evidence": "failure-1.json original_owned_processes[0].supervisor.micros 791549 equals the 'unresolved' row's supervisor (from the changed anchor.bound)."
+      }
+    ]
+  },
+  "disposition": "REPAIR",
+  "repeat_count": 1
+}
