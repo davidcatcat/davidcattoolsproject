@@ -1,11 +1,11 @@
 {
-  "task_id": "A11b.2.2.1-containment-20261007",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
   "mode": "implement_new_pr",
   "pr_number": null,
   "expected_head": "585caf7d4c9dad20afd3beb38e5140d6dadf89e0",
   "base_sha": "585caf7d4c9dad20afd3beb38e5140d6dadf89e0",
-  "branch": "feat/llmtool-a11b2-2-1-containment-20261007",
-  "pr_title": "feat(llmtool): add private supervisor fake-child containment harness (A11b.2.2.1)",
+  "branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
+  "pr_title": "feat(llmtool): recover A11b.2.2.1 containment with supervisor group anchor",
   "allowed_files": [
     "tools/llmtool/llmtool/_git_containment.py",
     "tools/llmtool/llmtool/_git_supervisor.py",
@@ -16,7 +16,7 @@
     "tools/llmtool/tests/run_containment_acceptance.py",
     "tools/llmtool/tests/containment_probe_parent.py",
     "tools/llmtool/tests/test_git_mutation.py",
-    "reports/llmtool_a11b2_2_1_containment_validation_20261007.md"
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md"
   ],
   "required_files": [
     "tools/llmtool/llmtool/_git_containment.py",
@@ -26,9 +26,9 @@
     "tools/llmtool/llmtool/_git_containment_child.py",
     "tools/llmtool/tests/test_git_containment.py",
     "tools/llmtool/tests/run_containment_acceptance.py",
-    "reports/llmtool_a11b2_2_1_containment_validation_20261007.md"
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md"
   ],
-  "acceptance_report": "reports/llmtool_a11b2_2_1_containment_validation_20261007.md",
+  "acceptance_report": "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md",
   "max_repairs": 2,
   "timeout_seconds": 1800,
   "ci_workflow": "llmtool-ci.yml",
