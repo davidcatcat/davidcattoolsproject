@@ -120,7 +120,11 @@ A11b.1 is DONE/merged via PR #32 (`e5525f18`) as a data-only contract slice.
 A11b.2.1 is DONE/merged via PR #43 (`780970ab`) as an internal read-only Git ADD
 preflight/state verifier; it does not execute `git add` and is not a public mutation path.
 A11b.2.2 is NOT STARTED and remains blocked on the B5 process-containment/failure-semantics
-gate. A11b as a whole is incomplete. Future executor work must still meet QG-S1
+gate. PR #44 is at **B5 design remediation / pending independent targeted re-review**;
+2.2.0, 2.2.1 and 2.2.2 are **NOT AUTHORIZED** in the documentation task. See the
+[remediated B5 spec](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md)
+and [remediation summary](../../reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md).
+A11b as a whole is incomplete. Future executor work must still meet QG-S1
 R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD.
 
 Detailed milestone scope and retained limitations are in [ROADMAP](ROADMAP.md).

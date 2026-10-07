@@ -502,7 +502,9 @@ A11a.5 offline runs/trace 已透過 PR #22 合併，SHA `da027f0d728e3b3ff605a6d
 post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b is IN PROGRESS; A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32
-(`e5525f18`) as a data-only slice. A11b.2 and A11c remain NOT STARTED. Execution remains
+(`e5525f18`) as a data-only slice. A11b.2.1 is DONE/merged via PR #43 (`780970ab`);
+A11b.2.2 remains NOT STARTED / B5 design remediation, NOT AUTHORIZED. A11c remains
+NOT STARTED. Execution remains
 future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
@@ -511,7 +513,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2 NOT STARTED | Typed action/approval data contract only; executor and recovery deferred | QG-S1 + QG-QA1 accepted；contract/sandbox/approval/audit spec review |
+| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2.1 DONE/merged (PR #43); A11b.2.2 NOT AUTHORIZED | Data-only contract and read-only ADD preflight; executor and recovery deferred | B5 design remediation pending independent targeted re-review; no implementation authorization |
 | A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -685,7 +687,7 @@ company result adopted/overridden、schema/identifier validity；**省 token 但
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2 NOT STARTED；A11c adopts route-by-task evidence；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2 B5 design remediation / NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE
@@ -806,7 +808,7 @@ the retained controls below before introducing any side effect.
 Current sub-slice status:
 
 - **A11b.2.1 — deterministic Git ADD preflight/state verifier: DONE/merged via PR #43 `780970ab`.** It is internal/read-only, constructs but never executes the future ADD argv, and has no public mutation path.
-- **A11b.2.2 — internal Git ADD mutation: NOT STARTED / B5-GATED.** Before any mutation code, the process-containment/failure-semantics design in [`llmtool_a11b2_2_b5_containment_failure_spec_20261007.md`](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md) requires independent security review. Even a design PASS authorizes only L1 cleanup/evidence hardening plus a fake-child supervisor containment harness; real `git add` stays prohibited until that harness passes actual macOS signal/SIGKILL probes and independent review.
+- **A11b.2.2 — internal Git ADD mutation: NOT STARTED / B5 design remediation / NOT AUTHORIZED.** PR #44 updates the [B5 spec](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md) for H1/H2/M1/M2/M3 and records [remediation dispositions](../../reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md). Independent targeted re-review is pending. A design PASS permits requesting separate slice authorization; it does not authorize implementation automatically. This documentation task authorizes none of 2.2.0, 2.2.1 or 2.2.2. Real `git add` stays prohibited until the separately authorized containment harness passes actual macOS signal/SIGKILL probes and independent review.
 
 任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
 包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
