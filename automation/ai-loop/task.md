@@ -1,18 +1,21 @@
-# A11b.2.2.1 — supervisor / fake-child containment harness
+# A11b.2.2.1 — supervisor / fake-child containment harness — F3 recovery
 
 ## Authorization, revision and delivery
 
-David supplied and authorized this next implementation handoff on 2026-10-07,
-including publication through the Mac AI-loop script. Implement this entire slice,
-not another milestone. The coordinator verified PR #44 and PR #46 are merged and
+David supplied and authorized this implementation handoff on 2026-10-07. The first
+Mac run stopped correctly at F3 NEEDS_DECISION before source/test implementation.
+The coordinator has resolved that design question below. Continue the same A11b.2.2.1
+slice on a fresh recovery branch; the old local branch/report are preserved as evidence,
+not reused or deleted. The coordinator verified PR #44 and PR #46 are merged and
 main is `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
 
 - Repository: davidcatcat/davidcattoolsproject.
 - Canonical Mac root: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
 - Pinned base/start: `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
-- New branch: `feat/llmtool-a11b2-2-1-containment-20261007`.
+- Recovery branch: `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+- The stopped local branch `feat/llmtool-a11b2-2-1-containment-20261007` remains untouched at the pinned base.
 - New Draft PR, created by the outer runner; no existing feature PR is reused.
-- Validation report: `reports/llmtool_a11b2_2_1_containment_validation_20261007.md`.
+- Validation report: `reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md`.
 - Initial implementation plus at most two repairs; no blind provider retry.
 - Stop at READY_FOR_FINAL_REVIEW. Independent security review and coordinator
   acceptance are pending; never merge or begin A11b.2.2.2 automatically.
@@ -43,6 +46,7 @@ Read these authoritative requirements and evidence in full:
 - reports/llmtool_a11b2_2_b5_containment_spec_targeted_rereview_20261007.md.
 - reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md.
 - reports/ai-loop/A11b.2.2.0-pr46-review-20261007-20261007T050236Z-59259.md.
+- reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md (stopped F3 checkpoint; not a PASS).
 - tools/llmtool/llmtool/git_mutation.py, git_intel.py, action_contract.py, and the existing process runner/error definitions
   located by inspection (do not assume a process_runner.py/errors.py filename).
 
@@ -124,9 +128,11 @@ internal binding without introducing fake product approval/audit authorization.
 ## 5. Fake child only
 
 Fixed deterministic synthetic cases in private code; no arbitrary command seam or
-Git ADD. Child gets its own session/process group. Supervisor owns lifecycle. A
-controlled descendant case must leave a long-lived child after leader exit, so the
-test proves descendant containment rather than merely leader reaping.
+Git ADD. F3 changes the topology: the supervisor itself is the session leader and
+process-group leader (`PID == PGID == SID`), and every fake child/controlled descendant
+stays in that supervisor-owned group. The child must not create a new session/group or
+escape it. A controlled descendant case must remain after its direct leader exits, so
+the test proves whole-group descendant containment rather than merely leader reaping.
 
 ## 6. Non-reaping lifecycle
 
@@ -158,14 +164,23 @@ implement unresolved-containment exit/handler behavior (F1), preserve its eviden
 and classify as state unknown / user action required without guessing ownership.
 Also inject supervisor death before CHILD_IDENTITY delivery (B5 residual window).
 
-## 8. Identity and reuse
+## 8. Identity, reuse and coordinator-approved F3 remediation
 
-Bind PID/PGID/SID/UID and kernel start-time identity. Fresh verification before signal;
-no remembered numeric PGID or kill(pid,0)/ps string alone as identity. Test mismatch,
-simulated reuse, leader absent with only numeric group known, verification-to-signal
-race and valid original-group continuity. Unknown/mismatch never kills unrelated
-processes. If the macOS primitive/continuity cannot be safely established, reject
-platform support with NOT SUPPORTED; mocked matching snapshots are not OS race proof.
+Bind PID/PGID/SID/UID and kernel start-time identity. The accepted remediation is:
+
+- supervisor starts a new session, so its `PID == PGID == SID`; parent is its real parent;
+- fake child and descendants remain in the supervisor's process group;
+- parent observes supervisor exit without reaping it and never calls poll/wait/communicate before the group-cleanup decision;
+- for timeout, hung supervisor, cancellation or unexpected supervisor death, parent may `killpg(supervisor_pid, SIGKILL)` only while the owned supervisor is live or an unreaped zombie and bound PID/PGID/SID/UID/start-time evidence matches;
+- because the parent has not reaped that child, the supervisor PID cannot be reused; because PGID equals that reserved PID, an unrelated new process group cannot acquire that PGID before reap;
+- only after group cleanup/absence is decided may parent reap the supervisor; never signal the remembered group after reap;
+- on normal fake-child termination, supervisor may make the cleanup decision and reap its direct child for status while the still-live supervisor pins the group, then send terminal evidence and wait for parent finalization;
+- on parent-liveness EOF/SIGKILL, supervisor performs a last-act `killpg(own_pgid, SIGKILL)`; self-termination is intentional and kills the fake group together;
+- if supervisor identity is ambiguous, already reaped, or no longer `PID == PGID == SID`, do not signal a numeric PGID; classify containment/state unknown.
+
+This replaces the stopped run's snapshot-only fallback and the earlier separate-child-process-group assumption. Do not add a separate anchor process and do not depend on Apple private audit-token signaling. Independent security review after implementation must explicitly verify this remediation.
+
+Test live and zombie supervisor-anchor cases, mismatch/reuse, attempted signal after reap, unexpected supervisor death, hung supervisor, parent SIGKILL and verification-to-signal timing. Actual Mac probes remain mandatory.
 
 ## 9. Typed outcomes and F1–F4
 
@@ -268,3 +283,8 @@ from the canonical parent installs only the pinned launcher and exits before tas
 loading/preflight/model calls; it preserves the existing stopped branch/report.
 Installation is not task recovery or acceptance. F3 remains unresolved; do not
 interpret INSTALL ONLY COMPLETE as permission to rerun the current task.
+
+
+## F3 recovery authorization — 2026-10-07
+
+The prior run `20261007T064116Z-68730` is retained only as a STOP/decision checkpoint. Its snapshot-then-killpg objection is accepted. This recovery remains the same A11b.2.2.1 milestone and may implement the supervisor-as-group-anchor topology above. The old local branch/report must remain untouched; the new recovery branch is the sole implementation branch. If actual Mac probes or review find a new BLOCKER/HIGH, stop again. Do not weaken gates, start 2.2.2, or chase LOW/NOTE findings into new sub-milestones.
