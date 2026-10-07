@@ -11,22 +11,40 @@ real llmtool Git ADD and A11b.2.2.2 remain prohibited.
 
 ## Run on the actual Mac
 
-Use the launcher David already downloaded to the canonical repo's parent:
+Preferred entry point is `scripts/ai-loop.sh` inside the canonical repository.
+The launcher is already versioned on this control branch. To install it on David's
+existing Mac checkout using the parent launcher he already has, run once:
 
 ```sh
 cd /Users/davidsun/git/davidcataiporject
-bash ai-loop.sh
+bash ai-loop.sh --install-launcher
 ```
 
-No repeated download is needed. Each invocation fetches the control branch, pins its
-SHA, downloads the matching runner/task.md/task.json and executes from the canonical
-repository. There is no manual prompt transfer to Codex/Claude. A stable alternative
-after first launch is the canonical repo's `.git/ai-loop/run.sh`.
+This fetches the pinned control runner and installs only the launcher. It does not
+load/start/resume the task, invoke Codex/Claude/gh, run suites/probes, stage/commit,
+switch a branch or discard the stopped report. It needs Git/Bash/Python only. An
+identical existing launcher is accepted; a different file or symlink is preserved
+and installation stops. `--install-launcher` cannot be combined with task options.
+The launcher may remain untracked on a feature branch until the helper is integrated;
+installation does not imply it has been merged into main.
+
+After the coordinator prepares the F3 decision and safe recovery contract, use:
 
 ```sh
-bash ai-loop.sh --check    # optional preflight; no model/code/branch creation
-bash ai-loop.sh --related  # default: related checks during implementation/repair
-bash ai-loop.sh --full     # also run full checks on the initial candidate
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh
+```
+
+No repeated manual download is needed. Each invocation fetches the control branch,
+pins its SHA, downloads the matching runner/task.md/task.json and executes from the
+canonical repository. There is no manual prompt transfer to Codex/Claude. The old
+parent launcher remains compatible; `.git/ai-loop/run.sh` is another stable entry.
+Installation is allowed now; it does not authorize rerunning the current stopped task.
+
+```sh
+bash scripts/ai-loop.sh --check    # optional preflight; no model/code/branch creation
+bash scripts/ai-loop.sh --related  # related checks during implementation/repair
+bash scripts/ai-loop.sh --full     # also full checks on the initial candidate
 ```
 
 `--test-mode related|full` is equivalent. Mandatory task gates cannot be disabled by
@@ -53,7 +71,7 @@ When David chooses script execution, the coordinating conversation must:
 3. Verify the runner supports the task. Add tested support before publication if its
    mode/gates are new. Verify the published remote files. Keep one coordinator/Git
    writer, and do not create a second competing implementation from another chat.
-4. Tell David to execute his existing `bash ai-loop.sh`. This Work conversation has
+4. Tell David to execute `bash scripts/ai-loop.sh` from the canonical repo. This Work conversation has
    no connected Mac executor or automatic callback/approval-resume service.
 5. Review the resulting Draft PR, validation evidence, exact SHA and CI here. Keep
    required independent security/QA/runtime gates distinct from ordinary Claude

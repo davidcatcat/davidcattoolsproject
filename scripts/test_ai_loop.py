@@ -22,6 +22,112 @@ def result(status='PASS', findings=None):
             'findings': findings or []}
 
 
+class LauncherInstallTests(unittest.TestCase):
+    source = '#!/usr/bin/env bash\nset -euo pipefail\necho fixture\n'
+
+    def test_install_creates_exact_launcher_and_preserves_other_work(self):
+        with tempfile.TemporaryDirectory() as runtime, \
+             patch.object(loop, 'command', side_effect=[(0, self.source, ''), (0, '', '')]) as command:
+            root = Path(runtime)
+            (root / 'stopped-report.md').write_text('NEEDS_DECISION')
+            loop.install_launcher(root, HEAD)
+            self.assertEqual((root / 'scripts/ai-loop.sh').read_text(), self.source)
+            self.assertEqual((root / 'stopped-report.md').read_text(), 'NEEDS_DECISION')
+            self.assertEqual(command.call_args_list[1].args[0], ['bash', '-n'])
+            self.assertEqual(command.call_args_list[1].kwargs['stdin'], self.source)
+
+    def test_identical_existing_launcher_is_not_rewritten(self):
+        with tempfile.TemporaryDirectory() as runtime, \
+             patch.object(loop, 'command', side_effect=[(0, self.source, ''), (0, '', '')]):
+            root = Path(runtime)
+            (root / 'scripts').mkdir()
+            target = root / 'scripts/ai-loop.sh'
+            target.write_text(self.source)
+            original = target.stat().st_mtime_ns
+            loop.install_launcher(root, HEAD)
+            self.assertEqual(target.stat().st_mtime_ns, original)
+
+    def test_different_existing_launcher_is_preserved(self):
+        with tempfile.TemporaryDirectory() as runtime, \
+             patch.object(loop, 'command', side_effect=[(0, self.source, ''), (0, '', '')]):
+            root = Path(runtime)
+            (root / 'scripts').mkdir()
+            target = root / 'scripts/ai-loop.sh'
+            target.write_text('unrelated user script')
+            with self.assertRaises(loop.Stop):
+                loop.install_launcher(root, HEAD)
+            self.assertEqual(target.read_text(), 'unrelated user script')
+
+    def test_symlink_or_non_directory_install_paths_are_rejected(self):
+        for kind in ('directory_symlink', 'target_symlink', 'non_directory'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(loop, 'command', side_effect=[(0, self.source, ''), (0, '', '')]):
+                root = Path(runtime)
+                if kind == 'directory_symlink':
+                    (root / 'elsewhere').mkdir()
+                    (root / 'scripts').symlink_to(root / 'elsewhere', target_is_directory=True)
+                elif kind == 'target_symlink':
+                    (root / 'scripts').mkdir()
+                    (root / 'scripts/ai-loop.sh').symlink_to(root / 'absent-user-file')
+                else:
+                    (root / 'scripts').write_text('user file')
+                with self.assertRaises(loop.Stop):
+                    loop.install_launcher(root, HEAD)
+                self.assertFalse((root / 'elsewhere/ai-loop.sh').exists())
+                self.assertFalse((root / 'absent-user-file').exists())
+
+    def test_invalid_git_source_or_bash_syntax_never_creates_launcher(self):
+        for outputs in ([(1, '', '')], [(0, 'invalid script', '')],
+                        [(0, self.source + 'x' * (64 * 1024), '')],
+                        [(0, self.source, ''), (1, '', 'syntax error')]):
+            with self.subTest(outputs=len(outputs)), tempfile.TemporaryDirectory() as runtime, \
+                 patch.object(loop, 'command', side_effect=outputs):
+                root = Path(runtime)
+                with self.assertRaises(loop.Stop):
+                    loop.install_launcher(root, HEAD)
+                self.assertFalse((root / 'scripts').exists())
+
+    def test_install_main_bypasses_stopped_task_checks_models_and_dependencies(self):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime)
+            gitdir = root / 'git-metadata-fixture'
+            gitdir.mkdir()
+            (root / 'stopped-report.md').write_text('NEEDS_DECISION retained')
+            def fake_git(cwd, *args):
+                values = {('rev-parse', '--show-toplevel'): str(root),
+                          ('remote', 'get-url', 'origin'): 'git@github.com:' + loop.IDENTITY + '.git',
+                          ('rev-parse', '--absolute-git-dir'): str(gitdir)}
+                self.assertIn(args, values)
+                return values[args]
+            stack.enter_context(patch.object(loop, 'REPO', root))
+            stack.enter_context(patch.object(loop, 'git', side_effect=fake_git))
+            stack.enter_context(patch.object(loop, 'command', side_effect=[(0, self.source, ''), (0, '', '')]))
+            forbidden = [stack.enter_context(patch.object(loop, name)) for name in
+                         ('load_task', 'codex', 'claude', 'tests', 'prepare_new_branch', 'run')]
+            stack.enter_context(patch.object(sys, 'argv',
+                ['ai_loop.py', '--control-sha', HEAD, '--install-launcher']))
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                loop.main()
+            finally:
+                os.chdir(previous)
+            for call in forbidden:
+                call.assert_not_called()
+            self.assertEqual((root / 'stopped-report.md').read_text(), 'NEEDS_DECISION retained')
+            self.assertTrue((root / 'scripts/ai-loop.sh').is_file())
+
+    def test_install_cannot_be_combined_with_task_or_check_options(self):
+        for option in ('--check', '--related', '--full'):
+            with self.subTest(option=option), \
+                 patch.object(sys, 'argv', ['ai_loop.py', '--control-sha', HEAD, '--install-launcher', option]), \
+                 patch.object(loop, 'git') as git:
+                with self.assertRaises(SystemExit) as stopped:
+                    loop.main()
+                self.assertEqual(stopped.exception.code, 2)
+                git.assert_not_called()
+
+
 class DecisionCheckpointTests(unittest.TestCase):
     @contextmanager
     def fixture(self, **options):

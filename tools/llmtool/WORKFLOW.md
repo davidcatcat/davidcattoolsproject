@@ -423,7 +423,7 @@ When David selects script execution, another Chat/Work conversation should:
    `implement_new_pr` and `review_existing_pr`; unsupported requirements need a tested
    runner update, not merely a free-form prompt. Publish helper changes and verify the
    exact remote content. Never prepare a second concurrent writer for the same task.
-4. Tell David to run his existing `bash ai-loop.sh` on the canonical Mac. The launcher
+4. Tell David to run `bash scripts/ai-loop.sh` from the canonical Mac repo. The launcher
    downloads a pinned runner/task automatically; no repeated launcher download or
    manual prompt transfer to Codex/Claude is needed.
 5. Read the resulting Draft PR, validation report, implementation SHA and exact final
@@ -443,3 +443,22 @@ A running process retains its pinned runner/task; updates affect the next launch
 This Work conversation has no connected Mac executor or automatic callback/resume
 service. Auth/quota/CLI/scope/design conflicts stop with evidence rather than bypassing
 permissions. Results reach GitHub; David can bring the final output back here.
+
+## Repo-local AI-loop launcher — 2026-10-07
+
+David selected `scripts/ai-loop.sh` inside the canonical repository as the preferred
+entry point. The parent bootstrap remains compatible. To install the Git-pinned
+launcher without starting a task, use the existing parent launcher once:
+
+```sh
+bash /Users/davidsun/git/davidcataiporject/ai-loop.sh --install-launcher
+```
+
+Installation reads the fetched control revision, checks Bash syntax and installs
+only the launcher. It exits before task loading, model/auth/dependency checks,
+branch preparation and tests; stopped task files and index remain untouched.
+An identical existing launcher is accepted; different content and symlink paths
+are preserved with STOP. A successful install does not resolve F3, authorize a
+blind rerun, merge the helper into main or provide a connected Mac executor.
+After coordinator recovery is ready, run `bash scripts/ai-loop.sh` from the
+canonical repo. All pinned task/preflight/acceptance gates still apply.

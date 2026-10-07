@@ -24,7 +24,7 @@ A11b.2.2.1/.2/.3. The control branch is fetchable before PR #45 is merged.
 - `bash -n ai-loop-delivery/scripts/ai-loop.sh`: exit 0.
 - `python3 -m py_compile ai-loop-delivery/scripts/ai_loop.py`: exit 0.
 - `python3 -W error::ResourceWarning -m unittest discover -s ai-loop-delivery/scripts -p test_ai_loop.py -q`:
-  69 tests, PASS, no ResourceWarning.
+  76 tests, PASS, no ResourceWarning.
 - Task JSON parses and names the actual PR branch/head/report. Tests use
   tools/llmtool/.venv, root-discovery PYTHONPATH and the Mac system Python.
 
@@ -130,3 +130,28 @@ David's real Mac run `20261007T064116Z-68730` invoked Codex successfully and sto
 The runner now supports opt-in `publish_decision_checkpoint` for an initial report-only new-task NEEDS_DECISION. It publishes one immutable curated checkpoint to the pinned control branch via GitHub API, checks both scope and report bytes again before ref update, rejects control drift/path collision/truncated tree, uses force=false, and verifies the remote blob. It does not modify the local feature branch/index or upload raw logs. API failures preserve the primary decision. All other stop types remain local. No approval/resume or alternative F3 design is introduced.
 
 69 standalone fixture tests PASS, including initial-decision publication and STOP without tests/review/PR, API failure preserving NEEDS_DECISION, opt-in/result/mode/repair guards, report-only/base guards, symlink and size/content rejection, ref drift/collision/race, report changes, private log exclusion, strict task setting and remote hash verification failure. Syntax/compilation and Bash launcher syntax PASS. This is helper authoring evidence; automatic publication by gh on David's Mac has NOT RUN. Actual containment, full suites, independent helper/security review and safe task recovery remain pending.
+
+## Repo-local launcher install-only path — 2026-10-07
+
+
+David selected `scripts/ai-loop.sh` inside the canonical Mac repository. The
+launcher is already versioned on the control branch; its bytes are unchanged.
+The runner now supports `--install-launcher`: the existing parent bootstrap
+fetches the control revision and this mode installs only the pinned launcher.
+It validates the Git source and Bash syntax, bounds the source to 64 KiB,
+rejects symlink/non-directory paths and different existing contents, accepts an
+identical file without rewriting, and exclusively creates a missing launcher.
+It retains the runner lock but returns before task loading, provider/dependency
+checks, branch preparation, tests/probes or feature publication. It cannot be
+combined with task/check/test-mode options. No task recovery is added.
+
+76 standalone authoring fixture tests PASS, including exact source installation,
+unrelated/stopped report preservation, idempotent install, different-file and
+symlink preservation, invalid Git source/Bash syntax rejection, installer main
+flow bypass of models/tests/task checks, and incompatible option rejection.
+Python compilation and unchanged Bash launcher syntax PASS. README and WORKFLOW
+now use the repo-local command and distinguish install-only from actual execution.
+
+No remote Mac executor is connected. Installation on David's Mac is NOT RUN here;
+he must execute the one install-only command. F3 design resolution, task recovery,
+actual containment gates and independent review remain pending.

@@ -258,3 +258,13 @@ content as proof for unpublished commits. Existing dirty/untracked protections a
 The initial Mac run `20261007T064116Z-68730` stopped at NEEDS_DECISION before source/test implementation. The coordinator imported David's provided transcript to `reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md` on the control branch. Read that report before preparing recovery. F3 continuity is unresolved; no alternative per-member design is accepted here. Keep the existing Mac branch/files and do not restart this task blindly.
 
 `publish_decision_checkpoint: true` authorizes the outer runner to publish a bounded curated checkpoint to the control branch ONLY when the initial new-task Codex result is valid NEEDS_DECISION, HEAD stays at the pinned base, and only the designated acceptance report changed. No raw logs, source/index changes, feature PR, PASS, merge or automatic resume accompany that publication. Control drift/collision/API errors preserve local evidence and do not retry. Other stop types remain local for coordinator diagnosis. This update applies to future invocations; it does not rerun or repair the already stopped run.
+
+## Repo-local launcher installation — 2026-10-07
+
+
+David selected `scripts/ai-loop.sh` inside the canonical repository as the entry
+point. The parent bootstrap remains compatible. `bash ai-loop.sh --install-launcher`
+from the canonical parent installs only the pinned launcher and exits before task
+loading/preflight/model calls; it preserves the existing stopped branch/report.
+Installation is not task recovery or acceptance. F3 remains unresolved; do not
+interpret INSTALL ONLY COMPLETE as permission to rerun the current task.

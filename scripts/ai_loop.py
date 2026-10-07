@@ -570,15 +570,50 @@ def wait_ci(root, head, workflow):
     raise Stop('CI timed out; no PASS inferred from missing checks')
 
 
+def install_launcher(root, control_sha):
+    """Install the pinned launcher without switching branches or starting a task."""
+    rc, source, _ = command(['git', 'show', control_sha + ':scripts/ai-loop.sh'], root)
+    if rc:
+        raise Stop('cannot read the pinned launcher from Git')
+    encoded = source.encode('utf-8')
+    if not source.startswith('#!/usr/bin/env bash\n') or '\0' in source or len(encoded) > 64 * 1024:
+        raise Stop('invalid bounded launcher')
+    rc, _, _ = command(['bash', '-n'], root, stdin=source)
+    if rc:
+        raise Stop('pinned launcher failed Bash syntax validation')
+    directory = root / 'scripts'
+    target = directory / 'ai-loop.sh'
+    if directory.is_symlink() or (directory.exists() and not directory.is_dir()) or target.is_symlink():
+        raise Stop('launcher install path must not be a symlink or non-directory')
+    directory.mkdir(exist_ok=True)
+    if target.exists():
+        if not target.is_file() or target.read_bytes() != encoded:
+            raise Stop('scripts/ai-loop.sh already differs; existing file preserved')
+        print('[Install] Existing scripts/ai-loop.sh already matches pinned Git.', flush=True)
+    else:
+        # Exclusive creation also protects against a concurrent file appearing.
+        with target.open('xb') as output:
+            output.write(encoded)
+            os.fchmod(output.fileno(), 0o700)
+        print('[Install] Installed ' + str(target), flush=True)
+    print('INSTALL ONLY COMPLETE. No task, model, test or branch switch performed.\n'
+          'Future task entry point: bash scripts/ai-loop.sh\n'
+          'Current stopped task still requires coordinator recovery.', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
+    parser.add_argument('--install-launcher', action='store_true',
+                        help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--test-mode', choices=('related', 'full'), help='override task test mode')
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
+    if args.install_launcher and (args.check or args.test_mode):
+        parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
     if Path.cwd().resolve() != root or git(root, 'rev-parse', '--show-toplevel') != str(root):
         raise Stop('must run in the canonical Mac repository')
@@ -595,6 +630,9 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
+        if args.install_launcher:
+            install_launcher(root, args.control_sha)
+            return
         task, text = load_task(root, args.control_sha)
         new_task = task['mode'] == 'implement_new_pr'
         test_mode = args.test_mode or task['default_test_mode']
