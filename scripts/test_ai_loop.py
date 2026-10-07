@@ -158,9 +158,102 @@ class QuotaResumeTests(unittest.TestCase):
             runner = stack.enter_context(patch.object(loop, 'run', side_effect=['[]', '']))
             yield root, old, task, inventory, runner
 
+    @contextmanager
+    def timeout_fixture(self):
+        with self.fixture() as (root, old, task, inventory, runner):
+            baseline = json.loads((old / 'task.json').read_text())
+            baseline.update(timeout_seconds=1800, initial_quota_recovery={
+                'run_id': '20261007T064116Z-68730', 'control_sha': 'c' * 40})
+            loop.save_json(old / 'task.json', baseline)
+            task.clear()
+            task.update(copy.deepcopy(baseline))
+            task.pop('initial_quota_recovery')
+            task.update(initial_timeout_recovery={'run_id': self.run_id, 'control_sha': 'b' * 40},
+                        codex_timeout_seconds=3600)
+            summary = json.loads((old / 'summary.json').read_text())
+            summary['reason'] = 'command timed out: codex'
+            loop.save_json(old / 'summary.json', summary)
+            loop.save_json(old / 'recovery.json', {'preserved_untracked': {'user.txt': inventory['user.txt']}})
+            (old / 'codex-0.stderr.log').write_text('partial implementation patch output\n')
+            with patch.object(loop, 'load_task', return_value=(baseline, 'pinned requirements')), \
+                 patch.object(loop, 'command', return_value=(1, '', '')) as command:
+                yield root, old, task, inventory, runner, command
+
+    def test_timeout_recovery_accepts_prior_quota_policy_but_inherits_no_pass(self):
+        with self.timeout_fixture() as (root, old, task, inventory, runner, command):
+            original, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
+            self.assertEqual(original, {'user.txt': inventory['user.txt']})
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(command.call_args.args[0][:3], ['/usr/bin/pgrep', '-f', r'(^|/)codex([ .-]|$)'])
+
+    def test_timeout_recovery_rejects_unchanged_or_reduced_timeout(self):
+        for seconds in (1800, 900, 3601):
+            with self.subTest(seconds=seconds), self.timeout_fixture() as (root, old, task, inventory, runner, command):
+                task['codex_timeout_seconds'] = seconds
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
+                command.assert_not_called()
+
+    def test_timeout_recovery_cannot_alter_full_tests_or_scope(self):
+        for key, value in (('allowed_files', ['different.py']), ('timeout_seconds', 3600)):
+            with self.subTest(key=key), self.timeout_fixture() as (root, old, task, inventory, runner, command):
+                task[key] = value
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
+
+    def test_timeout_recovery_requires_unchanged_protected_files_and_no_new_outside_scope(self):
+        for kind in ('modified', 'missing', 'extra', 'inventory_missing'):
+            with self.subTest(kind=kind), self.timeout_fixture() as (root, old, task, inventory, runner, command):
+                if kind == 'modified':
+                    inventory['user.txt'] = 'changed'
+                elif kind == 'missing':
+                    inventory.pop('user.txt')
+                elif kind == 'extra':
+                    inventory['new-unrelated.txt'] = 'new'
+                else:
+                    (old / 'recovery.json').unlink()
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
+                command.assert_not_called()
+
+    def test_timeout_recovery_rejects_active_codex_or_process_detection_failure(self):
+        for rc in (0, 2):
+            with self.subTest(rc=rc), self.timeout_fixture() as (root, old, task, inventory, runner, command):
+                command.return_value = (rc, 'active process' if rc == 0 else '', '')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
+
+    def test_timeout_policy_cannot_resume_a_quota_or_decision_stop(self):
+        for reason in ('command failed (exit 1): codex; see local logs', 'Codex reported NEEDS_DECISION'):
+            with self.subTest(reason=reason), self.timeout_fixture() as (root, old, task, inventory, runner, command):
+                summary = json.loads((old / 'summary.json').read_text())
+                summary['reason'] = reason
+                loop.save_json(old / 'summary.json', summary)
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
+
+    def test_allowed_tracked_edit_is_adopted_and_snapshotted(self):
+        with self.fixture() as (root, old, task, inventory, runner):
+            task['allowed_files'].append('tracked.py')
+            baseline = {k: v for k, v in task.items() if k != 'initial_quota_recovery'}
+            loop.save_json(old / 'task.json', baseline)
+            (root / 'tracked.py').write_text('allowed tracked change')
+            with patch.object(loop, 'load_task', return_value=(baseline, 'pinned requirements')):
+                _, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory, ['tracked.py'])
+            logs = root / '.ai-loop/new-run'
+            logs.mkdir()
+            loop.snapshot_recovery(root, logs, recovery)
+            self.assertEqual((logs / 'recovery-inputs/tracked.py').read_text(), 'allowed tracked change')
+
+    def test_unrelated_tracked_edit_is_rejected_before_remote_checks(self):
+        with self.fixture() as (root, old, task, inventory, runner):
+            with self.assertRaises(loop.Stop):
+                loop.prepare_initial_resume(root, task, self.run_id, inventory, ['user.txt'])
+            runner.assert_not_called()
+
     def test_partial_files_adopted_unrelated_preserved_and_backed_up(self):
         with self.fixture() as (root, old, task, inventory, runner):
-            original, recovery = loop.prepare_quota_resume(root, task, self.run_id, inventory)
+            original, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
             self.assertEqual(original, {'user.txt': inventory['user.txt']})
             self.assertEqual(recovery['partial_files'], {'source.py': inventory['source.py']})
             self.assertEqual(recovery['inherited_validation'], 'NONE')
@@ -175,7 +268,7 @@ class QuotaResumeTests(unittest.TestCase):
     def test_unapproved_run_stops_before_remote_or_model_calls(self):
         with self.fixture() as (root, old, task, inventory, runner):
             with self.assertRaises(loop.Stop):
-                loop.prepare_quota_resume(root, task, 'other-run', inventory)
+                loop.prepare_initial_resume(root, task, 'other-run', inventory)
             runner.assert_not_called()
 
     def test_published_branch_or_existing_pr_is_rejected(self):
@@ -183,21 +276,21 @@ class QuotaResumeTests(unittest.TestCase):
             with self.subTest(responses=responses), self.fixture() as (root, old, task, inventory, runner):
                 runner.side_effect = responses
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_branch_or_head_drift_is_rejected(self):
         for responses in (['feat/unrelated'], [ 'feat/fixture', 'c' * 40]):
             with self.subTest(responses=responses), self.fixture() as (root, old, task, inventory, runner), \
                  patch.object(loop, 'git', side_effect=responses):
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
                 runner.assert_not_called()
 
     def test_changed_contract_is_rejected(self):
         with self.fixture() as (root, old, task, inventory, runner):
             task['max_repairs'] = 0
             with self.assertRaises(loop.Stop):
-                loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_only_initial_quota_stop_can_resume(self):
         for change in ({'history': [{'round': 0}]}, {'reason': 'Codex reported NEEDS_DECISION'},
@@ -208,7 +301,7 @@ class QuotaResumeTests(unittest.TestCase):
                 summary.update(change)
                 loop.save_json(old / 'summary.json', summary)
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_missing_quota_error_or_provenance_drift_is_rejected(self):
         for kind in ('quota', 'provenance', 'saved_contract', 'saved_text'):
@@ -222,7 +315,7 @@ class QuotaResumeTests(unittest.TestCase):
                 else:
                     (old / 'task.md').write_text('different requirements')
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_symlink_evidence_or_candidate_is_rejected(self):
         for kind in ('summary.json', 'codex-0.stderr.log', 'candidate', 'logs'):
@@ -235,11 +328,11 @@ class QuotaResumeTests(unittest.TestCase):
                     path.unlink()
                     path.symlink_to(root / 'user.txt')
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_snapshot_detects_candidate_drift_without_overwriting_user_file(self):
         with self.fixture() as (root, old, task, inventory, runner):
-            _, recovery = loop.prepare_quota_resume(root, task, self.run_id, inventory)
+            _, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
             (root / 'source.py').write_text('concurrent edit')
             logs = root / '.ai-loop/new-run'
             logs.mkdir()
@@ -255,17 +348,17 @@ class QuotaResumeTests(unittest.TestCase):
                 else:
                     (root / 'source.py').write_bytes(b'x' * (2 * 1024 * 1024 + 1))
                 with self.assertRaises(loop.Stop):
-                    loop.prepare_quota_resume(root, task, self.run_id, inventory)
+                    loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
     def test_resume_authorization_is_one_use_even_after_another_stop(self):
         with tempfile.TemporaryDirectory() as runtime:
             state = Path(runtime)
             recovery = {'from_run': self.run_id}
-            loop.claim_quota_resume(state, recovery, 'new-run', HEAD)
+            loop.claim_initial_resume(state, recovery, 'new-run', HEAD)
             marker = state / ('resume-' + self.run_id + '.json')
             retained = marker.read_bytes()
             with self.assertRaises(loop.Stop):
-                loop.claim_quota_resume(state, recovery, 'second-run', HEAD)
+                loop.claim_initial_resume(state, recovery, 'second-run', HEAD)
             self.assertEqual(marker.read_bytes(), retained)
 
     def test_resume_claim_rejects_symlink_without_touching_target(self):
@@ -275,7 +368,7 @@ class QuotaResumeTests(unittest.TestCase):
             target.write_text('preserved')
             (state / ('resume-' + self.run_id + '.json')).symlink_to(target)
             with self.assertRaises(loop.Stop):
-                loop.claim_quota_resume(state, {'from_run': self.run_id}, 'new-run', HEAD)
+                loop.claim_initial_resume(state, {'from_run': self.run_id}, 'new-run', HEAD)
             self.assertEqual(target.read_text(), 'preserved')
 
 
@@ -881,6 +974,10 @@ class ExistingPRTests(unittest.TestCase):
         self.assertEqual(self.exercise_pipeline(new_task=True, resume=True),
                          ['related', 'full-final', 'mandatory-final'])
 
+    def test_extended_codex_limit_does_not_extend_claude_or_remove_final_gates(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, codex_timeout=3600),
+                         ['related', 'full-final', 'mandatory-final'])
+
     def test_mac_failure_stops_new_task_without_push_pr_or_retry(self):
         self.exercise_pipeline(new_task=True, mandatory_failure=True, should_stop=True)
 
@@ -899,7 +996,7 @@ class ExistingPRTests(unittest.TestCase):
 
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
                           new_task=False, mandatory_failure=False, hook_changes=False,
-                          decision=False, checkpoint_failure=False, resume=False):
+                          decision=False, checkpoint_failure=False, resume=False, codex_timeout=None):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -908,6 +1005,8 @@ class ExistingPRTests(unittest.TestCase):
             (root / 'tools/llmtool/.venv/bin/python').touch()
             (root / 'source.txt').write_text('unchanged existing implementation')
             task = self.task()
+            if codex_timeout is not None:
+                task['codex_timeout_seconds'] = codex_timeout
             if new_task:
                 task.update(mode='implement_new_pr', pr_number=None, expected_head=task['base_sha'],
                     require_local_full=True, mandatory_tests=[['fixture mandatory']],
@@ -1010,14 +1109,14 @@ class ExistingPRTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'prepare_existing_branch'))
             prepare_new = stack.enter_context(patch.object(loop, 'prepare_new_branch'))
             if resume:
-                stack.enter_context(patch.object(loop, 'prepare_quota_resume', return_value=({},
+                stack.enter_context(patch.object(loop, 'prepare_initial_resume', return_value=({},
                     {'from_run': '20261007T075141Z-70725', 'partial_files':
                      {'source.txt': loop.digest(root / 'source.txt')}, 'inherited_validation': 'NONE'})))
             stack.enter_context(patch.object(loop, 'read_pr', return_value=self.pr()))
             stack.enter_context(patch.object(loop, 'check_scope', side_effect=fake_scope))
             stack.enter_context(patch.object(loop, 'validate_mac_evidence', return_value={'fixture': 'Mac evidence is mocked here'}))
             stack.enter_context(patch.object(loop, 'tests', side_effect=fake_tests))
-            stack.enter_context(patch.object(loop, 'claude', side_effect=fake_claude))
+            claude = stack.enter_context(patch.object(loop, 'claude', side_effect=fake_claude))
             codex = stack.enter_context(patch.object(loop, 'codex', side_effect=fake_codex))
             checkpoint = stack.enter_context(patch.object(loop, 'publish_decision_checkpoint',
                 side_effect=loop.Stop('checkpoint API unavailable') if checkpoint_failure else None,
@@ -1048,6 +1147,9 @@ class ExistingPRTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
             self.assertEqual(codex.call_count, min(failures + final_full_failures, 2) + int(new_task))
+            if codex_timeout is not None:
+                self.assertEqual(codex.call_args.args[4], codex_timeout)
+                self.assertTrue(all(c.args[4] == task['timeout_seconds'] for c in claude.call_args_list))
             if resume:
                 prepare_new.assert_not_called()
                 self.assertIn('Continue the existing partial implementation', codex.call_args.args[2])

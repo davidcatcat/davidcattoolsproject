@@ -320,3 +320,32 @@ unsafe paths or missing provenance. Do not delete files or reset to pass a guard
 
 A one-use recovery claim is recorded before Codex starts. Repeating this recovery
 after another stop is rejected; do not delete its marker to bypass the guard.
+
+
+## Current recovery: interrupted initial Codex timeout — 2026-10-07
+
+This section supersedes the preceding quota-run invocation for the current launch.
+The continuation `20261007T113658Z-74880` at control `01cd4757b23ce0ec03f6b2c1e0848f849ebda01a`
+stopped with `command timed out: codex`. The supplied final log segment contains
+ongoing source/test edits; it is not evidence of implementation completion or PASS.
+Continue that partial candidate on the same unpublished F3 recovery branch/base:
+
+```sh
+bash scripts/ai-loop.sh --resume 20261007T113658Z-74880
+```
+
+Only the Codex call deadline changes from 1800 to 3600 seconds. Other command/test/
+Claude deadlines, allowed/required files, repair bounds and all full/native Mac/
+review/security gates stay unchanged. Complete a bounded audit of the current
+candidate against the contract, implement only missing requirements or correctness
+repairs, and return structured output for the outer runner. Do not restart from
+scratch, perform optional refactoring or run expensive suites/probes yourself.
+
+The new explicit one-use recovery verifies the pinned prior task and timeout STOP,
+requires unchanged preserved-untracked fingerprints from that run's recovery.json,
+rejects new out-of-scope files, staged/index changes, unrelated tracked edits or a
+published branch/PR, and conservatively rejects an active Codex CLI. Allowed tracked
+edits and untracked candidate files are retained in the new recovery-input snapshot
+before another model call. No old test/review evidence is inherited. The process
+check is not proof of B5 CLI descendant containment. Another failure stops; do not
+delete either old recovery marker, files, reports or logs to retry blindly.

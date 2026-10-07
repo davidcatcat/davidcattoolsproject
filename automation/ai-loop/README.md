@@ -183,3 +183,23 @@ A second interruption stops; this is not an automatic retry or session-resume se
 
 A one-use recovery claim is recorded before Codex starts. Repeating this recovery
 after another stop is rejected; do not delete its marker to bypass the guard.
+
+
+## Current timeout continuation — 2026-10-07
+
+The latest explicit recovery replaces the quota run above. Run from the canonical
+Mac repository:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T113658Z-74880
+```
+
+Codex now has a 3600-second limit; tests and Claude retain their existing limits.
+The task, branch/base, implementation scope and mandatory final gates stay pinned.
+Existing launcher fetches everything; no new download/install is needed. The new
+one-use claim leaves the prior quota claim intact. Old recovery fingerprints protect
+unrelated files; new out-of-scope files, an active Codex CLI, index/staging changes,
+changed base/branch/PR or unrelated tracked edits stop before model work. Allowed
+tracked edits and untracked candidate files are snapshotted and continued. All tests
+and review run on resulting bytes, with no inherited PASS or automatic merge.

@@ -164,7 +164,8 @@ def load_task(root, control_sha):
                 'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
-                'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery'}
+                'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
+                'initial_timeout_recovery', 'codex_timeout_seconds'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -191,6 +192,9 @@ def load_task(root, control_sha):
         raise Stop('invalid repair bound')
     if type(metadata['timeout_seconds']) is not int or not 60 <= metadata['timeout_seconds'] <= 3600:
         raise Stop('invalid timeout')
+    if 'codex_timeout_seconds' in metadata and (type(metadata['codex_timeout_seconds']) is not int
+            or not 60 <= metadata['codex_timeout_seconds'] <= 3600):
+        raise Stop('invalid Codex timeout')
     if metadata['default_test_mode'] not in ('related', 'full'):
         raise Stop('invalid default test mode')
     for suite in ('related_tests', 'full_tests', 'mandatory_tests'):
@@ -222,13 +226,17 @@ def load_task(root, control_sha):
             raise Stop('invalid Mac evidence gate')
         if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
             raise Stop('Mac containment task must retain full local checks and report')
-    if 'initial_quota_recovery' in metadata:
-        recovery = metadata['initial_quota_recovery']
+    if 'initial_quota_recovery' in metadata and 'initial_timeout_recovery' in metadata:
+        raise Stop('only one explicit recovery can be active')
+    for recovery_key in ('initial_quota_recovery', 'initial_timeout_recovery'):
+        if recovery_key not in metadata:
+            continue
+        recovery = metadata[recovery_key]
         if (metadata['mode'] != 'implement_new_pr' or not isinstance(recovery, dict)
                 or set(recovery) != {'run_id', 'control_sha'}
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or not re.fullmatch(r'[0-9a-f]{40}', recovery.get('control_sha', ''))):
-            raise Stop('invalid initial quota recovery contract')
+            raise Stop('invalid initial recovery contract')
     return metadata, text
 
 
@@ -320,7 +328,7 @@ def codex(root, logs, prompt, round_no, timeout):
     output = logs / ('codex-%d.json' % round_no)
     spec = logs / 'codex-schema.json'
     save_json(spec, schema('developer'))
-    print('[Codex] Implementation / repair %d' % round_no, flush=True)
+    print('[Codex] Implementation / repair %d (limit %d seconds)' % (round_no, timeout), flush=True)
     run(['codex', '-a', 'never', 'exec', '--sandbox', 'workspace-write',
          '--output-schema', str(spec), '--output-last-message', str(output), '-'],
         root, timeout=timeout, stdin=prompt,
@@ -492,11 +500,14 @@ def prepare_new_branch(root, task, check_only=False):
             raise Stop('new branch did not reach pinned main')
 
 
-def prepare_quota_resume(root, task, run_id, current_untracked):
-    """Explicit recovery of one pinned, unpublished initial Codex quota failure."""
-    policy = task.get('initial_quota_recovery')
+def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=()):
+    """Explicit recovery of one pinned, unpublished initial Codex interruption."""
+    timeout_recovery = 'initial_timeout_recovery' in task
+    policy = task.get('initial_timeout_recovery') or task.get('initial_quota_recovery')
     if not policy or run_id != policy['run_id']:
         raise Stop('resume run is not authorized by the current task contract')
+    if any(p not in task['allowed_files'] for p in tracked_paths):
+        raise Stop('unrelated tracked changes prevent recovery')
     if (git(root, 'branch', '--show-current') != task['branch']
             or git(root, 'rev-parse', 'HEAD') != task['base_sha']):
         raise Stop('resume requires the existing task branch at its pinned base')
@@ -513,10 +524,15 @@ def prepare_quota_resume(root, task, run_id, current_untracked):
             raise Stop('resume JSON/text record exceeds its bound')
         return path.read_text(encoding='utf-8')
     old_task, old_text = load_task(root, policy['control_sha'])
-    current_contract = {k: v for k, v in task.items() if k != 'initial_quota_recovery'}
-    if (old_task != current_contract or json.loads(read_record('task.json')) != old_task
+    recovery_keys = {'initial_quota_recovery', 'initial_timeout_recovery', 'codex_timeout_seconds'}
+    current_contract = {k: v for k, v in task.items() if k not in recovery_keys}
+    old_contract = {k: v for k, v in old_task.items() if k not in recovery_keys}
+    if (old_contract != current_contract or json.loads(read_record('task.json')) != old_task
             or read_record('task.md').strip() != old_text.strip()):
         raise Stop('resume contract differs from the pinned interrupted task')
+    if timeout_recovery and not (old_task.get('codex_timeout_seconds', old_task['timeout_seconds'])
+            < task.get('codex_timeout_seconds', task['timeout_seconds']) <= 3600):
+        raise Stop('timeout recovery requires an explicitly increased bounded Codex timeout')
     provenance = json.loads(read_record('provenance.json'))
     summary = json.loads(read_record('summary.json'))
     if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
@@ -525,17 +541,39 @@ def prepare_quota_resume(root, task, run_id, current_untracked):
             or summary.get('branch') != task['branch'] or summary.get('head') != task['base_sha']
             or summary.get('status') != 'STOPPED' or summary.get('history') != []
             or summary.get('decision_checkpoint') is not None
-            or summary.get('reason') != 'command failed (exit 1): codex; see local logs'):
-        raise Stop('resume is limited to initial Codex exit 1 before tests/commits')
+            or summary.get('reason') != ('command timed out: codex' if timeout_recovery else
+                'command failed (exit 1): codex; see local logs')):
+        raise Stop('resume is limited to the contracted initial Codex interruption before tests/commits')
     stderr = old_logs / 'codex-0.stderr.log'
     if stderr.is_symlink() or not stderr.is_file():
-        raise Stop('resume quota evidence is missing/unsafe')
+        raise Stop('resume Codex log is missing/unsafe')
     with stderr.open('rb') as stream:
         stream.seek(max(0, stderr.stat().st_size - 16384))
         tail = stream.read(16384).decode('utf-8', 'replace')
-    if 'ERROR: You’ve hit your usage limit.' not in tail:
+    if not timeout_recovery and 'ERROR: You’ve hit your usage limit.' not in tail:
         raise Stop('resume needs the recorded Codex usage-limit error')
+    if timeout_recovery:
+        previous_recovery = json.loads(read_record('recovery.json'))
+        protected = previous_recovery.get('preserved_untracked')
+        if not isinstance(protected, dict) or not protected:
+            raise Stop('timeout recovery requires the previous unrelated-file inventory')
+        if any(current_untracked.get(p) != h for p, h in protected.items()):
+            raise Stop('unrelated files changed since the previous recovery; files preserved')
+        if set(current_untracked) - set(protected) - set(task['allowed_files']):
+            raise Stop('new out-of-scope untracked files appeared during the interrupted run')
+        # Refuse a new writer while an old/native Codex CLI may still be active.
+        # This is a conservative process check, not B5 descendant-containment proof.
+        rc, _, _ = command(['/usr/bin/pgrep', '-f', r'(^|/)codex([ .-]|$)'], root)
+        if rc == 0:
+            raise Stop('a Codex CLI is still active; no concurrent recovery writer started')
+        if rc != 1:
+            raise Stop('could not establish absence of an active Codex CLI')
     adopted = {p: h for p, h in current_untracked.items() if p in task['allowed_files']}
+    for name in tracked_paths:
+        path = root / name
+        if not path.is_file():
+            raise Stop('deleted/non-file tracked task path prevents recovery')
+        adopted[name] = digest(path)
     if not adopted:
         raise Stop('no partial task files to resume')
     total = 0
@@ -570,7 +608,7 @@ def snapshot_recovery(root, logs, recovery):
     save_json(logs / 'recovery.json', recovery)
 
 
-def claim_quota_resume(state, recovery, run_id, control_sha):
+def claim_initial_resume(state, recovery, run_id, control_sha):
     """A recovery authorization is one-use, even if the next provider stops."""
     marker = state / ('resume-' + recovery['from_run'] + '.json')
     try:
@@ -578,7 +616,7 @@ def claim_quota_resume(state, recovery, run_id, control_sha):
             json.dump({'from_run': recovery['from_run'], 'new_run': run_id,
                        'control_sha': control_sha}, output, indent=2)
     except FileExistsError:
-        raise Stop('this quota recovery was already attempted; coordinator recovery required')
+        raise Stop('this recovery was already attempted; coordinator recovery required')
 
 
 def create_draft_pr(root, task, logs, publication_head, report_rel):
@@ -701,7 +739,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
-    parser.add_argument('--resume', metavar='RUN_ID', help='resume a contract-authorized initial Codex quota stop')
+    parser.add_argument('--resume', metavar='RUN_ID', help='resume a contract-authorized initial Codex quota/timeout stop')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -745,15 +783,17 @@ def main():
         git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
         if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
             raise Stop('main changed since task was prepared; task.md must be refreshed')
-        if git(root, 'diff', '--name-only', 'HEAD') or git(root, 'diff', '--cached', '--name-only'):
+        tracked_paths = git(root, 'diff', '--name-only', 'HEAD').splitlines()
+        if (git(root, 'diff', '--cached', '--name-only') or (tracked_paths and
+                (not args.resume or any(p not in task['allowed_files'] for p in tracked_paths)))):
             raise Stop('tracked work is dirty; existing files preserved')
         original = untracked(root)
         recovery = None
         if args.resume:
-            original, recovery = prepare_quota_resume(root, task, args.resume, original)
+            original, recovery = prepare_initial_resume(root, task, args.resume, original, tracked_paths)
             marker = state / ('resume-' + recovery['from_run'] + '.json')
             if marker.exists() or marker.is_symlink():
-                raise Stop('this quota recovery was already attempted; coordinator recovery required')
+                raise Stop('this recovery was already attempted; coordinator recovery required')
         collision = set(original).intersection(task['allowed_files'])
         if collision:
             raise Stop('untracked task-file collision; existing files preserved')
@@ -792,6 +832,7 @@ def main():
         save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
+            'codex_timeout_seconds': task.get('codex_timeout_seconds', task['timeout_seconds']),
             'codex': run(['codex', '--version'], root), 'claude': run(['claude', '--version'], root),
             'venv_python': run(['tools/llmtool/.venv/bin/python', '--version'], root),
             'system_python': run(['/usr/bin/python3', '--version'], root)})
@@ -799,7 +840,7 @@ def main():
         head = git(root, 'rev-parse', 'HEAD')
         if recovery:
             check_scope(root, task, original, branch, head)
-            claim_quota_resume(state, recovery, run_id, args.control_sha)
+            claim_initial_resume(state, recovery, run_id, args.control_sha)
         prompt = (('Implement the newly authorized task, then repair only within its scope. ' if new_task
                    else 'Repair only the existing PR implementation within this task. ')
                   + 'Read AGENTS.md and skills/implement-feature/SKILL.md. '
@@ -811,7 +852,7 @@ def main():
                   'Your summary will be committed to Git: do not include secrets, tokens, raw provider output or private logs. '
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
-        repair_reason = ('Continue the existing partial implementation after a quota interruption. '
+        repair_reason = ('Continue the existing partial implementation after an interrupted initial Codex call. '
                          'Read the existing allowed files before editing; do not restart from scratch. '
                          'Preserve historical report evidence and label all current gates pending. '
                          'No previous tests/review are inherited. Recovery input hashes and retained copies: '
@@ -830,7 +871,7 @@ def main():
                 result = None
                 if repair_reason is not None:
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
-                                   round_no, task['timeout_seconds'])
+                                   round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
                     check_scope(root, task, original, branch, head)
                     if result['status'] != 'PASS':
                         if result['status'] == 'NEEDS_DECISION':

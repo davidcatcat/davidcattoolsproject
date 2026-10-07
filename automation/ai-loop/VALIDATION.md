@@ -174,3 +174,25 @@ actual containment gates and independent review remain pending.
   and creates one Draft PR without creating a duplicate feature branch.
 - Actual Mac quota recovery, application full suites, native probes and external
   review remain NOT-TESTED/PENDING. Fixture results do not establish containment PASS.
+
+
+## Initial timeout continuation validation — 2026-10-07
+
+- Parent control: `01cd4757b23ce0ec03f6b2c1e0848f849ebda01a`; interrupted Mac run reported:
+  `20261007T113658Z-74880`, `command timed out: codex`. User-supplied final stderr
+  segment shows code/test diffs; it does not establish hang, completion or PASS.
+- Added explicit initial-timeout recovery with exact prior Git-pinned task/STOP/
+  provenance matching, prior unrelated-inventory continuity, no new out-of-scope
+  files, active-Codex detection and one-use claim. Allowed tracked edits are also
+  snapshotted; unrelated tracked/index changes still stop.
+- Separate `codex_timeout_seconds=3600`; other command/Claude/test deadlines and
+  acceptance gates remain unchanged. Old quota recovery remains supported for
+  its pinned historical contract; the current policy targets only the timeout run.
+- Standalone helper fixture suite: PASS, 98 tests. Nine added cases cover timeout
+  continuation, unchanged/reduced/excessive limits, contract/scope drift, missing/
+  changed unrelated inventory, active CLI/detection error, wrong stop reason and
+  allowed-versus-unrelated tracked edits and a full mocked continuation proving
+  the Codex-only limit change. Existing 89 checks remain green.
+- Standalone helper only; no application checkout, Mac provider execution,
+  application suites, native containment probes or security gate run here.
+  Actual Mac continuation and required feature gates remain pending.
