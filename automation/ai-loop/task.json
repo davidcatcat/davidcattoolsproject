@@ -127,5 +127,6 @@
     "run_id": "20261007T113658Z-74880",
     "control_sha": "01cd4757b23ce0ec03f6b2c1e0848f849ebda01a"
   },
-  "codex_timeout_seconds": 3600
+  "codex_timeout_seconds": 10800,
+  "claude_timeout_seconds": 10800
 }

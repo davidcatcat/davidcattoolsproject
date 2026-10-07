@@ -19,13 +19,25 @@ from datetime import datetime, timezone
 REPO = Path('/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
 IDENTITY = 'davidcatcat/davidcattoolsproject'
 TASK_DIR = 'automation/ai-loop/'
+MAX_MODEL_TIMEOUT = 3 * 60 * 60
 
 
 class Stop(RuntimeError):
     pass
 
 
-def command(argv, cwd, timeout=120, stdin=None, stdout_path=None, stderr_path=None):
+def duration(seconds):
+    seconds = max(0, int(seconds))
+    return '%02d:%02d:%02d' % (seconds // 3600, seconds % 3600 // 60, seconds % 60)
+
+
+def progress_line(label, elapsed, timeout, activity=None):
+    status = {True: '日誌有更新', False: '暫無新增日誌；等待結果',
+              None: '等待命令完成'}[activity]
+    return label + '｜已執行 ' + duration(elapsed) + '／上限 ' + duration(timeout) + '｜' + status
+
+
+def command(argv, cwd, timeout=120, stdin=None, stdout_path=None, stderr_path=None, progress=None):
     """Bound each child group, including cancellation. No shell interpolation."""
     handles = []
     try:
@@ -35,6 +47,7 @@ def command(argv, cwd, timeout=120, stdin=None, stdout_path=None, stderr_path=No
                                 stdout=handles[0], stderr=handles[1],
                                 start_new_session=True)
         started = time.monotonic()
+        last_log_bytes = 0
         payload = None if stdin is None else stdin.encode('utf-8')
         try:
             while True:
@@ -43,9 +56,20 @@ def command(argv, cwd, timeout=120, stdin=None, stdout_path=None, stderr_path=No
                     return proc.returncode, (out or b'').decode('utf-8', 'replace'), (err or b'').decode('utf-8', 'replace')
                 except subprocess.TimeoutExpired:
                     payload = None
-                    if time.monotonic() - started >= timeout:
+                    elapsed = time.monotonic() - started
+                    if elapsed >= timeout:
                         raise Stop('command timed out: ' + argv[0])
-                    print('[Running] ' + argv[0] + ' ...', flush=True)
+                    activity = None
+                    paths = [p for p in (stdout_path, stderr_path) if p]
+                    if paths:
+                        try:
+                            log_bytes = sum(Path(p).stat().st_size for p in paths)
+                            activity = log_bytes != last_log_bytes
+                            last_log_bytes = log_bytes
+                        except OSError:
+                            pass  # Progress metadata is not a completion/error gate.
+                    label = progress or ('[執行] 等待 ' + Path(argv[0]).name + ' 完成')
+                    print(progress_line(label, elapsed, timeout, activity), flush=True)
         finally:
             # Never signal a remembered PGID after communicate() reaped its leader.
             # This bounds the CLI invocation; it is not the llmtool containment harness.
@@ -166,7 +190,7 @@ def load_task(root, control_sha):
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
-                'initial_timeout_recovery', 'codex_timeout_seconds'}
+                'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -193,9 +217,9 @@ def load_task(root, control_sha):
         raise Stop('invalid repair bound')
     if type(metadata['timeout_seconds']) is not int or not 60 <= metadata['timeout_seconds'] <= 3600:
         raise Stop('invalid timeout')
-    if 'codex_timeout_seconds' in metadata and (type(metadata['codex_timeout_seconds']) is not int
-            or not 60 <= metadata['codex_timeout_seconds'] <= 3600):
-        raise Stop('invalid Codex timeout')
+    for key in ('codex_timeout_seconds', 'claude_timeout_seconds'):
+        if key in metadata and (type(metadata[key]) is not int or not 60 <= metadata[key] <= MAX_MODEL_TIMEOUT):
+            raise Stop('invalid model timeout: ' + key)
     if metadata['default_test_mode'] not in ('related', 'full'):
         raise Stop('invalid default test mode')
     for suite in ('related_tests', 'full_tests', 'mandatory_tests'):
@@ -329,10 +353,12 @@ def codex(root, logs, prompt, round_no, timeout):
     output = logs / ('codex-%d.json' % round_no)
     spec = logs / 'codex-schema.json'
     save_json(spec, schema('developer'))
-    print('[Codex] Implementation / repair %d (limit %d seconds)' % (round_no, timeout), flush=True)
+    label = '[Codex／實作修正] 依 task.md 產生或補完候選程式' if round_no == 0 else (
+        '[Codex／修正第%d輪] 處理測試失敗或審查阻擋項目' % round_no)
+    print(label + '；單次上限 ' + duration(timeout), flush=True)
     run(['codex', '-a', 'never', 'exec', '--sandbox', 'workspace-write',
          '--output-schema', str(spec), '--output-last-message', str(output), '-'],
-        root, timeout=timeout, stdin=prompt,
+        root, timeout=timeout, stdin=prompt, progress=label,
         stdout_path=logs / ('codex-%d.stdout.log' % round_no),
         stderr_path=logs / ('codex-%d.stderr.log' % round_no))
     return validate_result(json.loads(output.read_text()), 'developer')
@@ -340,12 +366,14 @@ def codex(root, logs, prompt, round_no, timeout):
 
 def claude(root, logs, prompt, round_no, timeout, head):
     output = logs / ('claude-%d.raw.json' % round_no)
-    print('[Claude] Independent read-only review %d' % round_no, flush=True)
+    label = ('[Claude／最終審查]' if round_no >= 100 else '[Claude／獨立審查]') + (
+        ' 檢查需求、完整程式差異與測試證據（唯讀）')
+    print(label + '；單次上限 ' + duration(timeout), flush=True)
     run(['claude', '-p', '--output-format', 'json', '--json-schema', json.dumps(schema('review')),
          '--max-turns', '30', '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read', 'Glob', 'Grep',
          '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
          '--settings', '{"disableAllHooks":true}', '--no-session-persistence'],
-        root, timeout=timeout, stdin=prompt, stdout_path=output,
+        root, timeout=timeout, stdin=prompt, progress=label, stdout_path=output,
         stderr_path=logs / ('claude-%d.stderr.log' % round_no))
     result = parse_claude(json.loads(output.read_text()), head)
     save_json(logs / ('claude-%d.json' % round_no), result)
@@ -362,6 +390,23 @@ def test_result_file(logs, round_no, suite):
     return logs / ('tests-%d-%s.json' % (round_no, suite))
 
 
+def test_purpose(argv, suite):
+    purposes = {'test_git_containment.py': 'supervisor／fake-child containment 測試',
+                'test_git_mutation.py': 'Git 前置檢查與錯誤清理回歸測試',
+                'test_git_intel.py': '唯讀 Git 資訊與程序清理測試',
+                'test_action_contract.py': 'Action／Approval 資料契約測試'}
+    for name, purpose in purposes.items():
+        if name in argv:
+            return purpose
+    if suite == 'mandatory-final':
+        return 'Mac containment 驗收（訊號、identity、parent SIGKILL probes）'
+    if 'syntax' in argv:
+        return 'Python 語法檢查'
+    if 'check' in argv:
+        return 'Python 全套檢查（' + ('Mac 系統 Python' if 'PYTHON=/usr/bin/python3' in argv else 'venv Python') + '）'
+    return '執行任務指定的 ' + suite + ' 測試'
+
+
 def tests(root, logs, task, round_no, suite='related'):
     results = []
     commands = test_commands(task, suite)
@@ -369,8 +414,10 @@ def tests(root, logs, task, round_no, suite='related'):
         argv = [a.replace('{mac_evidence}', str(mac_evidence_path(logs, round_no))) for a in argv]
         label = '[Tests/%s] %d/%d' % (suite, i + 1, len(commands))
         print(label + ' ' + ' '.join(argv), flush=True)
+        purpose = '[測試 %d/%d] ' % (i + 1, len(commands)) + test_purpose(argv, suite)
+        print(purpose, flush=True)
         started = time.monotonic()
-        rc, _, _ = command(argv, root, timeout=task['timeout_seconds'],
+        rc, _, _ = command(argv, root, timeout=task['timeout_seconds'], progress=purpose,
                             stdout_path=logs / ('tests-%d-%s-%d.stdout.log' % (round_no, suite, i)),
                             stderr_path=logs / ('tests-%d-%s-%d.stderr.log' % (round_no, suite, i)))
         elapsed = round(time.monotonic() - started, 1)
@@ -570,14 +617,14 @@ def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=
             raise Stop('resume JSON/text record exceeds its bound')
         return path.read_text(encoding='utf-8')
     old_task, old_text = load_task(root, policy['control_sha'])
-    recovery_keys = {'initial_quota_recovery', 'initial_timeout_recovery', 'codex_timeout_seconds'}
+    recovery_keys = {'initial_quota_recovery', 'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds'}
     current_contract = {k: v for k, v in task.items() if k not in recovery_keys}
     old_contract = {k: v for k, v in old_task.items() if k not in recovery_keys}
     if (old_contract != current_contract or json.loads(read_record('task.json')) != old_task
             or read_record('task.md').strip() != old_text.strip()):
         raise Stop('resume contract differs from the pinned interrupted task')
     if timeout_recovery and not (old_task.get('codex_timeout_seconds', old_task['timeout_seconds'])
-            < task.get('codex_timeout_seconds', task['timeout_seconds']) <= 3600):
+            < task.get('codex_timeout_seconds', task['timeout_seconds']) <= MAX_MODEL_TIMEOUT):
         raise Stop('timeout recovery requires an explicitly increased bounded Codex timeout')
     provenance = json.loads(read_record('provenance.json'))
     summary = json.loads(read_record('summary.json'))
@@ -873,6 +920,7 @@ def main():
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
             'codex_timeout_seconds': task.get('codex_timeout_seconds', task['timeout_seconds']),
+            'claude_timeout_seconds': task.get('claude_timeout_seconds', task['timeout_seconds']),
             'codex': run(['codex', '--version'], root), 'claude': run(['claude', '--version'], root),
             'venv_python': run(['tools/llmtool/.venv/bin/python', '--version'], root),
             'system_python': run(['/usr/bin/python3', '--version'], root)})
@@ -967,7 +1015,7 @@ def main():
                     + test_result_file(logs, round_no, suite).read_text()
                     + '\nDIFF:\n' + patch)
                 snapshot = git(root, 'status', '--porcelain')
-                review = claude(root, logs, review_prompt, round_no, task['timeout_seconds'], head)
+                review = claude(root, logs, review_prompt, round_no, task.get('claude_timeout_seconds', task['timeout_seconds']), head)
                 check_scope(root, task, original, branch, head)
                 if git(root, 'status', '--porcelain') != snapshot:
                     raise Stop('review altered source state')
@@ -1026,7 +1074,7 @@ def main():
                             + '\nRe-review the final cumulative diff including the appended truthful report. '
                             + 'Reviewed_head must now be ' + head + '\nFINAL DIFF:\n'
                             + git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head),
-                            round_no + 100, task['timeout_seconds'], head)
+                            round_no + 100, task.get('claude_timeout_seconds', task['timeout_seconds']), head)
                         check_scope(root, task, original, branch, head)
                         if git(root, 'status', '--porcelain') != snapshot:
                             raise Stop('final review altered files')

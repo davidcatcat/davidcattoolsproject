@@ -215,3 +215,23 @@ actual containment gates and independent review remain pending.
 - This is a writer-identification guard, not process isolation, a guarantee about
   unrelated sessions, or B5 descendant-containment evidence. Actual Mac recovery,
   feature tests/probes, independent security review and merge remain pending.
+
+
+## Descriptive progress and three-hour AI limit validation — 2026-10-07
+
+- Parent control: `b75ea2e371fd4e8e6130a4b2be8a48e7256b25aa`; user requested phase descriptions and
+  three-hour calls while the Mac run was already in Claude read-only review.
+- Added bounded optional Codex/Claude timeout settings up to 10800 seconds; current
+  task sets both to 10800. Test/other command timeout remains 1800. Existing CLI
+  turn, repair, scope, Mac/full/review/security/publication gates stay unchanged.
+- Every 20-second heartbeat describes assigned workflow phase and elapsed/deadline
+  durations. Log activity uses only file sizes; raw contents/reasoning are never
+  displayed by this feature. Empty or buffered logs do not imply failure/hang.
+- Standalone fixture suite: PASS, 111 tests, including five added checks for phase/
+  elapsed/limit/status rendering, real heartbeat path with mocked clock/process,
+  log-content non-disclosure, test purpose mappings, strict timeout schema and a
+  full mocked pipeline with three-hour limits for both AI calls. Existing checks
+  remain green with the timeout bound fixture updated from 3601 to 10801.
+- Python 3.9 grammar, task schema and whitespace checked on standalone helper files.
+  Actual Mac new-heartbeat execution is pending. The current Mac process retains
+  its old pinned runner and is not modified or restarted by this publication.

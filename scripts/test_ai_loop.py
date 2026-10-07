@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 from contextlib import ExitStack, contextmanager
 import os
 import copy
@@ -249,7 +249,7 @@ class QuotaResumeTests(unittest.TestCase):
             self.assertEqual(command.call_args.args[0][:3], ['/usr/bin/pgrep', '-f', r'(^|/)codex([ .-]|$)'])
 
     def test_timeout_recovery_rejects_unchanged_or_reduced_timeout(self):
-        for seconds in (1800, 900, 3601):
+        for seconds in (1800, 900, 10801):
             with self.subTest(seconds=seconds), self.timeout_fixture() as (root, old, task, inventory, runner, command):
                 task['codex_timeout_seconds'] = seconds
                 with self.assertRaises(loop.Stop):
@@ -681,6 +681,61 @@ class ScopeTests(unittest.TestCase):
                 loop.check_scope(Path('.'), {'allowed_files': ['source.py']}, {}, 'feat/example', HEAD)
 
 
+class ProgressTests(unittest.TestCase):
+    def test_progress_shows_phase_elapsed_limit_and_observed_activity(self):
+        line = loop.progress_line('[Claude／獨立審查] 檢查程式差異與測試證據', 260, 10800, False)
+        self.assertIn('00:04:20', line)
+        self.assertIn('03:00:00', line)
+        self.assertIn('暫無新增日誌；等待結果', line)
+        self.assertIn('日誌有更新', loop.progress_line('[Codex／實作修正]', 20, 10800, True))
+        self.assertIn('等待命令完成', loop.progress_line('[執行]', 20, 120))
+        self.assertNotIn(' ...', line)
+
+    def test_heartbeat_observes_log_growth_without_exposing_log_contents(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            path = Path(runtime) / 'provider.log'
+            proc = Mock(returncode=0, stdin=None, stdout=None, stderr=None)
+            proc.poll.return_value = 0
+            def communicate(*args, **kwargs):
+                if not path.stat().st_size:
+                    path.write_text('PRIVATE_PROMPT_AND_PROVIDER_OUTPUT')
+                    raise subprocess.TimeoutExpired('codex', 20)
+                return None, None
+            proc.communicate.side_effect = communicate
+            with patch.object(loop.subprocess, 'Popen', return_value=proc), \
+                 patch.object(loop.time, 'monotonic', side_effect=[0, 0, 20, 20]), \
+                 patch('builtins.print') as printer:
+                self.assertEqual(loop.command(['codex'], Path(runtime), timeout=10800,
+                    stderr_path=path, progress='[Codex／實作修正] 等待候選程式'), (0, '', ''))
+            console = ' '.join(str(call.args) for call in printer.call_args_list)
+            self.assertIn('00:00:20', console)
+            self.assertIn('日誌有更新', console)
+            self.assertNotIn('PRIVATE_PROMPT', console)
+
+    def test_test_purpose_labels_related_full_and_mac_gates(self):
+        self.assertIn('語法', loop.test_purpose(['make', 'syntax'], 'related'))
+        self.assertIn('前置檢查', loop.test_purpose(['test_git_mutation.py'], 'related'))
+        self.assertIn('Mac 系統 Python', loop.test_purpose(['make', 'check', 'PYTHON=/usr/bin/python3'], 'full-final'))
+        self.assertIn('venv Python', loop.test_purpose(['make', 'check', 'PYTHON=.venv/bin/python'], 'full-final'))
+        self.assertIn('parent SIGKILL', loop.test_purpose(['acceptance'], 'mandatory-final'))
+
+    def test_model_timeout_schema_accepts_three_hours_and_rejects_unbounded_values(self):
+        metadata = json.loads((Path(__file__).parents[1] / 'automation/ai-loop/task.json').read_text())
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        metadata.update(codex_timeout_seconds=10800, claude_timeout_seconds=10800)
+        self.assertEqual(load(metadata)['codex_timeout_seconds'], 10800)
+        self.assertEqual(load(metadata)['claude_timeout_seconds'], 10800)
+        self.assertEqual(load(metadata)['timeout_seconds'], 1800)
+        for key in ('codex_timeout_seconds', 'claude_timeout_seconds'):
+            for value in (True, 0, 10801, '10800'):
+                with self.subTest(key=key, value=value), self.assertRaises(loop.Stop):
+                    invalid = copy.deepcopy(metadata)
+                    invalid[key] = value
+                    load(invalid)
+
+
 class RuntimeTests(unittest.TestCase):
     def test_process_reads_prompt_via_stdin(self):
         rc, out, _ = loop.command([sys.executable, '-c', 'import sys; print(sys.stdin.read())'], Path.cwd(), stdin='task content')
@@ -1040,6 +1095,10 @@ class ExistingPRTests(unittest.TestCase):
         self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, codex_timeout=3600),
                          ['related', 'full-final', 'mandatory-final'])
 
+    def test_both_ai_calls_allow_three_hours_while_all_test_gates_remain(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True,
+            codex_timeout=10800, claude_timeout=10800), ['related', 'full-final', 'mandatory-final'])
+
     def test_mac_failure_stops_new_task_without_push_pr_or_retry(self):
         self.exercise_pipeline(new_task=True, mandatory_failure=True, should_stop=True)
 
@@ -1058,7 +1117,8 @@ class ExistingPRTests(unittest.TestCase):
 
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
                           new_task=False, mandatory_failure=False, hook_changes=False,
-                          decision=False, checkpoint_failure=False, resume=False, codex_timeout=None):
+                          decision=False, checkpoint_failure=False, resume=False, codex_timeout=None,
+                          claude_timeout=None):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -1069,6 +1129,8 @@ class ExistingPRTests(unittest.TestCase):
             task = self.task()
             if codex_timeout is not None:
                 task['codex_timeout_seconds'] = codex_timeout
+            if claude_timeout is not None:
+                task['claude_timeout_seconds'] = claude_timeout
             if new_task:
                 task.update(mode='implement_new_pr', pr_number=None, expected_head=task['base_sha'],
                     require_local_full=True, mandatory_tests=[['fixture mandatory']],
@@ -1211,7 +1273,8 @@ class ExistingPRTests(unittest.TestCase):
             self.assertEqual(codex.call_count, min(failures + final_full_failures, 2) + int(new_task))
             if codex_timeout is not None:
                 self.assertEqual(codex.call_args.args[4], codex_timeout)
-                self.assertTrue(all(c.args[4] == task['timeout_seconds'] for c in claude.call_args_list))
+                self.assertTrue(all(c.args[4] == task.get('claude_timeout_seconds', task['timeout_seconds'])
+                                    for c in claude.call_args_list))
             if resume:
                 prepare_new.assert_not_called()
                 self.assertIn('Continue the existing partial implementation', codex.call_args.args[2])

@@ -349,3 +349,21 @@ edits and untracked candidate files are retained in the new recovery-input snaps
 before another model call. No old test/review evidence is inherited. The process
 check is not proof of B5 CLI descendant containment. Another failure stops; do not
 delete either old recovery marker, files, reports or logs to retry blindly.
+
+
+## Current AI deadlines and progress — David's update 2026-10-07
+
+David requested simple progress descriptions instead of `[Running] ...` and a
+three-hour deadline. This supersedes the earlier 30/60-minute AI deadlines:
+Codex and Claude each have a bounded 10800-second limit per call. Test/other command
+deadlines remain `timeout_seconds=1800`; CLI turn limits, repair bounds, scope,
+required full/Mac checks, publication/security/merge gates are unchanged.
+
+Progress states the assigned phase/purpose, elapsed time, deadline and whether local
+CLI log bytes changed. It does not claim which file the model is currently reading,
+completion percentage, successful validation or access to live internal reasoning.
+Unchanged logs are a wait observation, not proof of a hang. Raw provider output,
+thoughts, prompts or credentials are not streamed to the terminal. The running
+process keeps its pinned runner/contract; these settings apply on the next launch,
+not retroactively to David's current Claude review. Do not interrupt/restart that
+run merely to refresh progress. Existing one-use recovery/publication guards stay.

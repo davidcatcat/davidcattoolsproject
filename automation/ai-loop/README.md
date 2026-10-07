@@ -221,3 +221,25 @@ not establish the activity or safety of unrelated sessions; keep one writer for
 the task. No process is terminated by the preflight. The failed preflight did not
 consume the one-use claim: repeat the same current timeout resume command after
 fetching this update. All branch/file/acceptance gates remain intact.
+
+
+## Descriptive progress and three-hour AI calls — 2026-10-07
+
+Codex and Claude each have a three-hour single-call timeout. Test command timeouts
+remain unchanged; auth/quota/errors still stop, repairs remain bounded and no
+acceptance gate is weakened. A running process keeps its pinned settings; updates
+apply at the next launch. Do not restart a current review just for these changes.
+
+Every 20 seconds, a still-running command prints phase/purpose, elapsed time, limit
+and observed log activity, for example:
+
+```text
+[Claude／獨立審查] 檢查需求、完整程式差異與測試證據（唯讀）｜已執行 00:04:20／上限 03:00:00｜暫無新增日誌；等待結果
+[Codex／實作修正] 依 task.md 產生或補完候選程式｜已執行 00:12:20／上限 03:00:00｜日誌有更新
+[測試 3/5] Git 前置檢查與錯誤清理回歸測試｜已執行 00:00:20／上限 00:30:00｜日誌有更新
+```
+
+These are workflow descriptions plus observed time/log-size changes, not model
+completion percentages or claims about a specific live internal action. No raw
+log content or private reasoning is copied to the console. Claude can buffer its
+JSON until completion, so unchanged logs alone do not establish a hang.
