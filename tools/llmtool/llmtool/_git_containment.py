@@ -5,7 +5,7 @@ program. Counts alone are insufficient: this host has no async plugins/native
 fork callbacks or foreign reaper. Arbitrary embedding hosts are rejected.
 No Action, Approval, repository path or executable argument is accepted.
 """
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import os
 from pathlib import Path
 import select
@@ -39,6 +39,7 @@ class Outcome:
     child: dict
     evidence: dict
     cleanup_faults: tuple = ()
+    diagnostics: dict = field(default_factory=dict)
 
 
 class ContainmentUnresolved(BaseException):
@@ -51,6 +52,8 @@ class ContainmentUnresolved(BaseException):
     def __init__(self, primary, ownership):
         super().__init__('containment/state unknown; user action required')
         self.primary, self.ownership = primary, ownership
+        self.primary_exception = ownership.get('primary_exception')
+        self.diagnostics = ownership.get('diagnostics', {})
         _UNRESOLVED.append(self)
 
 
@@ -130,6 +133,10 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
     cleanup_faults = []
     shutdown_deadline = None
     ready = False
+    primary_exception = None
+    diagnostics = {'timing': timing, 'signal': None, 'expected_event': 'launch',
+                   'primary_error': None, 'protocol_rows': [], 'cleanup_errors': [],
+                   'cleanup_outcome': 'not-started', 'anchor_verification': None}
     try:
         signals.install()  # Before pipes, including the injected pre-pipe signal.
         if timing == 'pre_pipe':
@@ -139,7 +146,8 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                 select.select([], [], [], .005)
         if signals.first is not None:
             primary, confirmed = 'interrupted', True
-            return Outcome(primary, True, {}, {}, {})
+            diagnostics['cleanup_outcome'] = 'no-process'
+            return Outcome(primary, True, {}, {}, {}, diagnostics=diagnostics)
         control_r, control_w = os.pipe()
         owned_fds.extend((control_r, control_w))
         status_r, status_w = os.pipe()
@@ -172,6 +180,7 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
         anchor = Anchor(process, bound)
         note = ExitNote(process.pid)
         reader = wire.Reader(status_r)
+        diagnostics['expected_event'] = 'READY'
         wire.send(control_w, wire.message('START', binding=binding,
                   parent=parent.data(), launch=bound.data(), nonce=nonce,
                   case=case, timeout=timeout, pipes=pipes), handshake_deadline)
@@ -193,6 +202,7 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                 shutdown_deadline = signals.first_time+5
                 cancel_deadline = min(now+1, shutdown_deadline)
                 deadline = min(deadline, shutdown_deadline)
+                diagnostics['expected_event'] = 'CANCEL_ACK'
                 wire.send(control_w, wire.message('CANCEL', nonce=nonce), cancel_deadline)
             if (not ready and now >= handshake_deadline):
                 if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
@@ -206,6 +216,9 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                 break
             value = reader.read()
             if value is not None:
+                # Closed protocol metadata only, never nonce/binding/argv/output.
+                diagnostics['protocol_rows'].append({'type': value['type']})
+                diagnostics['protocol_rows'] = diagnostics['protocol_rows'][-4:]
                 if value['nonce'] != nonce:
                     wire.reject()
                 kind = value['type']
@@ -213,12 +226,14 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                     if value['digest'] != digest or Identity.parse(value['supervisor']) != bound:
                         wire.reject()
                     ready = True
+                    diagnostics['expected_event'] = 'CHILD_IDENTITY'
                     _event('ready', supervisor=bound.data())
                 elif kind == 'CHILD_IDENTITY' and ready and not delivered:
                     item = Identity.parse(value['child'])
                     if item.ppid != bound.pid or item.pgid != bound.pgid or item.sid != bound.sid:
                         wire.reject()
                     child, delivered = item.data(), True
+                    diagnostics['expected_event'] = 'TERMINAL'
                     _event('child', child=child)
                 elif kind == 'CANCEL_ACK' and cancel_deadline is not None and not ack:
                     ack = True
@@ -244,26 +259,42 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                     primary = 'supervisor-lost' if ready else 'start-failed'
                 break
             select.select([status_r], [], [], .005)
-    except (EOFError, BrokenPipeError, TimeoutError):
+    except (EOFError, BrokenPipeError, TimeoutError) as error:
+        primary_exception = error
+        diagnostics['primary_error'] = wire.exception_evidence(error)
         if signals.first is not None and primary not in _PRIMARY_FAILURES:
             primary = 'interrupted'
         if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
             primary = 'supervisor-lost' if ready else 'start-failed'
-    except wire.ProtocolFailure:
+    except wire.ProtocolFailure as error:
+        primary_exception = error
+        diagnostics['primary_error'] = wire.exception_evidence(error)
         if signals.first is not None and primary not in _PRIMARY_FAILURES:
             primary = 'interrupted'
         if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
             primary = 'protocol-failure'
-    except (OSError, IdentityUnknown, NotSupported):
+    except (OSError, IdentityUnknown, NotSupported) as error:
+        primary_exception = error
+        diagnostics['primary_error'] = wire.exception_evidence(error)
         if signals.first is not None and primary not in _PRIMARY_FAILURES:
             primary = 'interrupted'
         if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
             primary = 'start-failed' if anchor is None else 'supervisor-lost'
-    except Exception:
+    except Exception as error:
+        primary_exception = error
+        diagnostics['primary_error'] = wire.exception_evidence(error)
         if signals.first is not None and primary not in _PRIMARY_FAILURES:
             primary = 'interrupted'
         if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
             primary = 'supervisor-lost' if process is not None else 'start-failed'
+    except BaseException as error:
+        primary_exception = error
+        diagnostics['primary_error'] = wire.exception_evidence(error)
+        if signals.first is not None and primary not in _PRIMARY_FAILURES:
+            primary = 'interrupted'
+        if primary not in _PRIMARY_FAILURES and primary != 'interrupted':
+            primary = 'supervisor-lost' if process is not None else 'start-failed'
+        raise
     finally:
         if signals.first is not None:
             if primary not in _PRIMARY_FAILURES:
@@ -272,6 +303,8 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                 shutdown_deadline = signals.first_time+5
         if process is not None:
             cleanup_deadline = shutdown_deadline or time.monotonic()+5
+            diagnostics['cleanup_outcome'] = 'pending'
+            diagnostics['failure_expected_event'] = diagnostics['expected_event']
             try:
                 if anchor is None:
                     raise IdentityUnknown('missing supervisor anchor')
@@ -286,57 +319,83 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                     # is permitted from this deliberately mismatched anchor.
                     anchor.bound = replace(anchor.bound,
                         micros=(anchor.bound.micros+1) % 1000000)
+                diagnostics['expected_event'] = 'group-decision'
                 if case == 'anchor_race':
                     if primary == 'complete':
                         primary = 'supervisor-lost'
                     anchor.kill_group(exit_after_verify=True, deadline=cleanup_deadline)
                 else:
                     anchor.kill_group()  # Fresh identity; decision BEFORE any reap.
+                diagnostics['cleanup_errors'].extend(anchor.monitor_faults)
+                diagnostics['anchor_verification'] = anchor.verification
+                diagnostics['expected_event'] = 'supervisor-reap'
                 anchor.reap(cleanup_deadline)
+                diagnostics['expected_event'] = 'group-disappearance'
                 confirmed = _group_gone(anchor, child, evidence, cleanup_deadline)
                 if not confirmed:
                     raise IdentityUnknown('missing group disappearance proof')
-            except BaseException:
+            except BaseException as error:
                 # Keep handlers, pipes, Popen and note alive; do not unwind the
                 # neutral runtime or release numeric identity ownership.
                 cleanup_faults.append('containment-unconfirmed')
+                diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
+                if anchor is not None:
+                    diagnostics['cleanup_errors'].extend(anchor.monitor_faults)
+                diagnostics['cleanup_outcome'] = 'unresolved'
+                diagnostics['signal'] = signals.first
+                diagnostics['anchor_verification'] = anchor.verification if anchor else None
                 raise ContainmentUnresolved(primary, {
                     'process': process, 'anchor': anchor, 'note': note,
                     'fds': owned_fds, 'signals': signals, 'runtime': neutral,
                     'child': child, 'evidence': evidence, 'stress': stress,
+                    'primary_exception': primary_exception, 'diagnostics': diagnostics,
                     'cleanup_faults': cleanup_faults}) from None
         else:
             confirmed = True
         if confirmed:
+            diagnostics['cleanup_outcome'] = 'confirmed' if process is not None else 'no-process'
             if stress is not None:
                 try:
                     stress.wait(timeout=max(0, cleanup_deadline-time.monotonic()))
-                except BaseException:
+                except BaseException as error:
                     cleanup_faults.append('stress-unreaped')
+                    diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
+                    diagnostics['cleanup_outcome'] = 'stress-unreaped'
+                    diagnostics['signal'] = signals.first
                     raise ContainmentUnresolved(primary, {
                         'process': process, 'anchor': anchor, 'note': note,
                         'fds': owned_fds, 'signals': signals, 'runtime': neutral,
                         'child': child, 'evidence': evidence, 'stress': stress,
+                        'primary_exception': primary_exception, 'diagnostics': diagnostics,
                         'cleanup_faults': cleanup_faults}) from None
             secondary_fault = False
             if note is not None:
                 try:
                     note.close()
-                except OSError:
+                except BaseException as error:
                     secondary_fault = True
                     cleanup_faults.append('monitor-close')
+                    diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
             for fd in owned_fds:
                 try:
                     os.close(fd)
-                except OSError:
+                except BaseException as error:
                     secondary_fault = True
                     cleanup_faults.append('endpoint-close')
+                    diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
             try:
                 neutral.cleanup()
-            except OSError:
+            except BaseException as error:
                 secondary_fault = True
                 cleanup_faults.append('runtime-cleanup')
-            signals.restore()
+                diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
+            diagnostics['signal'] = signals.first
+            try:
+                signals.restore()
+            except BaseException as error:
+                secondary_fault = True
+                cleanup_faults.append('handler-restore')
+                diagnostics['cleanup_errors'].append(wire.exception_evidence(error))
             if secondary_fault and primary == 'complete':
                 primary = 'protocol-failure'
     if signals.first is not None:
@@ -344,7 +403,8 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
             primary = 'interrupted'
     return Outcome(primary or 'start-failed', confirmed,
                    anchor.bound.data() if anchor else {}, child, evidence,
-                   tuple(cleanup_faults) + (tuple(anchor.signal_faults) if anchor else ()))
+                   tuple(cleanup_faults) + (tuple(anchor.signal_faults) if anchor else ()),
+                   diagnostics)
 
 
 if __name__ == '__main__':

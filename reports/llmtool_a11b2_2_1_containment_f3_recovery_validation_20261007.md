@@ -374,3 +374,152 @@ lock deletion, retry or rollback was added. No 2.2.2/.3, A11b.3, A11c or A12 wor
 was started or authorized. Only contracted files were edited. No staging, commit,
 push, merge, worktree, clone, alternate checkout, global install, permission bypass
 or task-contract change occurred. Stop at this candidate; the runner owns next steps.
+
+## Authorized native-SIGINT repair continuation — 2026-10-07
+
+Current status: **PREPARED REPAIR CANDIDATE; new runner gates PENDING**.
+This section supersedes earlier current-status wording for this continuation;
+all earlier report content is preserved as historical evidence. The implementation
+return is not native containment approval, security PASS or merge approval.
+
+### Pinned recovery and original failure
+
+- Current runner run: `20261007T153635Z-87533`; read its `task.json`, `recovery.json`,
+  `coordinator-assessment.md` and saved recovery evidence before repair.
+- Original run: `20261007T123142Z-77009`; pinned original control:
+  `b75ea2e371fd4e8e6130a4b2be8a48e7256b25aa`.
+- Read-only entry observations: canonical Mac cwd/Git root and repository remote
+  identity match the task, branch remains
+  `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`, and HEAD remains
+  `ce29d4a6a7764e62dc993b76b33996db2fb3455b`. Tracked/index state was clean at entry.
+  Base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+- The runner's recovery manifest preserves copies/hashes of all ten candidate files
+  and the original summary/Mac JSON. Evidence-summary SHA-256:
+  `b722cbfd422dc8e65b19c42db126de13d33fa56527013e4073a538efdde7363c`.
+  Original Mac JSON SHA-256:
+  `c6dbdfccdefdb35de8efc4f4f20102217eb0a102f94bb1f5ea785cc982283c07`.
+- Current unrelated artifacts are preserved; historical integrity remains
+  **UNVERIFIED**, and inherited validation for the repair is **NONE**. No remote
+  synchronization, feature publication or historical process absence is asserted
+  from Codex's local observations. No old snapshot PID/PGID was signaled.
+- This is the first bounded repair call of the newly authorized continuation,
+  which permits at most two calls. Source/test bytes changed; this is not a
+  report-only or unchanged candidate retry.
+
+Historical runner results at **ce29d4a**, confined to the original bytes:
+
+| Original gate | Historical evidence only |
+| --- | --- |
+| Syntax | Exit 0; 0.4 seconds |
+| Containment unit discovery | Exit 0; 0.8 seconds |
+| Git mutation regressions | Exit 0; 40.2 seconds |
+| A5 Git intelligence | Exit 0; 15.5 seconds |
+| Action contract | Exit 0; 0.7 seconds |
+| Preliminary read-only Claude ordinary review | Recorded PASS at ce29d4a; warned about zombie SID lookup; not formal security approval |
+| Full check, venv Python | Exit 0; 216.8 seconds |
+| Full check, /usr/bin/python3 | Exit 0; 336.1 seconds |
+| Mandatory actual Mac acceptance | **FAIL**, exit 1; 7.3 seconds |
+| fd_inheritance | Historical PASS, 9 checks, 0 skips |
+| sigint | **Original FAIL**, AssertionError; original JSON omitted timing, message and traceback |
+| Other twelve native scenarios, including both parent-SIGKILL variants | **NOT RUN**, no native PASS inherited |
+
+The original evidence records Darwin/macOS 15.7.9 and Python 3.13.3. These versions
+describe that failed invocation, not a new probe. The coordinator's later operator
+inspection observed a stuck standalone test host and its unreaped zombie supervisor;
+it did not identify the first failing operation or establish group containment.
+External fixture cleanup is not native PASS. **The original SIGINT result remains
+FAIL even if a later repaired invocation passes.**
+
+### Diagnostic repair and owned-zombie continuity
+
+Source inspection confirms that a probe's `finally` cleanup could replace the
+original signal-path exception with a generic AssertionError, and that failure JSON
+previously retained only its type. The repair keeps the original exception object
+and stores cleanup and monitor-close errors separately. Failure evidence includes
+bounded exception type, reviewed fixed message (otherwise withheld), numeric errno,
+up to eight traceback locations, signal timing variant/number, expected event,
+collected synthetic event/protocol rows and cleanup outcome. Tracebacks contain no
+source text, locals or exception-chain dumps. OS filenames, arbitrary argv, raw
+pipe fragments, stderr, environment, provider output and non-fixed exception text
+are excluded. No provider data is involved in the harness.
+
+The parent harness retains its primary exception separately in unresolved ownership,
+alongside the typed primary lifecycle outcome. Later containment/stress/monitor/FD/
+runtime/handler errors cannot replace that evidence. Its fixed host emits the
+bounded diagnostic object on unresolved containment. The existing F1 responsibility
+transfer still retains Popen, endpoints, monitor, handlers and neutral runtime;
+it neither normally returns nor restores handlers while containment is unresolved.
+
+The SID hypothesis is **source-supported, not the established native root cause**.
+[Apple's getsid implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_prot.c)
+uses a process lookup that can return ESRCH. The public
+[process-information ABI](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h)
+provides PID/PPID/UID/PGID/status/start time; its `e_tpgid` is a terminal group,
+not SID. The
+[BSD-info implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+has zombie-aware handling. These upstream sources and local SDK declarations are
+design evidence, not proof of behavior on the recorded kernel.
+
+Ordinary `identity()` remains strict: it still queries SID and rejects ambiguity or
+drift. `Anchor.verify()` permits a separate proof only after exact ESRCH from that
+ordinary query. It requires a retained direct-child Popen with unreleased status,
+launch-bound PID == PGID == SID, matching parent/UID, and two fresh kernel records
+that both report SZOMB and match PID/PGID/UID/PPID/seconds/microseconds. It rechecks
+Popen ownership after the reads and rechecks the single-thread/default-reaper host
+premise before querying. No permission error, missing row, live state, mismatch,
+changed start time or released ownership becomes an identity PASS.
+
+SID continuity in this special case derives from the already verified session-leader
+launch and this still-reserved direct-child PID, not from `tpgid` or numbers cached
+for an arbitrary process. The closed host has no foreign reaper; the immutable
+zombie cannot change session and its unreaped PID pins the equal group ID through
+the cleanup decision. This is still the accepted supervisor-as-group-anchor design,
+not a separate anchor, per-member signaling design or Apple private API. Host
+premises and continuity remain subject to native proof and independent security
+review. If kernel identity cannot support them, the path stays unresolved.
+
+### Added coverage and pending gates
+
+Deterministic regressions cover primary-versus-cleanup/monitor retention; cleanup
+failure alone; successful cleanup with a protocol failure; diagnostic secret/path/
+argv/output withholding; strict ordinary identity rejection; owned-zombie matching
+rows; live-to-zombie SID-query races; every bound field/state mismatch on either
+read; absent/permission-denied rows; non-ESRCH SID faults; unprovable host; released
+Popen ownership during verification; and non-Popen rejection. Existing assertions,
+including no signaling after reap, are retained.
+
+The actual-Mac kqueue scenario still registers while alive and after zombie exit,
+requires real NOTE_EXIT without reap, freshly confirms zombie state, exercises the
+owned continuity verifier and requires cleanup before reap/group disappearance.
+It retains/prints bounded native proof metadata identifying the actual verification
+mode; no mock/skip becomes native PASS. The real verification-to-signal supervisor
+exit case now checks zombie continuity again before group signaling. The acceptance
+interface, fourteen exact scenario names, nonzero checks, zero native skips, >=20
+plain plus >=20 Popen parent-SIGKILL repetitions, and <=2-second disappearance bound
+remain unchanged. Failure JSON gains diagnostics; success JSON retains its exact
+contract shape. Any mandatory Mac failure still stops without automatic retry.
+
+| New repair gate/disposition | Current status |
+| --- | --- |
+| Syntax, containment units, primary/cleanup regressions and new identity tests | PENDING outer runner |
+| Existing Git/A5/Action regressions and public/import boundary | PENDING outer runner |
+| FD topology / fixed supervisor / fake-child inheritance | PENDING exact-byte runner/native checks |
+| SIGINT / SIGTERM / SIGHUP, all timings/repeated signals/restoration | PENDING actual Mac |
+| Hung/lost supervisor, missing ACK, leader/descendant cleanup and F1 behavior | PENDING actual Mac |
+| Kernel start time, mismatch/reuse, live/zombie continuity and non-reaping kqueue | PENDING actual Mac and review |
+| Framing, code/runtime binding, direct/import/runpy/-m/wrapper boundary | PENDING runner/native checks |
+| x20 plain and x20 Popen parent SIGKILL, each <=2 seconds | PENDING actual Mac; no inherited native repetitions |
+| Full Python suites under venv and /usr/bin/python3 | PENDING outer runner on changed bytes |
+| Preliminary and complete final-diff ordinary Claude review | PENDING outer runner |
+| BLOCKER/HIGH/correctness disposition and independent security review | PENDING; security must assess owned-zombie SID continuity and F1–F4 |
+| Coordinator acceptance, final-HEAD CI / READY_FOR_FINAL_REVIEW | PENDING runner/coordinator |
+| Real product Git ADD / public mutation / approval issuer / audit bypass | None introduced or executed |
+| 2.2.2/.3, A11b.3, A11c or A12 | Not started or authorized |
+
+Codex performed source/evidence inspection and bounded edits only. It ran no tests,
+syntax command, suites, native process/signal probes, provider calls or acceptance
+generator. No acceptance JSON was fabricated. Tests, exact-byte hashes, truthful
+evidence append and all Git/publication work belong to the outer runner. No stage,
+commit, push, merge, branch switch, reset, stash, worktree, clone, global install,
+marker deletion, task-contract change or unrelated-file edit occurred. Stop at this
+prepared candidate; independent security/coordinator approval remains pending.

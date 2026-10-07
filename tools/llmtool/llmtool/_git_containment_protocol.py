@@ -20,6 +20,29 @@ CASES = frozenset(('exit', 'descendant', 'leader_exit', 'output', 'hung',
 OUTCOMES = frozenset(('complete', 'start-failed', 'timeout', 'interrupted',
                       'parent-lost', 'supervisor-lost', 'output-limit',
                       'protocol-failure', 'state-unknown'))
+# Only reviewed fixed messages may enter curated diagnostics. Exception str()
+# can contain paths, argv, credentials or raw output even in a cleanup fault.
+_SAFE_MESSAGES = frozenset((
+    'invalid containment protocol', 'containment peer closed',
+    'containment read deadline', 'containment write deadline',
+    'Darwin non-root host required', 'kernel identity unavailable',
+    'invalid kernel identity', 'invalid process identity', 'kernel identity changed',
+    'single-thread default-reaper host required', 'native single-thread host required',
+    'non-reaping Darwin notification required', 'invalid non-reaping exit notification',
+    'supervisor anchor ownership unknown', 'owned zombie continuity unconfirmed',
+    'shared synthetic cleanup deadline required', 'synthetic anchor deadline expired',
+    'synthetic anchor exit notification unavailable', 'synthetic anchor zombie unconfirmed',
+    'reap ordering rejected', 'reviewed standalone harness host required',
+    'missing supervisor anchor', 'missing group disappearance proof',
+    'containment/state unknown; user action required',
+    'probe host ownership unknown', 'probe host retained unresolved ownership',
+    'probe group disappearance unconfirmed', 'probe evidence deadline',
+    'mandatory Mac capability unsupported or unresolved',
+    'probe parent closed before expected evidence', 'probe evidence output limit',
+    'containment acceptance assertion failed', 'probe event count limit',
+    'fixture launch identity unavailable', 'fixture group disappearance unconfirmed',
+    'isolated trusted supervisor installation unavailable',
+))
 FIELDS = {
     'START': {'binding', 'parent', 'launch', 'nonce', 'case', 'timeout', 'pipes'},
     'READY': {'digest', 'supervisor', 'nonce'},
@@ -31,6 +54,40 @@ FIELDS = {
 
 class ProtocolFailure(Exception):
     """Fixed text only; never echo rejected data."""
+
+
+def exception_evidence(error):
+    """Bounded type/message/location, with no locals, source text or chaining.
+
+    OS errno supplies fixed text instead of OSError filenames/strerror supplied
+    by a caller. Unknown messages are withheld, never truncated raw secrets.
+    Trace locations name only reviewed modules; external paths are omitted.
+    """
+    kind = type(error).__name__
+    kind = kind[:64] if kind.isidentifier() else 'Exception'
+    message = 'details withheld'
+    if len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in _SAFE_MESSAGES:
+        message = error.args[0]
+    number = getattr(error, 'errno', None) if isinstance(error, OSError) else None
+    if type(number) is int and 0 < number < 256:
+        message = os.strerror(number)[:160]
+    else:
+        number = None
+    locations = []
+    allowed = {name for name in ARTIFACTS if not name.startswith('../')}
+    allowed.update(('test_git_containment.py', 'run_containment_acceptance.py',
+                    'containment_probe_parent.py'))
+    trace = error.__traceback__
+    while trace is not None:
+        name = Path(trace.tb_frame.f_code.co_filename).name
+        function = trace.tb_frame.f_code.co_name
+        locations.append({'file': name if name in allowed else '<external>',
+            'function': function[:64] if name in allowed else '<external>',
+            'line': trace.tb_lineno})
+        locations = locations[-8:]
+        trace = trace.tb_next
+    return {'exception_type': kind, 'message': message, 'errno': number,
+            'traceback': locations}
 
 
 def reject():

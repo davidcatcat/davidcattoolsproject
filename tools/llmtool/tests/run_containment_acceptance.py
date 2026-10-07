@@ -99,7 +99,13 @@ def main():
         # Retain all completed/partial invocation evidence. Deliberately invalid
         # for the PASS validator and nonzero; never fabricate missing scenarios.
         evidence['failure'] = {'scenario': current, 'status': 'FAIL',
-                               'exception_type': type(exc).__name__}
+                               **wire.exception_evidence(exc)}
+        diagnostics = getattr(exc, 'probe_diagnostics', None)
+        if diagnostics is not None:
+            evidence['failure']['diagnostics'] = diagnostics
+        secondary = getattr(exc, 'secondary_cleanup_errors', None)
+        if secondary:
+            evidence['failure']['secondary_cleanup_errors'] = secondary
         if scenarios is not None and scenarios.retained:
             evidence['failure']['retained'] = scenarios.retained
         owned = retained_processes()

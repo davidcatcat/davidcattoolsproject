@@ -6,12 +6,16 @@ This is not an atomic handle against a hostile same-UID reaper.
 """
 import ctypes
 from dataclasses import asdict, dataclass
+import errno
 import os
 import select
 import signal
+import subprocess
 import sys
 import threading
 import time
+
+from . import _git_containment_protocol as wire
 
 
 class NotSupported(Exception):
@@ -145,20 +149,76 @@ def absent(pid, group=False):
 
 
 class Anchor:
-    """No method reaps until the group signaling decision has been recorded."""
+    """A closed owner supplies its strict identity() snapshot captured at launch.
+
+    All callers in this slice retain the actual Popen and capture its launch
+    identity before any reap. A caller-supplied/self-consistent numeric snapshot
+    from arbitrary embedding code is not this premise or execution authority.
+    No method reaps until the group signaling decision has been recorded.
+    """
     def __init__(self, process, bound):
         self.process, self.bound = process, bound
         self.decided, self.reaped = False, False
         self.signal_faults = []
+        self.monitor_faults = []
+        self.verification = None
 
-    def kill_group(self, *, exit_after_verify=False, deadline=None):
+    def _owned(self):
         bound = self.bound
-        if (type(exit_after_verify) is not bool or self.reaped or self.process.returncode is not None
+        if (not isinstance(self.process, subprocess.Popen)
+                or self.reaped or self.process.returncode is not None
                 or bound.pid != self.process.pid
                 or bound.pid != bound.pgid or bound.pid != bound.sid
-                or bound.ppid != os.getpid() or bound.uid != os.geteuid()
-                or identity(bound.pid) != bound):
+                or bound.ppid != os.getpid() or bound.uid != os.geteuid()):
             raise IdentityUnknown('supervisor anchor ownership unknown')
+
+    def verify(self):
+        """Verify this direct child without consuming its exit status.
+
+        Ordinary identity queries still require getsid. Only ESRCH from that
+        query may enter the owned-zombie proof. Two fresh PROC_PIDTBSDINFO rows
+        must say SZOMB and match PID/PGID/UID/PPID/kernel start time. A zombie
+        cannot change session; the launch-bound session leader's reserved PID
+        pins its equal PGID/SID until this Popen child is reaped. This relies on
+        the closed, single-thread, no-foreign-reaper host described in host_check.
+        It is not a SID query for arbitrary zombies; e_tpgid is never a SID.
+        """
+        self.verification = None
+        self._owned()
+        host_check()
+        bound = self.bound
+        try:
+            observed = identity(bound.pid)
+        except ProcessLookupError as error:
+            if error.errno != errno.ESRCH:
+                raise
+            fields = ('pid', 'pgid', 'uid', 'ppid', 'seconds', 'micros')
+            before = _info(bound.pid, 3, _BSD)
+            after = _info(bound.pid, 3, _BSD)
+            proof = {'mode': 'unconfirmed-zombie', 'sid_source': 'launch-continuity',
+                     'sid_query': 'ESRCH', 'kernel_status': after.status,
+                     'kernel_rows': [{**{key: getattr(row, key) for key in fields},
+                                      'status': row.status} for row in (before, after)]}
+            self.verification = proof  # Retain bounded observed rows even on rejection.
+            if (before.status != 5 or after.status != 5
+                    or any(getattr(row, key) != getattr(bound, key)
+                           for row in (before, after) for key in fields)):
+                raise IdentityUnknown('owned zombie continuity unconfirmed') from None
+            proof['mode'] = 'owned-zombie'
+        else:
+            if observed != bound:
+                raise IdentityUnknown('supervisor anchor ownership unknown')
+            proof = {'mode': 'ordinary', 'sid_source': 'getsid'}
+        # Recheck the Popen pin after all observations, without poll/wait.
+        self._owned()
+        self.verification = proof
+        return bound
+
+    def kill_group(self, *, exit_after_verify=False, deadline=None):
+        if type(exit_after_verify) is not bool:
+            raise IdentityUnknown('supervisor anchor ownership unknown')
+        self.verify()
+        bound = self.bound
         if self.decided:
             return  # Idempotent while still pinned; never repeat a signal.
         if exit_after_verify:
@@ -171,6 +231,7 @@ class Anchor:
             if time.monotonic() >= race_deadline:
                 raise IdentityUnknown('synthetic anchor deadline expired')
             note = ExitNote(bound.pid)
+            failure = None
             try:
                 os.kill(bound.pid, signal.SIGKILL)
                 while not note.exited():
@@ -179,8 +240,17 @@ class Anchor:
                     select.select([], [], [], .005)
                 if _info(bound.pid, 3, _BSD).status != 5:
                     raise IdentityUnknown('synthetic anchor zombie unconfirmed')
+                self.verify()  # Exercise the same live-to-zombie continuity path.
+            except BaseException as error:
+                failure = error
+                raise
             finally:
-                note.close()
+                try:
+                    note.close()
+                except BaseException as error:
+                    self.monitor_faults.append(wire.exception_evidence(error))
+                    if failure is None:
+                        raise
         # The closed host has no other reaper. This direct child is still owned,
         # live or zombie; its reserved PID also pins the equal PGID through killpg.
         try:

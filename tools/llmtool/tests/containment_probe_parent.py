@@ -48,6 +48,7 @@ def main():
             user_action_required=True, containment_confirmed=False,
             supervisor=anchor.bound.data() if anchor else {},
             child=exc.ownership['child'],
+            diagnostics=exc.diagnostics,
             cleanup_faults=exc.ownership.get('cleanup_faults', []) +
                           (anchor.signal_faults if anchor else []))
         # F1 deliberately retains handlers/FDs/unreaped ownership. The outer
