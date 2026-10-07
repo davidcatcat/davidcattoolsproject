@@ -199,7 +199,25 @@ Codex now has a 3600-second limit; tests and Claude retain their existing limits
 The task, branch/base, implementation scope and mandatory final gates stay pinned.
 Existing launcher fetches everything; no new download/install is needed. The new
 one-use claim leaves the prior quota claim intact. Old recovery fingerprints protect
-unrelated files; new out-of-scope files, an active Codex CLI, index/staging changes,
+unrelated files; new out-of-scope files, an active ai-loop Codex exec for this repo, index/staging changes,
 changed base/branch/PR or unrelated tracked edits stop before model work. Allowed
 tracked edits and untracked candidate files are snapshotted and continued. All tests
 and review run on resulting bytes, with no inherited PASS or automatic merge.
+
+
+## Process guard correction — 2026-10-07
+
+The timeout continuation initially rejected every process whose name included
+Codex. David's process listing exposed false matches: VS Code's backend, app-server
+daemons, code-mode hosts and a plain interactive terminal. Do not terminate these
+services merely to satisfy the recovery preflight.
+
+The guard now reads full arguments with `ps -ww` and identifies only `codex exec`
+using this canonical repository's ai-loop schema/output log paths. A matching active
+runner stops with its PID; ambiguous matching arguments or inspection errors still
+stop. Background services, plain interactive terminals and other repositories'
+exec calls are not evidence that this ai-loop's writer is active. This check does
+not establish the activity or safety of unrelated sessions; keep one writer for
+the task. No process is terminated by the preflight. The failed preflight did not
+consume the one-use claim: repeat the same current timeout resume command after
+fetching this update. All branch/file/acceptance gates remain intact.

@@ -344,7 +344,7 @@ scratch, perform optional refactoring or run expensive suites/probes yourself.
 The new explicit one-use recovery verifies the pinned prior task and timeout STOP,
 requires unchanged preserved-untracked fingerprints from that run's recovery.json,
 rejects new out-of-scope files, staged/index changes, unrelated tracked edits or a
-published branch/PR, and conservatively rejects an active Codex CLI. Allowed tracked
+published branch/PR, and rejects active ai-loop Codex exec calls bound to this repository's log paths. Allowed tracked
 edits and untracked candidate files are retained in the new recovery-input snapshot
 before another model call. No old test/review evidence is inherited. The process
 check is not proof of B5 CLI descendant containment. Another failure stops; do not

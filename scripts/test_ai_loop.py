@@ -128,6 +128,68 @@ class LauncherInstallTests(unittest.TestCase):
                 git.assert_not_called()
 
 
+class ActiveRunnerProcessTests(unittest.TestCase):
+    root = Path('/fixture/repository')
+    schema = '/fixture/repository/.ai-loop/20261007T113658Z-74880/codex-schema.json'
+    output = '/fixture/repository/.ai-loop/20261007T113658Z-74880/codex-0.json'
+
+    def inspect(self, rows, rc=0):
+        pids = '\n'.join(row.split(None, 1)[0] for row in rows.splitlines())
+        with patch.object(loop, 'command', side_effect=[(0, pids, ''), (rc, rows, '')]) as command:
+            loop.ensure_no_active_runner_codex(self.root)
+            self.assertEqual(command.call_args.args[0][:2], ['/bin/ps', '-ww'])
+
+    def test_daemons_vscode_host_and_interactive_node_cli_do_not_block(self):
+        self.inspect('28710 /Users/user/.vscode/extensions/openai.chatgpt/bin/codex app-server\n'
+            '49642 /Users/user/.codex/packages/app-server-daemon/bin/codex app-server\n'
+            '51565 /Users/user/.codex/packages/app-server-daemon/bin/codex-code-mode-host\n'
+            '60808 /Users/user/.codex/packages/app-server-daemon/bin/codex app-server\n'
+            '76261 node /Users/user/.nvm/bin/codex\n'
+            '76262 /Users/user/.nvm/lib/node_modules/@openai/codex/vendor/codex/codex\n')
+
+    def test_native_or_node_runner_exec_is_blocked_with_pid(self):
+        for executable in ('/vendor/codex/codex', 'node /Users/user/.nvm/bin/codex'):
+            with self.subTest(executable=executable), self.assertRaisesRegex(loop.Stop, 'PID 76262'):
+                self.inspect('76262 ' + executable + ' -a never exec --output-schema '
+                             + self.schema + ' --output-last-message ' + self.output + ' -\n')
+
+    def test_equals_option_form_is_also_blocked(self):
+        with self.assertRaisesRegex(loop.Stop, 'PID 42'):
+            self.inspect('42 codex exec --output-schema=' + self.schema
+                         + ' --output-last-message=' + self.output + '\n')
+
+    def test_exec_for_other_repository_is_not_owned_by_this_runner(self):
+        self.inspect('42 codex exec --output-schema /other/.ai-loop/run/codex-schema.json '
+                     '--output-last-message /other/.ai-loop/run/codex-0.json\n')
+
+    def test_ambiguous_or_inconsistent_repo_binding_stops(self):
+        for suffix in ('', ' --output-last-message /outside/codex-0.json',
+                       ' --output-last-message ' + self.output + ' --output-schema ' + self.schema):
+            with self.subTest(suffix=suffix), self.assertRaises(loop.Stop):
+                self.inspect('42 codex exec --output-schema ' + self.schema + suffix + '\n')
+
+    def test_no_processes_or_all_exited_between_inspections_is_accepted(self):
+        with patch.object(loop, 'command', return_value=(1, '', '')) as command:
+            loop.ensure_no_active_runner_codex(self.root)
+            self.assertEqual(command.call_count, 1)
+        with patch.object(loop, 'command', side_effect=[(0, '42\n', ''), (1, '', '')]):
+            loop.ensure_no_active_runner_codex(self.root)
+
+    def test_inspection_failure_invalid_pids_or_malformed_rows_stops(self):
+        for outputs in ([(2, '', '')], [(0, 'not-a-pid', '')],
+                        [(0, '42', ''), (2, '', 'ps failed')],
+                        [(0, '42', ''), (0, '99 codex exec', '')],
+                        [(0, '42', ''), (0, '42 codex "unclosed', '')]):
+            with self.subTest(outputs=outputs), patch.object(loop, 'command', side_effect=outputs), \
+                 self.assertRaises(loop.Stop):
+                loop.ensure_no_active_runner_codex(self.root)
+
+    def test_multiple_active_entries_are_inspected_not_only_first_daemon(self):
+        with self.assertRaisesRegex(loop.Stop, 'PID 2'):
+            self.inspect('1 codex app-server\n2 codex exec --output-schema ' + self.schema
+                         + ' --output-last-message ' + self.output + '\n')
+
+
 class QuotaResumeTests(unittest.TestCase):
     run_id = '20261007T075141Z-70725'
 

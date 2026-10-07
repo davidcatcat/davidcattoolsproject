@@ -196,3 +196,22 @@ actual containment gates and independent review remain pending.
 - Standalone helper only; no application checkout, Mac provider execution,
   application suites, native containment probes or security gate run here.
   Actual Mac continuation and required feature gates remain pending.
+
+
+## Active runner guard correction — 2026-10-07
+
+- Parent control: `5b5333c2ab3ff9e2633426ff398a5559c0132eef`.
+- User process evidence showed long-lived VS Code/app-server/code-mode backends
+  and a newly opened plain `node .../bin/codex` terminal. The previous all-Codex
+  preflight was too broad. No shutdown of these services was authorized/performed.
+- Guard now enumerates candidate PIDs, reads full non-truncated argv via `ps -ww`,
+  and blocks only ai-loop exec calls bound to this repository's schema/output
+  paths (or ambiguous matching data/inspection failures). No raw process arguments
+  are printed or published. Failure identifies PID only, and remains before claim.
+- Standalone helper suite: PASS, 106 fixture tests, including eight new checks for
+  daemons/interactive terminals, native/node exec, equals-form flags, other repos,
+  ambiguous binding, process-exit races, malformed/failed inspection and mixed PID
+  lists. Existing 98 checks remain green.
+- This is a writer-identification guard, not process isolation, a guarantee about
+  unrelated sessions, or B5 descendant-containment evidence. Actual Mac recovery,
+  feature tests/probes, independent security review and merge remain pending.

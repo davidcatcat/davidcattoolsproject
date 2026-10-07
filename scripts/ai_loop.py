@@ -9,6 +9,7 @@ import platform
 from pathlib import Path
 import re
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -500,6 +501,51 @@ def prepare_new_branch(root, task, check_only=False):
             raise Stop('new branch did not reach pinned main')
 
 
+def ensure_no_active_runner_codex(root):
+    """Identify this repo's ai-loop exec calls, not every Codex app/terminal."""
+    rc, out, _ = command(['/usr/bin/pgrep', '-f', r'(^|/)codex([ .-]|$)'], root)
+    if rc == 1:
+        return
+    pids = out.split()
+    if rc != 0 or not pids or len(pids) > 128 or any(not re.fullmatch(r'[1-9][0-9]*', p) for p in pids):
+        raise Stop('could not enumerate Codex processes for recovery')
+    rc, rows, err = command(['/bin/ps', '-ww', '-p', ','.join(pids), '-o', 'pid=,args='], root)
+    if rc == 1 and not rows.strip() and not err.strip():
+        return  # All enumerated processes exited before ps inspected them.
+    if rc != 0 or len(rows.encode('utf-8')) > 128 * 1024:
+        raise Stop('could not inspect full Codex process arguments')
+    prefix = str(root / '.ai-loop') + '/'
+    for row in rows.splitlines():
+        fields = row.strip().split(None, 1)
+        if len(fields) != 2 or fields[0] not in pids:
+            raise Stop('invalid Codex process inspection result')
+        try:
+            argv = shlex.split(fields[1])
+        except ValueError:
+            raise Stop('ambiguous Codex process arguments; no recovery started')
+        # Our runner passes explicit absolute schema/output paths through exec.
+        # App servers, code-mode hosts and plain interactive terminals lack this
+        # binding and must not be inferred to be the timed-out runner's writer.
+        if 'exec' not in argv or not any(a.startswith(prefix) or
+                ('=' in a and a.split('=', 1)[1].startswith(prefix)) for a in argv):
+            continue
+        def option(name):
+            values = [a.split('=', 1)[1] for a in argv if a.startswith(name + '=')]
+            for i, a in enumerate(argv):
+                if a == name and i + 1 < len(argv):
+                    values.append(argv[i + 1])
+            return values[0] if len(values) == 1 else None
+        schema_path, output_path = option('--output-schema'), option('--output-last-message')
+        if not schema_path or not output_path:
+            raise Stop('possible active ai-loop Codex process has ambiguous output binding; PID ' + fields[0])
+        relative = schema_path[len(prefix):] if schema_path.startswith(prefix) else ''
+        if (not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+/codex-schema\.json', relative)
+                or Path(output_path).parent != Path(schema_path).parent
+                or not re.fullmatch(r'codex-[0-9]+\.json', Path(output_path).name)):
+            raise Stop('possible active ai-loop Codex process has invalid output binding; PID ' + fields[0])
+        raise Stop('ai-loop Codex exec is still active for this repository; PID ' + fields[0])
+
+
 def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=()):
     """Explicit recovery of one pinned, unpublished initial Codex interruption."""
     timeout_recovery = 'initial_timeout_recovery' in task
@@ -561,13 +607,7 @@ def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=
             raise Stop('unrelated files changed since the previous recovery; files preserved')
         if set(current_untracked) - set(protected) - set(task['allowed_files']):
             raise Stop('new out-of-scope untracked files appeared during the interrupted run')
-        # Refuse a new writer while an old/native Codex CLI may still be active.
-        # This is a conservative process check, not B5 descendant-containment proof.
-        rc, _, _ = command(['/usr/bin/pgrep', '-f', r'(^|/)codex([ .-]|$)'], root)
-        if rc == 0:
-            raise Stop('a Codex CLI is still active; no concurrent recovery writer started')
-        if rc != 1:
-            raise Stop('could not establish absence of an active Codex CLI')
+        ensure_no_active_runner_codex(root)
     adopted = {p: h for p, h in current_untracked.items() if p in task['allowed_files']}
     for name in tracked_paths:
         path = root / name
