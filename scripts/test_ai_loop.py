@@ -412,6 +412,152 @@ class NativeResumeTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop): loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
 
 
+
+
+class StoppedFailureRecoveryTests(unittest.TestCase):
+    run_id = '20261007T183516Z-7365'
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime)
+            old = root / '.ai-loop' / self.run_id
+            old.mkdir(parents=True)
+            (root / 'source.py').write_text('candidate source\n')
+            (root / 'reports').mkdir()
+            (root / 'reports/validation.md').write_text('candidate report\n')
+            (root / 'tests').mkdir()
+            (root / 'tests/flaky.py').write_text('upstream fix\n')
+            (root / 'user.txt').write_text('preserved\n')
+            old_base, new_base, candidate, control = '1'*40, '2'*40, '3'*40, '4'*40
+            baseline = {'mode': 'implement_new_pr', 'task_id': 'fixture',
+                'branch': 'feat/fixture', 'base_sha': old_base, 'expected_head': old_base,
+                'max_repairs': 4, 'allowed_files': ['source.py', 'reports/validation.md'],
+                'full_tests': [['full']], 'failure_triage': {
+                    'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}}
+            tested = {p: loop.digest(root/p) for p in baseline['allowed_files']}
+            loop.save_json(old/'task.json', baseline)
+            (old/'task.md').write_text('original requirements\n')
+            loop.save_json(old/'provenance.json', {'root': str(root), 'run_id': self.run_id,
+                'base': old_base, 'control_sha': control})
+            loop.save_json(old/'summary.json', {'status': 'STOPPED', 'branch': baseline['branch'],
+                'head': candidate, 'history': [{'round': 2, 'head': candidate,
+                    'final_full': {'status': 'FAIL'}}]})
+            failure = {'run_id': self.run_id, 'task_id': baseline['task_id'], 'round': 2,
+                'phase': 'full-final', 'head': candidate, 'status': 'FAIL', 'gate_waived': False,
+                'source_sha256': tested}
+            loop.save_json(old/'failure-2.json', failure)
+            mac = {'platform': 'darwin', 'failure': {'owned_processes': [],
+                'fixture_cleanup': {'status': 'RESOLVED', 'original_owned_processes': [{
+                    'pid': 90, 'host_identity': {'pid': 90}, 'supervisor': {'pid': 91}, 'members': []}]}}}
+            loop.save_json(old/'mac-containment-1.json', mac)
+            task = copy.deepcopy(baseline)
+            task.update(base_sha=new_base, expected_head=new_base)
+            task['stopped_failure_recovery'] = {
+                'run_id': self.run_id, 'control_sha': control, 'expected_head': candidate,
+                'old_base_sha': old_base, 'summary_sha256': loop.digest(old/'summary.json'),
+                'failure_round': 2, 'failure_evidence_sha256': loop.digest(old/'failure-2.json'),
+                'failure_phase': 'full-final', 'classification_rejection': 'SUMMARY_TOO_LONG',
+                'mac_evidence_sha256': loop.digest(old/'mac-containment-1.json'),
+                'upstream_paths': ['tests/flaky.py']}
+            inventory = {'user.txt': loop.digest(root/'user.txt')}
+
+            def fake_git(cwd, *args):
+                if args == ('branch', '--show-current'): return task['branch']
+                if args == ('rev-parse', 'HEAD'): return candidate
+                if args == ('diff', '--cached', '--name-only'): return ''
+                if args == ('diff', '--name-only', '-z', old_base, candidate):
+                    return 'source.py\0reports/validation.md\0'
+                if args == ('diff', '--name-only', '-z', old_base, new_base):
+                    return 'tests/flaky.py\0'
+                raise AssertionError(args)
+
+            stack.enter_context(patch.object(loop, 'load_task', return_value=(baseline, 'original requirements')))
+            stack.enter_context(patch.object(loop, 'git', side_effect=fake_git))
+            stack.enter_context(patch.object(loop, 'run', side_effect=['[]', '']))
+            stack.enter_context(patch.object(loop, 'command', return_value=(0, '', '')))
+            stack.enter_context(patch.object(loop, 'classification_rejection', return_value={
+                'head': candidate, 'evidence_sha256': task['stopped_failure_recovery']['failure_evidence_sha256'],
+                'reason_codes': ['SUMMARY_TOO_LONG'], 'recovery_authorized': False}))
+            stack.enter_context(patch.object(loop, 'ensure_probe_inventory_absent'))
+            stack.enter_context(patch.object(loop, 'ensure_no_active_runner_codex'))
+            yield root, old, task, inventory
+
+    def test_exact_stopped_failure_allows_validate_first_recovery(self):
+        with self.fixture() as (root, old, task, inventory):
+            original, recovery = loop.prepare_stopped_failure_resume(
+                root, task, self.run_id, inventory)
+            self.assertEqual(original, inventory)
+            self.assertEqual(recovery['kind'], 'stopped_failure')
+            self.assertTrue(recovery['validate_first'])
+            self.assertEqual(recovery['old_base_sha'], '1'*40)
+            self.assertEqual(recovery['upstream_base_sha'], '2'*40)
+            self.assertEqual(recovery['upstream_paths'], ['tests/flaky.py'])
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+
+    def test_wrong_rejection_or_upstream_paths_stop(self):
+        for fault in ('rejection', 'upstream'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory):
+                if fault == 'rejection':
+                    task['stopped_failure_recovery']['classification_rejection'] = 'OTHER'
+                else:
+                    task['stopped_failure_recovery']['upstream_paths'] = ['tests/other.py']
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
+
+    def test_changed_candidate_or_failure_evidence_stops(self):
+        for fault in ('source', 'failure'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory):
+                if fault == 'source':
+                    (root/'source.py').write_text('changed')
+                else:
+                    row = json.loads((old/'failure-2.json').read_text())
+                    row['phase'] = 'related'
+                    loop.save_json(old/'failure-2.json', row)
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
+
+    def test_integrate_recovery_base_creates_two_parent_merge_without_changing_candidate(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=root, check=True)
+            subprocess.run(['git', 'config', 'user.email', 'fixture@example.invalid'], cwd=root, check=True)
+            subprocess.run(['git', 'config', 'user.name', 'Fixture'], cwd=root, check=True)
+            (root/'tests').mkdir()
+            (root/'source.py').write_text('base\n')
+            (root/'tests/flaky.py').write_text('old\n')
+            subprocess.run(['git', 'add', '.'], cwd=root, check=True)
+            subprocess.run(['git', 'commit', '-qm', 'base'], cwd=root, check=True)
+            old_base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+            subprocess.run(['git', 'switch', '-qc', 'feat/fixture'], cwd=root, check=True)
+            (root/'source.py').write_text('candidate\n')
+            subprocess.run(['git', 'add', 'source.py'], cwd=root, check=True)
+            subprocess.run(['git', 'commit', '-qm', 'candidate'], cwd=root, check=True)
+            candidate = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+            source_hash = loop.digest(root/'source.py')
+            subprocess.run(['git', 'switch', '-q', 'main'], cwd=root, check=True)
+            (root/'tests/flaky.py').write_text('fixed\n')
+            subprocess.run(['git', 'add', 'tests/flaky.py'], cwd=root, check=True)
+            subprocess.run(['git', 'commit', '-qm', 'upstream'], cwd=root, check=True)
+            new_base = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
+            subprocess.run(['git', 'switch', '-q', 'feat/fixture'], cwd=root, check=True)
+            logs = root/'.ai-loop/new'
+            logs.mkdir(parents=True)
+            recovery = {'kind': 'stopped_failure', 'starting_head': candidate,
+                'partial_files': {'source.py': source_hash},
+                'upstream_paths': ['tests/flaky.py']}
+            task = {'base_sha': new_base, 'allowed_files': ['source.py']}
+            head = loop.integrate_recovery_base(root, task, logs, recovery)
+            parents = subprocess.check_output(
+                ['git', 'rev-list', '--parents', '-n', '1', head], cwd=root, text=True).split()
+            self.assertEqual(set(parents[1:]), {candidate, new_base})
+            self.assertEqual((root/'source.py').read_text(), 'candidate\n')
+            self.assertEqual((root/'tests/flaky.py').read_text(), 'fixed\n')
+            self.assertEqual(loop.git(root, 'diff', '--name-only', new_base, head), 'source.py')
+            self.assertEqual(json.loads((logs/'recovery.json').read_text())['integrated_head'], head)
+
+
+
 class DiagnosticsExportTests(unittest.TestCase):
     def test_visible_zip_contains_curated_evidence_and_source_but_no_provider_streams(self):
         import zipfile
