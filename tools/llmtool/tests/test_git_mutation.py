@@ -195,15 +195,30 @@ class GitPreflightTests(unittest.TestCase):
 
     def test_production_import_boundary(self):
         package = Path(__file__).resolve().parents[1]/'llmtool'
+        reviewed_private = {'_git_containment.py', '_git_supervisor.py',
+                            '_git_containment_protocol.py', '_git_process_identity.py',
+                            '_git_containment_child.py'}
+        private_markers = tuple(name[:-3] for name in reviewed_private)
         for filename in package.rglob('*.py'):
             if filename.name == 'git_mutation.py':
                 continue
-            for node in ast.walk(ast.parse(filename.read_text())):
+            text = filename.read_text()
+            # Only these root-level reviewed helpers may reference each other.
+            # Original mutation-import rejection applies to them as well.
+            public = not (filename.parent == package and filename.name in reviewed_private)
+            if public:
+                self.assertNotIn('git_mutation', text, filename)
+                for marker in private_markers:
+                    self.assertNotIn(marker, text, filename)
+            for node in ast.walk(ast.parse(text)):
                 if isinstance(node, ast.Import):
                     self.assertFalse(any('git_mutation' in n.name for n in node.names), filename)
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn('git_mutation', node.module or '', filename)
                     self.assertFalse(any(n.name == 'git_mutation' for n in node.names), filename)
+                if public and isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    for marker in ('git_mutation',) + private_markers:
+                        self.assertNotIn(marker, node.value, filename)
 
     def test_scope_and_approval_boundary(self):
         action = self.action()
