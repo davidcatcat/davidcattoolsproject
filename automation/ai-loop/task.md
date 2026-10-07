@@ -1,3 +1,125 @@
+# A11b.2.2.1 — bounded repair of Darwin zombie lookup
+
+## CURRENT invocation and authorization — assessed second native failure
+
+David supplied the second native diagnostic ZIP and requested the next step. The
+coordinator assessed a concrete API-use defect below. This authorizes ONE
+continuation of run `20261007T153635Z-87533` at committed candidate
+`325bde3fe74c5f998ccf1dd046487c0900716224`, on the existing unpublished branch
+`feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+Pinned main/base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T153635Z-87533
+```
+
+This CURRENT section supersedes EVERY historical startup/recovery invocation below,
+including the already-used recovery from run 77009. Keep the native-pinned task ID.
+Do not create/switch a branch, reset, stash, discard files or rewrite history. The
+runner checks the old contract at control
+`9c8b36d01dd0edb1233cc0fcc1be8c8b62cf006f`, exact stopped HEAD, tracked/index
+cleanliness, failure/source hashes and no published feature branch/PR. It preserves
+current unrelated untracked artifacts and snapshots all ten candidate files before
+Codex. Read `recovery.json`, `recovery-evidence/` and the copied
+`coordinator-assessment.md` first. The assessment's control-branch source is
+`reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md`;
+its latest second-failure section governs this recovery.
+
+The read-only stale-probe check remains required. Snapshot PIDs 95817/95818 do not
+prove current ownership and do not authorize signals. If retained processes remain,
+inspect fresh state/full host path/parent-child relation for coordinator-directed
+operator cleanup of the confirmed stuck fake-test parent only. No reboot requirement,
+blind remembered-PID/PGID kill or zombie signal. A failed preflight consumes no
+recovery. Operator fixture cleanup is not containment PASS.
+
+## CURRENT evidence and repair contract
+
+The captured ten source/test/report hashes match the stopped summary, and all nine
+runtime source/test hashes match the native JSON. Related checks, preliminary
+Claude review and both full Python checks passed on this candidate. Native
+`fd_inheritance` passed; ordinary SIGINT failed and the twelve later scenarios
+were NOT RUN. All those results are historical evidence for these exact bytes.
+
+The new traceback establishes:
+`Anchor.kill_group -> verify -> identity -> _info` fails at the FIRST
+`PROC_PIDTBSDINFO` query with `IdentityUnknown: kernel identity unavailable`.
+It does not reach `os.getsid` or the new ESRCH-owned-zombie fallback.
+The host retained `primary=interrupted`, signal 2, separate status EOF evidence,
+and unresolved ownership. Diagnostic retention now works and must be preserved.
+
+The candidate passes `arg=0` to EVERY `proc_pidinfo` flavor. Apple XNU
+`xnu-11417.140.69/bsd/kern/proc_info.c` enables zombie lookup for
+`PROC_PIDTBSDINFO` only when `arg` is nonzero, then calls
+`proc_find_zombref` if ordinary lookup fails:
+https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/proc_info.c
+
+This is a demonstrated API-use defect in a path that requires zombie evidence.
+The old formatter discarded the API return length and errno, so do not claim that
+the supplied JSON measured ESRCH, proved zombie state, or demonstrated final
+containment. A corrected native run must establish those facts.
+
+1. **Repair the actual libproc boundary.** Use an explicit reviewed zombie-capable
+   BSD query with nonzero arg for `PROC_PIDTBSDINFO`. Review every flavor-3
+   caller needed for live/zombie transition, owned-anchor verification, race,
+   probe cleanup and native kqueue evidence. Do not set nonzero arg blindly for
+   other flavors: the native thread-count/task query must retain its proper
+   flavor-specific argument. An explicit helper/keyword or documented per-flavor
+   policy is acceptable within the existing file allowlist.
+2. **Keep identity proof strict.** Ordinary live identity still needs real SID and
+   stable fresh kernel rows. Any owned-zombie special handling still requires the
+   direct unreaped Popen child, PID=PGID=SID launch anchor, UID/PPID/start-time
+   identity, two fresh SZOMB rows, host/no-reaper premise and ownership recheck
+   BEFORE group signaling/reaping. Keep mismatch/reuse/race/permission/missing-row
+   failures closed. Do not catch every IdentityUnknown as a valid zombie, convert
+   ESRCH into PASS, use tpgid as SID, or signal a remembered numeric group.
+3. **Retain bounded API failure evidence.** Clear ctypes errno before the call and
+   capture its actual returned byte count/errno immediately. Record requested
+   size, flavor and arg through the reviewed bounded formatter as needed, without
+   environment, credentials, arbitrary argv or raw provider output. A short/zero
+   result must remain a failure; adding diagnostics must not hide primary errors.
+4. **Add regression tests at the C-call boundary.** Existing tests mocked `_info`
+   or `identity` and therefore missed the arg=0 bug. Mock the libproc callable
+   itself and assert actual flavor/arg/size, including zombie-capable BSD and
+   unchanged task arguments. Exercise the initial BSD-read-before-SID ordering,
+   live-to-zombie transition and two-row owned-zombie proof. Cover short/zero
+   returns, errno/permission failures, mismatched/reused start identity, missing
+   rows and a reap race; rejection must never signal an unrelated group.
+   Native zombie/kqueue evidence must use the real repaired libproc path.
+5. **Preserve the original scope and all acceptance gates.** No actual Git ADD,
+   user index mutation, public CLI/model path, approval issuer, rollback/retry/
+   lock deletion, new milestone, alternate checkout or A11b.2.2.2. No weakening
+   F1 ownership retention, non-reaping order, deadlines, single-thread premise,
+   code binding or identity continuity. If the API correction reveals a new
+   design BLOCKER/HIGH or cannot safely prove continuity, return NEEDS_DECISION/
+   NOT SUPPORTED. Do not speculate a workaround into PASS.
+6. **Append truthful validation evidence.** Keep both original native SIGINT
+   failures (77009 and 87533) permanently labeled FAIL and historical full/review
+   evidence tied to its tested bytes. Record this API defect and new regression
+   coverage. New full/native/security results remain PENDING until actual runner
+   evidence exists. No old PASS is inherited for changed bytes.
+
+At most TWO Codex repair calls in this continuation, including the first call.
+Codex edits only the ten existing allowed files. The outer runner owns tests and
+Git; no suites/native probes/Git writes/global installs inside Codex. PASS means
+a prepared repair candidate, not native acceptance or security approval.
+
+At least one source/test byte must change before tests/probes; unchanged or
+report-only candidates cannot trigger a blind retry. The runner reruns related
+checks, independent read-only Claude review, both full Python suites and ALL
+fourteen Mac scenarios, including both >=20 parent-SIGKILL variants and <=2s
+disappearance. Another mandatory native failure stops immediately for assessment,
+without automatic repair/probe retry. The visible diagnostic ZIP remains available.
+Only after every required gate passes may the same branch publish one Draft PR,
+wait for exact-HEAD CI and stop at READY_FOR_FINAL_REVIEW. Coordinator and
+independent security acceptance remain pending; never merge or begin 2.2.2.
+
+## HISTORICAL first native-failure recovery — evidence only
+
+The following current/recovery labels belonged to the previous control revision.
+Their invocation and root-cause uncertainty statements are historical, superseded
+by the CURRENT section above. Preserve their evidence and original acceptance scope.
+
 # A11b.2.2.1 — bounded recovery after native SIGINT failure
 
 ## Current invocation and authorization — 2026-10-07
