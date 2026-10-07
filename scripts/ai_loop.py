@@ -164,7 +164,7 @@ def load_task(root, control_sha):
                 'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
-                'pr_title', 'acceptance_report', 'publish_decision_checkpoint'}
+                'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -222,6 +222,13 @@ def load_task(root, control_sha):
             raise Stop('invalid Mac evidence gate')
         if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
             raise Stop('Mac containment task must retain full local checks and report')
+    if 'initial_quota_recovery' in metadata:
+        recovery = metadata['initial_quota_recovery']
+        if (metadata['mode'] != 'implement_new_pr' or not isinstance(recovery, dict)
+                or set(recovery) != {'run_id', 'control_sha'}
+                or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
+                or not re.fullmatch(r'[0-9a-f]{40}', recovery.get('control_sha', ''))):
+            raise Stop('invalid initial quota recovery contract')
     return metadata, text
 
 
@@ -485,6 +492,95 @@ def prepare_new_branch(root, task, check_only=False):
             raise Stop('new branch did not reach pinned main')
 
 
+def prepare_quota_resume(root, task, run_id, current_untracked):
+    """Explicit recovery of one pinned, unpublished initial Codex quota failure."""
+    policy = task.get('initial_quota_recovery')
+    if not policy or run_id != policy['run_id']:
+        raise Stop('resume run is not authorized by the current task contract')
+    if (git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != task['base_sha']):
+        raise Stop('resume requires the existing task branch at its pinned base')
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('resume branch already has a PR; publication recovery is separate')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('resume branch is already published; files preserved')
+    old_logs = root / '.ai-loop' / run_id
+    def read_record(name):
+        path = old_logs / name
+        if any(p.is_symlink() for p in (root / '.ai-loop', old_logs, path)) or not path.is_file():
+            raise Stop('resume evidence is missing or a symlink: ' + name)
+        if path.stat().st_size > 1024 * 1024:
+            raise Stop('resume JSON/text record exceeds its bound')
+        return path.read_text(encoding='utf-8')
+    old_task, old_text = load_task(root, policy['control_sha'])
+    current_contract = {k: v for k, v in task.items() if k != 'initial_quota_recovery'}
+    if (old_task != current_contract or json.loads(read_record('task.json')) != old_task
+            or read_record('task.md').strip() != old_text.strip()):
+        raise Stop('resume contract differs from the pinned interrupted task')
+    provenance = json.loads(read_record('provenance.json'))
+    summary = json.loads(read_record('summary.json'))
+    if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
+            or provenance.get('control_sha') != policy['control_sha']
+            or provenance.get('base') != task['base_sha']
+            or summary.get('branch') != task['branch'] or summary.get('head') != task['base_sha']
+            or summary.get('status') != 'STOPPED' or summary.get('history') != []
+            or summary.get('decision_checkpoint') is not None
+            or summary.get('reason') != 'command failed (exit 1): codex; see local logs'):
+        raise Stop('resume is limited to initial Codex exit 1 before tests/commits')
+    stderr = old_logs / 'codex-0.stderr.log'
+    if stderr.is_symlink() or not stderr.is_file():
+        raise Stop('resume quota evidence is missing/unsafe')
+    with stderr.open('rb') as stream:
+        stream.seek(max(0, stderr.stat().st_size - 16384))
+        tail = stream.read(16384).decode('utf-8', 'replace')
+    if 'ERROR: You’ve hit your usage limit.' not in tail:
+        raise Stop('resume needs the recorded Codex usage-limit error')
+    adopted = {p: h for p, h in current_untracked.items() if p in task['allowed_files']}
+    if not adopted:
+        raise Stop('no partial task files to resume')
+    total = 0
+    for name in adopted:
+        path = root / name
+        if any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file():
+            raise Stop('partial task path is missing/unsafe: ' + name)
+        total += path.stat().st_size
+        if path.stat().st_size > 2 * 1024 * 1024 or total > 16 * 1024 * 1024:
+            raise Stop('partial task files exceed recovery snapshot bounds')
+    # Older runner did not save an initial unrelated-file inventory. Bind and
+    # preserve the current unrelated bytes, without claiming historical integrity.
+    original = {p: h for p, h in current_untracked.items() if p not in adopted}
+    return original, {'from_run': run_id, 'old_control_sha': policy['control_sha'],
+        'partial_files': adopted, 'preserved_untracked': original,
+        'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE'}
+
+
+def snapshot_recovery(root, logs, recovery):
+    """Retain the partial candidate before another provider can change it."""
+    for name, expected in recovery['partial_files'].items():
+        source = root / name
+        if any(p.is_symlink() for p in (source, *source.parents)) or not source.is_file():
+            raise Stop('partial task path changed before recovery snapshot')
+        data = source.read_bytes()
+        if source.is_symlink() or hashlib.sha256(data).hexdigest() != expected:
+            raise Stop('partial task changed before recovery snapshot')
+        target = logs / 'recovery-inputs' / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open('xb') as output:
+            output.write(data)
+    save_json(logs / 'recovery.json', recovery)
+
+
+def claim_quota_resume(state, recovery, run_id, control_sha):
+    """A recovery authorization is one-use, even if the next provider stops."""
+    marker = state / ('resume-' + recovery['from_run'] + '.json')
+    try:
+        with marker.open('x', encoding='utf-8') as output:
+            json.dump({'from_run': recovery['from_run'], 'new_run': run_id,
+                       'control_sha': control_sha}, output, indent=2)
+    except FileExistsError:
+        raise Stop('this quota recovery was already attempted; coordinator recovery required')
+
+
 def create_draft_pr(root, task, logs, publication_head, report_rel):
     if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
         raise Stop('base changed before PR creation')
@@ -605,6 +701,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
+    parser.add_argument('--resume', metavar='RUN_ID', help='resume a contract-authorized initial Codex quota stop')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -612,7 +709,7 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
-    if args.install_launcher and (args.check or args.test_mode):
+    if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
     if Path.cwd().resolve() != root or git(root, 'rev-parse', '--show-toplevel') != str(root):
@@ -651,6 +748,12 @@ def main():
         if git(root, 'diff', '--name-only', 'HEAD') or git(root, 'diff', '--cached', '--name-only'):
             raise Stop('tracked work is dirty; existing files preserved')
         original = untracked(root)
+        recovery = None
+        if args.resume:
+            original, recovery = prepare_quota_resume(root, task, args.resume, original)
+            marker = state / ('resume-' + recovery['from_run'] + '.json')
+            if marker.exists() or marker.is_symlink():
+                raise Stop('this quota recovery was already attempted; coordinator recovery required')
         collision = set(original).intersection(task['allowed_files'])
         if collision:
             raise Stop('untracked task-file collision; existing files preserved')
@@ -660,7 +763,9 @@ def main():
             return
         branch, head = git(root, 'branch', '--show-current'), git(root, 'rev-parse', 'HEAD')
         pr_info = None
-        if new_task:
+        if recovery:
+            print('[Resume] Preserving partial candidate from ' + args.resume + '; all validation runs afresh.', flush=True)
+        elif new_task:
             prepare_new_branch(root, task, check_only=args.check)
         else:
             pr_info = read_pr(root, task, task['expected_head'])
@@ -682,6 +787,8 @@ def main():
             f.write('\n/.ai-loop/\n')
         (logs / 'task.md').write_text(text + '\n', encoding='utf-8')
         save_json(logs / 'task.json', task)
+        if recovery:
+            snapshot_recovery(root, logs, recovery)
         save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
@@ -690,6 +797,9 @@ def main():
             'system_python': run(['/usr/bin/python3', '--version'], root)})
         branch = task['branch']
         head = git(root, 'rev-parse', 'HEAD')
+        if recovery:
+            check_scope(root, task, original, branch, head)
+            claim_quota_resume(state, recovery, run_id, args.control_sha)
         prompt = (('Implement the newly authorized task, then repair only within its scope. ' if new_task
                    else 'Repair only the existing PR implementation within this task. ')
                   + 'Read AGENTS.md and skills/implement-feature/SKILL.md. '
@@ -701,7 +811,12 @@ def main():
                   'Your summary will be committed to Git: do not include secrets, tokens, raw provider output or private logs. '
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
-        repair_reason = 'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None
+        repair_reason = ('Continue the existing partial implementation after a quota interruption. '
+                         'Read the existing allowed files before editing; do not restart from scratch. '
+                         'Preserve historical report evidence and label all current gates pending. '
+                         'No previous tests/review are inherited. Recovery input hashes and retained copies: '
+                         + str(logs / 'recovery.json')) if recovery else (
+                         'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None)
         full_tested_bytes = None
         mandatory_tested_bytes = None
         mac = None

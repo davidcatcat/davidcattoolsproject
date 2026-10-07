@@ -154,3 +154,32 @@ The current run already stopped using the older runner. Its report was imported 
 The first A11b.2.2.1 Mac run stopped before implementation on the F3 process-group continuity question. The coordinator accepted that stop and issued a recovery contract. The old local branch `feat/llmtool-a11b2-2-1-containment-20261007` and its local decision report are preserved as checkpoint evidence; do not delete/reset/reuse them. The current task uses the fresh branch `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007` from the same pinned main.
 
 The accepted F3 topology uses the supervisor itself as the owned process-group anchor: supervisor starts a new session (`PID=PGID=SID`), fake children stay in that group, and the parent never reaps its owned supervisor before the group-cleanup decision. This removes the snapshot-only PGID reuse gap while keeping the task inside A11b.2.2.1. Mandatory Mac probes, both Python full suites and later independent security review remain unchanged. Real product Git ADD and A11b.2.2.2 remain prohibited.
+
+
+## Continue the initial Codex quota stop — 2026-10-07
+
+The explicit recovery contract accepts only run `20261007T075141Z-70725` on the
+unpublished A11b.2.2.1 F3 recovery branch at the pinned base. From the canonical Mac:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T075141Z-70725
+```
+
+The installed launcher fetches the new runner/contract; no launcher replacement is
+needed. `--resume RUN_ID --check` performs recovery preflight only. Plain invocation
+still stops on partial-file collisions. The runner verifies the old Git-pinned
+contract, saved provenance/STOPPED summary and quota error; it rejects any published
+branch/PR or changed base/HEAD. Only initial Codex exit 1 before tests/commits is
+supported, not arbitrary errors or post-publication recovery.
+
+Before another model call, allowed partial files are copied into the new local run's
+`recovery-inputs/` and hashes recorded in `recovery.json`. Existing old logs remain.
+Current unrelated untracked files are fingerprinted and protected. Historical
+unrelated integrity is UNVERIFIED because the old runner did not record its original
+inventory. No old test/review results are reused. Codex continues the candidate,
+then the same bounded tests/Claude/full-suite/native-Mac/Draft-PR/CI gates run.
+A second interruption stops; this is not an automatic retry or session-resume service.
+
+A one-use recovery claim is recorded before Codex starts. Repeating this recovery
+after another stop is rejected; do not delete its marker to bypass the guard.

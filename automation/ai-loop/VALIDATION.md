@@ -155,3 +155,22 @@ now use the repo-local command and distinguish install-only from actual executio
 No remote Mac executor is connected. Installation on David's Mac is NOT RUN here;
 he must execute the one install-only command. F3 design resolution, task recovery,
 actual containment gates and independent review remain pending.
+
+
+## Initial quota recovery helper validation — 2026-10-07
+
+- Parent control revision: `523c30afa16384152d3a1c2bd0a03cd2020a8fdf`.
+- Standalone helper authoring only; no project checkout, application tests, real
+  Mac execution, provider calls, Git mutation by llmtool or native containment evidence.
+- Added contract-authorized `--resume RUN_ID` limited to the initial Codex quota
+  interruption, with exact task/base/branch/provenance checks and unpublished
+  branch/PR guards. Allowed partial candidate gets retained copies and hashes;
+  unrelated current untracked bytes remain protected. No previous PASS is inherited.
+- `python scripts/test_ai_loop.py` on the standalone helper files: PASS, 89 fixture
+  tests. Includes existing 76 plus 13 recovery adoption/snapshots, wrong run, branch/head
+  drift, published branch/PR, altered contracts/provenance, non-quota/decision/test
+  stop, symlinks, size limits, concurrent candidate edit, one-use claim and full mocked pipeline.
+- Mocked pipeline confirms continuation keeps all final full/Mac/review/CI gates
+  and creates one Draft PR without creating a duplicate feature branch.
+- Actual Mac quota recovery, application full suites, native probes and external
+  review remain NOT-TESTED/PENDING. Fixture results do not establish containment PASS.

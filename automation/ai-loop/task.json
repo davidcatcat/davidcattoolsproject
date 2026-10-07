@@ -122,5 +122,9 @@
     ]
   ],
   "mac_evidence": "mac-containment",
-  "publish_decision_checkpoint": true
+  "publish_decision_checkpoint": true,
+  "initial_quota_recovery": {
+    "run_id": "20261007T075141Z-70725",
+    "control_sha": "523c30afa16384152d3a1c2bd0a03cd2020a8fdf"
+  }
 }

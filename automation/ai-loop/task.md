@@ -291,3 +291,32 @@ fresh F3 recovery task authorized above may run; do not restart the old stopped 
 ## F3 recovery authorization — 2026-10-07
 
 The prior run `20261007T064116Z-68730` is retained only as a STOP/decision checkpoint. Its snapshot-then-killpg objection is accepted. This recovery remains the same A11b.2.2.1 milestone and may implement the supervisor-as-group-anchor topology above. The old local branch/report must remain untouched; the new recovery branch is the sole implementation branch. If actual Mac probes or review find a new BLOCKER/HIGH, stop again. Do not weaken gates, start 2.2.2, or chase LOW/NOTE findings into new sub-milestones.
+
+
+## Explicit initial quota recovery — 2026-10-07
+
+David reported that Codex usage has recovered and asked to continue. The run
+`20261007T075141Z-70725` at control `523c30afa16384152d3a1c2bd0a03cd2020a8fdf` stopped during
+initial Codex with exit 1 and the recorded usage-limit error. This authorizes only
+`bash scripts/ai-loop.sh --resume 20261007T075141Z-70725` on the existing unpublished
+F3 recovery branch at the pinned main/base. The JSON implementation scope,
+acceptance criteria, test commands, full checks, Mac probes and repair bounds
+remain identical to that interrupted contract.
+
+Retain existing allowed source/test/report files as the partial candidate. Read
+and continue them; do not restart implementation or overwrite historical evidence.
+The runner snapshots these files before Codex and preserves all current unrelated
+untracked files, including old reports, launcher, benchmarks and case directories.
+The previous runner did not save an initial unrelated-file inventory: integrity
+before this recovery is UNVERIFIED, not retrospectively asserted. No old test,
+review or containment PASS is inherited. Run all required gates on the resulting
+bytes before publication. This is a fresh bounded implementation continuation,
+not a Codex session resume, general retry service or approval bypass. Another
+quota interruption or failure stops again and requires coordinator assessment.
+
+Normal invocation still rejects task-file/branch collisions. Recovery rejects a
+changed contract, branch/base, published branch/PR, non-quota/decision/test failure,
+unsafe paths or missing provenance. Do not delete files or reset to pass a guard.
+
+A one-use recovery claim is recorded before Codex starts. Repeating this recovery
+after another stop is rejected; do not delete its marker to bypass the guard.
