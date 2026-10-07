@@ -24,7 +24,7 @@ A11b.2.2.1/.2/.3. The control branch is fetchable before PR #45 is merged.
 - `bash -n ai-loop-delivery/scripts/ai-loop.sh`: exit 0.
 - `python3 -m py_compile ai-loop-delivery/scripts/ai_loop.py`: exit 0.
 - `python3 -W error::ResourceWarning -m unittest discover -s ai-loop-delivery/scripts -p test_ai_loop.py -q`:
-  50 tests, PASS, no ResourceWarning.
+  57 tests, PASS, no ResourceWarning.
 - Task JSON parses and names the actual PR branch/head/report. Tests use
   tools/llmtool/.venv, root-discovery PYTHONPATH and the Mac system Python.
 
@@ -105,3 +105,20 @@ No application code, actual application checks, alternate checkout or live model
 was performed while authoring this helper update.
 
 Final checks also reject a publication hook that changes already-tested bytes before push.
+
+
+## Squash merge preflight repair — 2026-10-07
+
+David's first new-task launch stopped before implementation because the helper used
+ancestry alone. GitHub confirms PR #46 was squash-merged: main 585caf7 has one parent
+18365bb, while PR HEAD 91aebb has parent 687f3f9. Both commits have exact tree
+9a0021efb52576771a851dc68d293c16945ab7fe. This remote evidence does not claim a
+new local Mac inspection.
+
+The new guard accepts only normal ancestry or exact merged PR HEAD/branch/repository
+plus identical trees and merged-commit ancestry in pinned main. Seven additional
+fixtures cover normal ancestry, valid squash handoff, unpublished extra commits,
+unmerged/wrong-repo/branch/base PRs, missing merge ancestry, differing trees and
+Git ancestry errors. 57 standalone fixtures and Bash/Python syntax checks PASS.
+No project code/checks or live model calls were run. New-task Mac execution remains
+pending; the stopped preflight left files preserved and had not created its branch.

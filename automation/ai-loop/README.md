@@ -112,3 +112,12 @@ The helper's process-group timeout handling is not the future llmtool B5 supervi
 and does not claim parent-SIGKILL or full descendant containment for model CLIs.
 Authoring uses standalone helper fixtures, not an alternate project checkout. The
 new implementation/gates have not run on David's Mac yet. See VALIDATION.md.
+
+## Squash-merged branch handoff
+
+A current feature HEAD need not be an ancestor of main after a squash merge. The
+runner accepts that handoff only when its tracked tree exactly equals pinned main,
+GitHub identifies the same branch/repository and exact HEAD as a merged PR, and
+that PR's merge commit is an ancestor of pinned main. Equal content alone cannot
+approve an unpublished or empty local commit. Different trees, unmerged PRs,
+unknown merge ancestry and branch/PR collisions still stop with files preserved.

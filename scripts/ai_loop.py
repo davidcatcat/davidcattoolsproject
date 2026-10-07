@@ -344,6 +344,42 @@ def validate_mac_evidence(path, tested, python_version):
     return value
 
 
+def current_is_integrated(root, base):
+    """Accept normal ancestry or an exactly published, merged squash-equivalent tree."""
+    current = git(root, 'rev-parse', 'HEAD')
+    rc, _, _ = command(['git', 'merge-base', '--is-ancestor', current, base], root)
+    if rc == 0:
+        return True
+    if rc != 1:
+        raise Stop('could not establish current branch ancestry')
+    # Squash merges replace commit IDs. Equal trees alone must not approve local
+    # unpublished/empty commits: require the exact merged PR head and merge ancestry.
+    if git(root, 'rev-parse', current + '^{tree}') != git(root, 'rev-parse', base + '^{tree}'):
+        return False
+    branch = git(root, 'branch', '--show-current')
+    if not branch:
+        return False
+    pulls = json.loads(run(['gh', 'api', 'repos/' + IDENTITY
+        + '/pulls?state=closed&head=davidcatcat:' + branch], root))
+    for pr in pulls:
+        merge = pr.get('merge_commit_sha')
+        if (pr.get('state') != 'closed' or not pr.get('merged_at')
+                or not isinstance(merge, str) or not re.fullmatch(r'[0-9a-f]{40}', merge)
+                or pr.get('head', {}).get('sha') != current
+                or pr.get('head', {}).get('ref') != branch
+                or (pr.get('head', {}).get('repo') or {}).get('full_name') != IDENTITY
+                or pr.get('base', {}).get('ref') != 'main'
+                or (pr.get('base', {}).get('repo') or {}).get('full_name') != IDENTITY):
+            continue
+        rc, _, _ = command(['git', 'merge-base', '--is-ancestor', merge, base], root)
+        if rc == 0:
+            print('[Preflight] Current HEAD matches a merged PR and the pinned main tree (squash merge).', flush=True)
+            return True
+        if rc != 1:
+            raise Stop('could not verify the merged PR commit in pinned main')
+    return False
+
+
 def prepare_new_branch(root, task, check_only=False):
     """One fresh branch from pinned main; collisions/unpublished work stop."""
     if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
@@ -355,7 +391,7 @@ def prepare_new_branch(root, task, check_only=False):
         raise Stop('new task local branch already exists; files preserved for recovery')
     if rc != 1:
         raise Stop('could not establish local branch absence')
-    if command(['git', 'merge-base', '--is-ancestor', git(root, 'rev-parse', 'HEAD'), task['base_sha']], root)[0]:
+    if not current_is_integrated(root, task['base_sha']):
         raise Stop('current branch has unrelated/unpublished commits; files preserved')
     if not check_only:
         git(root, 'switch', '--no-overwrite-ignore', '-c', task['branch'], 'origin/main')

@@ -18,7 +18,7 @@ main is `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
   acceptance are pending; never merge or begin A11b.2.2.2 automatically.
 
 The runner fetches main, checks exact base, clean tracked/index state, preserved
-unrelated untracked artifacts, branch/PR absence and current-HEAD ancestry, then
+unrelated untracked artifacts, branch/PR absence and current-HEAD integration, then
 creates the fresh branch from origin/main. A moved base, branch collision or local
 unpublished/divergent work stops without reset, stash, force-push or deletion.
 No worktree, clone or alternate checkout, including /private/tmp project checkouts.
@@ -246,3 +246,9 @@ No formal security PASS or merge approval is implied. Keep raw prompts/test/mode
 streams local in .ai-loop/<run-id>; curated evidence alone goes to Git. Provider auth,
 quota, CLI, stale state, invalid structured output, missing files or exhausted repair
 bounds stop with work preserved and require coordinator recovery, not a blind rerun.
+
+
+Preflight permits normal ancestry or a verified squash handoff: exact merged PR
+HEAD/branch/repository, identical tracked tree to pinned main and PR merge commit
+already in pinned main. It does not reset/change the old branch or accept equal
+content as proof for unpublished commits. Existing dirty/untracked protections apply.

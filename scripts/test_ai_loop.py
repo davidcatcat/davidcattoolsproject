@@ -241,6 +241,83 @@ class MacEvidenceTests(unittest.TestCase):
                 loop.validate_mac_evidence(path, {}, '')
 
 
+class IntegratedHeadTests(unittest.TestCase):
+    base = 'b' * 40
+
+    def git_value(self, root, *args):
+        if args == ('rev-parse', 'HEAD'):
+            return HEAD
+        if args == ('branch', '--show-current'):
+            return 'feat/merged'
+        return 'c' * 40  # Identical tracked trees in the squash case.
+
+    def merged_pr(self):
+        return {'state': 'closed', 'merged_at': '2026-10-07T05:24:00Z',
+            'merge_commit_sha': 'e' * 40,
+            'head': {'sha': HEAD, 'ref': 'feat/merged', 'repo': {'full_name': loop.IDENTITY}},
+            'base': {'ref': 'main', 'repo': {'full_name': loop.IDENTITY}}}
+
+    def test_normal_ancestry_requires_no_pr_lookup(self):
+        with patch.object(loop, 'git', side_effect=self.git_value), \
+             patch.object(loop, 'command', return_value=(0, '', '')), \
+             patch.object(loop, 'run') as run:
+            self.assertTrue(loop.current_is_integrated(Path('.'), self.base))
+            run.assert_not_called()
+
+    def test_exact_merged_squash_head_with_equal_tree_is_accepted(self):
+        with patch.object(loop, 'git', side_effect=self.git_value), \
+             patch.object(loop, 'command', side_effect=[(1, '', ''), (0, '', '')]) as command, \
+             patch.object(loop, 'run', return_value=json.dumps([self.merged_pr()])):
+            self.assertTrue(loop.current_is_integrated(Path('.'), self.base))
+            self.assertEqual(command.call_args.args[0][-2:], ['e' * 40, self.base])
+
+    def test_equal_tree_does_not_accept_unpublished_extra_commit(self):
+        pr = self.merged_pr(); pr['head']['sha'] = 'd' * 40
+        with patch.object(loop, 'git', side_effect=self.git_value), \
+             patch.object(loop, 'command', return_value=(1, '', '')), \
+             patch.object(loop, 'run', return_value=json.dumps([pr])):
+            self.assertFalse(loop.current_is_integrated(Path('.'), self.base))
+
+    def test_unmerged_wrong_repo_or_wrong_branch_is_rejected(self):
+        for fault in ('unmerged', 'repo', 'branch', 'base'):
+            pr = self.merged_pr()
+            if fault == 'unmerged':
+                pr['merged_at'] = None
+            elif fault == 'repo':
+                pr['head']['repo']['full_name'] = 'other/repo'
+            elif fault == 'branch':
+                pr['head']['ref'] = 'feat/other'
+            else:
+                pr['base']['ref'] = 'release'
+            with patch.object(loop, 'git', side_effect=self.git_value), \
+                 patch.object(loop, 'command', return_value=(1, '', '')), \
+                 patch.object(loop, 'run', return_value=json.dumps([pr])):
+                self.assertFalse(loop.current_is_integrated(Path('.'), self.base))
+
+    def test_merge_commit_must_be_in_pinned_main(self):
+        with patch.object(loop, 'git', side_effect=self.git_value), \
+             patch.object(loop, 'command', side_effect=[(1, '', ''), (1, '', '')]), \
+             patch.object(loop, 'run', return_value=json.dumps([self.merged_pr()])):
+            self.assertFalse(loop.current_is_integrated(Path('.'), self.base))
+
+    def test_different_tree_stops_before_github_lookup(self):
+        def git(root, *args):
+            if args == ('rev-parse', self.base + '^{tree}'):
+                return 'different main tree'
+            return self.git_value(root, *args)
+        with patch.object(loop, 'git', side_effect=git), \
+             patch.object(loop, 'command', return_value=(1, '', '')), \
+             patch.object(loop, 'run') as run:
+            self.assertFalse(loop.current_is_integrated(Path('.'), self.base))
+            run.assert_not_called()
+
+    def test_ancestry_command_error_cannot_be_treated_as_squash(self):
+        with patch.object(loop, 'git', side_effect=self.git_value), \
+             patch.object(loop, 'command', return_value=(128, '', 'error')):
+            with self.assertRaises(loop.Stop):
+                loop.current_is_integrated(Path('.'), self.base)
+
+
 class NewBranchTests(unittest.TestCase):
     task = {'branch': 'feat/new-fixture', 'base_sha': HEAD}
 
@@ -262,9 +339,13 @@ class NewBranchTests(unittest.TestCase):
                 self.assertFalse(any(c.args[1] == 'switch' for c in git.call_args_list))
 
     def test_unpublished_commits_stop_without_switch(self):
+        def git_value(root, *args):
+            if args == ('rev-parse', 'HEAD'):
+                return 'b' * 40
+            return args[-1]
         with patch.object(loop, 'run', side_effect=['[]', '']), \
              patch.object(loop, 'command', side_effect=[(1, '', ''), (1, '', '')]), \
-             patch.object(loop, 'git', return_value=HEAD) as git:
+             patch.object(loop, 'git', side_effect=git_value) as git:
             with self.assertRaises(loop.Stop):
                 loop.prepare_new_branch(Path('.'), self.task)
             self.assertFalse(any(c.args[1] == 'switch' for c in git.call_args_list))
