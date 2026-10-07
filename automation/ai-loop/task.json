@@ -1,15 +1,43 @@
 {
-  "task_id": "A11b.2.2.0-cleanup-drift-20261007",
+  "task_id": "A11b.2.2.0-pr46-review-20261007",
+  "mode": "review_existing_pr",
+  "pr_number": 46,
+  "expected_head": "687f3f93d6d46b6d4fb5a95a7cfd1fb17170f53c",
   "base_sha": "18365bb079835f3b413dd135ea742213bb1a7724",
-  "branch": "feat/a11b2-2-0-cleanup-drift-ai-loop-20261007",
+  "branch": "feat/llmtool-a11b2-2-0-cleanup-20261007",
   "allowed_files": [
     "tools/llmtool/llmtool/git_mutation.py",
     "tools/llmtool/tests/test_git_mutation.py",
-    "reports/llmtool_a11b2_2_0_cleanup_drift_validation_20261007.md"
+    "reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md"
   ],
   "tests": [
-    [".venv/bin/python", "-m", "unittest", "discover", "-s", "tools/llmtool/tests", "-p", "test_git_mutation.py", "-v"],
-    ["make", "-C", "tools/llmtool", "check", "PYTHON=../../.venv/bin/python"]
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_git_mutation.py",
+      "-v"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=/usr/bin/python3"
+    ]
   ],
   "max_repairs": 2,
   "timeout_seconds": 1800,

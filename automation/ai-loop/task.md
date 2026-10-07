@@ -1,71 +1,82 @@
-# A11b.2.2.0 — prerequisite cleanup and drift evidence
+# PR #46 — A11b.2.2.0 independent review and bounded repair
 
-This is the next bounded implementation task selected by David's 2026-10-07
-instruction to prepare the next task and automate Codex/Claude handoff. Executing
-the launcher starts this task only. It does not authorize later slices or merge.
+## Current task
 
-## Verified prerequisite
+A11b.2.2.0 has already been implemented on PR #46. Do not repeat its implementation
+or create another feature PR. David authorized updating the handoff on 2026-10-07
+after confirming this published implementation.
 
-PR #44 is merged. The pinned main/base is
-`18365bb079835f3b413dd135ea742213bb1a7724`.
-The B5 targeted re-review was published before that merge. The launcher must fail
-closed if main advances before this contract is updated.
+- Repository: davidcatcat/davidcattoolsproject.
+- Main/base: `18365bb079835f3b413dd135ea742213bb1a7724` (PR #44 merged).
+- Existing PR: https://github.com/davidcatcat/davidcattoolsproject/pull/46.
+- Branch: `feat/llmtool-a11b2-2-0-cleanup-20261007`.
+- Starting publication HEAD: `687f3f93d6d46b6d4fb5a95a7cfd1fb17170f53c`.
+- Existing implementation SHA: `7692fa3fb49b45b49b38cc1424eaa9811fe4763f`.
+- Existing report: reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md.
+- Push and PR llmtool CI at the starting publication HEAD passed when this task
+  was prepared. New publication requires checks on its own exact HEAD.
 
-Read AGENTS.md, tools/llmtool/WORKFLOW.md, skills/implement-feature/SKILL.md,
-reports/llmtool_a11b2_1_git_preflight_independent_review_20261007.md,
-reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md (especially §18/§19),
-and reports/llmtool_a11b2_2_b5_containment_spec_targeted_rereview_20261007.md.
-Historical "documentation-only authorization" in those reports describes those
-past tasks. This task permits the prerequisite 2.2.0 changes listed below only.
+The script checks the actual open/unmerged PR state, main/base, branch identity,
+and exact starting HEAD before spending model tokens. A changed PR/base requires
+a refreshed contract. Reuse/fast-forward the existing local branch safely; never
+reset, stash, force-push or discard unrelated work.
 
-## Implement
+## Run in this order
 
-1. Inspect the existing read-only Git ADD preflight runner in
-   tools/llmtool/llmtool/git_mutation.py. Fix A11b.2.1 L1 cleanup so both
-   PermissionError and ProcessLookupError in process-group cleanup are handled.
-   Preserve the original typed failure. Use nested finally blocks so every opened
-   pipe closes even when cleanup fails. Do not change failure/CLI contracts or
-   turn an inconclusive cleanup into proof of containment.
-2. Add regression evidence for PermissionError/EPERM, ProcessLookupError,
-   original typed failure preservation, and deterministic pipe closure. Keep
-   tests tied to observable failure behavior; do not weaken existing tests.
-3. Split/rename L2 drift tests in tools/llmtool/tests/test_git_mutation.py so
-   config, info/attributes, index, and root drift each have an independent
-   single-variable test/reproducer. Keep original rejection behavior and evidence
-   coverage. Inspect the mixed
-   test_mid_query_instruction_file_index_root_and_config_drift case first.
-4. Run the targeted tests and canonical make check through the existing canonical
-   .venv. Record exact commands, exit status, environment and tested bytes/commit
-   provenance in reports/llmtool_a11b2_2_0_cleanup_drift_validation_20261007.md.
-   The outer runner repeats these tests and records the committed implementation
-   SHA. Do not invent Mac signal/runtime results not actually exercised.
+1. Run deterministic Git-preflight tests and full canonical checks on the existing
+   implementation. Use `tools/llmtool/.venv/bin/python` and Mac `/usr/bin/python3`
+   as specified in task.json, from the canonical repository. Include
+   `PYTHONPATH=tools/llmtool` for root-based targeted unittest discovery. Do not
+   assume a root `.venv` exists or silently substitute a different interpreter.
+2. Claude independently reviews the full cumulative base-to-current-HEAD diff,
+   originating L1/L2 requirements, and current deterministic test evidence. It
+   has read tools only. It does not modify files, run tests, write Git or merge.
+3. If tests and review PASS, skip Codex entirely. Preserve the existing code and
+   validation report; publish the new independent handoff report only.
+4. On a reproducible test failure or blocking finding, Codex may repair within
+   the three allowed_files in task.json. Retain the actual error/test evidence.
+   Update the validation report only to add truthful repair/verification evidence;
+   preserve historical before-fix evidence and do not present old test results as
+   validation of changed bytes. Tests are run again, the runner commits, and
+   Claude re-reviews the full cumulative diff. At most two repairs in total.
+5. Publish the dated automated review report and any tested repairs to the same
+   PR #46 branch. Wait for applicable llmtool CI runs on the exact final publication
+   HEAD. Report-only pushes may omit a push workflow due to path filters, so accept
+   the applicable PR workflow at that exact HEAD; missing/old checks are not PASS.
+   Preserve the existing PR description and append links to this new handoff.
+6. Stop at READY_FOR_FINAL_REVIEW. Final coordinator/merge decisions remain pending.
 
-## Scope and stopping point
+## Review requirements
 
-Only the three allowed_files in task.json may be edited by Codex. Keep roadmap,
-README and skills unchanged for this small code prerequisite; final state updates
-remain a separate coordinator decision after review/merge.
+Read AGENTS.md, CLAUDE.md, tools/llmtool/WORKFLOW.md,
+skills/review-change/SKILL.md, and (for repairs) skills/implement-feature/SKILL.md.
+Review the original requirements in:
 
-No supervisor implementation, fake-child containment harness, real Git ADD
-executor, public mutation CLI, approval enforcement, rollback, index.lock
-deletion, A11b.2.2.1/.2/.3, A11c or A12. Git staging/commit/push performed by the
-outer development script is ordinary repository publication; it does not enable
-llmtool Git mutation.
+- reports/llmtool_a11b2_1_git_preflight_independent_review_20261007.md.
+- reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md, especially §18/§19.
+- reports/llmtool_a11b2_2_b5_containment_spec_targeted_rereview_20261007.md.
 
-Codex edits source/tests and returns a structured implementation result. It must
-not stage, commit, push or merge. The script is the sole Git writer and publishes
-only this feature branch. Claude performs ordinary read-only review of the full
-cumulative diff and deterministic test evidence. It does not silently satisfy a
-separately required security/QA/containment gate.
+Check that PermissionError/ProcessLookupError cleanup does not replace the primary
+typed failure, resource-release failures cannot skip later pipe closure/reaping,
+and cleanup faults on otherwise successful reads cannot silently report success.
+Check single-variable config/info-attributes/index/root drift evidence and honest
+labels for compound probes. A real correctness or regression blocker needs concrete
+file/test evidence; optional naming/refactoring suggestions do not force repairs.
 
-## Acceptance
+Ordinary review does not claim B5 crash containment, formal security/QA approval,
+or Mac parent-SIGKILL/supervisor evidence. Return NEEDS_DECISION for unresolved
+architecture, scope or authorization conflicts. Structured outputs and exact
+reviewed_head are required; CLI exit zero alone is not review PASS.
 
-- New regression tests demonstrate the cleanup fixes and independently test each
-  drift category. Existing canonical checks pass without weaker expectations.
-- Independent Claude review has no unresolved blocking findings.
-- Script verifies final publication HEAD's llmtool CI, publishes a dated report
-  and opens a PR. No automatic merge or next milestone.
-- A clear bug/test failure may be repaired automatically up to two times. An
-  architecture/scope/authorization conflict, malformed output, auth/quota error,
-  unchanged implementation, stale main or unresolved blocker stops with preserved
-  local evidence. The scripts do not retry failed providers blindly.
+## Boundaries
+
+No reimplementation from main, duplicate PR, automatic merge, new milestone,
+supervisor/fake-child harness, real llmtool Git ADD, public mutation CLI, approval
+enforcement, rollback/index.lock deletion, A11b.2.2.1/.2/.3, A11c or A12. Keep
+roadmap/README/skills unchanged. The outer script owns Git; Codex must not stage,
+commit or push. Ordinary development publication does not enable product mutation.
+
+Auth/quota/CLI errors, dirty or divergent local work, stale PR/main, invalid model
+output, or exhausted repair bounds stop with files/logs preserved. No blind provider
+retry or permission bypass. This is a Mac script run, not an automatically connected
+Work execution or approval/resume service.

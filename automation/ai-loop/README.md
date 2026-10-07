@@ -2,8 +2,12 @@
 
 This is a development helper for David's current Codex CLI / Claude Code workflow,
 independent of llmtool product features. Control files live on the persistent
-`automation/ai-loop` branch; they do not need to be merged into main to be fetched.
-The coordinator updates task.md/task.json on that branch for each new task.
+`automation/ai-loop` branch; they can be fetched without merging PR #45 into main.
+The coordinator updates task.md/task.json on that branch when repo state changes.
+
+Current task: **review and, only if necessary, repair existing PR #46**. A11b.2.2.0
+is already implemented. The script does not repeat implementation, create a second
+feature PR or start 2.2.1.
 
 Download scripts/ai-loop.sh once, then run:
 
@@ -11,59 +15,75 @@ Download scripts/ai-loop.sh once, then run:
 bash ~/Downloads/ai-loop.sh
 ```
 
-The launcher selects the canonical repository automatically, uses existing Git
-authentication to fetch the control branch, pins its SHA, downloads its Python
-runner and task files, and executes the task. There is no manual task.md copy,
-Claude result copy, /import, or terminal switching. After the first invocation a
-stable launcher is also available at:
+The launcher automatically selects the canonical repository, fetches the control
+branch with existing Git authentication, pins its SHA, downloads its Python runner
+and task files, and executes the task. A previously downloaded launcher still works:
+every invocation obtains the updated runner/task. No manual task.md copy, Claude
+result copy, /import, or terminal switching is required. After the first invocation,
+a stable launcher is also available:
 
 ```sh
 bash /Users/davidsun/git/davidcataiporject/davidcattoolsproject/.git/ai-loop/run.sh
 ```
 
-Run either launcher with `--check` for preflight only. It fetches Git refs and
-checks the contract and dependencies, without calling either model or editing
-source. Existing installations/logins for git, codex, claude, gh, make, Python 3.9+
-and the project's `.venv/bin/python` are required. No API key purchase or new model
-configuration is added; the CLIs use existing local authentication/model settings.
-If authentication, quota, Git writes, tests or CI are blocked, the script stops
-instead of bypassing sandbox restrictions or inventing PASS.
+Add `--check` for preflight only. It fetches Git refs and checks the PR, task and
+local state/dependencies without switching branches, calling models or editing
+source. The normal invocation already performs preflight before paid model work;
+a separate --check run is optional.
 
-Flow: fetch pinned task → check canonical root/origin/clean tracked tree/base →
-create a bounded feature branch → Codex implementation → deterministic tests →
-runner commit → independent Claude review → up to two fixes → curated report →
-push → exact-head CI → PR → stop for final coordinator review.
+Existing installations/logins for git, codex, claude, gh, make and Python 3.9+ are
+required. This task uses `tools/llmtool/.venv/bin/python` plus Mac `/usr/bin/python3`,
+matching PR #46's local validation layout. Targeted unittest discovery sets
+`PYTHONPATH=tools/llmtool`; canonical Makefile invocations use the correct cwd-relative
+venv path. No root .venv, new API key or new model configuration is assumed.
 
-Existing untracked files are preserved and fingerprinted. No other project
-checkout is created. Run only one writer in the repository: stop interactive
-Codex/Claude work on it while this launcher runs. This is local automation, so the
-Mac must stay awake and connected; it is not a cloud service or scheduler.
+Flow: fetch pinned task → check canonical root/origin/clean tracked tree/main/PR →
+safely reuse or fast-forward the existing PR branch → deterministic tests → Claude
+review → at most two Codex repairs with tests/re-review → curated report → push the
+same branch → exact-publication-HEAD CI → append to existing PR description → stop
+for final coordinator review. Codex is not called when the existing implementation
+already passes tests/review.
+
+The task pins an expected starting PR HEAD. Closed/merged/moved PRs, changed main,
+local unpublished/divergent work, conflicting untracked files, provider/auth/quota
+errors and invalid structured output stop with files preserved. Existing local PR
+branches are reused; missing ones are created from the fetched PR branch, never
+from main. No reset, stash, force push, alternate checkout or auto-merge occurs.
+
+Existing untracked files are fingerprinted and preserved. Run only one writer in
+the canonical repository: stop interactive Codex/Claude work on it while this
+launcher runs. The Mac must remain awake, connected and logged in. This is local
+automation, not a cloud service or scheduler.
 
 Claude has only Read/Glob/Grep tools, hooks disabled, and no MCP servers. It cannot
-run tests or Git; the outer runner supplies diff/test evidence. CLI exit 0 means
-the provider completed, **not** that code passed review: the runner validates
-structured_output, findings, blocking flags and reviewed_head. Ordinary review is
-not formal security/QA sign-off. The launcher respects configured Codex workspace
-sandboxing and never uses dangerous permission bypasses.
+run tests or Git; the outer runner supplies the cumulative diff and current test
+results. CLI exit 0 means provider completion, not review PASS: structured_output,
+blocking findings and reviewed_head are validated. Ordinary review does not replace
+formal security/QA/containment gates. Codex uses workspace-write and no permission
+bypass. The runner is the sole Git writer.
 
-Raw prompts, model streams and test output stay in `.ai-loop/<run-id>/` (locally
-excluded via .git/info/exclude). Only curated reports are committed under
-reports/ai-loop; reviewers must avoid including secrets in findings. Completion
-records and bootstrap files stay in `.git/ai-loop/`. Reports distinguish the
-implementation SHA from the later report/publication SHA. CI is checked against
-the latter, with no inference from absent or old workflow runs.
+Raw prompts/model streams/test logs stay in `.ai-loop/<run-id>/`, excluded locally
+via .git/info/exclude. Only curated summaries, test argv/exit statuses, tested file
+SHA-256 and environment/version provenance are published under reports/ai-loop.
+Reviewers must keep secrets out of published summaries/findings. Completion records
+and bootstrap files stay in `.git/ai-loop/`. Reports distinguish the implementation
+SHA from the later publication SHA. CI accepts applicable push or PR llmtool runs
+on the exact latter SHA; path-filtered/missing push runs, old successful runs and
+absent checks cannot establish PASS by themselves.
 
-Rerunning a completed task is a no-op. An existing unfinished task branch causes
-a STOP with preserved work, requiring a coordinator-issued recovery task; the
-script never resets/stashes unrelated work. Timeout and Ctrl-C terminate the
-active CLI process group when its leader is still live. This convenience helper
-does not claim the parent-SIGKILL/descendant guarantees of the future llmtool B5
-supervisor and cannot keep running when the Mac is powered off.
+A completed task is a no-op on rerun. If a stopped run left local commits/edits,
+the runner preserves them and requires a coordinator-issued recovery contract;
+it does not overwrite them to resume. Timeout/Ctrl-C terminates the active CLI
+group while its leader is still live. This helper does not claim the future B5
+supervisor's parent-SIGKILL or full descendant-containment guarantees.
 
-Official interfaces used:
+This current Work thread has no connected Mac executor, installed/authenticated
+CLI pair, automatic callback or approval/resume service. Run the script on Mac;
+results are published to PR #46 for subsequent review here.
+
+Official interfaces:
 - https://learn.chatgpt.com/docs/non-interactive-mode
 - https://code.claude.com/docs/en/cli-reference
 
-Validation in this authoring environment is limited to standalone syntax and
-fixture checks. No configured project checkout, Mac CLI sessions, VPN or actual
-paid Codex/Claude loop was available here; run --check on the actual Mac first.
+Authoring checks are standalone syntax/fixture checks; actual Mac CLI compatibility,
+authentication and the live loop remain pending. See VALIDATION.md.

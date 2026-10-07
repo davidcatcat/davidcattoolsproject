@@ -159,11 +159,16 @@ def parse_claude(raw, head):
 def load_task(root, control_sha):
     metadata = json.loads(git(root, 'show', control_sha + ':' + TASK_DIR + 'task.json'))
     text = git(root, 'show', control_sha + ':' + TASK_DIR + 'task.md')
-    required = {'task_id', 'base_sha', 'branch', 'allowed_files', 'tests', 'max_repairs', 'timeout_seconds', 'ci_workflow'}
+    required = {'task_id', 'mode', 'pr_number', 'expected_head', 'base_sha', 'branch',
+                'allowed_files', 'tests', 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     if set(metadata) != required or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
         raise Stop('invalid base/branch')
+    if metadata['mode'] != 'review_existing_pr' or type(metadata['pr_number']) is not int or metadata['pr_number'] <= 0:
+        raise Stop('task must target an existing PR, not repeat implementation')
+    if not re.fullmatch(r'[0-9a-f]{40}', metadata['expected_head']):
+        raise Stop('invalid expected PR HEAD')
     git(root, 'check-ref-format', '--branch', metadata['branch'])
     if not isinstance(metadata['allowed_files'], list) or not metadata['allowed_files']:
         raise Stop('task needs explicit allowed_files')
@@ -227,11 +232,47 @@ def tests(root, logs, task, round_no):
     return all(r['exit_code'] == 0 for r in results)
 
 
+def read_pr(root, task, expected_head):
+    pr = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls/' + str(task['pr_number'])], root))
+    if (pr.get('state') != 'open' or pr.get('merged') is not False
+            or pr['base']['ref'] != 'main' or pr['base']['sha'] != task['base_sha']
+            or pr['base']['repo']['full_name'] != IDENTITY
+            or pr['head']['repo']['full_name'] != IDENTITY
+            or pr['head']['ref'] != task['branch'] or pr['head']['sha'] != expected_head):
+        raise Stop('PR state/base/branch/HEAD changed; refresh the task before continuing')
+    return pr
+
+
+def prepare_existing_branch(root, task, check_only=False):
+    """Reuse the PR branch; never recreate it from main or overwrite local commits."""
+    branch, remote = task['branch'], 'origin/' + task['branch']
+    git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/' + branch + ':refs/remotes/origin/' + branch)
+    if git(root, 'rev-parse', remote) != task['expected_head']:
+        raise Stop('remote PR branch moved since task preparation')
+    current = git(root, 'rev-parse', 'HEAD')
+    if command(['git', 'merge-base', '--is-ancestor', current, task['expected_head']], root)[0]:
+        raise Stop('current branch has unrelated/unpublished work; files preserved')
+    exists = command(['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + branch], root)[0] == 0
+    if exists:
+        local = git(root, 'rev-parse', branch)
+        if command(['git', 'merge-base', '--is-ancestor', local, task['expected_head']], root)[0]:
+            raise Stop('local PR branch has unpublished/divergent commits; files preserved')
+    if check_only:
+        return
+    if exists:
+        git(root, 'switch', '--no-overwrite-ignore', branch)
+        git(root, 'merge', '--ff-only', '--no-overwrite-ignore', remote)
+    else:
+        git(root, 'switch', '--no-overwrite-ignore', '-c', branch, remote)
+    if git(root, 'rev-parse', 'HEAD') != task['expected_head']:
+        raise Stop('checkout did not reach the pinned PR HEAD')
+
+
 def wait_ci(root, head, workflow):
     deadline = time.monotonic() + 1200
     while time.monotonic() < deadline:
         raw = run(['gh', 'run', 'list', '--repo', IDENTITY, '--commit', head,
-                   '--workflow', workflow, '--event', 'push', '--json',
+                   '--workflow', workflow, '--json',
                    'headSha,status,conclusion,url', '--limit', '10'], root)
         matches = [r for r in json.loads(raw) if r['headSha'] == head]
         if matches and all(r['status'] == 'completed' for r in matches):
@@ -268,8 +309,10 @@ def main():
         for executable in ('codex', 'claude', 'gh', 'make'):
             if not shutil.which(executable):
                 raise Stop(executable + ' is not installed/in PATH')
-        if not (root / '.venv/bin/python').is_file():
-            raise Stop('canonical .venv/bin/python is missing; use the existing llmtool environment')
+        if not (root / 'tools/llmtool/.venv/bin/python').is_file():
+            raise Stop('tools/llmtool/.venv/bin/python is missing; use the existing llmtool environment')
+        if not Path('/usr/bin/python3').is_file():
+            raise Stop('the Mac system Python required by this task is missing')
         # Git/GitHub authentication fails before spending model tokens.
         run(['gh', 'auth', 'status'], root)
         git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
@@ -286,11 +329,8 @@ def main():
             print('Already completed. ' + completed.read_text(), flush=True)
             return
         branch, head = git(root, 'branch', '--show-current'), git(root, 'rev-parse', 'HEAD')
-        existing = command(['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + task['branch']], root)[0] == 0
-        if existing:
-            raise Stop('task branch already exists; no automatic rerun/rewrite: ' + task['branch'])
-        if command(['git', 'merge-base', '--is-ancestor', head, task['base_sha']], root)[0]:
-            raise Stop('current branch has unmerged work; no automatic checkout over unrelated work')
+        pr_info = read_pr(root, task, task['expected_head'])
+        prepare_existing_branch(root, task, check_only=args.check)
         print('[Task] ' + task['task_id'] + '\n' + text, flush=True)
         if args.check:
             print('PRECHECK PASS. No models started; no source changes.', flush=True)
@@ -305,31 +345,48 @@ def main():
             f.write('\n/.ai-loop/\n')
         (logs / 'task.md').write_text(text + '\n', encoding='utf-8')
         save_json(logs / 'task.json', task)
-        save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'base': head,
+        save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
+            'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id,
-            'codex': run(['codex', '--version'], root), 'claude': run(['claude', '--version'], root)})
-        git(root, 'switch', '-c', task['branch'], task['base_sha'])
+            'codex': run(['codex', '--version'], root), 'claude': run(['claude', '--version'], root),
+            'venv_python': run(['tools/llmtool/.venv/bin/python', '--version'], root),
+            'system_python': run(['/usr/bin/python3', '--version'], root)})
         branch = task['branch']
         head = git(root, 'rev-parse', 'HEAD')
-        prompt = ('Execute exactly this task. Read AGENTS.md and skills/implement-feature/SKILL.md. '
+        prompt = ('Repair only the existing PR implementation within this task. Read AGENTS.md and skills/implement-feature/SKILL.md. '
                   'Do not stage, commit, push, merge, create worktrees, change task scope, or start another slice. '
                   'Only edit allowed_files in task.json. The outer runner owns Git and deterministic tests. '
                   'If architecture/scope/authorization is unclear, return NEEDS_DECISION. '
                   'Your summary will be committed to Git: do not include secrets, tokens, raw provider output or private logs. '
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
+        repair_reason = None
         try:
+            initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
+            if any(p and p not in task['allowed_files'] for p in initial_paths):
+                raise Stop('existing PR cumulative diff exceeds the pinned task scope')
             for round_no in range(task['max_repairs'] + 1):
-                result = codex(root, logs, prompt, round_no, task['timeout_seconds'])
-                touched = check_scope(root, task, original, branch, head)
-                if result['status'] != 'PASS':
-                    raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
+                result = None
+                if repair_reason is not None:
+                    result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
+                                   round_no, task['timeout_seconds'])
+                    check_scope(root, task, original, branch, head)
+                    if result['status'] != 'PASS':
+                        raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
+                tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
                 passed = tests(root, logs, task, round_no)
+                test_results = json.loads((logs / ('tests-%d.json' % round_no)).read_text())
                 touched = check_scope(root, task, original, branch, head)
+                after_tests = {p: digest(root / p) for p in tested_bytes if (root / p).exists()}
+                if after_tests != tested_bytes:
+                    raise Stop('tests changed the implementation bytes; provenance is invalid')
                 if not passed:
+                    history.append({'round': round_no, 'head': head, 'developer': result,
+                                    'tests': 'FAIL', 'test_results': test_results,
+                                    'review': None, 'tested_sha256': tested_bytes})
                     if round_no == task['max_repairs']:
                         raise Stop('deterministic tests still fail after repair bound')
-                    prompt += '\nRepair only the failed tests. Read local test logs under ' + str(logs)
+                    repair_reason = 'Repair only failures in the deterministic tests. Read test logs under ' + str(logs)
                     continue
                 if touched:
                     git(root, 'diff', '--check')
@@ -338,8 +395,9 @@ def main():
                     head = git(root, 'rev-parse', 'HEAD')
                 if check_scope(root, task, original, branch, head):
                     raise Stop('commit hooks left uncommitted source; tests/review provenance is unsafe')
-                if head == task['base_sha']:
-                    raise Stop('no implementation changes; task not completed')
+                committed_bytes = {p: digest(root / p) for p in tested_bytes if (root / p).exists()}
+                if committed_bytes != tested_bytes:
+                    raise Stop('commit hooks changed the tested bytes; no review PASS can be inferred')
                 patch = git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head)
                 review_prompt = ('Independently review the ENTIRE cumulative diff against task/AGENTS.md/CLAUDE.md '
                     'and skills/review-change/SKILL.md. You are read-only; tests were run by the outer runner. '
@@ -355,12 +413,14 @@ def main():
                 check_scope(root, task, original, branch, head)
                 if git(root, 'status', '--porcelain') != snapshot:
                     raise Stop('review altered source state')
-                history.append({'round': round_no, 'head': head, 'developer': result, 'review': review})
+                history.append({'round': round_no, 'head': head, 'developer': result, 'tests': 'PASS',
+                                'test_results': test_results, 'tested_sha256': tested_bytes, 'review': review})
                 if review['status'] == 'PASS':
                     break
                 if review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
                     raise Stop('Claude review needs a decision or exceeded repair bound')
-                prompt += '\nRepair only these reproducible blocking findings. Review is evidence, not permission to expand scope:\n' + json.dumps(review)
+                repair_reason = ('Repair only these reproducible blocking findings. '
+                                 'Review is evidence, not permission to expand scope:\n' + json.dumps(review))
             else:
                 raise Stop('loop ended without PASS')
             # Publish only curated results, never raw model streams or local logs.
@@ -371,25 +431,30 @@ def main():
                 raise Stop('report path collision or symlink')
             report.write_text('# AI loop: ' + task['task_id'] + '\n\n'
                 + 'Implementation/tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
+                + '- Existing PR: #' + str(task['pr_number']) + '\n- Starting PR HEAD: `' + task['expected_head'] + '`\n'
                 + '- Implementation HEAD: `' + head + '`\n- Control SHA: `' + args.control_sha + '`\n'
                 + '- Canonical Mac root: `' + str(root) + '`\n- Repair attempts used: ' + str(round_no) + '\n'
                 + '- Exact publication-head CI is checked after this report commit; inspect GitHub checks.\n'
                 + '- Raw prompts/provider output remain local in `.ai-loop/' + run_id + '/`.\n\n'
+                + '## Execution provenance\n\n```json\n' + (logs / 'provenance.json').read_text() + '```\n\n'
                 + '```json\n' + json.dumps(history, ensure_ascii=False, indent=2) + '\n```\n', encoding='utf-8')
             git(root, 'add', '--', report_rel)
             git(root, 'commit', '-m', 'docs: record ' + task['task_id'] + ' automated handoff')
             publication_head = git(root, 'rev-parse', 'HEAD')
             if check_scope(root, task, original, branch, publication_head):
                 raise Stop('publication hooks changed source; files preserved before push')
+            read_pr(root, task, task['expected_head'])
             git(root, 'push', '-u', 'origin', 'HEAD:refs/heads/' + branch)
             ci = wait_ci(root, publication_head, task['ci_workflow'])
+            pr_info = read_pr(root, task, publication_head)
             body = logs / 'pr-body.md'
-            body.write_text('Implements the bounded task in `automation/ai-loop/task.md` on control commit `'
+            body.write_text((pr_info.get('body') or '') + '\n\n## Automated independent review handoff\n\n'
+                            + 'Review/repair contract: `automation/ai-loop/task.md` on control commit `'
                             + args.control_sha + '`.\n\nCanonical Mac checks and independent ordinary Claude review passed. '
                             + 'Exact publication-head CI passed. Final coordinator review is pending; no auto-merge.\n\n'
                             + 'Report: `' + report_rel + '`\n', encoding='utf-8')
-            pr = run(['gh', 'pr', 'create', '--repo', IDENTITY, '--base', 'main', '--head', branch,
-                      '--title', 'fix(llmtool): ' + task['task_id'], '--body-file', str(body)], root)
+            run(['gh', 'pr', 'edit', str(task['pr_number']), '--repo', IDENTITY, '--body-file', str(body)], root)
+            pr = pr_info['html_url']
             summary = {'status': 'READY_FOR_FINAL_REVIEW', 'head': publication_head, 'branch': branch,
                        'report': report_rel, 'pr': pr, 'ci': ci}
             save_json(completed, summary)

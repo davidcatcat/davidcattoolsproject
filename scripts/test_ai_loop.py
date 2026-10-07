@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from contextlib import ExitStack
+import os
 
 spec = importlib.util.spec_from_file_location('ai_loop', Path(__file__).with_name('ai_loop.py'))
 loop = importlib.util.module_from_spec(spec)
@@ -140,6 +142,176 @@ class RuntimeTests(unittest.TestCase):
                  patch.object(loop.time, 'monotonic', side_effect=[0, 1201]):
                 with self.assertRaises(loop.Stop):
                     loop.wait_ci(Path('.'), HEAD, 'llmtool-ci.yml')
+
+
+class ExistingPRTests(unittest.TestCase):
+    def task(self):
+        return {'task_id': 'pr46-review', 'mode': 'review_existing_pr', 'pr_number': 46,
+                'base_sha': 'b' * 40, 'expected_head': HEAD, 'branch': 'feat/existing',
+                'allowed_files': ['source.txt'], 'tests': [['fake-test']],
+                'max_repairs': 2, 'timeout_seconds': 60, 'ci_workflow': 'llmtool-ci.yml'}
+
+    def pr(self):
+        return {'state': 'open', 'merged': False, 'base': {'ref': 'main', 'sha': 'b' * 40,
+                'repo': {'full_name': loop.IDENTITY}}, 'head': {'ref': 'feat/existing',
+                'sha': HEAD, 'repo': {'full_name': loop.IDENTITY}}, 'body': 'Original description',
+                'html_url': 'https://github.com/example/pull/46'}
+
+    def test_open_pinned_pr_is_accepted(self):
+        with patch.object(loop, 'run', return_value=json.dumps(self.pr())):
+            self.assertEqual(loop.read_pr(Path('.'), self.task(), HEAD)['head']['sha'], HEAD)
+
+    def test_closed_merged_or_moved_pr_stops(self):
+        for changed in ('state', 'merged', 'head', 'base'):
+            value = self.pr()
+            if changed == 'state':
+                value['state'] = 'closed'
+            elif changed == 'merged':
+                value['merged'] = True
+            else:
+                value[changed]['sha'] = 'c' * 40
+            with patch.object(loop, 'run', return_value=json.dumps(value)):
+                with self.assertRaises(loop.Stop):
+                    loop.read_pr(Path('.'), self.task(), HEAD)
+
+    def test_wrong_repo_or_branch_stops(self):
+        for changed in ('repo', 'ref'):
+            value = self.pr()
+            if changed == 'repo':
+                value['head']['repo']['full_name'] = 'someone/fork'
+            else:
+                value['head']['ref'] = 'feat/another'
+            with patch.object(loop, 'run', return_value=json.dumps(value)):
+                with self.assertRaises(loop.Stop):
+                    loop.read_pr(Path('.'), self.task(), HEAD)
+
+    def test_existing_branch_is_fast_forwarded_not_recreated(self):
+        with patch.object(loop, 'git', return_value=HEAD) as git, \
+             patch.object(loop, 'command', return_value=(0, '', '')):
+            loop.prepare_existing_branch(Path('.'), self.task())
+            args = [call.args[1:] for call in git.call_args_list]
+            self.assertIn(('switch', '--no-overwrite-ignore', 'feat/existing'), args)
+            self.assertIn(('merge', '--ff-only', '--no-overwrite-ignore', 'origin/feat/existing'), args)
+            self.assertFalse(any(a[0] == 'switch' and '-c' in a for a in args))
+
+    def test_precheck_does_not_switch_or_merge(self):
+        with patch.object(loop, 'git', return_value=HEAD) as git, \
+             patch.object(loop, 'command', return_value=(0, '', '')):
+            loop.prepare_existing_branch(Path('.'), self.task(), check_only=True)
+            self.assertFalse(any(call.args[1] in ('switch', 'merge') for call in git.call_args_list))
+
+    def test_remote_head_drift_stops_before_switch(self):
+        with patch.object(loop, 'git', return_value='c' * 40) as git:
+            with self.assertRaises(loop.Stop):
+                loop.prepare_existing_branch(Path('.'), self.task())
+            self.assertFalse(any(call.args[1] == 'switch' for call in git.call_args_list))
+
+    def test_divergent_local_branch_is_preserved(self):
+        with patch.object(loop, 'git', return_value=HEAD) as git, \
+             patch.object(loop, 'command', side_effect=[(0, '', ''), (0, '', ''), (1, '', '')]):
+            with self.assertRaises(loop.Stop):
+                loop.prepare_existing_branch(Path('.'), self.task())
+            self.assertFalse(any(call.args[1] in ('switch', 'reset', 'merge') for call in git.call_args_list))
+
+    def test_successful_existing_review_never_calls_codex_or_creates_pr(self):
+        self.exercise_pipeline()
+
+    def test_blocking_finding_is_repaired_then_rereviewed_on_same_pr(self):
+        self.exercise_pipeline(failures=1)
+
+    def test_two_repairs_exhausted_stops_without_publication(self):
+        self.exercise_pipeline(failures=3, should_stop=True)
+
+    def exercise_pipeline(self, failures=0, should_stop=False):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime)
+            gitdir = root / 'git-metadata-fixture'
+            (gitdir / 'info').mkdir(parents=True)
+            (root / 'tools/llmtool/.venv/bin').mkdir(parents=True)
+            (root / 'tools/llmtool/.venv/bin/python').touch()
+            (root / 'source.txt').write_text('unchanged existing implementation')
+            task = self.task()
+            current_head = [HEAD]
+            dirty = [False]
+            review_calls = [0]
+            commands = []
+
+            def fake_git(cwd, *args):
+                commands.append(args)
+                if args == ('rev-parse', '--show-toplevel'):
+                    return str(root)
+                if args == ('rev-parse', '--absolute-git-dir'):
+                    return str(gitdir)
+                if args == ('remote', 'get-url', 'origin'):
+                    return 'git@github.com:' + loop.IDENTITY + '.git'
+                if args == ('rev-parse', 'origin/main'):
+                    return task['base_sha']
+                if args == ('branch', '--show-current'):
+                    return task['branch']
+                if args == ('rev-parse', 'HEAD'):
+                    return current_head[0]
+                if args == ('rev-parse', '--git-path', 'info/exclude'):
+                    return str(gitdir / 'info/exclude')
+                if args == ('diff', '--name-only', '-z', task['base_sha'], HEAD):
+                    return 'source.txt'
+                if args[0] == 'commit':
+                    if dirty[0]:
+                        current_head[0] = 'e' * 40
+                        dirty[0] = False
+                    else:
+                        current_head[0] = 'c' * 40
+                return ''
+
+            def fake_tests(cwd, logs, metadata, round_no):
+                loop.save_json(logs / ('tests-%d.json' % round_no), [{'argv': ['fake-test'], 'exit_code': 0}])
+                return True
+
+            def fake_claude(*args):
+                review_calls[0] += 1
+                value = result('FAIL' if review_calls[0] <= failures else 'PASS')
+                value['reviewed_head'] = current_head[0]
+                if value['status'] == 'FAIL':
+                    value['findings'] = [{'severity': 'High', 'blocking': True, 'file': 'source.txt',
+                                          'detail': 'fixture regression', 'evidence': 'fixture test failure'}]
+                return value
+
+            def fake_codex(*args):
+                dirty[0] = True
+                (root / 'source.txt').write_text('bounded repair ' + str(review_calls[0]))
+                return {'status': 'PASS', 'summary': 'fixed fixture regression'}
+
+            stack.enter_context(patch.object(loop, 'REPO', root))
+            stack.enter_context(patch.object(loop, 'git', side_effect=fake_git))
+            stack.enter_context(patch.object(loop, 'load_task', return_value=(task, 'review existing PR')))
+            stack.enter_context(patch.object(loop, 'untracked', return_value={}))
+            stack.enter_context(patch.object(loop.shutil, 'which', return_value='/fake/bin'))
+            stack.enter_context(patch.object(loop, 'prepare_existing_branch'))
+            stack.enter_context(patch.object(loop, 'read_pr', return_value=self.pr()))
+            stack.enter_context(patch.object(loop, 'check_scope', side_effect=lambda *a: ['source.txt'] if dirty[0] else []))
+            stack.enter_context(patch.object(loop, 'tests', side_effect=fake_tests))
+            stack.enter_context(patch.object(loop, 'claude', side_effect=fake_claude))
+            codex = stack.enter_context(patch.object(loop, 'codex', side_effect=fake_codex))
+            runner = stack.enter_context(patch.object(loop, 'run', return_value='version fixture'))
+            stack.enter_context(patch.object(loop, 'wait_ci', return_value=[{'status': 'completed', 'conclusion': 'success'}]))
+            stack.enter_context(patch.object(sys, 'argv', ['ai_loop.py', '--control-sha', 'd' * 40]))
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                if should_stop:
+                    with self.assertRaises(loop.Stop):
+                        loop.main()
+                else:
+                    loop.main()
+            finally:
+                os.chdir(previous)
+            self.assertEqual(codex.call_count, min(failures, 2))
+            self.assertFalse(any(call.args[0][:3] == ['gh', 'pr', 'create'] for call in runner.call_args_list))
+            self.assertEqual(any(call.args[0][:3] == ['gh', 'pr', 'edit'] for call in runner.call_args_list), not should_stop)
+            self.assertEqual(any(a[:2] == ('push', '-u') for a in commands), not should_stop)
+            self.assertFalse(any(a[0] == 'switch' and '-c' in a for a in commands))
+            if not failures:
+                self.assertEqual((root / 'source.txt').read_text(), 'unchanged existing implementation')
+            self.assertEqual((gitdir / 'ai-loop/pr46-review.completed.json').is_file(), not should_stop)
 
 
 if __name__ == '__main__':
