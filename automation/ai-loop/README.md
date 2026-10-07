@@ -394,3 +394,30 @@ These are workflow descriptions plus observed time/log-size changes, not model
 completion percentages or claims about a specific live internal action. No raw
 log content or private reasoning is copied to the console. Claude can buffer its
 JSON until completion, so unchanged logs alone do not establish a hang.
+
+## Classification rejection diagnostics — 2026-10-08
+
+Failure classification remains strict: exact reviewed HEAD/evidence SHA256, allowed
+files, bounded strings/findings and decision/category agreement. The Claude request
+schema now states the existing 2000-character string and 16-finding limits and pins
+the expected HEAD/digest. The runner never truncates, rewrites a mismatched identity,
+or retries a rejected classification to turn it into an accepted repair.
+
+A rejected classification automatically publishes `round-N-rejection/rejection.json`
+with specific fixed reason codes, hashes, match booleans and string lengths. No raw
+provider output, model summaries/findings, credentials, session metadata or private
+log text is exported by this projection. Failed tests still block delivery.
+
+For an older stopped run whose terminal diagnostics are already published, run:
+
+```sh
+bash scripts/ai-loop.sh --publish-diagnostics RUN_ID
+```
+
+This preserves the original ZIP/report paths and additionally reads original local
+failure/classifier artifacts under the run's original Git-pinned contract. Only
+rejected classifications receive a separate immutable rejection batch; valid reviews
+are not relabeled. It does not invoke models/tests, signal processes, alter the
+feature branch/index, authorize recovery or reset the existing repair budget.
+Missing/unsafe/oversized provenance or changed inputs stop the upload. Identical
+publication is idempotent; a different report at the same path is never overwritten.

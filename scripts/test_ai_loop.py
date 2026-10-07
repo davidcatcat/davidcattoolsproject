@@ -2058,5 +2058,135 @@ class FailureCoordinationTests(unittest.TestCase):
             self.assertEqual(value['decision'], 'REPAIR')
 
 
+class ClassificationDiagnosticTests(unittest.TestCase):
+    def artifacts(self, logs, task, value=None, round_no=2):
+        path = logs / ('failure-%d.json' % round_no)
+        loop.save_json(path, {'run_id': logs.name, 'task_id': task['task_id'], 'round': round_no,
+            'phase': 'full-final', 'head': HEAD, 'status': 'FAIL', 'gate_waived': False,
+            'test_log_paths': ['PRIVATE_TEST_LOG'], 'evidence': {'private': 'PRIVATE_EVIDENCE'}})
+        sha = loop.digest(path)
+        if value is None:
+            value = FailureCoordinationTests().decision(HEAD, sha)
+            value['summary'] = 'PRIVATE_MODEL_TEXT' * 150
+        loop.save_json(logs / ('failure-%d-claude.raw.json' % round_no), {
+            'is_error': False, 'subtype': 'success', 'structured_output': value,
+            'result': 'PRIVATE_RESULT', 'session_id': 'PRIVATE_SESSION'})
+        return sha
+
+    def test_rejection_identifies_length_without_exporting_text(self):
+        with DiagnosticPublicationTests().fixture() as (root, logs, task):
+            sha = self.artifacts(logs, task)
+            row = loop.classification_rejection(logs, task, 2)
+            self.assertEqual(row['reason_codes'], ['SUMMARY_TOO_LONG'])
+            self.assertEqual(row['evidence_sha256'], sha)
+            self.assertTrue(row['checks']['reviewed_head_matches'])
+            self.assertTrue(row['checks']['reviewed_evidence_sha256_matches'])
+            self.assertEqual(row['checks']['summary_characters'], 2700)
+            self.assertFalse(row['gate_waived'])
+            self.assertFalse(row['recovery_authorized'])
+            self.assertNotIn('PRIVATE_', json.dumps(row))
+
+    def test_head_and_evidence_mismatch_are_separate_and_never_corrected(self):
+        value = FailureCoordinationTests().decision('f'*40, 'f'*64)
+        with DiagnosticPublicationTests().fixture() as (root, logs, task):
+            self.artifacts(logs, task, value)
+            before = (logs/'failure-2-claude.raw.json').read_bytes()
+            row = loop.classification_rejection(logs, task, 2)
+            self.assertEqual(row['reason_codes'], ['REVIEWED_HEAD_MISMATCH', 'REVIEWED_EVIDENCE_SHA256_MISMATCH'])
+            self.assertEqual(before, (logs/'failure-2-claude.raw.json').read_bytes())
+            with self.assertRaisesRegex(loop.FailureReviewError, 'REVIEWED_HEAD_MISMATCH'):
+                loop.validate_failure_review(value, task, HEAD, row['evidence_sha256'])
+
+    def test_schema_encodes_existing_limits_and_exact_review_identity(self):
+        row = loop.failure_schema(HEAD, 'a'*64)['properties']
+        self.assertEqual(row['reviewed_head']['enum'], [HEAD])
+        self.assertEqual(row['reviewed_evidence_sha256']['enum'], ['a'*64])
+        self.assertEqual(row['summary']['maxLength'], 2000)
+        self.assertEqual(row['findings']['maxItems'], 16)
+        for key in ('file', 'detail', 'evidence'):
+            self.assertEqual(row['findings']['items']['properties'][key]['maxLength'], 2000)
+        self.assertNotIn('enum', loop.failure_schema()['properties']['reviewed_head'])
+
+    def test_malformed_envelope_and_unexpected_fields_do_not_leak(self):
+        for raw in ('not JSON PRIVATE_SECRET', json.dumps({'is_error': True, 'result': 'PRIVATE_SECRET'}),
+                    json.dumps({'is_error': False, 'subtype': 'success', 'structured_output': {'private': 'PRIVATE_SECRET'}})):
+            with self.subTest(raw=raw), DiagnosticPublicationTests().fixture() as (root, logs, task):
+                self.artifacts(logs, task)
+                (logs/'failure-2-claude.raw.json').write_text(raw)
+                row = loop.classification_rejection(logs, task, 2)
+                self.assertIn(row['reason_codes'][0], ('CLAUDE_ENVELOPE_NOT_SUCCESS', 'CLASSIFICATION_SCHEMA'))
+                self.assertNotIn('PRIVATE_SECRET', json.dumps(row))
+
+    def test_valid_review_is_not_a_rejection(self):
+        with DiagnosticPublicationTests().fixture() as (root, logs, task):
+            self.artifacts(logs, task)
+            sha = loop.digest(logs/'failure-2.json')
+            value = FailureCoordinationTests().decision(HEAD, sha)
+            value['findings'][0]['file'] = 'source.py'
+            loop.save_json(logs/'failure-2-claude.raw.json', {'is_error': False, 'subtype': 'success',
+                                                           'structured_output': value})
+            self.assertIsNone(loop.classification_rejection(logs, task, 2))
+
+    def test_post_stop_upload_uses_original_contract_and_no_model_test_signal(self):
+        with DiagnosticPublicationTests().fixture() as (root, logs, task), \
+                patch.object(loop, 'publish_diagnostics') as pub, patch.object(loop, 'run') as run, \
+                patch.object(loop.os, 'kill') as kill, patch.object(loop.os, 'killpg') as killpg:
+            self.artifacts(logs, task)
+            with patch.object(loop, 'load_task', return_value=(task, 'original')) as load:
+                loop.publish_classification_rejections(root, logs)
+            load.assert_called_once_with(root, HEAD)
+            pub.assert_called_once()
+            self.assertEqual(pub.call_args.kwargs['batch'], 'round-2-rejection')
+            self.assertEqual(set(pub.call_args.kwargs['files']), {'index.md', 'rejection.json'})
+            self.assertNotIn(b'PRIVATE_', b''.join(pub.call_args.kwargs['files'].values()))
+            run.assert_not_called(); kill.assert_not_called(); killpg.assert_not_called()
+
+    def test_unsafe_oversized_wrong_contract_or_evidence_cannot_publish(self):
+        for fault in ('symlink', 'oversize', 'contract', 'run', 'active'):
+            with self.subTest(fault=fault), DiagnosticPublicationTests().fixture() as (root, logs, task), \
+                    patch.object(loop, 'publish_diagnostics') as pub:
+                self.artifacts(logs, task)
+                path = logs/'failure-2-claude.raw.json'
+                if fault == 'symlink':
+                    path.unlink(); path.symlink_to(logs/'codex-0.stderr.log')
+                elif fault == 'oversize': path.write_bytes(b'x' * (2*1024*1024+1))
+                elif fault == 'contract': loop.save_json(logs/'task.json', {'task_id': 'wrong'})
+                elif fault == 'run':
+                    row = json.loads((logs/'failure-2.json').read_text()); row['run_id'] = 'wrong'
+                    loop.save_json(logs/'failure-2.json', row)
+                else: loop.save_json(logs/'summary.json', {'status': 'RUNNING'})
+                with self.assertRaises(loop.Stop): loop.publish_classification_rejections(root, logs)
+                pub.assert_not_called()
+
+    def test_rejection_batch_is_immutable_and_idempotent(self):
+        helper = DiagnosticPublicationTests()
+        with helper.fixture() as (root, logs, task):
+            files = {'index.md': b'# Rejection\n', 'rejection.json': b'{"gate_waived": false}\n'}
+            state, api = helper.fake_api(root, logs, files=files, batch='round-2-rejection')
+            with patch.object(loop, 'diagnostic_api', side_effect=api):
+                loop.publish_diagnostics(root, logs, files=files, batch='round-2-rejection')
+                count = sum(call[0] != 'GET' for call in state['calls'])
+                loop.publish_diagnostics(root, logs, files=files, batch='round-2-rejection')
+                self.assertEqual(sum(call[0] != 'GET' for call in state['calls']), count)
+                with self.assertRaisesRegex(loop.Stop, 'never overwrite'):
+                    loop.publish_diagnostics(root, logs, files={**files, 'rejection.json': b'changed'}, batch='round-2-rejection')
+
+    def test_invalid_model_output_is_published_before_stopping_without_retry(self):
+        with FailureCoordinationTests().fixture() as (root, logs, task, obj, pub, review):
+            def invalid(*args):
+                value = FailureCoordinationTests().decision(args[4], args[6])
+                value['summary'] = 'x'*2001
+                loop.save_json(logs/'failure-0-claude.raw.json', {'is_error': False, 'subtype': 'success',
+                                                               'structured_output': value})
+                return loop.validate_failure_review(value, task, args[4], args[6])
+            review.side_effect = invalid
+            with self.assertRaisesRegex(loop.FailureReviewError, 'SUMMARY_TOO_LONG'):
+                obj.assess('full-final', HEAD, {}, 0, 3)
+            self.assertEqual([call.kwargs['batch'] for call in pub.call_args_list], ['round-0-failure', 'round-0-rejection'])
+            self.assertEqual(obj.records, [])
+            self.assertIsNone(obj.required_change)
+            self.assertEqual((root/'source.py').read_text(), 'original candidate')
+
+
 if __name__ == '__main__':
     unittest.main()

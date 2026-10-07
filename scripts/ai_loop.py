@@ -1051,7 +1051,7 @@ def publish_diagnostics(root, logs, files=None, batch=None):
         if batch is not None:
             raise Stop('diagnostic batch requires explicit curated files')
         files = diagnostic_payload(root, logs)
-    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition)', batch or '')
+    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection)', batch or '')
             or not isinstance(files, dict) or not files or 'index.md' not in files
             or set(files) != {'index.md', (batch or '').rsplit('-', 1)[-1] + '.json'}
             or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
@@ -1264,45 +1264,176 @@ def install_launcher(root, control_sha):
           'Current stopped task still requires coordinator recovery.', flush=True)
 
 
-def failure_schema():
+def failure_schema(head=None, evidence_sha=None):
     fields = {'decision': {'type': 'string', 'enum': ['REPAIR', 'NEEDS_DECISION', 'BLOCKED']},
         'category': {'type': 'string', 'enum': ['CODE_BUG', 'TEST_BUG', 'SCOPE_OR_DESIGN', 'ENVIRONMENT']},
         'reviewed_head': {'type': 'string'}, 'reviewed_evidence_sha256': {'type': 'string'},
-        'summary': {'type': 'string'}, 'findings': schema('review')['properties']['findings']}
+        'summary': {'type': 'string', 'minLength': 1, 'maxLength': 2000},
+        'findings': schema('review')['properties']['findings']}
+    fields['findings']['maxItems'] = 16
+    for key in ('file', 'detail', 'evidence'):
+        fields['findings']['items']['properties'][key].update(minLength=1, maxLength=2000)
+    if head is not None:
+        fields['reviewed_head']['enum'] = [head]
+    if evidence_sha is not None:
+        fields['reviewed_evidence_sha256']['enum'] = [evidence_sha]
     return {'type': 'object', 'properties': fields, 'required': list(fields), 'additionalProperties': False}
 
 
-def validate_failure_review(value, task, head, evidence_sha):
+class FailureReviewError(Stop):
+    def __init__(self, reasons):
+        self.reasons = reasons
+        super().__init__('failure classification rejected: ' + ', '.join(reasons))
+
+
+def failure_review_reasons(value, task, head, evidence_sha):
+    """Stable reason codes only; never echo invalid model text or credentials."""
     if not isinstance(value, dict) or set(value) != set(failure_schema()['properties']):
-        raise Stop('invalid failure classification schema')
+        return ['CLASSIFICATION_SCHEMA']
+    reasons = []
     pairs = {'REPAIR': ('CODE_BUG', 'TEST_BUG'), 'NEEDS_DECISION': ('SCOPE_OR_DESIGN',),
              'BLOCKED': ('ENVIRONMENT',)}
-    if (not isinstance(value.get('decision'), str) or value.get('decision') not in pairs
-            or value.get('category') not in pairs[value['decision']]
-            or value.get('reviewed_head') != head or value.get('reviewed_evidence_sha256') != evidence_sha
-            or not isinstance(value.get('summary'), str) or not value['summary'].strip()
-            or not 1 <= len(value['summary']) <= 2000
-            or not isinstance(value.get('findings'), list) or len(value['findings']) > 16):
-        raise Stop('invalid failure classification or evidence binding')
-    for finding in value['findings']:
+    decision = value['decision']
+    if not isinstance(decision, str) or decision not in pairs:
+        reasons.append('DECISION_INVALID')
+    elif value['category'] not in pairs[decision]:
+        reasons.append('CATEGORY_DECISION_MISMATCH')
+    if value['reviewed_head'] != head:
+        reasons.append('REVIEWED_HEAD_MISMATCH')
+    if value['reviewed_evidence_sha256'] != evidence_sha:
+        reasons.append('REVIEWED_EVIDENCE_SHA256_MISMATCH')
+    summary = value['summary']
+    if not isinstance(summary, str) or not summary.strip():
+        reasons.append('SUMMARY_EMPTY_OR_TYPE')
+    elif len(summary) > 2000:
+        reasons.append('SUMMARY_TOO_LONG')
+    findings = value['findings']
+    if not isinstance(findings, list) or len(findings) > 16:
+        reasons.append('FINDINGS_TYPE_OR_COUNT')
+        return reasons
+    valid = []
+    for finding in findings:
         if (not isinstance(finding, dict)
                 or set(finding) != {'severity', 'blocking', 'file', 'detail', 'evidence'}
                 or finding['severity'] not in ('Critical', 'High', 'Medium', 'Low')
-                or type(finding['blocking']) is not bool
-                or any(not isinstance(finding[k], str) or not finding[k].strip() or not 1 <= len(finding[k]) <= 2000
-                       for k in ('file', 'detail', 'evidence'))):
-            raise Stop('invalid bounded repair finding')
-        if value['decision'] == 'REPAIR' and finding['file'] not in task['allowed_files']:
-            raise Stop('failure repair exceeds allowed files')
-    if value['decision'] == 'REPAIR' and not any(f['blocking'] for f in value['findings']):
-        raise Stop('optional-only findings cannot trigger a repair')
+                or type(finding['blocking']) is not bool):
+            reasons.append('FINDING_SCHEMA')
+            continue
+        for key in ('file', 'detail', 'evidence'):
+            field = finding[key]
+            if not isinstance(field, str) or not field.strip():
+                reasons.append('FINDING_' + key.upper() + '_EMPTY_OR_TYPE')
+            elif len(field) > 2000:
+                reasons.append('FINDING_' + key.upper() + '_TOO_LONG')
+        if decision == 'REPAIR' and finding['file'] not in task['allowed_files']:
+            reasons.append('REPAIR_OUTSIDE_ALLOWED_FILES')
+        valid.append(finding)
+    if decision == 'REPAIR' and not any(f['blocking'] for f in valid):
+        reasons.append('REPAIR_WITHOUT_BLOCKING_FINDING')
+    return list(dict.fromkeys(reasons))
+
+
+def validate_failure_review(value, task, head, evidence_sha):
+    reasons = failure_review_reasons(value, task, head, evidence_sha)
+    if reasons:
+        raise FailureReviewError(reasons)
     return value
+
+
+def classification_rejection(logs, task, round_no):
+    """Read original local artifacts; publish hashes, counts and checks, never raw output."""
+    def read(name):
+        path = logs / name
+        if (any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()
+                or path.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('classification diagnostic input missing/unsafe/oversized')
+        raw = path.read_bytes()
+        if len(raw) > 2 * 1024 * 1024:
+            raise Stop('classification diagnostic input grew beyond bound')
+        return raw
+    evidence_raw = read('failure-%d.json' % round_no)
+    report = json.loads(evidence_raw)
+    head = report.get('head')
+    if (report.get('run_id') != logs.name or report.get('task_id') != task['task_id']
+            or type(report.get('round')) is not int or report['round'] != round_no
+            or report.get('status') != 'FAIL' or report.get('gate_waived') is not False
+            or report.get('phase') not in ('related', 'full', 'full-final', 'mandatory-final',
+                                         'developer', 'review', 'final-review', 'ci')
+            or not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head)):
+        raise Stop('classification diagnostic evidence identity invalid')
+    sha = hashlib.sha256(evidence_raw).hexdigest()
+    raw = read('failure-%d-claude.raw.json' % round_no)
+    try:
+        envelope = json.loads(raw)
+    except (ValueError, UnicodeError):
+        envelope = None
+    value = envelope.get('structured_output') if isinstance(envelope, dict) else None
+    completed = (isinstance(envelope, dict) and envelope.get('is_error') is False
+                 and envelope.get('subtype') == 'success')
+    reasons = failure_review_reasons(value, task, head, sha) if completed else ['CLAUDE_ENVELOPE_NOT_SUCCESS']
+    if not reasons:
+        return None
+    if (read('failure-%d.json' % round_no) != evidence_raw
+            or read('failure-%d-claude.raw.json' % round_no) != raw):
+        raise Stop('classification diagnostic input changed during inspection')
+    findings = value.get('findings') if isinstance(value, dict) else None
+    summary = value.get('summary') if isinstance(value, dict) else None
+    return {'run_id': logs.name, 'task_id': task['task_id'], 'round': round_no,
+        'phase': report['phase'], 'head': head, 'evidence_sha256': sha,
+        'raw_output_sha256': hashlib.sha256(raw).hexdigest(),
+        'disposition': 'CLASSIFICATION_REJECTED', 'gate_waived': False,
+        'reason_codes': reasons, 'checks': {
+            'envelope_success': completed,
+            'classification_schema_matches': isinstance(value, dict) and set(value) == set(failure_schema()['properties']),
+            'reviewed_head_matches': isinstance(value, dict) and value.get('reviewed_head') == head,
+            'reviewed_evidence_sha256_matches': isinstance(value, dict) and value.get('reviewed_evidence_sha256') == sha,
+            'summary_characters': len(summary) if isinstance(summary, str) else None,
+            'findings_count': len(findings) if isinstance(findings, list) else None,
+            'finding_string_lengths': [{k: len(f[k]) if isinstance(f.get(k), str) else None
+                for k in ('file', 'detail', 'evidence')} if isinstance(f, dict) else None
+                for f in findings[:16]] if isinstance(findings, list) else []},
+        'raw_provider_text_published': False, 'recovery_authorized': False}
+
+
+def publish_classification_rejections(root, logs):
+    """Post-stop upload only, using the original Git-pinned contract; no model or repair."""
+    if not any((logs / ('failure-%d-claude.raw.json' % i)).exists()
+               or (logs / ('failure-%d-claude.raw.json' % i)).is_symlink() for i in range(4)):
+        return
+    provenance = logs / 'provenance.json'
+    task_path = logs / 'task.json'
+    summary_path = logs / 'summary.json'
+    for path in (provenance, task_path, summary_path):
+        if (any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()
+                or path.stat().st_size > 128 * 1024):
+            raise Stop('classification diagnostic provenance missing/unsafe/oversized')
+    identity = json.loads(provenance.read_bytes())
+    summary = json.loads(summary_path.read_bytes())
+    control = identity.get('control_sha')
+    if (identity.get('root') != str(root) or identity.get('run_id') != logs.name
+            or not isinstance(control, str) or not re.fullmatch(r'[0-9a-f]{40}', control)
+            or summary.get('status') != 'STOPPED'):
+        raise Stop('classification diagnostics require original stopped-run provenance')
+    task, _ = load_task(root, control)
+    if json.loads(task_path.read_bytes()) != task:
+        raise Stop('classification diagnostic contract differs from original Git pin')
+    for round_no in range(4):
+        path = logs / ('failure-%d-claude.raw.json' % round_no)
+        if not path.exists() and not path.is_symlink():
+            continue
+        report = classification_rejection(logs, task, round_no)
+        if report is not None:
+            publish_diagnostics(root, logs, files={
+                'rejection.json': (json.dumps(report, ensure_ascii=False, indent=2) + '\n').encode('utf-8'),
+                'index.md': b'# AI-loop classification rejection\n\nEvidence only; no recovery or acceptance.\n\n[Validation checks](rejection.json)\n'},
+                batch='round-%d-rejection' % round_no)
 
 
 def review_failure(root, logs, task, text, head, evidence_path, evidence_sha, round_no):
     spec = logs / ('failure-%d-schema.json' % round_no)
     output = logs / ('failure-%d-claude.raw.json' % round_no)
-    save_json(spec, failure_schema())
+    bounded_schema = failure_schema(head, evidence_sha)
+    save_json(spec, bounded_schema)
     prompt = ('Read-only failure coordinator: read AGENTS.md, CLAUDE.md, task.md requirements below, '
         'the exact failed evidence and referenced local test logs/source. Do not run commands/tests or edit. '
         'Classify REPAIR only for a reproducible blocking CODE_BUG/TEST_BUG within allowed_files; '
@@ -1312,21 +1443,25 @@ def review_failure(root, logs, task, text, head, evidence_path, evidence_sha, ro
         'Optional Low/Note is deferred and must not trigger repairs. No failing required gate may be waived, '
         'no acceptance threshold/budget weakened, no stale-PID signaling or automatic merge. '
         'The output is an intended Git report: no secrets, credentials, raw provider output or private logs. '
+        'Keep summary and each finding string at most 2000 characters, findings at most 16. '
         'Bind reviewed_head=' + head + ' and reviewed_evidence_sha256=' + evidence_sha
         + '.\nEVIDENCE PATH: ' + str(evidence_path) + '\nTASK:\n' + text
         + '\nCONTRACT:\n' + json.dumps(task) + '\nCUMULATIVE CURRENT DIFF:\n'
         + git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha']))
     label = '[Claude／失敗協調] 分類阻擋問題並提供修復建議（唯讀）'
     print(label, flush=True)
-    run(['claude', '-p', '--output-format', 'json', '--json-schema', json.dumps(failure_schema()),
+    run(['claude', '-p', '--output-format', 'json', '--json-schema', json.dumps(bounded_schema),
          '--max-turns', '30', '--tools', 'Read,Glob,Grep', '--allowedTools', 'Read', 'Glob', 'Grep',
          '--permission-mode', 'dontAsk', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
          '--settings', '{"disableAllHooks":true}', '--no-session-persistence'], root,
         timeout=task.get('claude_timeout_seconds', task['timeout_seconds']), stdin=prompt,
         progress=label, stdout_path=output, stderr_path=logs / ('failure-%d-claude.stderr.log' % round_no))
-    raw = json.loads(output.read_text())
+    try:
+        raw = json.loads(output.read_text())
+    except (ValueError, UnicodeError):
+        raise FailureReviewError(['CLAUDE_ENVELOPE_NOT_SUCCESS'])
     if not isinstance(raw, dict) or raw.get('is_error') is not False or raw.get('subtype') != 'success':
-        raise Stop('Claude failure coordinator did not complete (auth/quota/format/turn limit)')
+        raise FailureReviewError(['CLAUDE_ENVELOPE_NOT_SUCCESS'])
     return validate_failure_review(raw.get('structured_output'), task, head, evidence_sha)
 
 
@@ -1407,7 +1542,18 @@ class FailureCoordinator:
                 'evidence_sha256': evidence_sha, 'failure_url': failure_url,
                 'disposition': 'REPAIR_BUDGET_EXHAUSTED', 'classification': 'NOT_RUN', 'gate_waived': False})
             raise Stop('failure coordination budget exhausted; failed gates remain blocked')
-        decision = review_failure(self.root, self.logs, self.task, self.text, head, path, evidence_sha, round_no)
+        try:
+            decision = review_failure(self.root, self.logs, self.task, self.text, head, path, evidence_sha, round_no)
+        except FailureReviewError:
+            check_scope(self.root, self.task, self.original, self.task['branch'], head)
+            if (self.source_bytes() != before or git(self.root, 'status', '--porcelain') != status
+                    or path.read_bytes() != encoded):
+                raise Stop('rejected failure review changed candidate/evidence state')
+            rejected = classification_rejection(self.logs, self.task, round_no)
+            if rejected is None:
+                raise Stop('classification rejection diagnostic differs from original validation')
+            self.publish(round_no, 'rejection', rejected)
+            raise
         validate_failure_review(decision, self.task, head, evidence_sha)
         check_scope(self.root, self.task, self.original, self.task['branch'], head)
         if (self.source_bytes() != before or git(self.root, 'status', '--porcelain') != status
@@ -1521,6 +1667,7 @@ def main():
             if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', args.publish_diagnostics):
                 raise Stop('invalid diagnostic run identity')
             publish_diagnostics(root, root / '.ai-loop' / args.publish_diagnostics)
+            publish_classification_rejections(root, root / '.ai-loop' / args.publish_diagnostics)
             print('DIAGNOSTICS ONLY COMPLETE. No task/model/test/branch/index change or recovery claim.', flush=True)
             return
         task, text = load_task(root, args.control_sha)
