@@ -48,16 +48,16 @@ class FailureMatrixTests(unittest.TestCase):
         self.path.parent.mkdir(parents=True)
         self.serial = 0
 
-    def configure(self, kind):
-        fields = '    type: ' + kind + '\n    model: test-model\n    timeout_seconds: 0.2\n'
+    def configure(self, kind, *, timeout_seconds=0.2):
+        fields = '    type: ' + kind + '\n    model: test-model\n    timeout_seconds: ' + str(timeout_seconds) + '\n'
         if kind == 'openai-compatible':
             fields += '    base_url: http://example.invalid\n'
         if kind in ('openai', 'openai-compatible'):
             fields += '    api_key: ' + SECRET + '\n'
         self.path.write_text('providers:\n  default:\n' + fields)
 
-    def invoke(self, kind, code, *, mode='debug', store_fault=None, cause=None, setup=None):
-        self.configure(kind)
+    def invoke(self, kind, code, *, mode='debug', store_fault=None, cause=None, setup=None, timeout_seconds=0.2):
+        self.configure(kind, timeout_seconds=timeout_seconds)
         self.serial += 1
         state = self.base / ('state-' + str(self.serial))
         out, err = io.StringIO(), io.StringIO()
@@ -199,7 +199,8 @@ class FailureMatrixTests(unittest.TestCase):
                         spawns.append(stack.enter_context(patch(module + '.subprocess.Popen', wraps=subprocess.Popen)))
                     with self.subTest(kind=kind, failure=failure, fault=fault):
                         self.invoke(kind, code, store_fault=fault,
-                                    cause={'process_status': 7} if failure == 'failure' else None, setup=setup)
+                                    cause={'process_status': 7} if failure == 'failure' else None, setup=setup,
+                                    timeout_seconds=0.2 if failure == 'timeout' else 2)
                     self.assertEqual(spawns[0].call_count, 0 if failure == 'missing' else 1)
 
     def test_concurrent_same_run_writes_serialize_and_invalid_sequence_fails_closed(self):
