@@ -24,7 +24,7 @@ current roadmap.
 | P1 — Failure Usage Preservation | **DONE and merged** via PR #39 `56799527`; safe validated usage survives parseable provider failures without changing failure semantics | Use as observability/accounting foundation; no historical benchmark recomputation |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2 NOT STARTED** | Next product slice remains gated; no executor/mutation |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2 B5-GATED** | Review B5 containment design, then containment harness; real Git ADD remains prohibited |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
@@ -802,6 +802,11 @@ the retained controls below before introducing any side effect.
   classifier 本身不授權執行。
 
 ### A11b.2 — Git Hardening
+
+Current sub-slice status:
+
+- **A11b.2.1 — deterministic Git ADD preflight/state verifier: DONE/merged via PR #43 `780970ab`.** It is internal/read-only, constructs but never executes the future ADD argv, and has no public mutation path.
+- **A11b.2.2 — internal Git ADD mutation: NOT STARTED / B5-GATED.** Before any mutation code, the process-containment/failure-semantics design in [`llmtool_a11b2_2_b5_containment_failure_spec_20261007.md`](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md) requires independent security review. Even a design PASS authorizes only L1 cleanup/evidence hardening plus a fake-child supervisor containment harness; real `git add` stays prohibited until that harness passes actual macOS signal/SIGKILL probes and independent review.
 
 任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
 包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
