@@ -1,0 +1,16 @@
+{
+  "decision": "REPAIR",
+  "category": "TEST_BUG",
+  "reviewed_head": "ea3ef2e9819241643739b1fe521390b2f7b38ca0",
+  "reviewed_evidence_sha256": "8c10b55e5fdab7161f1d652772d6f64407cf7393ce982b0a78680b8bb922ffa5",
+  "summary": "The full-final gate (`make -C tools/llmtool check PYTHON=.venv/bin/python`, exit 2) failed on one test: ControllerCleanupTests.test_failed_evidence_export_retains_assertion_source_hashes_and_original_inventory. 1235 tests ran, with 1 failure and 3 skips. The same test passed in the related run (tests-0-related-1: 69 tests OK), which launches from the repository root. Under `make -C tools/llmtool` the working directory is tools/llmtool. run_containment_acceptance.main() checks `Path.cwd().resolve() != ROOT` in preflight and raises before it computes `tested_sha256`, so the failure JSON records `tested_sha256 == {}`. The test patches `sys.platform` and `CANONICAL` but leaves the cwd unpatched, so its result depends on where the suite is launched from. This is a reproducible test bug in an allowlisted test file. The production canonical-cwd preflight is correct and must stay unchanged. This classification does not authorize waiving or skipping the gate. After the repair, the runner must rerun related checks, both full suites and all native gates on the changed bytes.",
+  "findings": [
+    {
+      "severity": "High",
+      "blocking": true,
+      "file": "tools/llmtool/tests/test_git_containment.py",
+      "detail": "The test calls the real runner.main() but only partly reproduces the canonical preflight. It patches sys.platform and runner.CANONICAL=runner.ROOT, but not the process cwd. When the suite runs from tools/llmtool (Makefile `test: $(PYTHON) -m unittest discover -s tests -v` via `make -C tools/llmtool`), main() raises ValueError('NOT SUPPORTED: actual canonical Mac invocation required') before `evidence['tested_sha256'] = before`. The written failure JSON therefore has an empty tested_sha256 map and the set assertion at line ~1839 fails. Bounded repair, in this test only: make the runner see the canonical root as its cwd for the duration of main(). Use a try/finally `os.chdir(runner.ROOT)` that restores the previous cwd (contextlib.chdir is not available on /usr/bin/python3 3.9.6), or `patch.object(runner.Path, 'cwd', return_value=runner.ROOT)`. Keep every existing assertion. Optionally also assert that failure['message'] is the primary assertion message, so that a future preflight rejection fails clearly. Do not change run_containment_acceptance.py's cwd/CANONICAL/platform preflight, the hash map semantics or any threshold. The fix must pass when launched both from the repo root (related gate) and from tools/llmtool (full gates under the venv and /usr/bin/python3).",
+      "evidence": "tests-0-full-final-0.stderr.log:1239-1262: FAIL at test_git_containment.py line 1839, `set(data['tested_sha256'])` is missing all nine non-report allowlisted files; Ran 1235, FAILED (failures=1, skipped=3); make: *** [test] Error 1. tests-0-related-1.stderr.log:13 shows the same test `ok` when run from the repo root. tools/llmtool/Makefile:10-11 runs discover from the tools/llmtool cwd. In run_containment_acceptance.py main(), the cwd check `Path.cwd().resolve() != ROOT` precedes `evidence['tested_sha256'] = before`."
+    }
+  ]
+}
