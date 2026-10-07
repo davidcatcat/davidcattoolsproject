@@ -273,7 +273,9 @@ def load_task(root, control_sha):
         keys = {'run_id', 'control_sha', 'expected_head', 'summary_sha256', 'evidence_sha256'}
         if (metadata['mode'] != 'implement_new_pr' or not metadata.get('mac_evidence')
                 or metadata['max_repairs'] < 1 or not isinstance(recovery, dict)
-                or set(recovery) != keys
+                or set(recovery) not in (keys, keys | {'failure_scenario'})
+                or not isinstance(recovery.get('failure_scenario', 'sigint'), str)
+                or recovery.get('failure_scenario', 'sigint') not in MAC_SCENARIOS
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or any(not isinstance(recovery.get(k), str)
                        or not re.fullmatch(r'[0-9a-f]{40}', recovery[k])
@@ -792,7 +794,7 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
             or history[0].get('head') != policy['expected_head']
             or history[0].get('mandatory', {}).get('status') != 'FAIL'
             or mac.get('platform') != 'darwin'
-            or mac.get('failure', {}).get('scenario') != 'sigint'
+            or mac.get('failure', {}).get('scenario') != policy.get('failure_scenario', 'sigint')
             or mac.get('failure', {}).get('status') != 'FAIL'):
         raise Stop('stopped native failure does not match coordinator assessment')
     tested = history[0].get('tested_sha256')
@@ -1379,11 +1381,13 @@ def main():
                          'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None)
         native_recovery = recovery is not None and recovery.get('kind') == 'acceptance_failure'
         if native_recovery:
-            repair_reason = ('Repair the existing committed candidate after the coordinator-assessed SIGINT Mac failure. '
+            scenario = task['acceptance_failure_recovery'].get('failure_scenario', 'sigint')
+            label = 'SIGINT' if scenario == 'sigint' else scenario
+            repair_reason = ('Repair the existing committed candidate after the coordinator-assessed ' + label + ' Mac failure. '
                 'Preserve the original failure. Read recovery.json, recovery-evidence/summary.json and '
                 'recovery-evidence/mac-containment-0.json under ' + str(logs) + '. '
-                'First preserve primary errors and bounded diagnostic evidence. Zombie/SID handling is a '
-                'suspected cause, not an established runtime fact. Do not remove identity checks, guess SID, '
+                'Follow the CURRENT bounded repair in task.md; distinguish captured facts from source-based hypotheses. '
+                'Preserve primary errors and bounded diagnostic evidence. Do not remove identity checks, guess SID, '
                 'reimplement the feature or rerun old probes. All validation starts afresh on changed bytes.')
         full_tested_bytes = None
         mandatory_tested_bytes = None

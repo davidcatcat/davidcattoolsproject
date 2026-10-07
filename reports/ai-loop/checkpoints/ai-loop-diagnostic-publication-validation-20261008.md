@@ -47,3 +47,15 @@ bash scripts/ai-loop.sh --publish-diagnostics 20261007T162747Z-96025
 This publication feature does not authorize a new native recovery. The consumed
 87533 continuation remains historical; the 96025 hung-supervisor failure still
 requires coordinator assessment and a matching recovery contract.
+
+
+## Actual Mac publication follow-up — 2026-10-07
+
+David executed `--publish-diagnostics 20261007T162747Z-96025` and the helper
+reported DIAGNOSTICS ONLY COMPLETE. The coordinator fetched the resulting
+immutable commit `3da0c0c25d0695fcb3792a225d503d372fc52572` and verified the
+published native JSON against the original ZIP. Real Mac/GitHub CLI diagnostic
+publication: PASS for this invocation. No task/model/test/branch/index change or
+recovery claim accompanied the upload. The earlier PENDING row is historical.
+Native containment remains FAIL at hung_supervisor; its bounded repair is now
+separately authorized by CURRENT task.md and the coordinator assessment.

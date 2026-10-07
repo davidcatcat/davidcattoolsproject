@@ -1,51 +1,65 @@
 # Mac AI-loop development handoff
 
-## Current operator step — publish the stopped diagnostics
+## CURRENT operator step — assess fixtures, then bounded hung-supervisor repair
 
-Run `20261007T162747Z-96025` stopped at native hung_supervisor FAIL, candidate
-`a00eda49aa0f0c3486d27589148361d67e7bdb3e`. FD inheritance and all three signal
-scenarios passed; nine later Mac scenarios did not run. The previous 87533 recovery
-is consumed. A new repair/resume requires coordinator assessment and a new contract.
+The diagnostic-only upload for `20261007T162747Z-96025` succeeded on David's Mac.
+The coordinator verified the immutable Git evidence against the original captured
+ZIP. Native FD inheritance and SIGINT/SIGTERM/SIGHUP passed on the old bytes;
+`hung_supervisor` failed and nine later scenarios did not run.
 
-Publish the already captured evidence without models/tests/recovery:
+A new bounded continuation is authorized in [task.md](task.md) and [the assessment](../../reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md).
+It pins candidate `a00eda49aa0f0c3486d27589148361d67e7bdb3e` and the exact failure
+hashes. It addresses strict non-reaping exit-transition observation and bounded
+supervisor diagnostics/genuine hung-stage proof. The early supervisor-loss cause
+is still unknown. No old PASS is inherited and acceptance thresholds stay intact.
+
+Before resuming, inspect possible retained fixtures and show the coordinator:
+
+```sh
+ps -ww -p 5769,5770 -o pid,ppid,pgid,state,etime,args
+```
+
+Saved PID numbers do not authorize signals. No reboot is required by the contract.
+After fresh inspection/fixture absence, the only new continuation command is:
 
 ```sh
 cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261007T162747Z-96025
+```
+
+The launcher downloads updates; no reinstall. One-use continuation, at most two
+Codex calls total. All related/review/full/native gates run on changed bytes. A
+new mandatory native failure stops without automatic retry; feature Draft PR and
+security/coordinator review remain gated. Old 77009/87533 invocations are consumed.
+
+## Diagnostic publication
+
+The upload-only command remains available for a frozen stopped run:
+
+```sh
 bash scripts/ai-loop.sh --publish-diagnostics 20261007T162747Z-96025
 ```
 
-The existing launcher downloads this runner automatically. No reinstall is needed.
-The command verifies the frozen ZIP manifest and original Git-pinned contract, then
-publishes immutable files under `reports/ai-loop/diagnostics/<run-id>/` on
-`automation/ai-loop-diagnostics`. It prints an exact-commit index URL. No local
-HEAD/index/tree change, branch switch, source staging, feature PR, recovery marker,
-Codex/Claude/venv dependency, model/test/probe or stale-PID cleanup is involved.
+It verifies the frozen ZIP manifest and original Git-pinned contract, then publishes
+curated immutable files under `reports/ai-loop/diagnostics/<run-id>/` on reports-only
+`automation/ai-loop-diagnostics`. Identical repeats are read-only; conflicts or
+concurrent remote moves fail without force/retry. It changes no local branch,
+HEAD, tree or index, starts no model/test/probe and makes no recovery claim.
+After model/test STOP the runner exports a visible ZIP and attempts this upload.
+Upload/auth/network failure preserves the original STOP and prints a補傳 command.
 
-After a model/test stop, the runner saves the original STOP and visible ZIP, then
-automatically attempts this publication. A new diagnostics branch has no source
-history parent. Appends preserve existing records; identical repeat uploads do no
-remote write. Conflicting records are not overwritten, and non-force publication
-rejects concurrent divergent updates. There is no automatic upload retry.
-
-Published material: projected runner statuses, bounded provenance, capture/source
-hashes, the validation report intended for Git, native Mac JSON and mandatory Mac
-stdout/stderr logs. Free-form provider summaries/findings, arbitrary STOP messages,
-raw Codex/Claude streams, credentials, candidate source snapshots and unrelated
-files stay local. The full ZIP remains available for deeper source investigation.
-Per-file publication limit is 128 KiB; total is 512 KiB. API request data is passed
-through structured files, not shell interpolation.
-
-Upload/auth/network/verification failure preserves the original STOP and ZIP and
-prints the explicit補傳 command. Retry requires the original frozen ZIP and never
-recaptures later working-tree bytes. Corrupt/unsafe archives fail before upload.
-Chat/Work can read the Git report on David's next message; this is not an automatic
-callback, Mac executor, recovery authorization or containment/security PASS.
+Published material: projected statuses, bounded provenance/capture/source hashes,
+validation report, native JSON and mandatory logs. Raw provider streams, free-form
+summaries, credentials, candidate source snapshots and unrelated files stay local.
+Limits: 128 KiB/file and 512 KiB total. Structured API request files are used.
+Work reads published evidence when David next messages; no automatic callback,
+Mac executor, containment/security approval or recovery authorization is implied.
 
 ## Historical first native-failure recovery — superseded invocation
 
-The older current-command labels below are historical. Use the operator step above.
+The older current-command labels below are historical. Use the CURRENT operator step above.
 
-## Current command — native SIGINT failure recovery
+## Historical command — first native SIGINT failure recovery
 
 The Mac run `20261007T123142Z-77009` stopped at SIGINT native acceptance FAIL,
 at local candidate `ce29d4a6a7764e62dc993b76b33996db2fb3455b`. The coordinator

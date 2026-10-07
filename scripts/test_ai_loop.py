@@ -255,6 +255,61 @@ class NativeResumeTests(unittest.TestCase):
                              (old/'mac-containment-0.json').read_bytes())
             self.assertEqual((logs/'recovery-evidence/summary.json').read_bytes(), (old/'summary.json').read_bytes())
 
+    def test_explicit_hung_failure_recovers_without_inheriting_signal_passes(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            mac = json.loads((old/'mac-containment-0.json').read_text())
+            mac['failure']['scenario'] = 'hung_supervisor'
+            mac['scenarios'] = {name: {'status': 'PASS'} for name in
+                                ('fd_inheritance', 'sigint', 'sigterm', 'sighup')}
+            loop.save_json(old/'mac-containment-0.json', mac)
+            policy = task['acceptance_failure_recovery']
+            policy.update(failure_scenario='hung_supervisor', evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+            original, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            self.assertEqual(original, inventory)
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(recovery['evidence_files']['mac-containment-0.json'], policy['evidence_sha256'])
+
+    def test_explicit_scenario_mismatch_stops_even_with_repinned_hash(self):
+        for expected, observed in (('hung_supervisor', 'sigint'), ('sigint', 'hung_supervisor'),
+                                   ('hung_supervisor', 'parent_sigkill_plain')):
+            with self.subTest(expected=expected, observed=observed), self.fixture() as (root, old, task, inventory, *rest):
+                mac = json.loads((old/'mac-containment-0.json').read_text())
+                mac['failure']['scenario'] = observed
+                loop.save_json(old/'mac-containment-0.json', mac)
+                task['acceptance_failure_recovery'].update(failure_scenario=expected,
+                    evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
+    def test_a_previous_native_policy_can_be_followed_without_gate_changes(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            prior = json.loads((old/'task.json').read_text())
+            prior.pop('initial_timeout_recovery')
+            prior['acceptance_failure_recovery'] = {'run_id': '20261007T113658Z-74880',
+                'control_sha': 'c'*40, 'expected_head': 'd'*40,
+                'summary_sha256': '1'*64, 'evidence_sha256': '2'*64}
+            loop.save_json(old/'task.json', prior)
+            with patch.object(loop, 'load_task', return_value=(prior, 'original requirements')):
+                _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+
+    def test_scenario_schema_is_bounded_and_legacy_sigint_still_loads(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        legacy = copy.deepcopy(task)
+        legacy['acceptance_failure_recovery'].pop('failure_scenario', None)
+        self.assertIn('acceptance_failure_recovery', load(legacy))
+        for value in (None, True, 1, [], {}, 'unknown', 'SIGINT'):
+            with self.subTest(value=value):
+                bad = copy.deepcopy(task)
+                bad['acceptance_failure_recovery']['failure_scenario'] = value
+                with self.assertRaises(loop.Stop): load(bad)
+        bad = copy.deepcopy(task)
+        bad['acceptance_failure_recovery']['extra'] = 'unreviewed'
+        with self.assertRaises(loop.Stop): load(bad)
+
     def test_wrong_run_or_head_or_dirty_tree_stops(self):
         for fault in ('run', 'head', 'dirty'):
             with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, git_mock, *rest):
@@ -1503,6 +1558,11 @@ class ExistingPRTests(unittest.TestCase):
         self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True),
                          ['related', 'full-final', 'mandatory-final'])
 
+    def test_hung_resume_prompt_and_all_gates_use_the_explicit_failure(self):
+        self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
+                         native_scenario='hung_supervisor'),
+                         ['related', 'full-final', 'mandatory-final'])
+
     def test_native_resume_never_retries_failed_mac_gate_automatically(self):
         self.assertEqual(self.exercise_pipeline(new_task=True, resume=True, native_resume=True,
                          mandatory_failure=True, should_stop=True),
@@ -1535,7 +1595,8 @@ class ExistingPRTests(unittest.TestCase):
     def exercise_pipeline(self, failures=0, should_stop=False, test_mode='related', final_full_failures=0,
                           new_task=False, mandatory_failure=False, hook_changes=False,
                           decision=False, checkpoint_failure=False, resume=False, codex_timeout=None,
-                          claude_timeout=None, native_resume=False, unchanged_repair=False):
+                          claude_timeout=None, native_resume=False, unchanged_repair=False,
+                          native_scenario=None):
         with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
             root = Path(runtime)
             gitdir = root / 'git-metadata-fixture'
@@ -1557,6 +1618,8 @@ class ExistingPRTests(unittest.TestCase):
                 task['allowed_files'].append('reports/validation.md')
             if native_resume:
                 task['acceptance_failure_recovery'] = {'run_id': '20261007T075141Z-70725'}
+                if native_scenario:
+                    task['acceptance_failure_recovery']['failure_scenario'] = native_scenario
             current_head = [HEAD]
             dirty = [False]
             review_calls = [0]
@@ -1702,7 +1765,8 @@ class ExistingPRTests(unittest.TestCase):
                                     for c in claude.call_args_list))
             if resume:
                 prepare_new.assert_not_called()
-                expected_reason = 'coordinator-assessed SIGINT Mac failure' if native_resume and not failures else (
+                label = native_scenario or 'SIGINT'
+                expected_reason = 'coordinator-assessed ' + label + ' Mac failure' if native_resume and not failures else (
                     'Continue the existing partial implementation' if not native_resume else 'Repair only')
                 self.assertIn(expected_reason, codex.call_args.args[2])
                 self.assertTrue(next((root / '.ai-loop').glob('*/recovery-inputs/source.txt')).is_file())

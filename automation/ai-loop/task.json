@@ -126,10 +126,11 @@
   "codex_timeout_seconds": 10800,
   "claude_timeout_seconds": 10800,
   "acceptance_failure_recovery": {
-    "run_id": "20261007T153635Z-87533",
-    "control_sha": "9c8b36d01dd0edb1233cc0fcc1be8c8b62cf006f",
-    "expected_head": "325bde3fe74c5f998ccf1dd046487c0900716224",
-    "summary_sha256": "ae855afa2409d12fa68161717335505ca68431b93ed8a466a76d8e0b47cab09b",
-    "evidence_sha256": "f025bb4d0ad8f910ecd9ccd56755ce0b84a55fb26ec25ce241c07ffe69d28281"
+    "run_id": "20261007T162747Z-96025",
+    "control_sha": "8c96e7ad60fd5c39f13f0a563afcc6cc26f84753",
+    "expected_head": "a00eda49aa0f0c3486d27589148361d67e7bdb3e",
+    "summary_sha256": "28961634d78941ea3f80f81e457896bca8e4c8be8f23a2e75afe42301be8dce3",
+    "evidence_sha256": "0bbb5aa95e3887bf2756fe275e1028c7dae1e1dd01f160f2ddd92c02ad3cf5a1",
+    "failure_scenario": "hung_supervisor"
   }
 }
