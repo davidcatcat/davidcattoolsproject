@@ -1,19 +1,39 @@
 {
-  "task_id": "A11b.2.2.0-pr46-review-20261007",
-  "mode": "review_existing_pr",
-  "pr_number": 46,
-  "expected_head": "687f3f93d6d46b6d4fb5a95a7cfd1fb17170f53c",
-  "base_sha": "18365bb079835f3b413dd135ea742213bb1a7724",
-  "branch": "feat/llmtool-a11b2-2-0-cleanup-20261007",
+  "task_id": "A11b.2.2.1-containment-20261007",
+  "mode": "implement_new_pr",
+  "pr_number": null,
+  "expected_head": "585caf7d4c9dad20afd3beb38e5140d6dadf89e0",
+  "base_sha": "585caf7d4c9dad20afd3beb38e5140d6dadf89e0",
+  "branch": "feat/llmtool-a11b2-2-1-containment-20261007",
+  "pr_title": "feat(llmtool): add private supervisor fake-child containment harness (A11b.2.2.1)",
   "allowed_files": [
-    "tools/llmtool/llmtool/git_mutation.py",
+    "tools/llmtool/llmtool/_git_containment.py",
+    "tools/llmtool/llmtool/_git_supervisor.py",
+    "tools/llmtool/llmtool/_git_containment_protocol.py",
+    "tools/llmtool/llmtool/_git_process_identity.py",
+    "tools/llmtool/llmtool/_git_containment_child.py",
+    "tools/llmtool/tests/test_git_containment.py",
+    "tools/llmtool/tests/run_containment_acceptance.py",
+    "tools/llmtool/tests/containment_probe_parent.py",
     "tools/llmtool/tests/test_git_mutation.py",
-    "reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md"
+    "reports/llmtool_a11b2_2_1_containment_validation_20261007.md"
   ],
+  "required_files": [
+    "tools/llmtool/llmtool/_git_containment.py",
+    "tools/llmtool/llmtool/_git_supervisor.py",
+    "tools/llmtool/llmtool/_git_containment_protocol.py",
+    "tools/llmtool/llmtool/_git_process_identity.py",
+    "tools/llmtool/llmtool/_git_containment_child.py",
+    "tools/llmtool/tests/test_git_containment.py",
+    "tools/llmtool/tests/run_containment_acceptance.py",
+    "reports/llmtool_a11b2_2_1_containment_validation_20261007.md"
+  ],
+  "acceptance_report": "reports/llmtool_a11b2_2_1_containment_validation_20261007.md",
   "max_repairs": 2,
   "timeout_seconds": 1800,
   "ci_workflow": "llmtool-ci.yml",
   "default_test_mode": "related",
+  "require_local_full": true,
   "related_tests": [
     [
       "make",
@@ -21,6 +41,19 @@
       "tools/llmtool",
       "syntax",
       "PYTHON=.venv/bin/python"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_git_containment.py",
+      "-v"
     ],
     [
       "env",
@@ -77,5 +110,16 @@
       "check",
       "PYTHON=/usr/bin/python3"
     ]
-  ]
+  ],
+  "mandatory_tests": [
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "tools/llmtool/tests/run_containment_acceptance.py",
+      "--output",
+      "{mac_evidence}"
+    ]
+  ],
+  "mac_evidence": "mac-containment"
 }

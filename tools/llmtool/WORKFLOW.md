@@ -403,3 +403,43 @@ including external review and applicable Mac verification. Green CI alone is
 insufficient. Recheck branch/target SHA before publication or merge; a changed SHA
 requires coordinator assessment of affected evidence. Report final commit/PR/CI
 identity once; avoid report-only commits made solely to embed their own SHA.
+
+## Mac AI-loop development handoff — 2026-10-07
+
+This standalone development helper lives on the persistent `automation/ai-loop`
+control branch. It is separate from llmtool production execution/approval and does
+not complete A11b/A11c product gates. See
+[the helper instructions](../../automation/ai-loop/README.md).
+
+When David selects script execution, another Chat/Work conversation should:
+
+1. Inspect the current remote main, feature PRs, exact CI/review evidence and applicable
+   spec. Respect David's existing authorization and preserve unrelated local work.
+2. Prepare a concrete Task Contract in `automation/ai-loop/task.md` plus its executable
+   `task.json` on the control branch, pinned to the verified base/starting HEAD. State
+   implementation versus existing-PR review, allowed/required files, acceptance and
+   mandatory Mac/security gates, test commands/mode, repair bounds and stop state.
+3. Check runner compatibility before publication. The runner supports
+   `implement_new_pr` and `review_existing_pr`; unsupported requirements need a tested
+   runner update, not merely a free-form prompt. Publish helper changes and verify the
+   exact remote content. Never prepare a second concurrent writer for the same task.
+4. Tell David to run his existing `bash ai-loop.sh` on the canonical Mac. The launcher
+   downloads a pinned runner/task automatically; no repeated launcher download or
+   manual prompt transfer to Codex/Claude is needed.
+5. Read the resulting Draft PR, validation report, implementation SHA and exact final
+   CI in the coordinating conversation. Ordinary Claude review is separate from a
+   required independent security gate. Merge and later slices need their applicable
+   authorization; the script stops at READY_FOR_FINAL_REVIEW.
+
+Defaults are related local tests, bounded Codex repairs and read-only Claude review;
+full mode adds local full checks. Mandatory contract gates cannot be disabled by
+`--related`: A11b.2.2.1 still requires both Mac Python full suites and actual Mac
+parent-SIGKILL containment probes. Existing completed tasks are not new work; issue
+a new contract/task ID after verifying prerequisites. A stopped run preserves files,
+commits and logs; diagnose it and prepare explicit recovery before another attempt.
+Never reset, stash, force-push or discard work to restart blindly.
+
+A running process retains its pinned runner/task; updates affect the next launch.
+This Work conversation has no connected Mac executor or automatic callback/resume
+service. Auth/quota/CLI/scope/design conflicts stop with evidence rather than bypassing
+permissions. Results reach GitHub; David can bring the final output back here.

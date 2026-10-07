@@ -24,7 +24,7 @@ A11b.2.2.1/.2/.3. The control branch is fetchable before PR #45 is merged.
 - `bash -n ai-loop-delivery/scripts/ai-loop.sh`: exit 0.
 - `python3 -m py_compile ai-loop-delivery/scripts/ai_loop.py`: exit 0.
 - `python3 -W error::ResourceWarning -m unittest discover -s ai-loop-delivery/scripts -p test_ai_loop.py -q`:
-  36 tests, PASS, no ResourceWarning.
+  50 tests, PASS, no ResourceWarning.
 - Task JSON parses and names the actual PR branch/head/report. Tests use
   tools/llmtool/.venv, root-discovery PYTHONPATH and the Mac system Python.
 
@@ -75,3 +75,33 @@ self-review and offline fixtures only; independent helper review remains pending
 Future ordinary Claude implementation reviews do not substitute for separate
 security/QA/containment gates. No automatic merge, next slice or Work callback is
 implemented.
+
+
+## New implementation handoff and runner support
+
+David supplied the A11b.2.2.1 prompt after an independent conversation merged PR #46.
+GitHub confirms main `585caf7d4c9dad20afd3beb38e5140d6dadf89e0` and PR #44/#46 merged.
+The new task authorizes only supervisor/fake-child containment, not real ADD or 2.2.2.
+The outer helper now supports a new branch/Draft PR as well as existing-PR review.
+The task/README/WORKFLOW document the prompt-to-Git-to-Mac-script handoff.
+
+Additional synthetic helper checks cover branch/PR collisions, unpublished commits,
+read-only new-task precheck, initial Codex implementation, new Draft publication,
+required full/Mac gates even in related mode, required-probe failure STOP without
+retry/publication, plus strict Mac evidence schema/environment/hash/count/latency/
+identity/absence validation. Mac evidence itself is mocked in pipeline fixtures;
+none of those fixtures is a real Mac containment result.
+
+The runner appends final command/probe evidence to the developer's validation report
+and re-reviews the full final diff. Source/test hashes control expensive gate reuse;
+report-only updates cannot establish different runtime behavior. Mandatory Mac failure
+or unsupported capability stops for assessment. Independent security review remains
+pending and is not substituted by ordinary Claude PASS or exact-head CI.
+
+Actual new-task Codex auth, trusted -I installation, supervisor implementation,
+Mac signals/kqueue/kernel identity and x20+x20 parent-SIGKILL probes are NOT TESTED
+by this authoring environment. David must run the published task on the real Mac.
+No application code, actual application checks, alternate checkout or live model call
+was performed while authoring this helper update.
+
+Final checks also reject a publication hook that changes already-tested bytes before push.

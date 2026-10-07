@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import shutil
@@ -162,12 +163,22 @@ def load_task(root, control_sha):
     required = {'task_id', 'mode', 'pr_number', 'expected_head', 'base_sha', 'branch',
                 'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
-    if set(metadata) != required or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
+    optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
+                'pr_title', 'acceptance_report'}
+    if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
         raise Stop('invalid base/branch')
-    if metadata['mode'] != 'review_existing_pr' or type(metadata['pr_number']) is not int or metadata['pr_number'] <= 0:
-        raise Stop('task must target an existing PR, not repeat implementation')
+    if metadata['mode'] == 'review_existing_pr':
+        if type(metadata['pr_number']) is not int or metadata['pr_number'] <= 0:
+            raise Stop('review task must target an existing PR')
+    elif metadata['mode'] == 'implement_new_pr':
+        if metadata['pr_number'] is not None or metadata['expected_head'] != metadata['base_sha']:
+            raise Stop('new implementation must start at its pinned base without an existing PR')
+        if not isinstance(metadata.get('pr_title'), str) or not metadata['pr_title'].strip():
+            raise Stop('new implementation needs a PR title')
+    else:
+        raise Stop('unsupported task mode')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['expected_head']):
         raise Stop('invalid expected PR HEAD')
     git(root, 'check-ref-format', '--branch', metadata['branch'])
@@ -182,7 +193,9 @@ def load_task(root, control_sha):
         raise Stop('invalid timeout')
     if metadata['default_test_mode'] not in ('related', 'full'):
         raise Stop('invalid default test mode')
-    for suite in ('related_tests', 'full_tests'):
+    for suite in ('related_tests', 'full_tests', 'mandatory_tests'):
+        if suite == 'mandatory_tests' and suite not in metadata:
+            continue
         if not isinstance(metadata[suite], list) or not metadata[suite]:
             raise Stop('task needs explicit related and full test commands')
         for argv in metadata[suite]:
@@ -190,6 +203,19 @@ def load_task(root, control_sha):
                 raise Stop('invalid test argv')
     if not isinstance(metadata['ci_workflow'], str) or not re.fullmatch(r'[A-Za-z0-9_.-]+\.yml', metadata['ci_workflow']):
         raise Stop('invalid CI workflow')
+    if 'require_local_full' in metadata and type(metadata['require_local_full']) is not bool:
+        raise Stop('invalid local full requirement')
+    if 'required_files' in metadata and (not isinstance(metadata['required_files'], list)
+            or not metadata['required_files'] or any(p not in metadata['allowed_files'] for p in metadata['required_files'])):
+        raise Stop('required files must be explicit allowed files')
+    if 'acceptance_report' in metadata and (metadata['acceptance_report'] not in metadata['allowed_files']
+            or not metadata['acceptance_report'].startswith('reports/') or not metadata['acceptance_report'].endswith('.md')):
+        raise Stop('invalid acceptance report path')
+    if 'mac_evidence' in metadata:
+        if metadata['mac_evidence'] != 'mac-containment' or not metadata.get('mandatory_tests'):
+            raise Stop('invalid Mac evidence gate')
+        if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
+            raise Stop('Mac containment task must retain full local checks and report')
     return metadata, text
 
 
@@ -225,6 +251,8 @@ def claude(root, logs, prompt, round_no, timeout, head):
 
 
 def test_commands(task, suite):
+    if suite == 'mandatory-final':
+        return task['mandatory_tests']
     return task['full_tests' if suite in ('full', 'full-final') else 'related_tests']
 
 
@@ -236,6 +264,7 @@ def tests(root, logs, task, round_no, suite='related'):
     results = []
     commands = test_commands(task, suite)
     for i, argv in enumerate(commands):
+        argv = [a.replace('{mac_evidence}', str(mac_evidence_path(logs, round_no))) for a in argv]
         label = '[Tests/%s] %d/%d' % (suite, i + 1, len(commands))
         print(label + ' ' + ' '.join(argv), flush=True)
         started = time.monotonic()
@@ -249,6 +278,122 @@ def tests(root, logs, task, round_no, suite='related'):
             break
     save_json(test_result_file(logs, round_no, suite), results)
     return all(r['exit_code'] == 0 for r in results)
+
+
+def runtime_bytes(values):
+    """Report-only evidence changes do not invalidate frozen source/test bytes."""
+    return {p: h for p, h in values.items() if not p.startswith('reports/')}
+
+
+def mac_evidence_path(logs, round_no):
+    return logs / ('mac-containment-%d.json' % round_no)
+
+
+MAC_SCENARIOS = ('fd_inheritance', 'sigint', 'sigterm', 'sighup', 'hung_supervisor',
+    'leader_exit_descendant', 'identity_reuse', 'macos_start_time', 'kqueue_non_reaping',
+    'protocol_framing', 'code_runtime_binding', 'public_import_boundary',
+    'parent_sigkill_plain', 'parent_sigkill_popen')
+
+
+def validate_mac_evidence(path, tested, python_version):
+    if not path.is_file() or path.is_symlink() or path.stat().st_size > 128 * 1024:
+        raise Stop('missing/unsafe/oversized Mac containment evidence')
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise Stop('duplicate key in Mac evidence')
+            value[key] = item
+        return value
+    def invalid_constant(value):
+        raise Stop('non-finite number in Mac evidence')
+    value = json.loads(path.read_text(), object_pairs_hook=unique_pairs, parse_constant=invalid_constant)
+    keys = {'schema_version', 'platform', 'os_version', 'python_version', 'tested_sha256', 'scenarios'}
+    if not isinstance(value, dict) or set(value) != keys or type(value['schema_version']) is not int or value['schema_version'] != 1:
+        raise Stop('invalid Mac containment evidence schema')
+    if (sys.platform != 'darwin' or value['platform'] != 'darwin'
+            or value['os_version'] != platform.mac_ver()[0]
+            or not value['os_version'] or value['python_version'] != python_version
+            or value['tested_sha256'] != runtime_bytes(tested)):
+        raise Stop('Mac evidence environment/revision mismatch; no containment PASS')
+    scenarios = value['scenarios']
+    if not isinstance(scenarios, dict) or set(scenarios) != set(MAC_SCENARIOS):
+        raise Stop('missing required Mac containment scenarios')
+    for name, row in scenarios.items():
+        if (not isinstance(row, dict) or set(row) != {'status', 'checks', 'skipped', 'repetitions'}
+                or row['status'] != 'PASS' or type(row['checks']) is not int or row['checks'] < 1
+                or type(row['skipped']) is not int or row['skipped'] != 0
+                or not isinstance(row['repetitions'], list)):
+            raise Stop('Mac scenario failed/skipped/incomplete: ' + name)
+        if name.startswith('parent_sigkill_'):
+            if not 20 <= len(row['repetitions']) <= 100 or row['checks'] < len(row['repetitions']):
+                raise Stop('parent SIGKILL needs >=20 repetitions per variant')
+            for repetition in row['repetitions']:
+                fields = {'leader_pid', 'pgid', 'descendant_pids', 'latency_seconds',
+                    'identity_verified', 'leader_absent', 'descendants_absent', 'group_absent', 'containment_confirmed'}
+                if (not isinstance(repetition, dict) or set(repetition) != fields
+                        or any(type(repetition[k]) is not int or repetition[k] <= 0 for k in ('leader_pid', 'pgid'))
+                        or not isinstance(repetition['descendant_pids'], list) or not repetition['descendant_pids']
+                        or any(type(p) is not int or p <= 0 for p in repetition['descendant_pids'])
+                        or type(repetition['latency_seconds']) not in (int, float)
+                        or not 0 <= repetition['latency_seconds'] <= 2
+                        or any(repetition[k] is not True for k in fields - {'leader_pid', 'pgid', 'descendant_pids', 'latency_seconds'})):
+                    raise Stop('parent SIGKILL latency/identity/absence proof failed')
+        elif row['repetitions']:
+            raise Stop('unexpected repetition fields in scenario: ' + name)
+    return value
+
+
+def prepare_new_branch(root, task, check_only=False):
+    """One fresh branch from pinned main; collisions/unpublished work stop."""
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('this task branch already has a PR; refresh/recover instead of duplicating it')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('new task remote branch already exists; files preserved')
+    rc, _, _ = command(['git', 'show-ref', '--verify', '--quiet', 'refs/heads/' + task['branch']], root)
+    if rc == 0:
+        raise Stop('new task local branch already exists; files preserved for recovery')
+    if rc != 1:
+        raise Stop('could not establish local branch absence')
+    if command(['git', 'merge-base', '--is-ancestor', git(root, 'rev-parse', 'HEAD'), task['base_sha']], root)[0]:
+        raise Stop('current branch has unrelated/unpublished commits; files preserved')
+    if not check_only:
+        git(root, 'switch', '--no-overwrite-ignore', '-c', task['branch'], 'origin/main')
+        if git(root, 'rev-parse', 'HEAD') != task['base_sha']:
+            raise Stop('new branch did not reach pinned main')
+
+
+def create_draft_pr(root, task, logs, publication_head, report_rel):
+    if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
+        raise Stop('base changed before PR creation')
+    body = logs / 'new-pr-body.md'
+    body.write_text('Implements only the authorized task: ' + task['task_id']
+        + '.\n\nValidation and limitations: `' + task.get('acceptance_report', report_rel)
+        + '`. Automated evidence: `' + report_rel + '`.\n\nPublication HEAD: `'
+        + publication_head + '`. Ordinary Claude review passed. Exact-head CI is pending. '
+        + 'Independent security review and coordinator acceptance remain pending. '
+        + 'No real product Git ADD, public mutation path, merge or next slice.\n', encoding='utf-8')
+    return run(['gh', 'pr', 'create', '--repo', IDENTITY, '--base', 'main', '--head', task['branch'],
+                '--draft', '--title', task['pr_title'], '--body-file', str(body)], root)
+
+
+def record_acceptance(root, task, head, history, mac):
+    """Append runner evidence without replacing the developer's historical report."""
+    report = root / task['acceptance_report']
+    if not report.is_file() or report.is_symlink():
+        raise Stop('required acceptance report missing/unsafe')
+    report.write_text(report.read_text() + '\n\n## Outer runner final verification\n\n'
+        + '- Tested implementation HEAD: `' + head + '`; subsequent report update changes evidence only.\n'
+        + '- Required local full canonical checks: PASS.\n'
+        + '- A11b.2.2.1 containment harness: PASS (implementation/required Mac checks only).\n'
+        + '- Real product Git ADD executed: NO; public mutation path: NONE.\n'
+        + '- A11b.2.2.2 authorized: NO.\n'
+        + '- Ready for independent security review: YES; security/merge approval remains pending.\n\n'
+        + 'The runner executed the configured commands and validated the new Mac evidence '
+        + 'against the frozen source/test hashes. Exit zero and JSON alone are not a proof '
+        + 'of test design correctness: independent source/security review remains required.\n\n'
+        + '```json\n' + json.dumps({'rounds': history, 'mac_evidence': mac}, ensure_ascii=False, indent=2)
+        + '\n```\n', encoding='utf-8')
 
 
 def read_pr(root, task, expected_head):
@@ -329,6 +474,7 @@ def main():
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
         task, text = load_task(root, args.control_sha)
+        new_task = task['mode'] == 'implement_new_pr'
         test_mode = args.test_mode or task['default_test_mode']
         for executable in ('codex', 'claude', 'gh', 'make'):
             if not shutil.which(executable):
@@ -353,10 +499,16 @@ def main():
             print('Already completed. ' + completed.read_text(), flush=True)
             return
         branch, head = git(root, 'branch', '--show-current'), git(root, 'rev-parse', 'HEAD')
-        pr_info = read_pr(root, task, task['expected_head'])
-        prepare_existing_branch(root, task, check_only=args.check)
-        print('[Task] ' + task['task_id'] + ' / PR #' + str(task['pr_number']), flush=True)
+        pr_info = None
+        if new_task:
+            prepare_new_branch(root, task, check_only=args.check)
+        else:
+            pr_info = read_pr(root, task, task['expected_head'])
+            prepare_existing_branch(root, task, check_only=args.check)
+        print('[Task] ' + task['task_id'] + (' / new Draft PR' if new_task else ' / PR #' + str(task['pr_number'])), flush=True)
         print('[Mode] local ' + test_mode + ' tests; full canonical checks remain required in CI', flush=True)
+        if task.get('require_local_full'):
+            print('[Required] Final local full checks and Mac containment probes cannot be skipped by --related.', flush=True)
         if args.check:
             print('PRECHECK PASS. No models started; no source changes.', flush=True)
             return
@@ -378,15 +530,21 @@ def main():
             'system_python': run(['/usr/bin/python3', '--version'], root)})
         branch = task['branch']
         head = git(root, 'rev-parse', 'HEAD')
-        prompt = ('Repair only the existing PR implementation within this task. Read AGENTS.md and skills/implement-feature/SKILL.md. '
+        prompt = (('Implement the newly authorized task, then repair only within its scope. ' if new_task
+                   else 'Repair only the existing PR implementation within this task. ')
+                  + 'Read AGENTS.md and skills/implement-feature/SKILL.md. '
                   'Do not stage, commit, push, merge, create worktrees, change task scope, or start another slice. '
-                  'Only edit allowed_files in task.json. The outer runner owns Git and deterministic tests. '
+                  'Only edit allowed_files in task.json. The outer runner owns Git and deterministic tests; '
+                  'do not run expensive suites/probes yourself. Write the initial report with pending runner checks, '
+                  'not fabricated PASS; final truthful evidence will be appended by the runner. '
                   'If architecture/scope/authorization is unclear, return NEEDS_DECISION. '
                   'Your summary will be committed to Git: do not include secrets, tokens, raw provider output or private logs. '
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
-        repair_reason = None
+        repair_reason = 'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None
         full_tested_bytes = None
+        mandatory_tested_bytes = None
+        mac = None
         try:
             initial_paths = git(root, 'diff', '--name-only', '-z', task['base_sha'], head).split('\0')
             if any(p and p not in task['allowed_files'] for p in initial_paths):
@@ -399,6 +557,8 @@ def main():
                     check_scope(root, task, original, branch, head)
                     if result['status'] != 'PASS':
                         raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
+                if any(not (root / p).is_file() or (root / p).is_symlink() for p in task.get('required_files', [])):
+                    raise Stop('required implementation/test/report artifacts missing; no empty-suite PASS')
                 tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
                 suite = 'full' if test_mode == 'full' and round_no == 0 else 'related'
                 passed = tests(root, logs, task, round_no, suite)
@@ -416,7 +576,7 @@ def main():
                     repair_reason = 'Repair only failures in the deterministic tests. Read test logs under ' + str(logs)
                     continue
                 if suite == 'full':
-                    full_tested_bytes = tested_bytes.copy()
+                    full_tested_bytes = runtime_bytes(tested_bytes)
                 if touched:
                     git(root, 'diff', '--check')
                     git(root, 'add', '--', *touched)
@@ -436,6 +596,8 @@ def main():
                     'Your findings will be committed to Git: never include secrets, tokens, raw provider output or private logs. '
                     'not formal security/QA sign-off or merge approval. Reviewed_head must be ' + head + '\nTASK:\n'
                     + text + '\nLOCAL TEST MODE: ' + test_mode + '\nTEST RESULTS:\n'
+                    + ('Required final Mac/full gates will run after this preliminary source review; '
+                       'review PASS is not yet acceptance/merge approval.\n' if new_task else '')
                     + test_result_file(logs, round_no, suite).read_text()
                     + '\nDIFF:\n' + patch)
                 snapshot = git(root, 'status', '--porcelain')
@@ -446,7 +608,7 @@ def main():
                 history.append({'round': round_no, 'head': head, 'developer': result, 'tests': 'PASS',
                                 'test_results': test_results, 'tested_sha256': tested_bytes, 'review': review})
                 if review['status'] == 'PASS':
-                    if test_mode == 'full' and full_tested_bytes != committed_bytes:
+                    if (test_mode == 'full' or task.get('require_local_full')) and full_tested_bytes != runtime_bytes(committed_bytes):
                         final_passed = tests(root, logs, task, round_no, 'full-final')
                         final_results = json.loads(test_result_file(logs, round_no, 'full-final').read_text())
                         history[-1]['final_full'] = {'status': 'PASS' if final_passed else 'FAIL', 'results': final_results}
@@ -460,7 +622,55 @@ def main():
                                 raise Stop('final full tests still fail after repair bound')
                             repair_reason = 'Repair only final-full test failures. Read logs under ' + str(logs)
                             continue
-                        full_tested_bytes = committed_bytes.copy()
+                        full_tested_bytes = runtime_bytes(committed_bytes)
+                    if task.get('mandatory_tests') and mandatory_tested_bytes != runtime_bytes(committed_bytes):
+                        evidence_path = mac_evidence_path(logs, round_no)
+                        if evidence_path.exists():
+                            raise Stop('Mac evidence path collision; old evidence is not a new run')
+                        mandatory_passed = tests(root, logs, task, round_no, 'mandatory-final')
+                        mandatory_results = json.loads(test_result_file(logs, round_no, 'mandatory-final').read_text())
+                        history[-1]['mandatory'] = {'status': 'PASS' if mandatory_passed else 'FAIL', 'results': mandatory_results}
+                        if check_scope(root, task, original, branch, head):
+                            raise Stop('required Mac checks altered source state')
+                        if {p: digest(root / p) for p in committed_bytes if (root / p).exists()} != committed_bytes:
+                            raise Stop('required Mac checks changed reviewed bytes')
+                        if not mandatory_passed:
+                            raise Stop('required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry')
+                        if task.get('mac_evidence'):
+                            mac = validate_mac_evidence(evidence_path, committed_bytes,
+                                json.loads((logs / 'provenance.json').read_text())['venv_python'].removeprefix('Python '))
+                        mandatory_tested_bytes = runtime_bytes(committed_bytes)
+                    if task.get('acceptance_report'):
+                        record_acceptance(root, task, head, history, mac)
+                        if check_scope(root, task, original, branch, head) != [task['acceptance_report']]:
+                            raise Stop('acceptance evidence update exceeded report scope')
+                        git(root, 'diff', '--check')
+                        git(root, 'add', '--', task['acceptance_report'])
+                        git(root, 'commit', '-m', 'docs: record required Mac containment verification')
+                        head = git(root, 'rev-parse', 'HEAD')
+                        if check_scope(root, task, original, branch, head):
+                            raise Stop('acceptance commit hooks changed files')
+                        now_bytes = {p: digest(root / p) for p in committed_bytes if (root / p).exists()}
+                        if runtime_bytes(now_bytes) != runtime_bytes(committed_bytes):
+                            raise Stop('acceptance commit changed verified implementation')
+                        committed_bytes = now_bytes
+                        snapshot = git(root, 'status', '--porcelain')
+                        final_review = claude(root, logs, review_prompt + '\nFINAL REQUIRED VERIFICATION:\n'
+                            + json.dumps({'rounds': history, 'mac': mac})
+                            + '\nRe-review the final cumulative diff including the appended truthful report. '
+                            + 'Reviewed_head must now be ' + head + '\nFINAL DIFF:\n'
+                            + git(root, 'diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head),
+                            round_no + 100, task['timeout_seconds'], head)
+                        check_scope(root, task, original, branch, head)
+                        if git(root, 'status', '--porcelain') != snapshot:
+                            raise Stop('final review altered files')
+                        history[-1]['final_review'] = final_review
+                        history[-1]['final_review_head'] = head
+                        if final_review['status'] != 'PASS':
+                            if final_review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
+                                raise Stop('final review needs a decision or exceeded repair bound')
+                            repair_reason = 'Repair only final review blockers:\n' + json.dumps(final_review)
+                            continue
                     break
                 if review['status'] == 'NEEDS_DECISION' or round_no == task['max_repairs']:
                     raise Stop('Claude review needs a decision or exceeded repair bound')
@@ -477,8 +687,9 @@ def main():
             report.write_text('# AI loop: ' + task['task_id'] + '\n\n'
                 + 'Local selected tests/ordinary Claude review: PASS. Final merge approval remains pending.\n\n'
                 + '- Local test mode: `' + test_mode + '`\n'
-                + '- Local full canonical suite: ' + ('PASS' if full_tested_bytes == committed_bytes else 'NOT RUN; required full suite remains in exact-head CI') + '\n'
-                + '- Existing PR: #' + str(task['pr_number']) + '\n- Starting PR HEAD: `' + task['expected_head'] + '`\n'
+                + '- Local full canonical suite: ' + ('PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT RUN; required full suite remains in exact-head CI') + '\n'
+                + '- Required Mac containment: ' + ('PASS; independent security review pending' if mac else 'not a gate of this task') + '\n'
+                + '- Task mode: `' + task['mode'] + '`\n- Starting HEAD: `' + task['expected_head'] + '`\n'
                 + '- Implementation HEAD: `' + head + '`\n- Control SHA: `' + args.control_sha + '`\n'
                 + '- Canonical Mac root: `' + str(root) + '`\n- Repair attempts used: ' + str(round_no) + '\n'
                 + '- Exact publication-head CI is checked after this report commit; inspect GitHub checks.\n'
@@ -490,8 +701,27 @@ def main():
             publication_head = git(root, 'rev-parse', 'HEAD')
             if check_scope(root, task, original, branch, publication_head):
                 raise Stop('publication hooks changed source; files preserved before push')
-            read_pr(root, task, task['expected_head'])
+            publication_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
+            if publication_bytes != committed_bytes:
+                raise Stop('publication hooks changed reviewed/tested bytes; no push or inferred PASS')
+            git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
+            if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
+                raise Stop('main changed before publication; refresh/recover without discarding work')
+            if new_task:
+                if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + branch], root):
+                    raise Stop('new branch was concurrently published; files preserved')
+                if json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=all&head=davidcatcat:' + branch], root)):
+                    raise Stop('a PR already exists for the new task; no duplicate publication')
+            else:
+                read_pr(root, task, task['expected_head'])
             git(root, 'push', '-u', 'origin', 'HEAD:refs/heads/' + branch)
+            if new_task:
+                create_draft_pr(root, task, logs, publication_head, report_rel)
+                pulls = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/pulls?state=open&head=davidcatcat:' + branch], root))
+                if len(pulls) != 1 or pulls[0].get('draft') is not True:
+                    raise Stop('could not establish unique new Draft PR; published work preserved')
+                task['pr_number'] = pulls[0]['number']
+                read_pr(root, task, publication_head)
             ci = wait_ci(root, publication_head, task['ci_workflow'])
             pr_info = read_pr(root, task, publication_head)
             body = logs / 'pr-body.md'
@@ -504,7 +734,9 @@ def main():
             pr = pr_info['html_url']
             summary = {'status': 'READY_FOR_FINAL_REVIEW', 'head': publication_head, 'branch': branch,
                        'report': report_rel, 'pr': pr, 'ci': ci, 'local_test_mode': test_mode,
-                       'local_full': 'PASS' if full_tested_bytes == committed_bytes else 'NOT_RUN'}
+                       'local_full': 'PASS' if full_tested_bytes == runtime_bytes(committed_bytes) else 'NOT_RUN',
+                       'mac_containment': 'PASS' if mac else 'NOT_APPLICABLE',
+                       'independent_security_review': 'PENDING' if new_task else 'not established by ordinary review'}
             save_json(completed, summary)
             save_json(logs / 'summary.json', summary)
             print('\nREADY FOR FINAL REVIEW\n' + pr + '\nHEAD: ' + publication_head, flush=True)

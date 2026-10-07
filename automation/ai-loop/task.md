@@ -1,91 +1,248 @@
-# PR #46 — A11b.2.2.0 independent review and bounded repair
+# A11b.2.2.1 — supervisor / fake-child containment harness
 
-## Current task
+## Authorization, revision and delivery
 
-A11b.2.2.0 has already been implemented on PR #46. Do not repeat its implementation
-or create another feature PR. David authorized updating the handoff on 2026-10-07
-after confirming this published implementation.
+David supplied and authorized this next implementation handoff on 2026-10-07,
+including publication through the Mac AI-loop script. Implement this entire slice,
+not another milestone. The coordinator verified PR #44 and PR #46 are merged and
+main is `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
 
 - Repository: davidcatcat/davidcattoolsproject.
-- Main/base: `18365bb079835f3b413dd135ea742213bb1a7724` (PR #44 merged).
-- Existing PR: https://github.com/davidcatcat/davidcattoolsproject/pull/46.
-- Branch: `feat/llmtool-a11b2-2-0-cleanup-20261007`.
-- Starting publication HEAD: `687f3f93d6d46b6d4fb5a95a7cfd1fb17170f53c`.
-- Existing implementation SHA: `7692fa3fb49b45b49b38cc1424eaa9811fe4763f`.
-- Existing report: reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md.
-- Push and PR llmtool CI at the starting publication HEAD passed when this task
-  was prepared. New publication requires checks on its own exact HEAD.
+- Canonical Mac root: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+- Pinned base/start: `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+- New branch: `feat/llmtool-a11b2-2-1-containment-20261007`.
+- New Draft PR, created by the outer runner; no existing feature PR is reused.
+- Validation report: `reports/llmtool_a11b2_2_1_containment_validation_20261007.md`.
+- Initial implementation plus at most two repairs; no blind provider retry.
+- Stop at READY_FOR_FINAL_REVIEW. Independent security review and coordinator
+  acceptance are pending; never merge or begin A11b.2.2.2 automatically.
 
-The script checks the actual open/unmerged PR state, main/base, branch identity,
-and exact starting HEAD before spending model tokens. A changed PR/base requires
-a refreshed contract. Reuse/fast-forward the existing local branch safely; never
-reset, stash, force-push or discard unrelated work.
+The runner fetches main, checks exact base, clean tracked/index state, preserved
+unrelated untracked artifacts, branch/PR absence and current-HEAD ancestry, then
+creates the fresh branch from origin/main. A moved base, branch collision or local
+unpublished/divergent work stops without reset, stash, force-push or deletion.
+No worktree, clone or alternate checkout, including /private/tmp project checkouts.
 
-## Run in this order
+Historical spec/roadmap prose saying documentation-only or NOT AUTHORIZED describes
+its originating task, not this new user authorization. Current scope is precisely
+2.2.1. Real Git ADD and 2.2.2 remain unauthorized. If a substantive design conflict
+exists, return NEEDS_DECISION with evidence; do not reinterpret away the requirement.
 
-1. Select local test coverage from task.json. Default `--related` runs syntax,
-   Git-preflight, Git-intelligence/A5 and Action-contract tests using the existing
-   `tools/llmtool/.venv/bin/python`. Explicit `--full` runs the canonical checks
-   with both that interpreter and Mac `/usr/bin/python3`. Run from the canonical
-   repository, with `PYTHONPATH=tools/llmtool` for root-based unittest discovery.
-   Do not assume a root `.venv` or silently substitute a different interpreter.
-   Related mode requires the full canonical suite in final exact-head CI; it does
-   not claim a local full-suite PASS. This selection policy was requested by David
-   on 2026-10-07 to avoid full local checks in every repair round.
-2. Claude independently reviews the full cumulative base-to-current-HEAD diff,
-   originating L1/L2 requirements, and current deterministic test evidence. It
-   has read tools only. It does not modify files, run tests, write Git or merge.
-3. If tests and review PASS, skip Codex entirely. Preserve the existing code and
-   validation report; publish the new independent handoff report only.
-4. On a reproducible test failure or blocking finding, Codex may repair within
-   the three allowed_files in task.json. Retain the actual error/test evidence.
-   Update the validation report only to add truthful repair/verification evidence;
-   preserve historical before-fix evidence and do not present old test results as
-   validation of changed bytes. Related tests run after each repair, the runner
-   commits, and Claude re-reviews the full cumulative diff. In full mode, run the
-   final local full suite after review PASS if the tested bytes changed; reuse an
-   initial full PASS only when the same bytes remain. A final full failure returns
-   to bounded repair. At most two repairs in total, including such failures.
-5. Publish the dated automated review report and any tested repairs to the same
-   PR #46 branch. Wait for applicable llmtool CI runs on the exact final publication
-   HEAD. Report-only pushes may omit a push workflow due to path filters, so accept
-   the applicable PR workflow at that exact HEAD; missing/old checks are not PASS.
-   CI runs the full canonical suite on Linux/Python 3.9 and 3.14; this does not
-   substitute for Mac-specific evidence. Record local mode/results separately
-   from CI. Preserve the existing PR description and append this new handoff.
-6. Stop at READY_FOR_FINAL_REVIEW. Final coordinator/merge decisions remain pending.
+## Read before implementation
 
-## Review requirements
+Read these authoritative requirements and evidence in full:
 
-Read AGENTS.md, CLAUDE.md, tools/llmtool/WORKFLOW.md,
-skills/review-change/SKILL.md, and (for repairs) skills/implement-feature/SKILL.md.
-Review the original requirements in:
-
-- reports/llmtool_a11b2_1_git_preflight_independent_review_20261007.md.
-- reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md, especially §18/§19.
+- AGENTS.md, CLAUDE.md, tools/llmtool/WORKFLOW.md, tools/llmtool/ROADMAP.md.
+- skills/implement-feature/SKILL.md, skills/review-change/SKILL.md,
+  skills/security-review/SKILL.md and skills/safe-git/SKILL.md.
+- reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md (especially
+  sections 3/4/8/9/11/18/19/21 and remediation section 26).
+- reports/llmtool_a11b2_2_b5_containment_spec_review_20261007.md
+  (historical BLOCKED findings).
+- reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md.
 - reports/llmtool_a11b2_2_b5_containment_spec_targeted_rereview_20261007.md.
+- reports/llmtool_a11b2_2_0_cleanup_validation_20261007.md.
+- reports/ai-loop/A11b.2.2.0-pr46-review-20261007-20261007T050236Z-59259.md.
+- tools/llmtool/llmtool/git_mutation.py, git_intel.py, action_contract.py, and the existing process runner/error definitions
+  located by inspection (do not assume a process_runner.py/errors.py filename).
 
-Check that PermissionError/ProcessLookupError cleanup does not replace the primary
-typed failure, resource-release failures cannot skip later pipe closure/reaping,
-and cleanup faults on otherwise successful reads cannot silently report success.
-Check single-variable config/info-attributes/index/root drift evidence and honest
-labels for compound probes. A real correctness or regression blocker needs concrete
-file/test evidence; optional naming/refactoring suggestions do not force repairs.
+## Scope and file contract
 
-Ordinary review does not claim B5 crash containment, formal security/QA approval,
-or Mac parent-SIGKILL/supervisor evidence. Return NEEDS_DECISION for unresolved
-architecture, scope or authorization conflicts. Structured outputs and exact
-reviewed_head are required; CLI exit zero alone is not review PASS.
+Implement only private supervisor + deterministic fake-child process containment.
+Use the explicit allowed_files and required_files in task.json. The private module
+names are reserved for this handoff; do not add an arbitrary command runner. If the
+reviewed architecture requires another file, return NEEDS_DECISION with the exact
+reason/path rather than expanding scope. Existing git_mutation production behavior
+and Action/approval semantics remain unchanged. Extend its import-boundary tests
+only as necessary to distinguish reviewed private code from forbidden public paths;
+preserve all existing rejection assertions.
 
-## Boundaries
+Never execute real product `git add`, mutate the user repository/index, implement
+real ADD/post-state mutation, add a public mutation CLI or model path, issue approval,
+bypass durable audit, retry/rollback, delete locks, or start 2.2.2/.3, A11b.3, A11c or
+A12. Fake-child/probe processes may create disposable runtime fixtures, not project
+checkouts. Their signals target only identity-bound owned synthetic processes.
 
-No reimplementation from main, duplicate PR, automatic merge, new milestone,
-supervisor/fake-child harness, real llmtool Git ADD, public mutation CLI, approval
-enforcement, rollback/index.lock deletion, A11b.2.2.1/.2/.3, A11c or A12. Keep
-roadmap/README/skills unchanged. The outer script owns Git; Codex must not stage,
-commit or push. Ordinary development publication does not enable product mutation.
+The outer development runner owns Git staging/commit/push/PR creation. Its ordinary
+publication staging is distinct from the prohibited llmtool Git ADD implementation.
+Codex must not stage/commit/push, install globally, invoke sudo, bypass permissions,
+run expensive suites/probes itself, or change the task/criteria. Return PASS for an
+implemented candidate, not as a claim that pending runner tests/security gates passed.
 
-Auth/quota/CLI errors, dirty or divergent local work, stale PR/main, invalid model
-output, or exhausted repair bounds stop with files/logs preserved. No blind provider
-retry or permission bypass. This is a Mac script run, not an automatically connected
-Work execution or approval/resume service.
+## 1. Supervisor and trusted runtime
+
+Separate process, never a thread; fixed exec-style launch equivalent to
+`[sys.executable, '-I', '-m', '<private supervisor module>']`, shell=False, distinct
+session, trusted neutral cwd outside the repository, fresh PATH/LC_ALL allowlist.
+No PYTHON*, DYLD_*, LD_*, user-site, credentials, proxies, agents or ASKPASS inheritance.
+Verify interpreter/install identity. Isolated module-resolution failure rejects;
+no PYTHONPATH/repository-cwd workaround or silent alternate interpreter. If the
+specified Mac Python environment cannot resolve the trusted installation, report
+NOT SUPPORTED/NEEDS_DECISION and preserve evidence instead of changing global setup.
+Without a legitimate internal FD/launch/code handshake, direct import, runpy,
+wrapper or subprocess -m invocation must fail closed without spawning any child.
+There is no hidden/public supervisor CLI.
+
+## 2. FD topology and host premise
+
+Parent uniquely owns control/liveness writer and status reader; supervisor owns
+control/liveness reader and status writer; fake child owns neither. CLOEXEC and
+non-inheritable endpoints, close_fds=True, pass_fds limited to the two required
+supervisor endpoints; close unused ends immediately. Supervisor sets inherited
+endpoints non-inheritable before spawning its child. No control/liveness/status/audit
+FD reaches fake children; verify enumeration in tests.
+
+Install signal scope before pipe creation. The production critical window permits
+only the one supervisor launch, no extra fork/spawn/thread or spawning callback.
+Support only reviewed main-thread/single-thread hosts. threading.active_count()==1
+alone does not prove absence of native threads/fork; explain and enforce the trusted
+host premise. Unsupported/unprovable conditions reject before spawn. The extra
+Popen(close_fds=True) inheritance stress variant is harness-only, never a production
+permission.
+
+## 3. Bounded protocol
+
+Versioned strict JSON, 4-byte big-endian length prefix, max 128 KiB; reject zero/
+oversize, duplicate/unknown keys, non-finite values, excessive depth/count, unknown
+version/type and mid-frame EOF before unsafe allocation. Nonblocking partial
+reads/writes with monotonic deadlines; EPIPE/BrokenPipeError triggers cleanup.
+No pickle/eval, arbitrary argv/shell or action replacement.
+START -> READY -> fixed fake-child spawn -> CHILD_IDENTITY -> optional CANCEL_ACK
+-> terminal status. After START only CANCEL is accepted from parent.
+
+## 4. Code/runtime binding
+
+Bind protocol, action/preflight digests and caller-pinned reviewed artifact manifest,
+interpreter/install identity; manifest includes supervisor, protocol/identity helpers,
+mutation/preflight, action contract, errors, package init and all containment/error
+path modules. Parent and supervisor independently verify origins and hashes, before
+READY and again before child spawn. A self-consistent Action-supplied manifest is
+not authority. Mismatch must reject with zero child spawn. This is drift detection
+under trusted installation, not a same-UID isolation claim. Explain the fake-harness
+internal binding without introducing fake product approval/audit authorization.
+
+## 5. Fake child only
+
+Fixed deterministic synthetic cases in private code; no arbitrary command seam or
+Git ADD. Child gets its own session/process group. Supervisor owns lifecycle. A
+controlled descendant case must leave a long-lived child after leader exit, so the
+test proves descendant containment rather than merely leader reaping.
+
+## 6. Non-reaping lifecycle
+
+On macOS implement kqueue KQ_FILTER_PROC/NOTE_EXIT or a separately reviewed equivalent.
+Notification -> owned-group cleanup decision -> leader reap, never poll/wait/
+communicate/consuming waitpid/context-manager reap first. Handle SIGCHLD auto-reap
+and custom reapers according to B5. Test alive and zombie-at-registration NOTE_EXIT,
+registration failure, fast exit and leader exit with live descendant. Never signal
+remembered released IDs after reap.
+
+## 7. Parent death, signals and supervisor failure
+
+Real host parent-SIGKILL -> writer closure -> supervisor EOF -> fake group SIGKILL
+-> leader reap -> eventual group disappearance. Run >=20 repetitions EACH for plain
+and harness-only Popen(close_fds=True) variants, with a real controlled descendant.
+Every repetition has <=2s monotonic latency to confirmed group disappearance;
+use kill(pid,0)/killpg(pgid,0) with identity evidence, not ps. EPERM is inconclusive,
+not absence. Distinguish zombies from executing descendants and safely clean owned
+processes on assertion failures. Record macOS/Python/code digest. Probe FAIL,
+NOT SUPPORTED or instability means STOP, not automatic retries or weaker thresholds.
+
+Test real SIGINT/SIGTERM/SIGHUP including pre-pipe, spawn and cleanup timing; minimal
+handlers, repeated signals cannot bypass cleanup/deadline; restore only after verified
+containment and reap. EOF is the death safety mechanism, handlers provide typed outcome.
+For hung/lost supervisor, missing ACK, bounded wait, malformed/closed status or missing
+group-gone proof: kill/reap still-owned supervisor, then fresh identity-bound group
+handling. No normal return/restoration while an owned process may live. Explicitly
+implement unresolved-containment exit/handler behavior (F1), preserve its evidence,
+and classify as state unknown / user action required without guessing ownership.
+Also inject supervisor death before CHILD_IDENTITY delivery (B5 residual window).
+
+## 8. Identity and reuse
+
+Bind PID/PGID/SID/UID and kernel start-time identity. Fresh verification before signal;
+no remembered numeric PGID or kill(pid,0)/ps string alone as identity. Test mismatch,
+simulated reuse, leader absent with only numeric group known, verification-to-signal
+race and valid original-group continuity. Unknown/mismatch never kills unrelated
+processes. If the macOS primitive/continuity cannot be safely established, reject
+platform support with NOT SUPPORTED; mocked matching snapshots are not OS race proof.
+
+## 9. Typed outcomes and F1–F4
+
+Internal start-failed, timeout, interrupted, parent-lost, supervisor-lost, output-limit,
+protocol-failure and containment/state-unknown outcomes; no real Git APPLIED/NOT_APPLIED
+semantic flow in this slice. Implement F1 unresolved exit, F2 kqueue cases, F3 kernel
+identity/continuity and F4 host premise within 2.2.1, without new milestones. Preserve
+primary failure despite cleanup/protocol faults. BLOCKER/HIGH/correctness defects
+block; optional Low/Note do not cause an unlimited repair loop or a zero-bug pursuit.
+
+## 10. Boundary and tests
+
+No CLI/router/provider/orchestrator/model/debug mutation path, approval issuer or audit
+bypass. Cover AST/string/static and dynamic import, direct invocation, runpy, -m and
+wrapper paths; invalid internal handshake cannot spawn a fake child. Keep A5 and
+A11b.1/2.1 regressions intact. New unit tests must discover actual nonzero test cases.
+CI on other platforms may report Mac-only capabilities NOT SUPPORTED/skipped; those
+results never count as Mac containment PASS. Actual Mac mandatory acceptance permits
+no skipped scenarios. Do not weaken tests or change required policy for a green run.
+
+## 11. Runner test order and evidence interface
+
+The runner calls Codex once for the initial implementation. After each candidate or
+bounded repair it runs syntax, new containment tests and existing Git/A5/Action tests,
+then read-only Claude ordinary review of the complete base-to-HEAD diff. On preliminary
+review PASS, it runs final full checks under both tools/llmtool/.venv/bin/python and
+/usr/bin/python3, plus required actual Mac acceptance. Full checks are reused only on
+identical source/test bytes. --related selects repair coverage, not permission to skip
+these mandatory final gates. --full also runs full checks on the initial candidate.
+
+Implement tests/run_containment_acceptance.py with exactly the fixed `--output PATH`
+evidence interface used by task.json, launched from canonical root by the outer runner
+outside the Codex sandbox. It must execute real required tests/probes, require nonzero
+checks and zero skips, retain failures, exit nonzero on any failure/unsupported case,
+and produce fresh JSON only for that invocation. No network/global install/user repo
+mutation. The output path is in the runner-owned local logs directory. Do not fabricate
+JSON PASS to satisfy the validator. Independently reviewed source and raw evidence
+are required; schema validation alone cannot prove semantic correctness.
+
+JSON shape (strict keys; max 128 KiB):
+
+- schema_version: integer 1; platform: 'darwin'; os_version: platform.mac_ver()[0];
+  python_version: platform.python_version() for the invoked venv interpreter.
+- tested_sha256: SHA-256 map of ALL existing allowed_files excluding reports/;
+  read task.json's pinned contract copied in the output directory's task.json.
+- scenarios: EXACT names fd_inheritance, sigint, sigterm, sighup, hung_supervisor,
+  leader_exit_descendant, identity_reuse, macos_start_time, kqueue_non_reaping,
+  protocol_framing, code_runtime_binding, public_import_boundary,
+  parent_sigkill_plain, parent_sigkill_popen.
+- Every scenario row: EXACT keys status ('PASS'), checks (positive int), skipped (0),
+  repetitions (empty array except for SIGKILL variants).
+- Each SIGKILL row: >=20 actual repetitions, checks >= repetition count. Each record
+  has EXACT keys leader_pid (positive int), pgid (positive int), descendant_pids
+  (nonempty positive-int array), latency_seconds (finite number 0..2), identity_verified,
+  leader_absent, descendants_absent, group_absent, containment_confirmed (all true).
+
+The heartbeat is not a repeated command: [Running] prints every
+20 seconds while a command is active. Tests show position, PASS/FAIL and duration.
+Any mandatory Mac failure or invalid evidence stops with files/logs preserved. No
+blind provider retry, permission bypass or automatic probe repair. Ordinary unit/full
+regression failures can use the fixed two-repair budget when reproducible/in scope.
+
+## 12. Report, review and publication
+
+Create the specified validation report with truthful provenance and initial pending
+runner gates. Preserve before-fix evidence and do not claim old results for changed
+bytes. Include every requested disposition: harness/supervisor, FD, x20 plain/x20
+Popen parent-SIGKILL, SIGINT/TERM/HUP, hung escalation, leader/descendant cleanup,
+PID/PGID reuse, kernel identity, non-reaping kqueue, framing, code/runtime binding,
+both Python full suites, BLOCKER/HIGH, no real Git ADD, no public mutation, no 2.2.2
+authorization and readiness for independent security review.
+
+After actual gates PASS, the runner appends its final results and hashes to that report,
+commits report evidence, and Claude re-reviews the complete final diff. It publishes
+report/implementation to the new branch, creates one Draft PR, verifies exact final
+HEAD llmtool CI, appends the handoff to the PR and stops at READY_FOR_FINAL_REVIEW.
+No formal security PASS or merge approval is implied. Keep raw prompts/test/model
+streams local in .ai-loop/<run-id>; curated evidence alone goes to Git. Provider auth,
+quota, CLI, stale state, invalid structured output, missing files or exhausted repair
+bounds stop with work preserved and require coordinator recovery, not a blind rerun.

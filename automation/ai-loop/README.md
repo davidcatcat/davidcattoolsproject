@@ -1,119 +1,114 @@
-# One-command Mac development handoff
+# Mac AI-loop development handoff
 
-This is a development helper for David's current Codex CLI / Claude Code workflow,
-independent of llmtool product features. Control files live on the persistent
-`automation/ai-loop` branch; they can be fetched without merging PR #45 into main.
-The coordinator updates task.md/task.json on that branch when repo state changes.
+This standalone development helper lives on the persistent `automation/ai-loop`
+control branch, available without merging its draft helper PR #45. It is independent
+of llmtool product execution, approval and A11b/A11c acceptance.
 
-Current task: **review and, only if necessary, repair existing PR #46**. A11b.2.2.0
-is already implemented. The script does not repeat implementation, create a second
-feature PR or start 2.2.1.
+Current task: **A11b.2.2.1 — private supervisor/fake-child containment harness**.
+PR #44 and PR #46 are merged; the pinned main/start is
+`585caf7d4c9dad20afd3beb38e5140d6dadf89e0`. Only fake children are authorized;
+real llmtool Git ADD and A11b.2.2.2 remain prohibited.
 
-Download scripts/ai-loop.sh once. From its directory, run:
+## Run on the actual Mac
+
+Use the launcher David already downloaded to the canonical repo's parent:
 
 ```sh
+cd /Users/davidsun/git/davidcataiporject
 bash ai-loop.sh
 ```
 
-The launcher automatically selects the canonical repository, fetches the control
-branch with existing Git authentication, pins its SHA, downloads its Python runner
-and task files, and executes the task. A previously downloaded launcher still works:
-every invocation obtains the updated runner/task. No manual task.md copy, Claude
-result copy, /import, or terminal switching is required. After the first invocation,
-a stable launcher is also available:
+No repeated download is needed. Each invocation fetches the control branch, pins its
+SHA, downloads the matching runner/task.md/task.json and executes from the canonical
+repository. There is no manual prompt transfer to Codex/Claude. A stable alternative
+after first launch is the canonical repo's `.git/ai-loop/run.sh`.
 
 ```sh
-bash /Users/davidsun/git/davidcataiporject/davidcattoolsproject/.git/ai-loop/run.sh
+bash ai-loop.sh --check    # optional preflight; no model/code/branch creation
+bash ai-loop.sh --related  # default: related checks during implementation/repair
+bash ai-loop.sh --full     # also run full checks on the initial candidate
 ```
 
-Add `--check` for preflight only. It fetches Git refs and checks the PR, task and
-local state/dependencies without switching branches, calling models or editing
-source. The normal invocation already performs preflight before paid model work;
-a separate --check run is optional.
+`--test-mode related|full` is equivalent. Mandatory task gates cannot be disabled by
+`--related`: this containment task still requires final full local suites on BOTH
+specified Mac Python interpreters and actual Mac acceptance. Each parent-SIGKILL
+variant runs >=20 times with a <=2-second per-repetition disappearance bound. The
+runner rejects missing/skipped/failed/stale Mac evidence. That is separate from
+Linux/Python 3.9/3.14 exact-head CI. Related mode is not a containment shortcut.
 
-Choose local test coverage:
+After changes, related tests run first. Full and Mac checks are reused only when
+source/test bytes are identical; report-only evidence changes do not rerun expensive
+checks. Test phases display command position, PASS/FAIL and duration. [Running] is a
+20-second heartbeat, not a restart.
 
-```sh
-bash ai-loop.sh --related  # default: related local tests; full canonical CI
-bash ai-loop.sh --full     # also require full local checks
-```
+## Handoff from another Chat/Work conversation
 
-`--test-mode related` and `--test-mode full` are equivalent alternatives. The
-default is in task.json. Related commands are explicitly selected for the task,
-not guessed from file names: this task covers syntax, Git-preflight, Git
-intelligence/A5 and Action contracts. Each command displays its position,
-PASS/FAIL and elapsed seconds; a failed command stops that phase immediately.
+When David chooses script execution, the coordinating conversation must:
 
-Full mode initially runs the canonical checks with both Mac interpreters. Each
-repair runs related tests first. After review PASS, it runs final full checks if
-the tested bytes changed; an initial full PASS is reused only for identical bytes.
-A final full failure uses the same two-repair bound. Related mode runs no local
-full suite, and explicitly reports local full checks as NOT RUN. Both modes require
-the full canonical GitHub CI on the final publication HEAD, on Linux/Python 3.9
-and 3.14. That CI is separate from local Mac evidence.
+1. Read current remote main/PR/CI/review state, repo guidance and the originating spec.
+2. Write the concrete authorized prompt to `automation/ai-loop/task.md` and matching
+   executable `task.json` on this control branch. Pin base/start, branch, task ID,
+   explicit allowed/required files, test commands/mode, mandatory gates, budgets and
+   stop state. Do not merely tell David to paste a prompt into Codex.
+3. Verify the runner supports the task. Add tested support before publication if its
+   mode/gates are new. Verify the published remote files. Keep one coordinator/Git
+   writer, and do not create a second competing implementation from another chat.
+4. Tell David to execute his existing `bash ai-loop.sh`. This Work conversation has
+   no connected Mac executor or automatic callback/approval-resume service.
+5. Review the resulting Draft PR, validation evidence, exact SHA and CI here. Keep
+   required independent security/QA/runtime gates distinct from ordinary Claude
+   review. Merge/next slices require their applicable authorization.
 
-A running process keeps its pinned runner/task. Updates take effect at the next
-launch; do not run another writer alongside it. After this task completes, a rerun
-is a no-op. The coordinator must prepare a new contract for new work; changing test
-mode does not rerun a completed task or bypass a moved PR HEAD.
+This same flow is documented in tools/llmtool/WORKFLOW.md on the control branch.
+Other conversations should explicitly read this branch until the helper PR is merged.
+A new milestone task gets a new task ID. Completed tasks are not restarted to do new
+work. A stopped run needs diagnosis/recovery before rerun; files and commits are
+preserved. Never reset/stash/force-push/discard user work to restart blindly.
 
-Existing installations and usable authentication for git, codex, claude, gh, make
-and Python 3.9+ are required. Preflight verifies GitHub authentication, but CLI
-version/installation checks do not establish Codex or Claude login. A provider's
-authentication is exercised when that provider is called; successful review skips
-Codex. This task uses `tools/llmtool/.venv/bin/python` plus Mac `/usr/bin/python3`,
-matching PR #46's local validation layout. Targeted unittest discovery sets
-`PYTHONPATH=tools/llmtool`; canonical Makefile invocations use the correct cwd-relative
-venv path. No root .venv, new API key or new model configuration is assumed.
+## Supported execution flows
 
-Flow: fetch pinned task → check canonical root/origin/clean tracked tree/main/PR →
-safely reuse or fast-forward the existing PR branch → deterministic tests → Claude
-review → at most two Codex repairs with tests/re-review → curated report → push the
-same branch → exact-publication-HEAD CI → append to existing PR description → stop
-for final coordinator review. Codex is not called when the existing implementation
-already passes tests/review.
+- `implement_new_pr`: verify branch/PR absence and base ancestry, create a fresh
+  feature branch from pinned origin/main, invoke Codex for the initial candidate,
+  test/review, allow at most two repairs, run required final gates, append truthful
+  validation evidence, re-review, publish and create one new Draft PR.
+- `review_existing_pr`: verify an open unmerged PR at the pinned branch/base/head,
+  safely reuse/fast-forward it, run selected tests and independent Claude review,
+  skip Codex when already passing; repair only reproducible blockers, publish to
+  the same PR and preserve its original description.
 
-The task pins an expected starting PR HEAD. Closed/merged/moved PRs, changed main,
-local unpublished/divergent work, conflicting untracked files, provider/auth/quota
-errors and invalid structured output stop with files preserved. Existing local PR
-branches are reused; missing ones are created from the fetched PR branch, never
-from main. No reset, stash, force push, alternate checkout or auto-merge occurs.
+Both modes verify applicable llmtool CI on the exact final publication SHA before
+completion. Missing/old runs are not PASS. The current implementation stops at
+READY_FOR_FINAL_REVIEW with independent security review pending. No automatic merge
+or next slice. A failed/unsupported Mac containment probe stops for coordinator
+assessment, without automatic retries or lowering thresholds.
 
-Existing untracked files are fingerprinted and preserved. Run only one writer in
-the canonical repository: stop interactive Codex/Claude work on it while this
-launcher runs. The Mac must remain awake, connected and logged in. This is local
-automation, not a cloud service or scheduler.
+## Environment, authority and evidence
 
-Claude has only Read/Glob/Grep tools, hooks disabled, and no MCP servers. It cannot
-run tests or Git; the outer runner supplies the cumulative diff and current test
-results. CLI exit 0 means provider completion, not review PASS: structured_output,
-blocking findings and reviewed_head are validated. Ordinary review does not replace
-formal security/QA/containment gates. Codex uses workspace-write and no permission
-bypass. The runner is the sole Git writer.
+Only `/Users/davidsun/git/davidcataiporject/davidcattoolsproject` is the project root.
+No alternate clone/worktree/checkout. Git/GitHub auth, Codex CLI, Claude Code, make,
+Python >=3.9, tools/llmtool/.venv/bin/python and Mac /usr/bin/python3 are prerequisites.
+The script preserves tracked/index cleanliness and unrelated untracked artifacts,
+rejects changed main, branch collisions and unpublished/divergent work. Existing
+isolated package installation must support the B5 -I launch; no global-install,
+PYTHONPATH/cwd bypass or silent alternate interpreter is authorized for that launch.
 
-Raw prompts/model streams/test logs stay in `.ai-loop/<run-id>/`, excluded locally
-via .git/info/exclude. Only curated summaries, test argv/exit statuses, tested file
-SHA-256 and environment/version provenance are published under reports/ai-loop.
-Reviewers must keep secrets out of published summaries/findings. Completion records
-and bootstrap files stay in `.git/ai-loop/`. Reports distinguish the implementation
-SHA from the later publication SHA. CI accepts applicable push or PR llmtool runs
-on the exact latter SHA; path-filtered/missing push runs, old successful runs and
-absent checks cannot establish PASS by themselves.
+GitHub authentication is checked in preflight. CLI installation/version does not
+prove provider login; usable auth is checked when that provider is called. This new
+implementation task calls Codex. Auth/quota/CLI errors and invalid structured outputs
+stop with evidence; there is no permission bypass or blind provider retry.
 
-A completed task is a no-op on rerun. If a stopped run left local commits/edits,
-the runner preserves them and requires a coordinator-issued recovery contract;
-it does not overwrite them to resume. Timeout/Ctrl-C terminates the active CLI
-group while its leader is still live. This helper does not claim the future B5
-supervisor's parent-SIGKILL or full descendant-containment guarantees.
+Codex writes only allowed files; the outer runner is the sole Git writer. Claude has
+Read/Glob/Grep only, no hooks/MCP, and cannot run tests or Git. JSON schema, exact
+reviewed_head and blocking findings are checked; exit zero alone is not review PASS.
+Mac evidence schema/hashes/counts are deterministic gates, not a proof of test-design
+correctness. Independent source/security review still assesses that evidence.
 
-This current Work thread has no connected Mac executor, installed/authenticated
-CLI pair, automatic callback or approval/resume service. Run the script on Mac;
-results are published to PR #46 for subsequent review here.
+Raw logs/prompts/model streams live locally in `.ai-loop/<run-id>/`, excluded through
+.git/info/exclude. Curated report/provenance/check summaries go to Git; do not publish
+secrets. Completion/bootstrap state lives in .git/ai-loop. Mac must remain awake and
+online. Run only one writer; an active invocation retains its pinned runner/task.
 
-Official interfaces:
-- https://learn.chatgpt.com/docs/non-interactive-mode
-- https://code.claude.com/docs/en/cli-reference
-
-Authoring checks are standalone syntax/fixture checks. The earlier Mac run reached
-Claude completion, report publication and exact-head CI waiting; the new test-mode
-options have not yet been exercised on Mac. See VALIDATION.md.
+The helper's process-group timeout handling is not the future llmtool B5 supervisor
+and does not claim parent-SIGKILL or full descendant containment for model CLIs.
+Authoring uses standalone helper fixtures, not an alternate project checkout. The
+new implementation/gates have not run on David's Mac yet. See VALIDATION.md.
