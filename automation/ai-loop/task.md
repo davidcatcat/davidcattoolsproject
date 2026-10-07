@@ -1,3 +1,28 @@
+# CURRENT state — hung-supervisor FAIL; diagnostics-only handoff
+
+Run `20261007T162747Z-96025` stopped at native hung_supervisor FAIL, candidate
+`a00eda49aa0f0c3486d27589148361d67e7bdb3e`. FD inheritance and SIGINT/SIGTERM/
+SIGHUP passed; both full suites passed. Nine later native scenarios did not run.
+
+The previous 87533 recovery is consumed. All startup/resume instructions below are
+historical. Preserve existing work; a new native repair/resume needs coordinator
+assessment and a new exact-run metadata contract.
+
+The newly authorized operator step publishes diagnostics only:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --publish-diagnostics 20261007T162747Z-96025
+```
+
+The command reads the frozen ZIP, verifies the original contract, publishes bounded
+reports/diagnostics to `automation/ai-loop-diagnostics` and prints the Git URL.
+No model/test/probe, feature source publication, local branch/index change or
+recovery claim. Future model/test stops attempt upload after saving their ZIP;
+upload errors preserve the original STOP and evidence. See [README](README.md).
+
+## Historical assessed repair contract — earlier current labels superseded
+
 # A11b.2.2.1 — bounded repair of Darwin zombie lookup
 
 ## CURRENT invocation and authorization — assessed second native failure

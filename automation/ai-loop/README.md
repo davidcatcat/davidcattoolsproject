@@ -1,5 +1,50 @@
 # Mac AI-loop development handoff
 
+## Current operator step — publish the stopped diagnostics
+
+Run `20261007T162747Z-96025` stopped at native hung_supervisor FAIL, candidate
+`a00eda49aa0f0c3486d27589148361d67e7bdb3e`. FD inheritance and all three signal
+scenarios passed; nine later Mac scenarios did not run. The previous 87533 recovery
+is consumed. A new repair/resume requires coordinator assessment and a new contract.
+
+Publish the already captured evidence without models/tests/recovery:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --publish-diagnostics 20261007T162747Z-96025
+```
+
+The existing launcher downloads this runner automatically. No reinstall is needed.
+The command verifies the frozen ZIP manifest and original Git-pinned contract, then
+publishes immutable files under `reports/ai-loop/diagnostics/<run-id>/` on
+`automation/ai-loop-diagnostics`. It prints an exact-commit index URL. No local
+HEAD/index/tree change, branch switch, source staging, feature PR, recovery marker,
+Codex/Claude/venv dependency, model/test/probe or stale-PID cleanup is involved.
+
+After a model/test stop, the runner saves the original STOP and visible ZIP, then
+automatically attempts this publication. A new diagnostics branch has no source
+history parent. Appends preserve existing records; identical repeat uploads do no
+remote write. Conflicting records are not overwritten, and non-force publication
+rejects concurrent divergent updates. There is no automatic upload retry.
+
+Published material: projected runner statuses, bounded provenance, capture/source
+hashes, the validation report intended for Git, native Mac JSON and mandatory Mac
+stdout/stderr logs. Free-form provider summaries/findings, arbitrary STOP messages,
+raw Codex/Claude streams, credentials, candidate source snapshots and unrelated
+files stay local. The full ZIP remains available for deeper source investigation.
+Per-file publication limit is 128 KiB; total is 512 KiB. API request data is passed
+through structured files, not shell interpolation.
+
+Upload/auth/network/verification failure preserves the original STOP and ZIP and
+prints the explicit補傳 command. Retry requires the original frozen ZIP and never
+recaptures later working-tree bytes. Corrupt/unsafe archives fail before upload.
+Chat/Work can read the Git report on David's next message; this is not an automatic
+callback, Mac executor, recovery authorization or containment/security PASS.
+
+## Historical first native-failure recovery — superseded invocation
+
+The older current-command labels below are historical. Use the operator step above.
+
 ## Current command — native SIGINT failure recovery
 
 The Mac run `20261007T123142Z-77009` stopped at SIGINT native acceptance FAIL,

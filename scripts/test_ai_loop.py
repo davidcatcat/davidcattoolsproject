@@ -1,10 +1,12 @@
 """Offline fixture checks; no project clone or provider calls."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import zipfile
 import unittest
 from unittest.mock import patch, Mock
 from contextlib import ExitStack, contextmanager
@@ -374,6 +376,218 @@ class DiagnosticsExportTests(unittest.TestCase):
                     target.mkdir(); (target/'run.zip').write_bytes(b'preserved')
                 with self.assertRaises(loop.Stop): loop.export_diagnostics(root, logs, {'allowed_files': []})
                 if fault == 'existing': self.assertEqual((target/'run.zip').read_bytes(), b'preserved')
+
+
+class DiagnosticPublicationTests(unittest.TestCase):
+    run_id = '20261007T162747Z-96025'
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime); logs = root/'.ai-loop'/self.run_id
+            logs.mkdir(parents=True); (root/'reports').mkdir()
+            (root/'source.py').write_text('UNPUBLISHED_SOURCE_SENTINEL\n')
+            (root/'reports/validation.md').write_text('# Native validation\nFAIL; pending repair.\n')
+            task = {'task_id': 'fixture', 'branch': 'feat/fixture', 'base_sha': HEAD,
+                    'allowed_files': ['source.py', 'reports/validation.md'],
+                    'acceptance_report': 'reports/validation.md', 'mac_evidence': 'mac-containment'}
+            loop.save_json(logs/'task.json', task)
+            loop.save_json(logs/'provenance.json', {'root': str(root), 'run_id': self.run_id,
+                                                  'control_sha': HEAD, 'base': HEAD})
+            loop.save_json(logs/'summary.json', {'status': 'STOPPED', 'head': HEAD, 'branch': task['branch'],
+                'reason': 'SENSITIVE_REASON_SENTINEL', 'history': [{'head': HEAD, 'round': 0,
+                    'developer': {'status': 'PASS', 'summary': 'PRIVATE_DEVELOPER_SENTINEL'},
+                    'review': {'status': 'PASS', 'reviewed_head': HEAD,
+                               'findings': ['PRIVATE_REVIEW_SENTINEL']},
+                    'mandatory': {'status': 'FAIL'}}]})
+            loop.save_json(logs/'mac-containment-0.json', {'schema_version': 1, 'platform': 'darwin',
+                'failure': {'scenario': 'hung_supervisor', 'status': 'FAIL'},
+                'scenarios': {'sigint': {'status': 'PASS'}}})
+            (logs/'tests-0-mandatory-final-0.stdout.log').write_text('[Native] hung_supervisor FAIL\n')
+            (logs/'tests-0-mandatory-final-0.stderr.log').write_text('')
+            (logs/'codex-0.stderr.log').write_text('PRIVATE_PROVIDER_SENTINEL')
+            (logs/'claude-0.stdout.log').write_text('PRIVATE_PROVIDER_SENTINEL')
+            loop.export_diagnostics(root, logs, task)
+            stack.enter_context(patch.object(loop, 'load_task', return_value=(task, 'pinned task')))
+            stack.enter_context(patch.object(loop.shutil, 'which', return_value='/fake/gh'))
+            yield root, logs, task
+
+    def fake_api(self, root, logs, existing=False, conflict=False, race=False, verify_bad=False):
+        selected = loop.diagnostic_payload(root, logs)
+        prefix = 'reports/ai-loop/diagnostics/'+logs.name+'/'
+        desired = {prefix+name: (hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(),
+                                  '100644', 'blob') for name, raw in selected.items()}
+        old_rows = {'reports/older.md': ('d'*40, '100644', 'blob')}
+        if existing:
+            old_rows.update(desired)
+            if conflict: old_rows[prefix+'summary.json'] = ('e'*40, '100644', 'blob')
+        state = {'head': 'a'*40 if existing else None, 'ref_reads': 0,
+                 'rows': old_rows if existing else {}, 'new_rows': {}, 'calls': []}
+        def tree_reply(rows):
+            return {'truncated': False, 'tree': [{'path': p, 'sha': row[0], 'mode': row[1],
+                                                 'type': row[2]} for p, row in rows.items()]}
+        def api(cwd, directory, method, endpoint, payload=None, allow_missing=False):
+            self.assertEqual((cwd, directory), (root, logs))
+            state['calls'].append((method, endpoint, payload))
+            if method == 'GET' and '/ref/heads/' in endpoint:
+                state['ref_reads'] += 1
+                if race and state['ref_reads'] == 2: return {'object': {'sha': 'f'*40}}
+                return {'object': {'sha': state['head']}} if state['head'] else None
+            if method == 'GET' and '/commits/' in endpoint:
+                return {'tree': {'sha': 'b'*40 if endpoint.endswith('a'*40) else '9'*40}}
+            if method == 'GET' and '/trees/' in endpoint:
+                rows = state['rows'] if 'b'*40 in endpoint else state['new_rows']
+                if verify_bad and state['head'] == 'c'*40:
+                    rows = {**rows, 'unrelated.py': ('e'*40, '100644', 'blob')}
+                return tree_reply(rows)
+            if method == 'POST' and endpoint.endswith('/trees'):
+                state['new_rows'] = dict(state['rows'])
+                for row in payload['tree']:
+                    raw = row['content'].encode('utf-8')
+                    state['new_rows'][row['path']] = (
+                        hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest(), row['mode'], row['type'])
+                return {'sha': '9'*40}
+            if method == 'POST' and endpoint.endswith('/commits'): return {'sha': 'c'*40}
+            if method in ('PATCH', 'POST') and '/refs' in endpoint:
+                if method == 'PATCH': self.assertIs(payload['force'], False)
+                else: self.assertEqual(payload['ref'], 'refs/heads/'+loop.DIAGNOSTICS_BRANCH)
+                state['head'] = payload['sha']; return {'object': {'sha': state['head']}}
+            raise AssertionError((method, endpoint))
+        return state, api
+
+    def test_payload_is_frozen_and_excludes_sources_provider_streams_and_free_summaries(self):
+        with self.fixture() as (root, logs, task):
+            (root/'source.py').write_text('later source changes\n')
+            (root/'reports/validation.md').write_text('later report changes\n')
+            payload = loop.diagnostic_payload(root, logs)
+            whole = b''.join(payload.values())
+            for sentinel in (b'UNPUBLISHED_SOURCE_SENTINEL', b'PRIVATE_PROVIDER_SENTINEL',
+                             b'SENSITIVE_REASON_SENTINEL', b'PRIVATE_DEVELOPER_SENTINEL',
+                             b'PRIVATE_REVIEW_SENTINEL', b'later report changes'):
+                self.assertNotIn(sentinel, whole)
+            self.assertIn(b'hung_supervisor', whole)
+            self.assertIn(b'pending repair', payload['validation.md'])
+            self.assertIn('tests-0-mandatory-final-0.stdout.log', payload)
+            self.assertFalse(json.loads(payload['source-hashes.json'])['source_files_published'])
+
+    def test_archive_hash_drift_symlink_missing_and_wrong_contract_stop_before_api(self):
+        for fault in ('drift', 'symlink', 'missing', 'contract'):
+            with self.subTest(fault=fault), self.fixture() as (root, logs, task), \
+                    patch.object(loop, 'diagnostic_api') as api:
+                archive = root/'ai-loop-diagnostics'/(logs.name+'.zip')
+                if fault == 'missing': archive.unlink()
+                elif fault == 'symlink':
+                    target = root/'old.zip'; archive.rename(target); archive.symlink_to(target)
+                elif fault == 'contract': task['branch'] = 'feat/changed'
+                else:
+                    with zipfile.ZipFile(archive) as source:
+                        entries = {name: source.read(name) for name in source.namelist()}
+                    entries['source.py'] = b'tampered'
+                    with zipfile.ZipFile(archive, 'w') as output:
+                        for name, raw in entries.items(): output.writestr(name, raw)
+                with self.assertRaises(loop.Stop): loop.publish_diagnostics(root, logs)
+                api.assert_not_called()
+
+    def test_new_reports_only_branch_has_no_source_parents_or_local_git_writes(self):
+        with self.fixture() as (root, logs, task):
+            state, api = self.fake_api(root, logs)
+            with patch.object(loop, 'diagnostic_api', side_effect=api), patch.object(loop, 'git') as git:
+                url = loop.publish_diagnostics(root, logs)
+            self.assertIn('/blob/'+('c'*40)+'/', url)
+            self.assertTrue(url.endswith('/index.md'))
+            commit = next(p for m, e, p in state['calls'] if m == 'POST' and e.endswith('/commits'))
+            self.assertEqual(commit['parents'], [])
+            self.assertFalse(any('refs/heads/main' in e or 'feat/fixture' in e for m, e, p in state['calls']))
+            git.assert_not_called()
+            self.assertEqual((root/'source.py').read_text(), 'UNPUBLISHED_SOURCE_SENTINEL\n')
+
+    def test_append_preserves_prior_records_and_nonforce_publication(self):
+        with self.fixture() as (root, logs, task):
+            state, api = self.fake_api(root, logs)
+            state['head'] = 'a'*40; state['rows'] = {'reports/older.md': ('d'*40, '100644', 'blob')}
+            with patch.object(loop, 'diagnostic_api', side_effect=api): loop.publish_diagnostics(root, logs)
+            self.assertEqual(state['new_rows']['reports/older.md'], ('d'*40, '100644', 'blob'))
+            self.assertTrue(any(m == 'PATCH' and p['force'] is False for m, e, p in state['calls']))
+
+    def test_identical_run_is_idempotent_conflict_never_overwrites(self):
+        for conflict in (False, True):
+            with self.subTest(conflict=conflict), self.fixture() as (root, logs, task):
+                state, api = self.fake_api(root, logs, existing=True, conflict=conflict)
+                with patch.object(loop, 'diagnostic_api', side_effect=api):
+                    if conflict:
+                        with self.assertRaisesRegex(loop.Stop, 'never overwrite'): loop.publish_diagnostics(root, logs)
+                    else: loop.publish_diagnostics(root, logs)
+                self.assertFalse(any(m != 'GET' for m, e, p in state['calls']))
+
+    def test_concurrent_branch_change_and_bad_remote_verification_stop(self):
+        for fault in ('race', 'verification'):
+            with self.subTest(fault=fault), self.fixture() as (root, logs, task):
+                state, api = self.fake_api(root, logs, race=fault=='race', verify_bad=fault=='verification')
+                with patch.object(loop, 'diagnostic_api', side_effect=api), self.assertRaises(loop.Stop):
+                    loop.publish_diagnostics(root, logs)
+                if fault == 'race': self.assertFalse(any('/refs' in e for m, e, p in state['calls']))
+                self.assertFalse((logs/'published-diagnostics.json').exists())
+
+    def test_receipt_symlink_does_not_mutate_remote_or_target(self):
+        with self.fixture() as (root, logs, task), patch.object(loop, 'diagnostic_api') as api:
+            target = root/'user.txt'; target.write_text('preserved')
+            (logs/'published-diagnostics.json').symlink_to(target)
+            with self.assertRaises(loop.Stop): loop.publish_diagnostics(root, logs)
+            api.assert_not_called(); self.assertEqual(target.read_text(), 'preserved')
+
+    def test_missing_ref_is_404_only_and_structured_request_is_cleaned_up(self):
+        with self.fixture() as (root, logs, task):
+            for code in (404, 403):
+                with patch.object(loop, 'command', return_value=(1, json.dumps({'message': 'Not Found', 'status': code}), '')):
+                    if code == 404:
+                        self.assertIsNone(loop.diagnostic_api(root, logs, 'GET', 'fixed', allow_missing=True))
+                    else:
+                        with self.assertRaises(loop.Stop): loop.diagnostic_api(root, logs, 'GET', 'fixed', allow_missing=True)
+            payload = {'content': 'literal $() `command`\nsecond line'}
+            def execute(argv, cwd, **kwargs):
+                self.assertEqual(json.loads(Path(argv[-1]).read_text()), payload)
+                self.assertNotIn(payload['content'], argv)
+                return 0, '{}', ''
+            with patch.object(loop, 'command', side_effect=execute):
+                loop.diagnostic_api(root, logs, 'POST', 'fixed', payload)
+            self.assertFalse(list(logs.glob('diagnostic-request-*')))
+
+    def test_upload_failure_does_not_change_original_stopped_summary_or_zip(self):
+        with self.fixture() as (root, logs, task):
+            before = (logs/'summary.json').read_bytes()
+            with patch.object(loop, 'export_diagnostics', return_value=root/'diagnostics.zip'), \
+                    patch.object(loop, 'publish_diagnostics', side_effect=loop.Stop('auth unavailable')):
+                loop.finish_diagnostics(root, logs, task)
+            self.assertEqual((logs/'summary.json').read_bytes(), before)
+
+
+class DiagnosticCLITests(unittest.TestCase):
+    def test_upload_only_bypasses_task_models_tests_probe_recovery_and_dependencies(self):
+        with tempfile.TemporaryDirectory() as runtime, ExitStack() as stack:
+            root = Path(runtime); (root/'.git').mkdir()
+            stack.enter_context(patch.object(loop, 'REPO', root))
+            stack.enter_context(patch.object(Path, 'cwd', return_value=root))
+            def git(cwd, *args):
+                if args == ('rev-parse', '--show-toplevel'): return str(root)
+                if args == ('rev-parse', '--absolute-git-dir'): return str(root/'.git')
+                if args == ('remote', 'get-url', 'origin'): return 'git@github.com:'+loop.IDENTITY+'.git'
+                raise AssertionError(args)
+            stack.enter_context(patch.object(loop, 'git', side_effect=git))
+            task = stack.enter_context(patch.object(loop, 'load_task'))
+            runner = stack.enter_context(patch.object(loop, 'run'))
+            publisher = stack.enter_context(patch.object(loop, 'publish_diagnostics'))
+            stack.enter_context(patch.object(sys, 'argv', ['runner', '--control-sha', HEAD,
+                '--publish-diagnostics', '20261007T162747Z-96025']))
+            loop.main()
+            task.assert_not_called(); runner.assert_not_called()
+            publisher.assert_called_once_with(root, root/'.ai-loop/20261007T162747Z-96025')
+            self.assertFalse(list((root/'.git/ai-loop').glob('resume-*')))
+
+    def test_upload_cannot_be_combined_with_resume_check_install_or_test_flags(self):
+        for flags in (['--resume', 'other'], ['--check'], ['--install-launcher'], ['--related'], ['--full']):
+            with self.subTest(flags=flags), patch.object(sys, 'argv', ['runner', '--control-sha', HEAD,
+                    '--publish-diagnostics', '20261007T162747Z-96025', *flags]), self.assertRaises(SystemExit):
+                loop.main()
 
 
 class QuotaResumeTests(unittest.TestCase):
@@ -1453,6 +1667,7 @@ class ExistingPRTests(unittest.TestCase):
                 side_effect=loop.Stop('checkpoint API unavailable') if checkpoint_failure else None,
                 return_value={'url': 'https://github.com/fixture/checkpoint', 'status': 'NEEDS_DECISION'}))
             runner = stack.enter_context(patch.object(loop, 'run', side_effect=fake_run))
+            diagnostics = stack.enter_context(patch.object(loop, 'publish_diagnostics', return_value='https://github.com/diagnostics'))
             stack.enter_context(patch.object(loop, 'wait_ci', return_value=[{'status': 'completed', 'conclusion': 'success'}]))
             argv = ['ai_loop.py', '--control-sha', 'd' * 40, '--' + test_mode]
             if resume:
@@ -1479,6 +1694,7 @@ class ExistingPRTests(unittest.TestCase):
                 os.chdir(previous)
             expected_calls = (1 if unchanged_repair else min(failures + final_full_failures + 1, 2)) if native_resume else (
                 min(failures + final_full_failures, 2) + int(new_task))
+            self.assertEqual(diagnostics.call_count, int(should_stop))
             self.assertEqual(codex.call_count, expected_calls)
             if codex_timeout is not None:
                 self.assertEqual(codex.call_args.args[4], codex_timeout)

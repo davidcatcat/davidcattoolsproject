@@ -3,6 +3,7 @@
 import argparse
 import fcntl
 import hashlib
+import io
 import json
 import os
 import platform
@@ -13,6 +14,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from datetime import datetime, timezone
@@ -21,6 +23,7 @@ REPO = Path('/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
 IDENTITY = 'davidcatcat/davidcattoolsproject'
 TASK_DIR = 'automation/ai-loop/'
 MAX_MODEL_TIMEOUT = 3 * 60 * 60
+DIAGNOSTICS_BRANCH = 'automation/ai-loop-diagnostics'
 
 
 class Stop(RuntimeError):
@@ -897,6 +900,227 @@ def export_diagnostics(root, logs, task):
     return destination
 
 
+def diagnostic_payload(root, logs):
+    """Publish only frozen, curated evidence; provider streams/source stay local."""
+    run_id = logs.name
+    if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', run_id):
+        raise Stop('invalid diagnostic run identity')
+    if logs != root / '.ai-loop' / run_id:
+        raise Stop('diagnostics must use the canonical run store')
+    archive_path = root / 'ai-loop-diagnostics' / (run_id + '.zip')
+    if (any(p.is_symlink() for p in (logs, *logs.parents, archive_path, *archive_path.parents))
+            or not logs.is_dir() or not archive_path.is_file()
+            or archive_path.stat().st_size > 16 * 1024 * 1024):
+        raise Stop('frozen diagnostic ZIP missing/unsafe/oversized; preserve local evidence')
+    raw_zip = archive_path.read_bytes()
+    if len(raw_zip) > 16 * 1024 * 1024:
+        raise Stop('diagnostic archive grew beyond publication bound')
+    with zipfile.ZipFile(io.BytesIO(raw_zip)) as archive:
+        rows = archive.infolist()
+        names = [row.filename for row in rows]
+        if (len(rows) > 256 or len(names) != len(set(names))
+                or sum(row.file_size for row in rows) > 16 * 1024 * 1024
+                or any(row.is_dir() or row.file_size > 2 * 1024 * 1024
+                       or Path(row.filename).is_absolute() or '..' in Path(row.filename).parts
+                       or (row.external_attr >> 16) & 0o170000 == 0o120000 for row in rows)):
+            raise Stop('invalid bounded diagnostic archive')
+        captured = {name: archive.read(name) for name in names}
+    hashes = json.loads(captured.pop('captured-sha256.json'))
+    if (not isinstance(hashes, dict) or set(hashes) != set(captured)
+            or any(hashlib.sha256(raw).hexdigest() != hashes[name] for name, raw in captured.items())):
+        raise Stop('frozen diagnostic capture hash mismatch')
+    summary = json.loads(captured['evidence/summary.json'])
+    provenance = json.loads(captured['evidence/provenance.json'])
+    contract = json.loads(captured['evidence/task.json'])
+    control_sha = provenance.get('control_sha')
+    if (not isinstance(control_sha, str) or not re.fullmatch(r'[0-9a-f]{40}', control_sha)
+            or provenance.get('root') != str(root) or provenance.get('run_id') != run_id
+            or summary.get('status') not in ('STOPPED', 'READY_FOR_FINAL_REVIEW')
+            or not re.fullmatch(r'[0-9a-f]{40}', summary.get('head', ''))):
+        raise Stop('diagnostic provenance/status invalid')
+    pinned, _ = load_task(root, control_sha)
+    if contract != pinned or summary.get('branch') != pinned['branch']:
+        raise Stop('diagnostic contract differs from its original Git pin')
+
+    def encoded(value):
+        return (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+
+    # Do not forward free-form Codex/Claude summaries/findings, exception reason,
+    # API error output, arbitrary history keys, prompts or environment values.
+    public_summary = {key: summary[key] for key in ('status', 'head', 'branch')}
+    public_summary.update(run_id=run_id, task_id=pinned['task_id'],
+                          source_summary_sha256=hashes['evidence/summary.json'])
+    public_summary['rounds'] = []
+    for item in summary.get('history', []):
+        row = {key: item[key] for key in ('round', 'head', 'tests', 'tested_sha256') if key in item}
+        for key in ('developer', 'review', 'final_full', 'mandatory'):
+            if isinstance(item.get(key), dict):
+                row[key] = {field: item[key][field] for field in ('status', 'reviewed_head')
+                            if field in item[key]}
+        public_summary['rounds'].append(row)
+    public_provenance = {key: provenance[key] for key in ('root', 'run_id', 'control_sha', 'base',
+        'start_head', 'start_branch', 'local_test_mode', 'venv_python', 'system_python') if key in provenance}
+    selected = {'summary.json': encoded(public_summary), 'provenance.json': encoded(public_provenance),
+        'source-hashes.json': encoded({'zip_sha256': hashlib.sha256(raw_zip).hexdigest(),
+            'captured_sha256': hashes, 'source_files_published': False})}
+    report = pinned.get('acceptance_report')
+    if report and report in pinned['allowed_files'] and report in captured:
+        selected['validation.md'] = captured[report]
+    native = []
+    for name, raw in captured.items():
+        if re.fullmatch(r'evidence/mac-containment-[0-9]+\.json', name):
+            data = json.loads(raw)
+            if data.get('platform') != 'darwin' or data.get('schema_version') != 1:
+                raise Stop('invalid native diagnostic evidence')
+            selected[Path(name).name] = raw
+            native.append(data)
+        elif (pinned.get('mac_evidence') == 'mac-containment'
+              and re.fullmatch(r'evidence/tests-[0-9]+-mandatory-final-[0-9]+\.(stdout|stderr)\.log', name)):
+            selected[Path(name).name] = raw
+    content = ('# AI-loop diagnostic handoff\n\nStatus: **' + summary['status']
+        + '**. Evidence only; no containment/security approval, feature publication or automatic recovery.\n\n'
+        + '- Run: `' + run_id + '`\n- Task: `' + pinned['task_id'] + '`\n'
+        + '- Candidate HEAD: `' + summary['head'] + '`\n- Original control: `' + control_sha + '`\n'
+        + '- Source ZIP SHA-256: `' + hashlib.sha256(raw_zip).hexdigest() + '`\n'
+        + '- Source code and raw Codex/Claude/authentication logs remain on the Mac.\n'
+        + '- [Projected runner summary](summary.json); [provenance](provenance.json); '
+          '[capture hashes](source-hashes.json).\n')
+    for data in native:
+        failure = data.get('failure', {})
+        content += '\nNative result: `' + str(failure.get('scenario', 'complete')) + '` / `'
+        content += str(failure.get('status', 'no failure recorded')) + '`.\n'
+        for name, result in sorted(data.get('scenarios', {}).items()):
+            content += '- `' + name + '`: `' + str(result.get('status')) + '`\n'
+    content += '\n## Published evidence files\n\n'
+    for name in sorted(selected):
+        content += '- [' + name + '](' + name + ')\n'
+    selected['index.md'] = content.encode('utf-8')
+    if (sum(len(raw) for raw in selected.values()) > 512 * 1024
+            or any(len(raw) > 128 * 1024 or b'\0' in raw for raw in selected.values())):
+        raise Stop('curated Git diagnostics exceed publication bound')
+    for raw in selected.values():
+        raw.decode('utf-8')
+    if archive_path.read_bytes() != raw_zip:
+        raise Stop('diagnostic archive changed during capture')
+    return selected
+
+
+def diagnostic_api(root, logs, method, endpoint, payload=None, allow_missing=False):
+    """Structured gh requests; never place report text/credentials in shell args."""
+    argv = ['gh', 'api', '--method', method, endpoint]
+    request = None
+    try:
+        if payload is not None:
+            with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=logs,
+                    prefix='diagnostic-request-', suffix='.json', delete=False) as output:
+                request = Path(output.name)
+                json.dump(payload, output, ensure_ascii=False)
+            argv += ['--input', str(request)]
+        rc, raw, _ = command(argv, root, progress='[診斷/Git] 發布篩選後的報告')
+        if len(raw.encode('utf-8')) > 4 * 1024 * 1024:
+            raise Stop('diagnostic API response exceeds bound')
+        reply = json.loads(raw)
+        if rc:
+            if allow_missing and reply.get('status') == '404' and reply.get('message') == 'Not Found':
+                return None
+            if allow_missing and reply.get('status') == 404 and reply.get('message') == 'Not Found':
+                return None
+            raise Stop('diagnostic Git API failed; local evidence preserved')
+        return reply
+    finally:
+        if request is not None:
+            request.unlink()
+
+
+def publish_diagnostics(root, logs):
+    """Append an immutable report batch to a separate, reports-only branch."""
+    if not shutil.which('gh'):
+        raise Stop('gh is required to publish diagnostics')
+    files = diagnostic_payload(root, logs)
+    receipt = logs / 'published-diagnostics.json'
+    if receipt.is_symlink():
+        raise Stop('diagnostic receipt is unsafe; preserved')
+    if receipt.exists():
+        previous_receipt = json.loads(receipt.read_bytes())
+        if previous_receipt.get('status') != 'PUBLISHED' or previous_receipt.get('run_id') != logs.name:
+            raise Stop('existing diagnostic receipt is unrelated; preserved')
+    prefix = 'reports/ai-loop/diagnostics/' + logs.name + '/'
+    expected = {prefix + name: hashlib.sha1(b'blob ' + str(len(raw)).encode('ascii')
+                + b'\0' + raw).hexdigest() for name, raw in files.items()}
+    api = 'repos/' + IDENTITY + '/git/'
+    ref_path = api + 'ref/heads/' + DIAGNOSTICS_BRANCH
+    read = lambda endpoint, missing=False: diagnostic_api(root, logs, 'GET', endpoint, allow_missing=missing)
+    ref = read(ref_path, True)
+    previous = ref['object']['sha'] if ref else None
+    if previous is not None and not re.fullmatch(r'[0-9a-f]{40}', previous):
+        raise Stop('invalid diagnostic branch identity')
+
+    def tree_rows(sha):
+        value = read(api + 'trees/' + sha + '?recursive=1')
+        if value.get('truncated') is not False:
+            raise Stop('cannot inspect complete diagnostic tree')
+        return {row['path']: (row['sha'], row['mode'], row['type'])
+                for row in value['tree'] if row.get('type') != 'tree'}
+
+    old_rows, base_tree = {}, None
+    if previous:
+        base_tree = read(api + 'commits/' + previous)['tree']['sha']
+        old_rows = tree_rows(base_tree)
+    existing = {path: row for path, row in old_rows.items() if path.startswith(prefix)}
+    desired = {path: (sha, '100644', 'blob') for path, sha in expected.items()}
+    if existing and existing != desired:
+        raise Stop('diagnostic run already differs remotely; never overwrite it')
+    commit = previous
+    if not existing:
+        payload = {'tree': [{'path': prefix + name, 'mode': '100644', 'type': 'blob',
+                            'content': raw.decode('utf-8')} for name, raw in files.items()]}
+        if base_tree:
+            payload['base_tree'] = base_tree
+        tree = diagnostic_api(root, logs, 'POST', api + 'trees', payload)['sha']
+        if tree_rows(tree) != {**old_rows, **desired}:
+            raise Stop('diagnostic tree changed outside the report batch')
+        commit = diagnostic_api(root, logs, 'POST', api + 'commits', {
+            'message': 'docs: publish AI-loop diagnostics ' + logs.name,
+            'tree': tree, 'parents': [previous] if previous else []})['sha']
+        if not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise Stop('invalid diagnostic commit identity')
+        latest = read(ref_path, True)
+        if (latest['object']['sha'] if latest else None) != previous:
+            raise Stop('diagnostic branch moved; no automatic upload retry')
+        if previous:
+            diagnostic_api(root, logs, 'PATCH', api + 'refs/heads/' + DIAGNOSTICS_BRANCH,
+                           {'sha': commit, 'force': False})
+        else:
+            diagnostic_api(root, logs, 'POST', api + 'refs',
+                           {'ref': 'refs/heads/' + DIAGNOSTICS_BRANCH, 'sha': commit})
+        if read(ref_path)['object']['sha'] != commit:
+            raise Stop('diagnostic publication unconfirmed')
+        verified = tree_rows(read(api + 'commits/' + commit)['tree']['sha'])
+        if verified != {**old_rows, **desired}:
+            raise Stop('published diagnostic content verification failed')
+    url = 'https://github.com/' + IDENTITY + '/blob/' + commit + '/' + prefix + 'index.md'
+    save_json(receipt, {'status': 'PUBLISHED', 'run_id': logs.name,
+        'branch': DIAGNOSTICS_BRANCH, 'commit': commit, 'url': url,
+        'published_sha256': {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()}})
+    print('[診斷/Git 已發布] ' + url, flush=True)
+    return url
+
+
+def finish_diagnostics(root, logs, task):
+    """Upload problems must not replace the original test/model STOP."""
+    try:
+        exported = export_diagnostics(root, logs, task)
+        print('[診斷 ZIP／Finder 可見] ' + str(exported), file=sys.stderr, flush=True)
+    except (Stop, OSError, ValueError) as error:
+        print('[診斷匯出未完成] ' + str(error), file=sys.stderr, flush=True)
+        return
+    try:
+        publish_diagnostics(root, logs)
+    except (Stop, OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as error:
+        print('[診斷/Git 未發布] ' + str(error) + '\n本機 ZIP 已保留。補傳：bash scripts/ai-loop.sh '
+              '--publish-diagnostics ' + logs.name, file=sys.stderr, flush=True)
+
+
 def create_draft_pr(root, task, logs, publication_head, report_rel):
     if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
         raise Stop('base changed before PR creation')
@@ -1018,6 +1242,8 @@ def main():
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
     parser.add_argument('--resume', metavar='RUN_ID', help='resume one explicitly contracted Codex/native acceptance stop')
+    parser.add_argument('--publish-diagnostics', metavar='RUN_ID',
+                        help='upload a frozen diagnostic report only; no models/tests/task recovery')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -1025,6 +1251,8 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
+    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume):
+        parser.error('--publish-diagnostics cannot be combined with task/install/test options')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
@@ -1045,6 +1273,12 @@ def main():
             raise Stop('another ai-loop is already running')
         if args.install_launcher:
             install_launcher(root, args.control_sha)
+            return
+        if args.publish_diagnostics:
+            if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', args.publish_diagnostics):
+                raise Stop('invalid diagnostic run identity')
+            publish_diagnostics(root, root / '.ai-loop' / args.publish_diagnostics)
+            print('DIAGNOSTICS ONLY COMPLETE. No task/model/test/branch/index change or recovery claim.', flush=True)
             return
         task, text = load_task(root, args.control_sha)
         new_task = task['mode'] == 'implement_new_pr'
@@ -1366,11 +1600,7 @@ def main():
             save_json(logs / 'summary.json', {'status': 'STOPPED', 'reason': str(exc), 'branch': branch,
                 'head': git(root, 'rev-parse', 'HEAD'), 'history': history,
                 'decision_checkpoint': checkpoint, 'checkpoint_publication_error': checkpoint_error})
-            try:
-                exported = export_diagnostics(root, logs, task)
-                print('[診斷 ZIP／Finder 可見] ' + str(exported), file=sys.stderr, flush=True)
-            except (Stop, OSError, ValueError) as export_error:
-                print('[診斷匯出未完成] ' + str(export_error), file=sys.stderr, flush=True)
+            finish_diagnostics(root, logs, task)
             print('STOPPED. Work preserved. Logs: ' + str(logs), file=sys.stderr, flush=True)
             raise
 
