@@ -12,6 +12,7 @@ import struct
 import stat
 import unicodedata
 import unittest
+from types import SimpleNamespace
 from dataclasses import FrozenInstanceError, replace
 from contextlib import redirect_stdout, redirect_stderr
 from unittest.mock import patch
@@ -533,7 +534,7 @@ class GitPreflightTests(unittest.TestCase):
         self.assertTrue(calls); self.assertFalse(marker.exists())
         self.assertEqual(before,(self.root/'.git/index').read_bytes())
 
-    def test_mid_query_instruction_file_index_root_and_config_drift(self):
+    def test_target_content_change_between_queries_rejected(self):
         action = self.action(); original = g._Reads.query
         def changed(reads, query):
             raw = original(reads,query)
@@ -696,13 +697,42 @@ class GitPreflightTests(unittest.TestCase):
 
     def test_config_change_between_queries_rejected(self):
         action = self.action(); original = g._Reads.query
+        config = self.root/'.git/config'
+        before = config.read_bytes()
+        index = (self.root/'.git/index').read_bytes()
+        target = (self.root/'target.txt').read_bytes()
         def query(reads,which):
             raw = original(reads,which)
             if which is g._Read.IGNORE:
-                self.git('config','filter.x.clean','PRIVATE_MARKER')
+                # Benign config-only drift: no filter/attribute rule can mask
+                # the metadata snapshot invariant being tested here.
+                config.write_bytes(before+b'\n[user]\n name = Changed synthetic name\n')
             return raw
         with patch.object(g._Reads,'query',query):
             self.reject(action)
+        self.assertEqual((self.root/'.git/index').read_bytes(),index)
+        self.assertEqual((self.root/'target.txt').read_bytes(),target)
+        self.assertFalse((self.root/'.git/info/attributes').exists())
+
+    def test_info_attributes_change_between_queries_rejected(self):
+        attributes = self.root/'.git/info/attributes'
+        attributes.write_text('# initial synthetic attributes\n')
+        action = self.action(); original = g._Reads.query
+        config = (self.root/'.git/config').read_bytes()
+        index = (self.root/'.git/index').read_bytes()
+        target = (self.root/'target.txt').read_bytes()
+        def query(reads,which):
+            raw = original(reads,which)
+            if which is g._Read.IGNORE:
+                # Change only an existing info/attributes file, not its parent
+                # directory, config, index or target content.
+                attributes.write_text('# changed synthetic attributes\n')
+            return raw
+        with patch.object(g._Reads,'query',query):
+            self.reject(action)
+        self.assertEqual((self.root/'.git/config').read_bytes(),config)
+        self.assertEqual((self.root/'.git/index').read_bytes(),index)
+        self.assertEqual((self.root/'target.txt').read_bytes(),target)
 
     def test_root_replacement_between_queries_rejected(self):
         action = self.action(); original = g._Reads.query
@@ -776,7 +806,9 @@ class GitPreflightTests(unittest.TestCase):
         (self.root/'.git/objects/pack/synthetic.promisor').write_bytes(b'')
         self.reject(action)
 
-    def test_concurrently_introduced_filter_never_executed(self):
+    def test_compound_late_filter_and_attribute_change_never_executes_helper(self):
+        # Deliberately compound helper-execution probe, not isolated evidence
+        # for config or attribute drift (covered separately above).
         (self.root/'target.txt').write_bytes(b'changed!\n')  # same size as HEAD; forces content comparison
         action = self.action(); original = g._Reads.query
         marker = self.root/'PRIVATE_MARKER'
@@ -789,6 +821,188 @@ class GitPreflightTests(unittest.TestCase):
         with patch.object(g._Reads,'query',query):
             self.reject(action)
         self.assertFalse(marker.exists(), 'preflight must not execute a late clean filter')
+
+
+class ReadCleanupTests(unittest.TestCase):
+    """Fault-injected read queries; no repository/index mutation or supervisor."""
+    def reads(self):
+        return g._Reads(SimpleNamespace(
+            repository=SimpleNamespace(canonical_root=str(Path(__file__).resolve().parents[1])),
+            payload=SimpleNamespace(files=())))
+
+    def exited_process(self, output=b'xx', error=b''):
+        # Deterministically model an exited but unreaped leader. Real pipe FDs
+        # still exercise registration, reads and explicit close, without relying
+        # on macOS timing to provoke killpg PermissionError.
+        streams = []
+        for data in (output, error):
+            read_fd, write_fd = os.pipe()
+            stream = os.fdopen(read_fd, 'rb', buffering=0)
+            self.addCleanup(stream.close)
+            try:
+                os.write(write_fd,data)
+            finally:
+                os.close(write_fd)
+            streams.append(stream)
+        class ExitedProcess:
+            pid = 12345  # All signaling is mocked; never signal this number.
+            returncode = None
+            stdout, stderr = streams
+            reaped = False
+            kill_called = False
+            def kill(self):
+                self.kill_called = True
+            def wait(self, timeout=None):
+                self.reaped = True
+                self.returncode = 0
+                return 0
+        return ExitedProcess()
+
+    def assert_closed(self, child):
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(child.stderr.closed)
+        for stream in (child.stdout,child.stderr):
+            with self.assertRaises(ValueError):
+                stream.fileno()
+
+    def test_exited_leader_group_permission_error_preserves_output_bound_failure(self):
+        for lane in ('stdout','stderr'):
+            with self.subTest(lane=lane):
+                child = self.exited_process(b'xx' if lane=='stdout' else b'',
+                                            b'xx' if lane=='stderr' else b'')
+                original_selector = g.selectors.DefaultSelector
+                selected = []
+                def selector():
+                    selected.append(original_selector())
+                    return selected[-1]
+                with patch.object(g.subprocess,'Popen',return_value=child), \
+                        patch.object(g.os,'killpg',side_effect=PermissionError('PRIVATE_MARKER')), \
+                        patch.object(g,'METADATA_LIMIT',1), patch.object(g,'STDERR_LIMIT',1), \
+                        patch.object(g.selectors,'DefaultSelector',side_effect=selector):
+                    with self.assertRaises(g.GitPreflightError) as caught:
+                        self.reads().query(g._Read.CONFIG)
+                self.assertEqual(str(caught.exception),
+                                 'Git ADD preflight rejected: Git inspection unavailable')
+                self.assertTrue(child.kill_called)
+                self.assertTrue(child.reaped)
+                self.assert_closed(child)
+                self.assertFalse(selected[0].get_map())
+
+    def test_live_child_reaped_after_group_signal_failure(self):
+        original = g.subprocess.Popen
+        for fault in (PermissionError,ProcessLookupError):
+            with self.subTest(fault=fault.__name__):
+                owned = []
+                def spawn(argv, **kwargs):
+                    # A finite safety backstop; the assertion below requires
+                    # SIGKILL, so natural expiry cannot make this test PASS.
+                    child = original([sys.executable,'-c','import time; time.sleep(2)'],**kwargs)
+                    owned.append(child)
+                    return child
+                def emergency_cleanup():
+                    if owned and owned[0].returncode is None:
+                        owned[0].kill(); owned[0].wait()
+                self.addCleanup(emergency_cleanup)
+                with patch.object(g.subprocess,'Popen',side_effect=spawn), \
+                        patch.object(g.os,'killpg',side_effect=fault('PRIVATE_MARKER')), \
+                        patch.object(g.time,'monotonic',side_effect=(0,20)):
+                    with self.assertRaises(g.GitPreflightError) as caught:
+                        self.reads().query(g._Read.CONFIG)
+                self.assertEqual(caught.exception.category,'Git inspection unavailable')
+                self.assertEqual(owned[0].returncode,-g.signal.SIGKILL)
+                self.assert_closed(owned[0])
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(owned[0].pid,os.WNOHANG)
+
+    def test_selector_setup_failure_still_reaps_and_closes(self):
+        child = self.exited_process()
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.selectors,'DefaultSelector',side_effect=OSError('PRIVATE_MARKER')), \
+                patch.object(g.os,'killpg'):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.CONFIG)
+        self.assertEqual(caught.exception.category,'Git inspection unavailable')
+        self.assertTrue(child.reaped)
+        self.assert_closed(child)
+
+    def test_cleanup_close_fault_cannot_replace_nonzero_head_failure(self):
+        child = self.exited_process(b'')
+        child.wait = lambda timeout=None: setattr(child,'returncode',7) or 7
+        original_selector = g.selectors.DefaultSelector
+        owned = []
+        def selector():
+            selected = original_selector()
+            original_close = selected.close
+            def close():
+                original_close()
+                raise OSError('PRIVATE_MARKER')
+            selected.close = close
+            owned.append(selected)
+            return selected
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.selectors,'DefaultSelector',side_effect=selector), \
+                patch.object(g.os,'killpg'):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.HEAD)
+        self.assertEqual(caught.exception.category,'HEAD mismatch')
+        self.assert_closed(child)
+        self.assertFalse(owned[0].get_map())
+
+    def test_stdout_close_fault_still_closes_stderr_and_preserves_primary(self):
+        child = self.exited_process()
+        original_close = child.stdout.close
+        def close():
+            original_close()
+            raise OSError('PRIVATE_MARKER')
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.os,'killpg'), patch.object(g,'METADATA_LIMIT',1), \
+                patch.object(child.stdout,'close',side_effect=close):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.CONFIG)
+        self.assertEqual(caught.exception.category,'Git inspection unavailable')
+        self.assertTrue(child.reaped)
+        self.assert_closed(child)
+
+    def test_wait_cleanup_fault_still_closes_pipes_and_preserves_primary(self):
+        child = self.exited_process()
+        original_wait = child.wait
+        def wait(timeout=None):
+            original_wait(timeout)
+            raise OSError('PRIVATE_MARKER')
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.os,'killpg'), patch.object(g,'METADATA_LIMIT',1), \
+                patch.object(child,'wait',side_effect=wait):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.CONFIG)
+        self.assertEqual(caught.exception.category,'Git inspection unavailable')
+        self.assertTrue(child.reaped)
+        self.assert_closed(child)
+
+    def test_direct_kill_cleanup_fault_still_reaps_and_preserves_primary(self):
+        child = self.exited_process()
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.os,'killpg',side_effect=PermissionError('PRIVATE_MARKER')), \
+                patch.object(child,'kill',side_effect=PermissionError('PRIVATE_MARKER')), \
+                patch.object(g,'METADATA_LIMIT',1):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.CONFIG)
+        self.assertEqual(caught.exception.category,'Git inspection unavailable')
+        self.assertTrue(child.reaped)
+        self.assert_closed(child)
+
+    def test_cleanup_fault_on_success_is_sanitized(self):
+        child = self.exited_process(b'')
+        original_close = child.stderr.close
+        def close():
+            original_close()
+            raise OSError('PRIVATE_MARKER')
+        with patch.object(g.subprocess,'Popen',return_value=child), \
+                patch.object(g.os,'killpg'), patch.object(child.stderr,'close',side_effect=close):
+            with self.assertRaises(g.GitPreflightError) as caught:
+                self.reads().query(g._Read.CONFIG)
+        self.assertEqual(caught.exception.category,'Git inspection unavailable')
+        self.assertTrue(child.reaped)
+        self.assert_closed(child)
 
 
 # Independent fixtures per state, so one early reject cannot mask another gate.
