@@ -42,6 +42,7 @@ _SAFE_MESSAGES = frozenset((
     'containment acceptance assertion failed', 'probe event count limit',
     'fixture launch identity unavailable', 'fixture group disappearance unconfirmed',
     'isolated trusted supervisor installation unavailable',
+    'unsupported kernel identity query',
 ))
 FIELDS = {
     'START': {'binding', 'parent', 'launch', 'nonce', 'case', 'timeout', 'pipes'},
@@ -86,8 +87,21 @@ def exception_evidence(error):
             'line': trace.tb_lineno})
         locations = locations[-8:]
         trace = trace.tb_next
-    return {'exception_type': kind, 'message': message, 'errno': number,
-            'traceback': locations}
+    result = {'exception_type': kind, 'message': message, 'errno': number,
+              'traceback': locations}
+    # Only the reviewed numeric C-call metadata may cross this boundary. Do
+    # not copy arbitrary attributes, API buffers, paths, argv or error strings.
+    api = getattr(error, 'libproc', None)
+    keys = {'flavor', 'arg', 'requested_bytes', 'returned_bytes', 'errno'}
+    if (type(api) is dict and set(api) == keys
+            and all(type(value) is int for value in api.values())
+            and (api['flavor'], api['arg']) in ((3, 1), (4, 0))
+            and 0 < api['requested_bytes'] <= 4096
+            and -(2**31) <= api['returned_bytes'] < 2**31
+            and 0 <= api['errno'] < 2**31):
+        result['libproc'] = dict(api)
+        result['errno'] = api['errno']
+    return result
 
 
 def reject():

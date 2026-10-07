@@ -43,8 +43,22 @@ class _Task(ctypes.Structure):
 
 
 def _info(pid, flavor, model):
+    """Reviewed per-flavor libproc policy, including live/zombie BSD reads.
+
+    XNU xnu-11417.140.69 proc_info.c requires a nonzero arg to enable
+    proc_find_zombref for PROC_PIDTBSDINFO. Every BSD caller (including the
+    first read before getsid) needs this to observe live-to-zombie transitions.
+    PROC_PIDTASKINFO has a separate contract and keeps arg=0. A successful BSD
+    read alone grants no SID, ownership, or signaling authority.
+    """
     if sys.platform != 'darwin' or os.geteuid() == 0:
         raise NotSupported('Darwin non-root host required')
+    if flavor == 3 and model is _BSD:  # PROC_PIDTBSDINFO, allow zombie lookup.
+        arg = 1
+    elif flavor == 4 and model is _Task:  # PROC_PIDTASKINFO, thread-count premise.
+        arg = 0
+    else:
+        raise NotSupported('unsupported kernel identity query')
     lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
     query = lib.proc_pidinfo
     query.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
@@ -52,8 +66,16 @@ def _info(pid, flavor, model):
     query.restype = ctypes.c_int
     value = model()
     size = ctypes.sizeof(value)
-    if query(pid, flavor, 0, ctypes.byref(value), size) != size:
-        raise IdentityUnknown('kernel identity unavailable')
+    ctypes.set_errno(0)
+    returned = query(pid, flavor, arg, ctypes.byref(value), size)
+    number = ctypes.get_errno()  # Capture immediately, before any other API call.
+    if returned != size:
+        error = IdentityUnknown('kernel identity unavailable')
+        error.libproc = {'flavor': flavor, 'arg': arg, 'requested_bytes': size,
+                         'returned_bytes': returned, 'errno': number}
+        # A failed BSD call (even ESRCH) is not the getsid ESRCH that permits
+        # Anchor's two-row owned-zombie proof. Missing/short rows stay unknown.
+        raise error
     return value
 
 

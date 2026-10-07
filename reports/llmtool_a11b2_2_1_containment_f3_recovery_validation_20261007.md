@@ -523,3 +523,147 @@ evidence append and all Git/publication work belong to the outer runner. No stag
 commit, push, merge, branch switch, reset, stash, worktree, clone, global install,
 marker deletion, task-contract change or unrelated-file edit occurred. Stop at this
 prepared candidate; independent security/coordinator approval remains pending.
+
+## Second native failure: bounded libproc repair — 2026-10-08
+
+Current status: **PREPARED REPAIR CANDIDATE; all new runner gates PENDING**.
+This append supersedes prior current-status/root-cause wording for this recovery
+only. Both original native SIGINT invocations remain permanently **FAIL**.
+The structured implementation return means a prepared candidate, not native
+acceptance, independent security approval, publication readiness or merge approval.
+
+### Authorization and entry evidence
+
+- Recovery run: `20261007T162747Z-96025`, continuing stopped run
+  `20261007T153635Z-87533` under the native-pinned task ID.
+- Read the current runner's `recovery.json`, copied `coordinator-assessment.md`,
+  `task.json`, `recovery-evidence/summary.json` and
+  `recovery-evidence/mac-containment-0.json` before edits. The second-failure
+  assessment governs; the first failure and previous recovery are historical.
+- Canonical Mac cwd and Git root were verified as
+  `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`; remote identity
+  is `davidcatcat/davidcattoolsproject`. Branch remains
+  `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+- Entry HEAD: `325bde3fe74c5f998ccf1dd046487c0900716224`; tracked/index state
+  was clean. Pinned base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`;
+  stopped control is `9c8b36d01dd0edb1233cc0fcc1be8c8b62cf006f`.
+- The runner preserved ten candidate files and their hashes. Second-failure
+  summary SHA-256: `ae855afa2409d12fa68161717335505ca68431b93ed8a466a76d8e0b47cab09b`;
+  native JSON SHA-256: `f025bb4d0ad8f910ecd9ccd56755ce0b84a55fb26ec25ce241c07ffe69d28281`.
+- This is the first Codex repair call in this newly authorized continuation
+  (at most two calls). Source and test bytes changed before runner checks.
+- Read-only `ps -ww` inspection of the two retained snapshot PIDs was attempted
+  but rejected by the sandbox (`operation not permitted`). Their current
+  presence/absence, full host path and parent-child relationship are therefore
+  **UNVERIFIED by this Codex call**. The outer runner retains ownership of the
+  required stale-process preflight. No snapshot PID/PGID was signaled, no probe
+  was launched, and no marker or fixture was deleted. Operator fixture cleanup
+  would not constitute containment PASS.
+- Unrelated untracked artifacts were left untouched; retrospective integrity
+  remains UNVERIFIED. No fetch or remote synchronization is claimed.
+
+### Historical exact-byte results and established defect
+
+Results below belong only to stopped candidate **325bde3**, with its saved
+source/test hash map. No historical PASS is inherited by this repair.
+
+| Gate | Historical result at 325bde3 only |
+| --- | --- |
+| Syntax / containment units / mutation / A5 / Action related checks | Exit 0 each; 0.3 / 0.8 / 39.5 / 13.7 / 0.6 seconds |
+| Preliminary read-only Claude ordinary review | Recorded PASS; not formal security approval |
+| Full check, venv Python | Exit 0; 211.8 seconds |
+| Full check, /usr/bin/python3 | Exit 0; 330.7 seconds |
+| Mandatory actual Mac acceptance | **FAIL**, exit 1; 7.2 seconds |
+| fd_inheritance | Historical PASS; 9 checks, zero skips |
+| Ordinary sigint | **Second original FAIL**; primary interrupted, signal 2, status EOF and unresolved cleanup retained |
+| Other twelve native scenarios, including both parent-SIGKILL variants | **NOT RUN**; no native acceptance inherited |
+
+The first invocation `20261007T123142Z-77009` at **ce29d4a** also remains
+**FAIL**, with its historical full/review evidence recorded above. The second
+invocation records macOS 15.7.9 and venv Python 3.13.3; its summary records system
+Python 3.9.6. These describe historical executions, not a new platform probe.
+
+The second traceback reaches `Anchor.kill_group -> verify -> identity -> _info`
+at the first BSD query and raises `IdentityUnknown: kernel identity unavailable`.
+It does not reach `getsid` or the owned-zombie fallback. Diagnostic retention
+worked: primary interruption and the later cleanup exception remain separate.
+The old evidence contains neither API return length nor errno and does not prove
+measured ESRCH, successful SZOMB observation, or final containment.
+
+The concrete API-use defect is the unconditional zero argument to libproc.
+[Apple XNU at xnu-11417.140.69](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/proc_info.c)
+enables zombie lookup for BSD flavor 3 when arg is nonzero and then uses the
+zombie lookup if ordinary process lookup fails. This establishes the missing
+API behavior in source; the repaired native invocation must still establish
+the actual kernel rows, errno on failures and complete containment behavior.
+
+### Bounded implementation and regression coverage
+
+The shared `_info` boundary now explicitly accepts only the reviewed flavor/model
+pairs: `PROC_PIDTBSDINFO` (3, `_BSD`) uses arg 1 for live/zombie reads;
+`PROC_PIDTASKINFO` (4, `_Task`) retains arg 0. Every flavor-3 caller was inspected:
+ordinary identity before/after SID, two-row owned-anchor verification, fixed
+verification-to-signal race, probe-host cleanup, native leader/descendant checks,
+and live/zombie kqueue registration evidence. All reach the repaired helper;
+none bypasses it with an independent C call. Native kqueue/zombie scenarios
+continue to use real libproc with no mocked capability or skipped proof.
+
+The helper clears ctypes errno immediately before the C call, then immediately
+captures actual returned bytes and errno. A size mismatch, including zero or
+short return, still raises `IdentityUnknown`, carrying only flavor, arg,
+requested bytes, returned bytes and errno. The reviewed formatter accepts an
+exact bounded numeric schema for this optional metadata and rejects arbitrary
+fields, booleans, strings and out-of-range values. It retains the fixed primary
+message and existing bounded traceback rules; no buffers, environment, argv,
+credentials, provider output or private logs enter curated evidence.
+BSD-query ESRCH remains a failed row and cannot trigger the SID-specific fallback.
+
+Identity proof and ordering are unchanged: ordinary identity requires a real
+SID and stable fresh kernel rows. Special owned-zombie continuity still requires
+the unreaped direct Popen child, launch-bound PID=PGID=SID, UID/PPID/start time,
+host/default-reaper premise, two fresh matching SZOMB rows and ownership recheck
+before signaling/reaping. Neither tpgid nor numeric group existence supplies SID
+or ownership. F1 retention, deadlines, code binding and group-decision-before-reap
+remain in force.
+
+New deterministic tests replace the **libproc callable**, leaving `_info`,
+`identity` and `Anchor` real. They assert actual flavor/arg and SDK buffer sizes
+(BSD 136, task 96), errno reset, and `use_errno=True`. Coverage includes initial
+BSD-before-SID ordering; live and owned-zombie success models; live-to-zombie SID
+failure; two fresh proof rows; verification-to-signal exit; zero/short/oversize
+returns; ESRCH/EPERM/EACCES; live identity/SID mismatch; mismatch/reused start
+identity on either zombie row; missing rows; and reaping during the second proof
+row. Rejection assertions forbid group/leader signals and premature reap.
+Additional tests retain actual C-call diagnostics as secondary to a primary
+fixture error and reject unsafe formatter metadata. All these tests are
+**PENDING execution**, and synthetic rows never count as native evidence.
+
+### New gate dispositions
+
+| Gate / requested disposition | Current repair status |
+| --- | --- |
+| Syntax, nonzero containment discovery, C-boundary regressions | PENDING outer runner |
+| Git mutation / A5 / Action and public import regressions | PENDING outer runner |
+| Supervisor/fake-child harness, FD topology and inheritance | PENDING exact-byte runner/native checks |
+| SIGINT / SIGTERM / SIGHUP, timing and repeated signals | PENDING actual Mac |
+| Hung/lost supervisor, missing ACK, F1 retention and leader/descendant cleanup | PENDING actual Mac |
+| PID/PGID mismatch/reuse, kernel start time, live/zombie continuity and kqueue | PENDING actual Mac and independent review |
+| Protocol framing/deadlines, code/runtime binding, public invocation boundary | PENDING runner/native checks |
+| Parent SIGKILL plain x20 and Popen x20, each disappearance <=2 seconds | PENDING actual Mac; no inherited repetitions |
+| Both full Python suites (venv and /usr/bin/python3) | PENDING outer runner on changed bytes |
+| Preliminary and complete final-diff Claude ordinary review | PENDING outer runner |
+| BLOCKER/HIGH disposition, independent security and coordinator acceptance | PENDING; source review is not security acceptance |
+| Exact final-HEAD CI / READY_FOR_FINAL_REVIEW | PENDING runner; not reached |
+| Real Git ADD, user index mutation, public mutation, approval issuer, audit bypass | None introduced or executed |
+| A11b.2.2.2 / later slices | Not started or authorized |
+
+Codex performed read-only inspection, source/diff review and allowlisted edits.
+No tests, syntax checks, suites, native containment probes or acceptance generator
+ran inside this call. No acceptance JSON or new PASS evidence was fabricated.
+Only `_git_process_identity.py`, `_git_containment_protocol.py`,
+`test_git_containment.py` and this report changed. No Git write, branch change,
+reset, stash, worktree, clone, global install, task change or scope expansion
+occurred. The outer runner must append truthful results and hashes, run all
+fourteen native scenarios with original bounds, and stop immediately for
+assessment on another mandatory native failure. Independent security review
+and coordinator approval remain pending; never merge or begin 2.2.2.

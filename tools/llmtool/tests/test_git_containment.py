@@ -5,6 +5,7 @@ AcceptanceScenarios via run_containment_acceptance.py; mocks never satisfy its
 native signal, process, kqueue or SIGKILL repetitions.
 """
 import ast
+import ctypes
 from contextlib import contextmanager
 from dataclasses import replace
 import errno
@@ -230,6 +231,308 @@ class ProtocolTests(unittest.TestCase):
                 patch.object(wire.time, 'monotonic', side_effect=[1, 3]):
             with self.assertRaises(TimeoutError):
                 reader.receive(2)
+
+
+class LibprocBoundaryTests(unittest.TestCase):
+    """Exercise real _info/identity/Anchor code with the C call replaced.
+
+    Synthetic kernel rows cannot establish native Darwin capability. Literal
+    SDK sizes and argument assertions catch the original arg=0 BSD defect.
+    """
+    def setUp(self):
+        self.bound = kernel.Identity(123, 123, 123, 501, 99, 1, 2)
+        self.process = Mock(spec=subprocess.Popen, pid=123, returncode=None)
+
+    def bsd(self, **changes):
+        fields = self.bound.data()
+        fields.pop('sid')
+        return {**fields, 'status': 5, 'tpgid': 987, **changes}
+
+    @contextmanager
+    def libproc(self, rows, after_read=None):
+        script = iter(rows)
+        self.calls, self.events = [], []
+        saved_errno = ctypes.get_errno()
+        def call(pid, flavor, arg, buffer, size):
+            # Assert actual C-boundary args, not the wrapper's mocked inputs.
+            self.assertEqual(ctypes.get_errno(), 0)
+            if flavor == 3:
+                self.assertEqual((arg, size), (1, 136))
+                model, row = kernel._BSD, next(script)
+                self.events.append('bsd')
+            else:
+                self.assertEqual((flavor, arg, size), (4, 0, 96))
+                model, row = kernel._Task, {'narrow9': 1}
+                self.events.append('task')
+            self.calls.append((pid, flavor, arg, size))
+            value = ctypes.cast(buffer, ctypes.POINTER(model)).contents
+            for key, item in row.items():
+                if not key.startswith('_'):
+                    setattr(value, key, item)
+            if after_read is not None:
+                after_read(len(self.calls))
+            ctypes.set_errno(row.get('_errno', 0))
+            return row.get('_returned', size)
+        query = Mock(side_effect=call)
+        with patch.object(kernel.sys, 'platform', 'darwin'), \
+                patch.object(kernel.os, 'geteuid', return_value=501), \
+                patch.object(kernel.os, 'getpid', return_value=99), \
+                patch.object(kernel.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=query)) as library:
+            try:
+                ctypes.set_errno(errno.EIO)  # Must be cleared before every call.
+                yield query
+                if query.called:
+                    self.assertEqual(query.argtypes, [ctypes.c_int, ctypes.c_int,
+                        ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int])
+                    self.assertIs(query.restype, ctypes.c_int)
+                    for invocation in library.call_args_list:
+                        self.assertEqual(invocation.args, ('/usr/lib/libproc.dylib',))
+                        self.assertEqual(invocation.kwargs, {'use_errno': True})
+            finally:
+                ctypes.set_errno(saved_errno)
+
+    def test_zombie_capable_bsd_and_unchanged_native_task_arguments(self):
+        with self.libproc([self.bsd()]), \
+                patch.object(kernel.threading, 'active_count', return_value=1), \
+                patch.object(kernel.signal, 'getsignal', return_value=signal.SIG_DFL), \
+                patch.object(kernel.select, 'kqueue', Mock(), create=True):
+            row = kernel._info(self.bound.pid, 3, kernel._BSD)
+            self.assertEqual((row.status, row.tpgid), (5, 987))
+            kernel.host_check()  # Actual flavor-4 native-thread query path.
+        self.assertEqual(self.calls, [(123, 3, 1, 136), (99, 4, 0, 96)])
+
+    def test_unreviewed_flavor_or_model_rejects_before_c_call(self):
+        for flavor, model in ((3, kernel._Task), (4, kernel._BSD), (5, kernel._BSD)):
+            with self.subTest(flavor=flavor, model=model), self.libproc([]) as query:
+                with self.assertRaises(kernel.NotSupported):
+                    kernel._info(123, flavor, model)
+                query.assert_not_called()
+
+    def test_live_identity_reads_bsd_before_sid_then_fresh_bsd_before_signal(self):
+        def sid(pid):
+            self.assertEqual(pid, 123)
+            self.events.append('sid')
+            return 123
+        def kill(*args):
+            self.events.append('signal')
+        with self.libproc([self.bsd(status=2), self.bsd(status=2)]), \
+                patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=sid), \
+                patch.object(kernel.os, 'killpg', side_effect=kill) as signal_group:
+            anchor = kernel.Anchor(self.process, self.bound)
+            anchor.kill_group()
+        self.assertEqual(self.events, ['bsd', 'sid', 'bsd', 'signal'])
+        self.assertEqual(anchor.verification['mode'], 'ordinary')
+        signal_group.assert_called_once_with(123, signal.SIGKILL)
+        self.process.wait.assert_not_called()
+
+    def test_short_zero_and_errno_bsd_failures_never_reach_sid_or_signal(self):
+        for returned in (0, 135, -1, 137):
+            for number in (0, errno.ESRCH, errno.EPERM, errno.EACCES):
+                with self.subTest(returned=returned, errno=number), \
+                        self.libproc([{'_returned': returned, '_errno': number}]), \
+                        patch.object(kernel, 'host_check'), \
+                        patch.object(kernel.os, 'getsid') as sid, \
+                        patch.object(kernel.os, 'killpg') as group, \
+                        patch.object(kernel.os, 'kill') as leader:
+                    anchor = kernel.Anchor(self.process, self.bound)
+                    with self.assertRaises(kernel.IdentityUnknown) as caught:
+                        anchor.kill_group()
+                    evidence = wire.exception_evidence(caught.exception)
+                    self.assertEqual(evidence['libproc'], {'flavor': 3, 'arg': 1,
+                        'requested_bytes': 136, 'returned_bytes': returned, 'errno': number})
+                    self.assertEqual(evidence['errno'], number)
+                    self.assertEqual(evidence['message'], 'kernel identity unavailable')
+                    self.assertEqual(len(self.calls), 1)
+                    self.assertFalse(anchor.decided)
+                    sid.assert_not_called()
+                    group.assert_not_called()
+                    leader.assert_not_called()
+                    self.process.wait.assert_not_called()
+
+    def test_task_failure_preserves_zero_argument_and_actual_errno(self):
+        def denied(*args):
+            self.assertEqual(ctypes.get_errno(), 0)
+            ctypes.set_errno(errno.EPERM)
+            return 0
+        query = Mock(side_effect=denied)
+        saved_errno = ctypes.get_errno()
+        with patch.object(kernel.sys, 'platform', 'darwin'), \
+                patch.object(kernel.os, 'geteuid', return_value=501), \
+                patch.object(kernel.ctypes, 'CDLL', return_value=SimpleNamespace(proc_pidinfo=query)):
+            try:
+                ctypes.set_errno(errno.EIO)
+                with self.assertRaises(kernel.IdentityUnknown) as caught:
+                    kernel._info(99, 4, kernel._Task)
+                self.assertEqual(query.call_args.args[:3], (99, 4, 0))
+                self.assertEqual(query.call_args.args[4], 96)
+                self.assertEqual(wire.exception_evidence(caught.exception)['libproc'],
+                    {'flavor': 4, 'arg': 0, 'requested_bytes': 96,
+                     'returned_bytes': 0, 'errno': errno.EPERM})
+            finally:
+                ctypes.set_errno(saved_errno)
+
+    def test_owned_zombie_and_live_to_zombie_require_two_new_szomb_rows(self):
+        for initial_status in (2, 5):
+            def sid(pid):
+                self.events.append('sid')
+                raise ProcessLookupError(errno.ESRCH, 'SYNTHETIC_SECRET')
+            def kill(*args):
+                self.assertIsNone(self.process.returncode)
+                self.process.wait.assert_not_called()
+                self.events.append('signal')
+            with self.subTest(initial_status=initial_status), \
+                    self.libproc([self.bsd(status=initial_status), self.bsd(), self.bsd()]), \
+                    patch.object(kernel, 'host_check'), \
+                    patch.object(kernel.os, 'getsid', side_effect=sid), \
+                    patch.object(kernel.os, 'killpg', side_effect=kill):
+                anchor = kernel.Anchor(self.process, self.bound)
+                anchor.kill_group()
+                self.assertEqual(self.events, ['bsd', 'sid', 'bsd', 'bsd', 'signal'])
+                self.assertEqual(anchor.verification['mode'], 'owned-zombie')
+                self.assertEqual(anchor.verification['sid_source'], 'launch-continuity')
+                self.assertEqual([r['status'] for r in anchor.verification['kernel_rows']], [5, 5])
+                self.assertEqual(len(self.calls), 3)
+
+    def test_general_identity_esrch_and_sid_permission_never_grant_zombie_authority(self):
+        for error in (ProcessLookupError(errno.ESRCH, 'SYNTHETIC_SECRET'),
+                      PermissionError(errno.EPERM, 'SYNTHETIC_SECRET')):
+            with self.subTest(error=type(error)), self.libproc([self.bsd()]), \
+                    patch.object(kernel.os, 'getsid', side_effect=error):
+                with self.assertRaises(type(error)):
+                    kernel.identity(123)
+                self.assertEqual(len(self.calls), 1)
+        with self.libproc([self.bsd()]), patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=PermissionError(errno.EPERM, 'private')), \
+                patch.object(kernel.os, 'killpg') as kill:
+            with self.assertRaises(PermissionError):
+                kernel.Anchor(self.process, self.bound).kill_group()
+            self.assertEqual(len(self.calls), 1)
+            kill.assert_not_called()
+
+    def test_changed_live_start_identity_or_sid_never_signals(self):
+        for key in ('pid', 'pgid', 'ppid', 'uid', 'seconds', 'micros', 'sid'):
+            rows = [self.bsd(status=2), self.bsd(status=2)]
+            if key != 'sid':
+                rows[1][key] += 1
+            with self.subTest(key=key), self.libproc(rows), \
+                    patch.object(kernel, 'host_check'), \
+                    patch.object(kernel.os, 'getsid', return_value=124 if key == 'sid' else 123), \
+                    patch.object(kernel.os, 'killpg') as kill:
+                with self.assertRaises(kernel.IdentityUnknown):
+                    kernel.Anchor(self.process, self.bound).kill_group()
+                kill.assert_not_called()
+
+    def test_either_zombie_proof_row_mismatch_reuse_or_missing_never_signals(self):
+        changed = [self.bsd(**{key: getattr(self.bound, key)+1})
+                   for key in ('pid', 'pgid', 'ppid', 'uid', 'seconds', 'micros')]
+        changed.extend((self.bsd(status=2), self.bsd(status=0),
+            {'_returned': 0, '_errno': errno.ESRCH},
+            {'_returned': 0, '_errno': errno.EPERM}, {'_returned': 135}))
+        for bad in changed:
+            for index in (0, 1):
+                rows = [self.bsd(), self.bsd()]
+                rows[index] = bad
+                with self.subTest(bad=bad, index=index), \
+                        self.libproc([self.bsd(), *rows]), \
+                        patch.object(kernel, 'host_check'), \
+                        patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                        patch.object(kernel.os, 'killpg') as group, \
+                        patch.object(kernel.os, 'kill') as leader:
+                    anchor = kernel.Anchor(self.process, self.bound)
+                    with self.assertRaises(kernel.IdentityUnknown):
+                        anchor.kill_group()
+                    group.assert_not_called()
+                    leader.assert_not_called()
+                    self.assertFalse(anchor.decided)
+                    self.process.wait.assert_not_called()
+
+    def test_reap_during_second_fresh_zombie_row_never_signals(self):
+        def reap(count):
+            if count == 3:  # Initial BSD then two fresh owned-zombie reads.
+                self.process.returncode = 0
+        with self.libproc([self.bsd(), self.bsd(), self.bsd()], after_read=reap), \
+                patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as leader:
+            with self.assertRaises(kernel.IdentityUnknown):
+                kernel.Anchor(self.process, self.bound).kill_group()
+            self.assertEqual(len(self.calls), 3)
+            group.assert_not_called()
+            leader.assert_not_called()
+            self.process.wait.assert_not_called()
+
+    def test_verification_to_signal_race_uses_repaired_bsd_boundary_without_reap(self):
+        reads = [self.bsd(status=2), self.bsd(status=2), self.bsd(),
+                 self.bsd(), self.bsd(), self.bsd()]
+        note = Mock()
+        note.exited.return_value = True
+        def sid(pid):
+            self.events.append('sid')
+            if len(self.calls) > 2:
+                raise ProcessLookupError(errno.ESRCH, 'private')
+            return 123
+        def signal_leader(*args):
+            self.events.append('leader')
+        def signal_group(*args):
+            self.events.append('group')
+            self.process.wait.assert_not_called()
+            self.assertIsNone(self.process.returncode)
+        with self.libproc(reads), patch.object(kernel, 'host_check'), \
+                patch.object(kernel, 'ExitNote', return_value=note), \
+                patch.object(kernel.os, 'getsid', side_effect=sid), \
+                patch.object(kernel.os, 'kill', side_effect=signal_leader), \
+                patch.object(kernel.os, 'killpg', side_effect=signal_group):
+            anchor = kernel.Anchor(self.process, self.bound)
+            anchor.kill_group(exit_after_verify=True, deadline=time.monotonic()+1)
+        self.assertEqual(self.events, ['bsd', 'sid', 'bsd', 'leader', 'bsd',
+                                      'bsd', 'sid', 'bsd', 'bsd', 'group'])
+        self.assertEqual(anchor.verification['mode'], 'owned-zombie')
+        self.assertEqual(len(self.calls), 6)
+        note.close.assert_called_once()
+        self.process.wait.assert_not_called()
+
+    def test_real_query_failure_remains_secondary_to_primary_fixture_failure(self):
+        primary = wire.ProtocolFailure('invalid containment protocol')
+        with self.libproc([{'_returned': 0, '_errno': errno.EPERM}]), \
+                patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid') as sid, \
+                patch.object(kernel.os, 'killpg') as kill:
+            with self.assertRaises(wire.ProtocolFailure) as caught:
+                try:
+                    raise primary
+                finally:
+                    cleanup_preserving_failure(lambda: cleanup_fixture(self.process, self.bound))
+            try:
+                self.assertIs(caught.exception, primary)
+                evidence = primary.secondary_cleanup_errors[0]
+                self.assertEqual(evidence['exception_type'], 'IdentityUnknown')
+                self.assertEqual(evidence['libproc']['returned_bytes'], 0)
+                self.assertEqual(evidence['libproc']['errno'], errno.EPERM)
+                self.assertEqual(evidence['libproc']['arg'], 1)
+                self.process.wait.assert_not_called()
+                sid.assert_not_called()
+                kill.assert_not_called()
+            finally:
+                _FAILED_PROBES[:] = [p for p in _FAILED_PROBES if p.process is not self.process]
+
+    def test_formatter_only_accepts_bounded_numeric_api_evidence(self):
+        valid = {'flavor': 3, 'arg': 1, 'requested_bytes': 136,
+                 'returned_bytes': 0, 'errno': errno.EPERM}
+        error = kernel.IdentityUnknown('kernel identity unavailable')
+        error.libproc = valid
+        self.assertEqual(wire.exception_evidence(error)['libproc'], valid)
+        malformed = [None, 'SYNTHETIC_SECRET', {**valid, 'argv': 'SYNTHETIC_SECRET'},
+            {**valid, 'returned_bytes': 'SYNTHETIC_SECRET'}, {**valid, 'arg': True},
+            {**valid, 'flavor': 4}, {**valid, 'arg': 0},
+            {**valid, 'requested_bytes': 4097}, {**valid, 'returned_bytes': 2**31},
+            {**valid, 'errno': -1}]
+        for metadata in malformed:
+            with self.subTest(metadata=metadata):
+                error.libproc = metadata
+                data = wire.exception_evidence(error)
+                self.assertNotIn('libproc', data)
+                self.assertNotIn(b'SYNTHETIC_SECRET', wire.canonical(data))
 
 
 class IdentityTests(unittest.TestCase):
