@@ -158,8 +158,11 @@ Test real SIGINT/SIGTERM/SIGHUP including pre-pipe, spawn and cleanup timing; mi
 handlers, repeated signals cannot bypass cleanup/deadline; restore only after verified
 containment and reap. EOF is the death safety mechanism, handlers provide typed outcome.
 For hung/lost supervisor, missing ACK, bounded wait, malformed/closed status or missing
-group-gone proof: kill/reap still-owned supervisor, then fresh identity-bound group
-handling. No normal return/restoration while an owned process may live. Explicitly
+group-gone proof: follow section 8's supervisor-anchor ordering. Freshly verify the
+still-owned, unreaped supervisor, signal its owned group while that supervisor pins
+the PID/PGID, and make the group-cleanup decision before any supervisor reap. Then
+reap the supervisor and verify eventual group/descendant disappearance. Never reap
+first and subsequently signal the remembered group number. No normal return/restoration while an owned process may live. Explicitly
 implement unresolved-containment exit/handler behavior (F1), preserve its evidence,
 and classify as state unknown / user action required without guessing ownership.
 Also inject supervisor death before CHILD_IDENTITY delivery (B5 residual window).
@@ -178,7 +181,7 @@ Bind PID/PGID/SID/UID and kernel start-time identity. The accepted remediation i
 - on parent-liveness EOF/SIGKILL, supervisor performs a last-act `killpg(own_pgid, SIGKILL)`; self-termination is intentional and kills the fake group together;
 - if supervisor identity is ambiguous, already reaped, or no longer `PID == PGID == SID`, do not signal a numeric PGID; classify containment/state unknown.
 
-This replaces the stopped run's snapshot-only fallback and the earlier separate-child-process-group assumption. Do not add a separate anchor process and do not depend on Apple private audit-token signaling. Independent security review after implementation must explicitly verify this remediation.
+This replaces the stopped run's snapshot-only fallback and the earlier separate-child-process-group assumption. For this recovery, section 8 also supersedes B5 section 11.2's old supervisor-kill/reap-before-group-fallback ordering: the supervisor-owned group cleanup decision MUST precede supervisor reap. All identity, disappearance, bounded cleanup, typed failure and independent review requirements remain mandatory. Do not add a separate anchor process and do not depend on Apple private audit-token signaling. Independent security review after implementation must explicitly verify this remediation.
 
 Test live and zombie supervisor-anchor cases, mismatch/reuse, attempted signal after reap, unexpected supervisor death, hung supervisor, parent SIGKILL and verification-to-signal timing. Actual Mac probes remain mandatory.
 
@@ -270,7 +273,7 @@ content as proof for unpublished commits. Existing dirty/untracked protections a
 
 ## Observed stop and decision evidence — 2026-10-07
 
-The initial Mac run `20261007T064116Z-68730` stopped at NEEDS_DECISION before source/test implementation. The coordinator imported David's provided transcript to `reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md` on the control branch. Read that report before preparing recovery. F3 continuity is unresolved; no alternative per-member design is accepted here. Keep the existing Mac branch/files and do not restart this task blindly.
+The initial Mac run `20261007T064116Z-68730` stopped at NEEDS_DECISION before source/test implementation. The coordinator imported David's provided transcript to `reports/ai-loop/checkpoints/A11b.2.2.1-containment-20261007-20261007T064116Z-68730.md` on the control branch. Read that report before preparing recovery. F3 continuity was unresolved at that checkpoint. Section 8 now authorizes a supervisor-anchor recovery design, whose implementation and Mac evidence remain pending; no alternative per-member design is accepted. Preserve the old Mac branch/files; execute only the fresh recovery task.
 
 `publish_decision_checkpoint: true` authorizes the outer runner to publish a bounded curated checkpoint to the control branch ONLY when the initial new-task Codex result is valid NEEDS_DECISION, HEAD stays at the pinned base, and only the designated acceptance report changed. No raw logs, source/index changes, feature PR, PASS, merge or automatic resume accompany that publication. Control drift/collision/API errors preserve local evidence and do not retry. Other stop types remain local for coordinator diagnosis. This update applies to future invocations; it does not rerun or repair the already stopped run.
 
@@ -281,8 +284,8 @@ David selected `scripts/ai-loop.sh` inside the canonical repository as the entry
 point. The parent bootstrap remains compatible. `bash ai-loop.sh --install-launcher`
 from the canonical parent installs only the pinned launcher and exits before task
 loading/preflight/model calls; it preserves the existing stopped branch/report.
-Installation is not task recovery or acceptance. F3 remains unresolved; do not
-interpret INSTALL ONLY COMPLETE as permission to rerun the current task.
+Installation is not task recovery or acceptance. After installation, only the
+fresh F3 recovery task authorized above may run; do not restart the old stopped task.
 
 
 ## F3 recovery authorization — 2026-10-07
