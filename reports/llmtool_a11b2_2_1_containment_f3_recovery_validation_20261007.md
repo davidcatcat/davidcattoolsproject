@@ -667,3 +667,168 @@ occurred. The outer runner must append truthful results and hashes, run all
 fourteen native scenarios with original bounds, and stop immediately for
 assessment on another mandatory native failure. Independent security review
 and coordinator approval remain pending; never merge or begin 2.2.2.
+
+## CURRENT run 96025 continuation — exit transition and controller cleanup, 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — ALL NEW RUNNER CHECKS PENDING**.
+This append preserves the historical report and supersedes its older current
+two-call/manual-native-failure stopping policy. David's CURRENT authorization
+permits four candidate calls including this continuation's first call, four
+evidence-bound failure classifications, and stops two repeated failures with
+the same blocking signature as REPAIR_STALLED. Classification, immutable
+diagnostic publication, test execution and Git remain outer-runner duties.
+No failing required check becomes PASS because repair stops.
+
+### Entry provenance and original failure
+
+- Canonical Mac cwd and Git root verified:
+  `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+- Repository identity: `davidcatcat/davidcattoolsproject`; branch unchanged:
+  `feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007`.
+- Entry HEAD / stopped candidate:
+  `a00eda49aa0f0c3486d27589148361d67e7bdb3e`.
+- Base remains `585caf7d4c9dad20afd3beb38e5140d6dadf89e0`.
+  Tracked/index state was clean at entry. Existing unrelated untracked artifacts
+  are preserved. No fetch or remote synchronization/publication claim is made.
+- Read current `task.json`, `recovery.json`, copied coordinator assessment and
+  preserved `recovery-evidence/summary.json` / `mac-containment-0.json` under
+  `.ai-loop/20261007T183516Z-7365/`. Original assessed run:
+  `20261007T162747Z-96025`; original control:
+  `8c96e7ad60fd5c39f13f0a563afcc6cc26f84753`.
+- Original summary SHA-256:
+  `28961634d78941ea3f80f81e457896bca8e4c8be8f23a2e75afe42301be8dce3`.
+  Original native JSON SHA-256:
+  `0bbb5aa95e3887bf2756fe275e1028c7dae1e1dd01f160f2ddd92c02ad3cf5a1`.
+- This is the first candidate call of this CURRENT continuation, not a fresh
+  implementation. Source/test bytes changed before any runner acceptance attempt.
+  Historical results bind only to their old bytes; inherited validation is NONE.
+
+At stopped HEAD a00eda4, related checks, preliminary ordinary Claude review and
+both full suites passed historically (venv 203.3 seconds; system Python 330.8
+seconds). Native fd_inheritance passed 9 checks; sigint/sigterm/sighup each passed
+25 checks. **hung_supervisor remained FAIL**, exit 1. The nine later native
+scenarios, including both parent-SIGKILL variants, **DID NOT RUN**. The two older
+SIGINT failures remain FAIL as recorded above. These are not new candidate gates.
+
+The captured failing host received READY and CHILD_IDENTITY, then status EOF
+without TERMINAL. Its primary was supervisor-lost; getsid ESRCH led to two fresh
+matching BSD rows with status 2. The strict zombie verifier rejected them.
+Status 2 is not SZOMB=5 and grants no zombie continuity/signaling authority.
+The later fixture-cleanup error did not establish a different primary cause.
+
+The latest coordinator correction combines fresh operator identification of the
+retained `closed_status` host with captured source order to localize this failure.
+That fault intentionally closes status and self-kills the supervisor-owned group;
+EOF without TERMINAL is expected. The archive lacks a separate completed-subcase
+record. Source order indicates progress through the preceding hung probe but
+does not establish a whole-scenario PASS or measured exit-transition duration.
+No unexplained supervisor crash or broad diagnostic protocol repair is asserted.
+Operator cleanup of historical orphan fixtures is a prerequisite, not a native
+containment PASS; this Codex call inspected/signaled no saved process IDs.
+
+### Implemented repair within the existing architecture
+
+`ExitNote` latches a validated NOTE_EXIT across empty reads, while still rejecting
+invalid later events. `Anchor.verify(deadline=...)` preserves ordinary live SID
+verification and the narrow getsid-ESRCH branch. In that branch it rechecks matching
+status-2 observations within the existing shared monotonic cleanup deadline using
+bounded non-consuming polling. It requires two consecutive fresh SZOMB=5 rows
+matching PID/PGID/UID/PPID/kernel start identity before accepting zombie proof.
+Every observed row must match; missing/short/permission rows, drift, unsupported
+host/reaper conditions, external reap, unknown status or deadline expiry reject.
+There is no retry of an ambiguous or failed identity query.
+
+The real unreaped Popen pin, launch PID=PGID=SID, UID/parent relationship and closed
+single-thread/default-reaper premise are checked before and after transition
+observation and before signaling. Cleanup decision still precedes supervisor reap;
+no released numeric group is signaled. The fixed verification-to-signal race also
+waits for actual SZOMB within its original bound rather than treating NOTE_EXIT as
+SZOMB. Actual observations are bounded to final/transition kernel rows and counts.
+The libproc BSD arg=1 / task arg=0 policy is preserved.
+
+The acceptance controller now freezes a bounded original inventory before cleanup,
+retains the actual host Popen, revalidates launch/current kernel identity and host
+premises, and sends SIGKILL only to its owned synthetic host. It does not signal
+that host's remembered supervisor/group/member IDs. Host death closes the liveness
+writer so the supervisor uses its own EOF containment path where applicable. The
+controller makes the host-only cleanup decision before host reap, then passively
+checks host, supervisor, supervisor group and every observed child/descendant/stress
+member for disappearance. Permission/inspection errors, lost-group ambiguity or
+unresponsive fixtures remain UNRESOLVED with inventory/handles retained.
+
+Production F1 is unchanged: it retains ownership, handlers and endpoints and cannot
+return normally. Controller cleanup is an external synthetic-fixture resolution,
+not a production containment success. The explicit F1 test retains its original
+two-second resolution bound; ordinary controller cleanup retains its six-second
+bound. No handshake, shutdown, group-disappearance or SIGKILL latency threshold is
+increased. No extra production process/thread/anchor or spawning callback is added.
+
+Failed-probe exceptions retain their original assertion/primary evidence, exact
+active subcase, bounded diagnostic rows and secondary cleanup errors. Failure JSON
+records `fixture_cleanup.status`, `original_owned_processes` and actual cleanup
+proof. Only confirmed cleanup may record RESOLVED with empty owned_processes;
+unresolved inventory stays nonempty. Completed fixture cleanup evidence is retained
+for subsequent assertions in that same subcase. Reaped fixture IDs permit passive inspection
+only. Direct controller-owned native fixtures also retain cleanup inventory/proof.
+Launch/FD setup failures retain ownership rather than losing an incomplete fixture.
+The outer runner's independent original-inventory PID-absence guard remains required.
+
+The hung_supervisor scenario records actual entry and completed subcases, covering
+hung, closed_status, malformed_status, lost_before_identity, registration_failure,
+drain_failure, missing_ACK and subsequent fixed cases. It preserves genuine hung
+TERMINAL evidence, intentional closed-status EOF with primary supervisor-lost,
+missing ACK, unexpected loss and every subsequent assertion. No production FD,
+message, version/schema or public CLI is added. Successful acceptance JSON retains
+the exact fourteen-scenario contract; failure JSON remains non-PASS and exits nonzero.
+
+### Added coverage awaiting the outer runner
+
+Deterministic regressions exercise status 2 to two fresh SZOMB rows, already-zombie
+proof, status regression during observation, latched NOTE_EXIT, shared-deadline
+expiry (including during a final read), identity/start drift, missing/short/permission
+rows, external reap and zero-signal rejection. Existing strict protocol version,
+schema/unknown-field/EPIPE, reuse/race, FD, binding, import/CLI and descendant tests
+remain required. Controller regressions cover original assertion/subcase retention,
+real Anchor/Popen ownership checks, SIGKILL-only host signaling before reap, original
+inventory and absence proof, released-ID passive checks, bounded unresponsive cleanup,
+retained groups, permission failures and missing supervisor identity.
+
+New native failure-path subcases deliberately raise an assertion after observing
+real unresolved/closed-status fixtures, then verify retained assertion/inventory,
+actual host pin and cleanup/reap/disappearance evidence. A native launch-identity
+drift subcase requires blocked cleanup with zero signal/reap, restores only that
+same controller-owned fixture's true launch identity, and resolves it under the
+normal ownership checks. This is fixed test injection, not an automatic provider
+retry or acceptance of ambiguous IDs. These subcases are implemented, NOT RUN here.
+
+| Required gate / disposition | Current changed-byte status |
+| --- | --- |
+| Syntax, nonzero containment discovery and new regressions | PENDING outer runner |
+| Existing Git mutation / A5 / Action regressions | PENDING outer runner |
+| Private harness/supervisor, FD inheritance and exec boundaries | PENDING runner/native |
+| Real SIGINT / SIGTERM / SIGHUP, timing and repeated signals | PENDING actual Mac |
+| Hung escalation, closed-status transition, missing ACK, F1 and fixture failure cleanup | PENDING actual Mac |
+| Leader/descendant containment and disappearance | PENDING actual Mac |
+| PID/PGID reuse, kernel identity and non-reaping kqueue | PENDING runner/native/security |
+| Framing, code/runtime binding and public/import invocation boundaries | PENDING runner/native |
+| Parent SIGKILL plain x20 and Popen x20, each <=2 seconds | PENDING actual Mac; no old repetitions inherited |
+| Full current-venv Python suite | PENDING outer runner |
+| Full /usr/bin/python3 suite | PENDING outer runner |
+| Preliminary and final complete-diff independent Claude ordinary review | PENDING outer runner |
+| BLOCKER/HIGH/correctness disposition | PENDING independent review and tests |
+| Independent security review of anchor/transition/controller/F1–F4 | PENDING; no security approval claimed |
+| Exact final-HEAD CI and one Draft PR / READY_FOR_FINAL_REVIEW | PENDING runner; not reached |
+| Coordinator/functional acceptance and merge | PENDING; merge not authorized |
+| Real product Git ADD, public mutation, approval issuer, audit bypass | None introduced or executed |
+| A11b.2.2.2/.3, A11b.3, A11c, A12 | Not started or authorized |
+
+Codex performed guidance/evidence/source inspection, allowlisted edits and source
+diff review only. No deterministic test, syntax command, full suite, native probe,
+acceptance generator, provider call or process cleanup was run. No fresh acceptance
+JSON or test PASS was fabricated. This candidate changes `_git_containment.py`,
+`_git_process_identity.py`, `test_git_containment.py`, `run_containment_acceptance.py`
+and this report only. No stage, commit, push, merge, worktree, alternate checkout,
+global install, task/allowlist/roadmap change or unrelated artifact edit occurred.
+The runner must bind fresh results to changed-byte hashes, execute every pinned
+gate, and append truthful final evidence. READY_FOR_FINAL_REVIEW, independent
+security acceptance, functional acceptance and merge remain separate pending states.

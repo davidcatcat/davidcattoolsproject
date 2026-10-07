@@ -46,7 +46,7 @@ def heartbeat():
 
 def retained_processes():
     """Synthetic identity evidence only; a snapshot never authorizes a signal."""
-    return [{'pid': probe.process.pid,
+    return [probe.inventory() if isinstance(probe, Probe) else {'pid': probe.process.pid,
              'host_identity': probe.host_identity.data() if probe.host_identity else {},
              'supervisor': probe.supervisor.data() if probe.supervisor else {}}
             for probe in _FAILED_PROBES]
@@ -55,9 +55,16 @@ def retained_processes():
 def cleanup_preserving_failure(cleanup):
     """Native assertion backstops keep a pending exception, never raw text."""
     primary = sys.exc_info()[1]
+    if primary is not None and not hasattr(primary, 'primary_before_cleanup'):
+        primary.primary_before_cleanup = wire.exception_evidence(primary)
     try:
-        cleanup()
+        result = cleanup()
+        if primary is not None and type(result) is dict and 'original_owned_processes' in result:
+            primary.fixture_cleanup = result
+        return result
     except BaseException as secondary:
+        if getattr(secondary, 'fixture_cleanup', None) is not None and primary is not None:
+            primary.fixture_cleanup = secondary.fixture_cleanup
         if primary is None:
             raise
         faults = getattr(primary, 'secondary_cleanup_errors', [])
@@ -66,21 +73,32 @@ def cleanup_preserving_failure(cleanup):
 
 def cleanup_fixture(process, bound):
     """Assertion backstop for direct unit/probe-owned session leaders."""
-    if process.returncode is not None:
-        return  # Already reaped; no numeric signal is permitted.
+    original = {'pid': process.pid, 'host_identity': bound.data() if bound else {}, 'supervisor': {}}
+    proof = {'host_pin_verified': False, 'decision_before_reap': False,
+             'host_reaped': False, 'host_absent': False, 'group_absent': False}
+    cleanup = {'status': 'UNRESOLVED', 'original_owned_processes': [original], 'evidence': proof}
     try:
         if bound is None:
             raise kernel.IdentityUnknown('fixture launch identity unavailable')
-        owner = kernel.Anchor(process, bound)
         deadline = time.monotonic()+2
-        owner.kill_group()
-        owner.reap(deadline)
-        while not kernel.absent(bound.pgid, group=True):
+        if process.returncode is None:
+            owner = kernel.Anchor(process, bound)
+            owner.kill_group(deadline=deadline)
+            proof['host_pin_verified'] = True
+            proof['decision_before_reap'] = owner.decided
+            owner.reap(deadline)
+        proof['host_reaped'] = process.returncode is not None
+        while time.monotonic() < deadline:
             heartbeat()
-            if time.monotonic() >= deadline:
-                raise kernel.IdentityUnknown('fixture group disappearance unconfirmed')
+            proof['host_absent'] = kernel.absent(process.pid)
+            proof['group_absent'] = kernel.absent(bound.pgid, group=True)
+            if proof['host_absent'] and proof['group_absent']:
+                cleanup['status'] = 'RESOLVED'
+                return cleanup
             select.select([], [], [], .005)
-    except BaseException:
+        raise kernel.IdentityUnknown('fixture group disappearance unconfirmed')
+    except BaseException as error:
+        error.fixture_cleanup = cleanup
         _FAILED_PROBES.append(SimpleNamespace(process=process, host_identity=bound,
                                             supervisor=None))
         raise  # Keep the actual cleanup location/type; the outer finally preserves primary.
@@ -492,6 +510,88 @@ class LibprocBoundaryTests(unittest.TestCase):
         note.close.assert_called_once()
         self.process.wait.assert_not_called()
 
+    def test_exit_transition_polls_matching_status_two_until_two_fresh_szomb_rows(self):
+        rows = [self.bsd(status=2), self.bsd(status=2), self.bsd(status=2),
+                self.bsd(), self.bsd(status=2), self.bsd(), self.bsd()]
+        with self.libproc(rows), patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                patch.object(kernel.select, 'select') as pause, \
+                patch.object(kernel.time, 'monotonic', return_value=1), \
+                patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as leader:
+            anchor = kernel.Anchor(self.process, self.bound)
+            anchor.kill_group(deadline=2)
+        group.assert_called_once_with(123, signal.SIGKILL)
+        leader.assert_not_called()
+        self.assertEqual(pause.call_count, 3)
+        self.assertEqual(anchor.verification['observations'], 6)
+        self.assertEqual([item['status'] for item in anchor.verification['kernel_rows']], [5, 5])
+        self.assertEqual([item['status'] for item in anchor.verification['transition_rows']], [2, 2])
+        for method in (self.process.poll, self.process.wait, self.process.communicate):
+            method.assert_not_called()
+
+    def test_transition_expiry_keeps_observed_status_two_and_never_signals_or_reaps(self):
+        clock = [1.0]
+        def pause(*args):
+            self.assertLessEqual(args[-1], .005)
+            clock[0] = 2.0
+        with self.libproc([self.bsd(status=2), self.bsd(status=2)]), \
+                patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                patch.object(kernel.select, 'select', side_effect=pause), \
+                patch.object(kernel.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as leader:
+            anchor = kernel.Anchor(self.process, self.bound)
+            with self.assertRaises(kernel.IdentityUnknown):
+                anchor.kill_group(deadline=2)
+        self.assertEqual(anchor.verification['mode'], 'unconfirmed-zombie')
+        self.assertEqual(anchor.verification['kernel_status'], 2)
+        self.assertEqual(len(self.calls), 2)
+        self.assertFalse(anchor.decided)
+        group.assert_not_called()
+        leader.assert_not_called()
+        self.process.wait.assert_not_called()
+
+    def test_drift_missing_short_permission_or_external_reap_during_transition_never_signals(self):
+        bad_rows = [self.bsd(**{key: getattr(self.bound, key)+1})
+                    for key in ('pid', 'pgid', 'uid', 'ppid', 'seconds', 'micros')]
+        bad_rows += [{'_returned': 0, '_errno': errno.ESRCH}, {'_returned': 135},
+                     {'_returned': 0, '_errno': errno.EPERM}, self.bsd(status=0), self.bsd()]
+        for bad in bad_rows:
+            self.process.returncode = None
+            def after(count):
+                if bad == self.bsd() and count == 3:
+                    self.process.returncode = 0  # Simulate forbidden foreign reap.
+            with self.subTest(bad=bad), \
+                    self.libproc([self.bsd(status=2), self.bsd(status=2), bad], after_read=after), \
+                    patch.object(kernel, 'host_check'), \
+                    patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                    patch.object(kernel.select, 'select'), \
+                    patch.object(kernel.time, 'monotonic', return_value=1), \
+                    patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as leader:
+                anchor = kernel.Anchor(self.process, self.bound)
+                with self.assertRaises(kernel.IdentityUnknown):
+                    anchor.kill_group(deadline=2)
+                group.assert_not_called()
+                leader.assert_not_called()
+                self.process.wait.assert_not_called()
+                self.assertFalse(anchor.decided)
+        self.process.returncode = None
+
+    def test_deadline_expiring_during_second_szomb_read_cannot_grant_signal(self):
+        clock = [1]
+        def expire(count):
+            if count == 3:
+                clock[0] = 2
+        with self.libproc([self.bsd(), self.bsd(), self.bsd()], after_read=expire), \
+                patch.object(kernel, 'host_check'), \
+                patch.object(kernel.os, 'getsid', side_effect=ProcessLookupError(errno.ESRCH, 'private')), \
+                patch.object(kernel.time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(kernel.os, 'killpg') as group:
+            with self.assertRaises(kernel.IdentityUnknown):
+                kernel.Anchor(self.process, self.bound).kill_group(deadline=2)
+        group.assert_not_called()
+        self.process.wait.assert_not_called()
+
     def test_real_query_failure_remains_secondary_to_primary_fixture_failure(self):
         primary = wire.ProtocolFailure('invalid containment protocol')
         with self.libproc([{'_returned': 0, '_errno': errno.EPERM}]), \
@@ -632,7 +732,7 @@ class IdentityTests(unittest.TestCase):
         self.process.wait.side_effect = lambda **kwargs: calls.append('reap')
         with patch.object(kernel, 'identity', side_effect=verify), \
                 patch.object(kernel, 'ExitNote', return_value=note), \
-                patch.object(kernel, '_info', return_value=SimpleNamespace(status=5)), \
+                patch.object(kernel, '_info', return_value=self.bsd()), \
                 patch.object(kernel.os, 'kill', side_effect=lambda *args: calls.append('leader')), \
                 patch.object(kernel.os, 'killpg', side_effect=lambda *args: calls.append('group')):
             anchor.kill_group(exit_after_verify=True, deadline=time.monotonic()+1)
@@ -751,7 +851,7 @@ class IdentityTests(unittest.TestCase):
         note.close.side_effect = PermissionError(errno.EPERM, 'SYNTHETIC_SECRET')
         with patch.object(kernel, 'identity', side_effect=[self.bound, primary]), \
                 patch.object(kernel, 'ExitNote', return_value=note), \
-                patch.object(kernel, '_info', return_value=SimpleNamespace(status=5)), \
+                patch.object(kernel, '_info', return_value=self.bsd()), \
                 patch.object(kernel.os, 'kill'), patch.object(kernel.os, 'killpg') as kill:
             with self.assertRaises(kernel.IdentityUnknown) as caught:
                 anchor.kill_group(exit_after_verify=True, deadline=time.monotonic()+1)
@@ -785,6 +885,26 @@ class IdentityTests(unittest.TestCase):
                 patch.object(kernel.select, 'KQ_NOTE_EXIT', 1, create=True):
             with self.assertRaises(OSError):
                 kernel.ExitNote(123)
+        queue.close.assert_called_once()
+
+    def test_note_exit_latches_across_empty_reads_but_rejects_later_invalid_events(self):
+        queue = Mock()
+        event = SimpleNamespace(ident=123, filter=1, flags=0, fflags=4)
+        bad = SimpleNamespace(ident=124, filter=1, flags=0, fflags=4)
+        queue.control.side_effect = [[], [event], [], [bad]]
+        with patch.object(kernel.select, 'kqueue', return_value=queue, create=True), \
+                patch.object(kernel.select, 'kevent', return_value=Mock(), create=True), \
+                patch.object(kernel.select, 'KQ_FILTER_PROC', 1, create=True), \
+                patch.object(kernel.select, 'KQ_EV_ADD', 1, create=True), \
+                patch.object(kernel.select, 'KQ_EV_ENABLE', 2, create=True), \
+                patch.object(kernel.select, 'KQ_EV_ERROR', 8, create=True), \
+                patch.object(kernel.select, 'KQ_NOTE_EXIT', 4, create=True):
+            note = kernel.ExitNote(123)
+            self.assertTrue(note.exited())
+            self.assertTrue(note.exited())
+            with self.assertRaises(kernel.IdentityUnknown):
+                note.exited()
+            note.close()
         queue.close.assert_called_once()
 
     def test_parent_reparenting_keeps_supervisors_self_anchor(self):
@@ -1036,7 +1156,8 @@ class ParentLifecycleTests(unittest.TestCase):
             self.assertEqual(calls[-1], 'gone')
             calls.append('restore')
         signals.restore.side_effect = restore
-        def kill_group():
+        def kill_group(*, deadline):
+            self.assertLessEqual(deadline-time.monotonic(), 5)
             if terminal_failure is not None:
                 signals.first = signal.SIGTERM  # Secondary interruption during cleanup.
                 signals.first_time = time.monotonic()
@@ -1140,6 +1261,8 @@ class Probe:
     """Outer acceptance owner, never a callback within the engine window."""
     def __init__(self, case='descendant', *, hold=False, popen=False, timing='ordinary', timeout=2):
         self.timing, self.signal_number = timing, None
+        self.subcase = case
+        self.fixture_cleanup = None
         self.expected_event = 'launch'
         self.cleanup_outcome, self.cleanup_errors = 'not-started', []
         argv = [sys.executable, '-I', str(HOST), '--case', case,
@@ -1154,12 +1277,18 @@ class Probe:
         self.buffer, self.rows = bytearray(), []
         self.supervisor = None
         self.host_identity = None
+        self.members = {}
+        self.unbound_supervisor_pid = None
         try:
             self.host_identity = kernel.identity(self.process.pid)
-        except BaseException:
+            os.set_blocking(self.process.stdout.fileno(), False)
+        except BaseException as error:
             _FAILED_PROBES.append(self)  # Never release an ambiguous launch pin.
+            error.probe_diagnostics = self.diagnostics(error)
+            error.fixture_cleanup = {'status': 'UNRESOLVED',
+                                     'original_owned_processes': [self.inventory()],
+                                     'evidence': {'host_reaped': False, 'host_absent': False}}
             raise
-        os.set_blocking(self.process.stdout.fileno(), False)
 
     def next(self, deadline, allow_unresolved=False):
         while time.monotonic() < deadline:
@@ -1173,8 +1302,24 @@ class Probe:
                 if len(self.rows) >= 16:
                     raise AssertionError('probe event count limit')
                 self.rows.append(row)
-                if row.get('event') == 'ready':
+                if row.get('supervisor'):
                     self.supervisor = kernel.Identity.parse(row['supervisor'])
+                    self.unbound_supervisor_pid = None
+                if row['event'] == 'spawn':
+                    self.unbound_supervisor_pid = row['supervisor_pid']
+                if row.get('child'):
+                    item = kernel.Identity.parse(row['child'])
+                    self.members[item.pid] = item
+                if row.get('evidence'):
+                    wire.child_evidence(row['evidence'])
+                    for data in row['evidence']['descendants']:
+                        item = kernel.Identity.parse(data)
+                        self.members[item.pid] = item
+                if row['event'] == 'stress':
+                    item = kernel.Identity.parse(row['identity'])
+                    self.members[item.pid] = item
+                if len(self.members) > 4:
+                    raise AssertionError('probe event count limit')
                 if (row.get('event') == 'unsupported'
                         or row.get('event') == 'unresolved' and not allow_unresolved):
                     raise AssertionError('mandatory Mac capability unsupported or unresolved')
@@ -1205,36 +1350,77 @@ class Probe:
         self.process.stdout.close()
         return result
 
-    def cleanup(self):
-        # The outer probe owns only the host's reap pin. Ask that host to use
-        # its supervisor anchor; a snapshot of a grandchild never grants this
-        # process authority to signal the grandchild's numeric group.
-        if self.process.returncode is not None:
-            self.process.stdout.close()
-            self.cleanup_outcome = 'already-reaped'
-            return
+    def inventory(self):
+        result = {'pid': self.process.pid,
+                  'host_identity': self.host_identity.data() if self.host_identity else {},
+                  'supervisor': self.supervisor.data() if self.supervisor else {},
+                  'members': [item.data() for item in self.members.values()]}
+        if self.unbound_supervisor_pid is not None:
+            result['unbound_supervisor_pid'] = self.unbound_supervisor_pid
+        return result
+
+    def cleanup(self, deadline=None):
+        # Test controller only: production F1 must retain ownership indefinitely.
+        # Kill only our real unreaped host under fresh launch continuity. EOF
+        # then invokes the supervisor's owned-group path. Grandchild/member
+        # snapshots permit passive absence checks, never numeric signaling.
+        original = self.inventory()  # Freeze before kill/reap/closing anything.
+        proof = {'host_pin_verified': False, 'host_signal': None,
+                 'decision_before_reap': False, 'host_reaped': False,
+                 'host_absent': False, 'supervisor_absent': False,
+                 'group_absent': False, 'members_absent': []}
+        self.fixture_cleanup = {'status': 'UNRESOLVED',
+                                'original_owned_processes': [original], 'evidence': proof}
         note = None
         failure = None
         self.cleanup_outcome = 'pending'
+        limit = time.monotonic()+6  # Existing controller bound, never restarted.
+        deadline = limit if deadline is None else min(deadline, limit)
         try:
-            owner = kernel.Anchor(self.process, self.host_identity)
-            owner.verify()
-            note = kernel.ExitNote(self.process.pid)
-            if kernel._info(self.process.pid, 3, kernel._BSD).status != 5:
+            if self.process.returncode is None:
+                if self.host_identity is None:
+                    raise kernel.IdentityUnknown('probe host ownership unknown')
+                owner = kernel.Anchor(self.process, self.host_identity)
+                owner.verify(deadline=deadline)
+                note = kernel.ExitNote(self.process.pid)
+                owner.verify(deadline=deadline)  # After registration, still unreaped.
+                proof['host_pin_verified'] = True
                 try:
-                    os.kill(self.process.pid, signal.SIGTERM)  # Owned live host only.
+                    os.kill(self.process.pid, signal.SIGKILL)  # Only our pinned host.
+                    proof['host_signal'] = 'SIGKILL'
                 except ProcessLookupError:
-                    owner.verify()  # Accept only a freshly proven owned zombie race.
-            deadline = time.monotonic()+6
-            while not note.exited():
-                heartbeat()
-                if time.monotonic() >= deadline:
-                    raise kernel.IdentityUnknown('probe host retained unresolved ownership')
-                select.select([], [], [], .005)
-            if self.supervisor is not None and not kernel.absent(self.supervisor.pgid, group=True):
+                    owner.verify(deadline=deadline)  # Fresh owned-zombie proof, no retry.
+                    proof['host_signal'] = 'ESRCH-owned'
+                owner.decided = True  # Host-only decision; no group signal in this controller.
+                proof['decision_before_reap'] = True
+                while not note.exited():
+                    heartbeat()
+                    if time.monotonic() >= deadline:
+                        raise kernel.IdentityUnknown('probe host retained unresolved ownership')
+                    select.select([], [], [], min(.005, max(0, deadline-time.monotonic())))
+                owner.reap(deadline)
+            proof['host_reaped'] = self.process.returncode is not None
+            # Reaped IDs are only inspected. Missing supervisor identity is
+            # ambiguous unless the actual host result proves no launch occurred.
+            no_launch = any(row['event'] == 'result' and row.get('supervisor') == {}
+                            and row.get('containment_confirmed') is True for row in self.rows)
+            if self.unbound_supervisor_pid is not None or (self.supervisor is None and not no_launch):
                 raise kernel.IdentityUnknown('probe group disappearance unconfirmed')
-            owner.kill_group()
-            owner.reap(deadline)
+            while time.monotonic() < deadline:
+                heartbeat()
+                proof['host_absent'] = kernel.absent(self.process.pid)
+                proof['supervisor_absent'] = (self.supervisor is None
+                                              or kernel.absent(self.supervisor.pid))
+                proof['group_absent'] = (self.supervisor is None
+                                         or kernel.absent(self.supervisor.pgid, group=True))
+                proof['members_absent'] = [{'pid': item.pid, 'absent': kernel.absent(item.pid)}
+                                           for item in self.members.values()]
+                if (proof['host_absent'] and proof['supervisor_absent'] and proof['group_absent']
+                        and all(item['absent'] for item in proof['members_absent'])):
+                    break
+                select.select([], [], [], min(.005, max(0, deadline-time.monotonic())))
+            else:
+                raise kernel.IdentityUnknown('probe group disappearance unconfirmed')
             self.process.stdout.close()
             self.cleanup_outcome = 'confirmed'
         except BaseException as error:
@@ -1253,7 +1439,14 @@ class Probe:
                         failure = error
                         self.cleanup_outcome = 'monitor-close-failed'
         if failure is not None:
+            if self not in _FAILED_PROBES:
+                _FAILED_PROBES.append(self)
+            failure.fixture_cleanup = self.fixture_cleanup
             raise failure
+        self.fixture_cleanup['status'] = 'RESOLVED'
+        if self in _FAILED_PROBES:
+            _FAILED_PROBES.remove(self)
+        return self.fixture_cleanup
 
     def diagnostics(self, primary):
         # Project only known synthetic metadata. Never include stderr, raw pipe
@@ -1286,7 +1479,7 @@ class Probe:
                 # whose exception formatter already withholds non-fixed text.
                 item['diagnostics'] = row.get('diagnostics', {})
             rows.append(item)
-        return {'timing': self.timing, 'signal': self.signal_number,
+        return {'subcase': self.subcase, 'timing': self.timing, 'signal': self.signal_number,
                 'expected_event': self.expected_event,
                 'primary_error': wire.exception_evidence(primary),
                 'event_rows': rows, 'cleanup_outcome': self.cleanup_outcome,
@@ -1297,10 +1490,13 @@ class Probe:
 def probe_scope(probe):
     """A cleanup/monitor error cannot replace the actual acceptance failure."""
     primary = None
+    original_diagnostics = None
     try:
         yield probe
     except BaseException as error:
         primary = error
+        original_diagnostics = probe.diagnostics(error)  # Freeze the exact failing subcase/error first.
+        error.primary_before_cleanup = original_diagnostics['primary_error']
         raise
     finally:
         try:
@@ -1308,17 +1504,22 @@ def probe_scope(probe):
         except BaseException as cleanup:
             if primary is None:
                 cleanup.probe_diagnostics = probe.diagnostics(cleanup)
+                cleanup.fixture_cleanup = probe.fixture_cleanup
                 raise
             # The pending original raise survives; ownership is retained by
             # cleanup on ambiguity. Keep the secondary failure separately.
         if primary is not None:
-            primary.probe_diagnostics = probe.diagnostics(primary)
+            primary.probe_diagnostics = {**original_diagnostics,
+                                         'cleanup_outcome': probe.cleanup_outcome,
+                                         'cleanup_errors': probe.cleanup_errors[-4:]}
+            primary.fixture_cleanup = probe.fixture_cleanup
 
 
 class ProbeDiagnosticsTests(unittest.TestCase):
     def probe(self):
         probe = Probe.__new__(Probe)  # Deterministic fake; no subprocess launch.
         probe.process = Mock(spec=subprocess.Popen, pid=123, returncode=None)
+        probe.process.stdout = Mock()
         probe.host_identity = kernel.Identity(123, 123, 123, os.geteuid(), os.getpid(), 1, 2)
         probe.supervisor = None
         probe.rows = [{'event': 'terminal', 'primary': 'complete',
@@ -1326,6 +1527,8 @@ class ProbeDiagnosticsTests(unittest.TestCase):
         probe.timing, probe.signal_number = 'ordinary', int(signal.SIGINT)
         probe.expected_event = 'result'
         probe.cleanup_outcome, probe.cleanup_errors = 'not-started', []
+        probe.subcase, probe.fixture_cleanup = 'closed_status', None
+        probe.members, probe.unbound_supervisor_pid = {}, None
         return probe
 
     def test_primary_signal_path_error_survives_cleanup_and_monitor_errors(self):
@@ -1423,11 +1626,246 @@ class ProbeDiagnosticsTests(unittest.TestCase):
         self.assertNotIn(b'SYNTHETIC_SECRET', wire.canonical(primary.secondary_cleanup_errors))
 
 
+class ControllerCleanupTests(unittest.TestCase):
+    """Real controller/Anchor flow with deterministic process and kernel models."""
+    def setUp(self):
+        self.probe = ProbeDiagnosticsTests().probe()
+        self.probe.supervisor = kernel.Identity(456, 456, 456, os.geteuid(), 123, 1, 3)
+        self.probe.members = {457: kernel.Identity(457, 456, 456, os.geteuid(), 456, 1, 4)}
+        self.probe.rows = [{'event': 'ready', 'supervisor': self.probe.supervisor.data()}]
+        self.events = []
+
+    def tearDown(self):
+        if self.probe in _FAILED_PROBES:
+            _FAILED_PROBES.remove(self.probe)
+
+    @contextmanager
+    def model(self, *, note_exited=True, absent=True, identity_error=None, signal_error=None,
+              observed_identity=None):
+        probe = self.probe
+        note = Mock()
+        note.exited.return_value = note_exited
+        clock = [1.0]
+        def observed(pid):
+            self.assertEqual(pid, probe.process.pid)
+            self.events.append('verify')
+            if identity_error is not None:
+                raise identity_error
+            return observed_identity or probe.host_identity
+        def signal_host(pid, number):
+            self.assertEqual((pid, number), (123, signal.SIGKILL))
+            self.assertIsNone(probe.process.returncode)
+            probe.process.wait.assert_not_called()
+            self.events.append('signal')
+            if signal_error is not None:
+                raise signal_error
+        def reap(**kwargs):
+            self.assertIn('signal', self.events)
+            self.assertLessEqual(kwargs['timeout'], 6)
+            self.events.append('reap')
+            probe.process.returncode = -signal.SIGKILL
+            return probe.process.returncode
+        def inspect(pid, group=False):
+            self.assertIsNotNone(probe.process.returncode)
+            self.events.append('inspect')
+            return absent
+        def pause(*args):
+            self.assertLessEqual(args[-1], .005)
+            clock[0] += .25
+        probe.process.wait.side_effect = reap
+        with patch.object(kernel, 'host_check'), \
+                patch.object(kernel, 'identity', side_effect=observed), \
+                patch.object(kernel, 'ExitNote', return_value=note), \
+                patch.object(kernel, 'absent', side_effect=inspect), \
+                patch.object(os, 'kill', side_effect=signal_host) as host_signal, \
+                patch.object(os, 'killpg') as group_signal, \
+                patch.object(time, 'monotonic', side_effect=lambda: clock[0]), \
+                patch.object(select, 'select', side_effect=pause):
+            yield note, host_signal, group_signal
+        probe.process.poll.assert_not_called()
+        probe.process.communicate.assert_not_called()
+
+    def test_original_assertion_inventory_and_subcase_survive_owned_host_cleanup(self):
+        primary = AssertionError('containment acceptance assertion failed')
+        original = self.probe.inventory()
+        with self.model() as (note, host_signal, group_signal):
+            with self.assertRaises(AssertionError) as caught:
+                with probe_scope(self.probe):
+                    raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(primary.probe_diagnostics['subcase'], 'closed_status')
+        self.assertEqual(primary.probe_diagnostics['primary_error']['message'], str(primary))
+        self.assertTrue(primary.probe_diagnostics['primary_error']['traceback'])
+        cleanup = primary.fixture_cleanup
+        self.assertEqual(cleanup['original_owned_processes'], [original])
+        self.assertEqual(cleanup['status'], 'RESOLVED')
+        proof = cleanup['evidence']
+        for key in ('host_pin_verified', 'decision_before_reap', 'host_reaped',
+                    'host_absent', 'supervisor_absent', 'group_absent'):
+            self.assertTrue(proof[key])
+        self.assertEqual(proof['members_absent'], [{'pid': 457, 'absent': True}])
+        self.assertEqual(self.events[:4], ['verify', 'verify', 'signal', 'reap'])
+        host_signal.assert_called_once_with(123, signal.SIGKILL)
+        group_signal.assert_not_called()
+        note.close.assert_called_once()
+        self.assertNotIn(self.probe, _FAILED_PROBES)
+
+    def test_drift_permission_missing_identity_and_reaper_ambiguity_never_signal(self):
+        for fault in ('drift', 'permission', 'missing', 'reaper'):
+            with self.subTest(fault=fault):
+                self.setUp()
+                error = PermissionError(errno.EPERM, 'SYNTHETIC_SECRET') if fault == 'permission' else None
+                observed = replace(self.probe.host_identity, micros=3) if fault == 'drift' else None
+                if fault == 'missing':
+                    self.probe.host_identity = None
+                primary = AssertionError('containment acceptance assertion failed')
+                with self.model(identity_error=error, observed_identity=observed) as (_, host_signal, group_signal), \
+                        patch.object(kernel, 'host_check', side_effect=(
+                            kernel.NotSupported('single-thread default-reaper host required')
+                            if fault == 'reaper' else None)):
+                    with self.assertRaises(AssertionError) as caught:
+                        with probe_scope(self.probe):
+                            raise primary
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(primary.fixture_cleanup['status'], 'UNRESOLVED')
+                self.assertTrue(primary.fixture_cleanup['original_owned_processes'])
+                self.assertIn(self.probe, _FAILED_PROBES)
+                self.probe.process.wait.assert_not_called()
+                host_signal.assert_not_called()
+                group_signal.assert_not_called()
+                self.assertNotIn(b'SYNTHETIC_SECRET', wire.canonical(primary.probe_diagnostics))
+                self.tearDown()
+
+    def test_host_signal_permission_error_preserves_pin_without_reap_or_group_signal(self):
+        with self.model(signal_error=PermissionError(errno.EPERM, 'private')) as (_, _, group):
+            with self.assertRaises(PermissionError):
+                self.probe.cleanup(deadline=2)
+        self.assertEqual(self.probe.fixture_cleanup['status'], 'UNRESOLVED')
+        self.assertIn(self.probe, _FAILED_PROBES)
+        self.probe.process.wait.assert_not_called()
+        group.assert_not_called()
+
+    def test_unresponsive_host_deadline_preserves_primary_and_unreaped_inventory(self):
+        primary = AssertionError('containment acceptance assertion failed')
+        with self.model(note_exited=False) as (_, _, group):
+            with self.assertRaises(AssertionError) as caught:
+                with probe_scope(self.probe):
+                    raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(primary.fixture_cleanup['status'], 'UNRESOLVED')
+        self.assertEqual(primary.probe_diagnostics['cleanup_outcome'], 'unresolved')
+        self.probe.process.wait.assert_not_called()
+        self.assertIn(self.probe, _FAILED_PROBES)
+        group.assert_not_called()
+
+    def test_retained_group_or_inspection_permission_is_not_resolved(self):
+        for permission in (False, True):
+            with self.subTest(permission=permission):
+                self.setUp()
+                with self.model(absent=False) as (_, signal_host, signal_group):
+                    with patch.object(kernel, 'absent', return_value=False,
+                                      side_effect=PermissionError(errno.EPERM, 'private') if permission else None):
+                        with self.assertRaises((PermissionError, kernel.IdentityUnknown)):
+                            self.probe.cleanup(deadline=2)
+                self.assertEqual(self.probe.fixture_cleanup['status'], 'UNRESOLVED')
+                self.assertTrue(self.probe.fixture_cleanup['evidence']['host_reaped'])
+                self.assertIn(self.probe, _FAILED_PROBES)
+                signal_host.assert_called_once_with(123, signal.SIGKILL)
+                signal_group.assert_not_called()
+                self.tearDown()
+
+    def test_released_host_is_only_inspected_and_unknown_supervisor_blocks(self):
+        self.probe.process.returncode = 0
+        with self.model() as (_, host_signal, group_signal):
+            self.probe.cleanup(deadline=2)
+        self.assertEqual(self.probe.fixture_cleanup['status'], 'RESOLVED')
+        self.assertFalse(self.probe.fixture_cleanup['evidence']['host_pin_verified'])
+        self.probe.process.wait.assert_not_called()
+        host_signal.assert_not_called()
+        group_signal.assert_not_called()
+        self.probe.supervisor = None
+        with self.model() as (_, host_signal, group_signal):
+            with self.assertRaises(kernel.IdentityUnknown):
+                self.probe.cleanup(deadline=2)
+        self.assertEqual(self.probe.fixture_cleanup['status'], 'UNRESOLVED')
+        self.probe.process.wait.assert_not_called()
+        host_signal.assert_not_called()
+        group_signal.assert_not_called()
+
+    def test_subcase_progress_records_actual_entries_without_scenario_pass(self):
+        scenarios = AcceptanceScenarios()
+        scenarios.begin_subcase('hung')
+        scenarios.finish_subcase()
+        scenarios.begin_subcase('closed_status')
+        self.assertEqual(scenarios.current_subcase, 'closed_status')
+        self.assertEqual(scenarios.completed_subcases, ['hung'])
+        self.assertEqual(scenarios.checks, 0)
+
+    def test_failed_evidence_export_retains_assertion_source_hashes_and_original_inventory(self):
+        # Exercise the actual --output failure writer, never a native success.
+        import json
+        runner = importlib.import_module('run_containment_acceptance')
+        primary = AssertionError('containment acceptance assertion failed')
+        with self.model():
+            with self.assertRaises(AssertionError):
+                with probe_scope(self.probe):
+                    raise primary
+        completed_cleanup = primary.fixture_cleanup
+        primary.fixture_cleanup = None  # Later assertion, after its fixture scope has completed.
+        scenarios = AcceptanceScenarios()
+        def fail():
+            scenarios.begin_subcase('closed_status')
+            scenarios.last_fixture_cleanup = completed_cleanup
+            raise primary
+        scenarios.fd_inheritance = fail
+        contract = {'task_id': 'A11b.2.2.1-containment-f3-recovery-20261007',
+                    'base_sha': '585caf7d4c9dad20afd3beb38e5140d6dadf89e0',
+                    'allowed_files': list(runner.EXPECTED_FILES),
+                    'required_files': list(runner.EXPECTED_FILES)}
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)/'failure.json'
+            (output.parent/'task.json').write_text(json.dumps(contract))
+            with patch.object(sys, 'argv', ['run_containment_acceptance.py', '--output', str(output)]), \
+                    patch.object(sys, 'platform', 'darwin'), \
+                    patch.object(runner, 'CANONICAL', runner.ROOT), \
+                    patch.object(kernel, 'host_check'), \
+                    patch.object(runner, 'AcceptanceScenarios', return_value=scenarios), \
+                    patch.object(runner, 'print', create=True):
+                self.assertEqual(runner.main(), 1)
+            raw = output.read_bytes()
+        data = json.loads(raw)
+        self.assertLessEqual(len(raw), wire.LIMIT)
+        self.assertEqual(data['scenarios'], {})
+        self.assertEqual(set(data['tested_sha256']), {name for name in runner.EXPECTED_FILES
+                                                     if not name.startswith('reports/')})
+        failure = data['failure']
+        self.assertEqual(failure['status'], 'FAIL')
+        self.assertEqual(failure['message'], str(primary))
+        self.assertEqual(failure['traceback'], primary.primary_before_cleanup['traceback'])
+        self.assertEqual(failure['subcase'], 'closed_status')
+        self.assertEqual(failure['owned_processes'], [])
+        self.assertEqual(failure['fixture_cleanup']['status'], 'RESOLVED')
+        self.assertEqual(failure['fixture_cleanup']['original_owned_processes'],
+                         [self.probe.inventory()])
+
+
 class AcceptanceScenarios:
     """Actual process probes, no unittest skips and no mocked native verdicts."""
     def __init__(self):
         self.checks = 0
         self.retained = {}
+        self.current_subcase = None
+        self.completed_subcases = []
+        self.last_fixture_cleanup = None
+
+    def begin_subcase(self, name):
+        # Fixed test labels only. Called at actual execution entry, not from a
+        # planned list. Completing a probe never marks its whole scenario PASS.
+        self.current_subcase = name
+        self.last_fixture_cleanup = None
+
+    def finish_subcase(self):
+        self.completed_subcases = (self.completed_subcases + [self.current_subcase])[-16:]
 
     def check(self, value):
         self.checks += 1
@@ -1436,6 +1874,7 @@ class AcceptanceScenarios:
         heartbeat()
 
     def completed(self, case='exit', timing='ordinary'):
+        self.begin_subcase(case)
         probe = Probe(case, timing=timing, hold=(case == 'hung'),
                       timeout=.5 if case == 'hung' else 2)
         with probe_scope(probe):
@@ -1448,7 +1887,8 @@ class AcceptanceScenarios:
                 self.check(kernel.absent(row['supervisor']['pgid'], group=True))
             if row['primary'] == 'start-failed' and not row['child']:
                 raise kernel.NotSupported('isolated trusted supervisor installation unavailable')
-            return row
+        self.last_fixture_cleanup = probe.fixture_cleanup
+        return row
 
     def fd_inheritance(self):
         row = self.completed('descendant')
@@ -1468,6 +1908,7 @@ class AcceptanceScenarios:
     def signals(self, number):
         for timing, event in (('ordinary', 'terminal'), ('pre_pipe', 'pre_pipe'),
                               ('spawn', 'spawn'), ('cleanup', 'cleanup')):
+            self.begin_subcase(signal.Signals(number).name.lower()+'_'+timing)
             probe = Probe('descendant', hold=(timing == 'ordinary'), timing=timing)
             probe.signal_number = int(number)
             with probe_scope(probe):
@@ -1488,6 +1929,7 @@ class AcceptanceScenarios:
                 self.check(probe.reap() == 0)
                 if row['supervisor']:
                     self.check(kernel.absent(row['supervisor']['pgid'], group=True))
+            self.finish_subcase()
         return []
 
     def sigint(self):
@@ -1500,26 +1942,49 @@ class AcceptanceScenarios:
         return self.signals(signal.SIGHUP)
 
     def hung_supervisor(self):
+        self.completed_subcases = []
         row = self.completed('hung')
         self.check(row['primary'] == 'supervisor-lost')
+        self.check(any(item['type'] == 'TERMINAL' for item in row['diagnostics']['protocol_rows']))
+        self.finish_subcase()
         for case in ('closed_status', 'malformed_status', 'lost_before_identity',
                      'registration_failure', 'drain_failure'):
             row = self.completed(case)
             self.check(row['primary'] in ('supervisor-lost', 'protocol-failure'))
+            if case == 'closed_status':
+                self.check(row['primary'] == 'supervisor-lost')
+                self.check(row['diagnostics']['primary_error']['exception_type'] == 'EOFError')
+                self.check(not any(item['type'] == 'TERMINAL'
+                                   for item in row['diagnostics']['protocol_rows']))
+                proof = row['diagnostics']['anchor_verification']
+                self.check(proof['mode'] in ('ordinary', 'owned-zombie'))
+                if proof['mode'] == 'owned-zombie':
+                    self.check(all(item['status'] == 5 for item in proof['kernel_rows']))
+                print('closed_status native anchor '+wire.canonical(proof).decode('ascii'), flush=True)
             if case == 'lost_before_identity':
                 self.check(not row['child'])
+            self.finish_subcase()
         # Missing ACK to a hung supervisor with real SIGTERM.
         probe = Probe('hung', hold=True, timeout=2)
+        self.begin_subcase('missing_ACK')
+        probe.subcase = 'missing_ACK'
         with probe_scope(probe):
             probe.until('terminal')  # Fixed hung state, real descendant established.
             os.kill(probe.process.pid, signal.SIGTERM)
             row = probe.until('result', seconds=7)
             self.check(row['primary'] == 'interrupted' and row['containment_confirmed'])
             self.check(probe.reap() == 0)
+        self.finish_subcase()
         self.check(self.completed('output')['primary'] == 'output-limit')
+        self.finish_subcase()
         self.check(self.completed('stderr_output')['primary'] == 'output-limit')
+        self.finish_subcase()
         self.check(self.completed('wait')['primary'] == 'timeout')
+        self.finish_subcase()
+        self.begin_subcase('unresolved')
         self.unresolved_exit()
+        self.finish_subcase()
+        self.failed_probe_cleanup()
         return []
 
     def unresolved_exit(self):
@@ -1551,22 +2016,93 @@ class AcceptanceScenarios:
             # test fixture. It grants no engine retry or ambiguous-ID permission.
             def resolve_fixture():
                 nonlocal resolved
-                owner = kernel.Anchor(probe.process, probe.host_identity)
                 started = time.monotonic()
-                owner.kill_group()
-                owner.reap(started+2)
+                probe.cleanup(deadline=started+2)
                 self.check(probe.process.returncode == -signal.SIGKILL)
-                if probe.supervisor is not None:
-                    while not kernel.absent(probe.supervisor.pgid, group=True):
-                        self.check(time.monotonic() < started+2)
-                        select.select([], [], [], .005)
-                    resolved = True
-                probe.process.stdout.close()
+                resolved = probe.fixture_cleanup['status'] == 'RESOLVED'
+                self.last_fixture_cleanup = probe.fixture_cleanup
+                return probe.fixture_cleanup
             cleanup_preserving_failure(resolve_fixture)
         self.check(resolved)
         for item in [terminal['child']] + terminal['evidence']['descendants']:
             self.check(kernel.absent(item['pid']))
         self.retained = {}
+
+    def failed_probe_cleanup(self):
+        # Execute real failure backstops while the controller remains the host's
+        # parent. The deliberate assertion is still an assertion, never an
+        # engine containment PASS; this subcase validates its cleanup evidence.
+        for case in ('unresolved', 'closed_status'):
+            self.begin_subcase('fixture_failure_'+case)
+            probe = Probe(case, timeout=1)
+            primary = AssertionError('containment acceptance assertion failed')
+            with patch.object(os, 'kill', wraps=os.kill) as signals, \
+                    patch.object(os, 'killpg', wraps=os.killpg) as group_signals:
+                try:
+                    with probe_scope(probe):
+                        row = probe.until('unresolved' if case == 'unresolved' else 'result', seconds=9)
+                        if case == 'unresolved':
+                            self.check(not row['containment_confirmed'])
+                            self.check(not any(event['event'] in ('result', 'handlers_restored')
+                                               for event in probe.rows))
+                        else:
+                            self.check(row['primary'] == 'supervisor-lost')
+                            self.check(row['diagnostics']['primary_error']['exception_type'] == 'EOFError')
+                        raise primary
+                except AssertionError as error:
+                    if error is not primary:
+                        raise  # An earlier real native failure is not this fixture assertion.
+            self.retained = {'controlled_failure': primary.probe_diagnostics,
+                             'fixture_cleanup': primary.fixture_cleanup}
+            self.last_fixture_cleanup = primary.fixture_cleanup
+            cleanup = primary.fixture_cleanup
+            self.check(primary.probe_diagnostics['primary_error']['message'] == str(primary))
+            self.check(bool(primary.probe_diagnostics['primary_error']['traceback']))
+            self.check(primary.probe_diagnostics['subcase'] == case)
+            self.check(cleanup['status'] == 'RESOLVED')
+            self.check(cleanup['original_owned_processes'][0]['host_identity'] == probe.host_identity.data())
+            self.check(cleanup['original_owned_processes'][0]['supervisor'] == probe.supervisor.data())
+            self.check(cleanup['evidence']['host_pin_verified'])
+            self.check(cleanup['evidence']['decision_before_reap'])
+            self.check(cleanup['evidence']['host_reaped'] and cleanup['evidence']['host_absent'])
+            self.check(cleanup['evidence']['supervisor_absent'] and cleanup['evidence']['group_absent'])
+            self.check(all(item['absent'] for item in cleanup['evidence']['members_absent']))
+            self.check(probe not in _FAILED_PROBES)
+            self.check(all(call.args == (probe.process.pid, signal.SIGKILL)
+                           for call in signals.call_args_list if call.args[1] != 0))
+            self.check(not any(call.args[1] != 0 for call in group_signals.call_args_list))
+            if case == 'unresolved':
+                self.check(probe.process.returncode == -signal.SIGKILL)
+            print(self.current_subcase+' '+wire.canonical(cleanup).decode('ascii'), flush=True)
+            self.finish_subcase()
+            self.retained = {}
+        # Native drift rejection uses the actual owned host and real kernel
+        # query. Restore its original launch identity only after proving that
+        # rejection signaled/reaped nothing, then resolve that same fixture.
+        self.begin_subcase('fixture_ambiguous_identity')
+        probe = Probe('unresolved', timeout=1)
+        with probe_scope(probe):
+            probe.until('unresolved')
+            original = probe.host_identity
+            rejected = None
+            try:
+                probe.host_identity = replace(original, micros=(original.micros+1) % 1000000)
+                with patch.object(os, 'kill', wraps=os.kill) as signals, \
+                        patch.object(os, 'killpg', wraps=os.killpg) as group_signals:
+                    try:
+                        probe.cleanup()
+                    except kernel.IdentityUnknown:
+                        rejected = probe.fixture_cleanup
+                    self.check(rejected is not None and rejected['status'] == 'UNRESOLVED')
+                    self.check(not signals.called and not group_signals.called)
+                    self.check(probe.process.returncode is None)
+                    self.check(probe in _FAILED_PROBES)
+            finally:
+                probe.host_identity = original
+        self.check(probe.fixture_cleanup['status'] == 'RESOLVED')
+        self.check(kernel.absent(probe.process.pid))
+        self.check(kernel.absent(probe.supervisor.pid) and kernel.absent(probe.supervisor.pgid, group=True))
+        self.finish_subcase()
 
     def leader_exit_descendant(self):
         probe = Probe('leader_exit', hold=True)
@@ -1641,17 +2177,20 @@ class AcceptanceScenarios:
                     self.check(time.monotonic() < until)
                     select.select([], [], [], .005)
                 self.check(process.returncode is None)
+                while kernel._info(process.pid, 3, kernel._BSD).status != 5:
+                    self.check(time.monotonic() < until)
+                    select.select([], [], [], .005)
                 self.check(kernel._info(process.pid, 3, kernel._BSD).status == 5)
                 # A general SID query may reject a zombie on Darwin. The owned
                 # anchor must prove continuity, without mocking that capability.
-                self.check(anchor.verify() == bound)
+                self.check(anchor.verify(deadline=until) == bound)
                 self.check(anchor.verification['mode'] in ('ordinary', 'owned-zombie'))
                 self.check(process.returncode is None and not anchor.reaped)
                 self.retained = {'zombie_first': zombie_first, 'anchor': bound.data(),
                                  'verification': anchor.verification, 'unreaped': True}
                 print('kqueue_non_reaping native anchor '+wire.canonical(self.retained).decode('ascii'),
                       flush=True)
-                anchor.kill_group()
+                anchor.kill_group(deadline=until)
                 anchor.reap(time.monotonic()+1)
                 self.check(kernel.absent(bound.pgid, group=True))
             finally:
@@ -1694,8 +2233,9 @@ class AcceptanceScenarios:
                         self.check(time.monotonic() < until)
                         select.select([], [], [], .005)
                     owner = kernel.Anchor(process, bound)
-                    owner.kill_group()
-                    owner.reap(time.monotonic()+1)
+                    cleanup_deadline = time.monotonic()+1
+                    owner.kill_group(deadline=cleanup_deadline)
+                    owner.reap(cleanup_deadline)
                     self.check(process.returncode != 0)
                 finally:
                     cleanup_preserving_failure(note.close)
@@ -1747,8 +2287,9 @@ class AcceptanceScenarios:
                             self.check(time.monotonic() < until)
                             select.select([], [], [], .005)
                         owner = kernel.Anchor(process, bound)
-                        owner.kill_group()
-                        owner.reap(time.monotonic()+1)
+                        cleanup_deadline = time.monotonic()+1
+                        owner.kill_group(deadline=cleanup_deadline)
+                        owner.reap(cleanup_deadline)
                         self.check(process.returncode != 0)
                     finally:
                         try:
@@ -1762,8 +2303,7 @@ class AcceptanceScenarios:
         repetitions = []
         for _ in range(20):
             probe = Probe('descendant', hold=True, popen=popen)
-            parent_killed = False
-            try:
+            with probe_scope(probe):
                 row = probe.until('terminal')
                 self.retained = {'completed_repetitions': repetitions.copy(),
                                  'active_identity_evidence': row}
@@ -1788,7 +2328,6 @@ class AcceptanceScenarios:
                 self.check(kernel.identity(probe.process.pid) == probe.host_identity)
                 started = time.monotonic()
                 os.kill(probe.process.pid, signal.SIGKILL)  # Real host parent only.
-                parent_killed = True
                 until = started+2
                 while True:
                     group_absent = leader_absent = descendants_absent = False
@@ -1821,13 +2360,6 @@ class AcceptanceScenarios:
                     'leader_absent': leader_absent, 'descendants_absent': descendants_absent,
                     'group_absent': group_absent, 'containment_confirmed': True})
                 self.retained = {'completed_repetitions': repetitions.copy()}
-            finally:
-                if not parent_killed:
-                    cleanup_preserving_failure(probe.cleanup)
-                elif probe.process.returncode is None:
-                    # Host SIGKILL was already sent. Only reap that owned host;
-                    # never signal remembered released supervisor/group IDs.
-                    cleanup_preserving_failure(probe.reap)
         return repetitions
 
     def parent_sigkill_plain(self):

@@ -7,6 +7,7 @@ This is not an atomic handle against a hostile same-UID reaper.
 import ctypes
 from dataclasses import asdict, dataclass
 import errno
+import math
 import os
 import select
 import signal
@@ -138,6 +139,7 @@ def host_check():
 class ExitNote:
     def __init__(self, pid):
         self.pid = pid
+        self.observed_exit = False
         self.queue = select.kqueue()
         try:
             event = select.kevent(pid, filter=select.KQ_FILTER_PROC,
@@ -155,7 +157,8 @@ class ExitNote:
                     or event.flags & select.KQ_EV_ERROR
                     or not event.fflags & select.KQ_NOTE_EXIT):
                 raise IdentityUnknown('invalid non-reaping exit notification')
-        return bool(events)
+        self.observed_exit = self.observed_exit or bool(events)
+        return self.observed_exit  # NOTE_EXIT is consumed once, not undone by an empty read.
 
     def close(self):
         self.queue.close()
@@ -194,18 +197,27 @@ class Anchor:
                 or bound.ppid != os.getpid() or bound.uid != os.geteuid()):
             raise IdentityUnknown('supervisor anchor ownership unknown')
 
-    def verify(self):
+    def verify(self, deadline=None):
         """Verify this direct child without consuming its exit status.
 
         Ordinary identity queries still require getsid. Only ESRCH from that
-        query may enter the owned-zombie proof. Two fresh PROC_PIDTBSDINFO rows
-        must say SZOMB and match PID/PGID/UID/PPID/kernel start time. A zombie
+        query may enter the owned-zombie proof. NOTE_EXIT can precede SZOMB on
+        Darwin; matching transitional rows may be rechecked only within the
+        caller's existing shared deadline, without any consuming wait. Two fresh
+        PROC_PIDTBSDINFO rows must say SZOMB and match PID/PGID/UID/PPID/kernel start time. A zombie
         cannot change session; the launch-bound session leader's reserved PID
         pins its equal PGID/SID until this Popen child is reaped. This relies on
         the closed, single-thread, no-foreign-reaper host described in host_check.
         It is not a SID query for arbitrary zombies; e_tpgid is never a SID.
         """
         self.verification = None
+        if deadline is not None and (type(deadline) not in (int, float)
+                                     or not math.isfinite(deadline)):
+            raise IdentityUnknown('shared synthetic cleanup deadline required')
+        def in_time():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise IdentityUnknown('owned zombie continuity unconfirmed')
+        in_time()
         self._owned()
         host_check()
         bound = self.bound
@@ -215,17 +227,35 @@ class Anchor:
             if error.errno != errno.ESRCH:
                 raise
             fields = ('pid', 'pgid', 'uid', 'ppid', 'seconds', 'micros')
-            before = _info(bound.pid, 3, _BSD)
-            after = _info(bound.pid, 3, _BSD)
             proof = {'mode': 'unconfirmed-zombie', 'sid_source': 'launch-continuity',
-                     'sid_query': 'ESRCH', 'kernel_status': after.status,
-                     'kernel_rows': [{**{key: getattr(row, key) for key in fields},
-                                      'status': row.status} for row in (before, after)]}
-            self.verification = proof  # Retain bounded observed rows even on rejection.
-            if (before.status != 5 or after.status != 5
-                    or any(getattr(row, key) != getattr(bound, key)
-                           for row in (before, after) for key in fields)):
-                raise IdentityUnknown('owned zombie continuity unconfirmed') from None
+                     'sid_query': 'ESRCH', 'kernel_rows': [],
+                     'transition_rows': [], 'observations': 0}
+            self.verification = proof  # Bounded actual observations, including rejection.
+            while True:
+                self._owned()
+                host_check()
+                in_time()
+                row = _info(bound.pid, 3, _BSD)
+                data = {**{key: getattr(row, key) for key in fields}, 'status': row.status}
+                proof['observations'] += 1
+                proof['kernel_status'] = row.status
+                proof['kernel_rows'] = (proof['kernel_rows'] + [data])[-2:]
+                if row.status != 5:
+                    proof['transition_rows'] = (proof['transition_rows'] + [data])[-2:]
+                # Drift, a failed/short read, or an external reap is never a
+                # transition to retry. Status 2 remains observation, not proof.
+                if (row.status not in (2, 5)
+                        or any(getattr(row, key) != getattr(bound, key) for key in fields)):
+                    raise IdentityUnknown('owned zombie continuity unconfirmed') from None
+                self._owned()
+                in_time()
+                if (len(proof['kernel_rows']) == 2
+                        and all(item['status'] == 5 for item in proof['kernel_rows'])):
+                    break
+                if row.status == 2:
+                    if deadline is None:
+                        raise IdentityUnknown('owned zombie continuity unconfirmed') from None
+                    select.select([], [], [], min(.005, max(0, deadline-time.monotonic())))
             proof['mode'] = 'owned-zombie'
         else:
             if observed != bound:
@@ -233,13 +263,15 @@ class Anchor:
             proof = {'mode': 'ordinary', 'sid_source': 'getsid'}
         # Recheck the Popen pin after all observations, without poll/wait.
         self._owned()
+        host_check()
+        in_time()
         self.verification = proof
         return bound
 
     def kill_group(self, *, exit_after_verify=False, deadline=None):
         if type(exit_after_verify) is not bool:
             raise IdentityUnknown('supervisor anchor ownership unknown')
-        self.verify()
+        self.verify(deadline=deadline)
         bound = self.bound
         if self.decided:
             return  # Idempotent while still pinned; never repeat a signal.
@@ -260,9 +292,27 @@ class Anchor:
                     if time.monotonic() >= race_deadline:
                         raise IdentityUnknown('synthetic anchor exit notification unavailable')
                     select.select([], [], [], .005)
-                if _info(bound.pid, 3, _BSD).status != 5:
-                    raise IdentityUnknown('synthetic anchor zombie unconfirmed')
-                self.verify()  # Exercise the same live-to-zombie continuity path.
+                # Preserve this fixed race's actual-SZOMB assertion without
+                # assuming NOTE_EXIT has already reached the final exit state.
+                fields = ('pid', 'pgid', 'uid', 'ppid', 'seconds', 'micros')
+                rows = []
+                while True:
+                    self._owned()
+                    host_check()
+                    if time.monotonic() >= race_deadline:
+                        raise IdentityUnknown('synthetic anchor zombie unconfirmed')
+                    row = _info(bound.pid, 3, _BSD)
+                    rows = (rows + [{**{key: getattr(row, key) for key in fields},
+                                     'status': row.status}])[-2:]
+                    if (row.status not in (2, 5)
+                            or any(getattr(row, key) != getattr(bound, key) for key in fields)):
+                        raise IdentityUnknown('synthetic anchor zombie unconfirmed')
+                    self._owned()
+                    if row.status == 5:
+                        break
+                    select.select([], [], [], min(.005, max(0, race_deadline-time.monotonic())))
+                self.verify(deadline=race_deadline)
+                self.verification['race_exit_rows'] = rows
             except BaseException as error:
                 failure = error
                 raise
@@ -275,6 +325,10 @@ class Anchor:
                         raise
         # The closed host has no other reaper. This direct child is still owned,
         # live or zombie; its reserved PID also pins the equal PGID through killpg.
+        self._owned()
+        host_check()
+        if deadline is not None and time.monotonic() >= deadline:
+            raise IdentityUnknown('owned zombie continuity unconfirmed')
         try:
             os.killpg(bound.pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError) as error:

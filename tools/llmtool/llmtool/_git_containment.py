@@ -325,7 +325,7 @@ def _run(host, case='exit', timeout=2, *, hold_terminal=False,
                         primary = 'supervisor-lost'
                     anchor.kill_group(exit_after_verify=True, deadline=cleanup_deadline)
                 else:
-                    anchor.kill_group()  # Fresh identity; decision BEFORE any reap.
+                    anchor.kill_group(deadline=cleanup_deadline)  # Decision BEFORE any reap.
                 diagnostics['cleanup_errors'].extend(anchor.monitor_faults)
                 diagnostics['anchor_verification'] = anchor.verification
                 diagnostics['expected_event'] = 'supervisor-reap'

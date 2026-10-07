@@ -77,6 +77,8 @@ def main():
         kernel.host_check()
         scenarios = AcceptanceScenarios()
         for position, current in enumerate(SCENARIOS, 1):
+            scenarios.begin_subcase(current)
+            scenarios.completed_subcases = []
             print('[{}/{}] {} START'.format(position, len(SCENARIOS), current), flush=True)
             started, initial = time.monotonic(), scenarios.checks
             repetitions = getattr(scenarios, current)()
@@ -99,18 +101,26 @@ def main():
         # Retain all completed/partial invocation evidence. Deliberately invalid
         # for the PASS validator and nonzero; never fabricate missing scenarios.
         evidence['failure'] = {'scenario': current, 'status': 'FAIL',
-                               **wire.exception_evidence(exc)}
+                               **(getattr(exc, 'primary_before_cleanup', None)
+                                  or wire.exception_evidence(exc))}
         diagnostics = getattr(exc, 'probe_diagnostics', None)
         if diagnostics is not None:
             evidence['failure']['diagnostics'] = diagnostics
+        cleanup = getattr(exc, 'fixture_cleanup', None)
+        if cleanup is None and scenarios is not None:
+            cleanup = scenarios.last_fixture_cleanup
+        if cleanup is not None:
+            evidence['failure']['fixture_cleanup'] = cleanup
         secondary = getattr(exc, 'secondary_cleanup_errors', None)
         if secondary:
             evidence['failure']['secondary_cleanup_errors'] = secondary
         if scenarios is not None and scenarios.retained:
             evidence['failure']['retained'] = scenarios.retained
+        if scenarios is not None:
+            evidence['failure']['subcase'] = scenarios.current_subcase
+            evidence['failure']['completed_subcases'] = scenarios.completed_subcases.copy()
         owned = retained_processes()
-        if owned:
-            evidence['failure']['owned_processes'] = owned
+        evidence['failure']['owned_processes'] = owned
         write(output, evidence)
         print('{} FAIL ({})'.format(current, type(exc).__name__), flush=True)
         return 1
