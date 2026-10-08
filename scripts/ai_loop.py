@@ -1020,8 +1020,8 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
         'evidence_files': evidence_files}
 
 
-def ensure_review_repair_scope(task, recovery, round_no, touched):
-    """Only the first review-failure repair may edit its two bound tests or pending report."""
+def ensure_review_repair_scope(task, recovery, round_no, touched, status=None):
+    """Separate disallowed edits, model decisions and absence of an authorized repair."""
     if not recovery:
         return
     if recovery.get('kind') == 'review_failure':
@@ -1035,9 +1035,16 @@ def ensure_review_repair_scope(task, recovery, round_no, touched):
         return
     authorized = approved_files | {task['acceptance_report']}
     touched = set(touched)
-    if not touched.issubset(authorized) or (round_no == 0 and not touched.intersection(approved_files)):
-        raise Stop('bounded recovery Codex edited outside authorized test files '
-                   'or made no first-round test-harness repair')
+    if not touched.issubset(authorized):
+        raise Stop('bounded recovery Codex edited outside authorized test-harness files')
+    if status == 'NEEDS_DECISION':
+        raise Stop('bounded recovery Codex requested a decision before implementing the test repair; '
+                   'no test or native PASS is inherited')
+    if round_no == 0 and not touched.intersection(approved_files):
+        if status == 'PASS':
+            raise Stop('bounded recovery Codex reported PASS but did not change an authorized test file')
+        raise Stop('bounded recovery produced no authorized test change; '
+                   'provider status and local evidence preserved')
 
 
 def prepare_review_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
@@ -2654,7 +2661,8 @@ def main():
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
                                    round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
                     touched_after_codex = check_scope(root, task, original, branch, head)
-                    ensure_review_repair_scope(task, recovery, round_no, touched_after_codex)
+                    ensure_review_repair_scope(task, recovery, round_no,
+                                               touched_after_codex, result['status'])
                     if result['status'] != 'PASS':
                         if coordinator.policy:
                             repair_reason = coordinator.assess('developer', head, {'developer': result}, round_no, last_round)
