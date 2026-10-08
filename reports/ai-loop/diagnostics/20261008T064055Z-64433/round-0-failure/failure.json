@@ -1,0 +1,152 @@
+{
+  "run_id": "20261008T064055Z-64433",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "round": 0,
+  "phase": "mandatory-final",
+  "head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
+  "source_sha256": {
+    "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+    "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+    "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+    "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+    "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+    "tools/llmtool/tests/test_git_containment.py": "39faf52c1b9707646dcab5bd2d02f99877c047360f24005f4cce35840820eab8",
+    "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+    "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+    "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728",
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md": "ae75f42801ffb4fe12968a68e36c161f12c2fbfe6bedb2f67a6c4dd5df0a1d8e"
+  },
+  "status": "FAIL",
+  "gate_waived": false,
+  "evidence_sha256": "fd6b86c56af6836c08226ac762e5cf3fffa181eaab441d8b17762388848c08f5",
+  "failed_commands": [
+    {
+      "argv": [
+        "env",
+        "PYTHONPATH=tools/llmtool",
+        "tools/llmtool/.venv/bin/python",
+        "tools/llmtool/tests/run_containment_acceptance.py",
+        "--output",
+        "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/.ai-loop/20261008T064055Z-64433/mac-containment-0.json"
+      ],
+      "exit_code": 1,
+      "suite": "mandatory-final"
+    }
+  ],
+  "ci_runs": [],
+  "mac": {
+    "failure": {
+      "completed_subcases": [],
+      "errno": 3,
+      "exception_type": "ProcessLookupError",
+      "fixture_cleanup": {
+        "evidence": {
+          "decision_before_reap": true,
+          "group_absent": true,
+          "host_absent": true,
+          "host_pin_verified": true,
+          "host_reaped": true
+        },
+        "original_owned_processes": [
+          {
+            "host_identity": {
+              "micros": 570055,
+              "pgid": 72468,
+              "pid": 72468,
+              "ppid": 72370,
+              "seconds": 1791442394,
+              "sid": 72468,
+              "uid": 501
+            },
+            "pid": 72468,
+            "supervisor": {}
+          }
+        ],
+        "status": "RESOLVED"
+      },
+      "message": "No such process",
+      "owned_processes": [],
+      "scenario": "kqueue_non_reaping",
+      "status": "FAIL",
+      "subcase": "kqueue_non_reaping",
+      "traceback": [
+        {
+          "file": "test_git_containment.py",
+          "function": "kqueue_non_reaping",
+          "line": 2334
+        },
+        {
+          "file": "_git_process_identity.py",
+          "function": "__init__",
+          "line": 148
+        }
+      ]
+    },
+    "os_version": "15.7.9",
+    "platform": "darwin",
+    "python_version": "3.13.3",
+    "scenarios": {
+      "fd_inheritance": {
+        "checks": 9,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "hung_supervisor": {
+        "checks": 112,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "identity_reuse": {
+        "checks": 7,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "leader_exit_descendant": {
+        "checks": 8,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "macos_start_time": {
+        "checks": 5,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sighup": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sigint": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sigterm": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      }
+    },
+    "schema_version": 1,
+    "tested_sha256": {
+      "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+      "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+      "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+      "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+      "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+      "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+      "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+      "tools/llmtool/tests/test_git_containment.py": "39faf52c1b9707646dcab5bd2d02f99877c047360f24005f4cce35840820eab8",
+      "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728"
+    }
+  },
+  "prior_review_status": null
+}
