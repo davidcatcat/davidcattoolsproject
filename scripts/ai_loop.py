@@ -195,7 +195,8 @@ def load_task(root, control_sha):
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
                 'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
-                'acceptance_failure_recovery', 'stopped_failure_recovery', 'failure_triage'}
+                'acceptance_failure_recovery', 'stopped_failure_recovery',
+                'review_failure_recovery', 'failure_triage'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -264,7 +265,8 @@ def load_task(root, control_sha):
         if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
             raise Stop('Mac containment task must retain full local checks and report')
     if sum(k in metadata for k in ('initial_quota_recovery', 'initial_timeout_recovery',
-                                   'acceptance_failure_recovery', 'stopped_failure_recovery')) > 1:
+                                   'acceptance_failure_recovery', 'stopped_failure_recovery',
+                                   'review_failure_recovery')) > 1:
         raise Stop('only one explicit recovery can be active')
     for recovery_key in ('initial_quota_recovery', 'initial_timeout_recovery'):
         if recovery_key not in metadata:
@@ -304,6 +306,23 @@ def load_task(root, control_sha):
                        or not re.fullmatch(r'[0-9a-f]{64}', recovery[k])
                        for k in ('summary_sha256', 'evidence_sha256'))):
             raise Stop('invalid acceptance failure recovery contract')
+    if 'review_failure_recovery' in metadata:
+        recovery = metadata['review_failure_recovery']
+        keys = {'run_id', 'control_sha', 'expected_head', 'summary_sha256',
+                'failure_evidence_sha256', 'repair_files'}
+        if (metadata['mode'] != 'implement_new_pr' or metadata['max_repairs'] < 1
+                or not isinstance(recovery, dict) or set(recovery) != keys
+                or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
+                or any(not isinstance(recovery.get(k), str) or not re.fullmatch(r'[0-9a-f]{40}', recovery[k])
+                       for k in ('control_sha', 'expected_head'))
+                or any(not isinstance(recovery.get(k), str) or not re.fullmatch(r'[0-9a-f]{64}', recovery[k])
+                       for k in ('summary_sha256', 'failure_evidence_sha256'))
+                or not isinstance(recovery.get('repair_files'), list)
+                or len(recovery['repair_files']) != 2
+                or len(set(recovery['repair_files'])) != 2
+                or any(not isinstance(p, str) or not p.startswith('tools/llmtool/tests/')
+                       or p not in metadata['allowed_files'] for p in recovery['repair_files'])):
+            raise Stop('invalid review failure recovery contract')
     if 'stopped_failure_recovery' in metadata:
         recovery = metadata['stopped_failure_recovery']
         common = {'run_id', 'control_sha', 'expected_head', 'old_base_sha', 'summary_sha256',
@@ -924,6 +943,105 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
         'partial_files': tested, 'preserved_untracked': current_untracked,
         'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE',
         'evidence_files': evidence_files}
+
+
+def prepare_review_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
+    """Exact bounded repair for a stopped FAIL code review; no model classification retry."""
+    policy = task.get('review_failure_recovery')
+    if not policy or policy['run_id'] != run_id:
+        raise Stop('review failure recovery is not authorized for this run')
+    if tracked_paths or git(root, 'diff', '--cached', '--name-only'):
+        raise Stop('review failure recovery requires clean tracked/index state')
+    if (git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != policy['expected_head']):
+        raise Stop('review failure recovery requires the exact stopped branch/HEAD')
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY
+            + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('review failure candidate already has a PR')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('review failure candidate already published')
+    if set(current_untracked).intersection(task['allowed_files']):
+        raise Stop('untracked candidate collision')
+    rc, _, _ = command(['git', 'merge-base', '--is-ancestor', task['base_sha'],
+                         policy['expected_head']], root)
+    if rc != 0:
+        raise Stop('review failure candidate not descended from pinned main')
+    paths = {p for p in git(root, 'diff', '--name-only', '-z',
+                            task['base_sha'], policy['expected_head']).split('\\0') if p}
+    if not paths or not paths.issubset(set(task['allowed_files'])):
+        raise Stop('review failure candidate exceeds original scope')
+
+    old_logs = root / '.ai-loop' / run_id
+    def record(name, expected=None):
+        path = old_logs / name
+        if (any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()
+                or path.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('review recovery evidence missing/unsafe/oversized: ' + name)
+        raw = path.read_bytes()
+        if len(raw) > 2 * 1024 * 1024 or (expected and hashlib.sha256(raw).hexdigest() != expected):
+            raise Stop('review recovery evidence changed: ' + name)
+        return raw, json.loads(raw)
+
+    old_task, old_text = load_task(root, policy['control_sha'])
+    variable = {'initial_quota_recovery', 'initial_timeout_recovery', 'acceptance_failure_recovery',
+                'stopped_failure_recovery', 'review_failure_recovery',
+                'codex_timeout_seconds', 'claude_timeout_seconds'}
+    if task.get('failure_triage'):
+        variable.update({'failure_triage', 'max_repairs'})
+    if ({k: v for k, v in task.items() if k not in variable}
+            != {k: v for k, v in old_task.items() if k not in variable}
+            or record('task.json')[1] != old_task):
+        raise Stop('review recovery changed task scope, tests, or acceptance gates')
+    old_md = old_logs / 'task.md'
+    if (any(p.is_symlink() for p in (old_md, *old_md.parents)) or not old_md.is_file()
+            or old_md.stat().st_size > 1024 * 1024
+            or old_md.read_text(encoding='utf-8').strip() != old_text.strip()):
+        raise Stop('original review task text/provenance mismatch')
+    provenance = record('provenance.json')[1]
+    summary_raw, summary = record('summary.json', policy['summary_sha256'])
+    failure_raw, failure = record('failure-0.json', policy['failure_evidence_sha256'])
+    review = failure.get('evidence', {}).get('review')
+    if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
+            or provenance.get('control_sha') != policy['control_sha']
+            or provenance.get('base') != task['base_sha']
+            or summary.get('status') != 'STOPPED'
+            or summary.get('branch') != task['branch']
+            or summary.get('head') != policy['expected_head']
+            or failure.get('run_id') != run_id or failure.get('task_id') != task['task_id']
+            or failure.get('round') != 0 or failure.get('phase') != 'review'
+            or failure.get('head') != policy['expected_head']
+            or failure.get('status') != 'FAIL' or failure.get('gate_waived') is not False
+            or not isinstance(review, dict)
+            or review.get('status') != 'FAIL'
+            or review.get('reviewed_head') != policy['expected_head']
+            or not isinstance(review.get('findings'), list)
+            or {f.get('file') for f in review['findings'] if isinstance(f, dict) and f.get('blocking')}
+                != set(policy['repair_files'])
+            or any(not isinstance(f, dict) or f.get('file') not in policy['repair_files']
+                   or f.get('blocking') is not True or f.get('severity') not in ('High', 'Critical', 'Medium')
+                   for f in review['findings'])):
+        raise Stop('stopped FAIL review does not match exact authorized repair findings')
+    tested = failure.get('source_sha256')
+    if not isinstance(tested, dict) or set(tested) != set(task['allowed_files']):
+        raise Stop('review failure source inventory incomplete')
+    total = 0
+    for name, expected in tested.items():
+        path = root / name
+        if (any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()
+                or path.stat().st_size > 2 * 1024 * 1024 or digest(path) != expected):
+            raise Stop('review failure candidate bytes drifted: ' + name)
+        total += path.stat().st_size
+    if total > 16 * 1024 * 1024:
+        raise Stop('review failure candidate inventory oversized')
+    ensure_no_active_runner_codex(root)
+    return current_untracked, {
+        'from_run': run_id, 'kind': 'review_failure', 'starting_head': policy['expected_head'],
+        'old_control_sha': policy['control_sha'], 'partial_files': tested,
+        'repair_files': sorted(policy['repair_files']), 'preserved_untracked': current_untracked,
+        'inherited_validation': 'NONE', 'prior_unrelated_integrity': 'UNVERIFIED',
+        'evidence_files': {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
+                           'failure-0.json': hashlib.sha256(failure_raw).hexdigest()}
+    }
 
 
 def prepare_stopped_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
@@ -2005,7 +2123,8 @@ def main():
         original = untracked(root)
         recovery = None
         if args.resume:
-            prepare_resume = (prepare_stopped_failure_resume if task.get('stopped_failure_recovery')
+            prepare_resume = (prepare_review_failure_resume if task.get('review_failure_recovery')
+                              else prepare_stopped_failure_resume if task.get('stopped_failure_recovery')
                               else prepare_acceptance_resume if task.get('acceptance_failure_recovery')
                               else prepare_initial_resume)
             original, recovery = prepare_resume(root, task, args.resume, original, tracked_paths)
@@ -2086,6 +2205,16 @@ def main():
                           'No previous tests/review are inherited. Recovery input hashes and retained copies: '
                           + str(logs / 'recovery.json')) if recovery else (
                           'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None))
+        if recovery and recovery.get('kind') == 'review_failure':
+            repair_reason = ('Repair ONLY these two allowlisted test-harness files from the exact '
+                'stopped ordinary Claude FAIL review: ' + ', '.join(recovery['repair_files']) + '. '
+                'Do not change any product module or other test; you may append a truthful PENDING '
+                'validation note to the existing acceptance report. '
+                'Read recovery.json and recovery-evidence/failure-0.json under ' + str(logs) + '. '
+                'Keep strict base SHA equality pinned to ' + task['base_sha'] + '. '
+                'Do not derive it dynamically, accept older SHAs, reduce native scenarios, '
+                'weaken assertions or thresholds, or overwrite historical evidence. '
+                'All related, full, and native tests/reviews must run again on changed bytes.')
         native_recovery = recovery is not None and recovery.get('kind') == 'acceptance_failure'
         if native_recovery:
             scenario = task['acceptance_failure_recovery'].get('failure_scenario', 'sigint')
@@ -2117,7 +2246,13 @@ def main():
                 if repair_reason is not None:
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
                                    round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
-                    check_scope(root, task, original, branch, head)
+                    touched_after_codex = check_scope(root, task, original, branch, head)
+                    if recovery and recovery.get('kind') == 'review_failure' and round_no == 0:
+                        approved = set(recovery['repair_files']) | {task['acceptance_report']}
+                        if (not set(touched_after_codex).issubset(approved)
+                                or not set(touched_after_codex).intersection(recovery['repair_files'])):
+                            raise Stop('review recovery Codex edited outside two authorized test files '
+                                       'or made no test-harness repair')
                     if result['status'] != 'PASS':
                         if coordinator.policy:
                             repair_reason = coordinator.assess('developer', head, {'developer': result}, round_no, last_round)
