@@ -29,10 +29,10 @@ Codex↔Claude prompt copy/paste should be required for ordinary iterations.
 - A10 `retrieve-context`, A5 Git Intelligence, A6 Validator, A11a
   diagnostics and A11b.2.1 read-only Git preflight are available now.
   These are building blocks, **not** an autonomous coding executor.
-- PR #49 `A11b.2.2.1` is an unmerged, synthetic-only containment harness
+- PR #49 `A11b.2.2.1` is a **merged** synthetic-only containment harness (squash `eb464628dd6096811c659cfdf663f364107a6ef4`)
   with independently reported Security/Functional QA PASS and native Mac
   acceptance. A successful fake containment probe is **not** permission to
-  perform actual Git ADD or run arbitrary commands. Merge is a separate decision.
+  perform actual Git ADD or run arbitrary commands. A11b.2.2.2 design and approval are separate.
 - PR #45 remains a Draft temporary-runner change with its own outstanding
   security/QA gate. The existing control task is an old one-use `76644`
   recovery: do **not** replay or reinterpret it for this plan.
@@ -184,9 +184,7 @@ dashboard before this vertical slice.
 
 ## Decisions and sequencing
 
-1. **PR #49:** accept the already completed synthetic gate separately,
-   then obtain the required user/coordinator squash-merge authorization.
-   Do not merge it from this *documentation* task.
+1. **PR #49:** **DONE / squash-merged** as `eb464628dd6096811c659cfdf663f364107a6ef4` after independent Security and Functional QA. Still **no** real Git ADD or A11b.2.2.2 implementation permission.
 2. **C1 first** (real test excerpt selector + benchmark), because the
    immediate aim is measurable token reduction using already available
    read-only llmtool.
