@@ -1,5 +1,11 @@
 # LLMTool Roadmap
 
+## Transitional orchestration gate — until llmtool takes over (2026-10-09)
+
+The temporary ai-loop remains the **sole standard Mac operator interface** through A11b/A11c native acceptance. The coordinator manages pinned task.md/task.json and script-based Codex/Claude/tests/review/repair/CI; the operator never carries prompts. A runner, CI, local process or system failure requires a separate script-based maintenance/recovery step **before** llmtool product work continues, preserving local evidence and safety. [Skill](../../skills/ai-loop-handoff/SKILL.md) · [WORKFLOW](WORKFLOW.md) · [maintenance](../../automation/ai-loop/MAINTENANCE_HANDOFF.md).
+
+**Prerequisites open:** Issue #52 helper fixture/CI (local physical-temp test PASS only; independent review and CI missing) and Issue #53 self-maintenance/resume implementation. C1 Issue #51 is NOT STARTED. llmtool-native cutover must demonstrate real authorized edit→test→independent review→bounded repair→recovery→PR/CI, Mac and specialist acceptance plus measured premium token/cost/quality; then freeze/deprecate temporary ai-loop duplication rather than extending it indefinitely.
+
 目標是 generic, portable LLM CLI and future orchestration foundation。
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
 coder、reviewer；目前 A9 AgentStep 是 role + explicit profile + bounded text handoff，沒有工具或環境修改權限。三者分離，不用模型品牌
