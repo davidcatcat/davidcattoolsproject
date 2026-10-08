@@ -1,0 +1,12 @@
+{
+  "run_id": "20261008T100821Z-76644",
+  "result_file": "codex-0.json",
+  "result_sha256": "3e0778155ce211f1da82171af432b3a6e8fbb7212c7d8ee50bef1d5a6801a2f3",
+  "developer_status": "NEEDS_DECISION",
+  "changed_allowed_files": [],
+  "repair_files_changed": [],
+  "source_text_published": false,
+  "provider_summary_published": false,
+  "test_gates_reexecuted": false,
+  "repair_authorized": false
+}
