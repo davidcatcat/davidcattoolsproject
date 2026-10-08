@@ -12,7 +12,7 @@
 - **閱讀 `111f160..6874410` 的完整 diff：**
   - production：`_git_supervisor.py` 的 `_last_act`；
   - test host：`containment_probe_parent.py`；
-  - test：`test_git_containment.py`（+88／−15）；
+  - test：`test_git_containment.py`（+73／−15）；
   - 文件：`WORKFLOW.md`、新增的 spec amendment `llmtool_pr49_b5_self_anchor_amendment_20261008.md`；
   - evidence 目錄：`reports/pr49_security_remediation_20261008/`。
 - **獨立驗證（在真正的 Mac 上，sandbox 以外）：**
