@@ -1,5 +1,16 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## 2026-10-09 C1 decision resolved as an ai-loop handoff defect — frozen recovery
+
+The **actual private Codex decision** from frozen run `20261008T185112Z-21061` was that `automation/ai-loop/task.json` and `scripts/ai-loop.sh` do not exist in the C1 main-based checkout. This is **expected architecture**: the runner fetches both authoritative task files from the `automation/ai-loop` Git control revision and supplies exact `TASK`/`CONTRACT` in Codex's prompt. There was no human authorization issue; Codex made 0 source edits, no tests ran, Claude's error envelope was invalid, and no PASS was inherited.
+
+**Correct repair implemented:** Runner prepends an explicit authority/provenance notice to Codex; it does not copy control files into main or expand the five-file C1 allowlist. The current `task.json` has exactly one `initial_decision_recovery` pinned to old control `9d6bbc3c578a3dca0c4d29026b1c64c89cb200bb`, run ID and public `codex-0.json` SHA-256 `39d066a116f2ea169fc76176afa0beeca2055e7a4770250c1e8f1fa785c76927`. The script checks frozen task/provenance, original `NEEDS_DECISION` output, no changed candidate, original Claude failure envelope, clean branch/HEAD, no C1 PR/remote branch, and uses an exclusive single-use recovery marker. It does NOT accept stale test/review PASS, create other files, auto-merge, or call Claude just to reinterpret a zero-edit Codex decision.
+
+**Next vetted Mac operator entrypoint** (only after current exact-head helper CI Python 3.9/3.14 success):
+`bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061 --check && bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061`.
+The `--check` starts no models; only on PASS should actual recovery run. Do not run fresh C1, don't reuse older 76644 recovery or manually invoke Codex/Claude. All ordinary local related tests, final full tests, independent ordinary Claude review and exact-head CI are required anew. [Issue #54](https://github.com/davidcatcat/davidcattoolsproject/issues/54) tracks the incident; general Issue #53 maintenance hardening remains open.
+
+
 ## Live C1 STOP: Codex needs a human decision (2026-10-09)
 
 The only actual C1 attempt, run `20261008T185112Z-21061`, **STOPPED before tests**. [Source-free Codex diagnostic](https://github.com/davidcatcat/davidcattoolsproject/blob/05928d578ee29605dd994e99b1a0dd646eaf0b75/reports/ai-loop/diagnostics/20261008T185112Z-21061/round-0-codex/codex.json) confirms `developer_status=NEEDS_DECISION`, **0 files modified**, and no repair authorization. [Claude triage](https://github.com/davidcatcat/davidcattoolsproject/blob/17ff4bbdb60a798c4ae20fecefb192f3450083e3/reports/ai-loop/diagnostics/20261008T185112Z-21061/round-0-triage/triage.json) ended with `ERROR_ENVELOPE`, not a valid decision. Do **not** run ordinary C1 a second time, claim CODE_BUG, or infer a decision rationale not contained in public evidence.
