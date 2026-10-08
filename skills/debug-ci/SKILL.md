@@ -5,6 +5,10 @@ description: Diagnose and minimally fix CI failures. Use when GitHub Actions, te
 
 # Debug CI
 
+## ai-loop / helper failure priority
+
+If this CI failure concerns `scripts/ai_loop.py`, `scripts/test_ai_loop.py`, the launcher or its Mac environment, follow [ai-loop-handoff](../ai-loop-handoff/SKILL.md). Preserve interrupted evidence and dirty user work, investigate deterministic failure causes, and authorize **separate helper maintenance**, not the live C1 product contract. No user prompt relay or direct manual Codex/Claude CLI. If maintenance is not implemented, report `AUTOMATED_MAINTENANCE_NOT_READY` and require the coordinator to bootstrap/review it through authorized Git/CI first. Use physically resolved macOS test temp roots instead of weakening symlink escape guards.
+
 Find the first meaningful failure, reproduce it, and make the smallest correct fix.
 
 ## Process
