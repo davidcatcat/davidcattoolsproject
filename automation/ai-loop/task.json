@@ -130,14 +130,15 @@
     "repeat_limit": 2,
     "allow_mac_repair": true
   },
-  "review_failure_recovery": {
-    "run_id": "20261008T052643Z-60914",
-    "control_sha": "2a919119459a4042e45115bc4934a7319f461740",
-    "expected_head": "35ad4be92f6492fa86a8bc2fe961a22cf9c84a49",
-    "summary_sha256": "921919abad240e84a5b79f6e3c9a35706bbfa939b7b161e87d0c693d96b57d24",
-    "failure_evidence_sha256": "5340bb23e53cf76107f9999fbbdee94fa136d3ccdfbb6fba6e4e8f0dce0244de",
+  "acceptance_failure_recovery": {
+    "run_id": "20261008T064055Z-64433",
+    "control_sha": "3c08dba54e6ac59db8385816ad51f2faaeacabee",
+    "expected_head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
+    "summary_sha256": "05f13f97a570ed41b70b69e9e2be246689d35c539eba020f7668d18ad804efb5",
+    "evidence_sha256": "c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc",
+    "failure_scenario": "kqueue_non_reaping",
+    "failure_evidence_sha256": "fd6b86c56af6836c08226ac762e5cf3fffa181eaab441d8b17762388848c08f5",
     "repair_files": [
-      "tools/llmtool/tests/run_containment_acceptance.py",
       "tools/llmtool/tests/test_git_containment.py"
     ]
   }
