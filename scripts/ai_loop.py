@@ -196,7 +196,7 @@ def load_task(root, control_sha):
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
                 'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
                 'acceptance_failure_recovery', 'stopped_failure_recovery',
-                'review_failure_recovery', 'failure_triage'}
+                'review_failure_recovery', 'sandbox_decision_recovery', 'failure_triage'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -266,7 +266,7 @@ def load_task(root, control_sha):
             raise Stop('Mac containment task must retain full local checks and report')
     if sum(k in metadata for k in ('initial_quota_recovery', 'initial_timeout_recovery',
                                    'acceptance_failure_recovery', 'stopped_failure_recovery',
-                                   'review_failure_recovery')) > 1:
+                                   'review_failure_recovery', 'sandbox_decision_recovery')) > 1:
         raise Stop('only one explicit recovery can be active')
     for recovery_key in ('initial_quota_recovery', 'initial_timeout_recovery'):
         if recovery_key not in metadata:
@@ -327,6 +327,26 @@ def load_task(root, control_sha):
                 or any(not isinstance(p, str) or not p.startswith('tools/llmtool/tests/')
                        or p not in metadata['allowed_files'] for p in recovery['repair_files'])):
             raise Stop('invalid review failure recovery contract')
+    if 'sandbox_decision_recovery' in metadata:
+        policy = metadata['sandbox_decision_recovery']
+        fields = {'run_id', 'control_sha', 'expected_head', 'summary_sha256',
+                  'codex_result_sha256', 'native_evidence_sha256', 'repair_files'}
+        expected_test = 'tools/llmtool/tests/test_git_containment.py'
+        if (metadata['mode'] != 'implement_new_pr' or not metadata.get('mac_evidence')
+                or metadata['max_repairs'] < 1
+                or not isinstance(policy, dict) or set(policy) != fields
+                or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+',
+                                    policy.get('run_id', ''))
+                or any(not isinstance(policy.get(key), str)
+                       or not re.fullmatch(r'[0-9a-f]{40}', policy[key])
+                       for key in ('control_sha', 'expected_head'))
+                or any(not isinstance(policy.get(key), str)
+                       or not re.fullmatch(r'[0-9a-f]{64}', policy[key])
+                       for key in ('summary_sha256', 'codex_result_sha256',
+                                   'native_evidence_sha256'))
+                or policy.get('repair_files') != [expected_test]
+                or expected_test not in metadata['allowed_files']):
+            raise Stop('invalid sandbox decision recovery contract')
     if 'stopped_failure_recovery' in metadata:
         recovery = metadata['stopped_failure_recovery']
         common = {'run_id', 'control_sha', 'expected_head', 'old_base_sha', 'summary_sha256',
@@ -836,6 +856,152 @@ def ensure_probe_inventory_absent(root, inventory, allow_host_only=False):
 def ensure_failed_probe_pids_absent(root, evidence):
     """Conservative read-only gate. A snapshot never authorizes a PID signal."""
     ensure_probe_inventory_absent(root, evidence.get('failure', {}).get('owned_processes'))
+
+
+def prepare_sandbox_decision_resume(root, task, run_id, current_untracked, tracked_paths=()):
+    """Recover a no-change Codex sandbox decision, never a native gate PASS."""
+    policy = task.get('sandbox_decision_recovery')
+    if not policy or policy['run_id'] != run_id:
+        raise Stop('sandbox decision recovery is not authorized for this run')
+    if (tracked_paths or git(root, 'diff', '--cached', '--name-only')
+            or git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != policy['expected_head']):
+        raise Stop('sandbox decision recovery requires clean exact stopped branch/HEAD')
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY
+            + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('sandbox decision recovery branch already has a PR')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('sandbox decision recovery branch is already published')
+    if set(current_untracked).intersection(task['allowed_files']):
+        raise Stop('sandbox decision candidate collision')
+    rc, _, _ = command(['git', 'merge-base', '--is-ancestor',
+                         task['base_sha'], policy['expected_head']], root)
+    if rc != 0:
+        raise Stop('sandbox decision candidate must descend from pinned main')
+    paths = {p for p in git(root, 'diff', '--name-only', '-z',
+                            task['base_sha'], policy['expected_head']).split('\\0') if p}
+    if not paths or not paths.issubset(set(task['allowed_files'])):
+        raise Stop('sandbox decision candidate exceeds original scope')
+
+    old_logs = root / '.ai-loop' / run_id
+    def record(name, sha=None):
+        path = old_logs / name
+        if (any(p.is_symlink() for p in (path, *path.parents))
+                or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('sandbox decision evidence missing/unsafe: ' + name)
+        raw = path.read_bytes()
+        if len(raw) > 2 * 1024 * 1024 or (sha and hashlib.sha256(raw).hexdigest() != sha):
+            raise Stop('sandbox decision evidence differs from pinned hash: ' + name)
+        try:
+            return raw, json.loads(raw)
+        except (UnicodeError, ValueError):
+            raise Stop('sandbox decision evidence malformed: ' + name)
+    old_task, old_text = load_task(root, policy['control_sha'])
+    exceptions = {'initial_quota_recovery', 'initial_timeout_recovery',
+                  'acceptance_failure_recovery', 'review_failure_recovery',
+                  'stopped_failure_recovery', 'sandbox_decision_recovery',
+                  'codex_timeout_seconds', 'claude_timeout_seconds'}
+    if task.get('failure_triage'):
+        exceptions.update({'failure_triage', 'max_repairs'})
+    if ({k: v for k, v in task.items() if k not in exceptions}
+            != {k: v for k, v in old_task.items() if k not in exceptions}
+            or record('task.json')[1] != old_task):
+        raise Stop('sandbox decision recovery altered scope, tests or Mac gates')
+    old_md = old_logs / 'task.md'
+    if (any(p.is_symlink() for p in (old_md, *old_md.parents))
+            or not old_md.is_file() or old_md.stat().st_size > 1024 * 1024
+            or old_md.read_text(encoding='utf-8').strip() != old_text.strip()):
+        raise Stop('sandbox decision original task prose changed')
+    provenance = record('provenance.json')[1]
+    summary_raw, summary = record('summary.json', policy['summary_sha256'])
+    codex_raw, codex_outcome = record('codex-0.json', policy['codex_result_sha256'])
+    validate_result(codex_outcome, 'developer')
+    previous_raw, previous = record('recovery.json')
+    native_raw, native = record('recovery-evidence/mac-containment-0.json',
+                                policy['native_evidence_sha256'])
+    candidate = previous.get('partial_files')
+    reason = codex_outcome.get('summary', '')
+    if (provenance.get('root') != str(root)
+            or provenance.get('run_id') != run_id
+            or provenance.get('control_sha') != policy['control_sha']
+            or provenance.get('base') != task['base_sha']
+            or provenance.get('start_head') != policy['expected_head']
+            or summary.get('status') != 'STOPPED'
+            or summary.get('branch') != task['branch']
+            or summary.get('head') != policy['expected_head']
+            or summary.get('history') != []
+            or summary.get('reason') !=
+                'bounded recovery Codex edited outside authorized test files or made no first-round test-harness repair'
+            or codex_outcome.get('status') != 'NEEDS_DECISION'
+            or 'sandbox denied the required fresh read-only process-absence check' not in reason
+            or 'No files changed' not in reason
+            or previous.get('kind') != 'acceptance_failure'
+            or previous.get('failure_scenario') != 'kqueue_non_reaping'
+            or previous.get('from_run') != '20261008T064055Z-64433'
+            or previous.get('starting_head') != policy['expected_head']
+            or previous.get('old_control_sha') !=
+                old_task.get('acceptance_failure_recovery', {}).get('control_sha')
+            or old_task.get('acceptance_failure_recovery', {}).get('run_id')
+                != '20261008T064055Z-64433'
+            or old_task.get('acceptance_failure_recovery', {}).get('repair_files')
+                != policy['repair_files']
+            or not isinstance(candidate, dict)
+            or set(candidate) != set(task['allowed_files'])
+            or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v)
+                   for v in candidate.values())
+            or previous.get('evidence_files', {}).get('mac-containment-0.json')
+                != policy['native_evidence_sha256']
+            or native.get('platform') != 'darwin'
+            or native.get('schema_version') != 1
+            or native.get('tested_sha256') != runtime_bytes(candidate)
+            or native.get('failure', {}).get('status') != 'FAIL'
+            or native.get('failure', {}).get('scenario') != 'kqueue_non_reaping'):
+        raise Stop('Codex sandbox decision does not match the exact original native failure')
+    clean = 0
+    for name, sha in candidate.items():
+        path = root / name
+        frozen = old_logs / 'recovery-inputs' / name
+        if (any(p.is_symlink() for p in (path, *path.parents, frozen, *frozen.parents))
+                or not path.is_file() or not frozen.is_file()
+                or path.stat().st_size > 2 * 1024 * 1024
+                or frozen.stat().st_size > 2 * 1024 * 1024
+                or digest(path) != sha or digest(frozen) != sha):
+            raise Stop('Codex decision stop changed candidate bytes: ' + name)
+        clean += path.stat().st_size
+    if clean > 16 * 1024 * 1024:
+        raise Stop('sandbox decision candidate snapshot exceeds bounds')
+    ensure_no_active_runner_codex(root)
+    inventory = native['failure'].get('fixture_cleanup', {}).get('original_owned_processes')
+    if (native['failure'].get('owned_processes') != []
+            or native['failure'].get('fixture_cleanup', {}).get('status') != 'RESOLVED'
+            or not isinstance(inventory, list) or len(inventory) != 1
+            or inventory[0].get('supervisor') != {}
+            or inventory[0].get('host_identity', {}).get('pid') != inventory[0].get('pid')):
+        raise Stop('sandbox decision recovery lacks original host-only cleanup proof')
+    # Host/owner process absence must be confirmed OUTSIDE the Codex sandbox,
+    # for every --check and again for the actual one-use resume.
+    ensure_probe_inventory_absent(root, inventory, allow_host_only=True)
+    return current_untracked, {
+        'from_run': run_id, 'kind': 'acceptance_failure',
+        'origin_kind': 'sandbox_decision', 'failure_scenario': 'kqueue_non_reaping',
+        'starting_head': policy['expected_head'],
+        'old_control_sha': policy['control_sha'],
+        'partial_files': candidate,
+        'repair_files': policy['repair_files'],
+        'preserved_untracked': current_untracked,
+        'prior_unrelated_integrity': 'UNVERIFIED',
+        'inherited_validation': 'NONE',
+        'outer_absence_check': {'status': 'ABSENT_AT_PRECHECK', 'authority': 'MAC_RUNNER',
+                                'inventory_sha256': hashlib.sha256(
+                                    json.dumps(inventory, sort_keys=True).encode()).hexdigest(),
+                                'native_evidence_sha256': policy['native_evidence_sha256']},
+        'private_evidence_files': {
+            'codex-0.json': hashlib.sha256(codex_raw).hexdigest()},
+        'evidence_files': {
+            'summary.json': hashlib.sha256(summary_raw).hexdigest(),
+            'recovery.json': hashlib.sha256(previous_raw).hexdigest(),
+            'recovery-evidence/mac-containment-0.json': hashlib.sha256(native_raw).hexdigest()}
+    }
 
 
 def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_paths=()):
@@ -2510,7 +2676,8 @@ def main():
         original = untracked(root)
         recovery = None
         if args.resume:
-            prepare_resume = (prepare_review_failure_resume if task.get('review_failure_recovery')
+            prepare_resume = (prepare_sandbox_decision_resume if task.get('sandbox_decision_recovery')
+                              else prepare_review_failure_resume if task.get('review_failure_recovery')
                               else prepare_stopped_failure_resume if task.get('stopped_failure_recovery')
                               else prepare_acceptance_resume if task.get('acceptance_failure_recovery')
                               else prepare_initial_resume)
@@ -2606,6 +2773,28 @@ def main():
                           'No previous tests/review are inherited. Recovery input hashes and retained copies: '
                           + str(logs / 'recovery.json')) if recovery else (
                           'Implement the initial candidate. This is implementation, not a repair attempt.' if new_task else None))
+        if recovery and recovery.get('origin_kind') == 'sandbox_decision':
+            repair_reason = (
+                'Sandbox-only host process inspection was denied during the original '
+                'Codex call, triggering NEEDS_DECISION with NO changed files. '
+                'That was a duplicate of a required MAC_RUNNER check and does NOT '
+                'authorize sandbox escalation. The OUTER MAC_RUNNER freshly verified '
+                'the original native host-only process inventory absent BEFORE '
+                'your call. Read recovery.json outer_absence_check (status '
+                'ABSENT_AT_PRECHECK, authority MAC_RUNNER), and exact original '
+                'native evidence under recovery-evidence/. This is an outer '
+                'precondition, NOT native containment PASS. Do not invoke ps, '
+                'kill, lsof or process enumeration inside the sandbox to reprove '
+                'outer-only facts. Do not override denial or claim an unsupported '
+                'sandbox privilege. If any other new process ownership issue '
+                'requires examination, return NEEDS_DECISION. You are authorized '
+                'only to edit the kqueue_non_reaping scenario inside '
+                'tools/llmtool/tests/test_git_containment.py and optionally '
+                'the existing acceptance report with PENDING status. Preserve '
+                'all identity/unreaped/event checks, native scenario count, '
+                'no-signal-after-reap and strict deadlines; NEVER treat an '
+                'arbitrary ESRCH as a PASS. Retain fresh related/full/native '
+                'checks and independent review by the outer runner.')
         if recovery and recovery.get('kind') == 'review_failure':
             repair_reason = ('Repair ONLY these two allowlisted test-harness files from the exact '
                 'stopped ordinary Claude FAIL review: ' + ', '.join(recovery['repair_files']) + '. '
@@ -2618,7 +2807,8 @@ def main():
                 'All related, full, and native tests/reviews must run again on changed bytes.')
         native_recovery = recovery is not None and recovery.get('kind') == 'acceptance_failure'
         if native_recovery:
-            scenario = task['acceptance_failure_recovery'].get('failure_scenario', 'sigint')
+            scenario = recovery.get('failure_scenario',
+                                     task.get('acceptance_failure_recovery', {}).get('failure_scenario', 'sigint'))
             label = 'SIGINT' if scenario == 'sigint' else scenario
             extra = ((' This was a harness preflight failure before any native scenario. Read '
                       'recovery-evidence/failure-0.json too; repair only these authorized test files: '
