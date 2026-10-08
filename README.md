@@ -4,7 +4,7 @@
 
 **Until an independently accepted llmtool-native A11b/A11c workflow replaces it, the user's only standard Mac operation is to run a vetted `ai-loop` script. The user is not the Codex/Claude prompt courier.** Coordinator publishes Git-pinned `automation/ai-loop/task.md` + `task.json`; ai-loop owns scoped code/review/tests/bounded repair and PR/CI. A helper or environment STOP requires **script-first maintenance and evidence-preserving recovery** instead of asking the user to paste shell/model prompts. Follow [ai-loop-handoff Skill](skills/ai-loop-handoff/SKILL.md), [active control README](automation/ai-loop/README.md) and [maintenance handoff](automation/ai-loop/MAINTENANCE_HANDOFF.md).
 
-**Current blocker:** Issue #52's local uncommitted helper test fix has not been independently reviewed or verified by exact-head GitHub CI; Issue #53's self-maintenance mode is NOT IMPLEMENTED. Normal C1 is NOT READY. Updating these documents does not repair the executable.
+**Current:** Issue #52 is CLOSED: the one-use maintenance launcher completed local Mac 210/210, Claude independent review PASS, and [exact-head CI](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37826584204) Python 3.9/3.14 both PASS (210 + 15 tests). C1 Issue #51 is precheck-authorized but NOT STARTED; use the cached `.git/ai-loop/run.sh` single launcher on clean main. Issue #53 remains open for general reusable recovery; it does not automatically block an otherwise clean C1 precheck.
 
 Personal AI-assisted engineering tools and reusable Agent Skills.
 
