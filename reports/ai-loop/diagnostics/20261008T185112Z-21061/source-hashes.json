@@ -1,0 +1,13 @@
+{
+  "zip_sha256": "a28dde69e61b39d083340a74efe6bb5c46b4216f4f6ca6b2b565873ab46b8bf5",
+  "captured_sha256": {
+    "tools/llmtool/llmtool/cli.py": "7e510422b30f9c626e1849dce1f98e38d631877be5359c86fb155beefb0d47d4",
+    "tools/llmtool/tests/test_cli.py": "2112061360a6e9de9db9ff849f68f8671f737f69b9458416b9869cf5a4597306",
+    "tools/llmtool/README.md": "cbf545ff57e7a3e3b56c7d47f1ae7b51f37323374b6a2fb5a33d3b818e632c74",
+    "evidence/summary.json": "a3470a1065631c97250e255bc76c5e39ac72d93f350f6c5a0c8d2c9ec3f05137",
+    "evidence/task.json": "6358b10692cdf7e2db407af2b0b4be287b4c0e308382094971a980998a716365",
+    "evidence/provenance.json": "3edf953ffd357c50e681eddb561f65bc26a77a8ea44db6f951ebdabbc38ffb3b",
+    "evidence/triage-public.json": "0221b9b57c1c8dcc1ba18b3cd6dc474c694724b4d8f53cc8488c7eab9524abbf"
+  },
+  "source_files_published": false
+}

@@ -1,0 +1,11 @@
+{
+  "root": "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+  "run_id": "20261008T185112Z-21061",
+  "control_sha": "9d6bbc3c578a3dca0c4d29026b1c64c89cb200bb",
+  "base": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "start_head": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "start_branch": "main",
+  "local_test_mode": "related",
+  "venv_python": "Python 3.13.3",
+  "system_python": "Python 3.9.6"
+}
