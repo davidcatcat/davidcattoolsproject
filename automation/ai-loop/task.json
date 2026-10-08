@@ -146,6 +146,9 @@
     "prior_mac_evidence_sha256": "9baed935a39d56b6a0c8dd10e3a47da317b0ac972039d117c97881fdae411b83",
     "upstream_paths": [
       "tools/llmtool/tests/test_entrypoint_interrupt.py"
+    ],
+    "nonrepair_blocking_files": [
+      "tools/llmtool/tests/run_containment_acceptance.py"
     ]
   }
 }
