@@ -6,6 +6,8 @@ on:
       - automation/ai-loop
     paths:
       - 'scripts/ai_loop.py'
+      - 'scripts/ai_loop_maintenance.py'
+      - 'scripts/test_ai_loop_maintenance.py'
       - 'scripts/test_ai_loop.py'
       - 'scripts/ai-loop.sh'
       - 'automation/ai-loop/**'
@@ -39,8 +41,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Python syntax
-        run: python -m py_compile scripts/ai_loop.py scripts/test_ai_loop.py
+        run: python -m py_compile scripts/ai_loop.py scripts/test_ai_loop.py scripts/ai_loop_maintenance.py scripts/test_ai_loop_maintenance.py
       - name: Bash launcher syntax
         run: bash -n scripts/ai-loop.sh
       - name: Offline helper regression suite
         run: python scripts/test_ai_loop.py
+
+      - name: Offline maintenance safety regression suite
+        run: python scripts/test_ai_loop_maintenance.py
