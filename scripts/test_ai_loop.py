@@ -991,6 +991,37 @@ class DiagnosticsExportTests(unittest.TestCase):
                 # Candidate source is retained only in the local ZIP and never Git published.
                 self.assertIn(b'PRIVATE_SOURCE_TOKEN', raw_archive)
 
+    def test_public_triage_validation_never_allows_source_or_provider_text(self):
+        run_id = '20261008T064055Z-64433'
+        task = {'allowed_files': ['tools/llmtool/tests/test_git_containment.py']}
+        good = {'run_id': run_id, 'native_failures': [{
+            'evidence_file': 'mac-containment-0.json', 'scenario': 'kqueue_non_reaping',
+            'exception_type': 'ProcessLookupError', 'cleanup_status': 'RESOLVED',
+            'owned_processes_retained': False,
+            'frames': [{'file': task['allowed_files'][0], 'line': 2334,
+                        'function': 'kqueue_non_reaping'}]}],
+            'provider_envelopes': [{'file': 'failure-0-claude.raw.json',
+                'subtype': 'success', 'is_error': True, 'state': 'ERROR_ENVELOPE'}],
+            'contains_source_text': False, 'contains_provider_text': False,
+            'repair_authorized': False, 'gates_inherited': False}
+        self.assertEqual(loop.validate_public_triage(good, task, run_id), good)
+        for fault in ('extra', 'source_text', 'wrong_path', 'wrong_line',
+                      'provider_payload', 'authority', 'wrong_provider'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(good)
+                if fault == 'extra': bad['extra'] = 'PRIVATE_SOURCE_TOKEN'
+                elif fault == 'source_text': bad['contains_source_text'] = True
+                elif fault == 'wrong_path':
+                    bad['native_failures'][0]['frames'][0]['file'] = '../secrets.json'
+                elif fault == 'wrong_line':
+                    bad['native_failures'][0]['frames'][0]['line'] = '2334;source'
+                elif fault == 'provider_payload':
+                    bad['provider_envelopes'][0]['result'] = 'PRIVATE_CLAUDE_PROVIDER_PAYLOAD'
+                elif fault == 'authority': bad['repair_authorized'] = True
+                else: bad['provider_envelopes'][0]['file'] = 'credentials.json'
+                with self.assertRaises(loop.Stop):
+                    loop.validate_public_triage(bad, task, run_id)
+
     def test_diagnostic_triage_is_non_authoritative_and_rejects_unsafe_run(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
