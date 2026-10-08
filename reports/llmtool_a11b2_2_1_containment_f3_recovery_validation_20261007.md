@@ -1157,3 +1157,815 @@ remain pending on these bytes. Independent security/QA and functional acceptance
 remain pending. Draft PR readiness is not established; merge and the next slice
 remain unauthorized. No real product Git ADD or public mutation was introduced.
 The outer runner must append truthful final evidence after executing its gates.
+
+
+## Outer runner final verification
+
+- Tested implementation HEAD: `1106a77743cd8078564c0cadf9e1038b6e78e5b2`; subsequent report update changes evidence only.
+- Required local full canonical checks: PASS.
+- A11b.2.2.1 containment harness: PASS (implementation/required Mac checks only).
+- Real product Git ADD executed: NO; public mutation path: NONE.
+- A11b.2.2.2 authorized: NO.
+- Ready for independent security review: YES; security/merge approval remains pending.
+
+The runner executed the configured commands and validated the new Mac evidence against the frozen source/test hashes. Exit zero and JSON alone are not a proof of test design correctness: independent source/security review remains required.
+
+```json
+{
+  "rounds": [
+    {
+      "round": 0,
+      "head": "1106a77743cd8078564c0cadf9e1038b6e78e5b2",
+      "developer": {
+        "status": "PASS",
+        "summary": "Implemented the bounded kqueue scenario repair and appended a truthful pending report note. Zombie-first registration accepts only exact ESRCH with fresh owned, unreaped zombie identity proof before and after registration. Successful registration still requires NOTE_EXIT; deadlines and cleanup ordering remain unchanged. Only the authorized test scenario and report changed. No tests, native probes, host inspection or Git writes were performed. All runner validation and independent review remain pending."
+      },
+      "tests": "PASS",
+      "test_results": [
+        {
+          "suite": "related",
+          "argv": [
+            "make",
+            "-C",
+            "tools/llmtool",
+            "syntax",
+            "PYTHON=.venv/bin/python"
+          ],
+          "exit_code": 0,
+          "seconds": 0.3
+        },
+        {
+          "suite": "related",
+          "argv": [
+            "env",
+            "PYTHONPATH=tools/llmtool",
+            "tools/llmtool/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/llmtool/tests",
+            "-p",
+            "test_git_containment.py",
+            "-v"
+          ],
+          "exit_code": 0,
+          "seconds": 1.2
+        },
+        {
+          "suite": "related",
+          "argv": [
+            "env",
+            "PYTHONPATH=tools/llmtool",
+            "tools/llmtool/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/llmtool/tests",
+            "-p",
+            "test_git_mutation.py",
+            "-v"
+          ],
+          "exit_code": 0,
+          "seconds": 42.9
+        },
+        {
+          "suite": "related",
+          "argv": [
+            "env",
+            "PYTHONPATH=tools/llmtool",
+            "tools/llmtool/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/llmtool/tests",
+            "-p",
+            "test_git_intel.py",
+            "-v"
+          ],
+          "exit_code": 0,
+          "seconds": 13.7
+        },
+        {
+          "suite": "related",
+          "argv": [
+            "env",
+            "PYTHONPATH=tools/llmtool",
+            "tools/llmtool/.venv/bin/python",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tools/llmtool/tests",
+            "-p",
+            "test_action_contract.py",
+            "-v"
+          ],
+          "exit_code": 0,
+          "seconds": 0.5
+        }
+      ],
+      "tested_sha256": {
+        "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+        "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+        "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+        "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+        "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+        "tools/llmtool/tests/test_git_containment.py": "50b290ed1cf420c2a2806ca6517d450a26b39be87bb6a23abcc58182c28a2652",
+        "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+        "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+        "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728",
+        "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md": "bca8a9026b2b174fc2a7c78cd56310f91ac9f860680c184c9de4a1664b0c735f"
+      },
+      "review": {
+        "status": "PASS",
+        "summary": "Ordinary code review of the full cumulative diff at 1106a77, checked against the 76644 sandbox-decision recovery task, CLAUDE.md and the review-change skill. This is not a security, QA, native containment or merge sign-off. The 76644 repair is in scope. Of the code files it changes only AcceptanceScenarios.kqueue_non_reaping in tools/llmtool/tests/test_git_containment.py, and it appends a pending note to the report. No production module, signal code, scenario name or count, deadline or cleanup/reap ordering changed. Most of the cumulative diff is earlier candidate work, already covered by previous ordinary reviews; I found nothing new that blocks in it. How the repaired kqueue path works: - In the zombie-first branch, the test first proves the child is an actual zombie (kernel status SZOMB 5), that `anchor.verify` passes, and that the child is still an owned, unreaped Popen. Only after that does it try to register ExitNote. - A failed registration is accepted only when it raises ProcessLookupError with errno == ESRCH, and only in the zombie-first branch. Every other error, and every error in the before-exit branch, is re-raised. - After the ESRCH path, the test re-checks SZOMB, re-runs `anchor.verify` and confirms returncode is None. Only then does it make the group-cleanup decision and reap. - If registration succeeds, the original NOTE_EXIT wait still applies. - Diagnostics label the ESRCH path as 'ESRCH_AFTER_OWNED_ZOMBIE', so it is never recorded as an exit event. The report addition says only that the outer runner's ABSENT_AT_PRECHECK result is a precondition, not a native PASS. It claims no test results, and it states that Codex did not re-run host process inspection. The base pin stays a strict equality against ceae425e (run_containment_acceptance.py:68). Related checks run by the outer runner exited 0: syntax, containment, mutation, git_intel and action_contract. Both full suites, all fourteen native Mac scenarios, final-diff review and exact-HEAD CI have not run yet on these bytes; this review does not stand in for any of them. One non-blocking Low note is listed.",
+        "reviewed_head": "1106a77743cd8078564c0cadf9e1038b6e78e5b2",
+        "findings": [
+          {
+            "severity": "Low",
+            "blocking": false,
+            "file": "tools/llmtool/tests/test_git_containment.py",
+            "detail": "The new ESRCH-acceptance branch in kqueue_non_reaping is only exercised by the native Mac acceptance run. No deterministic unit test checks that ESRCH is re-raised when zombie_first is False, or that a non-ESRCH ProcessLookupError is re-raised. The guard is simple and reads correctly, and the native gate is mandatory, so this is an optional improvement only.",
+            "evidence": "test_git_containment.py:2317-2350: `except ProcessLookupError as error: if not zombie_first or error.errno != errno.ESRCH: raise` ... `registration = 'ESRCH_AFTER_OWNED_ZOMBIE'`. No matching mock-based regression appears in IdentityTests or LibprocBoundaryTests; the only existing ExitNote unit test is test_registration_failure_closes_notification_fd, which uses a generic OSError."
+          }
+        ]
+      },
+      "final_full": {
+        "status": "PASS",
+        "results": [
+          {
+            "suite": "full-final",
+            "argv": [
+              "make",
+              "-C",
+              "tools/llmtool",
+              "check",
+              "PYTHON=.venv/bin/python"
+            ],
+            "exit_code": 0,
+            "seconds": 208.0
+          },
+          {
+            "suite": "full-final",
+            "argv": [
+              "make",
+              "-C",
+              "tools/llmtool",
+              "check",
+              "PYTHON=/usr/bin/python3"
+            ],
+            "exit_code": 0,
+            "seconds": 341.1
+          }
+        ]
+      },
+      "mandatory": {
+        "status": "PASS",
+        "results": [
+          {
+            "suite": "mandatory-final",
+            "argv": [
+              "env",
+              "PYTHONPATH=tools/llmtool",
+              "tools/llmtool/.venv/bin/python",
+              "tools/llmtool/tests/run_containment_acceptance.py",
+              "--output",
+              "/Users/davidsun/git/davidcataiporject/davidcattoolsproject/.ai-loop/20261008T110815Z-78652/mac-containment-0.json"
+            ],
+            "exit_code": 0,
+            "seconds": 54.2
+          }
+        ]
+      }
+    }
+  ],
+  "mac_evidence": {
+    "os_version": "15.7.9",
+    "platform": "darwin",
+    "python_version": "3.13.3",
+    "scenarios": {
+      "code_runtime_binding": {
+        "checks": 7,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "fd_inheritance": {
+        "checks": 9,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "hung_supervisor": {
+        "checks": 112,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "identity_reuse": {
+        "checks": 7,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "kqueue_non_reaping": {
+        "checks": 74,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "leader_exit_descendant": {
+        "checks": 8,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "macos_start_time": {
+        "checks": 5,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "parent_sigkill_plain": {
+        "checks": 267,
+        "repetitions": [
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86755
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005309498053975403,
+            "leader_absent": true,
+            "leader_pid": 86754,
+            "pgid": 86753
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86759
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011013215989805758,
+            "leader_absent": true,
+            "leader_pid": 86758,
+            "pgid": 86757
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86763
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011443031020462513,
+            "leader_absent": true,
+            "leader_pid": 86762,
+            "pgid": 86761
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86767
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005177616025321186,
+            "leader_absent": true,
+            "leader_pid": 86766,
+            "pgid": 86765
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86771
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011173972976393998,
+            "leader_absent": true,
+            "leader_pid": 86770,
+            "pgid": 86769
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86775
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006356375990435481,
+            "leader_absent": true,
+            "leader_pid": 86774,
+            "pgid": 86773
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86779
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011201946996152401,
+            "leader_absent": true,
+            "leader_pid": 86778,
+            "pgid": 86777
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86783
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011294013005681336,
+            "leader_absent": true,
+            "leader_pid": 86782,
+            "pgid": 86781
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86787
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005165188922546804,
+            "leader_absent": true,
+            "leader_pid": 86786,
+            "pgid": 86785
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86791
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.010915779042989016,
+            "leader_absent": true,
+            "leader_pid": 86790,
+            "pgid": 86789
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86795
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005221500992774963,
+            "leader_absent": true,
+            "leader_pid": 86794,
+            "pgid": 86793
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86799
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005590831977315247,
+            "leader_absent": true,
+            "leader_pid": 86798,
+            "pgid": 86797
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86803
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006054435041733086,
+            "leader_absent": true,
+            "leader_pid": 86802,
+            "pgid": 86801
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86807
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006272030062973499,
+            "leader_absent": true,
+            "leader_pid": 86806,
+            "pgid": 86805
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86811
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005716969026252627,
+            "leader_absent": true,
+            "leader_pid": 86810,
+            "pgid": 86809
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86815
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005161349079571664,
+            "leader_absent": true,
+            "leader_pid": 86814,
+            "pgid": 86813
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86819
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005267483065836132,
+            "leader_absent": true,
+            "leader_pid": 86818,
+            "pgid": 86817
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86823
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006371150026097894,
+            "leader_absent": true,
+            "leader_pid": 86822,
+            "pgid": 86821
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86833
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.010822259006090462,
+            "leader_absent": true,
+            "leader_pid": 86832,
+            "pgid": 86825
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86837
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.0063367439433932304,
+            "leader_absent": true,
+            "leader_pid": 86836,
+            "pgid": 86835
+          }
+        ],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "parent_sigkill_popen": {
+        "checks": 2889,
+        "repetitions": [
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86844
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.0063873749459162354,
+            "leader_absent": true,
+            "leader_pid": 86843,
+            "pgid": 86841
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86855
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.010557475034147501,
+            "leader_absent": true,
+            "leader_pid": 86854,
+            "pgid": 86852
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86860
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006144243059679866,
+            "leader_absent": true,
+            "leader_pid": 86859,
+            "pgid": 86857
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86865
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005852967035025358,
+            "leader_absent": true,
+            "leader_pid": 86864,
+            "pgid": 86862
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86870
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005696563050150871,
+            "leader_absent": true,
+            "leader_pid": 86869,
+            "pgid": 86867
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86875
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005617193062789738,
+            "leader_absent": true,
+            "leader_pid": 86874,
+            "pgid": 86872
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86880
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006342940032482147,
+            "leader_absent": true,
+            "leader_pid": 86879,
+            "pgid": 86877
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86885
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005655352026224136,
+            "leader_absent": true,
+            "leader_pid": 86884,
+            "pgid": 86882
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86891
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005117209977470338,
+            "leader_absent": true,
+            "leader_pid": 86890,
+            "pgid": 86888
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86896
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.010942328022792935,
+            "leader_absent": true,
+            "leader_pid": 86895,
+            "pgid": 86893
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86901
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.010956260026432574,
+            "leader_absent": true,
+            "leader_pid": 86900,
+            "pgid": 86898
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86906
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006248062942177057,
+            "leader_absent": true,
+            "leader_pid": 86905,
+            "pgid": 86903
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86912
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.0054938639514148235,
+            "leader_absent": true,
+            "leader_pid": 86911,
+            "pgid": 86909
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86920
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006174360052682459,
+            "leader_absent": true,
+            "leader_pid": 86919,
+            "pgid": 86917
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86928
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005407133023254573,
+            "leader_absent": true,
+            "leader_pid": 86927,
+            "pgid": 86925
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86936
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.006121931015513837,
+            "leader_absent": true,
+            "leader_pid": 86935,
+            "pgid": 86933
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86943
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.01104643999133259,
+            "leader_absent": true,
+            "leader_pid": 86942,
+            "pgid": 86940
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86953
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011069817002862692,
+            "leader_absent": true,
+            "leader_pid": 86951,
+            "pgid": 86949
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86960
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.011869569076225162,
+            "leader_absent": true,
+            "leader_pid": 86959,
+            "pgid": 86957
+          },
+          {
+            "containment_confirmed": true,
+            "descendant_pids": [
+              86967
+            ],
+            "descendants_absent": true,
+            "group_absent": true,
+            "identity_verified": true,
+            "latency_seconds": 0.005557804019190371,
+            "leader_absent": true,
+            "leader_pid": 86966,
+            "pgid": 86964
+          }
+        ],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "protocol_framing": {
+        "checks": 24,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "public_import_boundary": {
+        "checks": 115,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sighup": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sigint": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      },
+      "sigterm": {
+        "checks": 25,
+        "repetitions": [],
+        "skipped": 0,
+        "status": "PASS"
+      }
+    },
+    "schema_version": 1,
+    "tested_sha256": {
+      "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+      "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+      "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+      "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+      "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+      "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+      "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+      "tools/llmtool/tests/test_git_containment.py": "50b290ed1cf420c2a2806ca6517d450a26b39be87bb6a23abcc58182c28a2652",
+      "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728"
+    }
+  }
+}
+```
