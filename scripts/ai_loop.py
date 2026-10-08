@@ -967,7 +967,7 @@ def prepare_review_failure_resume(root, task, run_id, current_untracked, tracked
     if rc != 0:
         raise Stop('review failure candidate not descended from pinned main')
     paths = {p for p in git(root, 'diff', '--name-only', '-z',
-                            task['base_sha'], policy['expected_head']).split('\\0') if p}
+                            task['base_sha'], policy['expected_head']).split('\0') if p}
     if not paths or not paths.issubset(set(task['allowed_files'])):
         raise Stop('review failure candidate exceeds original scope')
 
