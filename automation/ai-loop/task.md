@@ -1,3 +1,68 @@
+# CURRENT Mac preflight harness recovery — 2026-10-08
+
+Run `20261008T033528Z-35739` successfully integrated the separately merged
+PR #47 test-infrastructure fix into the unpublished A11b.2.2.1 candidate. On
+candidate `8bada855a99ce4660c66537922f3ad833b8669fb`, related checks,
+ordinary Claude review, the venv full suite and the Mac system-Python full suite
+all passed. Mandatory Mac containment then stopped in 0.3 seconds at harness
+preflight before any native scenario ran.
+
+The exact failure is a bounded **TEST_BUG**, not a containment result:
+`tools/llmtool/tests/run_containment_acceptance.py` still pins the old base
+`585caf7d4c9dad20afd3beb38e5140d6dadf89e0`, while the current task is
+strictly pinned to post-PR47 main
+`63e232e22a769f409e381e34dfe0ef1add766d8e`. A regression fixture in
+`tools/llmtool/tests/test_git_containment.py` carries the same old literal.
+
+Claude's published evidence-bound review for round 0 returned
+`REPAIR / TEST_BUG` and named only those two blocking test files. The runner
+previously stopped with `MAC_EVIDENCE_INCOMPLETE` because the preflight failure
+correctly had zero scenarios and zero tested native hashes. Control-plane logic
+now distinguishes this narrow case from a real native failure: a preflight repair
+is permitted only when the native JSON is Darwin/schema-v1, scenario
+`preflight`, scenarios `{}`, tested_sha256 `{}`, owned_processes `[]`,
+Claude classifies `TEST_BUG`, and every blocking finding is under
+`tools/llmtool/tests/`. No missing native evidence becomes PASS.
+
+Current exact recovery pins in `task.json`:
+- run: `20261008T033528Z-35739`
+- original control: `b65b31712abdb4f2809047911ba136944f320385`
+- stopped HEAD: `8bada855a99ce4660c66537922f3ad833b8669fb`
+- summary SHA-256:
+  `7a10a6b35bf7a297d2a974ada90cb77cd33221eea05dfcac24551a4865b5a573`
+- Mac preflight JSON SHA-256:
+  `d12a698dd959efb93164fe3174db7e473ca3e889a3b99057c92a127abdce2c9a`
+- failure evidence SHA-256:
+  `7ea19918439e64bfb488697a76dfc1f5dcad45b193cf39c1295635039f78facf`
+- authorized repair files only:
+  `tools/llmtool/tests/run_containment_acceptance.py` and
+  `tools/llmtool/tests/test_git_containment.py`.
+
+Bounded repair requirements:
+1. Update the acceptance harness exact base pin from `585caf7...` to exactly
+   `63e232e...`. Keep the equality check; do not accept both bases, derive it
+   dynamically, or delete the pin.
+2. Update the synthetic regression contract in `test_git_containment.py` to the
+   same new base so it still reaches the intended failure-export assertions.
+3. Preserve all existing assertions, identity checks, scenario list, timeout and
+   disappearance thresholds, no-skip rules, PASS schema, nonzero failure exit,
+   fixture cleanup and source-hash binding.
+4. Historical report text remains historical. The runner may append truthful
+   current evidence later; do not rewrite old evidence as if it originally used
+   the new base.
+5. After changed bytes, all related checks, both full suites and all fourteen Mac
+   containment scenarios run again. No PASS is inherited from run 35739.
+
+First operator action after control CI passes is read-only preflight:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T033528Z-35739 --check
+```
+
+Do not manually edit, rebase, cherry-pick, reset, publish the feature branch, or
+rerun the older 7365 recovery.
+
 # CURRENT post-PR47 stopped-failure recovery — 2026-10-08
 
 Run `20261007T183516Z-7365` stopped on candidate
