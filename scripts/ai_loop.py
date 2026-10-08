@@ -1795,6 +1795,35 @@ def diagnostic_codex_outcome(root, logs, task):
     return result
 
 
+def private_codex_decision(root, logs, task):
+    """Read one stopped local decision; never publish its text or authorize work."""
+    outcome = diagnostic_codex_outcome(root, logs, task)
+    if (outcome['developer_status'] != 'NEEDS_DECISION'
+            or outcome['changed_allowed_files'] or outcome['repair_files_changed']
+            or outcome['repair_authorized'] is not False
+            or outcome['test_gates_reexecuted'] is not False):
+        raise Stop('private decision inspection requires an unchanged NEEDS_DECISION candidate')
+    # Pin the exact stopped C1 provider output already independently
+    # attested by the source-free round-0-codex diagnostic on GitHub.
+    if logs.name == '20261008T185112Z-21061' and outcome['result_sha256'] != (
+            '39d066a116f2ea169fc76176afa0beeca2055e7a4770250c1e8f1fa785c76927'):
+        raise Stop('original C1 decision output no longer matches Git diagnostic')
+    record = logs / 'codex-0.json'
+    if any(path.is_symlink() for path in (record, *record.parents)):
+        raise Stop('private decision record path unsafe')
+    raw = record.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != outcome['result_sha256']:
+        raise Stop('private Codex decision changed during inspection')
+    value = json.loads(raw)
+    validate_result(value, 'developer')
+    summary = value.get('summary')
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 8192:
+        raise Stop('private decision summary is missing or oversized')
+    return {'run_id': logs.name, 'sha256': outcome['result_sha256'],
+        'summary': summary, 'decision_only': True, 'review_pass': False,
+        'repair_authorized': False, 'c1_started_after_stop': False}
+
+
 def record_diagnostic_triage(root, logs, task):
     public, private = diagnostic_triage(root, logs, task)
     validate_public_triage(public, task, logs.name)
@@ -2608,6 +2637,8 @@ def main():
                         help='upload a frozen diagnostic report only; no models/tests/task recovery')
     parser.add_argument('--diagnose', metavar='RUN_ID',
                         help='publish source-free triage of stopped run; no models/tests/candidate edits')
+    parser.add_argument('--inspect-decision', metavar='RUN_ID',
+                        help='show private Codex decision locally only; no Git upload, model or worktree change')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -2616,13 +2647,16 @@ def main():
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
     if args.maintenance_issue52 and (args.install_launcher or args.check or args.test_mode or args.resume
-                                     or args.diagnose or args.publish_diagnostics):
+                                     or args.diagnose or args.inspect_decision or args.publish_diagnostics):
         parser.error('--maintenance-issue52 is exclusive; it does not run C1')
-    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose):
+    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose or args.inspect_decision):
         parser.error('--publish-diagnostics cannot be combined with task/install/test options')
     if args.diagnose and (args.publish_diagnostics or args.install_launcher or args.check
-                          or args.test_mode or args.resume):
+                          or args.test_mode or args.resume or args.inspect_decision):
         parser.error('--diagnose cannot be combined with other modes')
+    if args.inspect_decision and (args.publish_diagnostics or args.install_launcher or args.check
+                                  or args.test_mode or args.resume or args.maintenance_issue52):
+        parser.error('--inspect-decision cannot be combined with other modes')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
@@ -2682,10 +2716,11 @@ def main():
             publish_classification_rejections(root, root / '.ai-loop' / args.publish_diagnostics)
             print('DIAGNOSTICS ONLY COMPLETE. No task/model/test/branch/index change or recovery claim.', flush=True)
             return
-        if args.diagnose:
-            if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', args.diagnose):
+        if args.diagnose or args.inspect_decision:
+            inspected_run = args.diagnose or args.inspect_decision
+            if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', inspected_run):
                 raise Stop('invalid diagnostic run identity')
-            old_logs = root / '.ai-loop' / args.diagnose
+            old_logs = root / '.ai-loop' / inspected_run
             for name in ('task.json', 'provenance.json', 'summary.json'):
                 path = old_logs / name
                 if (any(p.is_symlink() for p in (path, *path.parents))
@@ -2693,7 +2728,7 @@ def main():
                     raise Stop('diagnose input missing/unsafe: ' + name)
             identity = json.loads((old_logs/'provenance.json').read_text())
             control = identity.get('control_sha')
-            if (identity.get('root') != str(root) or identity.get('run_id') != args.diagnose
+            if (identity.get('root') != str(root) or identity.get('run_id') != inspected_run
                     or not isinstance(control, str)
                     or not re.fullmatch(r'[0-9a-f]{40}', control)):
                 raise Stop('original diagnostic provenance mismatch')
@@ -2713,6 +2748,15 @@ def main():
                 for name, sha in sources.items():
                     if name not in pinned['allowed_files'] or digest(root / name) != sha:
                         raise Stop('native diagnostic source drift; no stale source context')
+            if args.inspect_decision:
+                decision = private_codex_decision(root, old_logs, pinned)
+                print('[PRIVATE / LOCAL ONLY] Frozen Codex NEEDS_DECISION', flush=True)
+                print('[Run] ' + decision['run_id'], flush=True)
+                print('[SHA256] ' + decision['sha256'], flush=True)
+                print('[Reason, JSON escaped] ' + json.dumps(decision['summary'], ensure_ascii=True), flush=True)
+                print('NO Git upload, model call, candidate change, approval or test PASS.', flush=True)
+                print('This is a genuine human decision checkpoint. Review for secrets before sharing its substance.', flush=True)
+                return
             public, _private = diagnostic_triage(root, old_logs, pinned)
             validate_public_triage(public, pinned, args.diagnose)
             safe = (json.dumps(public, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
