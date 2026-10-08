@@ -8,7 +8,7 @@
 
 ## 審查範圍和方法
 
-- **審查對象：** PR #49，head **`68744107…`**（`6874410`）。
+- **審查對象：** PR #49，head **`68744100c2890d05ca0e565f4d246ae1c773e951`**（`6874410`；原本誤植為 `68744107`，依照 QA49-N3 更正）。
 - **閱讀 `111f160..6874410` 的完整 diff：**
   - production：`_git_supervisor.py` 的 `_last_act`；
   - test host：`containment_probe_parent.py`；
@@ -108,7 +108,7 @@ PR #49 INDEPENDENT SECURITY RE-REVIEW (remediation 6874410):
 PASS
 
 Reviewed head:
-68744107 (6874410)
+68744100c2890d05ca0e565f4d246ae1c773e951 (6874410; corrected from mistyped 68744107 per QA49-N3)
 
 P49-M1 supervisor last-act self-group cleanup:
 CLOSED — getpid/getpgrp leadership check + killpg(0, SIGKILL); libproc/PPID no longer gate the final act; wrong-group
