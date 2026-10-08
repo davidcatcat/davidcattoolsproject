@@ -2754,6 +2754,9 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
                         task['base_sha'], head).split('\0') if p]
     if sorted(changed_paths) != sorted(task['allowed_files']):
         raise Stop('QA changed-file inventory differs from pinned PR #55')
+    # Exact-head GitHub CI is a precondition, not inferred from local model
+    # or test output. Fail before paid reviewers if CI has changed/failed.
+    wait_ci(root, head, task['ci_workflow'])
     patch = git(root, 'diff', '--no-ext-diff', '--no-textconv',
                 task['base_sha'], head)
     if len(patch.encode('utf-8')) > 256 * 1024:
