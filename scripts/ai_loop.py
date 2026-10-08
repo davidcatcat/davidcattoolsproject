@@ -278,11 +278,24 @@ def load_task(root, control_sha):
     if 'acceptance_failure_recovery' in metadata:
         recovery = metadata['acceptance_failure_recovery']
         keys = {'run_id', 'control_sha', 'expected_head', 'summary_sha256', 'evidence_sha256'}
+        scenario = recovery.get('failure_scenario', 'sigint') if isinstance(recovery, dict) else None
+        preflight_keys = keys | {'failure_scenario', 'failure_evidence_sha256', 'repair_files'}
+        valid_keyset = (isinstance(recovery, dict) and
+                        (set(recovery) in (keys, keys | {'failure_scenario'})
+                         or (scenario == 'preflight' and set(recovery) == preflight_keys)))
+        invalid_preflight = (scenario == 'preflight' and
+            (not isinstance(recovery.get('failure_evidence_sha256'), str)
+             or not re.fullmatch(r'[0-9a-f]{64}', recovery['failure_evidence_sha256'])
+             or not isinstance(recovery.get('repair_files'), list)
+             or not recovery['repair_files']
+             or any(not isinstance(p, str) or p not in metadata['allowed_files']
+                    or not p.startswith('tools/llmtool/tests/') for p in recovery['repair_files'])))
         if (metadata['mode'] != 'implement_new_pr' or not metadata.get('mac_evidence')
                 or metadata['max_repairs'] < 1 or not isinstance(recovery, dict)
-                or set(recovery) not in (keys, keys | {'failure_scenario'})
-                or not isinstance(recovery.get('failure_scenario', 'sigint'), str)
-                or recovery.get('failure_scenario', 'sigint') not in MAC_SCENARIOS
+                or not valid_keyset
+                or not isinstance(scenario, str)
+                or scenario not in MAC_SCENARIOS + ('preflight',)
+                or invalid_preflight
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or any(not isinstance(recovery.get(k), str)
                        or not re.fullmatch(r'[0-9a-f]{40}', recovery[k])
@@ -812,7 +825,7 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
         return raw, json.loads(raw)
     old_task, old_text = load_task(root, policy['control_sha'])
     variable = {'initial_quota_recovery', 'initial_timeout_recovery', 'acceptance_failure_recovery',
-                'codex_timeout_seconds', 'claude_timeout_seconds'}
+                'stopped_failure_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds'}
     if task.get('failure_triage'):
         variable.update({'failure_triage', 'max_repairs'})
     if {k: v for k, v in task.items() if k not in variable} != {
@@ -829,23 +842,43 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     summary_raw, summary = record('summary.json', policy['summary_sha256'])
     mac_raw, mac = record('mac-containment-0.json', policy['evidence_sha256'])
     history = summary.get('history')
+    scenario = policy.get('failure_scenario', 'sigint')
+    reason = summary.get('reason')
+    reason_ok = (isinstance(reason, str) and
+        ((scenario == 'preflight' and reason.startswith('failure coordinator: MAC_EVIDENCE_INCOMPLETE;'))
+         or (scenario != 'preflight' and
+             reason == 'required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry')))
     if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
             or provenance.get('base') != task['base_sha']
             or provenance.get('control_sha') != policy['control_sha']
             or summary.get('branch') != task['branch']
             or summary.get('head') != policy['expected_head']
             or summary.get('status') != 'STOPPED'
-            or summary.get('reason') != 'required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry'
+            or not reason_ok
             or not isinstance(history, list) or len(history) != 1
             or history[0].get('head') != policy['expected_head']
             or history[0].get('mandatory', {}).get('status') != 'FAIL'
             or mac.get('platform') != 'darwin'
-            or mac.get('failure', {}).get('scenario') != policy.get('failure_scenario', 'sigint')
+            or mac.get('failure', {}).get('scenario') != scenario
             or mac.get('failure', {}).get('status') != 'FAIL'):
         raise Stop('stopped native failure does not match coordinator assessment')
     tested = history[0].get('tested_sha256')
-    if (not isinstance(tested, dict) or set(tested) != set(task['allowed_files'])
-            or mac.get('tested_sha256') != runtime_bytes(tested)):
+    if not isinstance(tested, dict) or set(tested) != set(task['allowed_files']):
+        raise Stop('failed native source hashes do not bind the complete candidate')
+    failure_raw = None
+    if scenario == 'preflight':
+        failure_raw, failure = record('failure-0.json', policy['failure_evidence_sha256'])
+        if (mac.get('schema_version') != 1 or mac.get('scenarios') != {}
+                or mac.get('tested_sha256') != {}
+                or mac.get('failure', {}).get('owned_processes') != []
+                or failure.get('run_id') != run_id or failure.get('task_id') != task['task_id']
+                or failure.get('round') != 0 or failure.get('phase') != 'mandatory-final'
+                or failure.get('head') != policy['expected_head']
+                or failure.get('status') != 'FAIL' or failure.get('gate_waived') is not False
+                or failure.get('source_sha256') != tested
+                or failure.get('evidence', {}).get('mac') != mac):
+            raise Stop('preflight recovery evidence does not match the exact stopped test-harness failure')
+    elif mac.get('tested_sha256') != runtime_bytes(tested):
         raise Stop('failed native source hashes do not bind the complete candidate')
     total = 0
     for name, expected in tested.items():
@@ -859,13 +892,18 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     # Unrelated files may have been added by David since the stopped run. Bind
     # current bytes, without claiming historical preservation we cannot prove.
     ensure_no_active_runner_codex(root)
-    ensure_failed_probe_pids_absent(root, mac)
+    if scenario != 'preflight':
+        ensure_failed_probe_pids_absent(root, mac)
+    evidence_files = {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
+                      'mac-containment-0.json': hashlib.sha256(mac_raw).hexdigest()}
+    if failure_raw is not None:
+        evidence_files['failure-0.json'] = hashlib.sha256(failure_raw).hexdigest()
     return current_untracked, {'from_run': run_id, 'kind': 'acceptance_failure',
-        'old_control_sha': policy['control_sha'], 'starting_head': policy['expected_head'],
+        'failure_scenario': scenario, 'old_control_sha': policy['control_sha'],
+        'starting_head': policy['expected_head'],
         'partial_files': tested, 'preserved_untracked': current_untracked,
         'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE',
-        'evidence_files': {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
-                           'mac-containment-0.json': hashlib.sha256(mac_raw).hexdigest()}}
+        'evidence_files': evidence_files}
 
 
 def prepare_stopped_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
@@ -1760,8 +1798,19 @@ class FailureCoordinator:
         elif self.repeats[signature] >= self.policy['repeat_limit']:
             stop_reason = 'REPAIR_STALLED'
         elif phase == 'mandatory-final':
+            blocking_files = [f['file'] for f in decision['findings'] if f['blocking']]
+            preflight_repair = (isinstance(native, dict) and native.get('platform') == 'darwin'
+                and native.get('schema_version') == 1 and isinstance(native.get('failure'), dict)
+                and native['failure'].get('status') == 'FAIL'
+                and native['failure'].get('scenario') == 'preflight'
+                and native['failure'].get('owned_processes') == []
+                and native.get('scenarios') == {} and native.get('tested_sha256') == {}
+                and decision['category'] == 'TEST_BUG' and bool(blocking_files)
+                and all(p.startswith('tools/llmtool/tests/') for p in blocking_files))
             if not self.policy['allow_mac_repair']:
                 stop_reason = 'MAC_REPAIR_NOT_AUTHORIZED'
+            elif preflight_repair:
+                pass  # Harness preflight itself failed; no native containment PASS is inferred.
             elif (not isinstance(native, dict) or native.get('platform') != 'darwin'
                     or type(native.get('schema_version')) is not int or native['schema_version'] != 1
                     or not isinstance(native.get('failure'), dict)
@@ -1960,9 +2009,13 @@ def main():
         if native_recovery:
             scenario = task['acceptance_failure_recovery'].get('failure_scenario', 'sigint')
             label = 'SIGINT' if scenario == 'sigint' else scenario
+            extra = ((' This was a harness preflight failure before any native scenario. Read '
+                      'recovery-evidence/failure-0.json too; repair only these authorized test files: '
+                      + ', '.join(task['acceptance_failure_recovery']['repair_files']) + '.')
+                     if scenario == 'preflight' else '')
             repair_reason = ('Repair the existing committed candidate after the coordinator-assessed ' + label + ' Mac failure. '
                 'Preserve the original failure. Read recovery.json, recovery-evidence/summary.json and '
-                'recovery-evidence/mac-containment-0.json under ' + str(logs) + '. '
+                'recovery-evidence/mac-containment-0.json under ' + str(logs) + '.' + extra + ' '
                 'Follow the CURRENT bounded repair in task.md; distinguish captured facts from source-based hypotheses. '
                 'Preserve primary errors and bounded diagnostic evidence. Do not remove identity checks, guess SID, '
                 'reimplement the feature or rerun old probes. All validation starts afresh on changed bytes.')
