@@ -514,6 +514,144 @@ class NativeResumeTests(unittest.TestCase):
 
 
 
+class ReviewFailureRecoveryTests(unittest.TestCase):
+    run_id = '20261008T052643Z-60914'
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            root = Path(tmp)
+            old = root / '.ai-loop' / self.run_id
+            old.mkdir(parents=True)
+            tests_dir = root / 'tools/llmtool/tests'
+            tests_dir.mkdir(parents=True)
+            (tests_dir/'run_containment_acceptance.py').write_text('old pinned base\n')
+            (tests_dir/'test_git_containment.py').write_text('old synthetic fixture\n')
+            report = root / 'reports/validation.md'
+            report.parent.mkdir()
+            report.write_text('pending native gates\n')
+            (root/'personal.txt').write_text('preserve\n')
+            base, candidate, control = 'a'*40, 'b'*40, 'c'*40
+            files = ['tools/llmtool/tests/run_containment_acceptance.py',
+                     'tools/llmtool/tests/test_git_containment.py', 'reports/validation.md']
+            baseline = {'mode': 'implement_new_pr', 'task_id': 'fixture',
+                'branch': 'feat/fixture', 'base_sha': base, 'expected_head': base,
+                'max_repairs': 4, 'allowed_files': files, 'acceptance_report': 'reports/validation.md',
+                'full_tests': [['full']], 'failure_triage': {'max_reviews': 4,
+                    'repeat_limit': 2, 'allow_mac_repair': True}}
+            tested = {p: loop.digest(root/p) for p in files}
+            review = {'status': 'FAIL', 'reviewed_head': candidate, 'summary': 'Two stale base pins.',
+                'findings': [
+                    {'severity': 'High', 'blocking': True, 'file': files[0],
+                     'detail': 'Harness pins old base.', 'evidence': 'Review cites harness line 70.'},
+                    {'severity': 'Medium', 'blocking': True, 'file': files[1],
+                     'detail': 'Fixture pins old base.', 'evidence': 'Review cites fixture.'}]}
+            failure = {'run_id': self.run_id, 'task_id': 'fixture', 'round': 0,
+                'phase': 'review', 'head': candidate, 'status': 'FAIL', 'gate_waived': False,
+                'source_sha256': tested, 'evidence': {'review': review}}
+            loop.save_json(old/'task.json', baseline)
+            (old/'task.md').write_text('original review contract\n')
+            loop.save_json(old/'provenance.json', {'root': str(root), 'run_id': self.run_id,
+                'control_sha': control, 'base': base})
+            loop.save_json(old/'summary.json', {'status': 'STOPPED', 'branch': baseline['branch'],
+                'head': candidate, 'history': [{'round': 0, 'review': review}]})
+            loop.save_json(old/'failure-0.json', failure)
+            task = copy.deepcopy(baseline)
+            task['review_failure_recovery'] = {
+                'run_id': self.run_id, 'control_sha': control,
+                'expected_head': candidate, 'summary_sha256': loop.digest(old/'summary.json'),
+                'failure_evidence_sha256': loop.digest(old/'failure-0.json'),
+                'repair_files': files[:2]}
+            initial = {'personal.txt': loop.digest(root/'personal.txt')}
+            def git(cwd, *args):
+                if args == ('branch', '--show-current'): return task['branch']
+                if args == ('rev-parse', 'HEAD'): return candidate
+                if args == ('diff', '--cached', '--name-only'): return ''
+                if args == ('diff', '--name-only', '-z', base, candidate):
+                    return '\0'.join(files)+'\0'
+                raise AssertionError(args)
+            stack.enter_context(patch.object(loop, 'load_task',
+                return_value=(baseline, 'original review contract')))
+            stack.enter_context(patch.object(loop, 'git', side_effect=git))
+            stack.enter_context(patch.object(loop, 'run', side_effect=['[]', '']))
+            stack.enter_context(patch.object(loop, 'command', return_value=(0, '', '')))
+            stack.enter_context(patch.object(loop, 'ensure_no_active_runner_codex'))
+            yield root, old, task, initial
+
+    def test_exact_failed_review_authorizes_two_file_repair_not_old_pass(self):
+        with self.fixture() as (root, old, task, initial):
+            original, recovery = loop.prepare_review_failure_resume(
+                root, task, self.run_id, initial)
+            self.assertEqual(original, initial)
+            self.assertEqual(recovery['kind'], 'review_failure')
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(set(recovery['repair_files']),
+                             set(task['review_failure_recovery']['repair_files']))
+            logs = root/'.ai-loop/new'; logs.mkdir()
+            loop.snapshot_recovery(root, logs, recovery)
+            self.assertTrue((logs/'recovery-evidence/failure-0.json').exists())
+
+    def test_review_recovery_fails_on_candidate_or_review_drift(self):
+        for fault in ('candidate', 'finding', 'provenance', 'summary'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, initial):
+                if fault == 'candidate':
+                    (root/'tools/llmtool/tests/test_git_containment.py').write_text('modified\n')
+                elif fault == 'finding':
+                    value = json.loads((old/'failure-0.json').read_text())
+                    value['evidence']['review']['findings'][0]['file'] = 'other.py'
+                    loop.save_json(old/'failure-0.json', value)
+                    task['review_failure_recovery']['failure_evidence_sha256'] = loop.digest(old/'failure-0.json')
+                elif fault == 'provenance':
+                    value = json.loads((old/'provenance.json').read_text())
+                    value['control_sha'] = 'd'*40
+                    loop.save_json(old/'provenance.json', value)
+                else:
+                    (old/'summary.json').write_text('{}')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_review_failure_resume(root, task, self.run_id, initial)
+
+    def test_review_recovery_only_two_tests_or_report(self):
+        task = {'acceptance_report': 'reports/validation.md'}
+        recovery = {'kind': 'review_failure', 'repair_files': [
+            'tools/llmtool/tests/run_containment_acceptance.py',
+            'tools/llmtool/tests/test_git_containment.py']}
+        first = recovery['repair_files'][0]
+        loop.ensure_review_repair_scope(task, recovery, 0, [first, task['acceptance_report']])
+        for paths in ([], ['reports/validation.md'], [first, 'tools/llmtool/llmtool/_git_containment.py']):
+            with self.subTest(paths=paths), self.assertRaises(loop.Stop):
+                loop.ensure_review_repair_scope(task, recovery, 0, paths)
+        # Follow-up bounded repairs still require ordinary evidence-bound review.
+        loop.ensure_review_repair_scope(task, recovery, 1, [])
+
+    def test_review_recovery_schema_rejects_extra_authority(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('stopped_failure_recovery', None)
+        task['review_failure_recovery'] = {
+            'run_id': self.run_id, 'control_sha': 'a'*40, 'expected_head': 'b'*40,
+            'summary_sha256': 'c'*64, 'failure_evidence_sha256': 'd'*64,
+            'repair_files': ['tools/llmtool/tests/run_containment_acceptance.py',
+                             'tools/llmtool/tests/test_git_containment.py']}
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertIn('review_failure_recovery', load(task))
+        for fault in ('different_file', 'one_file', 'duplicate', 'extra', 'two_recoveries'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task)
+                policy = bad['review_failure_recovery']
+                if fault == 'different_file':
+                    policy['repair_files'][0] = 'tools/llmtool/llmtool/_git_containment.py'
+                elif fault == 'one_file':
+                    policy['repair_files'].pop()
+                elif fault == 'duplicate':
+                    policy['repair_files'][1] = policy['repair_files'][0]
+                elif fault == 'extra':
+                    policy['other'] = True
+                else:
+                    bad['stopped_failure_recovery'] = {'run_id': self.run_id}
+                with self.assertRaises(loop.Stop): load(bad)
+
+
 class StoppedFailureRecoveryTests(unittest.TestCase):
     run_id = '20261007T183516Z-7365'
 
