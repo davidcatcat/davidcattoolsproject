@@ -130,25 +130,15 @@
     "repeat_limit": 2,
     "allow_mac_repair": true
   },
-  "stopped_failure_recovery": {
-    "run_id": "20261008T035727Z-43467",
-    "control_sha": "a831946fc75823e2a97296a4d5f33bc375f3dc8e",
-    "expected_head": "0dc05b75844f9caa4c4ccf9c28c8b21972fd25f9",
-    "old_base_sha": "63e232e22a769f409e381e34dfe0ef1add766d8e",
-    "summary_sha256": "1b4e242e582bdc2502f5063224dcd94e5a3e5cc93cc4665228db2a3a471de6c6",
-    "failure_round": 1,
-    "failure_evidence_sha256": "26d51d0a067e7b408998a2fd633645765d3f7f85a51fcb069689903bf1c94dd1",
-    "failure_phase": "full-final",
-    "classification_decision": "NEEDS_DECISION",
-    "classification_category": "TEST_BUG",
-    "classification_raw_sha256": "fcea8633beb151df4248a07e6749864a0f7ac7b38bd662ce1c4db73ef807ac5b",
-    "prior_mac_evidence_file": "mac-containment-0.json",
-    "prior_mac_evidence_sha256": "9baed935a39d56b6a0c8dd10e3a47da317b0ac972039d117c97881fdae411b83",
-    "upstream_paths": [
-      "tools/llmtool/tests/test_entrypoint_interrupt.py"
-    ],
-    "nonrepair_blocking_files": [
-      "tools/llmtool/tests/run_containment_acceptance.py"
+  "review_failure_recovery": {
+    "run_id": "20261008T052643Z-60914",
+    "control_sha": "2a919119459a4042e45115bc4934a7319f461740",
+    "expected_head": "35ad4be92f6492fa86a8bc2fe961a22cf9c84a49",
+    "summary_sha256": "921919abad240e84a5b79f6e3c9a35706bbfa939b7b161e87d0c693d96b57d24",
+    "failure_evidence_sha256": "5340bb23e53cf76107f9999fbbdee94fa136d3ccdfbb6fba6e4e8f0dce0244de",
+    "repair_files": [
+      "tools/llmtool/tests/run_containment_acceptance.py",
+      "tools/llmtool/tests/test_git_containment.py"
     ]
   }
 }
