@@ -284,14 +284,18 @@ def load_task(root, control_sha):
         preflight_keys = keys | {'failure_scenario', 'failure_evidence_sha256', 'repair_files'}
         valid_keyset = (isinstance(recovery, dict) and
                         (set(recovery) in (keys, keys | {'failure_scenario'})
-                         or (scenario == 'preflight' and set(recovery) == preflight_keys)))
-        invalid_preflight = (scenario == 'preflight' and
+                         or (scenario in ('preflight', 'kqueue_non_reaping')
+                             and set(recovery) == preflight_keys)))
+        invalid_preflight = (scenario in ('preflight', 'kqueue_non_reaping') and
+
             (not isinstance(recovery.get('failure_evidence_sha256'), str)
              or not re.fullmatch(r'[0-9a-f]{64}', recovery['failure_evidence_sha256'])
              or not isinstance(recovery.get('repair_files'), list)
              or not recovery['repair_files']
              or any(not isinstance(p, str) or p not in metadata['allowed_files']
-                    or not p.startswith('tools/llmtool/tests/') for p in recovery['repair_files'])))
+                    or not p.startswith('tools/llmtool/tests/') for p in recovery['repair_files'])
+             or (scenario == 'kqueue_non_reaping' and recovery['repair_files'] != [
+                 'tools/llmtool/tests/test_git_containment.py'])))
         if (metadata['mode'] != 'implement_new_pr' or not metadata.get('mac_evidence')
                 or metadata['max_repairs'] < 1 or not isinstance(recovery, dict)
                 or not valid_keyset
@@ -864,7 +868,8 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
         return raw, json.loads(raw)
     old_task, old_text = load_task(root, policy['control_sha'])
     variable = {'initial_quota_recovery', 'initial_timeout_recovery', 'acceptance_failure_recovery',
-                'stopped_failure_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds'}
+                'stopped_failure_recovery', 'review_failure_recovery',
+                'codex_timeout_seconds', 'claude_timeout_seconds'}
     if task.get('failure_triage'):
         variable.update({'failure_triage', 'max_repairs'})
     if {k: v for k, v in task.items() if k not in variable} != {
@@ -885,7 +890,9 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     reason = summary.get('reason')
     reason_ok = (isinstance(reason, str) and
         ((scenario == 'preflight' and reason.startswith('failure coordinator: MAC_EVIDENCE_INCOMPLETE;'))
-         or (scenario != 'preflight' and
+         or (scenario == 'kqueue_non_reaping'
+             and reason == 'command failed (exit 1): claude; see local logs')
+         or (scenario not in ('preflight', 'kqueue_non_reaping') and
              reason == 'required Mac acceptance failed; probes/design need coordinator assessment, no automatic retry')))
     if (provenance.get('root') != str(root) or provenance.get('run_id') != run_id
             or provenance.get('base') != task['base_sha']
@@ -905,7 +912,60 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     if not isinstance(tested, dict) or set(tested) != set(task['allowed_files']):
         raise Stop('failed native source hashes do not bind the complete candidate')
     failure_raw = None
-    if scenario == 'preflight':
+    if scenario == 'kqueue_non_reaping':
+        failure_raw, failure = record('failure-0.json', policy['failure_evidence_sha256'])
+        failed = mac.get('failure', {})
+        cleanup = failed.get('fixture_cleanup')
+        passed_scenarios = {'fd_inheritance', 'sigint', 'sigterm', 'sighup',
+                            'hung_supervisor', 'leader_exit_descendant',
+                            'identity_reuse', 'macos_start_time'}
+        frames = failed.get('traceback')
+        expected_frames = [
+            {'file': 'test_git_containment.py', 'function': 'kqueue_non_reaping', 'line': 2334},
+            {'file': '_git_process_identity.py', 'function': '__init__', 'line': 148}]
+        error_path = old_logs / 'failure-0-claude.raw.json'
+        if (any(p.is_symlink() for p in (error_path, *error_path.parents))
+                or not error_path.is_file() or error_path.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('original Claude classification error envelope missing/unsafe')
+        envelope_raw = error_path.read_bytes()
+        try:
+            envelope = json.loads(envelope_raw)
+        except (UnicodeError, ValueError):
+            raise Stop('original Claude classification error envelope malformed')
+        if (not isinstance(envelope, dict) or envelope.get('subtype') != 'success'
+                or envelope.get('is_error') is not True
+                or mac.get('schema_version') != 1
+                or mac.get('tested_sha256') != runtime_bytes(tested)
+                or failed.get('errno') != 3
+                or failed.get('exception_type') != 'ProcessLookupError'
+                or failed.get('subcase') != 'kqueue_non_reaping'
+                or frames != expected_frames
+                or set(mac.get('scenarios', {})) != passed_scenarios
+                or any(not isinstance(v, dict) or v.get('status') != 'PASS'
+                       or v.get('skipped') != 0 for v in mac['scenarios'].values())
+                or failed.get('owned_processes') != []
+                or not isinstance(cleanup, dict) or cleanup.get('status') != 'RESOLVED'
+                or not isinstance(cleanup.get('original_owned_processes'), list)
+                or len(cleanup['original_owned_processes']) != 1
+                or not isinstance(cleanup.get('evidence'), dict)
+                or any(cleanup['evidence'].get(k) is not True
+                       for k in ('decision_before_reap', 'host_pin_verified', 'host_reaped',
+                                 'host_absent', 'group_absent'))
+                or failure.get('run_id') != run_id or failure.get('task_id') != task['task_id']
+                or failure.get('round') != 0 or failure.get('phase') != 'mandatory-final'
+                or failure.get('head') != policy['expected_head']
+                or failure.get('status') != 'FAIL' or failure.get('gate_waived') is not False
+                or failure.get('source_sha256') != tested
+                or failure.get('evidence', {}).get('mac') != mac
+                or summary['history'][0].get('final_full', {}).get('status') != 'PASS'
+                or summary['history'][0].get('review', {}).get('status') != 'PASS'):
+            raise Stop('kqueue failure evidence differs from exact coordinator assessment')
+        source = (root / 'tools/llmtool/tests/test_git_containment.py').read_text(
+            encoding='utf-8').splitlines()
+        if (len(source) < 2334 or source[2333].strip() != 'note = kernel.ExitNote(process.pid)'
+                or 'for zombie_first in (False, True):' not in '\n'.join(source[2308:2334])):
+            raise Stop('kqueue native test source no longer matches stopped failure location')
+    elif scenario == 'preflight':
         failure_raw, failure = record('failure-0.json', policy['failure_evidence_sha256'])
         if (mac.get('schema_version') != 1 or mac.get('scenarios') != {}
                 or mac.get('tested_sha256') != {}
@@ -931,12 +991,16 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     # Unrelated files may have been added by David since the stopped run. Bind
     # current bytes, without claiming historical preservation we cannot prove.
     ensure_no_active_runner_codex(root)
-    if scenario != 'preflight':
+    if scenario == 'kqueue_non_reaping':
+        ensure_probe_inventory_absent(root, mac['failure']['fixture_cleanup']['original_owned_processes'])
+    elif scenario != 'preflight':
         ensure_failed_probe_pids_absent(root, mac)
     evidence_files = {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
                       'mac-containment-0.json': hashlib.sha256(mac_raw).hexdigest()}
     if failure_raw is not None:
         evidence_files['failure-0.json'] = hashlib.sha256(failure_raw).hexdigest()
+    if scenario == 'kqueue_non_reaping':
+        evidence_files['failure-0-claude.raw.json'] = hashlib.sha256(envelope_raw).hexdigest()
     return current_untracked, {'from_run': run_id, 'kind': 'acceptance_failure',
         'failure_scenario': scenario, 'old_control_sha': policy['control_sha'],
         'starting_head': policy['expected_head'],
@@ -947,13 +1011,22 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
 
 def ensure_review_repair_scope(task, recovery, round_no, touched):
     """Only the first review-failure repair may edit its two bound tests or pending report."""
-    if not recovery or recovery.get('kind') != 'review_failure' or round_no != 0:
+    if not recovery:
         return
-    authorized = set(recovery['repair_files']) | {task['acceptance_report']}
+    if recovery.get('kind') == 'review_failure':
+        if round_no != 0:
+            return
+        approved_files = set(recovery['repair_files'])
+    elif (recovery.get('kind') == 'acceptance_failure'
+          and recovery.get('failure_scenario') == 'kqueue_non_reaping'):
+        approved_files = {'tools/llmtool/tests/test_git_containment.py'}
+    else:
+        return
+    authorized = approved_files | {task['acceptance_report']}
     touched = set(touched)
-    if not touched.issubset(authorized) or not touched.intersection(recovery['repair_files']):
-        raise Stop('review recovery Codex edited outside two authorized test files '
-                   'or made no test-harness repair')
+    if not touched.issubset(authorized) or (round_no == 0 and not touched.intersection(approved_files)):
+        raise Stop('bounded recovery Codex edited outside authorized test files '
+                   'or made no first-round test-harness repair')
 
 
 def prepare_review_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
@@ -2462,7 +2535,20 @@ def main():
             extra = ((' This was a harness preflight failure before any native scenario. Read '
                       'recovery-evidence/failure-0.json too; repair only these authorized test files: '
                       + ', '.join(task['acceptance_failure_recovery']['repair_files']) + '.')
-                     if scenario == 'preflight' else '')
+                     if scenario == 'preflight' else
+                     (' This is the independently diagnosed 64433 TEST-HARNESS ONLY failure, not a '
+                      'valid Claude classification. Repair only the existing '
+                      'tools/llmtool/tests/test_git_containment.py kqueue_non_reaping scenario '
+                      '(plus a truthful pending note in the acceptance report). '
+                      'Before-exit NOTE_EXIT registration MUST still produce a non-reaping event; '
+                      'zombie-first path must prove original identity, unreaped zombie and bounded '
+                      'exit state. Darwin may return ESRCH if registration occurs after process exit; '
+                      'do NOT simply ignore ESRCH or treat arbitrary ESRCH as PASS. '
+                      'Do NOT edit any production module, ExitNote implementation, other tests, '
+                      'test counts/timeout ceilings, signal/identity checks or acceptance script. '
+                      'Read recovery-evidence/failure-0.json and local run diagnostic context. '
+                      'All fourteen scenarios and both full suites must run afresh. ')
+                      if scenario == 'kqueue_non_reaping' else '')
             repair_reason = ('Repair the existing committed candidate after the coordinator-assessed ' + label + ' Mac failure. '
                 'Preserve the original failure. Read recovery.json, recovery-evidence/summary.json and '
                 'recovery-evidence/mac-containment-0.json under ' + str(logs) + '.' + extra + ' '
