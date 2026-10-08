@@ -3146,7 +3146,7 @@ def verify_pr55_medium_repair(root, task):
     logs = root / '.ai-loop' / run_id
     private = root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json'
     def checked(path):
-        if (any(p.is_symlink() for p in (root / '.ai-loop', logs, path))
+        if (any(p.is_symlink() for p in (root / '.ai-loop', logs, path.parent, path))
                 or not path.is_file() or path.stat().st_size > 256 * 1024):
             raise Stop('Medium repair private evidence absent or unsafe')
         return json.loads(path.read_bytes())
