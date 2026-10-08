@@ -61,6 +61,29 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
+## Native self-development MVP — new cost-first priority
+
+The nearest llmtool product goal is **not** expanding the temporary
+`ai-loop` launcher. The objective is llmtool's own scoped
+Codex CLI development → Claude CLI independent review → real tests →
+bounded repair → audited PR handoff, with quality-preserving **measured
+premium-token reduction** from selective company-model delegation.
+
+[Release sequence and acceptance requirements](NATIVE_SELF_DEV_MVP.md):
+**C0** read-only llmtool development dogfood available now; **C1**
+deterministic real-test-output excerpt selection and company-only
+reliability/token benchmark; **C2** safety-reviewed native repository
+execution vertical slice; **C3** actual Mac self-development acceptance
+and ai-loop cutover. C1/C2/C3 are proposed, **not yet implemented**.
+Existing Claude/Codex CLI providers are intentionally **text-only**
+and do not grant edit/test/Git capabilities. A11b process containment
+does not itself authorize real Git ADD or general execution.
+
+Cost evidence is route-specific: small PR #36 pilot was token-negative
+(Codex usage increased by 104.46%); one large-log L01 research pipeline
+had two quality-approved Codex savings observations (39.82% / 37.55%).
+Do not advertise broad savings before representative tests and accounting.
+
 ## A11 delivery checkpoint
 
 A11 is deliberately split into implementation milestones and independent quality
