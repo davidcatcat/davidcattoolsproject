@@ -1,0 +1,21 @@
+{
+  "task_id": "ai-loop-maintenance-issue52-20261009",
+  "mode": "maintenance_existing_dirty",
+  "repo": "davidcatcat/davidcattoolsproject",
+  "branch": "automation/ai-loop",
+  "original_local_head": "ac03992b6025a2f1fbea786be4b9823ecbef325f",
+  "target": "scripts/test_ai_loop.py",
+  "allowed_files": [
+    "scripts/test_ai_loop.py"
+  ],
+  "ci_workflow": "ai-loop-ci.yml",
+  "ci_versions": [
+    "3.9",
+    "3.14"
+  ],
+  "expected_helper_test_count": 210,
+  "max_repairs": 1,
+  "remote_pr": 45,
+  "normal_task": "C1-test-excerpts-20261009",
+  "no_auto_merge": true
+}
