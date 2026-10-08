@@ -45,12 +45,11 @@ is the detailed **proposed** priority/gate contract:
   measurable task-level premium-token/quality/latency results. Freeze
   or deprecate duplicate ai-loop orchestration only after parity.
 
-PR #49's synthetic A11b.2.2.1 containment is independently reported
-Security/Functional QA PASS with native Mac evidence, but remains
-**unmerged** as of this baseline and grants **no real Git ADD**.
-PR #45 temporary helper remains separate and Draft. Finish #49
-merge authorization and required future product-execution gates
-independently. Do **not** block initial read-only C0/C1 dogfood
+PR #49's synthetic A11b.2.2.1 containment has **Security/Functional QA PASS**,
+14/14 native Mac acceptance and 20/20 + 20/20 parent SIGKILL repetitions.
+It was **squash-merged** as `eb464628dd6096811c659cfdf663f364107a6ef4`.
+This does **not authorize real Git ADD**. PR #45 temporary helper remains Draft;
+future product-execution gates and A11b.2.2.2 require a separate design/review. Do **not** block initial read-only C0/C1 dogfood
 on A12 Telegram, optional A2.3 HTTP or a complete generic executor.
 A measured cost optimization cannot replace safety/QA gate PASS.
 
@@ -67,7 +66,7 @@ current roadmap.
 | P1 — Failure Usage Preservation | **DONE and merged** via PR #39 `56799527`; safe validated usage survives parseable provider failures without changing failure semantics | Use as observability/accounting foundation; no historical benchmark recomputation |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2 B5-GATED** | Review B5 containment design, then containment harness; real Git ADD remains prohibited |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2.1 synthetic containment DONE/merged via PR #49 `eb464628`** | A11b.2.2.2 real Git ADD requires separately reviewed design, product isolation, approval and hardening; not authorized |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
@@ -851,7 +850,8 @@ the retained controls below before introducing any side effect.
 Current sub-slice status:
 
 - **A11b.2.1 — deterministic Git ADD preflight/state verifier: DONE/merged via PR #43 `780970ab`.** It is internal/read-only, constructs but never executes the future ADD argv, and has no public mutation path.
-- **A11b.2.2 — internal Git ADD mutation: NOT STARTED / B5 design remediation / NOT AUTHORIZED.** PR #44 updates the [B5 spec](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md) for H1/H2/M1/M2/M3 and records [remediation dispositions](../../reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md). Independent targeted re-review is pending. A design PASS permits requesting separate slice authorization; it does not authorize implementation automatically. This documentation task authorizes none of 2.2.0, 2.2.1 or 2.2.2. Real `git add` stays prohibited until the separately authorized containment harness passes actual macOS signal/SIGKILL probes and independent review.
+- **A11b.2.2.1 — synthetic containment harness: DONE / squash-merged via PR #49 `eb464628`.** Independent Security re-review PASS, independent Functional QA PASS, Mac native 14/14 and SIGKILL 20+20 PASS on source-bound evidence. The versioned [B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md) supersedes the earlier fake-process topology for this slice only. Deferred LOW: S49-3 raw-FD rejection leak and QA49-N1 natural leader-exit permanent regression; P49-L1 fixture hook isolation is required before real product integration.
+- **A11b.2.2.2 — actual Git ADD mutation: NOT STARTED / NOT AUTHORIZED.** It still requires a separately reviewed B5 §14.1 product integration design (post-state semantics, fault hook isolation, host-thread/sandbox and approval constraints) and a new task contract. No synthetic test PASS or documentation task authorizes real `git add`.
 
 任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
 包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
