@@ -1,11 +1,18 @@
 # davidcattoolsproject
 
+## Mandatory interim llmtool development operation (2026-10-09)
+
+**Until an independently accepted llmtool-native A11b/A11c workflow replaces it, the user's only standard Mac operation is to run a vetted `ai-loop` script. The user is not the Codex/Claude prompt courier.** Coordinator publishes Git-pinned `automation/ai-loop/task.md` + `task.json`; ai-loop owns scoped code/review/tests/bounded repair and PR/CI. A helper or environment STOP requires **script-first maintenance and evidence-preserving recovery** instead of asking the user to paste shell/model prompts. Follow [ai-loop-handoff Skill](skills/ai-loop-handoff/SKILL.md), [active control README](automation/ai-loop/README.md) and [maintenance handoff](automation/ai-loop/MAINTENANCE_HANDOFF.md).
+
+**Current blocker:** Issue #52's local uncommitted helper test fix has not been independently reviewed or verified by exact-head GitHub CI; Issue #53's self-maintenance mode is NOT IMPLEMENTED. Normal C1 is NOT READY. Updating these documents does not repair the executable.
+
 Personal AI-assisted engineering tools and reusable Agent Skills.
 
 ## Skills
 
 This repository currently provides:
 
+- `ai-loop-handoff` — single validated Mac launcher and maintenance-first helper recovery.
 - `start-project` — turn a new idea into a small testable v0.1.
 - `inspect-repo` — inspect an unfamiliar repository before changing it.
 - `implement-feature` — implement a change through tests and final validation.
