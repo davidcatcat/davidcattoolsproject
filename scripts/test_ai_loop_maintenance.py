@@ -133,5 +133,54 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(m.TARGET,'scripts/test_ai_loop.py')
         self.assertEqual(m.BRANCH,'automation/ai-loop')
 
+
+    def test_post_push_without_marker_resumes_only_exact_candidate(self):
+        with tempfile.TemporaryDirectory() as d:
+            head = 'e'*40
+            def fake_git(*args, **kwargs):
+                values = {
+                    ('fetch', '--no-tags', 'origin', 'refs/heads/' + m.BRANCH + ':refs/remotes/origin/' + m.BRANCH): '',
+                    ('rev-parse', 'origin/' + m.BRANCH): head,
+                    ('show', head + ':automation/ai-loop/task.json'): '{"task":"C1"}',
+                    ('show', m.BASE + ':automation/ai-loop/task.json'): '{"task":"C1"}',
+                    ('rev-parse', '--absolute-git-dir'): d,
+                    ('rev-parse', m.BASE + ':' + m.TARGET): 'old',
+                    ('rev-parse', head + ':' + m.TARGET): 'new',
+                    ('hash-object', m.TARGET): 'new',
+                    ('rev-parse', head + '^:' + m.TARGET): 'old',
+                    ('diff', '--name-only', head + '^', head): m.TARGET,
+                    ('show', '-s', '--format=%s', head): 'test(ai-loop): isolate historical recovery fixtures',
+                }
+                if args not in values: raise AssertionError(args)
+                return values[args]
+            with patch.object(m, 'git', side_effect=fake_git):
+                self.assertEqual(m.remote_pinned(head), head)
+                marker = Path(d)/'ai-loop'/'maintenance-issue52'/'published-commit'
+                self.assertEqual(marker.read_text().strip(), head)
+                self.assertEqual(m.remote_pinned(head), head)
+
+    def test_post_push_rejects_spoofed_multi_file_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            head = 'e'*40
+            def fake_git(*args, **kwargs):
+                values = {
+                    ('fetch', '--no-tags', 'origin', 'refs/heads/' + m.BRANCH + ':refs/remotes/origin/' + m.BRANCH): '',
+                    ('rev-parse', 'origin/' + m.BRANCH): head,
+                    ('show', head + ':automation/ai-loop/task.json'): 'C1',
+                    ('show', m.BASE + ':automation/ai-loop/task.json'): 'C1',
+                    ('rev-parse', '--absolute-git-dir'): d,
+                    ('rev-parse', m.BASE + ':' + m.TARGET): 'old',
+                    ('rev-parse', head + ':' + m.TARGET): 'new',
+                    ('hash-object', m.TARGET): 'new',
+                    ('rev-parse', head + '^:' + m.TARGET): 'old',
+                    ('diff', '--name-only', head + '^', head): m.TARGET + '\nother.py',
+                    ('show', '-s', '--format=%s', head): 'test(ai-loop): isolate historical recovery fixtures',
+                }
+                return values[args]
+            with patch.object(m, 'git', side_effect=fake_git):
+                with self.assertRaisesRegex(m.Stop, 'cannot be authenticated'):
+                    m.remote_pinned(head)
+                self.assertFalse((Path(d)/'ai-loop'/'maintenance-issue52'/'published-commit').exists())
+
 if __name__=='__main__':
     unittest.main()
