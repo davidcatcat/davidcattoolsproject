@@ -879,7 +879,7 @@ def prepare_sandbox_decision_resume(root, task, run_id, current_untracked, track
     if rc != 0:
         raise Stop('sandbox decision candidate must descend from pinned main')
     paths = {p for p in git(root, 'diff', '--name-only', '-z',
-                            task['base_sha'], policy['expected_head']).split('\\0') if p}
+                            task['base_sha'], policy['expected_head']).split('\0') if p}
     if not paths or not paths.issubset(set(task['allowed_files'])):
         raise Stop('sandbox decision candidate exceeds original scope')
 
@@ -2806,7 +2806,7 @@ def main():
                 'weaken assertions or thresholds, or overwrite historical evidence. '
                 'All related, full, and native tests/reviews must run again on changed bytes.')
         native_recovery = recovery is not None and recovery.get('kind') == 'acceptance_failure'
-        if native_recovery:
+        if native_recovery and recovery.get('origin_kind') != 'sandbox_decision':
             scenario = recovery.get('failure_scenario',
                                      task.get('acceptance_failure_recovery', {}).get('failure_scenario', 'sigint'))
             label = 'SIGINT' if scenario == 'sigint' else scenario
