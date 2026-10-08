@@ -269,6 +269,63 @@ class NativeResumeTests(unittest.TestCase):
             self.assertEqual(recovery['inherited_validation'], 'NONE')
             self.assertEqual(recovery['evidence_files']['mac-containment-0.json'], policy['evidence_sha256'])
 
+    def test_preflight_harness_failure_can_recover_without_native_pass_or_pid_cleanup(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            tested = json.loads((old/'summary.json').read_text())['history'][0]['tested_sha256']
+            mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': {}, 'scenarios': {},
+                   'failure': {'status': 'FAIL', 'scenario': 'preflight',
+                               'exception_type': 'ValueError', 'owned_processes': []}}
+            loop.save_json(old/'mac-containment-0.json', mac)
+            summary = json.loads((old/'summary.json').read_text())
+            summary['reason'] = 'failure coordinator: MAC_EVIDENCE_INCOMPLETE; bounded test harness repair'
+            loop.save_json(old/'summary.json', summary)
+            failure = {'run_id': self.run_id, 'task_id': task['task_id'], 'round': 0,
+                       'phase': 'mandatory-final', 'head': 'e'*40, 'source_sha256': tested,
+                       'status': 'FAIL', 'gate_waived': False, 'evidence': {'mac': mac}}
+            loop.save_json(old/'failure-0.json', failure)
+            policy = task['acceptance_failure_recovery']
+            policy.update(failure_scenario='preflight',
+                summary_sha256=loop.digest(old/'summary.json'),
+                evidence_sha256=loop.digest(old/'mac-containment-0.json'),
+                failure_evidence_sha256=loop.digest(old/'failure-0.json'),
+                repair_files=['source.py'])
+            with patch.object(loop, 'ensure_failed_probe_pids_absent') as pid_check:
+                original, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            self.assertEqual(original, inventory)
+            self.assertEqual(recovery['failure_scenario'], 'preflight')
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(recovery['evidence_files']['failure-0.json'], policy['failure_evidence_sha256'])
+            pid_check.assert_not_called()
+
+    def test_preflight_recovery_requires_exact_empty_native_state_and_failure_hash(self):
+        for fault in ('scenarios', 'tested', 'owned', 'failure'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory, *rest):
+                tested = json.loads((old/'summary.json').read_text())['history'][0]['tested_sha256']
+                mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': {}, 'scenarios': {},
+                       'failure': {'status': 'FAIL', 'scenario': 'preflight',
+                                   'exception_type': 'ValueError', 'owned_processes': []}}
+                if fault == 'scenarios': mac['scenarios'] = {'sigint': {'status': 'PASS'}}
+                if fault == 'tested': mac['tested_sha256'] = {'source.py': 'x'}
+                if fault == 'owned': mac['failure']['owned_processes'] = [{'pid': 123}]
+                loop.save_json(old/'mac-containment-0.json', mac)
+                summary = json.loads((old/'summary.json').read_text())
+                summary['reason'] = 'failure coordinator: MAC_EVIDENCE_INCOMPLETE; bounded test harness repair'
+                loop.save_json(old/'summary.json', summary)
+                failure = {'run_id': self.run_id, 'task_id': task['task_id'], 'round': 0,
+                           'phase': 'mandatory-final', 'head': 'e'*40, 'source_sha256': tested,
+                           'status': 'FAIL', 'gate_waived': False, 'evidence': {'mac': mac}}
+                loop.save_json(old/'failure-0.json', failure)
+                policy = task['acceptance_failure_recovery']
+                policy.update(failure_scenario='preflight',
+                    summary_sha256=loop.digest(old/'summary.json'),
+                    evidence_sha256=loop.digest(old/'mac-containment-0.json'),
+                    failure_evidence_sha256=loop.digest(old/'failure-0.json'),
+                    repair_files=['source.py'])
+                if fault == 'failure':
+                    (old/'failure-0.json').write_text('{}')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+
     def test_explicit_scenario_mismatch_stops_even_with_repinned_hash(self):
         for expected, observed in (('hung_supervisor', 'sigint'), ('sigint', 'hung_supervisor'),
                                    ('hung_supervisor', 'parent_sigkill_plain')):
@@ -313,6 +370,28 @@ class NativeResumeTests(unittest.TestCase):
         bad = copy.deepcopy(task)
         bad['acceptance_failure_recovery']['extra'] = 'unreviewed'
         with self.assertRaises(loop.Stop): load(bad)
+
+    def test_preflight_recovery_schema_is_bounded_to_allowlisted_test_files(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('stopped_failure_recovery', None)
+        task['acceptance_failure_recovery'] = {
+            'run_id': self.run_id, 'control_sha': '1'*40, 'expected_head': '2'*40,
+            'summary_sha256': '3'*64, 'evidence_sha256': '4'*64,
+            'failure_scenario': 'preflight', 'failure_evidence_sha256': '5'*64,
+            'repair_files': ['tools/llmtool/tests/run_containment_acceptance.py']}
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertEqual(load(task)['acceptance_failure_recovery']['failure_scenario'], 'preflight')
+        for fault in ('missing_failure_hash', 'empty_files', 'production_file', 'extra'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task)
+                recovery = bad['acceptance_failure_recovery']
+                if fault == 'missing_failure_hash': recovery.pop('failure_evidence_sha256')
+                elif fault == 'empty_files': recovery['repair_files'] = []
+                elif fault == 'production_file': recovery['repair_files'] = [bad['allowed_files'][0]]
+                else: recovery['extra'] = True
+                with self.assertRaises(loop.Stop): load(bad)
 
     def test_new_auto_policy_budget_can_follow_old_failure_without_scope_or_gate_changes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
@@ -2193,6 +2272,32 @@ class FailureCoordinationTests(unittest.TestCase):
                 with patch.object(loop, 'ensure_failed_probe_pids_absent', side_effect=loop.Stop('still present')):
                     with self.assertRaises(loop.Stop): obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
                 kill.assert_not_called(); killpg.assert_not_called()
+
+    def test_mac_preflight_test_bug_can_repair_without_native_scenario_evidence(self):
+        with self.fixture() as (root, logs, task, obj, pub, review):
+            test_path = 'tools/llmtool/tests/run_containment_acceptance.py'
+            task['allowed_files'].append(test_path)
+            original = review.side_effect
+            def preflight_decision(*a):
+                value = original(*a)
+                value['category'] = 'TEST_BUG'
+                value['findings'][0]['file'] = test_path
+                return value
+            review.side_effect = preflight_decision
+            mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': {}, 'scenarios': {},
+                   'failure': {'status': 'FAIL', 'scenario': 'preflight',
+                               'exception_type': 'ValueError', 'owned_processes': []}}
+            reason = obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
+            self.assertIn('Repair only', reason)
+            self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
+
+    def test_mac_preflight_without_test_bug_classification_stays_blocked(self):
+        with self.fixture() as (root, logs, task, obj, *rest):
+            mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': {}, 'scenarios': {},
+                   'failure': {'status': 'FAIL', 'scenario': 'preflight',
+                               'exception_type': 'ValueError', 'owned_processes': []}}
+            with self.assertRaisesRegex(loop.Stop, 'MAC_EVIDENCE_INCOMPLETE'):
+                obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
 
     def test_mac_proven_clean_failure_can_repair_on_changed_bytes(self):
         with self.fixture() as (root, logs, task, obj, *rest):
