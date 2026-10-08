@@ -5,6 +5,10 @@ description: Implement a feature or bug fix from an agreed requirement through t
 
 # Implement Feature
 
+## llmtool developer handoff during ai-loop transition
+
+Before native llmtool A11b/A11c self-development acceptance, follow [ai-loop-handoff](../ai-loop-handoff/SKILL.md). Coordinator supplies pinned Git task markdown/JSON, runner executes Codex, independent read-only Claude, tests and bounded repair; Mac user only starts a validated script. On runner/CI/system STOP, first repair orchestration under a separate, exact-authorized maintenance contract and preserve existing candidate/evidence. Do not replace that automation with user-pasted agent prompts. A written maintenance issue or handoff is not executable readiness.
+
 Deliver a working change, not just code generation.
 
 ## Process
