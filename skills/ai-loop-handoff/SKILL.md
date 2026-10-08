@@ -5,6 +5,17 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## PR #55 pending Medium risk disposition — privacy-safe one-command classification
+
+[Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6069088872) records an exact-revision dual specialist `PASS`, but with **one non-blocking Medium Security finding** (plus seven Low findings). This is a **coordinator merge HOLD**, not an automatic waiver, and not a reason to rerun full C1 or make the user a prompt courier.
+
+The temporary runner now has an explicit one-use `--qa-medium 20261008T202910Z-31100`: first verify the original frozen private role evidence through `--qa-findings`' deterministic checks, then independently categorize ONLY the Medium issue by one read-only Claude CLI call. Publish **only** fixed enum category/action/confidence and allowlisted code location; never upload raw review paragraphs, model summaries, private test output or credentials. Cache validated private classification to avoid replay. On provider/identity/schema drift STOP without PR modification. No source edits or merge.
+
+Run from canonical Mac repository **only when the control branch HEAD helper CI 3.9/3.14 has passed**:
+`bash .git/ai-loop/run.sh --qa-medium 20261008T202910Z-31100`.
+Coordinator then decides whether to scope a Codex repair on the **same** PR #55, restart exact-head CI and required independent gates, or demand explicit higher-level security risk acceptance. Never auto-merge or move to company-only Phase 0/Token comparison solely on a PASS status.
+
+
 ## Active handoff: PR #55 dedicated dual specialist review
 
 Once C1 source was implemented, runner [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55) HEAD `67d02be6bc8cb3f237c5060edda3321f6d885bf3` passed ordinary code review and GitHub CI. **Current task.md/task.json now authorize a different task** `C1-PR55-Security-Functional-QA-20261009`, `mode=review_existing_pr`. Never run the old new-pr or prior `--resume`. The actual source/test task is archived in `automation/ai-loop/history/20261009-C1-issue51-completed-task.md/json`.
