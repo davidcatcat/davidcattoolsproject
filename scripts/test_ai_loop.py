@@ -158,6 +158,106 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     loop.independent_qa_pr55(root, logs, task, 'task', {})
                 review.assert_not_called()
 
+class PR55MediumRepairAuthorityTests(unittest.TestCase):
+    """The one original private Medium finding is the ONLY new writer authority."""
+
+    @contextmanager
+    def evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / '.ai-loop' / '20261008T202910Z-31100'
+            logs.mkdir(parents=True)
+            head = '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
+            source = 'tools/llmtool/llmtool/test_output_excerpts.py'
+            test = 'tools/llmtool/tests/test_test_output_excerpts.py'
+            finding = {'severity': 'Medium', 'blocking': False, 'file': source,
+                       'detail': 'PRIVATE-MEDIUM-REVIEW-DETAIL',
+                       'evidence': 'PRIVATE-MEDIUM-REVIEW-EVIDENCE'}
+            risk_sha = hashlib.sha256(json.dumps(
+                finding, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            role = {'status': 'PASS', 'reviewed_head': head, 'summary': 'PRIVATE-ROLE-SUMMARY',
+                    'findings': [finding] + [
+                        {'severity': 'Low', 'blocking': False, 'file': source,
+                         'detail': 'LOW', 'evidence': 'SOURCE'} for _ in range(2)]}
+            task = {'pr_number': 55, 'base_sha': '8e29024656f873431f6ad83e45015b57bfe381a9',
+                    'expected_head': head, 'branch': 'feat/llmtool-c1-test-excerpts-20261009',
+                    'qa_medium_repair': {'run_id': logs.name, 'head': head,
+                        'original_finding_sha256': risk_sha,
+                        'risk_classification': 'INPUT_VALIDATION',
+                        'risk_action': 'FIX_BEFORE_MERGE',
+                        'source_file': source, 'test_file': test}}
+            loop.save_json(logs / 'task.json', {
+                'qa_gates': ['security', 'functional_qa'], 'expected_head': head,
+                'pr_number': 55})
+            loop.save_json(logs / 'qa-pr55.json', {
+                'run_id': logs.name, 'head': head, 'pr': 55,
+                'diff_sha256': 'f977cb5dcd8ab47dc787cb0d1f439e843d0bff99dd1f69e018157a28348c7ea8',
+                'qa_result': 'PASS', 'merge_authorized': False,
+                'roles': [{'role':'security', **role}, {'role':'functional_qa', 'status':'PASS'}]})
+            loop.save_json(logs / 'claude-201.json', role)
+            medium_dir = root / '.ai-loop' / 'qa-medium-issue56'
+            medium_dir.mkdir()
+            loop.save_json(medium_dir / 'assessment.json', {
+                'reviewed_head': head, 'original_finding_sha256': risk_sha,
+                'action': 'FIX_BEFORE_MERGE', 'category': 'INPUT_VALIDATION',
+                'confidence': 'HIGH', 'source_path': source, 'line': 46,
+                'private_reason': 'PRIVATE-INDEPENDENT-REASON'})
+            def git(_, *args):
+                values = {
+                    ('rev-parse', 'HEAD'): head,
+                    ('branch', '--show-current'): task['branch'],
+                    ('status', '--porcelain'): '',
+                    ('diff', '--no-ext-diff', '--no-textconv', task['base_sha'], head):
+                        'frozen PR55 patch'}
+                if args not in values:
+                    raise AssertionError(args)
+                return values[args]
+            real_sha = hashlib.sha256
+            def spoof_patch_hash(data):
+                if data == b'frozen PR55 patch':
+                    obj = Mock()
+                    obj.hexdigest.return_value = 'f977cb5dcd8ab47dc787cb0d1f439e843d0bff99dd1f69e018157a28348c7ea8'
+                    return obj
+                return real_sha(data)
+            with patch.object(loop, 'git', side_effect=git), \
+                 patch.object(loop.hashlib, 'sha256', side_effect=spoof_patch_hash):
+                yield root, task, logs, finding
+
+    def test_exact_frozen_medium_authorizes_only_regression_scoped_reason(self):
+        with self.evidence() as (root, task, logs, finding):
+            with patch.object(loop, 'codex') as codex, patch.object(loop, 'claude') as claude:
+                instruction = loop.verify_pr55_medium_repair(root, task)
+                codex.assert_not_called()
+                claude.assert_not_called()
+            self.assertIn(finding['detail'], instruction)
+            self.assertIn(finding['evidence'], instruction)
+            self.assertIn('ONLY', instruction)
+            self.assertIn(task['qa_medium_repair']['test_file'], instruction)
+            self.assertIn('No prior tests/Claude QA results count as PASS', instruction)
+
+    def test_medium_repair_rejects_tampered_action_head_finding_and_qa_gate(self):
+        with self.evidence() as (root, task, logs, finding):
+            assessment = root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json'
+            data = json.loads(assessment.read_text())
+            data['action'] = 'DEFER_WITH_EXPLICIT_RISK_ACCEPTANCE'
+            loop.save_json(assessment, data)
+            with self.assertRaisesRegex(loop.Stop, 'not proved'):
+                loop.verify_pr55_medium_repair(root, task)
+            data['action'] = 'FIX_BEFORE_MERGE'
+            loop.save_json(assessment, data)
+            task['qa_medium_repair']['original_finding_sha256'] = 'e'*64
+            with self.assertRaisesRegex(loop.Stop, 'not proved'):
+                loop.verify_pr55_medium_repair(root, task)
+            task['qa_medium_repair']['original_finding_sha256'] = data['original_finding_sha256']
+            evidence = logs / 'qa-pr55.json'
+            report = json.loads(evidence.read_text())
+            report['qa_result'] = 'STOPPED'
+            loop.save_json(evidence, report)
+            with self.assertRaisesRegex(loop.Stop, 'specialist evidence mismatch'):
+                loop.verify_pr55_medium_repair(root, task)
+
+
 class FrozenPR55MediumRiskTests(unittest.TestCase):
     """A separate bounded local classification, not a security approval."""
 
