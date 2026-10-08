@@ -158,6 +158,115 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     loop.independent_qa_pr55(root, logs, task, 'task', {})
                 review.assert_not_called()
 
+class FrozenPR55MediumRiskTests(unittest.TestCase):
+    """A separate bounded local classification, not a security approval."""
+
+    @contextmanager
+    def evidence(self, *, provider_error=False):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            logs = root / '.ai-loop' / '20261008T202910Z-31100'
+            logs.mkdir(parents=True)
+            head = '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
+            filepath = 'tools/llmtool/llmtool/test_output_excerpts.py'
+            task = {'pr_number': 55, 'qa_gates': ['security', 'functional_qa'],
+                'expected_head': head, 'branch': 'feat/llmtool-c1-test-excerpts-20261009',
+                'base_sha': '8e29024656f873431f6ad83e45015b57bfe381a9',
+                'allowed_files': [filepath]}
+            medium = {'severity': 'Medium', 'blocking': False, 'file': filepath,
+                'detail': 'PRIVATE-REVIEW-FINDING-DO-NOT-PUBLISH',
+                'evidence': 'PRIVATE-REVIEW-CODE-EVIDENCE'}
+            low = {'severity': 'Low', 'blocking': False, 'file': filepath,
+                'detail': 'benign local review', 'evidence': 'fixed source line'}
+            loop.save_json(logs / 'claude-201.json', {
+                'status': 'PASS', 'reviewed_head': head, 'summary': 'private review',
+                'findings': [medium, low, low]})
+            digest = hashlib.sha256(json.dumps(medium, sort_keys=True,
+                ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+            response = {'reviewed_head': head, 'original_finding_sha256': digest,
+                'category': 'DATA_EXPOSURE', 'action': 'FIX_BEFORE_MERGE',
+                'confidence': 'MEDIUM', 'source_path': filepath, 'line': 123,
+                'private_reason': 'PRIVATE-CLAUDE-CODE-DETAIL'}
+            sent, reviews = [], []
+            def fake_git(_root, *args):
+                if args == ('branch', '--show-current'):
+                    return task['branch']
+                if args == ('rev-parse', 'HEAD'):
+                    return head
+                if args == ('status', '--porcelain'):
+                    return ''
+                raise AssertionError(args)
+            def fake_run(argv, _root, **kwargs):
+                if argv[0] == 'claude':
+                    reviews.append((argv, kwargs.get('stdin')))
+                    kwargs['stdout_path'].write_text(json.dumps(
+                        {'subtype': 'success', 'is_error': provider_error,
+                         'structured_output': response}), encoding='utf-8')
+                    return ''
+                if argv[:2] == ['gh', 'api'] and '--method' not in argv:
+                    return json.dumps([{'body': x.removeprefix('body=')} for x in sent])
+                if argv[:4] == ['gh', 'api', '--method', 'POST']:
+                    sent.append(argv[-1])
+                    return '{"id":789}'
+                raise AssertionError(argv)
+            with patch.object(loop, 'git', side_effect=fake_git), \
+                 patch.object(loop, 'run', side_effect=fake_run), \
+                 patch.object(loop, 'publish_frozen_qa_severity_inventory', return_value=None):
+                yield root, logs, task, medium, response, sent, reviews
+
+    def test_medium_reviewer_sanitizes_public_output_and_reuses_existing_result(self):
+        with self.evidence() as (root, logs, task, medium, result, sent, reviews):
+            loop.assess_frozen_pr55_medium(root, logs, task)
+            self.assertEqual(len(reviews), 1)
+            self.assertIn('PRIVATE-REVIEW-FINDING', reviews[0][1])
+            self.assertIn('Read,Glob,Grep', reviews[0][0])
+            self.assertEqual(len(sent), 1)
+            self.assertIn('Category: DATA_EXPOSURE', sent[0])
+            self.assertIn('Action: FIX_BEFORE_MERGE', sent[0])
+            for private in ('PRIVATE-REVIEW', 'PRIVATE-CLAUDE'):
+                self.assertNotIn(private, sent[0])
+            path = root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json'
+            self.assertEqual(json.loads(path.read_text()), result)
+            loop.assess_frozen_pr55_medium(root, logs, task)
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(len(sent), 1, 'retry must not duplicate Git comment')
+
+    def test_medium_review_blocks_on_original_finding_tamper(self):
+        with self.evidence() as (root, logs, task, medium, result, sent, reviews):
+            path = logs / 'claude-201.json'
+            record = json.loads(path.read_text())
+            record['findings'][0]['blocking'] = True
+            loop.save_json(path, record)
+            with self.assertRaisesRegex(loop.Stop, 'unrecognized original Medium finding'):
+                loop.assess_frozen_pr55_medium(root, logs, task)
+            self.assertEqual(reviews, [])
+            self.assertEqual(sent, [])
+
+    def test_medium_model_error_envelope_fails_closed_without_public_output(self):
+        with self.evidence(provider_error=True) as (root, logs, task, medium, result, sent, reviews):
+            with self.assertRaisesRegex(loop.Stop, 'did not complete successfully'):
+                loop.assess_frozen_pr55_medium(root, logs, task)
+            self.assertEqual(len(reviews), 1)
+            self.assertEqual(sent, [])
+            self.assertFalse((root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json').exists())
+
+    def test_medium_schema_rejects_wrong_revision_and_untrusted_category(self):
+        with self.evidence() as (root, logs, task, medium, result, sent, reviews):
+            original = task['expected_head']
+            task['expected_head'] = 'f' * 40
+            # The real frozen inventory check would reject this before paid models.
+            task['expected_head'] = original
+            loop.assess_frozen_pr55_medium(root, logs, task)
+            path = root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json'
+            row = json.loads(path.read_text())
+            row['category'] = 'PRIVATE-CLAUDE-CATEGORY'
+            loop.save_json(path, row)
+            with self.assertRaisesRegex(loop.Stop, 'schema violation'):
+                loop.assess_frozen_pr55_medium(root, logs, task)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(len(reviews), 1)
+
+
 class FrozenPR55SeverityInventoryTests(unittest.TestCase):
     """Only safe numeric metadata may cross the Mac-to-Git boundary."""
 
