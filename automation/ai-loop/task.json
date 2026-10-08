@@ -130,14 +130,13 @@
     "repeat_limit": 2,
     "allow_mac_repair": true
   },
-  "acceptance_failure_recovery": {
-    "run_id": "20261008T064055Z-64433",
-    "control_sha": "3c08dba54e6ac59db8385816ad51f2faaeacabee",
+  "sandbox_decision_recovery": {
+    "run_id": "20261008T100821Z-76644",
+    "control_sha": "2534621046491780dcbf7062856f148317edea2b",
     "expected_head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
-    "summary_sha256": "05f13f97a570ed41b70b69e9e2be246689d35c539eba020f7668d18ad804efb5",
-    "evidence_sha256": "c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc",
-    "failure_scenario": "kqueue_non_reaping",
-    "failure_evidence_sha256": "fd6b86c56af6836c08226ac762e5cf3fffa181eaab441d8b17762388848c08f5",
+    "summary_sha256": "4ba4ab9696ca0020e50eb0d951d18fb60d5b21ac163d936af22923390b5ae4ce",
+    "codex_result_sha256": "3e0778155ce211f1da82171af432b3a6e8fbb7212c7d8ee50bef1d5a6801a2f3",
+    "native_evidence_sha256": "c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc",
     "repair_files": [
       "tools/llmtool/tests/test_git_containment.py"
     ]
