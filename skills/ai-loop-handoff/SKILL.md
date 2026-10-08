@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Actual frozen C1 recovery contract — 2026-10-09
+
+The private C1 Codex decision in run `20261008T185112Z-21061` concerned **missing task/launcher files in the main-based checkout**. These are deliberately held on the Git-pinned ai-loop control branch, and their full `TASK`/`CONTRACT` are provided by the runner. The runner now explicitly declares that authority and keeps all original allowlists/security checks; do not treat the absence as a human approval requirement or copy control files into main.
+
+Current `automation/ai-loop/task.json` authorizes exactly one **zero-edit initial decision recovery**: original run/control SHA, Codex output SHA, frozen evidence, original Claude failure, no C1 file modifications/PR, clean exact branch/HEAD and one-use marker. After exact-head helper CI green, the operator uses one script-only precheck-then-resume command:
+`bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061 --check && bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061`.
+Never start fresh C1, manually pass provider prompts, waive tests or claim model review PASS from prior failure; a non-PASS recovery must remain stopped. This is a special recovery type, not permission to accept arbitrary model decisions. [Issue #54](https://github.com/davidcatcat/davidcattoolsproject/issues/54).
+
+
 ## Current C1 STOP and decision inspection (2026-10-09)
 
 C1 first-run `20261008T185112Z-21061` is STOPPED before tests: source-free Codex diagnostic confirms `NEEDS_DECISION` and **zero changed authorized files**; Claude error envelope is NOT review PASS. This is a **decision gate**, not a license to replay C1 or weaken scope. The specific private rationale has not been published. Once exact-head helper CI passes, the sole approved diagnostic handoff is `bash .git/ai-loop/run.sh --inspect-decision 20261008T185112Z-21061`, which reads pinned local evidence, refuses modified/drifted work, JSON-escapes the private summary to the *operator's terminal only*, and never uploads it or invokes a model. The coordinator may ask the operator for a **material decision** but must not demand raw model prompt/output relay. Any resume needs a new explicit, narrow, frozen contract; do not auto-approve an unknown NEEDS_DECISION. See [Issue #54](https://github.com/davidcatcat/davidcattoolsproject/issues/54).
