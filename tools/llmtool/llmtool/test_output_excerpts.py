@@ -42,8 +42,27 @@ _SENSITIVE = re.compile(
     r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|'
     r'\b(?:bearer|basic)\s+\S+|'
     r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
-    r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]|'
-    r'[a-z][a-z0-9+.-]*://[^\s/]+:[^\s/]+@', re.IGNORECASE)
+    r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.IGNORECASE)
+_URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
+_URL_AUTHORITY = re.compile(r'[^\s/]+')
+
+
+def _sensitive_url(text):
+    # Consume scheme runs without a suffix that could trigger backtracking.
+    # Authorities end at whitespace or '/', so these additional scans cannot
+    # overlap beyond the ':' of a subsequent URL delimiter. Keep arbitrary
+    # scheme/userinfo lengths and the original conservative credential check.
+    for scheme in _URL_SCHEME.finditer(text):
+        start = scheme.end()
+        if not text.startswith('://', start):
+            continue
+        authority = _URL_AUTHORITY.match(text, start + 3)
+        if authority is not None:
+            value = authority[0]
+            colon = value.find(':', 1)
+            if colon != -1 and value.find('@', colon + 2) != -1:
+                return True
+    return False
 
 
 def _error(category):
@@ -159,7 +178,7 @@ def _lines(raw):
            or (c == '\r' and (i + 1 == len(text) or text[i + 1] != '\n'))
            for i, c in enumerate(text)):
         raise _error('source contains binary or unsafe controls')
-    if _SENSITIVE.search(text):
+    if _SENSITIVE.search(text) or _sensitive_url(text):
         raise _error('source contains sensitive-content indicators')
     if raw.count(b'\n') > MAX_SOURCE_LINES:
         raise _error('source line count exceeds bound')

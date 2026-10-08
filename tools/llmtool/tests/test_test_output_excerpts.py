@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from collections import Counter
@@ -106,6 +108,27 @@ class TestOutputExcerptsTests(unittest.TestCase):
             select_test_excerpts(self.path, 1)
         self.assertNotIn(str(self.path), str(caught.exception))
         self.assertEqual(self.path.read_bytes(), raw)
+
+    def select_with_deadline(self, raw):
+        self.path.write_bytes(raw)
+        environment = os.environ.copy()
+        environment['PYTHONPATH'] = str(Path(__file__).resolve().parents[1])
+        # A child process lets the regression fail promptly even if a regex
+        # holds the GIL. Exercise the public parser, including physical reads.
+        completed = subprocess.run(
+            [sys.executable, '-c',
+             'import json, sys\n'
+             'from llmtool.errors import LLMToolError\n'
+             'from llmtool.test_output_excerpts import select_test_excerpts\n'
+             'try:\n'
+             '    result = select_test_excerpts(sys.argv[1], 1)\n'
+             'except LLMToolError as error:\n'
+             '    result = {"error": str(error)}\n'
+             'print(json.dumps(result))\n', str(self.path)],
+            env=environment, capture_output=True, text=True, check=True, timeout=5)
+        self.assertEqual(completed.stderr, '')
+        self.assertEqual(self.path.read_bytes(), raw)
+        return json.loads(completed.stdout)
 
     def test_unittest_failure_error_duplicate_ids_and_counts(self):
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('ERROR', ERROR_ID, ERROR_BODY),
@@ -344,6 +367,62 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertNotIn('FIXTURE_VALUE', str(caught.exception))
                 self.assertNotIn(indicator, str(caught.exception))
                 self.assertNotIn(str(self.path), str(caught.exception))
+
+    def test_near_limit_url_scan_completes_without_false_success(self):
+        cases = ((b'', b'a'), (b'', b'7'), (b'', b'+.-'), (b'', b'a7+.-'),
+                 (b'a://', b'a'), (b'a://', b'a:'), (b'http://user:', b'a'),
+                 (b'a://', b'@'))
+        for prefix, unit in cases:
+            with self.subTest(prefix=prefix, unit=unit):
+                size = MAX_FILE_BYTES - len(prefix)
+                raw = prefix + (unit * (size // len(unit) + 1))[:size]
+                result = self.select_with_deadline(raw)
+                self.assert_provenance(result, raw)
+                self.assert_incomplete(result, 'unknown_format')
+                self.assertEqual(result['test_status'], 'FAILED')
+                self.assertEqual(result['test_exit_code'], 1)
+                self.assertEqual(result['failure_ids'], [])
+                self.assertEqual(result['excerpts'], [])
+
+    def test_url_credentials_remain_rejected_without_component_length_caps(self):
+        urls = ('https://user:FIXTURE_VALUE@example.invalid',
+                'GIT+SSH://user:FIXTURE_VALUE@example.invalid',
+                'a' * 1024 + '://user:FIXTURE_VALUE@example.invalid',
+                'https://' + 'u' * 1024 + ':FIXTURE_VALUE@example.invalid',
+                'https://user:' + 'p' * 1024 + '@example.invalid',
+                'https://user@alias:FIXTURE_VALUE@example.invalid',
+                'https://user:part:FIXTURE_VALUE@example.invalid',
+                'https://user:part@alias@example.invalid',
+                'a://prefix+a://user:FIXTURE_VALUE@example.invalid',
+                '9+https://user:FIXTURE_VALUE@example.invalid',
+                '\u0130://user:FIXTURE_VALUE@example.invalid')
+        for url in urls:
+            with self.subTest(url_length=len(url)):
+                raw = url.encode() + b'\n' + UNIT_FAILURE
+                result = self.select_with_deadline(raw)
+                self.assertEqual(result, {'error': 'test-excerpts: source contains '
+                                         'sensitive-content indicators; details omitted'})
+                self.assertNotIn('FIXTURE_VALUE', json.dumps(result))
+                self.assertNotIn(str(self.path), json.dumps(result))
+
+        for prefix in (b'a' * 1024 + b'://', b'https://user:'):
+            raw = prefix + b'u' * (MAX_FILE_BYTES - len(prefix) - 3) + b':p@'
+            result = self.select_with_deadline(raw)
+            self.assertEqual(result, {'error': 'test-excerpts: source contains '
+                                     'sensitive-content indicators; details omitted'})
+
+    def test_urls_without_credentials_preserve_supported_report_coverage(self):
+        for url in ('https://example.invalid:443/path',
+                    'https://example.invalid/path:user@host',
+                    'https://user@example.invalid',
+                    'https://example.invalid:\nuser@host',
+                    'https://example.invalid:\tuser@host'):
+            with self.subTest(url=url):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + url)])
+                result = self.select(raw)
+                self.assertEqual(result['status'], 'COMPLETE')
+                self.assertEqual(result['test_status'], 'FAILED')
+                self.assertEqual(result['failure_ids'], [FAIL_ID])
 
     def test_invalid_metadata_and_bounds_are_rejected_before_read(self):
         for exit_code in (True, False, '1', 1.0, None, -128, 256):
