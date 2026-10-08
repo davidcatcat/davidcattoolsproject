@@ -1,0 +1,36 @@
+[1/14] fd_inheritance START
+[1/14] fd_inheritance PASS 0.486s
+[2/14] sigint START
+[2/14] sigint PASS 1.443s
+[3/14] sigterm START
+[3/14] sigterm PASS 1.445s
+[4/14] sighup START
+[4/14] sighup PASS 1.460s
+[5/14] hung_supervisor START
+closed_status native anchor {"kernel_rows":[{"micros":829066,"pgid":99436,"pid":99436,"ppid":99434,"seconds":1791474649,"status":5,"uid":501},{"micros":829066,"pgid":99436,"pid":99436,"ppid":99434,"seconds":1791474649,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":3,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[{"micros":829066,"pgid":99436,"pid":99436,"ppid":99434,"seconds":1791474649,"status":2,"uid":501}]}
+fixture_failure_unresolved {"evidence":{"decision_before_reap":true,"group_absent":true,"host_absent":true,"host_pin_verified":true,"host_reaped":true,"host_signal":"SIGKILL","inspection_eperm":false,"members_absent":[{"absent":true,"pid":99511},{"absent":true,"pid":99513}],"supervisor_absent":true},"original_owned_processes":[{"host_identity":{"micros":559441,"pgid":99509,"pid":99509,"ppid":99355,"seconds":1791474657,"sid":99509,"uid":501},"members":[{"micros":792990,"pgid":99510,"pid":99511,"ppid":99510,"seconds":1791474657,"sid":99510,"uid":501},{"micros":893649,"pgid":99510,"pid":99513,"ppid":99511,"seconds":1791474657,"sid":99510,"uid":501}],"pid":99509,"supervisor":{"micros":689090,"pgid":99510,"pid":99510,"ppid":99509,"seconds":1791474657,"sid":99510,"uid":501}}],"status":"RESOLVED"}
+fixture_failure_closed_status {"evidence":{"decision_before_reap":true,"group_absent":true,"host_absent":true,"host_pin_verified":true,"host_reaped":true,"host_signal":"SIGKILL","inspection_eperm":false,"members_absent":[{"absent":true,"pid":99521}],"supervisor_absent":true},"original_owned_processes":[{"host_identity":{"micros":815158,"pgid":99518,"pid":99518,"ppid":99355,"seconds":1791474658,"sid":99518,"uid":501},"members":[{"micros":39719,"pgid":99519,"pid":99521,"ppid":99519,"seconds":1791474659,"sid":99519,"uid":501}],"pid":99518,"supervisor":{"micros":935770,"pgid":99519,"pid":99519,"ppid":99518,"seconds":1791474658,"sid":99519,"uid":501}}],"status":"RESOLVED"}
+[5/14] hung_supervisor PASS 13.452s
+[6/14] leader_exit_descendant START
+[6/14] leader_exit_descendant PASS 0.552s
+[7/14] identity_reuse START
+[7/14] identity_reuse PASS 0.579s
+[8/14] macos_start_time START
+[8/14] macos_start_time PASS 0.001s
+[9/14] kqueue_non_reaping START
+kqueue_non_reaping native anchor {"anchor":{"micros":642664,"pgid":99546,"pid":99546,"ppid":99355,"seconds":1791474661,"sid":99546,"uid":501},"registration":"NOTE_EXIT","unreaped":true,"verification":{"kernel_rows":[{"micros":642664,"pgid":99546,"pid":99546,"ppid":99355,"seconds":1791474661,"status":5,"uid":501},{"micros":642664,"pgid":99546,"pid":99546,"ppid":99355,"seconds":1791474661,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":2,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[]},"zombie_first":false}
+kqueue_non_reaping native anchor {"anchor":{"micros":810856,"pgid":99548,"pid":99548,"ppid":99355,"seconds":1791474661,"sid":99548,"uid":501},"registration":"ESRCH_AFTER_OWNED_ZOMBIE","unreaped":true,"verification":{"kernel_rows":[{"micros":810856,"pgid":99548,"pid":99548,"ppid":99355,"seconds":1791474661,"status":5,"uid":501},{"micros":810856,"pgid":99548,"pid":99548,"ppid":99355,"seconds":1791474661,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":2,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[]},"zombie_first":true}
+[9/14] kqueue_non_reaping PASS 0.342s
+[10/14] protocol_framing START
+[10/14] protocol_framing PASS 0.143s
+[11/14] code_runtime_binding START
+[Running]
+[11/14] code_runtime_binding PASS 0.410s
+[12/14] public_import_boundary START
+<frozen runpy>:128: RuntimeWarning: 'llmtool._git_supervisor' found in sys.modules after import of package 'llmtool', but prior to execution of 'llmtool._git_supervisor'; this may result in unpredictable behaviour
+[12/14] public_import_boundary PASS 0.921s
+[13/14] parent_sigkill_plain START
+[13/14] parent_sigkill_plain PASS 9.363s
+[14/14] parent_sigkill_popen START
+[Running]
+[14/14] parent_sigkill_popen PASS 24.283s

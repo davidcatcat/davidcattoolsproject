@@ -913,21 +913,43 @@ class IdentityTests(unittest.TestCase):
         module = importlib.import_module('llmtool._git_supervisor')
         class LastAct(BaseException):
             pass
-        with patch.object(module.os, 'getpid', return_value=self.bound.pid), \
-                patch.object(module, 'identity', return_value=replace(self.bound, ppid=1)), \
-                patch.object(module.os, 'killpg', side_effect=LastAct) as kill, \
-                patch.object(module.os, '_exit') as exit_process:
-            with self.assertRaises(LastAct):
-                module._last_act(self.bound)
-            kill.assert_called_once_with(self.bound.pgid, signal.SIGKILL)
-            exit_process.assert_not_called()
-        with patch.object(module.os, 'getpid', return_value=self.bound.pid), \
-                patch.object(module, 'identity', return_value=replace(self.bound, micros=3)), \
-                patch.object(module.os, 'killpg') as kill, \
-                patch.object(module.os, '_exit', side_effect=LastAct):
-            with self.assertRaises(LastAct):
-                module._last_act(self.bound)
-            kill.assert_not_called()
+        rows = [SimpleNamespace(**{**self.bound.data(), 'ppid': ppid})
+                for ppid in (456, 1)]
+        # Prove the real double-read query rejects only the changing PPID.
+        with patch.object(kernel, '_info', side_effect=rows), \
+                patch.object(kernel.os, 'getsid', return_value=self.bound.sid):
+            with self.assertRaises(kernel.IdentityUnknown):
+                kernel.identity(self.bound.pid)
+        for failure in (kernel.IdentityUnknown('PPID race'), OSError(errno.EIO, 'libproc'),
+                        kernel.NotSupported('inspection unavailable')):
+            with self.subTest(failure=type(failure).__name__), \
+                    patch.object(module.os, 'getpid', return_value=self.bound.pid), \
+                    patch.object(module.os, 'getpgrp', return_value=self.bound.pid), \
+                    patch.object(module, 'identity', side_effect=failure) as lookup, \
+                    patch.object(module.os, 'killpg', side_effect=LastAct) as kill, \
+                    patch.object(module.os, '_exit') as exit_process:
+                with self.assertRaises(LastAct):
+                    module._last_act(self.bound)
+                kill.assert_called_once_with(0, signal.SIGKILL)
+                lookup.assert_not_called()
+                exit_process.assert_not_called()
+
+    def test_last_act_rejects_other_groups_and_stale_anchor(self):
+        module = importlib.import_module('llmtool._git_supervisor')
+        class LastAct(BaseException):
+            pass
+        for pid, pgid, own in ((123, 456, self.bound),
+                              (124, 124, self.bound),
+                              (123, 123, replace(self.bound, pgid=456)),
+                              (123, 123, replace(self.bound, sid=456))):
+            with self.subTest(pid=pid, pgid=pgid, own=own), \
+                    patch.object(module.os, 'getpid', return_value=pid), \
+                    patch.object(module.os, 'getpgrp', return_value=pgid), \
+                    patch.object(module.os, 'killpg') as kill, \
+                    patch.object(module.os, '_exit', side_effect=LastAct):
+                with self.assertRaises(LastAct):
+                    module._last_act(own)
+                kill.assert_not_called()
 
 
 class BindingBoundaryTests(unittest.TestCase):
@@ -1212,6 +1234,42 @@ class BindingBoundaryTests(unittest.TestCase):
             self.assertIn(error, containment._UNRESOLVED)
         finally:
             containment._UNRESOLVED.remove(error)
+
+
+class UnresolvedReportTests(unittest.TestCase):
+    def test_report_loss_retains_operator_wait_with_unavailable_supervisor(self):
+        ns = runpy.run_path(str(HOST), run_name='remediation_test')
+        class Waiting(BaseException):
+            pass
+        for failure in (BrokenPipeError(errno.EPIPE, 'closed'),
+                        OSError(errno.EBADF, 'invalid'), RuntimeError('report failure')):
+            with self.subTest(failure=type(failure).__name__):
+                ownership = {'anchor': None, 'child': {}, 'process': Mock(returncode=77),
+                             'fds': [9, 10], 'signals': Mock(), 'monitor': Mock(),
+                             'runtime': Mock(), 'primary_exception': OSError('original')}
+                exc = containment.ContainmentUnresolved('supervisor-lost', ownership)
+                def wait(*args):
+                    self.assertIs(exc.ownership, ownership)
+                    self.assertIs(exc.primary_exception, ownership['primary_exception'])
+                    self.assertIn(exc, containment._UNRESOLVED)
+                    for key, method in (('process', 'wait'), ('signals', 'restore'),
+                                        ('monitor', 'close'), ('runtime', 'cleanup')):
+                        getattr(ownership[key], method).assert_not_called()
+                    self.assertEqual(ownership['fds'], [9, 10])
+                    raise Waiting
+                try:
+                    with patch.object(sys, 'argv', [str(HOST)]), \
+                            patch.object(wire, 'file_hash', return_value='0'*64), \
+                            patch.object(containment, '_run', side_effect=exc), \
+                            patch.object(containment.os, 'write', side_effect=failure) as write, \
+                            patch.object(ns['select'], 'select', side_effect=wait) as waiting:
+                        with self.assertRaises(Waiting):
+                            ns['main']()
+                        write.assert_called_once()
+                        waiting.assert_called_once_with([], [], [], 1)
+                        self.assertEqual(exc.primary, 'supervisor-lost')
+                finally:
+                    containment._UNRESOLVED.remove(exc)
 
 
 class ParentLifecycleTests(unittest.TestCase):

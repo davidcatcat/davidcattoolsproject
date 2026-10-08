@@ -5,7 +5,6 @@ SIGKILL, including this supervisor. A live parent decides group cleanup before
 reaping its supervisor. Synthetic children never change session or group.
 """
 import fcntl
-from dataclasses import replace
 import os
 import select
 import signal
@@ -42,18 +41,16 @@ def _endpoints():
 
 
 def _last_act(own):
-    try:
-        current = identity(os.getpid())
-    except (OSError, IdentityUnknown, NotSupported):
-        os._exit(79)  # Ambiguity never grants a second numeric-group attempt.
-    # Parent death reparents this supervisor. Its own live PID still pins the
-    # equal group/session ID; PPID is not stable in the very EOF path we protect.
-    if (replace(current, ppid=own.ppid) != own or own.pid != os.getpid()
-            or own.pid != own.pgid or own.pid != own.sid):
-        # No uncertain numeric-group signal. Parent owns the unresolved fallback.
+    # Live self PID cannot be reused. In this closed single-thread supervisor,
+    # no setsid/setpgid or callback can change membership between check and kill.
+    # Generic libproc identity includes PPID, which races with parent death and
+    # must not gate the final self-owned cleanup.
+    pid = os.getpid()
+    if (pid != own.pid or own.pid != own.pgid or own.pid != own.sid
+            or os.getpgrp() != pid):
         os._exit(79)
-    os.killpg(own.pgid, signal.SIGKILL)
-    os._exit(79)  # SIGKILL should never return; fixed fail-closed backstop.
+    os.killpg(0, signal.SIGKILL)  # Current group, never a remembered numeric ID.
+    os._exit(79)  # SIGKILL should never return.
 
 
 def _main():

@@ -1,0 +1,6 @@
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py:127: RuntimeWarning: 'llmtool._git_supervisor' found in sys.modules after import of package 'llmtool', but prior to execution of 'llmtool._git_supervisor'; this may result in unpredictable behaviour
+  warn(RuntimeWarning(msg))
+----------------------------------------------------------------------
+Ran 81 tests in 1.550s
+
+OK
