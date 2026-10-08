@@ -1,0 +1,81 @@
+{
+  "task_id": "C1-PR55-Security-Functional-QA-20261009",
+  "mode": "review_existing_pr",
+  "pr_number": 55,
+  "expected_head": "67d02be6bc8cb3f237c5060edda3321f6d885bf3",
+  "base_sha": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "branch": "feat/llmtool-c1-test-excerpts-20261009",
+  "allowed_files": [
+    "tools/llmtool/llmtool/test_output_excerpts.py",
+    "tools/llmtool/llmtool/cli.py",
+    "tools/llmtool/tests/test_test_output_excerpts.py",
+    "tools/llmtool/tests/test_cli.py",
+    "tools/llmtool/README.md",
+    "reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md"
+  ],
+  "required_files": [
+    "tools/llmtool/llmtool/test_output_excerpts.py",
+    "tools/llmtool/tests/test_test_output_excerpts.py"
+  ],
+  "qa_gates": [
+    "security",
+    "functional_qa"
+  ],
+  "default_test_mode": "related",
+  "max_repairs": 0,
+  "timeout_seconds": 1800,
+  "claude_timeout_seconds": 2400,
+  "ci_workflow": "llmtool-ci.yml",
+  "require_local_full": true,
+  "related_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "syntax",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_test_output_excerpts.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_cli.py",
+      "-v"
+    ]
+  ],
+  "full_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=/usr/bin/python3"
+    ]
+  ]
+}
