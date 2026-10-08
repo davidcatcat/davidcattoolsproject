@@ -1,0 +1,18 @@
+{
+  "run_id": "20261008T185112Z-21061",
+  "task_id": "C1-test-excerpts-20261009",
+  "round": 0,
+  "phase": "developer",
+  "head": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "source_sha256": {
+    "tools/llmtool/llmtool/cli.py": "7e510422b30f9c626e1849dce1f98e38d631877be5359c86fb155beefb0d47d4",
+    "tools/llmtool/tests/test_cli.py": "2112061360a6e9de9db9ff849f68f8671f737f69b9458416b9869cf5a4597306",
+    "tools/llmtool/README.md": "cbf545ff57e7a3e3b56c7d47f1ae7b51f37323374b6a2fb5a33d3b818e632c74"
+  },
+  "status": "FAIL",
+  "gate_waived": false,
+  "evidence_sha256": "7359dc661a5a2251be7ab2d85adae0b6d25b130e66c49e4acf3466ab60bffa55",
+  "failed_commands": [],
+  "ci_runs": [],
+  "prior_review_status": null
+}
