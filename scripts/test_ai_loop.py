@@ -74,7 +74,7 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     raise AssertionError(args)
                 return match[args]
             with patch.object(loop, 'git', side_effect=git), \
-                 patch.object(loop, 'read_pr', return_value={'head': {'sha': head}}), \
+                 patch.object(loop, 'read_pr', return_value={'head': {'sha': head}, 'draft': True}), \
                  patch.object(loop, 'wait_ci', return_value=[{'conclusion': 'success'}]), \
                  patch.object(loop, 'check_scope', return_value=[]):
                 yield root, logs, task, head
@@ -141,6 +141,65 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
             self.assertEqual(len(public), 1)
             self.assertNotIn('PRIVATE-ISSUE-DETAIL', public[0])
             self.assertEqual(json.loads((logs / 'qa-pr55.json').read_text())['qa_result'], 'STOPPED')
+
+    def test_medium_security_pass_forbids_second_reviewer_and_final_pass(self):
+        with self.qa_fixture() as (root, logs, task, head):
+            calls = []
+            def medium_review(_root, _logs, prompt, round_no, timeout, sha):
+                calls.append(round_no)
+                return {'status': 'PASS', 'reviewed_head': head,
+                        'summary': 'PRIVATE-MEDIUM-REVIEW',
+                        'findings': [{'severity': 'Medium', 'blocking': False,
+                            'file': task['allowed_files'][0],
+                            'detail': 'PRIVATE-REGRESSION', 'evidence': 'PRIVATE-TRACE'}]}
+            with patch.object(loop, 'tests', return_value=True), \
+                 patch.object(loop, 'claude', side_effect=medium_review), \
+                 patch.object(loop, 'run', return_value='{"id":1}'):
+                with self.assertRaisesRegex(loop.Stop, 'specialist review not PASS'):
+                    loop.independent_qa_pr55(root, logs, task, 'task', {})
+            self.assertEqual(calls, [201], 'do not spend QA tokens after Security Medium')
+            summary = json.loads((logs / 'qa-pr55.json').read_text())
+            self.assertEqual(summary['qa_result'], 'STOPPED')
+            self.assertFalse(summary['merge_authorized'])
+
+    def test_new_postfix_head_and_seven_path_inventory_read_only(self):
+        with self.qa_fixture() as (root, logs, task, original_head):
+            new_head = 'd5ecfce9f7e28da2983affb235dd942d51388723'
+            new_report = ('reports/ai-loop/'
+                'C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md')
+            (root / new_report).write_text('FROZEN SOURCE REPORT')
+            task['allowed_files'].append(new_report)
+            task['expected_head'] = new_head
+            task['task_id'] = 'C1-PR55-PostFix-Security-Functional-QA-20261009'
+            def newgit(_root, *args):
+                if args == ('branch', '--show-current'):
+                    return task['branch']
+                if args == ('rev-parse', 'HEAD'):
+                    return new_head
+                if args == ('status', '--porcelain'):
+                    return ''
+                if args == ('diff', '--name-only', '-z', task['base_sha'], new_head):
+                    return '\0'.join(task['allowed_files']) + '\0'
+                if args == ('diff', '--no-ext-diff', '--no-textconv', task['base_sha'], new_head):
+                    return 'diff --git a/new_source b/new_source\n+new QA fixture'
+                raise AssertionError(args)
+            roles, publications = [], []
+            def review(_root, _logs, prompt, round_no, timeout, sha):
+                roles.append((round_no, sha, prompt))
+                return {'status':'PASS', 'reviewed_head':new_head, 'summary':'OK', 'findings':[]}
+            with patch.object(loop, 'git', side_effect=newgit), \
+                 patch.object(loop, 'read_pr', return_value={'head':{'sha':new_head}, 'draft':True}), \
+                 patch.object(loop, 'tests', return_value=True), \
+                 patch.object(loop, 'claude', side_effect=review), \
+                 patch.object(loop, 'run', side_effect=lambda args, cwd: publications.append(args) or '{"id":1}'):
+                loop.independent_qa_pr55(root, logs, task, 'postfix task', {})
+            self.assertEqual([r[0] for r in roles], [201, 202])
+            self.assertEqual([r[1] for r in roles], [new_head, new_head])
+            self.assertIn('catastrophic', roles[0][2])
+            self.assertIn('subprocess-deadline', roles[1][2])
+            self.assertIn(new_report, task['allowed_files'])
+            self.assertEqual(len(publications), 1)
+            self.assertEqual(json.loads((logs/'qa-pr55.json').read_text())['qa_result'], 'PASS')
 
     def test_no_models_on_wrong_revision_or_test_failure(self):
         with self.qa_fixture() as (root, logs, task, head):
