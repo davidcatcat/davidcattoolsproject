@@ -184,6 +184,16 @@ def remote_pinned(control_sha):
     remote = git('rev-parse', 'origin/' + BRANCH)
     marker_path = Path(git('rev-parse', '--absolute-git-dir')) / 'ai-loop' / 'maintenance-issue52' / 'published-commit'
     published = marker_path.read_text().strip() if marker_path.is_file() else None
+    if not published and remote != control_sha:
+        # A crash between successful fast-forward push and local marker write
+        # must not trigger duplicate Codex/Claude calls or a second commit.
+        # Recover only if remote is precisely our one-child commit and bytes match.
+        if (git('rev-parse', remote + '^') != control_sha
+                or git('rev-parse', remote + ':' + TARGET) != git('hash-object', TARGET)):
+            raise Stop('remote moved without exact recoverable maintenance commit')
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(remote + '\n')
+        published = remote
     if remote != (published or control_sha):
         raise Stop('control branch moved since vetted maintenance task; report for repin')
     local_before = git('rev-parse', BASE + ':' + TARGET)
