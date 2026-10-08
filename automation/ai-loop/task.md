@@ -1,3 +1,63 @@
+# CURRENT exact FAIL-review recovery — 2026-10-08 / run 60914
+
+Run `20261008T052643Z-60914` stopped after all five related suites PASS at exact
+unpublished candidate `35ad4be92f6492fa86a8bc2fe961a22cf9c84a49`,
+base `ceae425eacaa8729a9eb8d796e43304918a8c908` (merged PR #48).
+
+Claude's ordinary read-only independent review completed as **FAIL**, not formal
+security approval. Two exact blocking test-only findings are in:
+- `tools/llmtool/tests/run_containment_acceptance.py`
+- `tools/llmtool/tests/test_git_containment.py`
+
+Both still pin `63e232e22a769f409e381e34dfe0ef1add766d8e`. The current
+runner pins exact base `ceae425eacaa8729a9eb8d796e43304918a8c908`.
+No test or production containment behavior is approved as PASS; required Mac
+native acceptance will fail before the first scenario without this fix.
+
+The subsequent failure-classification Claude CLI call exited 1 and both stderr
+files were empty. This **does not establish quota/auth as the cause**.
+The exact ordinary FAIL review is already a sufficient bounded repair basis;
+do not retry or silently substitute the failed classification. Preserve local
+raw model output and provider logs.
+
+Control runner now supports a dedicated `review_failure_recovery` contract:
+- original control `2a919119459a4042e45115bc4934a7319f461740`;
+- exact stopped HEAD `35ad4be92f6492fa86a8bc2fe961a22cf9c84a49`;
+- stopped summary SHA-256
+  `921919abad240e84a5b79f6e3c9a35706bbfa939b7b161e87d0c693d96b57d24`;
+- original local `failure-0.json` SHA-256
+  `5340bb23e53cf76107f9999fbbdee94fa136d3ccdfbb6fba6e4e8f0dce0244de`;
+- exact same unchanged base, task scope and mandatory gate commands;
+- exact blocking review finding file set = the two test paths above.
+
+The runner checks the original task/summary/provenance/failure hashes,
+candidate SHA-256 for all ten allowlisted source/test/report files, an
+unpublished clean branch, and no active ai-loop Codex process. It snapshots
+the candidate before any model call; it may then call Codex **only** for a
+two-file strict-base repair and an optional truthful pending-report note.
+The first repair cannot touch production modules, other tests, task contracts,
+signal authority, real containment thresholds, fourteen scenario names or
+exact PASS requirements. Preserve all historical evidence, no retroactive PASS.
+
+Update both old-base literals to the **exact complete**
+`ceae425eacaa8729a9eb8d796e43304918a8c908` SHA. Keep strict equality;
+do not derive main SHA dynamically, accept both bases, or skip preflight.
+Rerun related checks, read-only ordinary review, both full Python suites and
+all fourteen mandatory native Mac scenarios on changed bytes. Native PASS,
+independent security/QA acceptance, PR publication and merge are pending.
+
+First Mac operator action, only after control helper CI success:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T052643Z-60914 --check
+```
+
+`--check` only verifies exact recovery contract; no model, test or source
+changes. A PASS is required before the same command without `--check`.
+Do not manually change candidate, rebase, reset, cherry-pick, publish the
+feature branch or rerun older 43467 recovery.
+
 # CURRENT post-PR48 out-of-scope TEST_BUG recovery — 2026-10-08
 
 Run `20261008T035727Z-43467` stopped on unpublished A11b candidate
