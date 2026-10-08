@@ -5,6 +5,11 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Current C1 STOP and decision inspection (2026-10-09)
+
+C1 first-run `20261008T185112Z-21061` is STOPPED before tests: source-free Codex diagnostic confirms `NEEDS_DECISION` and **zero changed authorized files**; Claude error envelope is NOT review PASS. This is a **decision gate**, not a license to replay C1 or weaken scope. The specific private rationale has not been published. Once exact-head helper CI passes, the sole approved diagnostic handoff is `bash .git/ai-loop/run.sh --inspect-decision 20261008T185112Z-21061`, which reads pinned local evidence, refuses modified/drifted work, JSON-escapes the private summary to the *operator's terminal only*, and never uploads it or invokes a model. The coordinator may ask the operator for a **material decision** but must not demand raw model prompt/output relay. Any resume needs a new explicit, narrow, frozen contract; do not auto-approve an unknown NEEDS_DECISION. See [Issue #54](https://github.com/davidcatcat/davidcattoolsproject/issues/54).
+
+
 ## Mandatory user contract
 
 Until the native llmtool self-development workflow passes A11b/A11c real-task acceptance, **ai-loop is the sole standard Mac operator interface**. The user only starts a reviewed, validated ai-loop script and makes material authorization/design decisions. **Never ask the user to copy/paste Codex prompts, Claude prompts, long ad hoc shell commands, or shuttle logs between agents.**
