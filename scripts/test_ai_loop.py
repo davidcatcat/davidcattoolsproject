@@ -59,7 +59,8 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     'pr_number': 55, 'branch': branch, 'base_sha': base,
                     'expected_head': head, 'allowed_files': paths,
                     'qa_gates': ['security', 'functional_qa'],
-                    'timeout_seconds': 1800, 'claude_timeout_seconds': 2400}
+                    'timeout_seconds': 1800, 'claude_timeout_seconds': 2400,
+                    'ci_workflow': 'llmtool-ci.yml'}
             def git(_root, *args):
                 match = {
                     ('branch', '--show-current'): branch,
@@ -74,6 +75,7 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                 return match[args]
             with patch.object(loop, 'git', side_effect=git), \
                  patch.object(loop, 'read_pr', return_value={'head': {'sha': head}}), \
+                 patch.object(loop, 'wait_ci', return_value=[{'conclusion': 'success'}]), \
                  patch.object(loop, 'check_scope', return_value=[]):
                 yield root, logs, task, head
 
