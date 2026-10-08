@@ -1,8 +1,8 @@
 {
-  "task_id": "C1-PR55-Medium-InputValidation-Fix-20261009",
+  "task_id": "C1-PR55-PostFix-Security-Functional-QA-20261009",
   "mode": "review_existing_pr",
   "pr_number": 55,
-  "expected_head": "67d02be6bc8cb3f237c5060edda3321f6d885bf3",
+  "expected_head": "d5ecfce9f7e28da2983affb235dd942d51388723",
   "base_sha": "8e29024656f873431f6ad83e45015b57bfe381a9",
   "branch": "feat/llmtool-c1-test-excerpts-20261009",
   "allowed_files": [
@@ -11,7 +11,8 @@
     "tools/llmtool/tests/test_test_output_excerpts.py",
     "tools/llmtool/tests/test_cli.py",
     "tools/llmtool/README.md",
-    "reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md"
+    "reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md",
+    "reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md"
   ],
   "required_files": [
     "tools/llmtool/llmtool/test_output_excerpts.py",
@@ -74,13 +75,8 @@
       "PYTHON=/usr/bin/python3"
     ]
   ],
-  "qa_medium_repair": {
-    "run_id": "20261008T202910Z-31100",
-    "head": "67d02be6bc8cb3f237c5060edda3321f6d885bf3",
-    "original_finding_sha256": "e1b621b2f1bf39e27763576968ce462ee429daf299b00efe8e44442e91c48a07",
-    "risk_classification": "INPUT_VALIDATION",
-    "risk_action": "FIX_BEFORE_MERGE",
-    "source_file": "tools/llmtool/llmtool/test_output_excerpts.py",
-    "test_file": "tools/llmtool/tests/test_test_output_excerpts.py"
-  }
+  "qa_gates": [
+    "security",
+    "functional_qa"
+  ]
 }
