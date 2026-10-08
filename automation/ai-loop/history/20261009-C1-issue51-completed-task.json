@@ -1,0 +1,88 @@
+{
+  "task_id": "C1-test-excerpts-20261009",
+  "mode": "implement_new_pr",
+  "pr_number": null,
+  "expected_head": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "base_sha": "8e29024656f873431f6ad83e45015b57bfe381a9",
+  "branch": "feat/llmtool-c1-test-excerpts-20261009",
+  "pr_title": "feat(llmtool): deterministic test failure excerpts for token-efficient QA (C1)",
+  "allowed_files": [
+    "tools/llmtool/llmtool/test_output_excerpts.py",
+    "tools/llmtool/llmtool/cli.py",
+    "tools/llmtool/tests/test_test_output_excerpts.py",
+    "tools/llmtool/tests/test_cli.py",
+    "tools/llmtool/README.md"
+  ],
+  "required_files": [
+    "tools/llmtool/llmtool/test_output_excerpts.py",
+    "tools/llmtool/tests/test_test_output_excerpts.py"
+  ],
+  "default_test_mode": "related",
+  "max_repairs": 2,
+  "timeout_seconds": 1800,
+  "codex_timeout_seconds": 3600,
+  "claude_timeout_seconds": 3600,
+  "ci_workflow": "llmtool-ci.yml",
+  "require_local_full": true,
+  "related_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "syntax",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_test_output_excerpts.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_cli.py",
+      "-v"
+    ]
+  ],
+  "full_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=/usr/bin/python3"
+    ]
+  ],
+  "failure_triage": {
+    "max_reviews": 2,
+    "repeat_limit": 2,
+    "allow_mac_repair": false
+  },
+  "initial_decision_recovery": {
+    "run_id": "20261008T185112Z-21061",
+    "control_sha": "9d6bbc3c578a3dca0c4d29026b1c64c89cb200bb",
+    "codex_result_sha256": "39d066a116f2ea169fc76176afa0beeca2055e7a4770250c1e8f1fa785c76927"
+  }
+}
