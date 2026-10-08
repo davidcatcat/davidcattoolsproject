@@ -1,0 +1,16 @@
+{
+  "run_id": "20261008T185112Z-21061",
+  "native_failures": [],
+  "provider_envelopes": [
+    {
+      "file": "failure-0-claude.raw.json",
+      "subtype": "success",
+      "is_error": true,
+      "state": "ERROR_ENVELOPE"
+    }
+  ],
+  "contains_source_text": false,
+  "contains_provider_text": false,
+  "repair_authorized": false,
+  "gates_inherited": false
+}
