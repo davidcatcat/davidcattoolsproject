@@ -1,0 +1,9 @@
+{
+  "status": "STOPPED",
+  "head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
+  "branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
+  "run_id": "20261008T100821Z-76644",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "source_summary_sha256": "4ba4ab9696ca0020e50eb0d951d18fb60d5b21ac163d936af22923390b5ae4ce",
+  "rounds": []
+}
