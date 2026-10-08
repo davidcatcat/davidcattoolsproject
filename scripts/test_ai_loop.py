@@ -31,6 +31,128 @@ def result(status='PASS', findings=None):
             'findings': findings or []}
 
 
+class C1SpecialistQAGatesTests(unittest.TestCase):
+    """No PR/source mutation, separate reviewer sessions, no fake role PASS."""
+
+    @contextmanager
+    def qa_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            head = '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
+            base = '8e29024656f873431f6ad83e45015b57bfe381a9'
+            branch = 'feat/llmtool-c1-test-excerpts-20261009'
+            paths = [
+                'tools/llmtool/llmtool/test_output_excerpts.py',
+                'tools/llmtool/llmtool/cli.py',
+                'tools/llmtool/tests/test_test_output_excerpts.py',
+                'tools/llmtool/tests/test_cli.py',
+                'tools/llmtool/README.md',
+                'reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md',
+            ]
+            for name in paths:
+                p = root / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text('safe, fixed synthetic source')
+            logs = root / '.ai-loop' / '20261009T000000Z-123'
+            logs.mkdir(parents=True)
+            task = {'task_id': 'C1-PR55-Security-Functional-QA-20261009',
+                    'pr_number': 55, 'branch': branch, 'base_sha': base,
+                    'expected_head': head, 'allowed_files': paths,
+                    'qa_gates': ['security', 'functional_qa'],
+                    'timeout_seconds': 1800, 'claude_timeout_seconds': 2400}
+            def git(_root, *args):
+                match = {
+                    ('branch', '--show-current'): branch,
+                    ('rev-parse', 'HEAD'): head,
+                    ('diff', '--name-only', '-z', base, head): '\0'.join(paths) + '\0',
+                    ('diff', '--no-ext-diff', '--no-textconv', base, head):
+                        'diff --git a/safe.py b/safe.py\n+safe reviewer fixture',
+                    ('status', '--porcelain'): '',
+                }
+                if args not in match:
+                    raise AssertionError(args)
+                return match[args]
+            with patch.object(loop, 'git', side_effect=git), \
+                 patch.object(loop, 'read_pr', return_value={'head': {'sha': head}}), \
+                 patch.object(loop, 'check_scope', return_value=[]):
+                yield root, logs, task, head
+
+    def test_dual_gate_pass_posts_only_bounded_metadata_and_does_not_modify_source(self):
+        with self.qa_fixture() as (root, logs, task, head):
+            role_calls = []
+            comments = []
+            suites = []
+            def fake_review(_root, _logs, prompt, round_no, timeout, tested_head):
+                role_calls.append((round_no, prompt, tested_head))
+                return {'status': 'PASS', 'reviewed_head': head,
+                        'summary': 'PRIVATE-SUMMARY-DO-NOT-PUBLISH',
+                        'findings': [{'severity': 'Low', 'blocking': False,
+                            'file': task['allowed_files'][0],
+                            'detail': 'PRIVATE-DETAIL-DO-NOT-PUBLISH',
+                            'evidence': 'PRIVATE-EVIDENCE-DO-NOT-PUBLISH'}]}
+            def fake_run(argv, _root):
+                self.assertEqual(argv[:4], ['gh', 'api', '--method', 'POST'])
+                comments.append(argv[-1])
+                return '{"id":123}'
+            def fake_tests(_root, _logs, _task, _round, suite):
+                suites.append(suite)
+                return True
+            before = {p: (root / p).read_bytes() for p in task['allowed_files']}
+            with patch.object(loop, 'tests', side_effect=fake_tests), \
+                 patch.object(loop, 'claude', side_effect=fake_review), \
+                 patch.object(loop, 'run', side_effect=fake_run):
+                loop.independent_qa_pr55(root, logs, task, 'task evidence', {})
+            self.assertEqual(suites, ['related', 'full-final'])
+            self.assertEqual([x[0] for x in role_calls], [201, 202])
+            self.assertIn('SECURITY gate:', role_calls[0][1])
+            self.assertIn('FUNCTIONAL QA gate:', role_calls[1][1])
+            self.assertEqual([x[2] for x in role_calls], [head, head])
+            self.assertEqual(len(comments), 1)
+            self.assertIn('body=', comments[0])
+            for forbidden in ['PRIVATE-SUMMARY-', 'PRIVATE-DETAIL-', 'PRIVATE-EVIDENCE-']:
+                self.assertNotIn(forbidden, comments[0])
+            self.assertEqual(before, {p: (root / p).read_bytes() for p in task['allowed_files']})
+            report = json.loads((logs / 'qa-pr55.json').read_text())
+            self.assertEqual(report['qa_result'], 'PASS')
+            self.assertFalse(report['merge_authorized'])
+            self.assertEqual(len(report['roles']), 2)
+
+    def test_first_specialist_blocker_never_calls_second_reviewer_or_claims_pass(self):
+        with self.qa_fixture() as (root, logs, task, head):
+            calls, public = [], []
+            def bad_review(_root, _logs, prompt, round_no, timeout, sha):
+                calls.append(round_no)
+                return {'status': 'FAIL', 'reviewed_head': head,
+                        'summary': 'PRIVATE-SECURITY-SUMMARY',
+                        'findings': [{'severity': 'High', 'blocking': True,
+                            'file': task['allowed_files'][0],
+                            'detail': 'PRIVATE-ISSUE-DETAIL', 'evidence': 'secret-content'}]}
+            with patch.object(loop, 'tests', return_value=True), \
+                 patch.object(loop, 'claude', side_effect=bad_review), \
+                 patch.object(loop, 'run', side_effect=lambda a, r: public.append(a[-1]) or '{"id":1}'):
+                with self.assertRaisesRegex(loop.Stop, 'specialist review not PASS'):
+                    loop.independent_qa_pr55(root, logs, task, 'task', {})
+            self.assertEqual(calls, [201])
+            self.assertEqual(len(public), 1)
+            self.assertNotIn('PRIVATE-ISSUE-DETAIL', public[0])
+            self.assertEqual(json.loads((logs / 'qa-pr55.json').read_text())['qa_result'], 'STOPPED')
+
+    def test_no_models_on_wrong_revision_or_test_failure(self):
+        with self.qa_fixture() as (root, logs, task, head):
+            with patch.object(loop, 'claude') as review, \
+                 patch.object(loop, 'tests') as tests_run:
+                task['expected_head'] = 'f' * 40
+                with self.assertRaisesRegex(loop.Stop, 'HEAD/branch mismatch'):
+                    loop.independent_qa_pr55(root, logs, task, 'task', {})
+                tests_run.assert_not_called()
+                review.assert_not_called()
+                task['expected_head'] = head
+            with patch.object(loop, 'tests', return_value=False), \
+                 patch.object(loop, 'claude') as review:
+                with self.assertRaisesRegex(loop.Stop, 'related tests failed'):
+                    loop.independent_qa_pr55(root, logs, task, 'task', {})
+                review.assert_not_called()
+
 class InitialDecisionHandoffTests(unittest.TestCase):
     """A zero-edit Codex decision is a frozen control-branch handoff, not model approval."""
 
