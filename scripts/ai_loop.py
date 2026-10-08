@@ -2554,6 +2554,8 @@ class CIFailure(Stop):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
+    parser.add_argument('--maintenance-issue52', action='store_true',
+                        help='one-use pinned runner maintenance; never starts the active C1 task')
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
     parser.add_argument('--resume', metavar='RUN_ID', help='resume one explicitly contracted Codex/native acceptance stop')
     parser.add_argument('--publish-diagnostics', metavar='RUN_ID',
@@ -2567,6 +2569,9 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
+    if args.maintenance_issue52 and (args.install_launcher or args.check or args.test_mode or args.resume
+                                     or args.diagnose or args.publish_diagnostics):
+        parser.error('--maintenance-issue52 is exclusive; it does not run C1')
     if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose):
         parser.error('--publish-diagnostics cannot be combined with task/install/test options')
     if args.diagnose and (args.publish_diagnostics or args.install_launcher or args.check
@@ -2590,6 +2595,37 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
+        if args.maintenance_issue52:
+            # Bootstrap exactly the one-use maintenance runner pinned to this
+            # fetched control revision. The live C1 task is never loaded or run.
+            fixture = json.loads(git(root, 'show', args.control_sha
+                + ':automation/ai-loop/maintenance/issue52.json'))
+            if (fixture.get('task_id') != 'ai-loop-maintenance-issue52-20261009'
+                    or fixture.get('allowed_files') != ['scripts/test_ai_loop.py']
+                    or fixture.get('branch') != 'automation/ai-loop'
+                    or fixture.get('original_local_head') !=
+                        'ac03992b6025a2f1fbea786be4b9823ecbef325f'):
+                raise Stop('invalid one-use maintenance authorization')
+            source = git(root, 'show', args.control_sha + ':scripts/ai_loop_maintenance.py') + '\n'
+            if len(source.encode('utf-8')) > 64 * 1024:
+                raise Stop('maintenance bootstrap too large')
+            directory = state / 'bootstrap' / args.control_sha
+            if any(path.is_symlink() for path in (directory, *directory.parents)):
+                raise Stop('maintenance bootstrap symlink path')
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / 'ai_loop_maintenance.py'
+            if path.exists():
+                if path.is_symlink() or path.read_text(encoding='utf-8') != source:
+                    raise Stop('maintenance bootstrap collision')
+            else:
+                with path.open('x', encoding='utf-8') as output:
+                    output.write(source)
+                path.chmod(0o600)
+            rc = subprocess.run([sys.executable, str(path), '--control-sha', args.control_sha],
+                                cwd=str(root), check=False).returncode
+            if rc:
+                raise Stop('one-use maintenance stopped; original evidence and work preserved')
+            return
         if args.install_launcher:
             install_launcher(root, args.control_sha)
             return
