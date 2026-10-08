@@ -1074,3 +1074,38 @@ ordinary diff-review workflows. No deterministic tests, syntax command, full sui
 native probe or provider call ran here. No stage, commit, push, merge, worktree,
 alternate checkout or task/scope change occurred. All required gates must run
 again on changed bytes; the outer runner appends truthful final evidence.
+
+## CURRENT exact ordinary FAIL-review base-pin repair — 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — ALL CHANGED-BYTE RUNNER CHECKS PENDING**.
+
+Recovery run `20261008T064055Z-64433` repairs the two blocking test-only findings
+from the ordinary FAIL review of stopped run `20261008T052643Z-60914`, exact HEAD
+`35ad4be92f6492fa86a8bc2fe961a22cf9c84a49`. The canonical Mac repository root,
+existing authorized branch and stopped HEAD were verified read-only. All ten
+candidate hashes and both preserved summary/failure evidence hashes matched the
+local recovery manifest before edits. The original failure evidence SHA-256 is
+`5340bb23e53cf76107f9999fbbdee94fa136d3ccdfbb6fba6e4e8f0dce0244de`.
+
+Only the exact base literal in `tools/llmtool/tests/run_containment_acceptance.py`
+and its failure-export fixture in `tools/llmtool/tests/test_git_containment.py`
+changes from `63e232e22a769f409e381e34dfe0ef1add766d8e` to the current contract's
+complete `ceae425eacaa8729a9eb8d796e43304918a8c908` SHA. Strict equality and
+preflight remain intact. Assertions, all fourteen scenario names, thresholds,
+signal authority, production modules and task contracts are unchanged. This note
+is appended; all historical evidence remains historical, with no inherited PASS.
+
+Syntax and all related checks, independent preliminary/final read-only ordinary
+review with blocking-finding disposition, both full Python suites and all fourteen
+mandatory native Mac scenarios are **PENDING outer runner on changed bytes**.
+This includes plain x20 and Popen x20 parent-SIGKILL repetitions with the existing
+<=2-second disappearance requirement and zero native skips. Fresh hashes, final
+evidence, exact-HEAD CI and PR publication remain pending. Native containment PASS,
+independent security/QA and functional acceptance are not established;
+READY_FOR_FINAL_REVIEW is not reached and merge remains unauthorized.
+
+No tests, native probes, provider calls, fixture cleanup or Git writes were run
+by Codex for this repair. The failed classification call was not retried or
+substituted; its exit does not establish quota/auth failure. Local raw provider
+output/logs and unrelated untracked artifacts remain untouched. No next slice,
+real product Git ADD, public mutation or scope expansion is introduced.

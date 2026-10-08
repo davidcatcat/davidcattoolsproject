@@ -1974,7 +1974,7 @@ class ControllerCleanupTests(unittest.TestCase):
             raise primary
         scenarios.fd_inheritance = fail
         contract = {'task_id': 'A11b.2.2.1-containment-f3-recovery-20261007',
-                    'base_sha': '63e232e22a769f409e381e34dfe0ef1add766d8e',
+                    'base_sha': 'ceae425eacaa8729a9eb8d796e43304918a8c908',
                     'allowed_files': list(runner.EXPECTED_FILES),
                     'required_files': list(runner.EXPECTED_FILES)}
         with tempfile.TemporaryDirectory() as directory:

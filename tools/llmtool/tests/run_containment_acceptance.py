@@ -65,7 +65,7 @@ def main():
             raise ValueError('contract size limit')
         contract = wire.strict_load(raw_contract)
         if (contract['task_id'] != 'A11b.2.2.1-containment-f3-recovery-20261007'
-                or contract['base_sha'] != '63e232e22a769f409e381e34dfe0ef1add766d8e'
+                or contract['base_sha'] != 'ceae425eacaa8729a9eb8d796e43304918a8c908'
                 or tuple(contract['allowed_files']) != EXPECTED_FILES):
             raise ValueError('pinned runner contract mismatch')
         if any(not (ROOT/name).is_file() for name in contract['required_files']):
