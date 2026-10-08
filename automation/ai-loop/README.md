@@ -1,5 +1,14 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## ACTIVE (2026-10-09): PR #55 post-fix new-HEAD dual specialist QA
+
+The exact Medium `INPUT_VALIDATION` repair was committed to the **existing** PR #55; current publication HEAD `d5ecfce9f7e28da2983affb235dd942d51388723`, still OPEN/Draft. [Exact-head llmtool CI #37849174251](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37849174251) is SUCCESS for Python 3.9 and 3.14 (1,292 tests, 1 skip each); the runner report records both full Mac `make check` suites and ordinary Claude code review PASS. Only the two previously approved Codex source/test paths changed, plus one runner report. The previous Medium risk was marked FIX_BEFORE_MERGE and the **old** Security/Functional QA model PASS must NOT be inherited on changed source.
+
+The completed repair contract is archived under `automation/ai-loop/history/20261009-C1-PR55-Medium-InputValidation-Fix-task.md/json`. **Current live `task.md/task.json` is now `C1-PR55-PostFix-Security-Functional-QA-20261009`: read-only PR review, new exact HEAD, seven changed files, `qa_gates=[security,functional_qa]`, zero writer calls, fresh related and both full Mac gates, fresh two independent role-isolated Claude sessions.** Focus explicitly on prior catastrophic URL-regex backtracking, safe URL credentials detection, near-limit timeouts and false-positive behavior. **Any Medium+ or blocking finding (even when reviewer status says PASS) makes the overall QA STOPPED and prevents starting the second expensive role.** Results are published to [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56) as sanitized counts/allowlisted paths only. Private model text stays on Mac; no provider egress or auto-merge.
+
+Only after current exact-control HEAD helper CI 3.9/3.14 PASS, the one standard Mac command is `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. Fail closed on any mismatched revision, dirty Git, tests, model error or uncertain review; no manual provider prompts. A dual model PASS still requires separate coordinator merge decision, and company-only Phase 0 + cost/token benchmarks remain separately authorized.
+
+
 ## ACTIVE (2026-10-09): PR #55 Medium INPUT_VALIDATION fix, before merge
 
 Issue #56's single Medium Security finding has now been independently triaged on **unchanged PR #55** `67d02be6bc8cb3f237c5060edda3321f6d885bf3`: `INPUT_VALIDATION`, `FIX_BEFORE_MERGE`, confidence `HIGH`, `test_output_excerpts.py:46`. Prior dual specialist QA PASS and all seven Low findings remain frozen as **historical evidence**, not a waiver or post-fix PASS. PR stays Draft/unmerged.
