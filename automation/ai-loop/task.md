@@ -1,130 +1,36 @@
-# CURRENT ACTIVE TASK — Issue #51 C1 deterministic test excerpts (2026-10-09)
+# CURRENT ACTIVE TASK — Independent Security Review + Functional QA for Draft PR #55 (Issue #56)
 
-## Assignment and authoritative state
+## Authority / identity
 
-- Repository: `davidcatcat/davidcattoolsproject`.
-- Canonical Mac checkout ONLY: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-- Current pinned `main` commit: `8e29024656f873431f6ad83e45015b57bfe381a9` (contains squash-merged #49 and #50).
-- Scope: [Issue #51](https://github.com/davidcatcat/davidcattoolsproject/issues/51) and
-  [native self-development C1 plan](https://github.com/davidcatcat/davidcattoolsproject/blob/8e29024656f873431f6ad83e45015b57bfe381a9/tools/llmtool/NATIVE_SELF_DEV_MVP.md).
-- New branch `feat/llmtool-c1-test-excerpts-20261009`; **do not reuse old A11b branch / old 76644 run / PR #49**.
-- This is a **new task, not a recovery**. Existing stopped-run evidence is archived
-  byte-for-byte in `automation/ai-loop/history/`. Old original control SHAs remain valid historical data.
+- This is **NOT** a fresh C1 development task and **NOT** another Codex implementation.
+- Exactly pinned review target: PR #55 at `67d02be6bc8cb3f237c5060edda3321f6d885bf3`, base main `8e29024656f873431f6ad83e45015b57bfe381a9`.
+- Branch: `feat/llmtool-c1-test-excerpts-20261009`, existing local canonical Mac checkout only.
+- Prior completed C1 implementation task is archived at `automation/ai-loop/history/20261009-C1-issue51-completed-task.md/json`; **never re-use its `initial_decision_recovery`**.
+- Two separate independent role reviews, in distinct read-only Claude CLI sessions, pinned to the *same immutable* PR HEAD: `security` then `functional_qa`. No Codex writer call. Runner-controlled tests and review, never user prompt relaying.
+- Mac operator: one standard script entrance `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh` **only after coordinator verifies current exact-head helper CI**. If the precheck STOPs, no models start; preserve all work.
+- Publish a **sanitized** role-status/count/path-only audit summary to GitHub Issue #56; keep the model's untrusted raw output and detailed findings private in `.ai-loop/<run>/`. This is a model-assisted specialist gate, not an external human certification or merge authorization.
 
-## User goal and division of work
+## Frozen allowed source inventory
 
-Implement an actual `llmtool` product feature using the existing runner:
-**Codex CLI is the sole source-code writer, Claude CLI is the independent
-read-only ordinary code reviewer, deterministic tests are run by the outer
-ai-loop runner.** The user must not copy prompts between agents. If a gate
-requires a policy/design/human decision, STOP with structured evidence.
-The runner controls Git commits, Draft PR creation and exact-head CI, never
-merges or grants approval. Keep independent security/QA signoff separate.
+Exactly 5 C1 source/tests/docs files plus the one runner-owned accepted report (6 total) as `allowed_files` in adjacent task.json. No tracked or untracked source edit; no commit, push, force, branch recreation or PR HEAD mutation.
 
-**This is C1 deterministic / read-only only.** NO LLM call by the new
-feature; NO automatic company-model routing, token-saving claims, shell,
-tests execution from product CLI, Git mutation, executor, patch, permissions
-escalation, network, unstated optional A11b.2.2.2, or automatic merge.
+Expected functionality: `llmtool test-excerpts --file PATH --exit-code INT --json`. One explicitly selected read-only capture, no subprocess/provider/network/Git mutation, no secret exfiltration, no summary invented as truth. Return bounded raw evidence with SHA, original byte offsets and preserved captured failure status. Do not enable company-model routing or token-saving claims.
 
-## Minimum public behavior (implement smallest correct vertical slice)
+## Independent Security Review
 
-1. Add offline command **`llmtool test-excerpts --file PATH --exit-code INT --json`**
-   (or an exactly equivalent explicit, documented opt-in interface) to safely
-   inspect only an explicitly selected captured log. No implicit repo traversal,
-   user config, provider credentials, auth, external API or working-directory mutation.
-   A nonzero captured test exit code must never become a test PASS because
-   the excerpt parser returns successfully. Parser success != test success.
-2. Deterministically identify **real Python unittest and pytest**
-   failing test IDs and bounded anchored excerpts. Support the common
-   `FAIL:`/`ERROR:` unittest header and `FAILED file::test` pytest
-   summary forms, report only IDs justified by the captured raw source.
-   Do not invent a root cause, traceback, test ID or assertion outcome.
-   When complete known failure coverage cannot be established, return
-   `INCOMPLETE`/explicit unknowns and retained nonzero exit rather than
-   fabricating a full coverage or PASS claim. Unknown format must fail closed.
-3. Provide versioned JSON with source `sha256`/size, supplied test exit
-   code, detected format, ordered deduplicated failure IDs, byte-offset
-   ranges / bounded excerpts, source references, omitted and unknown
-   coverage flags, and explicit result status. Keep original raw artifact
-   unchanged. No model summaries accepted as raw evidence. Avoid output
-   that blindly echoes untrusted control sequences; reject or visibly
-   escape ANSI/control characters. Never put raw inputs, paths, credentials
-   or exception messages into stderr error reporting.
-4. Enforce strict explicit-input/file bounds and race-safe/no-follow
-   regular-file handling; reject symlinks, directories, oversized, malformed
-   UTF-8/binary or changed inputs. C1 **does not** authorize transfer of
-   captured content outside the host; treat excerpts as potentially
-   sensitive, and require a separately reviewed permission/redaction gate
-   before any future company/external model use.
-5. Respect Python 3.9 through 3.14; preserve existing CLI/Provider, A5 Git,
-   A6 Validator, A9 and A10 contracts. No new dependencies or CLI
-   behavior changes outside the named new opt-in command.
-6. Update `tools/llmtool/README.md` truthfully with usage and limitations:
-   deterministic excerpt utility != measured savings; Phase 0/paired
-   benchmark are future, separately authorized steps.
+Read full cumulative diff, actual implementation, CLI dispatch and negative tests. Independently examine no-follow directory file access, hardlink/symlink/TOCTOU, fd cleanup, size/offset bounds, controlled UTF-8+ANSI+bidi, rejected credentials, safe output/error categories, false-success prevention and no implicit config/network/providers/shell/Git. Record actual findings with file and concrete evidence. `PASS` only if no blocking security defect; otherwise `FAIL`/`NEEDS_DECISION`. Do not call any test outcome PASS merely because parser successfully executed.
 
-## Deterministic negative/regression coverage
+## Independent Functional QA
 
-Create `tools/llmtool/tests/test_test_output_excerpts.py` and augment
-`test_cli.py` for the public command. Minimum fixtures/tests:
+Read actual implementation and exercise/inspect focused regressions plus full Mac canonical tests. Verify real stdlib unittest failure bodies and pytest short-summary, repeated and parametrized IDs, zero/nonzero/negative captured exits, mixed failures, source SHA/byte ranges, cutoff/omission, incomplete unknown reports, malformed/unsupported data and source unchanged. JUnit XML not supported in this narrow C1; original broad MVP includes JUnit-style fixtures, so explicitly record *broader-plan acceptance incomplete* and do not silently claim all C1a delivered. Assess known Low usability gaps: false-positive sensitive regex (`basic test` and `token =`), and non-BrokenPipe stdout OSError returns 1 rather than captured 7. Identify material new blockers only from reproducible evidence, not preferences.
 
-- unittest failure and error headers, repeated/duplicate IDs, multiple
-  traceback blocks, test run count vs reported failures/errors;
-- pytest failure summary, mixed `FAIL`/`ERROR`, parametrized node IDs;
-- ANSI/control characters, Unicode, byte ranges/hash/offsets, truncation
-  and max excerpt limits; explicit source provenance;
-- malformed/unsupported/partial output, invalid/test-failed exit metadata,
-  no recognized ID with nonzero exit, zero reported failures with nonzero
-  exit, missing summaries and false-success guard;
-- symlink, directory, oversize/binary data and file-state drift before/
-  after bounded reads, no unintended file changes;
-- no provider/HTTP calls, no implicit credential lookup, no repo scan,
-  no shell subprocess, no Git writes, no full-log egress.
-- reject or safely omit sensitive-content indicators; no source leakage
-  in stderr, and no output schema status claiming test PASS from a
-  failed external test.
+## Gates and success criteria
 
-Do not loosen assertions or classify skips/missing coverage as PASS just
-to make the suite green. Preserve original test evidence and error codes.
+- Runner checks exact PR HEAD, base, identity, six-file diff, immutable source bytes and clean Git index/status pre/post model runs.
+- Deterministic related syntax/test modules, plus **both full Mac canonical suites** must exit zero; any failure STOP and no pass. GitHub CI for PR HEAD [#37836667084](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37836667084) independently confirmed 3.9 and 3.14 success; 1289 tests, 1 skip each.
+- Claude sessions are *read-only*, independent, separate prompts and outputs, maximum 2400 seconds each. No command execution, no staging or source mutation.
+- A blocked first specialist gate stops rather than spend second model tokens; never turn review error-envelope into PASS.
+- GitHub Issue #56 receives only immutable revision, test/status flags, role verdict counts and allowlisted file names. The full model text stays local; do not upload secrets or raw captures. Final coordinator/human acceptance, merge, C1b company-only Phase 0 and C1c measured token savings are **NOT** authorized.
+- If any STOP, preserve candidate and private evidence; create a separate scoped repair/review contract before another script run; never make the user the prompt courier.
 
-## Allowed changes and boundaries
-
-The exact allowlist is in `automation/ai-loop/task.json`:
-`tools/llmtool/llmtool/test_output_excerpts.py`,
-`tools/llmtool/llmtool/cli.py`,
-`tools/llmtool/tests/test_test_output_excerpts.py`,
-`tools/llmtool/tests/test_cli.py`, and
-`tools/llmtool/README.md`.
-No other source/test/doc file or report is authorized for Codex edits.
-The outer runner creates its own bounded `reports/ai-loop/` handoff.
-
-Coder must read `AGENTS.md`, relevant `skills/implement-feature/SKILL.md`,
-CLI/source/tests, Issue #51, and Roadmap. Reviewer must independently
-inspect cumulative code diff, contract and actual test evidence; prior
-author's statements are claims, not an acceptance gate.
-
-## Gates, budgets and handoff
-
-- Local related: syntax + new test module + public CLI tests.
-- Final canonical full: `make -C tools/llmtool check` under both existing
-  Mac venv Python and `/usr/bin/python3`. Any required check failure STOPS
-  without weakening gates.
-- Exact publication HEAD GitHub CI: `llmtool-ci.yml` Python 3.9/3.14.
-- Max 2 repair attempts, max 2 failure reviews, 1h per model call
-  ceiling and 30 min per test command. Minimize duplicate log/model
-  consumption. Do not add native Mac process containment probes:
-  this read-only parser changes neither A11b process primitives nor
-  any existing process controller.
-- Final ordinary Claude review is **not** independent formal Security
-  Review or Functional QA signoff. Publication ends at DRAFT PR with
-  mandatory external coordinator/QA decision. No auto-merge.
-- Deferred: company-only Phase 0 reliability on 48KiB+ real-output
-  fixtures, paired premium token/cost measurement and C2 native
-  self-development executor. Do not claim these were done by this task.
-
-Operator: from canonical repo, run `bash scripts/ai-loop.sh --check`
-first. If and only if it prints PRECHECK PASS and no unrelated work
-is at risk, run `bash scripts/ai-loop.sh`. These are the **only**
-normal CLI handoffs; do NOT relay Codex/Claude prompts manually.
-No `--resume` on old 76644; on any STOP, preserve current state and
-request fresh coordinator assessment rather than resetting/restarting.
+No script or AI model is allowed to automatically merge Draft PR #55 or advance C2.
