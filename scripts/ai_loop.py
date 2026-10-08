@@ -311,7 +311,7 @@ def load_task(root, control_sha):
         rejected_keys = common | {'classification_rejection', 'mac_evidence_sha256'}
         decision_keys = common | {'classification_decision', 'classification_category',
                                   'classification_raw_sha256', 'prior_mac_evidence_file',
-                                  'prior_mac_evidence_sha256'}
+                                  'prior_mac_evidence_sha256', 'nonrepair_blocking_files'}
         phases = ('related', 'full', 'full-final', 'mandatory-final',
                   'developer', 'review', 'final-review', 'ci')
         keyset = set(recovery) if isinstance(recovery, dict) else set()
@@ -338,7 +338,12 @@ def load_task(root, control_sha):
                     (recovery.get('classification_decision') != 'NEEDS_DECISION'
                      or recovery.get('classification_category') not in ('CODE_BUG', 'TEST_BUG')
                      or not re.fullmatch(r'mac-containment-[0-9]+\.json',
-                                         recovery.get('prior_mac_evidence_file', ''))))
+                                         recovery.get('prior_mac_evidence_file', ''))
+                     or not isinstance(recovery.get('nonrepair_blocking_files'), list)
+                     or any(not isinstance(p, str) or p not in metadata['allowed_files']
+                            for p in recovery.get('nonrepair_blocking_files', []))
+                     or set(recovery.get('nonrepair_blocking_files', [])).intersection(
+                            recovery.get('upstream_paths', []))))
                 or not isinstance(recovery.get('upstream_paths'), list)
                 or not recovery['upstream_paths']
                 or any(not isinstance(p, str) or p.startswith(('/', '.git/'))
@@ -1025,10 +1030,17 @@ def prepare_stopped_failure_resume(root, task, run_id, current_untracked, tracke
                 or envelope.get('subtype') != 'success'):
             raise Stop('stopped classifier decision envelope did not succeed')
         validate_failure_review(value, old_task, candidate, policy['failure_evidence_sha256'])
-        blocking = {f['file'] for f in value['findings'] if f['blocking']}
+        blocking_rows = [f for f in value['findings'] if f['blocking']]
+        upstream_blocking = {f['file'] for f in blocking_rows
+                             if f['file'] not in set(policy['nonrepair_blocking_files'])}
+        nonrepair_rows = [f for f in blocking_rows
+                          if f['file'] in set(policy['nonrepair_blocking_files'])]
         if (value['decision'] != policy['classification_decision']
                 or value['category'] != policy['classification_category']
-                or blocking != set(policy['upstream_paths'])):
+                or upstream_blocking != set(policy['upstream_paths'])
+                or {f['file'] for f in nonrepair_rows} != set(policy['nonrepair_blocking_files'])
+                or any('Nothing here needs a containment-file repair.' not in f['detail']
+                       for f in nonrepair_rows)):
             raise Stop('stopped out-of-scope decision does not match the approved upstream fix')
         classification_private[raw_name] = policy['classification_raw_sha256']
 
