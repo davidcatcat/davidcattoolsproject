@@ -456,6 +456,20 @@ class NativeResumeTests(unittest.TestCase):
                         loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
                     kill.assert_not_called(); killpg.assert_not_called()
 
+    def test_snapshot_rechecks_private_evidence_without_export_copy(self):
+        with self.fixture() as (root, old, task, inventory, *rest):
+            _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
+            private = old/'private-review.json'
+            private.write_text('{"secret":"model-output"}')
+            recovery['private_evidence_files'] = {'private-review.json': loop.digest(private)}
+            logs = root/'.ai-loop/new-run'; logs.mkdir()
+            loop.snapshot_recovery(root, logs, recovery)
+            self.assertFalse((logs/'recovery-evidence/private-review.json').exists())
+            private.write_text('changed')
+            logs2 = root/'.ai-loop/new-run-2'; logs2.mkdir()
+            with self.assertRaises(loop.Stop):
+                loop.snapshot_recovery(root, logs2, recovery)
+
     def test_snapshot_rechecks_failure_bytes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
@@ -580,6 +594,100 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
             self.assertEqual(recovery['upstream_base_sha'], '2'*40)
             self.assertEqual(recovery['upstream_paths'], ['tests/flaky.py'])
             self.assertEqual(recovery['inherited_validation'], 'NONE')
+
+    def test_out_of_scope_test_bug_can_resume_only_after_exact_upstream_fix(self):
+        with self.fixture() as (root, old, task, inventory):
+            raw_name = 'failure-2-claude.raw.json'
+            value = {'decision': 'NEEDS_DECISION', 'category': 'TEST_BUG',
+                'reviewed_head': '3'*40,
+                'reviewed_evidence_sha256': task['stopped_failure_recovery']['failure_evidence_sha256'],
+                'summary': 'The blocking test bug is outside this task scope.',
+                'findings': [{'severity': 'High', 'blocking': True, 'file': 'tests/flaky.py',
+                              'detail': 'Repair the independent flaky test.',
+                              'evidence': 'The exact failed full-suite evidence identifies this test.'},
+                             {'severity': 'Low', 'blocking': False, 'file': 'source.py',
+                              'detail': 'No candidate source change is authorized.',
+                              'evidence': 'Candidate source is not implicated.'}]}
+            loop.save_json(old/raw_name, {'is_error': False, 'subtype': 'success',
+                                         'structured_output': value})
+            mac = {'platform': 'darwin', 'failure': {'status': 'FAIL', 'scenario': 'hung_supervisor',
+                'owned_processes': [{'pid': 90, 'host_identity': {'pid': 90},
+                                     'supervisor': {'pid': 91}, 'members': []}]}}
+            loop.save_json(old/'mac-containment-0.json', mac)
+            policy = task['stopped_failure_recovery']
+            policy.pop('classification_rejection')
+            policy.pop('mac_evidence_sha256')
+            policy.update(classification_decision='NEEDS_DECISION',
+                classification_category='TEST_BUG',
+                classification_raw_sha256=loop.digest(old/raw_name),
+                prior_mac_evidence_file='mac-containment-0.json',
+                prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+            original, recovery = loop.prepare_stopped_failure_resume(
+                root, task, self.run_id, inventory)
+            self.assertEqual(original, inventory)
+            self.assertEqual(recovery['upstream_paths'], ['tests/flaky.py'])
+            self.assertEqual(recovery['private_evidence_files'],
+                             {raw_name: policy['classification_raw_sha256']})
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+
+    def test_out_of_scope_recovery_rejects_wrong_blocker_or_changed_raw(self):
+        for fault in ('blocker', 'raw'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, inventory):
+                raw_name = 'failure-2-claude.raw.json'
+                blocker = 'source.py' if fault == 'blocker' else 'tests/flaky.py'
+                value = {'decision': 'NEEDS_DECISION', 'category': 'TEST_BUG',
+                    'reviewed_head': '3'*40,
+                    'reviewed_evidence_sha256': task['stopped_failure_recovery']['failure_evidence_sha256'],
+                    'summary': 'Bounded classification.',
+                    'findings': [{'severity': 'High', 'blocking': True, 'file': blocker,
+                                  'detail': 'Blocking finding.', 'evidence': 'Exact evidence.'}]}
+                loop.save_json(old/raw_name, {'is_error': False, 'subtype': 'success',
+                                             'structured_output': value})
+                mac = {'platform': 'darwin', 'failure': {'status': 'FAIL',
+                    'scenario': 'hung_supervisor', 'owned_processes': [
+                        {'pid': 90, 'host_identity': {'pid': 90},
+                         'supervisor': {'pid': 91}, 'members': []}]}}
+                loop.save_json(old/'mac-containment-0.json', mac)
+                policy = task['stopped_failure_recovery']
+                policy.pop('classification_rejection')
+                policy.pop('mac_evidence_sha256')
+                policy.update(classification_decision='NEEDS_DECISION',
+                    classification_category='TEST_BUG',
+                    classification_raw_sha256=loop.digest(old/raw_name),
+                    prior_mac_evidence_file='mac-containment-0.json',
+                    prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+                if fault == 'raw':
+                    (old/raw_name).write_text((old/raw_name).read_text() + ' ')
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
+
+    def test_out_of_scope_recovery_schema_is_strict(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('acceptance_failure_recovery', None)
+        task.pop('stopped_failure_recovery', None)
+        task['stopped_failure_recovery'] = {
+            'run_id': self.run_id, 'control_sha': '1'*40, 'expected_head': '2'*40,
+            'old_base_sha': '3'*40, 'summary_sha256': '4'*64, 'failure_round': 1,
+            'failure_evidence_sha256': '5'*64, 'failure_phase': 'full-final',
+            'classification_decision': 'NEEDS_DECISION', 'classification_category': 'TEST_BUG',
+            'classification_raw_sha256': '6'*64,
+            'prior_mac_evidence_file': 'mac-containment-0.json',
+            'prior_mac_evidence_sha256': '7'*64,
+            'upstream_paths': ['tools/llmtool/tests/test_entrypoint_interrupt.py']}
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertEqual(load(task)['stopped_failure_recovery']['classification_category'], 'TEST_BUG')
+        for fault in ('decision', 'category', 'raw_hash', 'mac_name', 'overlap', 'extra'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task); recovery = bad['stopped_failure_recovery']
+                if fault == 'decision': recovery['classification_decision'] = 'REPAIR'
+                elif fault == 'category': recovery['classification_category'] = 'ENVIRONMENT'
+                elif fault == 'raw_hash': recovery['classification_raw_sha256'] = 'bad'
+                elif fault == 'mac_name': recovery['prior_mac_evidence_file'] = '../mac.json'
+                elif fault == 'overlap': recovery['upstream_paths'] = [bad['allowed_files'][0]]
+                else: recovery['extra'] = True
+                with self.assertRaises(loop.Stop): load(bad)
 
     def test_wrong_rejection_or_upstream_paths_stop(self):
         for fault in ('rejection', 'upstream'):
