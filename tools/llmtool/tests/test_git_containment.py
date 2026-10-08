@@ -9,12 +9,14 @@ import ctypes
 from contextlib import contextmanager
 from dataclasses import replace
 import errno
+import hashlib
 import importlib
 import os
 from pathlib import Path
 import runpy
 import select
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -929,24 +931,124 @@ class IdentityTests(unittest.TestCase):
 
 
 class BindingBoundaryTests(unittest.TestCase):
+    @contextmanager
+    def trusted_interpreter(self):
+        # Binding unit tests pin controlled bytes; no interpreter is executed.
+        # Ambient CI interpreters need not satisfy the deployment trust premise.
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory).resolve() / 'python-fixture'
+            interpreter.write_bytes(b'synthetic pinned interpreter\n')
+            interpreter.chmod(0o700)
+            yield interpreter
+
     def test_complete_pinned_manifest_and_drift_rejection(self):
+        with self.trusted_interpreter() as interpreter, \
+                patch.object(wire.sys, 'executable', str(interpreter)):
+            manifest = pinned()
+            binding = wire.runtime_binding(manifest)
+            self.assertEqual(binding['executable'], str(interpreter))
+            self.assertEqual(binding['interpreter'], str(interpreter))
+            self.assertEqual(binding['interpreter_sha256'],
+                             hashlib.sha256(interpreter.read_bytes()).hexdigest())
+            self.assertEqual(len(wire.verify_binding(binding)), 64)
+            changed = {**manifest, '_git_supervisor.py': '0'*64}
+            with self.assertRaises(wire.ProtocolFailure):
+                wire.runtime_binding(changed)
+            with patch.object(wire.importlib.util, 'find_spec', return_value=None):
+                with self.assertRaises(wire.ProtocolFailure):
+                    wire.runtime_binding(manifest)
+            self.assertIn('git_mutation.py', manifest)
+            self.assertIn('errors.py', manifest)
+            for change in ({'protocol': True}, {'action_digest': '0'*64},
+                           {'fixture': {'case': 'wait', 'timeout': 2}}):
+                with self.assertRaises(wire.ProtocolFailure):
+                    wire.verify_binding({**binding, **change})
+            self.assertNotEqual(binding['action_digest'],
+                                wire.runtime_binding(manifest, 'wait')['action_digest'])
+
+    def test_writable_interpreter_rejected_by_runtime_binding(self):
         manifest = pinned()
-        binding = wire.runtime_binding(manifest)
-        self.assertEqual(len(wire.verify_binding(binding)), 64)
-        changed = {**manifest, '_git_supervisor.py': '0'*64}
-        with self.assertRaises(wire.ProtocolFailure):
-            wire.runtime_binding(changed)
-        with patch.object(wire.importlib.util, 'find_spec', return_value=None):
+        with self.trusted_interpreter() as interpreter, \
+                patch.object(wire.sys, 'executable', str(interpreter)):
+            for mode in (0o777, 0o720, 0o702):
+                with self.subTest(mode=oct(mode)):
+                    interpreter.chmod(mode)
+                    with self.assertRaises(wire.ProtocolFailure):
+                        wire.runtime_binding(manifest)
+
+    def test_file_hash_requires_regular_owned_bounded_trusted_file(self):
+        with self.trusted_interpreter() as interpreter:
+            self.assertEqual(wire.file_hash(interpreter),
+                             hashlib.sha256(interpreter.read_bytes()).hexdigest())
+            before = interpreter.stat()
+            untrusted_owner = SimpleNamespace(st_mode=before.st_mode,
+                st_uid=max(0, os.geteuid())+1, st_size=before.st_size)
+            with patch.object(wire.os, 'fstat', return_value=untrusted_owner):
+                with self.assertRaises(wire.ProtocolFailure):
+                    wire.file_hash(interpreter)
+            directory = interpreter.parent / 'directory'
+            directory.mkdir(mode=0o700)
+            # fdopen rejects a directory before the metadata predicate.
+            directory_fds = []
+            real_open = os.open
+            def open_directory(*args, **kwargs):
+                fd = real_open(*args, **kwargs)
+                directory_fds.append(fd)
+                self.assertTrue(stat.S_ISDIR(os.fstat(fd).st_mode))
+                return fd
+            with patch.object(wire.os, 'open', side_effect=open_directory):
+                try:
+                    with self.assertRaises(IsADirectoryError):
+                        wire.file_hash(directory)
+                    self.assertEqual(len(directory_fds), 1)
+                finally:
+                    for fd in directory_fds:
+                        try:
+                            os.close(fd)
+                        except OSError as error:
+                            if error.errno != errno.EBADF:
+                                raise
+                            self.assertEqual(error.errno, errno.EBADF)
+            fifo = interpreter.parent / 'fifo'
+            os.mkfifo(fifo, mode=0o600)
             with self.assertRaises(wire.ProtocolFailure):
-                wire.runtime_binding(manifest)
-        self.assertIn('git_mutation.py', manifest)
-        self.assertIn('errors.py', manifest)
-        for change in ({'protocol': True}, {'action_digest': '0'*64},
-                       {'fixture': {'case': 'wait', 'timeout': 2}}):
+                wire.file_hash(fifo)
+            alias = interpreter.parent / 'alias'
+            alias.symlink_to(interpreter)
+            with patch.object(wire.os, 'open', wraps=os.open) as opened:
+                with self.assertRaises(wire.ProtocolFailure):
+                    wire.file_hash(alias)
+                opened.assert_not_called()
+            with interpreter.open('wb') as stream:
+                stream.truncate(64*1024*1024+1)
             with self.assertRaises(wire.ProtocolFailure):
-                wire.verify_binding({**binding, **change})
-        self.assertNotEqual(binding['action_digest'],
-                            wire.runtime_binding(manifest, 'wait')['action_digest'])
+                wire.file_hash(interpreter)
+
+    def test_file_hash_rejects_read_and_named_identity_drift(self):
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        with self.trusted_interpreter() as interpreter:
+            before = interpreter.stat()
+            real_stat = os.stat
+            for stage in ('read', 'named'):
+                for field in fields:
+                    with self.subTest(stage=stage, field=field):
+                        values = {name: getattr(before, name) for name in fields}
+                        values.update(st_mode=before.st_mode, st_uid=before.st_uid)
+                        values[field] += 1
+                        changed = SimpleNamespace(**values)
+                        if stage == 'read':
+                            with patch.object(wire.os, 'fstat', side_effect=[before, changed]):
+                                with self.assertRaises(wire.ProtocolFailure):
+                                    wire.file_hash(interpreter)
+                        else:
+                            def named_stat(path, *args, **kwargs):
+                                observed = real_stat(path, *args, **kwargs)
+                                if Path(path) == interpreter and kwargs.get('follow_symlinks') is False:
+                                    return changed
+                                return observed
+                            with patch.object(wire.os, 'stat', side_effect=named_stat):
+                                with self.assertRaises(wire.ProtocolFailure):
+                                    wire.file_hash(interpreter)
 
     def test_environment_is_fresh(self):
         with patch.dict(os.environ, {'PYTHONPATH': 'hostile', 'DYLD_INSERT_LIBRARIES': 'hostile',

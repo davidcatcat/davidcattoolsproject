@@ -36,47 +36,6 @@ jobs:
         run: |
           python -m pip install --requirement tools/llmtool/requirements-ci.txt
           python -m pip install --no-deps -e tools/llmtool
-      - name: Diagnose Python 3.14 interpreter binding
-        if: matrix.python-version == '3.14'
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          import stat
-          import sys
-
-          executable = os.path.abspath(sys.executable)
-          interpreter = os.path.realpath(executable)
-          fd = os.open(interpreter, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-          with os.fdopen(fd, 'rb') as stream:
-              before = os.fstat(stream.fileno())
-              for chunk in iter(lambda: stream.read(65536), b''):
-                  pass
-              after = os.fstat(stream.fileno())
-          named = os.stat(interpreter, follow_symlinks=False)
-          def signature(value):
-              return [value.st_dev, value.st_ino, value.st_size,
-                      value.st_mtime_ns, value.st_ctime_ns]
-          print(json.dumps({
-              'python_version': list(sys.version_info[:3]),
-              'executable': executable,
-              'realpath': interpreter,
-              'regular': stat.S_ISREG(before.st_mode),
-              'mode': oct(stat.S_IMODE(before.st_mode)),
-              'uid': before.st_uid,
-              'euid': os.geteuid(),
-              'size': before.st_size,
-              'signature_before': signature(before),
-              'signature_after': signature(after),
-              'signature_named': signature(named),
-              'fd_stable': signature(before) == signature(after),
-              'name_matches_fd': signature(after) == signature(named),
-              'reject_not_regular': not stat.S_ISREG(before.st_mode),
-              'reject_writable': bool(before.st_mode & 0o022),
-              'reject_owner': before.st_uid not in (0, os.geteuid()),
-              'reject_size': before.st_size > 64 * 1024 * 1024,
-          }, sort_keys=True))
-          PY
       - name: Offline canonical checks
         run: make -C tools/llmtool check
       - name: Working tree is clean
