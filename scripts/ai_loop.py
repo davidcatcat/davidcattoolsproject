@@ -791,8 +791,8 @@ def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=
         'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE'}
 
 
-def ensure_probe_inventory_absent(root, inventory):
-    """Read-only absence proof for a recorded owned fixture inventory; never signal it."""
+def ensure_probe_inventory_absent(root, inventory, allow_host_only=False):
+    """Read-only absence proof; accept host-only fixtures only by explicit permission."""
     if not isinstance(inventory, list) or not inventory or len(inventory) > 128:
         raise Stop('failed Mac evidence lacks a bounded ownership inventory')
     pids = set()
@@ -803,6 +803,13 @@ def ensure_probe_inventory_absent(root, inventory):
         pids.add(row['pid'])
         for key in ('host_identity', 'supervisor'):
             item = row.get(key)
+            if (key == 'supervisor' and item == {} and allow_host_only
+                    and isinstance(row.get('host_identity'), dict)
+                    and row['host_identity'].get('pid') == row['pid']
+                    and row.get('members', []) == []):
+                # A kqueue test spawned only its direct child host. This does not
+                # fabricate supervisor ownership; the only PID to check is the host.
+                continue
             if (not isinstance(item, dict) or type(item.get('pid')) is not int
                     or not 1 < item['pid'] < 2**31):
                 raise Stop('invalid failed probe identity inventory')
@@ -992,7 +999,8 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
     # current bytes, without claiming historical preservation we cannot prove.
     ensure_no_active_runner_codex(root)
     if scenario == 'kqueue_non_reaping':
-        ensure_probe_inventory_absent(root, mac['failure']['fixture_cleanup']['original_owned_processes'])
+        ensure_probe_inventory_absent(root, mac['failure']['fixture_cleanup']['original_owned_processes'],
+                                      allow_host_only=True)
     elif scenario != 'preflight':
         ensure_failed_probe_pids_absent(root, mac)
     evidence_files = {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
