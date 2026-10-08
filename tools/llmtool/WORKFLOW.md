@@ -1,5 +1,10 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
+## Current native C1 bootstrap recovery gate — 2026-10-09
+
+C1's first run `20261008T185112Z-21061` STOPPED with zero implementation files because Codex searched for `automation/ai-loop/task.json`/`scripts/ai-loop.sh` in the main-based checkout. They live only on the validated control branch and are supplied in full by the runner; **this is not a reason for human permission escalation**. The runner now explicitly passes control provenance and authorizes only the original five C1 paths, with a frozen one-use `initial_decision_recovery` contract binding original Codex SHA and local state. No prior tests/reviews are inherited. After helper exact-head CI succeeds the Mac operator invokes `bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061 --check && bash .git/ai-loop/run.sh --resume 20261008T185112Z-21061`. Failure means STOP and script-first repair; no manual model prompting or fresh C1 branch.
+
+
 ## Priority: one ai-loop script until llmtool-native cutover (2026-10-09)
 
 For developing llmtool itself, the Mac operator **only executes a vetted ai-loop script**; do not require manual Codex/Claude prompts, ad hoc model CLI calls, or repeated shell repair blocks. Coordinator publishes `automation/ai-loop/task.md` and matching `task.json`; runner controls Codex implementation, independent read-only Claude review, deterministic tests, bounded repairs and Draft PR/exact-head CI. On a helper/CI/process/macOS/environment/interrupt error, **fix and resume the runner first** through a separate safe maintenance contract and executable. Preserve user work and security guards. See [ai-loop-handoff Skill](../../skills/ai-loop-handoff/SKILL.md) and [maintenance handoff](../../automation/ai-loop/MAINTENANCE_HANDOFF.md).
