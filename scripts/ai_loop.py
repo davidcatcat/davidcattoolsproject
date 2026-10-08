@@ -2487,9 +2487,23 @@ def main():
             snapshot_recovery(root, logs, recovery)
             integrate_recovery_base(root, task, logs, recovery)
             if recovery.get('kind') == 'acceptance_failure':
-                assessment = 'reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md'
-                (logs / 'coordinator-assessment.md').write_text(
-                    git(root, 'show', args.control_sha + ':' + assessment) + '\n', encoding='utf-8')
+                if recovery.get('failure_scenario') == 'kqueue_non_reaping':
+                    (logs / 'coordinator-assessment.md').write_text(
+                        '# 64433 native test-harness recovery (bounded coordinator authorization)\n\n'
+                        'Evidence: native kqueue_non_reaping ProcessLookupError/ESRCH at '
+                        'test_git_containment.py:2334; after the first branch passed, the '
+                        'zombie-first branch attempted an EVFILT_PROC registration. '
+                        'Original classification CLI was an error envelope, NOT an '
+                        'approved model disposition. Edit only the existing kqueue test '
+                        'plus truthful pending report note. Do not edit production '
+                        'ExitNote/identity implementation, accept arbitrary ESRCH, '
+                        'skip test branches, reduce fourteen scenarios or inherit PASS. '
+                        'Revalidate all full and native gates on the changed bytes.\n',
+                        encoding='utf-8')
+                else:
+                    assessment = 'reports/ai-loop/checkpoints/A11b.2.2.1-sigint-failure-assessment-20261007.md'
+                    (logs / 'coordinator-assessment.md').write_text(
+                        git(root, 'show', args.control_sha + ':' + assessment) + '\n', encoding='utf-8')
         save_json(logs / 'provenance.json', {'root': str(root), 'start_branch': branch, 'start_head': head,
             'base': task['base_sha'], 'pr_number': task['pr_number'], 'expected_head': task['expected_head'],
             'control_sha': args.control_sha, 'run_id': run_id, 'local_test_mode': test_mode,
