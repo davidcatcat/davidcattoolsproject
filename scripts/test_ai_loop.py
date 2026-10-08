@@ -745,6 +745,7 @@ class ReviewFailureRecoveryTests(unittest.TestCase):
     def test_review_recovery_schema_rejects_extra_authority(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
         task.pop('stopped_failure_recovery', None)
+        task.pop('acceptance_failure_recovery', None)
         task['review_failure_recovery'] = {
             'run_id': self.run_id, 'control_sha': 'a'*40, 'expected_head': 'b'*40,
             'summary_sha256': 'c'*64, 'failure_evidence_sha256': 'd'*64,
