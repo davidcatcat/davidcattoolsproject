@@ -1,0 +1,42 @@
+{
+  "run_id": "20261008T064055Z-64433",
+  "native_failures": [
+    {
+      "evidence_file": "mac-containment-0.json",
+      "scenario": "kqueue_non_reaping",
+      "exception_type": "ProcessLookupError",
+      "cleanup_status": "RESOLVED",
+      "owned_processes_retained": false,
+      "frames": [
+        {
+          "file": "tools/llmtool/tests/test_git_containment.py",
+          "line": 2334,
+          "function": "kqueue_non_reaping"
+        },
+        {
+          "file": "tools/llmtool/llmtool/_git_process_identity.py",
+          "line": 148,
+          "function": "__init__"
+        }
+      ]
+    }
+  ],
+  "provider_envelopes": [
+    {
+      "file": "claude-0.raw.json",
+      "subtype": "success",
+      "is_error": false,
+      "state": "SUCCESS_ENVELOPE"
+    },
+    {
+      "file": "failure-0-claude.raw.json",
+      "subtype": "success",
+      "is_error": true,
+      "state": "ERROR_ENVELOPE"
+    }
+  ],
+  "contains_source_text": false,
+  "contains_provider_text": false,
+  "repair_authorized": false,
+  "gates_inherited": false
+}
