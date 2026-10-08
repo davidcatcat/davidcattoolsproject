@@ -960,7 +960,7 @@ class DiagnosticsExportTests(unittest.TestCase):
             logs.mkdir(parents=True)
             src = root/'tools/llmtool/tests/test_git_containment.py'
             src.parent.mkdir(parents=True)
-            src.write_text('\\n'.join('line-%s PRIVATE_SOURCE_TOKEN' % i for i in range(1, 25)))
+            src.write_text('\n'.join('line-%s PRIVATE_SOURCE_TOKEN' % i for i in range(1, 25)))
             failure = {'schema_version': 1, 'platform': 'darwin',
                 'failure': {'status': 'FAIL', 'scenario': 'kqueue_non_reaping',
                     'exception_type': 'ProcessLookupError',
