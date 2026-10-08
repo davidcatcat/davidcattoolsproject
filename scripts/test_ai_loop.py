@@ -158,6 +158,102 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     loop.independent_qa_pr55(root, logs, task, 'task', {})
                 review.assert_not_called()
 
+class FrozenPR55SeverityInventoryTests(unittest.TestCase):
+    """Only safe numeric metadata may cross the Mac-to-Git boundary."""
+
+    @contextmanager
+    def evidence(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            run_id = '20261008T202910Z-31100'
+            logs = root / '.ai-loop' / run_id
+            logs.mkdir(parents=True)
+            head = '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
+            diff_hash = 'f977cb5dcd8ab47dc787cb0d1f439e843d0bff99dd1f69e018157a28348c7ea8'
+            name = 'tools/llmtool/llmtool/test_output_excerpts.py'
+            task = {'pr_number': 55, 'qa_gates': ['security', 'functional_qa'],
+                'expected_head': head, 'branch': 'feat/llmtool-c1-test-excerpts-20261009',
+                'base_sha': '8e29024656f873431f6ad83e45015b57bfe381a9',
+                'allowed_files': [name]}
+            reports = []
+            for number, role, count in ((201, 'security', 3), (202, 'functional_qa', 5)):
+                record = {'status': 'PASS', 'reviewed_head': head,
+                    'summary': 'SECRET-PRIVATE-ROLE-SUMMARY',
+                    'findings': [{'severity': 'Low', 'blocking': False, 'file': name,
+                        'detail': 'SENSITIVE-PRIVATE-FINDING-DETAIL',
+                        'evidence': 'SENSITIVE-PRIVATE-SOURCE-EVIDENCE'} for _ in range(count)]}
+                loop.save_json(logs / ('claude-%d.json' % number), record)
+                reports.append(dict(role=role, status='PASS', reviewed_head=head,
+                    summary=record['summary'], findings=record['findings']))
+            loop.save_json(logs / 'qa-pr55.json', {
+                'run_id': run_id, 'head': head, 'pr': 55, 'diff_sha256': diff_hash,
+                'qa_result': 'PASS', 'tests_related': 'PASS', 'tests_full_local': 'PASS',
+                'merge_authorized': False, 'product_provider_egress_authorized': False,
+                'roles': reports})
+            loop.save_json(logs / 'provenance.json', {
+                'run_id': run_id, 'root': str(root)})
+            loop.save_json(logs / 'task.json', task)
+            def fake_git(_root, *args):
+                if args == ('branch', '--show-current'):
+                    return task['branch']
+                if args == ('rev-parse', 'HEAD'):
+                    return head
+                if args == ('status', '--porcelain'):
+                    return ''
+                if args[:2] == ('diff', '--no-ext-diff'):
+                    return 'frozen diff'
+                raise AssertionError(args)
+            digest_fake = Mock()
+            digest_fake.hexdigest.return_value = diff_hash
+            published = []
+            previous = []
+            def fake_run(args, _root, **kwargs):
+                if args[:2] == ['gh', 'api'] and '--method' not in args:
+                    return json.dumps(previous)
+                self.assertIn('POST', args)
+                published.append(args[-1])
+                return '{"id":1}'
+            with patch.object(loop, 'git', side_effect=fake_git), \
+                 patch.object(loop, 'read_pr', return_value={'head': {'sha': head}}), \
+                 patch.object(loop, 'hashlib', Mock(sha256=Mock(return_value=digest_fake))), \
+                 patch.object(loop, 'run', side_effect=fake_run):
+                yield root, logs, task, reports, published, previous
+
+    def test_severity_only_no_private_text_no_model_no_source_change(self):
+        with self.evidence() as (root, logs, task, reports, published, previous):
+            with patch.object(loop, 'claude') as no_models:
+                loop.publish_frozen_qa_severity_inventory(root, logs, task)
+                no_models.assert_not_called()
+            self.assertEqual(len(published), 1)
+            body = published[0]
+            self.assertIn('Security PASS (3): Low=3, Medium=0', body)
+            self.assertIn('Functional QA PASS (5): Low=5, Medium=0', body)
+            for leak in ['SECRET-PRIVATE', 'SENSITIVE-PRIVATE']:
+                self.assertNotIn(leak, body)
+            self.assertNotIn('body=PRIVATE-', body)
+            previous.append({'body': body.removeprefix('body=')})
+            loop.publish_frozen_qa_severity_inventory(root, logs, task)
+            self.assertEqual(len(published), 1, 'duplicate safe issue comment')
+
+    def test_severity_inventory_rejects_private_drift_and_blocking_findings(self):
+        with self.evidence() as (root, logs, task, reports, published, previous):
+            review = logs / 'claude-201.json'
+            modified = json.loads(review.read_text())
+            modified['findings'][0]['severity'] = 'High'
+            modified['findings'][0]['blocking'] = True
+            loop.save_json(review, modified)
+            with self.assertRaises(loop.Stop):
+                loop.publish_frozen_qa_severity_inventory(root, logs, task)
+            self.assertEqual(published, [])
+            modified['findings'][0]['severity'] = 'Low'
+            modified['findings'][0]['blocking'] = False
+            loop.save_json(review, modified)
+            task['expected_head'] = 'f' * 40
+            with self.assertRaisesRegex(loop.Stop, 'clean pinned'):
+                loop.publish_frozen_qa_severity_inventory(root, logs, task)
+            self.assertEqual(published, [])
+
+
 class InitialDecisionHandoffTests(unittest.TestCase):
     """A zero-edit Codex decision is a frozen control-branch handoff, not model approval."""
 
