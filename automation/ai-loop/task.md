@@ -1,3 +1,51 @@
+# CURRENT — A11b native failure, deterministic diagnosis, 2026-10-08
+
+Run `20261008T064055Z-64433` STOPPED on unpublished candidate
+`59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad`, still based on
+`ceae425eacaa8729a9eb8d796e43304918a8c908`.
+Five related checks, preliminary ordinary Claude review, and both complete
+Python suites passed on these bytes. This is NOT native acceptance or security PASS.
+
+Mac native suite passed 8 of 14 scenarios and failed in
+`kqueue_non_reaping` with `ProcessLookupError / ESRCH` when
+`ExitNote(pid)` registered an EVFILT_PROC NOTE_EXIT notification.
+The native test has two branches: register-before-exit and zombie-first.
+The log already proves register-before-exit passed and retained an unreaped
+owned-zombie anchor. The failed second branch explicitly waited for status 5
+before attempting registration. Existing Darwin implementations document
+ESRCH when registering EVFILT_PROC after a process has already exited.
+Do not infer generic retry/flakiness; determine the intended acceptance
+contract and safe expected outcome without weakening the before-exit path,
+the identity/unreaped checks, or all fourteen native scenarios.
+
+Fixture cleanup was recorded RESOLVED, owned_processes empty. A fresh read-only
+absence check of original PID inventory is still required before native testing.
+A subsequent Claude failure coordinator CLI returned exit 1. Its JSON envelope
+had subtype=success and is_error=true; empty stderr does NOT establish
+auth/quota cause. No classifier PASS or CODE_BUG judgment is inherited.
+There is no authorization to blindly retry native probes, signal old PIDs,
+merge/publish the candidate, or weaken acceptance requirements.
+
+The control runner now automatically extracts bounded source line context and
+Claude envelope metadata when a future run stops. Private source excerpts remain
+Mac-only, under `.ai-loop/<run>/triage-local.json`; only schema-validated
+file/line/exception/provider-state metadata is eligible for Git diagnostics.
+Raw provider output and secret/auth logs are never published.
+
+For this ALREADY stopped run, use the separately authorized diagnostic-only
+mode (no Codex/Claude, no tests, no candidate/index edits):
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --diagnose 20261008T064055Z-64433
+```
+
+This enforces original task/control SHA, exact stopped candidate HEAD and source
+hashes against the native evidence, then publishes an immutable
+`round-0-triage/index.md` containing source-free metadata on the dedicated
+diagnostics branch. The command does not authorize recovery. Do not run old
+`--resume 60914` or unapproved `--resume 64433`.
+
 # CURRENT exact FAIL-review recovery — 2026-10-08 / run 60914
 
 Run `20261008T052643Z-60914` stopped after all five related suites PASS at exact
