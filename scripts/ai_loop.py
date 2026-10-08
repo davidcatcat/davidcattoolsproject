@@ -1763,14 +1763,14 @@ def diagnostic_codex_outcome(root, logs, task):
             # path/type validation, never treat a Git error as absence.
             tree = git(root, 'ls-tree', '-r', '-z', '--full-tree',
                        base, '--', name)
-            rows = [row for row in tree.split('\\0') if row]
+            rows = [row for row in tree.split('\0') if row]
             if len(rows) > 1:
                 raise Stop('pinned base Git tree has ambiguous path entries')
             previous = None
             if rows:
-                metadata, separator, tree_path = rows[0].partition('\\t')
+                metadata, separator, tree_path = rows[0].partition('\t')
                 match = re.fullmatch(r'(100644|100755) blob ([0-9a-f]{40})', metadata)
-                if separator != '\\t' or tree_path != name or not match:
+                if separator != '\t' or tree_path != name or not match:
                     raise Stop('pinned base Git tree entry unsafe or mismatched')
                 previous = match.group(2)
             present = git(root, 'hash-object', '--', name) if current.is_file() else None
