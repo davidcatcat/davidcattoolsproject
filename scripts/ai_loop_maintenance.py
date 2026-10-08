@@ -178,32 +178,38 @@ def codex_repair(data, findings, contract, state):
 
 
 def remote_pinned(control_sha):
+    """Inspect only the latest fetched immutable Git-controlled repair revision."""
     if not re.fullmatch(r'[a-f0-9]{40}', control_sha):
         raise Stop('invalid maintenance control SHA')
     git('fetch', '--no-tags', 'origin', 'refs/heads/' + BRANCH + ':refs/remotes/origin/' + BRANCH)
     remote = git('rev-parse', 'origin/' + BRANCH)
+    if remote != control_sha:
+        raise Stop('control branch moved during maintenance preflight')
+    if git('show', remote + ':automation/ai-loop/task.json') != git('show', BASE + ':automation/ai-loop/task.json'):
+        raise Stop('live C1 task changed during maintenance')
     marker_path = Path(git('rev-parse', '--absolute-git-dir')) / 'ai-loop' / 'maintenance-issue52' / 'published-commit'
     published = marker_path.read_text().strip() if marker_path.is_file() else None
-    if not published and remote != control_sha:
-        # A crash between successful fast-forward push and local marker write
-        # must not trigger duplicate Codex/Claude calls or a second commit.
-        # Recover only if remote is precisely our one-child commit and bytes match.
-        if (git('rev-parse', remote + '^') != control_sha
-                or git('rev-parse', remote + ':' + TARGET) != git('hash-object', TARGET)):
-            raise Stop('remote moved without exact recoverable maintenance commit')
+    original_blob = git('rev-parse', BASE + ':' + TARGET)
+    remote_blob = git('rev-parse', remote + ':' + TARGET)
+    candidate_blob = git('hash-object', TARGET)
+    if remote_blob == original_blob:
+        if published:
+            raise Stop('published marker conflicts with original target bytes')
+        return remote
+    # The fetched launcher pins the NEW head after a successful push. This
+    # exact 1-file parent/commit attestation permits a crash after push but
+    # before writing the private marker to recover without model replays.
+    if (candidate_blob != remote_blob
+            or git('rev-parse', remote + '^:' + TARGET) != original_blob
+            or git('diff', '--name-only', remote + '^', remote) != TARGET
+            or git('show', '-s', '--format=%s', remote)
+                != 'test(ai-loop): isolate historical recovery fixtures'):
+        raise Stop('remote maintenance publication cannot be authenticated')
+    if published and published != remote:
+        raise Stop('existing published marker disagrees with remote')
+    if not published:
         marker_path.parent.mkdir(parents=True, exist_ok=True)
         marker_path.write_text(remote + '\n')
-        published = remote
-    if remote != (published or control_sha):
-        raise Stop('control branch moved since vetted maintenance task; report for repin')
-    local_before = git('rev-parse', BASE + ':' + TARGET)
-    remote_before = git('rev-parse', remote + ':' + TARGET)
-    if not published and local_before != remote_before:
-        raise Stop('maintenance target changed on remote; no overwrite')
-    if published and remote_before != git('hash-object', TARGET):
-        raise Stop('published candidate byte mismatch; no local modification')
-    if git('show', remote + ':automation/ai-loop/task.json') != git('show', BASE + ':automation/ai-loop/task.json'):
-        raise Stop('active C1 task changed; maintenance cannot alter its authorization')
     return remote
 
 
