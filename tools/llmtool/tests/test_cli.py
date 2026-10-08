@@ -96,6 +96,150 @@ class CLITests(unittest.TestCase):
                 self.assertIn(b"llmtool", result.stdout)
         self.assertEqual(self.server.requests, [])
 
+    def test_test_excerpts_public_command_retains_failed_exit_and_provenance(self):
+        from test_test_output_excerpts import UNIT_FAILURE, FAIL_ID
+        import hashlib
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '7', '--json')
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(result.stderr, b'')
+        evidence = json.loads(result.stdout)
+        self.assertEqual(evidence['schema_version'], 1)
+        self.assertEqual(evidence['status'], 'COMPLETE')
+        self.assertEqual(evidence['test_status'], 'FAILED')
+        self.assertEqual(evidence['test_exit_code'], 7)
+        self.assertEqual(evidence['failure_ids'], [FAIL_ID])
+        self.assertEqual(evidence['source']['sha256'], hashlib.sha256(UNIT_FAILURE).hexdigest())
+        self.assertNotIn(b'PRIVATE_CAPTURE_PATH', result.stdout + result.stderr)
+        self.assertEqual(path.read_bytes(), UNIT_FAILURE)
+        self.assertEqual(self.server.requests, [])
+
+    def test_test_excerpts_zero_unknown_signal_and_inconsistent_metadata(self):
+        from test_test_output_excerpts import UNIT_FAILURE, unittest_capture
+        path = (self.cwd / 'capture.log').resolve()
+        cases = ((unittest_capture([], run_count=2), 0, 0, 'COMPLETE', 'NO_FAILURES_REPORTED'),
+                 (unittest_capture([], run_count=2), 5, 5, 'INCOMPLETE', 'FAILED'),
+                 (b'opaque failure\n', 3, 3, 'INCOMPLETE', 'FAILED'),
+                 (b'opaque result\n', 0, 1, 'INCOMPLETE', 'UNKNOWN'),
+                 (UNIT_FAILURE, 0, 1, 'INCOMPLETE', 'FAILED'),
+                 (UNIT_FAILURE, -15, 1, 'COMPLETE', 'FAILED'))
+        for raw, captured_exit, cli_exit, status, test_status in cases:
+            with self.subTest(captured_exit=captured_exit, status=status):
+                path.write_bytes(raw)
+                result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', str(captured_exit), '--json')
+                self.assertEqual(result.returncode, cli_exit, result.stderr)
+                self.assertEqual(result.stderr, b'')
+                evidence = json.loads(result.stdout)
+                self.assertEqual(evidence['test_exit_code'], captured_exit)
+                self.assertEqual(evidence['status'], status)
+                self.assertEqual(evidence['test_status'], test_status)
+                self.assertNotEqual(evidence['test_status'], 'PASS')
+        self.assertEqual(self.server.requests, [])
+
+    def test_test_excerpts_ignores_hostile_config_credentials_and_stdin(self):
+        from test_test_output_excerpts import UNIT_FAILURE
+        self.env['LLMTOOL_MODEL'] = 'INVALID_MODEL_VALUE'
+        self.env['LLMTOOL_API_KEY'] = 'UNUSED_CREDENTIAL_VALUE'
+        project = self.cwd / '.llmtool.yaml'
+        project.write_text('private_project: [MALFORMED_PROJECT_VALUE')
+        config = self.home / '.config/llmtool/config.yaml'
+        config.parent.mkdir(parents=True)
+        config.write_text('private_user: [MALFORMED_USER_VALUE')
+        path = (self.cwd / 'capture.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        before = {p.relative_to(self.cwd).as_posix(): p.read_bytes()
+                  for p in self.cwd.rglob('*') if p.is_file()}
+        result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '1', '--json',
+                              data=b'UNSELECTED_STDIN_VALUE')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr, b'')
+        self.assertEqual(json.loads(result.stdout)['status'], 'COMPLETE')
+        for marker in (b'UNUSED_CREDENTIAL_VALUE', b'MALFORMED_PROJECT_VALUE',
+                       b'MALFORMED_USER_VALUE', b'UNSELECTED_STDIN_VALUE'):
+            self.assertNotIn(marker, result.stdout + result.stderr)
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual(before, {p.relative_to(self.cwd).as_posix(): p.read_bytes()
+                                  for p in self.cwd.rglob('*') if p.is_file()})
+
+    def test_test_excerpts_rejects_unsafe_files_without_stderr_source_leaks(self):
+        from test_test_output_excerpts import UNIT_FAILURE, MAX_FILE_BYTES
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        for raw in (b'api_key=FIXTURE_SECRET_VALUE\n' + UNIT_FAILURE,
+                    UNIT_FAILURE + b'\x1b[31m', b'\xff\x00', b'x' * (MAX_FILE_BYTES + 1)):
+            with self.subTest(size=len(raw)):
+                path.write_bytes(raw)
+                result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '1', '--json')
+                self.assert_failure(result)
+                self.assertNotIn(b'PRIVATE_CAPTURE_PATH', result.stderr)
+                self.assertNotIn(b'FIXTURE_SECRET_VALUE', result.stderr)
+                self.assertNotIn(b'\x1b', result.stderr)
+                self.assertEqual(path.read_bytes(), raw)
+        link = self.cwd / 'PRIVATE_SYMLINK.log'
+        link.symlink_to(path)
+        for file in (self.cwd.resolve() / link.name, self.cwd.resolve(), self.cwd.resolve() / 'PRIVATE_MISSING.log'):
+            result = self.run_cli('test-excerpts', '--file', str(file), '--exit-code', '1', '--json')
+            self.assert_failure(result)
+            self.assertNotIn(b'PRIVATE_', result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_test_excerpts_arguments_help_and_bounded_output(self):
+        from test_test_output_excerpts import UNIT_FAILURE
+        path = (self.cwd / 'capture.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        help_result = self.run_cli('test-excerpts', '--help')
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn(b'--exit-code', help_result.stdout)
+        for extra in ((), ('--exit-code', '1'), ('--json',),
+                      ('--exit-code', 'PRIVATE_INVALID_VALUE', '--json'),
+                      ('--exit-code', '256', '--json'),
+                      ('--exit-code', '1', '--json', '--max-excerpts', '0'),
+                      ('--exit-code', '1', '--json', '--max-excerpt-bytes', '127'),
+                      ('--exit-code', '1', '--json', '--provider', 'PRIVATE_PROFILE')):
+            result = self.run_cli('test-excerpts', '--file', str(path), *extra)
+            self.assert_failure(result)
+            self.assertNotIn(b'PRIVATE_', result.stderr)
+        result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '1', '--json',
+                              '--max-excerpt-bytes', '128', '--max-excerpts', '1')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        evidence = json.loads(result.stdout)
+        self.assertEqual(len(evidence['excerpts']), 1)
+        self.assertLessEqual(len(evidence['excerpts'][0]['text'].encode()), 128)
+        self.assertTrue(evidence['excerpts'][0]['truncated'])
+        self.assertEqual(self.server.requests, [])
+
+    def test_test_excerpts_does_not_invoke_provider_shell_repo_or_credentials(self):
+        from contextlib import ExitStack
+        from llmtool.cli import main
+        from test_test_output_excerpts import UNIT_FAILURE
+        path = (self.cwd / 'capture.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        out, err = io.StringIO(), io.StringIO()
+        with ExitStack() as stack:
+            for name in ('llmtool.cli.resolve_config', 'llmtool.cli.api_key', 'llmtool.cli.create_client',
+                         'llmtool.cli.collect_git_snapshot', 'llmtool.cli.load_skill',
+                         'subprocess.run', 'subprocess.Popen', 'socket.socket',
+                         'os.scandir', 'os.listdir', 'os.chdir'):
+                stack.enter_context(patch(name, side_effect=AssertionError('unexpected operation')))
+            stack.enter_context(patch('sys.stdout', out))
+            stack.enter_context(patch('sys.stderr', err))
+            self.assertEqual(main(['test-excerpts', '--file', str(path), '--exit-code', '1', '--json']), 1)
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(json.loads(out.getvalue())['status'], 'COMPLETE')
+
+    def test_test_excerpts_broken_pipe_does_not_turn_failed_capture_into_success(self):
+        from llmtool.cli import main
+        from test_test_output_excerpts import UNIT_FAILURE
+        path = (self.cwd / 'capture.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+
+        class Broken:
+            def write(self, value):
+                raise BrokenPipeError()
+
+        with patch('sys.stdout', Broken()):
+            self.assertEqual(main(['test-excerpts', '--file', str(path), '--exit-code', '7', '--json']), 7)
+
     def test_configure_noninteractive_fails_without_touching_real_home_or_network(self):
         result = self.run_cli("configure")
         self.assertNotEqual(result.returncode, 0)
