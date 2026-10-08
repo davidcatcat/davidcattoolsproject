@@ -4,7 +4,7 @@
 
 Until llmtool-native A11b/A11c development workflow passes independent real-task acceptance, **the operator only runs a validated ai-loop script**. Coordinator authors matching Git `task.md` + `task.json` contracts; runner invokes Codex, independent read-only Claude, tests, bounded repair and Draft PR/CI. Never instruct the user to manually relay prompts or assemble many Mac commands. See [ai-loop-handoff Skill](../../skills/ai-loop-handoff/SKILL.md) and [MAINTENANCE_HANDOFF](MAINTENANCE_HANDOFF.md).
 
-**Current STOP:** live `task.json` is C1 Issue #51, but Mac has a local uncommitted Issue #52 fix to `scripts/test_ai_loop.py`; `--check` correctly rejects dirty tracked work. Issue #53's separate maintenance mode is NOT IMPLEMENTED. Do not run C1 as a repair; first validate/publish the helper fix with independent review + exact-head helper Python 3.9/3.14 CI, and implement a reviewed single-script maintenance entrypoint. Only after these readiness gates may the operator run the ordinary `bash scripts/ai-loop.sh --check && bash scripts/ai-loop.sh`. No bypass or auto-merge.
+**CURRENT (2026-10-09): Issue #52 RESOLVED on control `ab1f396b00ba11704f0b370a70bf1a31f85f2ee9`.** One-use `--maintenance-issue52` completed end-to-end: Mac 210/210 helper tests, independent Claude review PASS as reported by the runner, and [exact-head GitHub CI](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37826584204) Python 3.9 and 3.14 both PASS (210 helper + 15 maintenance safety cases each). The Mac operator reported the local branch reconciled to **clean main**; C1 Issue #51 remains NOT STARTED but its pinned main `8e29024656f873431f6ad83e45015b57bfe381a9` still matches upstream and no remote C1 branch/PR exists. Coordinator now authorizes the ordinary C1 precheck and, only on its PASS, execution. **Since `scripts/ai-loop.sh` is absent from tracked `main`, use the stable `.git/ai-loop/run.sh` script created by the launcher:** `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh` from the canonical repo. No manual model prompts. Issue #53 remains OPEN for general reusable maintenance/resume hardening; the successful one-use bootstrap is not general self-repair. No auto-merge.
 
 **The current control branch is now assigned to `C1-test-excerpts-20261009` on pinned
 `main@8e29024656f873431f6ad83e45015b57bfe381a9`.** Exact task contract and requirements:
@@ -27,7 +27,7 @@ candidate data. If the Mac checkout has unrelated/unpublished work,
 **Operator normal next command** (only once latest helper CI succeeds):
 ```sh
 cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
-bash scripts/ai-loop.sh --check && bash scripts/ai-loop.sh
+bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh
 ```
 A failing check means STOP and report, not manual prompt relay or
 switching to another checkout. The runner is a temporary bootstrap,
