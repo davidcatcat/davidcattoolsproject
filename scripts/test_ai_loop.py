@@ -652,6 +652,182 @@ class NativeResumeTests(unittest.TestCase):
 
 
 
+class SandboxDecisionRecoveryTests(unittest.TestCase):
+    run_id = '20261008T100821Z-76644'
+    test_path = 'tools/llmtool/tests/test_git_containment.py'
+    report_path = 'reports/validation.md'
+    candidate_head = 'e'*40
+    control_sha = 'b'*40
+    native_sha = 'd'*64
+    original_reason = ('No files changed. Candidate, contract and evidence hashes match, '
+        'but the sandbox denied the required fresh read-only process-absence check. '
+        'Recovery rules block edits on inspection errors. The outer runner must '
+        'establish absence proof outside the sandbox before repair.')
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            root = Path(temporary)
+            logs = root/'.ai-loop'/self.run_id
+            logs.mkdir(parents=True)
+            (root/self.test_path).parent.mkdir(parents=True)
+            (root/self.test_path).write_text('original kqueue test')
+            (root/self.report_path).parent.mkdir(parents=True)
+            (root/self.report_path).write_text('native still pending')
+            (root/'personal.txt').write_text('preserve')
+            allowed = [self.test_path, self.report_path]
+            files = {p: loop.digest(root/p) for p in allowed}
+            old_task = {
+                'mode': 'implement_new_pr', 'task_id': 'fixture',
+                'branch': 'feat/fixture', 'base_sha': HEAD, 'expected_head': HEAD,
+                'allowed_files': allowed, 'acceptance_report': self.report_path,
+                'max_repairs': 4, 'failure_triage': {'max_reviews': 4,
+                    'repeat_limit': 2, 'allow_mac_repair': True},
+                'acceptance_failure_recovery': {
+                    'run_id': '20261008T064055Z-64433',
+                    'control_sha': 'c'*40, 'repair_files': [self.test_path]}}
+            task = copy.deepcopy(old_task)
+            task.pop('acceptance_failure_recovery')
+            task['sandbox_decision_recovery'] = {
+                'run_id': self.run_id, 'control_sha': self.control_sha,
+                'expected_head': self.candidate_head,
+                'summary_sha256': '0'*64, 'codex_result_sha256': '0'*64,
+                'native_evidence_sha256': '0'*64, 'repair_files': [self.test_path]}
+            loop.save_json(logs/'task.json', old_task)
+            (logs/'task.md').write_text('original review handoff\n')
+            loop.save_json(logs/'provenance.json', {
+                'root': str(root), 'run_id': self.run_id,
+                'base': HEAD, 'start_head': self.candidate_head,
+                'control_sha': self.control_sha})
+            loop.save_json(logs/'summary.json', {
+                'status': 'STOPPED', 'branch': old_task['branch'],
+                'head': self.candidate_head, 'history': [],
+                'reason': ('bounded recovery Codex edited outside authorized test files '
+                           'or made no first-round test-harness repair')})
+            loop.save_json(logs/'codex-0.json', {
+                'status': 'NEEDS_DECISION', 'summary': self.original_reason})
+            owned = [{'pid': 72468, 'host_identity': {'pid': 72468},
+                'supervisor': {}}]
+            native = {
+                'platform': 'darwin', 'schema_version': 1,
+                'tested_sha256': loop.runtime_bytes(files),
+                'failure': {'status': 'FAIL', 'scenario': 'kqueue_non_reaping',
+                    'owned_processes': [], 'fixture_cleanup': {
+                        'status': 'RESOLVED', 'original_owned_processes': owned}}}
+            prior = logs/'recovery-evidence/mac-containment-0.json'
+            prior.parent.mkdir()
+            loop.save_json(prior, native)
+            previous = {
+                'kind': 'acceptance_failure', 'failure_scenario': 'kqueue_non_reaping',
+                'from_run': '20261008T064055Z-64433',
+                'starting_head': self.candidate_head, 'old_control_sha': 'c'*40,
+                'partial_files': files,
+                'evidence_files': {'mac-containment-0.json': loop.digest(prior)}}
+            loop.save_json(logs/'recovery.json', previous)
+            for path in allowed:
+                frozen = logs/'recovery-inputs'/path
+                frozen.parent.mkdir(parents=True, exist_ok=True)
+                frozen.write_bytes((root/path).read_bytes())
+            policy = task['sandbox_decision_recovery']
+            policy['summary_sha256'] = loop.digest(logs/'summary.json')
+            policy['codex_result_sha256'] = loop.digest(logs/'codex-0.json')
+            policy['native_evidence_sha256'] = loop.digest(prior)
+            personal = {'personal.txt': loop.digest(root/'personal.txt')}
+
+            def git(cwd, *args):
+                if args == ('branch', '--show-current'): return task['branch']
+                if args == ('rev-parse', 'HEAD'): return self.candidate_head
+                if args == ('diff', '--cached', '--name-only'): return ''
+                if args == ('diff', '--name-only', '-z', HEAD, self.candidate_head):
+                    return self.test_path+'\0'+self.report_path+'\0'
+                raise AssertionError(args)
+
+            stack.enter_context(patch.object(loop, 'load_task',
+                return_value=(old_task, 'original review handoff')))
+            stack.enter_context(patch.object(loop, 'git', side_effect=git))
+            stack.enter_context(patch.object(loop, 'run', side_effect=['[]', '']))
+            stack.enter_context(patch.object(loop, 'command', return_value=(0, '', '')))
+            stack.enter_context(patch.object(loop, 'ensure_no_active_runner_codex'))
+            absence = stack.enter_context(patch.object(loop, 'ensure_probe_inventory_absent'))
+            yield root, logs, task, personal, absence, owned
+
+    def test_no_change_decision_recovers_after_fresh_outer_absence(self):
+        with self.fixture() as (root, old, task, personal, absence, owned):
+            initial, recovery = loop.prepare_sandbox_decision_resume(
+                root, task, self.run_id, personal)
+            self.assertEqual(initial, personal)
+            absence.assert_called_once_with(root, owned, allow_host_only=True)
+            self.assertEqual(recovery['kind'], 'acceptance_failure')
+            self.assertEqual(recovery['origin_kind'], 'sandbox_decision')
+            self.assertEqual(recovery['outer_absence_check']['authority'], 'MAC_RUNNER')
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(recovery['repair_files'], [self.test_path])
+            self.assertEqual(recovery['private_evidence_files']['codex-0.json'],
+                             task['sandbox_decision_recovery']['codex_result_sha256'])
+            new = root/'.ai-loop/new-run'; new.mkdir()
+            loop.snapshot_recovery(root, new, recovery)
+            self.assertFalse((new/'recovery-evidence/codex-0.json').exists())
+            self.assertEqual((new/'recovery-inputs'/self.test_path).read_text(),
+                             (root/self.test_path).read_text())
+
+    def test_no_change_decision_rejects_evidence_and_candidate_drift(self):
+        for kind in ('summary', 'codex', 'native', 'source', 'snapshot', 'control'):
+            with self.subTest(kind=kind), self.fixture() as (root, old, task, personal, absence, owned):
+                if kind == 'summary':
+                    value = json.loads((old/'summary.json').read_text())
+                    value['reason'] = 'different reason'
+                    loop.save_json(old/'summary.json', value)
+                    task['sandbox_decision_recovery']['summary_sha256'] = loop.digest(old/'summary.json')
+                elif kind == 'codex':
+                    value = json.loads((old/'codex-0.json').read_text())
+                    value['status'] = 'PASS'
+                    loop.save_json(old/'codex-0.json', value)
+                    task['sandbox_decision_recovery']['codex_result_sha256'] = loop.digest(old/'codex-0.json')
+                elif kind == 'native':
+                    value = json.loads((old/'recovery-evidence/mac-containment-0.json').read_text())
+                    value['failure']['scenario'] = 'other'
+                    loop.save_json(old/'recovery-evidence/mac-containment-0.json', value)
+                    task['sandbox_decision_recovery']['native_evidence_sha256'] = loop.digest(
+                        old/'recovery-evidence/mac-containment-0.json')
+                    p = json.loads((old/'recovery.json').read_text())
+                    p['evidence_files']['mac-containment-0.json'] = task['sandbox_decision_recovery']['native_evidence_sha256']
+                    loop.save_json(old/'recovery.json', p)
+                elif kind == 'source':
+                    (root/self.test_path).write_text('tampered')
+                elif kind == 'snapshot':
+                    (old/'recovery-inputs'/self.test_path).write_text('tampered')
+                elif kind == 'control':
+                    value = json.loads((old/'provenance.json').read_text())
+                    value['control_sha'] = 'f'*40
+                    loop.save_json(old/'provenance.json', value)
+                with self.assertRaises(loop.Stop):
+                    loop.prepare_sandbox_decision_resume(root, task, self.run_id, personal)
+
+    def test_no_change_decision_schema_requires_single_exact_test(self):
+        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('acceptance_failure_recovery', None)
+        task['sandbox_decision_recovery'] = {
+            'run_id': self.run_id, 'control_sha': self.control_sha,
+            'expected_head': self.candidate_head, 'summary_sha256': 'a'*64,
+            'codex_result_sha256': 'b'*64, 'native_evidence_sha256': 'c'*64,
+            'repair_files': [self.test_path]}
+        def load(value):
+            with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
+                return loop.load_task(Path('.'), HEAD)[0]
+        self.assertIn('sandbox_decision_recovery', load(task))
+        for fault in ('extra', 'wrong_repair', 'two_recoveries', 'missing_hash'):
+            with self.subTest(fault=fault):
+                bad = copy.deepcopy(task)
+                policy = bad['sandbox_decision_recovery']
+                if fault == 'extra': policy['other'] = True
+                elif fault == 'wrong_repair':
+                    policy['repair_files'] = ['tools/llmtool/llmtool/_git_process_identity.py']
+                elif fault == 'two_recoveries':
+                    bad['acceptance_failure_recovery'] = {'run_id': self.run_id}
+                elif fault == 'missing_hash': policy.pop('codex_result_sha256')
+                with self.assertRaises(loop.Stop): load(bad)
+
+
 class ReviewFailureRecoveryTests(unittest.TestCase):
     run_id = '20261008T052643Z-60914'
 
