@@ -1,5 +1,11 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
+## Priority: one ai-loop script until llmtool-native cutover (2026-10-09)
+
+For developing llmtool itself, the Mac operator **only executes a vetted ai-loop script**; do not require manual Codex/Claude prompts, ad hoc model CLI calls, or repeated shell repair blocks. Coordinator publishes `automation/ai-loop/task.md` and matching `task.json`; runner controls Codex implementation, independent read-only Claude review, deterministic tests, bounded repairs and Draft PR/exact-head CI. On a helper/CI/process/macOS/environment/interrupt error, **fix and resume the runner first** through a separate safe maintenance contract and executable. Preserve user work and security guards. See [ai-loop-handoff Skill](../../skills/ai-loop-handoff/SKILL.md) and [maintenance handoff](../../automation/ai-loop/MAINTENANCE_HANDOFF.md).
+
+**Operational blocker:** Issue #52's uncommitted `scripts/test_ai_loop.py` patch passed 210 local tests under physical TMPDIR but has not passed independent Claude review or helper CI 3.9/3.14. Issue #53 self-repair/adopt-dirty mode is NOT IMPLEMENTED. Live control task is C1 Issue #51; it must NOT start until recovery and helper validation are complete. Document-only instructions are not executable fixes. This operator rule does not waive safety, specialist Security/QA or Mac evidence.
+
 ## Execution environment
 
 Use Codex Cloud when selected by the user for repository investigation, development,
