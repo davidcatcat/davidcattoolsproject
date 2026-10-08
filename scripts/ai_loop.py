@@ -306,24 +306,39 @@ def load_task(root, control_sha):
             raise Stop('invalid acceptance failure recovery contract')
     if 'stopped_failure_recovery' in metadata:
         recovery = metadata['stopped_failure_recovery']
-        keys = {'run_id', 'control_sha', 'expected_head', 'old_base_sha', 'summary_sha256',
-                'failure_round', 'failure_evidence_sha256', 'failure_phase',
-                'classification_rejection', 'mac_evidence_sha256', 'upstream_paths'}
+        common = {'run_id', 'control_sha', 'expected_head', 'old_base_sha', 'summary_sha256',
+                  'failure_round', 'failure_evidence_sha256', 'failure_phase', 'upstream_paths'}
+        rejected_keys = common | {'classification_rejection', 'mac_evidence_sha256'}
+        decision_keys = common | {'classification_decision', 'classification_category',
+                                  'classification_raw_sha256', 'prior_mac_evidence_file',
+                                  'prior_mac_evidence_sha256'}
         phases = ('related', 'full', 'full-final', 'mandatory-final',
                   'developer', 'review', 'final-review', 'ci')
+        keyset = set(recovery) if isinstance(recovery, dict) else set()
+        rejected_mode = keyset == rejected_keys
+        decision_mode = keyset == decision_keys
+        hash_keys = ['summary_sha256', 'failure_evidence_sha256']
+        if rejected_mode:
+            hash_keys.append('mac_evidence_sha256')
+        if decision_mode:
+            hash_keys.extend(['classification_raw_sha256', 'prior_mac_evidence_sha256'])
         if (metadata['mode'] != 'implement_new_pr' or metadata['max_repairs'] < 1
-                or not isinstance(recovery, dict) or set(recovery) != keys
+                or not isinstance(recovery, dict) or not (rejected_mode or decision_mode)
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or any(not isinstance(recovery.get(k), str)
                        or not re.fullmatch(r'[0-9a-f]{40}', recovery[k])
                        for k in ('control_sha', 'expected_head', 'old_base_sha'))
                 or any(not isinstance(recovery.get(k), str)
-                       or not re.fullmatch(r'[0-9a-f]{64}', recovery[k])
-                       for k in ('summary_sha256', 'failure_evidence_sha256', 'mac_evidence_sha256'))
+                       or not re.fullmatch(r'[0-9a-f]{64}', recovery[k]) for k in hash_keys)
                 or type(recovery.get('failure_round')) is not int
                 or not 0 <= recovery['failure_round'] <= 3
                 or recovery.get('failure_phase') not in phases
-                or recovery.get('classification_rejection') != 'SUMMARY_TOO_LONG'
+                or (rejected_mode and recovery.get('classification_rejection') != 'SUMMARY_TOO_LONG')
+                or (decision_mode and
+                    (recovery.get('classification_decision') != 'NEEDS_DECISION'
+                     or recovery.get('classification_category') not in ('CODE_BUG', 'TEST_BUG')
+                     or not re.fullmatch(r'mac-containment-[0-9]+\.json',
+                                         recovery.get('prior_mac_evidence_file', ''))))
                 or not isinstance(recovery.get('upstream_paths'), list)
                 or not recovery['upstream_paths']
                 or any(not isinstance(p, str) or p.startswith(('/', '.git/'))
@@ -983,13 +998,39 @@ def prepare_stopped_failure_resume(root, task, run_id, current_untracked, tracke
             or failure.get('head') != candidate or failure.get('status') != 'FAIL'
             or failure.get('gate_waived') is not False):
         raise Stop('stopped deterministic failure does not match the recovery contract')
-    rejected = classification_rejection(old_logs, old_task, round_no)
-    if (not isinstance(rejected, dict)
-            or rejected.get('head') != candidate
-            or rejected.get('evidence_sha256') != policy['failure_evidence_sha256']
-            or rejected.get('reason_codes') != [policy['classification_rejection']]
-            or rejected.get('recovery_authorized') is not False):
-        raise Stop('stopped classifier rejection does not match the pinned diagnosis')
+    classification_private = {}
+    if 'classification_rejection' in policy:
+        rejected = classification_rejection(old_logs, old_task, round_no)
+        if (not isinstance(rejected, dict)
+                or rejected.get('head') != candidate
+                or rejected.get('evidence_sha256') != policy['failure_evidence_sha256']
+                or rejected.get('reason_codes') != [policy['classification_rejection']]
+                or rejected.get('recovery_authorized') is not False):
+            raise Stop('stopped classifier rejection does not match the pinned diagnosis')
+    else:
+        raw_name = 'failure-%d-claude.raw.json' % round_no
+        raw_path = old_logs / raw_name
+        if (any(p.is_symlink() for p in (raw_path, *raw_path.parents)) or not raw_path.is_file()
+                or raw_path.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('stopped classifier decision evidence missing/unsafe')
+        raw = raw_path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != policy['classification_raw_sha256']:
+            raise Stop('stopped classifier decision bytes changed')
+        try:
+            envelope = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise Stop('stopped classifier decision envelope is invalid')
+        value = envelope.get('structured_output') if isinstance(envelope, dict) else None
+        if (not isinstance(envelope, dict) or envelope.get('is_error') is not False
+                or envelope.get('subtype') != 'success'):
+            raise Stop('stopped classifier decision envelope did not succeed')
+        validate_failure_review(value, old_task, candidate, policy['failure_evidence_sha256'])
+        blocking = {f['file'] for f in value['findings'] if f['blocking']}
+        if (value['decision'] != policy['classification_decision']
+                or value['category'] != policy['classification_category']
+                or blocking != set(policy['upstream_paths'])):
+            raise Stop('stopped out-of-scope decision does not match the approved upstream fix')
+        classification_private[raw_name] = policy['classification_raw_sha256']
 
     tested = failure.get('source_sha256')
     if not isinstance(tested, dict) or set(tested) != set(task['allowed_files']):
@@ -1004,25 +1045,36 @@ def prepare_stopped_failure_resume(root, task, run_id, current_untracked, tracke
     if total > 16 * 1024 * 1024:
         raise Stop('stopped recovery candidate snapshot exceeds bound')
 
-    mac_raw, mac = record('mac-containment-1.json', policy['mac_evidence_sha256'])
-    cleanup = mac.get('failure', {}).get('fixture_cleanup')
-    if (mac.get('platform') != 'darwin' or not isinstance(cleanup, dict)
-            or mac.get('failure', {}).get('owned_processes') != []
-            or cleanup.get('status') != 'RESOLVED'
-            or not isinstance(cleanup.get('original_owned_processes'), list)
-            or not cleanup['original_owned_processes']):
-        raise Stop('prior Mac fixture cleanup is not safely resolved')
-    ensure_probe_inventory_absent(root, cleanup['original_owned_processes'])
+    if 'classification_rejection' in policy:
+        mac_name = 'mac-containment-1.json'
+        mac_raw, mac = record(mac_name, policy['mac_evidence_sha256'])
+        cleanup = mac.get('failure', {}).get('fixture_cleanup')
+        if (mac.get('platform') != 'darwin' or not isinstance(cleanup, dict)
+                or mac.get('failure', {}).get('owned_processes') != []
+                or cleanup.get('status') != 'RESOLVED'
+                or not isinstance(cleanup.get('original_owned_processes'), list)
+                or not cleanup['original_owned_processes']):
+            raise Stop('prior Mac fixture cleanup is not safely resolved')
+        inventory = cleanup['original_owned_processes']
+    else:
+        mac_name = policy['prior_mac_evidence_file']
+        mac_raw, mac = record(mac_name, policy['prior_mac_evidence_sha256'])
+        inventory = mac.get('failure', {}).get('owned_processes')
+        if (mac.get('platform') != 'darwin' or not isinstance(inventory, list) or not inventory):
+            raise Stop('prior Mac failure lacks the exact retained ownership inventory')
+    ensure_probe_inventory_absent(root, inventory)
     ensure_no_active_runner_codex(root)
+    evidence_files = {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
+                      'failure-%d.json' % round_no: hashlib.sha256(failure_raw).hexdigest(),
+                      mac_name: hashlib.sha256(mac_raw).hexdigest()}
     return current_untracked, {'from_run': run_id, 'kind': 'stopped_failure',
         'old_control_sha': policy['control_sha'], 'starting_head': candidate,
         'old_base_sha': old_base, 'upstream_base_sha': task['base_sha'],
         'upstream_paths': sorted(upstream_paths), 'partial_files': tested,
         'preserved_untracked': current_untracked, 'prior_unrelated_integrity': 'UNVERIFIED',
         'inherited_validation': 'NONE', 'validate_first': True,
-        'evidence_files': {'summary.json': hashlib.sha256(summary_raw).hexdigest(),
-                           'failure-%d.json' % round_no: hashlib.sha256(failure_raw).hexdigest(),
-                           'mac-containment-1.json': hashlib.sha256(mac_raw).hexdigest()}}
+        'private_evidence_files': classification_private,
+        'evidence_files': evidence_files}
 
 
 def integrate_recovery_base(root, task, logs, recovery):
@@ -1076,6 +1128,13 @@ def snapshot_recovery(root, logs, recovery):
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open('xb') as output:
             output.write(data)
+    for name, expected in recovery.get('private_evidence_files', {}).items():
+        source = root / '.ai-loop' / recovery['from_run'] / name
+        if any(p.is_symlink() for p in (source, *source.parents)) or not source.is_file():
+            raise Stop('private recovery evidence changed before snapshot')
+        data = source.read_bytes()
+        if len(data) > 2 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != expected:
+            raise Stop('private recovery evidence changed before snapshot')
     save_json(logs / 'recovery.json', recovery)
 
 
