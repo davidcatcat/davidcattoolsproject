@@ -269,6 +269,122 @@ class NativeResumeTests(unittest.TestCase):
             self.assertEqual(recovery['inherited_validation'], 'NONE')
             self.assertEqual(recovery['evidence_files']['mac-containment-0.json'], policy['evidence_sha256'])
 
+    def setup_kqueue_recovery(self, root, old, task):
+        test = 'tools/llmtool/tests/test_git_containment.py'
+        path = root/test
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = ['# synthetic kqueue source line %d' % i for i in range(1, 2351)]
+        lines[2317] = '        for zombie_first in (False, True):'
+        lines[2333] = '                note = kernel.ExitNote(process.pid)'
+        path.write_text('\n'.join(lines) + '\n')
+        baseline = loop.load_task.return_value[0]
+        baseline['allowed_files'].append(test)
+        task['allowed_files'].append(test)
+        loop.save_json(old/'task.json', baseline)
+        summary = json.loads((old/'summary.json').read_text())
+        tested = summary['history'][0]['tested_sha256']
+        tested[test] = loop.digest(path)
+        summary['reason'] = 'command failed (exit 1): claude; see local logs'
+        summary['history'][0]['review'] = {'status': 'PASS'}
+        summary['history'][0]['final_full'] = {'status': 'PASS'}
+        loop.save_json(old/'summary.json', summary)
+        inventory = [{'pid': 90, 'host_identity': {'pid': 90},
+                      'supervisor': {}, 'members': []}]
+        good = ['fd_inheritance', 'sigint', 'sigterm', 'sighup',
+                'hung_supervisor', 'leader_exit_descendant', 'identity_reuse',
+                'macos_start_time']
+        mac = {'platform': 'darwin', 'schema_version': 1,
+               'tested_sha256': loop.runtime_bytes(tested),
+               'scenarios': {x: {'status': 'PASS', 'skipped': 0} for x in good},
+               'failure': {'status': 'FAIL', 'scenario': 'kqueue_non_reaping',
+                   'subcase': 'kqueue_non_reaping', 'exception_type': 'ProcessLookupError',
+                   'errno': 3,
+                   'traceback': [
+                       {'file': 'test_git_containment.py', 'function': 'kqueue_non_reaping',
+                        'line': 2334},
+                       {'file': '_git_process_identity.py', 'function': '__init__',
+                        'line': 148}],
+                   'owned_processes': [], 'fixture_cleanup': {'status': 'RESOLVED',
+                       'original_owned_processes': inventory,
+                       'evidence': {k: True for k in
+                           ('decision_before_reap', 'host_pin_verified', 'host_reaped',
+                            'host_absent', 'group_absent')}}}}
+        loop.save_json(old/'mac-containment-0.json', mac)
+        failure = {'run_id': self.run_id, 'task_id': task['task_id'], 'round': 0,
+                   'phase': 'mandatory-final', 'head': 'e'*40, 'status': 'FAIL',
+                   'gate_waived': False, 'source_sha256': tested,
+                   'evidence': {'mac': mac}}
+        loop.save_json(old/'failure-0.json', failure)
+        loop.save_json(old/'failure-0-claude.raw.json',
+                       {'subtype': 'success', 'is_error': True, 'result': 'LOCAL_PRIVATE'})
+        task['acceptance_failure_recovery'].update(
+            failure_scenario='kqueue_non_reaping',
+            summary_sha256=loop.digest(old/'summary.json'),
+            evidence_sha256=loop.digest(old/'mac-containment-0.json'),
+            failure_evidence_sha256=loop.digest(old/'failure-0.json'),
+            repair_files=[test])
+        return inventory
+
+    def test_kqueue_failure_recovery_pins_native_error_and_private_provider(self):
+        with self.fixture() as (root, old, task, current, *rest):
+            owned = self.setup_kqueue_recovery(root, old, task)
+            with patch.object(loop, 'ensure_probe_inventory_absent') as absent:
+                original, recovery = loop.prepare_acceptance_resume(
+                    root, task, self.run_id, current)
+            absent.assert_called_once_with(root, owned)
+            self.assertEqual(recovery['failure_scenario'], 'kqueue_non_reaping')
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertEqual(set(recovery['private_evidence_files']),
+                             {'failure-0-claude.raw.json'})
+            logs = root/'.ai-loop/new-run'; logs.mkdir()
+            loop.snapshot_recovery(root, logs, recovery)
+            self.assertFalse((logs/'recovery-evidence/failure-0-claude.raw.json').exists())
+            self.assertEqual(loop.digest(old/'failure-0-claude.raw.json'),
+                             recovery['private_evidence_files']['failure-0-claude.raw.json'])
+            (old/'failure-0-claude.raw.json').write_text('changed')
+            with self.assertRaises(loop.Stop):
+                loop.snapshot_recovery(root, root/'.ai-loop/new-run-2', recovery)
+
+    def test_kqueue_recovery_rejects_wrong_native_or_provider_evidence(self):
+        for fault in ('errno', 'frames', 'cleanup', 'provider', 'source'):
+            with self.subTest(fault=fault), self.fixture() as (root, old, task, current, *rest):
+                self.setup_kqueue_recovery(root, old, task)
+                if fault == 'provider':
+                    loop.save_json(old/'failure-0-claude.raw.json',
+                                   {'subtype': 'success', 'is_error': False})
+                elif fault == 'source':
+                    (root/'tools/llmtool/tests/test_git_containment.py').write_text('drift')
+                else:
+                    mac = json.loads((old/'mac-containment-0.json').read_text())
+                    if fault == 'errno': mac['failure']['errno'] = 2
+                    elif fault == 'frames': mac['failure']['traceback'][0]['line'] = 2335
+                    elif fault == 'cleanup': mac['failure']['fixture_cleanup']['status'] = 'UNRESOLVED'
+                    loop.save_json(old/'mac-containment-0.json', mac)
+                    failure = json.loads((old/'failure-0.json').read_text())
+                    failure['evidence']['mac'] = mac
+                    loop.save_json(old/'failure-0.json', failure)
+                    policy = task['acceptance_failure_recovery']
+                    policy['evidence_sha256'] = loop.digest(old/'mac-containment-0.json')
+                    policy['failure_evidence_sha256'] = loop.digest(old/'failure-0.json')
+                with patch.object(loop, 'ensure_probe_inventory_absent'):
+                    with self.assertRaises(loop.Stop):
+                        loop.prepare_acceptance_resume(root, task, self.run_id, current)
+
+    def test_kqueue_recovery_repair_scope_is_test_only(self):
+        task = {'acceptance_report': 'reports/validation.md'}
+        rec = {'kind': 'acceptance_failure', 'failure_scenario': 'kqueue_non_reaping',
+               'repair_files': ['tools/llmtool/tests/test_git_containment.py']}
+        path = rec['repair_files'][0]
+        loop.ensure_review_repair_scope(task, rec, 0, [path])
+        loop.ensure_review_repair_scope(task, rec, 1, [task['acceptance_report']])
+        for paths in ([], [task['acceptance_report']],
+                      [path, 'tools/llmtool/llmtool/_git_process_identity.py']):
+            with self.subTest(paths=paths), self.assertRaises(loop.Stop):
+                loop.ensure_review_repair_scope(task, rec, 0, paths)
+        with self.assertRaises(loop.Stop):
+            loop.ensure_review_repair_scope(task, rec, 1,
+                ['tools/llmtool/llmtool/_git_process_identity.py'])
+
     def test_preflight_harness_failure_can_recover_without_native_pass_or_pid_cleanup(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             tested = json.loads((old/'summary.json').read_text())['history'][0]['tested_sha256']
