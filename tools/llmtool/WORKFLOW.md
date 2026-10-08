@@ -403,3 +403,12 @@ including external review and applicable Mac verification. Green CI alone is
 insufficient. Recheck branch/target SHA before publication or merge; a changed SHA
 requires coordinator assessment of affected evidence. Report final commit/PR/CI
 identity once; avoid report-only commits made solely to embed their own SHA.
+
+## PR #49 B5 topology amendment
+
+For the authorized synthetic containment slice, use the versioned
+[B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md)
+with the historical B5 spec. It records the supervisor-owned group, direct-child
+parent anchor, self-group last act and retained operator-wait obligations.
+Real Git ADD and A11b.2.2.2 remain unauthorized; PR #49 remains Draft pending
+fresh verification and independent Security Re-review and functional QA.
