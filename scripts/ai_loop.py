@@ -1721,23 +1721,56 @@ def diagnostic_codex_outcome(root, logs, task):
         raise Stop('Codex outcome is not valid JSON')
     validate_result(value, 'developer')  # No trust in free-form summary.
     source = logs / 'recovery-inputs'
-    if source.is_symlink() or not source.is_dir():
-        raise Stop('Codex comparison baseline is missing')
+    if source.is_symlink() or (source.exists() and not source.is_dir()):
+        raise Stop('Codex comparison baseline is unsafe')
+    # A brand-new implement_new_pr run starts at pinned main, without the
+    # recovery-inputs directory used by older interrupted-task workflows.
+    # Do not manufacture a snapshot or infer successful implementation.
+    fresh = not source.is_dir()
+    if fresh:
+        base = task.get('base_sha')
+        proof = logs / 'provenance.json'
+        if (task.get('mode') != 'implement_new_pr'
+                or not isinstance(base, str) or not re.fullmatch(r'[0-9a-f]{40}', base)
+                or proof.is_symlink() or not proof.is_file() or proof.stat().st_size > 128 * 1024):
+            raise Stop('new-task Codex comparison provenance missing/unsafe')
+        provenance = json.loads(proof.read_bytes())
+        if (provenance.get('root') != str(root) or provenance.get('run_id') != logs.name
+                or provenance.get('start_head') != base or provenance.get('base') != base
+                or provenance.get('start_branch') != 'main'
+                or git(root, 'rev-parse', 'HEAD') != base
+                or git(root, 'branch', '--show-current') != task.get('branch')
+                or git(root, 'diff', '--cached', '--name-only')):
+            raise Stop('new-task Codex comparison has wrong Git provenance')
     allowed = task['allowed_files']
     if not isinstance(allowed, list) or len(set(allowed)) != len(allowed) or len(allowed) > 64:
         raise Stop('invalid Codex comparison file allowlist')
     modified = []
     for name in allowed:
-        snapshot = source / name
+        if (not isinstance(name, str) or not name
+                or name.startswith('/') or '..' in Path(name).parts):
+            raise Stop('invalid Codex allowed path')
         current = root / name
-        if (any(p.is_symlink() for p in (snapshot, *snapshot.parents))
-                or not snapshot.is_file() or snapshot.stat().st_size > 2 * 1024 * 1024):
-            raise Stop('Codex recovery snapshot changed or missing: ' + name)
-        if (any(p.is_symlink() for p in (current, *current.parents))
-                or not current.is_file() or current.stat().st_size > 2 * 1024 * 1024):
-            raise Stop('Codex candidate source changed or missing: ' + name)
-        if digest(snapshot) != digest(current):
-            modified.append(name)
+        if any(p.is_symlink() for p in (current, *current.parents)):
+            raise Stop('Codex candidate path unsafe: ' + name)
+        if current.exists() and (not current.is_file() or current.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('Codex candidate source unsafe/oversized: ' + name)
+        if fresh:
+            rc, _, _ = command(['git', 'cat-file', '-e', base + ':' + name], root)
+            if rc not in (0, 1):
+                raise Stop('pinned base Git object validation failed')
+            previous = git(root, 'rev-parse', base + ':' + name) if rc == 0 else None
+            present = git(root, 'hash-object', '--', name) if current.is_file() else None
+            if previous != present:
+                modified.append(name)
+        else:
+            snapshot = source / name
+            if (any(p.is_symlink() for p in (snapshot, *snapshot.parents))
+                    or not snapshot.is_file() or snapshot.stat().st_size > 2 * 1024 * 1024
+                    or not current.is_file()):
+                raise Stop('Codex recovery snapshot changed or missing: ' + name)
+            if digest(snapshot) != digest(current):
+                modified.append(name)
     authorized = set(task.get('acceptance_failure_recovery', {}).get('repair_files', []))
     result = {'run_id': logs.name, 'result_file': 'codex-0.json',
         'result_sha256': hashlib.sha256(raw).hexdigest(),
