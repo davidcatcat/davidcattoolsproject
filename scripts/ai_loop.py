@@ -1532,6 +1532,50 @@ def validate_public_triage(value, task, run_id):
     return value
 
 
+def diagnostic_codex_outcome(root, logs, task):
+    """Read-only, schema-fixed metadata for a stopped first-round Codex attempt.
+
+    Candidate source and free-form provider content remain entirely local.
+    """
+    output = logs / 'codex-0.json'
+    if (any(path.is_symlink() for path in (output, *output.parents))
+            or not output.is_file() or output.stat().st_size > 128 * 1024):
+        raise Stop('Codex outcome missing, symlinked or oversized')
+    raw = output.read_bytes()
+    try:
+        value = json.loads(raw)
+    except (UnicodeError, ValueError):
+        raise Stop('Codex outcome is not valid JSON')
+    validate_result(value, 'developer')  # No trust in free-form summary.
+    source = logs / 'recovery-inputs'
+    if source.is_symlink() or not source.is_dir():
+        raise Stop('Codex comparison baseline is missing')
+    allowed = task['allowed_files']
+    if not isinstance(allowed, list) or len(set(allowed)) != len(allowed) or len(allowed) > 64:
+        raise Stop('invalid Codex comparison file allowlist')
+    modified = []
+    for name in allowed:
+        snapshot = source / name
+        current = root / name
+        if (any(p.is_symlink() for p in (snapshot, *snapshot.parents))
+                or not snapshot.is_file() or snapshot.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('Codex recovery snapshot changed or missing: ' + name)
+        if (any(p.is_symlink() for p in (current, *current.parents))
+                or not current.is_file() or current.stat().st_size > 2 * 1024 * 1024):
+            raise Stop('Codex candidate source changed or missing: ' + name)
+        if digest(snapshot) != digest(current):
+            modified.append(name)
+    authorized = set(task.get('acceptance_failure_recovery', {}).get('repair_files', []))
+    result = {'run_id': logs.name, 'result_file': 'codex-0.json',
+        'result_sha256': hashlib.sha256(raw).hexdigest(),
+        'developer_status': value['status'],
+        'changed_allowed_files': sorted(modified),
+        'repair_files_changed': sorted(authorized.intersection(modified)),
+        'source_text_published': False, 'provider_summary_published': False,
+        'test_gates_reexecuted': False, 'repair_authorized': False}
+    return result
+
+
 def record_diagnostic_triage(root, logs, task):
     public, private = diagnostic_triage(root, logs, task)
     validate_public_triage(public, task, logs.name)
@@ -1734,7 +1778,7 @@ def publish_diagnostics(root, logs, files=None, batch=None):
         if batch is not None:
             raise Stop('diagnostic batch requires explicit curated files')
         files = diagnostic_payload(root, logs)
-    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection|triage)', batch or '')
+    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection|triage|codex)', batch or '')
             or not isinstance(files, dict) or not files or 'index.md' not in files
             or set(files) != {'index.md', (batch or '').rsplit('-', 1)[-1] + '.json'}
             or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
@@ -2423,6 +2467,18 @@ def main():
             url = publish_diagnostics(root, old_logs, files={
                 'index.md': index, 'triage.json': safe}, batch='round-0-triage')
             print('[診斷/Git] ' + url, flush=True)
+            if (old_logs/'codex-0.json').is_file():
+                details = diagnostic_codex_outcome(root, old_logs, pinned)
+                codex_index = ('# Deterministic Codex attempt assessment\\n\\n'
+                    'Status, SHA and allowlisted changed-file names only. '
+                    'No model summary, source code or repair authority.\\n\\n'
+                    '[Structured assessment](codex.json)\\n').replace('\\n', '\n').encode('utf-8')
+                codex_bytes = (json.dumps(details, ensure_ascii=False, indent=2)
+                               + '\n').encode('utf-8')
+                codex_url = publish_diagnostics(root, old_logs,
+                    files={'index.md': codex_index, 'codex.json': codex_bytes},
+                    batch='round-0-codex')
+                print('[診斷/Codex 結構化狀態] ' + codex_url, flush=True)
             print('No models/tests/candidate changes. Raw source and provider data remain local.', flush=True)
             return
         task, text = load_task(root, args.control_sha)
