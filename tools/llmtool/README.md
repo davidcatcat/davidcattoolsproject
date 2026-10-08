@@ -2,7 +2,7 @@
 
 ## Development orchestration until native self-development (2026-10-09)
 
-The user's Mac-side work is limited to starting a **validated ai-loop script** and making material decisions; the user is not a Codex/Claude prompt courier. Coordinator writes Git-pinned `automation/ai-loop/task.md/task.json`; helper or system faults take a separate **maintenance-first** recovery path before returning to feature work. [AI-loop operator Skill](../../skills/ai-loop-handoff/SKILL.md) · [WORKFLOW](WORKFLOW.md) · [maintenance state](../../automation/ai-loop/MAINTENANCE_HANDOFF.md). This is a temporary development policy, **not** a claim that llmtool's native autonomous coding/executor is available. Current Issues #52/#53 block C1.
+The user's Mac-side work is limited to starting a **validated ai-loop script** and making material decisions; the user is not a Codex/Claude prompt courier. Coordinator writes Git-pinned `automation/ai-loop/task.md/task.json`; helper or system faults take a separate **maintenance-first** recovery path before returning to feature work. [AI-loop operator Skill](../../skills/ai-loop-handoff/SKILL.md) · [WORKFLOW](WORKFLOW.md) · [maintenance state](../../automation/ai-loop/MAINTENANCE_HANDOFF.md). This is a temporary development policy, **not** a claim that llmtool's native autonomous coding/executor is available. Issue #52 is CLOSED after the one-use script's Mac/Claude/GitHub CI success; C1 is precheck-authorized but NOT STARTED. Issue #53's generalized self-repair is still open.
 
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
