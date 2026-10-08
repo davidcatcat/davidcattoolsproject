@@ -1,3 +1,42 @@
+# ACTIVE COORDINATOR GUIDANCE — final acceptance and no manual prompt relay (2026-10-09)
+
+**Design is now recorded, not yet implemented.** Read
+[FINAL_ACCEPTANCE_DESIGN.md](FINAL_ACCEPTANCE_DESIGN.md) before authorizing the
+next control task. This addresses the user's requirement: **the Mac operator
+must not manually shuttle ordinary prompts between Codex and Claude**. The
+existing runner already coordinates Codex implementation, Claude ordinary
+code review, tests and bounded repair, but **does not yet implement** separate
+formal independent Security Review and Functional QA sign-off. Do not mislabel
+ordinary review as either required acceptance gate.
+
+[PR #49](https://github.com/davidcatcat/davidcattoolsproject/pull/49):
+remediation Security re-review PASS and independent Functional QA PASS have
+both been reported; the QA itself was challenged by another independent
+reviewer. The code/test-bound Mac evidence recorded 14/14 scenarios, 20+20
+parent SIGKILL and two 1,247-test Mac suites (each with 3 filesystem skips).
+This status is not merge authorization. Confirm the **latest** remote HEAD,
+GitHub CI and required coordinator acceptance before merging. These reviews
+used manual/special-purpose execution: they are **not evidence that a new
+formal-QA automation mode already exists**.
+
+The control `task.md`/`task.json` below remains the frozen, single-use
+`76644` sandbox-decision recovery for an **old** unpublished candidate.
+It is **not** PR #49's latest HEAD and is not a generic review task. Do NOT
+run the historical `--resume 20261008T100821Z-76644` command to perform
+PR #49 QA or any new task, and do not silently repoint its SHA. A future
+fresh control task requires the explicit migration/provenance gates in the
+design, tests, and independent PR #45 security review. The historical
+instructions below are retained as forensic evidence, not active guidance.
+
+When a supported, correctly pinned, **fresh** control task is authorized,
+the operator's normal interface is preflight `bash scripts/ai-loop.sh --check`
+(no models/edits), then `bash scripts/ai-loop.sh` for the exact task. Routine
+Codex/Claude prompts come from the runner; a blocked gate returns one
+structured human decision request. No automatic source-merge, PR approval,
+real Git ADD, product execution or next-slice escalation.
+
+---
+
 # CURRENT — 76644 sandbox-decision recovery, 2026-10-08
 
 Run `20261008T100821Z-76644` returned Codex developer_status
