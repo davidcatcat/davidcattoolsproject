@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Current exact-head handoff — post-Medium-fix QA on PR #55
+
+PR #55 remains Draft/unmerged at source HEAD `d5ecfce9f7e28da2983affb235dd942d51388723`. Codex's targeted original Medium fix passed both Mac full suites per runner and exact-head GitHub CI Python 3.9/3.14. This is **not** equivalent to the independent Security and Functional QA acceptance: those old PASS records target the original `67d02be6` source and became stale.
+
+The previous Medium-fix task was archived in `automation/ai-loop/history/20261009-C1-PR55-Medium-InputValidation-Fix-task.md/json`. **Live task `C1-PR55-PostFix-Security-Functional-QA-20261009`** binds PR #55, exact new HEAD, base SHA, seven-file cumulative inventory and two read-only specialist sessions. Run fresh related + Mac full suite before models; Security first (validate URL credential rejection without catastrophic complexity), Functional QA second only when Security has no Medium+ or blocking concerns. Prevent even a model's status PASS with Medium from falsely completing coordinator gate. Publish only safe categories/counts/allowlisted paths to Issue #56. No Codex writer, no source/branch/PR mutations, no merge, no inherited prior QA PASS, no company/provider content egress.
+
+Mac operator's only action after **latest** control Helper CI succeeds on 3.9 and 3.14: `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. On STOP preserve all state. Coordinator reviews Issue #56 and handles any discovered blocker via reviewed script, not by having user relay Claude/Codex prompts.
+
+
 ## Active approved PR #55 Medium security repair (2026-10-09)
 
 One Medium Security finding in original independent QA was verified as `INPUT_VALIDATION`, `FIX_BEFORE_MERGE` with `HIGH` confidence at `test_output_excerpts.py:46` (Issue #56). **Do not merge or waive** despite original role `PASS`. The original PR `67d02be6bc8cb3f237c5060edda3321f6d885bf3` remains Draft.
