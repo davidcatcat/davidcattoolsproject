@@ -999,9 +999,12 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
                       'mac-containment-0.json': hashlib.sha256(mac_raw).hexdigest()}
     if failure_raw is not None:
         evidence_files['failure-0.json'] = hashlib.sha256(failure_raw).hexdigest()
-    if scenario == 'kqueue_non_reaping':
-        evidence_files['failure-0-claude.raw.json'] = hashlib.sha256(envelope_raw).hexdigest()
+    # Raw Claude output is PRIVATE: rehash before use, never copy it to exportable
+    # recovery-evidence or the published diagnostics ZIP/Git.
+    private_files = ({'failure-0-claude.raw.json': hashlib.sha256(envelope_raw).hexdigest()}
+                     if scenario == 'kqueue_non_reaping' else {})
     return current_untracked, {'from_run': run_id, 'kind': 'acceptance_failure',
+        'private_evidence_files': private_files,
         'failure_scenario': scenario, 'old_control_sha': policy['control_sha'],
         'starting_head': policy['expected_head'],
         'partial_files': tested, 'preserved_untracked': current_untracked,
