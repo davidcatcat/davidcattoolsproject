@@ -1,0 +1,11 @@
+[1/14] fd_inheritance START
+[1/14] fd_inheritance PASS 0.429s
+[2/14] sigint START
+[2/14] sigint PASS 1.476s
+[3/14] sigterm START
+[3/14] sigterm PASS 1.477s
+[4/14] sighup START
+[4/14] sighup PASS 1.482s
+[5/14] hung_supervisor START
+closed_status native anchor {"kernel_rows":[{"micros":637449,"pgid":51541,"pid":51541,"ppid":51540,"seconds":1791432543,"status":5,"uid":501},{"micros":637449,"pgid":51541,"pid":51541,"ppid":51540,"seconds":1791432543,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":3,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[{"micros":637449,"pgid":51541,"pid":51541,"ppid":51540,"seconds":1791432543,"status":2,"uid":501}]}
+hung_supervisor FAIL (PermissionError)
