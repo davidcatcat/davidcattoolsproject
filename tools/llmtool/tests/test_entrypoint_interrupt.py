@@ -111,7 +111,10 @@ raise SystemExit(importlib.import_module(target).main(['providers']))
                                 self.assertLess(time.monotonic(), deadline)
                                 time.sleep(0.01)
                             process.send_signal(signal.SIGINT)
-                            out, err = process.communicate(timeout=5)
+                            # This bound protects against a stuck child; it is not a startup/exit latency SLA.
+                            # Keep it aligned with the existing 10s real-subprocess startup budget so a busy
+                            # full-suite Mac Python run does not turn scheduler delay into a false interrupt failure.
+                            out, err = process.communicate(timeout=10)
                             self.assertEqual((process.returncode, out, err),
                                 (130, b'', b'llmtool: interrupted\n'))
                         finally:
