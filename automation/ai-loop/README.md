@@ -1,3 +1,26 @@
+# CURRENT A11b recovery after independent PR #48 — 2026-10-08
+
+Run `20261008T035727Z-43467` stopped at full-final because an unrelated
+real-subprocess interrupt test outside the A11b allowlist timed out once under the
+Mac Python 3.9 full suite. The exact targeted test then passed 10/10. Independent
+PR #48 retained all exact interrupt assertions, changed only the post-SIGINT
+bounded controller wait from 5s to 10s, passed exact-head 3.9/3.14 CI, and merged
+to main as `ceae425eacaa8729a9eb8d796e43304918a8c908`.
+
+The current recovery treats Claude's original
+`NEEDS_DECISION / TEST_BUG` as valid evidence that the blocking root-cause file
+was outside task scope. It will resume only if the locally retained raw envelope
+hash matches and its complete blocking file set is exactly the sole upstream #48
+path. Previous round-0 native owned PIDs must also be proven absent read-only.
+No historical test/native PASS is inherited.
+
+No-token preflight, only after helper CI is green:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T035727Z-43467 --check
+```
+
 # CURRENT A11b Mac-preflight repair handoff — 2026-10-08
 
 The post-PR47 candidate reached both full suites successfully, then stopped before
