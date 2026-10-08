@@ -1,3 +1,45 @@
+# CURRENT — 76644 Codex decision gate confirmed (2026-10-08)
+
+The Mac operator ran `bash scripts/ai-loop.sh --diagnose 20261008T100821Z-76644`.
+Immutable curated report:
+`https://github.com/davidcatcat/davidcattoolsproject/blob/59f1f7a0033e440bcb306c58680be87f7c934c61/reports/ai-loop/diagnostics/20261008T100821Z-76644/round-0-codex/codex.json`.
+
+Frozen exact outcome: developer_status=`NEEDS_DECISION`; original JSON SHA-256
+`3e0778155ce211f1da82171af432b3a6e8fbb7212c7d8ee50bef1d5a6801a2f3`;
+changed_allowed_files=[]; repair_files_changed=[]; test_gates_reexecuted=false.
+No Codex repair took effect, no new Mac native proof exists, and no PR/merge is authorized.
+This is NOT a scope violation; previous runner STOP combined no-change with
+forbidden-change and model-decision scenarios. The updated guard handles those
+separately in future runs.
+
+The model's human-facing decision rationale remains only in
+`.ai-loop/20261008T100821Z-76644/codex-0.json` on the Mac. The existing
+privacy contract explicitly does NOT publish its free-form `summary`.
+Do not invent the rationale or automatically convert `NEEDS_DECISION`
+to `PASS`/REPAIR. Until the rationale is available for coordinator review,
+A11b.2.2.1 is BLOCKED_FOR_DECISION. The one-use 64433 recovery is consumed;
+do NOT rerun `--resume 64433`, manually modify/reset/publish the candidate,
+weaken the fourteen native cases, or signal old PIDs.
+
+Read-only local rationale retrieval (nothing is published or executed):
+
+```sh
+python3 - <<'PY'
+import json
+from pathlib import Path
+p = Path('.ai-loop/20261008T100821Z-76644/codex-0.json')
+v = json.loads(p.read_text(encoding='utf-8'))
+print('status:', v.get('status'))
+print('decision reason:', v.get('summary'))
+PY
+```
+
+The operator should redact any private credentials before sharing that summary.
+If it identifies an approval/design conflict, obtain explicit bounded authority;
+if it identifies a technical misconception, explain and re-evaluate it.
+Only afterward consider one new evidence-pinned recovery (not an old run retry).
+All related/full/native/security/QA gates still require fresh PASS on final bytes.
+
 # CURRENT — 76644 stopped without any allowed-file changes (2026-10-08)
 
 Last attempted Mac recovery: `20261008T100821Z-76644`, control
