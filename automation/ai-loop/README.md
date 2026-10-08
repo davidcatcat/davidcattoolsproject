@@ -1,5 +1,12 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## Live C1 STOP: Codex needs a human decision (2026-10-09)
+
+The only actual C1 attempt, run `20261008T185112Z-21061`, **STOPPED before tests**. [Source-free Codex diagnostic](https://github.com/davidcatcat/davidcattoolsproject/blob/05928d578ee29605dd994e99b1a0dd646eaf0b75/reports/ai-loop/diagnostics/20261008T185112Z-21061/round-0-codex/codex.json) confirms `developer_status=NEEDS_DECISION`, **0 files modified**, and no repair authorization. [Claude triage](https://github.com/davidcatcat/davidcattoolsproject/blob/17ff4bbdb60a798c4ae20fecefb192f3450083e3/reports/ai-loop/diagnostics/20261008T185112Z-21061/round-0-triage/triage.json) ended with `ERROR_ENVELOPE`, not a valid decision. Do **not** run ordinary C1 a second time, claim CODE_BUG, or infer a decision rationale not contained in public evidence.
+
+Use a **single helper invocation** `bash .git/ai-loop/run.sh --inspect-decision 20261008T185112Z-21061` only after helper CI on the updated control head passes. This checks the original frozen task, candidate branch/head, unchanged allowed files, and SHA-256 of the exact private Codex JSON; then displays only the decision summary on the operator's own terminal, JSON-escaped. It makes **no model calls or Git publication and grants no approval**. The operator assesses whether any *genuine material human decision* is necessary; never manually paste Codex/Claude prompts or leak secrets. Any follow-on C1 recovery must be separately bound to the frozen run/evidence and user-approved scope. Track [Issue #54](https://github.com/davidcatcat/davidcattoolsproject/issues/54).
+
+
 ## Operator contract — one launcher and repair-first recovery (2026-10-09)
 
 Until llmtool-native A11b/A11c development workflow passes independent real-task acceptance, **the operator only runs a validated ai-loop script**. Coordinator authors matching Git `task.md` + `task.json` contracts; runner invokes Codex, independent read-only Claude, tests, bounded repair and Draft PR/CI. Never instruct the user to manually relay prompts or assemble many Mac commands. See [ai-loop-handoff Skill](../../skills/ai-loop-handoff/SKILL.md) and [MAINTENANCE_HANDOFF](MAINTENANCE_HANDOFF.md).
