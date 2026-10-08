@@ -1,5 +1,14 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## Active: PR #55 exact-head independent QA (Issue #56, 2026-10-09)
+
+The live Git task is now **`C1-PR55-Security-Functional-QA-20261009`**, replacing the completed C1 source-implementation task, which is frozen under `automation/ai-loop/history/20261009-C1-issue51-completed-task.md/json`. **Do not rerun new C1 or old `--resume`**. Target is unchanged Draft PR #55 at `67d02be6bc8cb3f237c5060edda3321f6d885bf3`; current task `mode=review_existing_pr`, `qa_gates=[security,functional_qa]`, zero repairs/zero Codex writers. All six changed files (five product authorized paths plus runner report) are pinned.
+
+The QA-specific runner path checks existing PR base/head/diff and current working tree, requires exact-head GitHub CI and fresh related + both local full suites, then invokes **two separate read-only Claude review sessions** (Security, Functional QA), preserving original PR source/HEAD. On a genuine first-gate blocker, it stops before spending the second model's tokens. Only fixed role-status/test/file-name metadata is sent to [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56); raw provider and detailed review content stays under local `.ai-loop` and **no merge/model-egress authorization** is granted.
+
+The single Mac operator entrypoint, **only after exact control HEAD helper CI Python 3.9/3.14 PASS and coordinator approval**, is `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. If `--check` STOPs, it cannot run the second command. Never manually relay prompts or invoke bare Codex/Claude. This automated two-role gate is not an external human security certification; coordinator must assess findings and explicit remaining approvals before changing Draft or merging.
+
+
 ## 2026-10-09 C1 decision resolved as an ai-loop handoff defect — frozen recovery
 
 The **actual private Codex decision** from frozen run `20261008T185112Z-21061` was that `automation/ai-loop/task.json` and `scripts/ai-loop.sh` do not exist in the C1 main-based checkout. This is **expected architecture**: the runner fetches both authoritative task files from the `automation/ai-loop` Git control revision and supplies exact `TASK`/`CONTRACT` in Codex's prompt. There was no human authorization issue; Codex made 0 source edits, no tests ran, Claude's error envelope was invalid, and no PASS was inherited.
