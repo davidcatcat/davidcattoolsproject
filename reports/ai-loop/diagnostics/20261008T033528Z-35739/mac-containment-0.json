@@ -1,0 +1,23 @@
+{
+  "failure": {
+    "errno": null,
+    "exception_type": "ValueError",
+    "message": "details withheld",
+    "owned_processes": [],
+    "scenario": "preflight",
+    "status": "FAIL",
+    "traceback": [
+      {
+        "file": "run_containment_acceptance.py",
+        "function": "main",
+        "line": 70
+      }
+    ]
+  },
+  "os_version": "15.7.9",
+  "platform": "darwin",
+  "python_version": "3.13.3",
+  "scenarios": {},
+  "schema_version": 1,
+  "tested_sha256": {}
+}
