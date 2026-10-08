@@ -1290,6 +1290,128 @@ def claim_initial_resume(state, recovery, run_id, control_sha):
         raise Stop('this recovery was already attempted; coordinator recovery required')
 
 
+def diagnostic_triage(root, logs, task):
+    """Collect bounded failure context locally, with a metadata-only public projection.
+
+    Original source excerpts and provider text are never included in Git reports.
+    This observes frozen run evidence; it cannot confer repair/acceptance authority.
+    """
+    if (not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
+            or logs != root / '.ai-loop' / logs.name
+            or any(p.is_symlink() for p in (logs, *logs.parents))):
+        raise Stop('invalid diagnostic triage root/run')
+    allowed = task.get('allowed_files', [])
+    if not isinstance(allowed, list):
+        raise Stop('invalid diagnostic triage allowlist')
+    by_name = {}
+    for name in allowed:
+        if isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_./-]+', name):
+            by_name.setdefault(Path(name).name, []).append(name)
+
+    def read_json(path):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
+            return None
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except (OSError, UnicodeError, ValueError):
+            return None
+
+    public = {'run_id': logs.name, 'native_failures': [], 'provider_envelopes': [],
+              'contains_source_text': False, 'contains_provider_text': False,
+              'repair_authorized': False, 'gates_inherited': False}
+    local_context = []
+    for path in sorted(logs.glob('mac-containment-*.json'))[:4]:
+        evidence = read_json(path)
+        if not isinstance(evidence, dict) or not isinstance(evidence.get('failure'), dict):
+            continue
+        failed = evidence['failure']
+        if failed.get('status') != 'FAIL':
+            continue
+        scenario = failed.get('scenario')
+        if not isinstance(scenario, str) or not re.fullmatch(r'[a-z0-9_]{1,64}', scenario):
+            scenario = 'unknown'
+        exc = failed.get('exception_type')
+        if not isinstance(exc, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,80}', exc):
+            exc = 'unknown'
+        cleanup = failed.get('fixture_cleanup')
+        cleanup_status = cleanup.get('status') if isinstance(cleanup, dict) else None
+        if cleanup_status not in ('RESOLVED', 'UNRESOLVED'):
+            cleanup_status = 'UNVERIFIED'
+        row = {'evidence_file': path.name, 'scenario': scenario,
+               'exception_type': exc, 'cleanup_status': cleanup_status,
+               'owned_processes_retained': bool(failed.get('owned_processes'))}
+        frames = failed.get('traceback')
+        row['frames'] = []
+        if isinstance(frames, list):
+            for frame in frames[:8]:
+                if not isinstance(frame, dict):
+                    continue
+                filename, lineno, function = frame.get('file'), frame.get('line'), frame.get('function')
+                if (not isinstance(filename, str) or not isinstance(lineno, int)
+                        or isinstance(lineno, bool) or not 1 <= lineno <= 200000):
+                    continue
+                matches = by_name.get(Path(filename).name, [])
+                if len(matches) != 1:
+                    continue
+                name = matches[0]
+                safe = {'file': name, 'line': lineno}
+                if isinstance(function, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,100}', function):
+                    safe['function'] = function
+                row['frames'].append(safe)
+                source = root / name
+                if (any(p.is_symlink() for p in (source, *source.parents))
+                        or not source.is_file() or source.stat().st_size > 2 * 1024 * 1024):
+                    continue
+                lines = source.read_text(encoding='utf-8', errors='replace').splitlines()
+                if lineno > len(lines):
+                    continue
+                beginning = max(1, lineno - 7)
+                ending = min(len(lines), lineno + 7)
+                local_context.append({'frame': safe,
+                    'source_sha256': digest(source),
+                    'lines': [{'line': number, 'text': lines[number-1][:350]}
+                              for number in range(beginning, ending + 1)]})
+        public['native_failures'].append(row)
+
+    for path in sorted(logs.glob('*.raw.json'))[:16]:
+        if not re.fullmatch(r'(claude-[0-9]+|failure-[0-9]+-claude)\.raw\.json', path.name):
+            continue
+        value = read_json(path)
+        if isinstance(value, dict):
+            subtype = value.get('subtype')
+            if subtype not in ('success', 'error', 'max_turns'):
+                subtype = 'other'
+            is_error = value.get('is_error')
+            if type(is_error) is not bool:
+                is_error = None
+            state = 'ERROR_ENVELOPE' if is_error is True else (
+                'SUCCESS_ENVELOPE' if subtype == 'success' and is_error is False
+                else 'UNVERIFIED')
+            public['provider_envelopes'].append({'file': path.name, 'subtype': subtype,
+                'is_error': is_error, 'state': state})
+        else:
+            public['provider_envelopes'].append({'file': path.name,
+                'subtype': 'unparseable', 'is_error': None, 'state': 'UNVERIFIED'})
+
+    private = {'public': public, 'source_context': local_context,
+               'privacy': 'LOCAL_ONLY. Do not publish source_context or raw provider outputs.'}
+    return public, private
+
+
+def record_diagnostic_triage(root, logs, task):
+    public, private = diagnostic_triage(root, logs, task)
+    for name, value in (('triage-public.json', public), ('triage-local.json', private)):
+        path = logs / name
+        if path.exists() or path.is_symlink():
+            raise Stop('diagnostic triage snapshot already exists: ' + name)
+        encoded = (json.dumps(value, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+        if len(encoded) > 256 * 1024:
+            raise Stop('diagnostic triage exceeds bounded snapshot')
+        with path.open('xb') as output:
+            output.write(encoded)
+    return public
+
+
 def export_diagnostics(root, logs, task):
     """Visible curated ZIP; never export provider streams or authentication files."""
     folder = root / 'ai-loop-diagnostics'
@@ -1300,7 +1422,8 @@ def export_diagnostics(root, logs, task):
     if destination.exists() or destination.is_symlink():
         raise Stop('diagnostics ZIP already exists; preserved')
     entries = [(root / name, name) for name in task['allowed_files']]
-    for name in ('summary.json', 'task.json', 'provenance.json', 'recovery.json', 'coordinator-assessment.md'):
+    for name in ('summary.json', 'task.json', 'provenance.json', 'recovery.json',
+                 'coordinator-assessment.md', 'triage-public.json'):
         entries.append((logs / name, 'evidence/' + name))
     for path in logs.glob('mac-containment-*.json'):
         entries.append((path, 'evidence/' + path.name))
@@ -1395,6 +1518,18 @@ def diagnostic_payload(root, logs):
     selected = {'summary.json': encoded(public_summary), 'provenance.json': encoded(public_provenance),
         'source-hashes.json': encoded({'zip_sha256': hashlib.sha256(raw_zip).hexdigest(),
             'captured_sha256': hashes, 'source_files_published': False})}
+    if 'evidence/triage-public.json' in captured:
+        triage = json.loads(captured['evidence/triage-public.json'])
+        if (not isinstance(triage, dict) or triage.get('run_id') != run_id
+                or triage.get('contains_source_text') is not False
+                or triage.get('contains_provider_text') is not False
+                or triage.get('repair_authorized') is not False
+                or triage.get('gates_inherited') is not False
+                or set(triage) != {'run_id', 'native_failures', 'provider_envelopes',
+                                 'contains_source_text', 'contains_provider_text',
+                                 'repair_authorized', 'gates_inherited'}):
+            raise Stop('unsafe public diagnostic triage schema')
+        selected['triage-public.json'] = encoded(triage)
     report = pinned.get('acceptance_report')
     if report and report in pinned['allowed_files'] and report in captured:
         selected['validation.md'] = captured[report]
@@ -1557,6 +1692,10 @@ def publish_diagnostics(root, logs, files=None, batch=None):
 def finish_diagnostics(root, logs, task):
     """Upload problems must not replace the original test/model STOP."""
     try:
+        triage = record_diagnostic_triage(root, logs, task)
+        print('[診斷/自動定位] Native failures=' + str(len(triage['native_failures']))
+              + '; provider envelopes=' + str(len(triage['provider_envelopes']))
+              + '; raw source remains local', file=sys.stderr, flush=True)
         exported = export_diagnostics(root, logs, task)
         print('[診斷 ZIP／Finder 可見] ' + str(exported), file=sys.stderr, flush=True)
     except (Stop, OSError, ValueError) as error:
