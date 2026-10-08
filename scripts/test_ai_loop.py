@@ -1506,6 +1506,81 @@ class DiagnosticsExportTests(unittest.TestCase):
             with self.assertRaisesRegex(loop.Stop, 'provenance missing'):
                 loop.diagnostic_codex_outcome(root, logs, task)
 
+    def test_private_codex_decision_only_reveals_verified_local_summary(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '.ai-loop' / '20261009T010203Z-123'
+            logs.mkdir(parents=True)
+            response = {'status': 'NEEDS_DECISION',
+                        'summary': 'human approval needed; PRIVATE_LOCAL_TEXT'}
+            loop.save_json(logs / 'codex-0.json', response)
+            expected = loop.digest(logs / 'codex-0.json')
+            metadata = {'developer_status': 'NEEDS_DECISION',
+                'result_sha256': expected, 'changed_allowed_files': [],
+                'repair_files_changed': [], 'repair_authorized': False,
+                'test_gates_reexecuted': False}
+            with patch.object(loop, 'diagnostic_codex_outcome', return_value=metadata) as inspect:
+                got = loop.private_codex_decision(root, logs, {'allowed_files': []})
+                self.assertEqual(got['summary'], response['summary'])
+                self.assertEqual(got['sha256'], expected)
+                self.assertFalse(got['repair_authorized'])
+                self.assertFalse(got['review_pass'])
+                self.assertTrue(got['decision_only'])
+                inspect.assert_called_once()
+
+    def test_private_codex_decision_fails_closed_on_mismatch_or_false_authority(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '.ai-loop' / '20261009T010203Z-123'
+            logs.mkdir(parents=True)
+            response = {'status': 'NEEDS_DECISION', 'summary': 'private'}
+            loop.save_json(logs / 'codex-0.json', response)
+            expected = loop.digest(logs / 'codex-0.json')
+            base = {'developer_status': 'NEEDS_DECISION',
+                'result_sha256': expected, 'changed_allowed_files': [],
+                'repair_files_changed': [], 'repair_authorized': False,
+                'test_gates_reexecuted': False}
+            for field, changed in (
+                ('developer_status', 'PASS'),
+                ('changed_allowed_files', ['secret.txt']),
+                ('repair_files_changed', ['test.py']),
+                ('repair_authorized', True),
+                ('test_gates_reexecuted', True)):
+                with self.subTest(field=field):
+                    invalid = {**base, field: changed}
+                    with patch.object(loop, 'diagnostic_codex_outcome', return_value=invalid):
+                        with self.assertRaises(loop.Stop):
+                            loop.private_codex_decision(root, logs, {})
+            with patch.object(loop, 'diagnostic_codex_outcome',
+                              return_value={**base, 'result_sha256': '0'*64}):
+                with self.assertRaisesRegex(loop.Stop, 'changed during inspection'):
+                    loop.private_codex_decision(root, logs, {})
+            (logs / 'codex-0.json').write_text('{"status":"NEEDS_DECISION","summary":"tampered","extra":"token"}')
+            with patch.object(loop, 'diagnostic_codex_outcome',
+                              return_value={**base, 'result_sha256': loop.digest(logs / 'codex-0.json')}):
+                with self.assertRaises(loop.Stop):
+                    loop.private_codex_decision(root, logs, {})
+            (logs / 'codex-0.json').unlink()
+            (logs / 'codex-0.json').symlink_to(logs / 'other-secret')
+            with patch.object(loop, 'diagnostic_codex_outcome', return_value=base):
+                with self.assertRaisesRegex(loop.Stop, 'path unsafe'):
+                    loop.private_codex_decision(root, logs, {})
+
+    def test_original_c1_private_decision_requires_exact_published_sha(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '.ai-loop' / '20261008T185112Z-21061'
+            logs.mkdir(parents=True)
+            loop.save_json(logs / 'codex-0.json',
+                {'status': 'NEEDS_DECISION', 'summary': 'cannot be substituted'})
+            metadata = {'developer_status': 'NEEDS_DECISION',
+                'result_sha256': loop.digest(logs / 'codex-0.json'),
+                'changed_allowed_files': [], 'repair_files_changed': [],
+                'repair_authorized': False, 'test_gates_reexecuted': False}
+            with patch.object(loop, 'diagnostic_codex_outcome', return_value=metadata):
+                with self.assertRaisesRegex(loop.Stop, 'no longer matches Git diagnostic'):
+                    loop.private_codex_decision(root, logs, {})
+
     def test_codex_recovery_disposition_is_specific_and_fail_closed(self):
         task = {'acceptance_report': 'reports/probe.md'}
         recovery = {'kind': 'acceptance_failure', 'failure_scenario': 'kqueue_non_reaping',
