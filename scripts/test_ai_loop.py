@@ -236,6 +236,15 @@ class PR55MediumRepairAuthorityTests(unittest.TestCase):
             self.assertIn(task['qa_medium_repair']['test_file'], instruction)
             self.assertIn('No prior tests/Claude QA results count as PASS', instruction)
 
+    def test_medium_repair_rejects_symlinked_private_assessment_directory(self):
+        with self.evidence() as (root, task, logs, finding):
+            source = root / '.ai-loop' / 'qa-medium-issue56'
+            destination = root / 'outside-private'
+            source.rename(destination)
+            source.symlink_to(destination, target_is_directory=True)
+            with self.assertRaisesRegex(loop.Stop, 'private evidence absent or unsafe'):
+                loop.verify_pr55_medium_repair(root, task)
+
     def test_medium_repair_rejects_tampered_action_head_finding_and_qa_gate(self):
         with self.evidence() as (root, task, logs, finding):
             assessment = root / '.ai-loop' / 'qa-medium-issue56' / 'assessment.json'
