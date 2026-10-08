@@ -605,9 +605,9 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                 'findings': [{'severity': 'High', 'blocking': True, 'file': 'tests/flaky.py',
                               'detail': 'Repair the independent flaky test.',
                               'evidence': 'The exact failed full-suite evidence identifies this test.'},
-                             {'severity': 'Low', 'blocking': False, 'file': 'source.py',
-                              'detail': 'No candidate source change is authorized.',
-                              'evidence': 'Candidate source is not implicated.'}]}
+                             {'severity': 'Medium', 'blocking': True, 'file': 'source.py',
+                              'detail': 'Required validation remains pending. Nothing here needs a containment-file repair.',
+                              'evidence': 'No fresh gate PASS exists on the final bytes.'}]}
             loop.save_json(old/raw_name, {'is_error': False, 'subtype': 'success',
                                          'structured_output': value})
             mac = {'platform': 'darwin', 'failure': {'status': 'FAIL', 'scenario': 'hung_supervisor',
@@ -621,7 +621,8 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                 classification_category='TEST_BUG',
                 classification_raw_sha256=loop.digest(old/raw_name),
                 prior_mac_evidence_file='mac-containment-0.json',
-                prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+                prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'),
+                nonrepair_blocking_files=['source.py'])
             original, recovery = loop.prepare_stopped_failure_resume(
                 root, task, self.run_id, inventory)
             self.assertEqual(original, inventory)
@@ -655,7 +656,8 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                     classification_category='TEST_BUG',
                     classification_raw_sha256=loop.digest(old/raw_name),
                     prior_mac_evidence_file='mac-containment-0.json',
-                    prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'))
+                    prior_mac_evidence_sha256=loop.digest(old/'mac-containment-0.json'),
+                    nonrepair_blocking_files=[])
                 if fault == 'raw':
                     (old/raw_name).write_text((old/raw_name).read_text() + ' ')
                 with self.assertRaises(loop.Stop):
@@ -673,12 +675,14 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
             'classification_raw_sha256': '6'*64,
             'prior_mac_evidence_file': 'mac-containment-0.json',
             'prior_mac_evidence_sha256': '7'*64,
+            'nonrepair_blocking_files': [],
             'upstream_paths': ['tools/llmtool/tests/test_entrypoint_interrupt.py']}
         def load(value):
             with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
                 return loop.load_task(Path('.'), HEAD)[0]
         self.assertEqual(load(task)['stopped_failure_recovery']['classification_category'], 'TEST_BUG')
-        for fault in ('decision', 'category', 'raw_hash', 'mac_name', 'overlap', 'extra'):
+        for fault in ('decision', 'category', 'raw_hash', 'mac_name', 'overlap',
+                      'nonrepair_outside', 'nonrepair_overlap', 'extra'):
             with self.subTest(fault=fault):
                 bad = copy.deepcopy(task); recovery = bad['stopped_failure_recovery']
                 if fault == 'decision': recovery['classification_decision'] = 'REPAIR'
@@ -686,6 +690,9 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                 elif fault == 'raw_hash': recovery['classification_raw_sha256'] = 'bad'
                 elif fault == 'mac_name': recovery['prior_mac_evidence_file'] = '../mac.json'
                 elif fault == 'overlap': recovery['upstream_paths'] = [bad['allowed_files'][0]]
+                elif fault == 'nonrepair_outside': recovery['nonrepair_blocking_files'] = ['tests/outside.py']
+                elif fault == 'nonrepair_overlap':
+                    recovery['nonrepair_blocking_files'] = [recovery['upstream_paths'][0]]
                 else: recovery['extra'] = True
                 with self.assertRaises(loop.Stop): load(bad)
 
