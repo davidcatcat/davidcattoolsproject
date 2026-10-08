@@ -951,6 +951,54 @@ class DiagnosticsExportTests(unittest.TestCase):
                 self.assertIn('captured-sha256.json', archive.namelist())
                 self.assertFalse(any('codex' in p or 'claude' in p for p in archive.namelist()))
 
+    def test_native_failure_triage_is_local_and_provider_metadata_is_curated(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            run_id = '20261008T064055Z-64433'
+            logs = root/'.ai-loop'/run_id
+            logs.mkdir(parents=True)
+            src = root/'tools/llmtool/tests/test_git_containment.py'
+            src.parent.mkdir(parents=True)
+            src.write_text('\\n'.join('line-%s PRIVATE_SOURCE_TOKEN' % i for i in range(1, 25)))
+            failure = {'schema_version': 1, 'platform': 'darwin',
+                'failure': {'status': 'FAIL', 'scenario': 'kqueue_non_reaping',
+                    'exception_type': 'ProcessLookupError',
+                    'traceback': [{'file': src.name, 'function': 'kqueue_non_reaping',
+                                   'line': 12}],
+                    'fixture_cleanup': {'status': 'RESOLVED'}, 'owned_processes': []}}
+            loop.save_json(logs/'mac-containment-0.json', failure)
+            loop.save_json(logs/'failure-0-claude.raw.json', {
+                'subtype': 'success', 'is_error': True,
+                'result': 'PRIVATE_CLAUDE_PROVIDER_PAYLOAD'})
+            task = {'allowed_files': ['tools/llmtool/tests/test_git_containment.py']}
+            public = loop.record_diagnostic_triage(root, logs, task)
+            self.assertEqual(public['native_failures'][0]['frames'][0]['line'], 12)
+            self.assertEqual(public['provider_envelopes'][0]['state'], 'ERROR_ENVELOPE')
+            self.assertEqual(public['provider_envelopes'][0]['subtype'], 'success')
+            local = json.loads((logs/'triage-local.json').read_text())
+            self.assertIn('PRIVATE_SOURCE_TOKEN', json.dumps(local))
+            self.assertNotIn('PRIVATE_SOURCE_TOKEN', json.dumps(public))
+            self.assertNotIn('PRIVATE_CLAUDE_PROVIDER_PAYLOAD', json.dumps(local))
+            (logs/'summary.json').write_text('{"status":"STOPPED"}')
+            archive_path = loop.export_diagnostics(root, logs, task)
+            with zipfile.ZipFile(archive_path) as archive:
+                names = archive.namelist()
+                self.assertIn('evidence/triage-public.json', names)
+                self.assertNotIn('evidence/triage-local.json', names)
+                raw_archive = b''.join(archive.read(name) for name in names)
+                self.assertNotIn(b'PRIVATE_CLAUDE_PROVIDER_PAYLOAD', raw_archive)
+                # Candidate source is retained only in the local ZIP and never Git published.
+                self.assertIn(b'PRIVATE_SOURCE_TOKEN', raw_archive)
+
+    def test_diagnostic_triage_is_non_authoritative_and_rejects_unsafe_run(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root/'.ai-loop'/'not-a-run'
+            logs.mkdir(parents=True)
+            with self.assertRaises(loop.Stop):
+                loop.diagnostic_triage(root, logs, {'allowed_files': []})
+
     def test_export_preserves_existing_zip_and_rejects_symlink_folder(self):
         for fault in ('existing', 'symlink'):
             with self.subTest(fault=fault), tempfile.TemporaryDirectory() as runtime:
