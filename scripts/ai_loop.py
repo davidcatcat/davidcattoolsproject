@@ -290,20 +290,33 @@ def load_task(root, control_sha):
             'tools/llmtool/README.md',
             'reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md',
         ]
-        if (metadata['qa_gates'] != ['security', 'functional_qa']
+        qa_revisions = {
+            # Immutable first review remains valid history, never reused on new bytes.
+            '67d02be6bc8cb3f237c5060edda3321f6d885bf3': (
+                'C1-PR55-Security-Functional-QA-20261009', exact_c1_paths),
+            # Post-fix review must include the separate truthful runner report.
+            'd5ecfce9f7e28da2983affb235dd942d51388723': (
+                'C1-PR55-PostFix-Security-Functional-QA-20261009',
+                exact_c1_paths + [
+                    'reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md']),
+        }
+        expected_profile = qa_revisions.get(metadata['expected_head'])
+        if (expected_profile is None
+                or metadata['task_id'] != expected_profile[0]
+                or metadata['allowed_files'] != expected_profile[1]
+                or metadata['qa_gates'] != ['security', 'functional_qa']
                 or metadata['mode'] != 'review_existing_pr'
                 or metadata['pr_number'] != 55
-                or metadata['expected_head'] != '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
                 or metadata['base_sha'] != '8e29024656f873431f6ad83e45015b57bfe381a9'
                 or metadata['branch'] != 'feat/llmtool-c1-test-excerpts-20261009'
-                or metadata['allowed_files'] != exact_c1_paths
                 or metadata['max_repairs'] != 0
                 or metadata.get('require_local_full') is not True
                 or metadata.get('failure_triage')
+                or metadata.get('qa_medium_repair')
                 or metadata.get('acceptance_report')
                 or metadata.get('mandatory_tests')
                 or metadata.get('initial_decision_recovery')):
-            raise Stop('invalid read-only C1 PR55 QA gate contract')
+            raise Stop('invalid exact-revision read-only C1 PR55 QA gate contract')
     if 'failure_triage' in metadata:
         policy = metadata['failure_triage']
         if (not isinstance(policy, dict) or set(policy) != {'max_reviews', 'repeat_limit', 'allow_mac_repair'}
@@ -2776,8 +2789,8 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
     if check_scope(root, task, untracked_original, branch, head):
         raise Stop('QA forbids existing or new worktree modifications')
     current_pr = read_pr(root, task, head)
-    if current_pr['head']['sha'] != head:
-        raise Stop('QA PR identity drift')
+    if current_pr['head']['sha'] != head or current_pr.get('draft') is not True:
+        raise Stop('QA PR identity/draft state drift')
     changed_paths = [p for p in git(root, 'diff', '--name-only', '-z',
                         task['base_sha'], head).split('\0') if p]
     if sorted(changed_paths) != sorted(task['allowed_files']):
@@ -2801,7 +2814,20 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
         raise Stop('QA deterministic tests changed source/worktree state')
     results = []
     for index, role in enumerate(task['qa_gates']):
-        rubric = (
+        post_fix = head == 'd5ecfce9f7e28da2983affb235dd942d51388723'
+        focused = ('Post-fix security regression: independently inspect the prior '
+            'Medium INPUT_VALIDATION risk from URL credential detection. '
+            'Verify adversarial near-1-MiB patterns cannot trigger catastrophic '
+            'regex backtracking or quadratic scan behavior; positive and '
+            'negative credential URL cases remain fail-closed; no output leaks '
+            'test contents before validation. Prior revision QA PASS is STALE. '
+            if post_fix and role == 'security' else
+            'Post-fix functional regression: verify the new subprocess-deadline '
+            'tests really exercise both worst-case inputs and valid/invalid '
+            'credential URLs on this exact revision. Prior revision QA PASS '
+            'cannot be inherited. '
+            if post_fix else '')
+        rubric = focused + (
             'SECURITY gate: independently test trust boundaries; verify the '
             'physical no-follow file path chain, TOCTOU/FD closure, symlink/hardlink '
             'and parent swap defenses, bounded size/byte spans, path/credential '
@@ -2854,13 +2880,21 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
                         'reviewed_head': verdict['reviewed_head'],
                         'findings': verdict['findings'],
                         'summary': verdict['summary']})
-        # Do not waste the other specialist's tokens on a blocked first gate.
-        if verdict['status'] != 'PASS':
+        # Medium findings need a separate coordinator disposition, even if
+        # a model marks its role PASS. Do not spend second-role tokens on such
+        # a finding or falsely report both security gates as PASS.
+        medium_or_worse = any(
+            finding['severity'] in ('Medium', 'High', 'Critical')
+            or finding['blocking'] for finding in verdict['findings'])
+        if verdict['status'] != 'PASS' or medium_or_worse:
             break
     final = {'task_id': task['task_id'], 'run_id': logs.name,
              'pr': 55, 'head': head, 'diff_sha256': hashlib.sha256(patch.encode()).hexdigest(),
              'qa_result': ('PASS' if len(results) == 2 and
-                           all(r['status'] == 'PASS' for r in results) else 'STOPPED'),
+                           all(r['status'] == 'PASS' and not any(
+                               f['severity'] in ('Medium', 'High', 'Critical')
+                               or f['blocking'] for f in r['findings'])
+                               for r in results) else 'STOPPED'),
              'tests_related': 'PASS', 'tests_full_local': 'PASS',
              'roles': results, 'merge_authorized': False,
              'product_provider_egress_authorized': False}
