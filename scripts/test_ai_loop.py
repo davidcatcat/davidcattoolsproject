@@ -2399,7 +2399,7 @@ class ClassificationDiagnosticTests(unittest.TestCase):
             {'properties': {'decision': {'const': 'REPAIR'},
                             'category': {'enum': ['CODE_BUG', 'TEST_BUG']}}},
             {'properties': {'decision': {'const': 'NEEDS_DECISION'},
-                            'category': {'const': 'SCOPE_OR_DESIGN'}}},
+                            'category': {'enum': ['CODE_BUG', 'TEST_BUG', 'SCOPE_OR_DESIGN']}}},
             {'properties': {'decision': {'const': 'BLOCKED'},
                             'category': {'const': 'ENVIRONMENT'}}}
         ])
@@ -2409,7 +2409,8 @@ class ClassificationDiagnosticTests(unittest.TestCase):
         cases = [
             ('REPAIR', 'CODE_BUG', True), ('REPAIR', 'TEST_BUG', True),
             ('REPAIR', 'ENVIRONMENT', False), ('NEEDS_DECISION', 'SCOPE_OR_DESIGN', True),
-            ('NEEDS_DECISION', 'TEST_BUG', False), ('BLOCKED', 'ENVIRONMENT', True),
+            ('NEEDS_DECISION', 'TEST_BUG', True), ('NEEDS_DECISION', 'CODE_BUG', True),
+            ('NEEDS_DECISION', 'ENVIRONMENT', False), ('BLOCKED', 'ENVIRONMENT', True),
             ('BLOCKED', 'CODE_BUG', False)]
         for decision, category, valid in cases:
             with self.subTest(decision=decision, category=category):
