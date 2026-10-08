@@ -1498,7 +1498,15 @@ def failure_schema(head=None, evidence_sha=None):
         fields['reviewed_head']['enum'] = [head]
     if evidence_sha is not None:
         fields['reviewed_evidence_sha256']['enum'] = [evidence_sha]
-    return {'type': 'object', 'properties': fields, 'required': list(fields), 'additionalProperties': False}
+    return {'type': 'object', 'properties': fields, 'required': list(fields),
+        'additionalProperties': False, 'oneOf': [
+            {'properties': {'decision': {'const': 'REPAIR'},
+                            'category': {'enum': ['CODE_BUG', 'TEST_BUG']}}},
+            {'properties': {'decision': {'const': 'NEEDS_DECISION'},
+                            'category': {'const': 'SCOPE_OR_DESIGN'}}},
+            {'properties': {'decision': {'const': 'BLOCKED'},
+                            'category': {'const': 'ENVIRONMENT'}}}
+        ]}
 
 
 class FailureReviewError(Stop):
