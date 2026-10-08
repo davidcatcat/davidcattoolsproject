@@ -31,6 +31,111 @@ def result(status='PASS', findings=None):
             'findings': findings or []}
 
 
+class InitialDecisionHandoffTests(unittest.TestCase):
+    """A zero-edit Codex decision is a frozen control-branch handoff, not model approval."""
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def git(*args):
+                return subprocess.run(['git', *args], cwd=str(root), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
+            git('init', '-q')
+            (root / 'bootstrap.txt').write_text('pinned main content')
+            git('add', 'bootstrap.txt')
+            git('-c', 'user.name=Fixture', '-c',
+                'user.email=fixture@example.invalid', 'commit', '-qm', 'base')
+            base = git('rev-parse', 'HEAD')
+            branch = 'feat/llmtool-c1-test-excerpts-20261009'
+            git('switch', '-q', '-c', branch)
+            run_id = '20261008T185112Z-21061'
+            old_control = '9d6bbc3c578a3dca0c4d29026b1c64c89cb200bb'
+            logs = root / '.ai-loop' / run_id
+            logs.mkdir(parents=True)
+            old_task = {'task_id': 'C1-test-excerpts-20261009',
+                'mode': 'implement_new_pr', 'branch': branch,
+                'base_sha': base, 'allowed_files': ['feature.py']}
+            summary_reason = 'command failed (exit 1): claude; see local logs'
+            reason = ('Checkout matches canonical path and pinned HEAD. '
+                'Required automation/ai-loop/task.json and scripts/ai-loop.sh '
+                'are absent. No files changed, tests run, or Git mutations performed.')
+            codex = {'status': 'NEEDS_DECISION', 'summary': reason}
+            loop.save_json(logs / 'codex-0.json', codex)
+            source_sha = loop.digest(logs / 'codex-0.json')
+            loop.save_json(logs / 'task.json', old_task)
+            (logs / 'task.md').write_text('Frozen C1 task\n')
+            loop.save_json(logs / 'provenance.json', {
+                'root': str(root), 'run_id': run_id, 'control_sha': old_control,
+                'start_branch': 'main', 'start_head': base, 'base': base})
+            loop.save_json(logs / 'summary.json', {
+                'branch': branch, 'head': base, 'status': 'STOPPED',
+                'reason': summary_reason, 'history': []})
+            loop.save_json(logs / 'failure-0.json', {
+                'run_id': run_id, 'task_id': old_task['task_id'], 'head': base,
+                'phase': 'developer', 'gate_waived': False})
+            loop.save_json(logs / 'failure-0-claude.raw.json', {
+                'subtype': 'success', 'is_error': True})
+            task = {**old_task, 'initial_decision_recovery': {
+                'run_id': run_id, 'control_sha': old_control,
+                'codex_result_sha256': source_sha}}
+            previous_run = loop.run
+            def mocked_run(args, cwd, **kwargs):
+                if args[:2] == ['gh', 'api']:
+                    return '[]'
+                if args[:3] == ['git', 'ls-remote', '--heads']:
+                    return ''
+                return previous_run(args, cwd, **kwargs)
+            with patch.object(loop, 'run', side_effect=mocked_run), \
+                 patch.object(loop, 'load_task', return_value=(old_task, 'Frozen C1 task')):
+                yield root, task, run_id, logs
+
+    def test_zero_edit_decision_recovery_reuses_exact_pinned_task_without_pass(self):
+        with self.fixture() as (root, task, run_id, logs):
+            original, recovery = loop.prepare_initial_decision_resume(
+                root, task, run_id, {}, ())
+            self.assertEqual(original, {})
+            self.assertEqual(recovery['kind'], 'initial_decision')
+            self.assertEqual(recovery['partial_files'], {})
+            self.assertEqual(recovery['inherited_validation'], 'NONE')
+            self.assertIn('codex-0.json', recovery['private_evidence_files'])
+
+    def test_initial_decision_recovery_rejects_bad_sha_and_tampered_evidence(self):
+        with self.fixture() as (root, task, run_id, logs):
+            task['initial_decision_recovery']['codex_result_sha256'] = 'e' * 64
+            with self.assertRaisesRegex(loop.Stop, 'decision SHA differs'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
+            task['initial_decision_recovery']['codex_result_sha256'] = loop.digest(logs / 'codex-0.json')
+            evidence = logs / 'summary.json'
+            doc = json.loads(evidence.read_text())
+            doc['history'] = [{'tests': 'PASS'}]
+            loop.save_json(evidence, doc)
+            with self.assertRaisesRegex(loop.Stop, 'provenance differs'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
+
+    def test_initial_decision_recovery_never_accepts_new_dirty_or_wrong_branch(self):
+        with self.fixture() as (root, task, run_id, logs):
+            with self.assertRaisesRegex(loop.Stop, 'clean tracked/index'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {}, ('bootstrap.txt',))
+            with self.assertRaisesRegex(loop.Stop, 'candidate changed'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {'feature.py': 'a'*64}, ())
+            with patch.object(loop, 'git', side_effect=lambda rt, *args: (
+                    'unrelated' if args == ('branch', '--show-current')
+                    else subprocess.run(['git', *args], cwd=str(rt), check=True,
+                        stdout=subprocess.PIPE).stdout.decode().strip())):
+                with self.assertRaisesRegex(loop.Stop, 'candidate changed'):
+                    loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
+
+    def test_initial_decision_recovery_never_reuses_ambiguous_contract(self):
+        with self.fixture() as (root, task, run_id, logs):
+            task['task_id'] = 'other-task'
+            with self.assertRaisesRegex(loop.Stop, 'identity mismatch'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
+            task['task_id'] = 'C1-test-excerpts-20261009'
+            task['allowed_files'].append('unapproved.py')
+            with self.assertRaisesRegex(loop.Stop, 'original frozen task'):
+                loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
+
 class LauncherInstallTests(unittest.TestCase):
     source = '#!/usr/bin/env bash\nset -euo pipefail\necho fixture\n'
 
