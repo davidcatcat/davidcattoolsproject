@@ -1,5 +1,9 @@
 # Codex repository guidance
 
+## Required ai-loop single-script handoff
+
+For llmtool engineering before native A11b/A11c acceptance, read [ai-loop-handoff](skills/ai-loop-handoff/SKILL.md). The operator runs only the **vetted ai-loop entrypoint**, never relays Codex/Claude prompts or builds ad hoc shell command batches. The coordinator publishes the Git task contract and handles design decisions; runner handles bounded Codex implementation, read-only Claude, tests, repairs and CI. On script, system, Mac process, environment or CI faults, repair/recover the orchestration first through a **separate approved maintenance task**, preserving dirty user work and original evidence. Do not repurpose C1 or weaken safety guards. If no tested maintenance script exists, report `AUTOMATED_MAINTENANCE_NOT_READY` rather than ask the operator to run manual model prompts. Issue #52/#53 currently blocks C1.
+
 ## Canonical repository and pre-change checks
 
 The canonical local Mac project repository directory is:
