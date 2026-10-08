@@ -2868,6 +2868,95 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
           'coordinator signoff and PR merge still PENDING.', flush=True)
 
 
+def publish_frozen_qa_severity_inventory(root, logs, task):
+    """No models and no review text egress: one frozen PR55 QA run only."""
+    expected_head = '67d02be6bc8cb3f237c5060edda3321f6d885bf3'
+    expected_run = '20261008T202910Z-31100'
+    expected_diff = 'f977cb5dcd8ab47dc787cb0d1f439e843d0bff99dd1f69e018157a28348c7ea8'
+    if (logs.name != expected_run or task.get('pr_number') != 55
+            or task.get('qa_gates') != ['security', 'functional_qa']
+            or task.get('expected_head') != expected_head
+            or git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != expected_head
+            or git(root, 'status', '--porcelain')):
+        raise Stop('QA severity inventory requires clean pinned PR55')
+    read_pr(root, task, expected_head)
+    source = git(root, 'diff', '--no-ext-diff', '--no-textconv',
+                 task['base_sha'], expected_head)
+    if hashlib.sha256(source.encode()).hexdigest() != expected_diff:
+        raise Stop('QA source diff drift')
+    def private_json(name):
+        p = logs / name
+        if (any(v.is_symlink() for v in (root / '.ai-loop', logs, p))
+                or not p.is_file() or p.stat().st_size > 256 * 1024):
+            raise Stop('unsafe private QA record: ' + name)
+        return json.loads(p.read_bytes())
+    qa = private_json('qa-pr55.json')
+    provenance = private_json('provenance.json')
+    original_task = private_json('task.json')
+    if (qa.get('run_id') != expected_run or qa.get('head') != expected_head
+            or qa.get('pr') != 55 or qa.get('diff_sha256') != expected_diff
+            or qa.get('qa_result') != 'PASS'
+            or qa.get('tests_related') != 'PASS'
+            or qa.get('tests_full_local') != 'PASS'
+            or qa.get('merge_authorized') is not False
+            or qa.get('product_provider_egress_authorized') is not False
+            or provenance.get('run_id') != expected_run
+            or provenance.get('root') != str(root)
+            or original_task != task
+            or not isinstance(qa.get('roles'), list) or len(qa['roles']) != 2):
+        raise Stop('QA origin or PASS evidence drift')
+    counts = {}
+    for i, role in enumerate(('security', 'functional_qa')):
+        record = private_json('claude-%d.json' % (201 + i))
+        validate_result(record, 'review', expected_head)
+        expected = {'role': role, 'status': record['status'],
+                    'reviewed_head': record['reviewed_head'],
+                    'findings': record['findings'], 'summary': record['summary']}
+        if qa['roles'][i] != expected or record['status'] != 'PASS':
+            raise Stop('independent specialist evidence mismatch')
+        if len(record['findings']) != (3 if i == 0 else 5):
+            raise Stop('original published finding count changed')
+        distribution = {'Low': 0, 'Medium': 0, 'High': 0, 'Critical': 0}
+        for item in record['findings']:
+            if (item['file'] not in task['allowed_files'] or item['blocking']
+                    or item['severity'] in ('High', 'Critical')):
+                raise Stop('blocking, high or out-of-scope QA finding')
+            distribution[item['severity']] += 1
+        counts[role] = distribution
+    # All emitted text is constructed from constants and numeric counts.
+    # No model-generated summaries, detail, evidence or user test data egress.
+    body = ('### PR55 QA severity counts: frozen private records\n\n'
+        + '- Revision: ' + expected_head + '\n'
+        + '- QA run: ' + expected_run + '\n'
+        + '- Diff SHA256: ' + expected_diff + '\n'
+        + '- Security PASS (3): Low=' + str(counts['security']['Low'])
+        + ', Medium=' + str(counts['security']['Medium']) + '\n'
+        + '- Functional QA PASS (5): Low=' + str(counts['functional_qa']['Low'])
+        + ', Medium=' + str(counts['functional_qa']['Medium']) + '\n'
+        + '- Blocking, High, Critical: zero per structured role PASS outputs\n'
+        + '- Raw findings and provider data remain on the Mac; NOT published.\n'
+        + '- Finding-by-finding coordinator signoff and merge: PENDING.\n')
+    api = 'repos/' + IDENTITY + '/issues/56/comments?per_page=100'
+    posted = json.loads(run(['gh', 'api', api], root))
+    if not isinstance(posted, list):
+        raise Stop('cannot check existing QA metadata publication')
+    signature = '### PR55 QA severity counts: frozen private records'
+    seen = [x.get('body') for x in posted if isinstance(x, dict)
+            and isinstance(x.get('body'), str) and signature in x['body']]
+    if seen:
+        if seen != [body]:
+            raise Stop('QA metadata publication collision')
+        print('[QA] Existing severity-count report verified; no duplicate publication.', flush=True)
+        return
+    if (git(root, 'status', '--porcelain')
+            or git(root, 'rev-parse', 'HEAD') != expected_head):
+        raise Stop('QA source changed before metadata publication')
+    run(['gh', 'api', '--method', 'POST', 'repos/' + IDENTITY
+         + '/issues/56/comments', '-f', 'body=' + body], root)
+    print('[QA] Severity counts published to Issue #56; no private review text.', flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
@@ -2879,6 +2968,8 @@ def main():
                         help='upload a frozen diagnostic report only; no models/tests/task recovery')
     parser.add_argument('--diagnose', metavar='RUN_ID',
                         help='publish source-free triage of stopped run; no models/tests/candidate edits')
+    parser.add_argument('--qa-findings', metavar='RUN_ID',
+                        help='publish frozen severity counts only, without models or private text')
     parser.add_argument('--inspect-decision', metavar='RUN_ID',
                         help='show private Codex decision locally only; no Git upload, model or worktree change')
     parser.add_argument('--install-launcher', action='store_true',
@@ -2889,16 +2980,20 @@ def main():
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
     if args.maintenance_issue52 and (args.install_launcher or args.check or args.test_mode or args.resume
-                                     or args.diagnose or args.inspect_decision or args.publish_diagnostics):
+                                     or args.diagnose or args.inspect_decision or args.qa_findings or args.publish_diagnostics):
         parser.error('--maintenance-issue52 is exclusive; it does not run C1')
-    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose or args.inspect_decision):
+    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose or args.inspect_decision or args.qa_findings):
         parser.error('--publish-diagnostics cannot be combined with task/install/test options')
     if args.diagnose and (args.publish_diagnostics or args.install_launcher or args.check
-                          or args.test_mode or args.resume or args.inspect_decision):
+                          or args.test_mode or args.resume or args.inspect_decision or args.qa_findings):
         parser.error('--diagnose cannot be combined with other modes')
     if args.inspect_decision and (args.publish_diagnostics or args.install_launcher or args.check
-                                  or args.test_mode or args.resume or args.maintenance_issue52):
+                                  or args.test_mode or args.resume or args.maintenance_issue52 or args.qa_findings):
         parser.error('--inspect-decision cannot be combined with other modes')
+    if args.qa_findings and (args.check or args.resume or args.test_mode
+                             or args.install_launcher or args.maintenance_issue52
+                             or args.publish_diagnostics or args.diagnose or args.inspect_decision):
+        parser.error('--qa-findings is a standalone metadata-only operation')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
@@ -3023,6 +3118,11 @@ def main():
             print('No models/tests/candidate changes. Raw source and provider data remain local.', flush=True)
             return
         task, text = load_task(root, args.control_sha)
+        if args.qa_findings:
+            if args.qa_findings != '20261008T202910Z-31100':
+                raise Stop('wrong frozen PR55 QA run identity')
+            publish_frozen_qa_severity_inventory(root, root / '.ai-loop' / args.qa_findings, task)
+            return
         new_task = task['mode'] == 'implement_new_pr'
         test_mode = args.test_mode or task['default_test_mode']
         for executable in ('codex', 'claude', 'gh', 'make'):
