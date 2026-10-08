@@ -1,5 +1,11 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## Operator contract — one launcher and repair-first recovery (2026-10-09)
+
+Until llmtool-native A11b/A11c development workflow passes independent real-task acceptance, **the operator only runs a validated ai-loop script**. Coordinator authors matching Git `task.md` + `task.json` contracts; runner invokes Codex, independent read-only Claude, tests, bounded repair and Draft PR/CI. Never instruct the user to manually relay prompts or assemble many Mac commands. See [ai-loop-handoff Skill](../../skills/ai-loop-handoff/SKILL.md) and [MAINTENANCE_HANDOFF](MAINTENANCE_HANDOFF.md).
+
+**Current STOP:** live `task.json` is C1 Issue #51, but Mac has a local uncommitted Issue #52 fix to `scripts/test_ai_loop.py`; `--check` correctly rejects dirty tracked work. Issue #53's separate maintenance mode is NOT IMPLEMENTED. Do not run C1 as a repair; first validate/publish the helper fix with independent review + exact-head helper Python 3.9/3.14 CI, and implement a reviewed single-script maintenance entrypoint. Only after these readiness gates may the operator run the ordinary `bash scripts/ai-loop.sh --check && bash scripts/ai-loop.sh`. No bypass or auto-merge.
+
 **The current control branch is now assigned to `C1-test-excerpts-20261009` on pinned
 `main@8e29024656f873431f6ad83e45015b57bfe381a9`.** Exact task contract and requirements:
 [task.json](task.json), [task.md](task.md). This task is **implementation_new_pr**,
