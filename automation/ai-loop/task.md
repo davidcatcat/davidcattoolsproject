@@ -1,3 +1,78 @@
+# CURRENT post-PR48 out-of-scope TEST_BUG recovery — 2026-10-08
+
+Run `20261008T035727Z-43467` stopped on unpublished A11b candidate
+`0dc05b75844f9caa4c4ccf9c28c8b21972fd25f9`.
+
+Round 0 reached real Mac containment after the stale-base harness repair. The
+candidate passed fd_inheritance, SIGINT, SIGTERM and SIGHUP, then
+`hung_supervisor/unresolved` hit a Darwin EPERM in the test controller's passive
+disappearance poll. Claude classified that exact native failure
+`REPAIR / TEST_BUG`; Codex repaired only the allowlisted controller test while
+retaining the same deadlines, signal authority and unresolved-on-no-proof rules.
+
+On the changed round-1 bytes, related checks, developer review and ordinary
+review passed. The venv full suite passed. Mac system Python 3.9 full-final then
+failed only in
+`test_entrypoint_interrupt.EntrypointInterruptTests.test_repeated_real_subprocess_startup_import_and_parser_interrupts`:
+after the child had written its product-controlled ready marker and the parent had
+sent SIGINT, the test controller's `communicate(timeout=5)` expired once during
+the 1242-test full suite. The same exact targeted Mac Python 3.9 test subsequently
+passed 10/10, each complete 9-subprocess invocation taking about 3.9-4.35 seconds.
+
+Claude's original exact-evidence classification was
+`NEEDS_DECISION / TEST_BUG`: the blocking root-cause file
+`tools/llmtool/tests/test_entrypoint_interrupt.py` is outside the A11b allowlist.
+That pairing is semantically valid: category describes root cause; decision
+describes whether the current task is authorized to repair it. The control helper
+now encodes that distinction instead of rejecting this result as
+`CATEGORY_DECISION_MISMATCH`.
+
+Independent Draft PR #48 changed only
+`tools/llmtool/tests/test_entrypoint_interrupt.py`: it retained the exact exit
+130 / empty stdout / exact interrupted stderr assertions and changed only the
+post-SIGINT safety wait from 5 seconds to 10 seconds, matching the existing
+real-subprocess startup budget. No retry, skip, production entrypoint/CLI change,
+signal policy change or assertion weakening was introduced. Exact-head CI passed
+on Python 3.9 and 3.14. PR #48 was squash-merged to main as
+`ceae425eacaa8729a9eb8d796e43304918a8c908`.
+
+Current stopped-failure recovery pins:
+- run `20261008T035727Z-43467`;
+- original control `a831946fc75823e2a97296a4d5f33bc375f3dc8e`;
+- stopped candidate `0dc05b75844f9caa4c4ccf9c28c8b21972fd25f9`;
+- old base `63e232e22a769f409e381e34dfe0ef1add766d8e`;
+- new main `ceae425eacaa8729a9eb8d796e43304918a8c908`;
+- round-1 failure SHA-256
+  `26d51d0a067e7b408998a2fd633645765d3f7f85a51fcb069689903bf1c94dd1`;
+- original Claude raw envelope SHA-256
+  `fcea8633beb151df4248a07e6749864a0f7ac7b38bd662ce1c4db73ef807ac5b`;
+- prior round-0 Mac evidence SHA-256
+  `9baed935a39d56b6a0c8dd10e3a47da317b0ac972039d117c97881fdae411b83`;
+- sole approved upstream path
+  `tools/llmtool/tests/test_entrypoint_interrupt.py`.
+
+Recovery revalidates the raw Claude envelope privately and requires every blocking
+finding to equal the approved upstream path set. The raw provider envelope is
+hash-checked but is not copied into exportable recovery evidence. It also performs
+a fresh read-only absence proof for the retained round-0 Mac owned PID inventory;
+saved IDs are never signaled.
+
+If all exact pins hold, the runner snapshots the stopped A11b bytes, creates a
+two-parent merge with exact new main, proves all A11b candidate bytes are unchanged
+and the upstream test file equals main, then starts with deterministic validation.
+No prior PASS is inherited. Both full suites and all fourteen Mac native scenarios
+must pass again before publication.
+
+First operator action after helper CI is green:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T035727Z-43467 --check
+```
+
+Do not rerun the old 35739/7365 recoveries and do not manually rebase,
+cherry-pick, reset, stash or publish the feature branch.
+
 # CURRENT Mac preflight harness recovery — 2026-10-08
 
 Run `20261008T033528Z-35739` successfully integrated the separately merged
