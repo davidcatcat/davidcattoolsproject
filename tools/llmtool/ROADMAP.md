@@ -11,6 +11,49 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
+## Near-term release priority — cost-first native self-development (2026-10-09)
+
+**Primary goal:** make `llmtool` itself safely coordinate Codex CLI
+implementation, Claude CLI independent review, deterministic testing,
+bounded repair and authorized PR handoff for developing `llmtool`, while
+**measurably reducing premium model tokens at unchanged quality**.
+The current `ai-loop` script is a **temporary bootstrapping tool**:
+maintain necessary safety, but do not prioritize a second permanent
+formal review/QA orchestration stack in the temporary runner.
+
+The [native self-development MVP specification](NATIVE_SELF_DEV_MVP.md)
+is the detailed **proposed** priority/gate contract:
+
+- **C0 NOW:** use already merged A2.4/A2.5 text-only CLI providers,
+  A5 Git snapshot, A9 text-only roles and A10 context collection as
+  bounded development dogfood. This does **not** authorize repo edits
+  through those providers, or establish generic cost savings.
+- **C1 FIRST NEW DELIVERY:** deterministic real-format unittest/pytest
+  failure excerpt/coverage selector, followed by Company-only Phase 0
+  and quality-equivalent paired token measurement **before** enabling
+  any company triage route as a saving claim. Small-input PR #36 pilot
+  *increased* Codex token use 104.46% (54,849→112,144), whereas the
+  specific large-log L01 pipeline saved 39.82%/37.55% in two controlled
+  observations; neither result generalizes to every request.
+- **C2 FIRST NATIVE CODING MVP:** explicit authorized repo-bound
+  Codex development execution adapter/typed A11b actions, policy,
+  sandbox/process containment, real tests, read-only Claude review,
+  bounded repair, audit and approval barriers. This is **not implemented**
+  by A9/A10 or the existing pure-text CLI providers.
+- **C3 CUTOVER:** independent Security/Functional QA and real canonical-Mac
+  task acceptance, followed by verified llmtool self-development and
+  measurable task-level premium-token/quality/latency results. Freeze
+  or deprecate duplicate ai-loop orchestration only after parity.
+
+PR #49's synthetic A11b.2.2.1 containment is independently reported
+Security/Functional QA PASS with native Mac evidence, but remains
+**unmerged** as of this baseline and grants **no real Git ADD**.
+PR #45 temporary helper remains separate and Draft. Finish #49
+merge authorization and required future product-execution gates
+independently. Do **not** block initial read-only C0/C1 dogfood
+on A12 Telegram, optional A2.3 HTTP or a complete generic executor.
+A measured cost optimization cannot replace safety/QA gate PASS.
+
 ## Current milestone snapshot
 
 This table is the authoritative current-state summary. Historical validation reports
