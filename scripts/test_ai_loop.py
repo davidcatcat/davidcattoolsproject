@@ -108,6 +108,9 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
             self.assertEqual([x[0] for x in role_calls], [201, 202])
             self.assertIn('SECURITY gate:', role_calls[0][1])
             self.assertIn('FUNCTIONAL QA gate:', role_calls[1][1])
+            for _, prompt, _ in role_calls:
+                self.assertIn('AUTHORITATIVE CONTROL HANDOFF', prompt)
+                self.assertIn('intentionally', prompt)
             self.assertEqual([x[2] for x in role_calls], [head, head])
             self.assertEqual(len(comments), 1)
             self.assertIn('body=', comments[0])
