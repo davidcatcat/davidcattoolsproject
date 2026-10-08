@@ -1,3 +1,32 @@
+# CURRENT A11b Mac-preflight repair handoff — 2026-10-08
+
+The post-PR47 candidate reached both full suites successfully, then stopped before
+the first native containment scenario because the acceptance harness still pinned
+the old main SHA. Current authorized recovery is run
+`20261008T033528Z-35739`, exact candidate
+`8bada855a99ce4660c66537922f3ad833b8669fb`.
+
+Only two test-harness files are authorized for this repair:
+`tools/llmtool/tests/run_containment_acceptance.py` and
+`tools/llmtool/tests/test_git_containment.py`. Production containment files are
+not authorized by this failure. The repair keeps strict base equality and changes
+the stale base literal to post-PR47 main `63e232e...`; all native gates remain
+non-PASS until rerun.
+
+The helper now treats a zero-scenario Mac `preflight` failure as auto-repairable
+only for an evidence-bound Claude `TEST_BUG` whose blocking files are all test
+harness paths. It still refuses to infer any native PASS and reruns all validation
+after changed bytes.
+
+Current no-token preflight, only after helper CI is green:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T033528Z-35739 --check
+```
+
+The older 7365 recovery is consumed/historical.
+
 # CURRENT A11b recovery after merged flaky-test fix — 2026-10-08
 
 PR #47 was squash-merged to main at
