@@ -1401,27 +1401,24 @@ class DiagnosticsExportTests(unittest.TestCase):
             task = {'mode': 'implement_new_pr', 'base_sha': base,
                     'branch': 'feat/llmtool-c1-test-excerpts-20261009',
                     'allowed_files': ['existing.py', 'brand_new.py']}
-            state = {'existing_blob': 'oldblob', 'new_exists': False, 'staged': False,
-                     'head': base}
+            old_blob = 'a' * 40
+            state = {'existing_blob': old_blob, 'staged': False,
+                     'head': base, 'tree_override': None}
             def fake_git(_root, *argv):
                 calls = {
                     ('rev-parse', 'HEAD'): state['head'],
                     ('branch', '--show-current'): task['branch'],
                     ('diff', '--cached', '--name-only'): 'staged.py' if state['staged'] else '',
-                    ('rev-parse', base + ':existing.py'): 'oldblob',
+                    ('ls-tree', '-r', '-z', '--full-tree', base, '--', 'existing.py'):
+                        (state['tree_override'] if state['tree_override'] is not None
+                         else '100644 blob ' + old_blob + '\t' + 'existing.py' + '\0'),
+                    ('ls-tree', '-r', '-z', '--full-tree', base, '--', 'brand_new.py'): '',
                     ('hash-object', '--', 'existing.py'): state['existing_blob'],
-                    ('hash-object', '--', 'brand_new.py'): 'newblob'}
+                    ('hash-object', '--', 'brand_new.py'): 'b' * 40}
                 if argv not in calls:
                     raise AssertionError(argv)
                 return calls[argv]
-            def fake_command(argv, _root, **kwargs):
-                if argv == ['git', 'cat-file', '-e', base + ':existing.py']:
-                    return 0, '', ''
-                if argv == ['git', 'cat-file', '-e', base + ':brand_new.py']:
-                    return 1, '', 'missing'
-                raise AssertionError(argv)
-            with patch.object(loop, 'git', side_effect=fake_git), \
-                 patch.object(loop, 'command', side_effect=fake_command):
+            with patch.object(loop, 'git', side_effect=fake_git):
                 result = loop.diagnostic_codex_outcome(root, logs, task)
                 self.assertEqual(result['developer_status'], 'FAIL')
                 self.assertEqual(result['changed_allowed_files'], [])
@@ -1441,10 +1438,58 @@ class DiagnosticsExportTests(unittest.TestCase):
                 with self.assertRaisesRegex(loop.Stop, 'wrong Git provenance'):
                     loop.diagnostic_codex_outcome(root, logs, task)
                 state['head'] = base
+                state['tree_override'] = '120000 blob ' + old_blob + '\t' + 'existing.py' + '\0'
+                with self.assertRaisesRegex(loop.Stop, 'Git tree entry unsafe'):
+                    loop.diagnostic_codex_outcome(root, logs, task)
+                state['tree_override'] = '100644 blob ' + old_blob + '\t' + '../escape.py' + '\0'
+                with self.assertRaisesRegex(loop.Stop, 'Git tree entry unsafe'):
+                    loop.diagnostic_codex_outcome(root, logs, task)
+                state['tree_override'] = None
                 (root / 'brand_new.py').unlink()
                 (root / 'brand_new.py').symlink_to(root / 'existing.py')
                 with self.assertRaisesRegex(loop.Stop, 'candidate path unsafe'):
                     loop.diagnostic_codex_outcome(root, logs, task)
+
+    def test_new_task_codex_diagnostic_real_git_missing_base_path(self):
+        # Regression for the actual Mac STOP: 'git cat-file -e SHA:missing'
+        # returns 128; a missing new C1 file must be reported as absent,
+        # while bad Git objects must still fail closed.
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            def invoke(*argv):
+                return subprocess.run(['git', *argv], cwd=str(root), check=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
+            invoke('init', '-q')
+            (root / 'existing.py').write_text('initial source')
+            invoke('add', 'existing.py')
+            invoke('-c', 'user.name=Fixture', '-c',
+                   'user.email=fixture@example.invalid', 'commit', '-qm', 'base')
+            base = invoke('rev-parse', 'HEAD')
+            branch = 'feat/llmtool-c1-test-excerpts-20261009'
+            invoke('switch', '-q', '-c', branch)
+            logs = root / '.ai-loop' / '20261008T185112Z-21061'
+            logs.mkdir(parents=True)
+            loop.save_json(logs / 'codex-0.json',
+                {'status': 'NEEDS_DECISION', 'summary': 'PRIVATE_PROVIDER_DATA'})
+            loop.save_json(logs / 'provenance.json', {
+                'root': str(root), 'run_id': logs.name, 'base': base,
+                'start_head': base, 'start_branch': 'main'})
+            task = {'mode': 'implement_new_pr', 'base_sha': base,
+                    'branch': branch, 'allowed_files': ['existing.py', 'brand_new.py']}
+            first = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(first['changed_allowed_files'], [])
+            self.assertFalse(first['repair_authorized'])
+            self.assertNotIn('PRIVATE_PROVIDER_DATA', json.dumps(first))
+            (root / 'brand_new.py').write_text('new C1 code')
+            later = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(later['changed_allowed_files'], ['brand_new.py'])
+            (root / 'existing.py').write_text('changed source')
+            changed = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(changed['changed_allowed_files'],
+                             ['brand_new.py', 'existing.py'])
+            task['base_sha'] = 'f' * 40
+            with self.assertRaises(loop.Stop):
+                loop.diagnostic_codex_outcome(root, logs, task)
 
     def test_new_task_codex_diagnostic_never_infers_base_without_pinned_proof(self):
         with tempfile.TemporaryDirectory() as runtime:
