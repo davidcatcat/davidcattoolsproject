@@ -1,0 +1,36 @@
+{
+  "run_id": "20261008T035727Z-43467",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "round": 1,
+  "phase": "full-final",
+  "head": "0dc05b75844f9caa4c4ccf9c28c8b21972fd25f9",
+  "evidence_sha256": "26d51d0a067e7b408998a2fd633645765d3f7f85a51fcb069689903bf1c94dd1",
+  "raw_output_sha256": "fcea8633beb151df4248a07e6749864a0f7ac7b38bd662ce1c4db73ef807ac5b",
+  "disposition": "CLASSIFICATION_REJECTED",
+  "gate_waived": false,
+  "reason_codes": [
+    "CATEGORY_DECISION_MISMATCH"
+  ],
+  "checks": {
+    "envelope_success": true,
+    "classification_schema_matches": true,
+    "reviewed_head_matches": true,
+    "reviewed_evidence_sha256_matches": true,
+    "summary_characters": 1987,
+    "findings_count": 2,
+    "finding_string_lengths": [
+      {
+        "file": 48,
+        "detail": 1270,
+        "evidence": 600
+      },
+      {
+        "file": 49,
+        "detail": 572,
+        "evidence": 349
+      }
+    ]
+  },
+  "raw_provider_text_published": false,
+  "recovery_authorized": false
+}
