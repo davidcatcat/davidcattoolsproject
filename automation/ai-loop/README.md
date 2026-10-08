@@ -1,5 +1,14 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## ACTIVE (2026-10-09): PR #55 Medium INPUT_VALIDATION fix, before merge
+
+Issue #56's single Medium Security finding has now been independently triaged on **unchanged PR #55** `67d02be6bc8cb3f237c5060edda3321f6d885bf3`: `INPUT_VALIDATION`, `FIX_BEFORE_MERGE`, confidence `HIGH`, `test_output_excerpts.py:46`. Prior dual specialist QA PASS and all seven Low findings remain frozen as **historical evidence**, not a waiver or post-fix PASS. PR stays Draft/unmerged.
+
+**Live task has changed.** Archived the completed dual-review task under `automation/ai-loop/history/20261009-C1-PR55-Issue56-dual-QA-task.md/json`. Live `task.md/task.json` now authorize a *single* targeted **same-PR Codex fix**, `C1-PR55-Medium-InputValidation-Fix-20261009`, with `qa_medium_repair` binding original Medium finding SHA and local frozen private risk assessment. The runner verifies the original risk evidence before even allowing a precheck PASS. Only the original `test_output_excerpts.py` module and its `test_test_output_excerpts.py` regressions may change; report publication remains runner-owned. No second PR, no broad refactor, no automatic merge, zero automatic Codex repair retries, no new product provider calls other than necessary implementation/review. Both related and **both Mac full test suites**, ordinary independent read-only Claude review, exact-new-HEAD GitHub CI are mandatory. Repeat formal dual specialist QA on the **new** HEAD after repair; the earlier specialist QA is stale on changed bytes.
+
+**Operator step, only after latest control-head Helper CI Python 3.9/3.14 PASS**: `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. User never relays prompts, manipulates Git or runs separate models. On STOP, preserve evidence and repair script/contract first.
+
+
 ## Current PR #55 merge hold — one Medium Security finding (2026-10-09)
 
 The previous **read-only** C1 QA gate PASS and the later frozen severity-count report are both genuine, but do **not** grant merge authority. [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6069088872) proves **Security: 2 Low, 1 Medium; Functional QA: 5 Low, 0 Medium; no High/Critical** on original HEAD `67d02be6bc8cb3f237c5060edda3321f6d885bf3`. The Medium finding is flagged non-blocking by its model, but the coordinator imposes a conservative **merge HOLD** until independently categorized and dispositioned. Do not auto-mark READY, merge, or claim security fully accepted.
