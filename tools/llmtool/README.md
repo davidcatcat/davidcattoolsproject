@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2 is NOT STARTED and remains blocked on the B5 process-containment/failure-semantics design gate.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); real A11b.2.2.2 Git ADD remains NOT AUTHORIZED pending reviewed integration design.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -95,7 +95,7 @@ are never treated as the same claim.
 | A11a — Observability & Diagnostics | **DONE** | Structured diagnostics, opt-in safe metadata store, runs/trace/doctor, failure handling |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged; A11b.2.1 DONE/merged; A11b.2.2 B5-GATED** | ADD preflight is merged; actual Git mutation remains prohibited until containment design + harness review pass |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged; A11b.2.1 DONE/merged; A11b.2.2.1 synthetic containment DONE/merged PR #49** | Actual Git mutation remains prohibited; A11b.2.2.2 integration/sandbox/approval design and review required |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate route-by-task delegation, independent verification and real task acceptance; no blanket company-first policy |
 
 ### Company-LLM routing evidence after Round 3
@@ -142,11 +142,13 @@ QG-S1 and QG-QA1 are PASS/CLOSED. Historical FAIL/pending wording remains intact
 A11b.1 is DONE/merged via PR #32 (`e5525f18`) as a data-only contract slice.
 A11b.2.1 is DONE/merged via PR #43 (`780970ab`) as an internal read-only Git ADD
 preflight/state verifier; it does not execute `git add` and is not a public mutation path.
-A11b.2.2 is NOT STARTED and remains blocked on the B5 process-containment/failure-semantics
-gate. PR #44 is at **B5 design remediation / pending independent targeted re-review**;
-2.2.0, 2.2.1 and 2.2.2 are **NOT AUTHORIZED** in the documentation task. See the
-[remediated B5 spec](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md)
-and [remediation summary](../../reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md).
+A11b.2.2.1 synthetic process-containment harness is DONE/merged via PR #49 (`eb464628`),
+with independent Security/Functional QA PASS, Mac 14/14 native tests and SIGKILL 20+20.
+This slice did **not** implement actual Git ADD or a public mutation surface.
+A11b.2.2.2 requires separate reviewed product integration design and authorization.
+Track S49-3/QA49-N2 raw-FD cleanup, QA49-N1 natural leader-exit regression and
+P49-L1 fault hook isolation before real executor integration. See the
+[B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md).
 A11b as a whole is incomplete. Future executor work must still meet QG-S1
 R-EXEC/R-FS/R-GIT/R-APR/R-INJ/R-EXP/R-AUD.
 
