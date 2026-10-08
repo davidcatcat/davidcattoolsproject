@@ -1,0 +1,31 @@
+{
+  "status": "STOPPED",
+  "head": "35ad4be92f6492fa86a8bc2fe961a22cf9c84a49",
+  "branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
+  "run_id": "20261008T052643Z-60914",
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "source_summary_sha256": "921919abad240e84a5b79f6e3c9a35706bbfa939b7b161e87d0c693d96b57d24",
+  "rounds": [
+    {
+      "round": 0,
+      "head": "35ad4be92f6492fa86a8bc2fe961a22cf9c84a49",
+      "tests": "PASS",
+      "tested_sha256": {
+        "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+        "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+        "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+        "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+        "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+        "tools/llmtool/tests/test_git_containment.py": "eef9825c8eeb03db6ddc234d7f5b3ae16b7403429aac2e775f1a1973b9f4baba",
+        "tools/llmtool/tests/run_containment_acceptance.py": "97c45cc931dbc69b2cb2e8be92b304bbbd394f2c986c19a35274cf809bbe01c0",
+        "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+        "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728",
+        "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md": "89779020c1ece5839fdac34e02c763db024971a4f7a60df92cae2475e02efb3c"
+      },
+      "review": {
+        "status": "FAIL",
+        "reviewed_head": "35ad4be92f6492fa86a8bc2fe961a22cf9c84a49"
+      }
+    }
+  ]
+}
