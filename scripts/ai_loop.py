@@ -1398,8 +1398,59 @@ def diagnostic_triage(root, logs, task):
     return public, private
 
 
+def validate_public_triage(value, task, run_id):
+    """Verify every public field is bounded metadata, never free-form provider/source text."""
+    if (not isinstance(value, dict)
+            or set(value) != {'run_id', 'native_failures', 'provider_envelopes',
+                              'contains_source_text', 'contains_provider_text',
+                              'repair_authorized', 'gates_inherited'}
+            or value['run_id'] != run_id
+            or any(value[key] is not False for key in
+                   ('contains_source_text', 'contains_provider_text', 'repair_authorized',
+                    'gates_inherited'))
+            or not isinstance(value['native_failures'], list)
+            or len(value['native_failures']) > 4
+            or not isinstance(value['provider_envelopes'], list)
+            or len(value['provider_envelopes']) > 16):
+        raise Stop('unsafe public diagnostic triage schema')
+    for row in value['native_failures']:
+        if (not isinstance(row, dict)
+                or set(row) != {'evidence_file', 'scenario', 'exception_type',
+                                'cleanup_status', 'owned_processes_retained', 'frames'}
+                or not isinstance(row['evidence_file'], str)
+                or not re.fullmatch(r'mac-containment-[0-9]+\.json', row['evidence_file'])
+                or not isinstance(row['scenario'], str)
+                or not re.fullmatch(r'[a-z0-9_]{1,64}', row['scenario'])
+                or not isinstance(row['exception_type'], str)
+                or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,80}', row['exception_type'])
+                or row['cleanup_status'] not in ('RESOLVED', 'UNRESOLVED', 'UNVERIFIED')
+                or type(row['owned_processes_retained']) is not bool
+                or not isinstance(row['frames'], list) or len(row['frames']) > 8):
+            raise Stop('unsafe native triage metadata')
+        for frame in row['frames']:
+            if (not isinstance(frame, dict)
+                    or not set(frame).issubset({'file', 'line', 'function'})
+                    or not {'file', 'line'}.issubset(frame)
+                    or frame['file'] not in task['allowed_files']
+                    or type(frame['line']) is not int or not 1 <= frame['line'] <= 200000
+                    or ('function' in frame and
+                        (not isinstance(frame['function'], str)
+                         or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,100}', frame['function'])))):
+                raise Stop('unsafe native triage source reference')
+    for row in value['provider_envelopes']:
+        if (not isinstance(row, dict) or set(row) != {'file', 'subtype', 'is_error', 'state'}
+                or not isinstance(row['file'], str)
+                or not re.fullmatch(r'(claude-[0-9]+|failure-[0-9]+-claude)\.raw\.json', row['file'])
+                or row['subtype'] not in ('success', 'error', 'max_turns', 'other', 'unparseable')
+                or row['is_error'] not in (True, False, None)
+                or row['state'] not in ('ERROR_ENVELOPE', 'SUCCESS_ENVELOPE', 'UNVERIFIED')):
+            raise Stop('unsafe provider triage metadata')
+    return value
+
+
 def record_diagnostic_triage(root, logs, task):
     public, private = diagnostic_triage(root, logs, task)
+    validate_public_triage(public, task, logs.name)
     for name, value in (('triage-public.json', public), ('triage-local.json', private)):
         path = logs / name
         if path.exists() or path.is_symlink():
@@ -1520,15 +1571,7 @@ def diagnostic_payload(root, logs):
             'captured_sha256': hashes, 'source_files_published': False})}
     if 'evidence/triage-public.json' in captured:
         triage = json.loads(captured['evidence/triage-public.json'])
-        if (not isinstance(triage, dict) or triage.get('run_id') != run_id
-                or triage.get('contains_source_text') is not False
-                or triage.get('contains_provider_text') is not False
-                or triage.get('repair_authorized') is not False
-                or triage.get('gates_inherited') is not False
-                or set(triage) != {'run_id', 'native_failures', 'provider_envelopes',
-                                 'contains_source_text', 'contains_provider_text',
-                                 'repair_authorized', 'gates_inherited'}):
-            raise Stop('unsafe public diagnostic triage schema')
+        validate_public_triage(triage, pinned, run_id)
         selected['triage-public.json'] = encoded(triage)
     report = pinned.get('acceptance_report')
     if report and report in pinned['allowed_files'] and report in captured:
@@ -1607,7 +1650,7 @@ def publish_diagnostics(root, logs, files=None, batch=None):
         if batch is not None:
             raise Stop('diagnostic batch requires explicit curated files')
         files = diagnostic_payload(root, logs)
-    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection)', batch or '')
+    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection|triage)', batch or '')
             or not isinstance(files, dict) or not files or 'index.md' not in files
             or set(files) != {'index.md', (batch or '').rsplit('-', 1)[-1] + '.json'}
             or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
@@ -2214,6 +2257,8 @@ def main():
     parser.add_argument('--resume', metavar='RUN_ID', help='resume one explicitly contracted Codex/native acceptance stop')
     parser.add_argument('--publish-diagnostics', metavar='RUN_ID',
                         help='upload a frozen diagnostic report only; no models/tests/task recovery')
+    parser.add_argument('--diagnose', metavar='RUN_ID',
+                        help='publish source-free triage of stopped run; no models/tests/candidate edits')
     parser.add_argument('--install-launcher', action='store_true',
                         help='install scripts/ai-loop.sh only; do not start or resume the task')
     mode = parser.add_mutually_exclusive_group()
@@ -2221,8 +2266,11 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
-    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume):
+    if args.publish_diagnostics and (args.install_launcher or args.check or args.test_mode or args.resume or args.diagnose):
         parser.error('--publish-diagnostics cannot be combined with task/install/test options')
+    if args.diagnose and (args.publish_diagnostics or args.install_launcher or args.check
+                          or args.test_mode or args.resume):
+        parser.error('--diagnose cannot be combined with other modes')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
     root = REPO.resolve()
@@ -2250,6 +2298,48 @@ def main():
             publish_diagnostics(root, root / '.ai-loop' / args.publish_diagnostics)
             publish_classification_rejections(root, root / '.ai-loop' / args.publish_diagnostics)
             print('DIAGNOSTICS ONLY COMPLETE. No task/model/test/branch/index change or recovery claim.', flush=True)
+            return
+        if args.diagnose:
+            if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', args.diagnose):
+                raise Stop('invalid diagnostic run identity')
+            old_logs = root / '.ai-loop' / args.diagnose
+            for name in ('task.json', 'provenance.json', 'summary.json'):
+                path = old_logs / name
+                if (any(p.is_symlink() for p in (path, *path.parents))
+                        or not path.is_file() or path.stat().st_size > 1024 * 1024):
+                    raise Stop('diagnose input missing/unsafe: ' + name)
+            identity = json.loads((old_logs/'provenance.json').read_text())
+            control = identity.get('control_sha')
+            if (identity.get('root') != str(root) or identity.get('run_id') != args.diagnose
+                    or not isinstance(control, str)
+                    or not re.fullmatch(r'[0-9a-f]{40}', control)):
+                raise Stop('original diagnostic provenance mismatch')
+            pinned, _ = load_task(root, control)
+            summary = json.loads((old_logs/'summary.json').read_text())
+            if (json.loads((old_logs/'task.json').read_text()) != pinned
+                    or summary.get('status') != 'STOPPED' or summary.get('branch') != pinned['branch']
+                    or summary.get('head') != git(root, 'rev-parse', 'HEAD')):
+                raise Stop('diagnose requires original task and exact stopped candidate HEAD')
+            for path in sorted(old_logs.glob('mac-containment-*.json')):
+                if path.is_symlink() or path.stat().st_size > 128 * 1024:
+                    raise Stop('native diagnostic evidence unsafe')
+                evidence = json.loads(path.read_text())
+                sources = evidence.get('tested_sha256')
+                if not isinstance(sources, dict):
+                    raise Stop('native diagnostic source hash inventory missing')
+                for name, sha in sources.items():
+                    if name not in pinned['allowed_files'] or digest(root / name) != sha:
+                        raise Stop('native diagnostic source drift; no stale source context')
+            public, _private = diagnostic_triage(root, old_logs, pinned)
+            validate_public_triage(public, pinned, args.diagnose)
+            safe = (json.dumps(public, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
+            index = ('# Deterministic failure triage\n\n'
+                     'Safe evidence metadata only; no provider/source text or repair authority.\n\n'
+                     '[Structured metadata](triage.json)\n').encode('utf-8')
+            url = publish_diagnostics(root, old_logs, files={
+                'index.md': index, 'triage.json': safe}, batch='round-0-triage')
+            print('[診斷/Git] ' + url, flush=True)
+            print('No models/tests/candidate changes. Raw source and provider data remain local.', flush=True)
             return
         task, text = load_task(root, args.control_sha)
         new_task = task['mode'] == 'implement_new_pr'
