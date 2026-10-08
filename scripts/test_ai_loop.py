@@ -17,6 +17,13 @@ spec = importlib.util.spec_from_file_location('ai_loop', Path(__file__).with_nam
 loop = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(loop)
 HEAD = 'a' * 40
+TASK_DIR = Path(__file__).parents[1] / 'automation/ai-loop'
+HISTORICAL_TASK = TASK_DIR / 'history/20261008T100821Z-76644.task.json'
+
+
+def historical_task():
+    """Return fresh archived recovery data, independent of the mutable active task."""
+    return json.loads(HISTORICAL_TASK.read_text())
 
 
 def result(status='PASS', findings=None):
@@ -486,7 +493,7 @@ class NativeResumeTests(unittest.TestCase):
             self.assertEqual(recovery['inherited_validation'], 'NONE')
 
     def test_scenario_schema_is_bounded_and_legacy_sigint_still_loads(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
@@ -509,7 +516,7 @@ class NativeResumeTests(unittest.TestCase):
         with self.assertRaises(loop.Stop): load(bad)
 
     def test_preflight_recovery_schema_is_bounded_to_allowlisted_test_files(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
@@ -617,7 +624,7 @@ class NativeResumeTests(unittest.TestCase):
             with self.assertRaises(loop.Stop): loop.snapshot_recovery(root, logs, recovery)
 
     def test_new_schema_binds_failure_and_allows_only_one_recovery_policy(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
@@ -807,7 +814,7 @@ class SandboxDecisionRecoveryTests(unittest.TestCase):
                     loop.prepare_sandbox_decision_resume(root, task, self.run_id, personal)
 
     def test_no_change_decision_schema_requires_single_exact_test(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('acceptance_failure_recovery', None)
         task['sandbox_decision_recovery'] = {
             'run_id': self.run_id, 'control_sha': self.control_sha,
@@ -941,7 +948,7 @@ class ReviewFailureRecoveryTests(unittest.TestCase):
         loop.ensure_review_repair_scope(task, recovery, 1, [])
 
     def test_review_recovery_schema_rejects_extra_authority(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('stopped_failure_recovery', None)
         task.pop('acceptance_failure_recovery', None)
@@ -1121,7 +1128,7 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                     loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
 
     def test_out_of_scope_recovery_schema_is_strict(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('review_failure_recovery', None)
         task.pop('acceptance_failure_recovery', None)
@@ -1178,7 +1185,7 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
                     loop.prepare_stopped_failure_resume(root, task, self.run_id, inventory)
 
     def test_stopped_recovery_schema_is_strict_and_mutually_exclusive(self):
-        task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task = historical_task()
         task.pop('sandbox_decision_recovery', None)
         task.pop('review_failure_recovery', None)
         task.pop('acceptance_failure_recovery', None)
@@ -2051,7 +2058,7 @@ class DecisionCheckpointTests(unittest.TestCase):
             self.assertEqual(f[5], [])
 
     def test_task_contract_requires_boolean_and_report_for_decision_publication(self):
-        metadata = json.loads((Path(__file__).parents[1] / 'automation/ai-loop/task.json').read_text())
+        metadata = historical_task()
         def load(value):
             with patch.object(loop, 'git', side_effect=lambda root, *args:
                     json.dumps(value) if args[0] == 'show' and args[1].endswith('task.json') else ''):
@@ -2186,7 +2193,7 @@ class ProgressTests(unittest.TestCase):
         self.assertIn('parent SIGKILL', loop.test_purpose(['acceptance'], 'mandatory-final'))
 
     def test_model_timeout_schema_accepts_three_hours_and_rejects_unbounded_values(self):
-        metadata = json.loads((Path(__file__).parents[1] / 'automation/ai-loop/task.json').read_text())
+        metadata = historical_task()
         def load(value):
             with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
                 return loop.load_task(Path('.'), HEAD)[0]
@@ -3024,7 +3031,7 @@ class FailureCoordinationTests(unittest.TestCase):
             self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
 
     def test_failure_schema_and_policy_bounds_are_strict(self):
-        original = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        original = historical_task()
         original['failure_triage'] = {'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}
         original['max_repairs'] = 4
         def load(task):
@@ -3209,6 +3216,55 @@ class ClassificationDiagnosticTests(unittest.TestCase):
             self.assertEqual(obj.records, [])
             self.assertIsNone(obj.required_change)
             self.assertEqual((root/'source.py').read_text(), 'original candidate')
+
+
+class TaskFixtureTests(unittest.TestCase):
+    def test_historical_fixture_returns_fresh_archived_data(self):
+        archived = json.loads(HISTORICAL_TASK.read_text())
+        task = historical_task()
+        self.assertEqual(task, archived)
+        self.assertIn('mac_evidence', task)
+        self.assertIn('sandbox_decision_recovery', task)
+        task['allowed_files'].clear()
+        task['sandbox_decision_recovery']['repair_files'].clear()
+        self.assertEqual(historical_task(), archived)
+
+    def test_active_task_loads_independently_of_historical_recovery(self):
+        root = Path(__file__).parents[1]
+        active = json.loads((TASK_DIR / 'task.json').read_text())
+        text = (TASK_DIR / 'task.md').read_text()
+        with patch(__name__ + '.historical_task') as historical:
+            loaded, loaded_text = loop.load_task(root, 'HEAD')
+        historical.assert_not_called()
+        self.assertEqual(loaded, active)
+        self.assertEqual(loaded_text, text.strip())
+
+    def test_historical_schema_checks_coexist_with_active_c1_without_reading_it(self):
+        # Exercise positive setups and every existing negative assertion while
+        # the real C1 contract remains active but unavailable as a fixture.
+        cases = (
+            (NativeResumeTests, 'test_scenario_schema_is_bounded_and_legacy_sigint_still_loads'),
+            (NativeResumeTests, 'test_preflight_recovery_schema_is_bounded_to_allowlisted_test_files'),
+            (NativeResumeTests, 'test_new_schema_binds_failure_and_allows_only_one_recovery_policy'),
+            (SandboxDecisionRecoveryTests, 'test_no_change_decision_schema_requires_single_exact_test'),
+            (ReviewFailureRecoveryTests, 'test_review_recovery_schema_rejects_extra_authority'),
+            (StoppedFailureRecoveryTests, 'test_out_of_scope_recovery_schema_is_strict'),
+            (StoppedFailureRecoveryTests, 'test_stopped_recovery_schema_is_strict_and_mutually_exclusive'),
+            (DecisionCheckpointTests, 'test_task_contract_requires_boolean_and_report_for_decision_publication'),
+            (ProgressTests, 'test_model_timeout_schema_accepts_three_hours_and_rejects_unbounded_values'),
+            (FailureCoordinationTests, 'test_failure_schema_and_policy_bounds_are_strict'),
+        )
+        read_text = Path.read_text
+
+        def read_fixture(path, *args, **kwargs):
+            self.assertNotEqual(path, TASK_DIR / 'task.json',
+                                'historical schema fixture read the active task')
+            return read_text(path, *args, **kwargs)
+
+        with patch.object(Path, 'read_text', autospec=True, side_effect=read_fixture):
+            for case, method in cases:
+                with self.subTest(case=case.__name__, method=method):
+                    case(method).debug()
 
 
 if __name__ == '__main__':
