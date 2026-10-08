@@ -1,3 +1,25 @@
+# CURRENT 60914 blocked ordinary review recovery — 2026-10-08
+
+The unpublished A11b candidate `35ad4be...` passed five related suites on
+post-PR48 main `ceae425...`, but Claude ordinary review correctly found two
+old-base test-harness pins and returned FAIL. The subsequent read-only failure
+classification CLI exited 1, with empty stderr. Do not infer quota/auth or
+rerun blindly. The exact signed-off source review has two blocking test paths,
+so a constrained first Codex repair is authorized without model reclassification.
+
+The `review_failure_recovery` task contract pins the local stopped failure
+SHA-256, original control and HEAD. The runner snapshots old bytes and permits
+only two test harness edits plus pending validation-report note; no production
+code changes or historical PASS. Both full suites and fourteen Mac gates remain
+mandatory. See CURRENT task.md for SHA pins.
+
+No-token preflight (after helper CI is green):
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T052643Z-60914 --check
+```
+
 # CURRENT A11b recovery after independent PR #48 — 2026-10-08
 
 Run `20261008T035727Z-43467` stopped at full-final because an unrelated
