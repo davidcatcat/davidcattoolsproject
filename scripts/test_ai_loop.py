@@ -605,6 +605,13 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
 
     def test_stopped_recovery_schema_is_strict_and_mutually_exclusive(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('acceptance_failure_recovery', None)
+        task['stopped_failure_recovery'] = {
+            'run_id': self.run_id, 'control_sha': '1'*40, 'expected_head': '2'*40,
+            'old_base_sha': '3'*40, 'summary_sha256': '4'*64, 'failure_round': 2,
+            'failure_evidence_sha256': '5'*64, 'failure_phase': 'full-final',
+            'classification_rejection': 'SUMMARY_TOO_LONG', 'mac_evidence_sha256': '6'*64,
+            'upstream_paths': ['tools/llmtool/tests/test_diagnostics_failure_matrix.py']}
         def load(value):
             with patch.object(loop, 'git', side_effect=[json.dumps(value), 'task', '']):
                 return loop.load_task(Path('.'), HEAD)[0]
