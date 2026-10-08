@@ -237,7 +237,7 @@ class FrozenPR55MediumRiskTests(unittest.TestCase):
             record = json.loads(path.read_text())
             record['findings'][0]['blocking'] = True
             loop.save_json(path, record)
-            with self.assertRaisesRegex(loop.Stop, 'unrecognized original Medium finding'):
+            with self.assertRaisesRegex(loop.Stop, 'review claimed PASS with blocking findings'):
                 loop.assess_frozen_pr55_medium(root, logs, task)
             self.assertEqual(reviews, [])
             self.assertEqual(sent, [])
