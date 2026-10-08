@@ -1109,3 +1109,51 @@ by Codex for this repair. The failed classification call was not retried or
 substituted; its exit does not establish quota/auth failure. Local raw provider
 output/logs and unrelated untracked artifacts remain untouched. No next slice,
 real product Git ADD, public mutation or scope expansion is introduced.
+
+## CURRENT 76644 sandbox-decision kqueue repair — 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — CHANGED-BYTE RUNNER CHECKS PENDING**.
+
+The current runner handoff is `.ai-loop/20261008T110815Z-78652/recovery.json`,
+recovering stopped run `20261008T100821Z-76644` at exact candidate HEAD
+`59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad` and pinned base
+`ceae425eacaa8729a9eb8d796e43304918a8c908`. Read-only inspection confirmed the
+canonical Mac root, existing authorized branch, repository identity, all ten
+frozen candidate file hashes and preserved recovery/summary/native/decision
+hashes. The original decision remains NEEDS_DECISION with no prior repair.
+
+The handoff records `outer_absence_check.status=ABSENT_AT_PRECHECK` and
+`authority=MAC_RUNNER`, bound to original native-evidence SHA-256
+`c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc`
+and inventory SHA-256
+`4cf7054b6b344bcdac526168197964787f98d229494ecab571011b25971be431`.
+This is the outer runner's process-absence precondition at its check time,
+**not native containment PASS**. Codex did not repeat host process inspection,
+signal saved PIDs or bypass sandbox restrictions.
+
+Only `AcceptanceScenarios.kqueue_non_reaping` in the authorized test file is
+repaired. Zombie-first registration now requires actual SZOMB 5, launch-bound
+anchor verification and the owned unreaped Popen pin before attempting ExitNote.
+Only ProcessLookupError with exact ESRCH from that registration may take the
+expected Darwin refusal path, exclusively for zombie-first. It must immediately
+observe SZOMB again and complete fresh identity/unreaped checks before the
+existing cleanup decision and reap. Other registration failures propagate.
+Successful registration in either branch still requires the original NOTE_EXIT
+event behavior. Bounded native diagnostics distinguish NOTE_EXIT from
+ESRCH_AFTER_OWNED_ZOMBIE; ESRCH is never represented as an event.
+
+Production modules, signal code, scenario names/count, deadlines, cleanup/reap
+ordering and existing negative tests remain unchanged. Historical evidence is
+preserved; no previous PASS applies to changed bytes. This call ran no tests,
+native probes or Git writes and preserved unrelated untracked work.
+
+Syntax and all related checks, both full Python suites, all fourteen native Mac
+scenarios with zero skips (including plain x20/Popen x20 parent-SIGKILL with
+unchanged <=2-second disappearance), independent ordinary review and BLOCKER/HIGH
+disposition, final hashes and exact-HEAD CI are **PENDING outer runner**.
+Harness/supervisor, FD, signals, hung escalation, descendant containment,
+identity/reuse, non-reaping kqueue, framing, binding and import-boundary acceptance
+remain pending on these bytes. Independent security/QA and functional acceptance
+remain pending. Draft PR readiness is not established; merge and the next slice
+remain unauthorized. No real product Git ADD or public mutation was introduced.
+The outer runner must append truthful final evidence after executing its gates.

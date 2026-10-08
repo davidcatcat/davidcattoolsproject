@@ -2329,13 +2329,32 @@ class AcceptanceScenarios:
                     while kernel._info(process.pid, 3, kernel._BSD).status != 5:
                         self.check(time.monotonic() < until)
                         select.select([], [], [], .005)
+                    # Establish the same owned, unreaped zombie BEFORE trying
+                    # a new registration; ESRCH alone cannot prove an exit.
+                    self.check(anchor.verify(deadline=until) == bound)
+                    self.check(anchor.verification['mode'] in ('ordinary', 'owned-zombie'))
+                    self.check(process.returncode is None and not anchor.reaped)
+                    self.check(kernel._info(process.pid, 3, kernel._BSD).status == 5)
                 else:
                     self.check(kernel._info(process.pid, 3, kernel._BSD).status != 5)
-                note = kernel.ExitNote(process.pid)
+                registration = 'NOTE_EXIT'
+                try:
+                    note = kernel.ExitNote(process.pid)
+                except ProcessLookupError as error:
+                    if not zombie_first or error.errno != errno.ESRCH:
+                        raise
+                    # Darwin may refuse EVFILT_PROC for an already-exited
+                    # child. Require fresh zombie/identity/pin proof below,
+                    # rather than interpreting the registration error as an
+                    # exit event. The before-exit path still requires NOTE_EXIT.
+                    registration = 'ESRCH_AFTER_OWNED_ZOMBIE'
                 until = time.monotonic()+1
-                while not note.exited():
-                    self.check(time.monotonic() < until)
-                    select.select([], [], [], .005)
+                if note is not None:
+                    while not note.exited():
+                        self.check(time.monotonic() < until)
+                        select.select([], [], [], .005)
+                else:
+                    self.check(kernel._info(process.pid, 3, kernel._BSD).status == 5)
                 self.check(process.returncode is None)
                 while kernel._info(process.pid, 3, kernel._BSD).status != 5:
                     self.check(time.monotonic() < until)
@@ -2346,7 +2365,8 @@ class AcceptanceScenarios:
                 self.check(anchor.verify(deadline=until) == bound)
                 self.check(anchor.verification['mode'] in ('ordinary', 'owned-zombie'))
                 self.check(process.returncode is None and not anchor.reaped)
-                self.retained = {'zombie_first': zombie_first, 'anchor': bound.data(),
+                self.retained = {'zombie_first': zombie_first, 'registration': registration,
+                                 'anchor': bound.data(),
                                  'verification': anchor.verification, 'unreaped': True}
                 print('kqueue_non_reaping native anchor '+wire.canonical(self.retained).decode('ascii'),
                       flush=True)
