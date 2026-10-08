@@ -1,0 +1,30 @@
+{
+  "decision": "REPAIR",
+  "category": "TEST_BUG",
+  "reviewed_head": "8bada855a99ce4660c66537922f3ad833b8669fb",
+  "reviewed_evidence_sha256": "7ea19918439e64bfb488697a76dfc1f5dcad45b193cf39c1295635039f78facf",
+  "summary": "Mandatory-final Mac acceptance failed at preflight, 0.3 seconds after it started. No native scenario ran, so no containment result exists for these bytes, and this does not point to a containment code defect. Native JSON shows a ValueError at run_containment_acceptance.py:70 in main. That line raises 'pinned runner contract mismatch'. The check on lines 67-69 hardcodes base_sha 585caf7d4c9dad20afd3beb38e5140d6dadf89e0. The current runner contract (.ai-loop/20261008T033528Z-35739/task.json) pins base_sha 63e232e22a769f409e381e34dfe0ef1add766d8e: the PR #47 two-parent integration intentionally moved the base to the new main. task_id matches, and allowed_files matches EXPECTED_FILES exactly, so the stale base pin is the only failing condition. The stdout log shows only 'preflight FAIL (ValueError)'. Both full suites passed on these bytes (venv 207.6 s, /usr/bin/python3 327.3 s); no historical PASS is inherited. Repair is a bounded TEST_BUG fix in allowlisted test-harness files. Update the pinned base constant to the new contract's exact base and keep the strict equality check. All fourteen native scenarios must then run again on the changed bytes.",
+  "findings": [
+    {
+      "severity": "High",
+      "blocking": true,
+      "file": "tools/llmtool/tests/run_containment_acceptance.py",
+      "detail": "The preflight contract pin is stale after the approved PR #47 integration, so the mandatory Mac gate cannot reach any scenario. Bounded repair: change the hardcoded base_sha comparison on line 68 from 585caf7d4c9dad20afd3beb38e5140d6dadf89e0 to exactly 63e232e22a769f409e381e34dfe0ef1add766d8e, the current task.json base_sha. Keep it an exact single-value equality: do not accept either base, read the base from the contract without a pin, or drop the check. Also keep the task_id and EXPECTED_FILES checks, the canonical-cwd/platform preflight, the fresh-output invalidation, the scenario list, the PASS schema, the thresholds and the nonzero exit on failure exactly as they are. Optionally, but still within this file, the ValueError message could stay in the withheld set; do not add it to curated diagnostics unless it is a fixed string.",
+      "evidence": "failure-0.json mac.failure: exception_type ValueError, traceback run_containment_acceptance.py main line 70, scenario 'preflight', scenarios {}, tested_sha256 {}. Source lines 67-70: task_id / base_sha != '585caf7d…' / allowed_files != EXPECTED_FILES -> raise ValueError('pinned runner contract mismatch'). task.json lines 2/6: task_id matches; base_sha '63e232e22a769f409e381e34dfe0ef1add766d8e'. allowed_files in the contract equals EXPECTED_FILES. tests-0-mandatory-final-0.stdout.log: 'preflight FAIL (ValueError)'; exit 1, 0.3 s."
+    },
+    {
+      "severity": "Medium",
+      "blocking": true,
+      "file": "tools/llmtool/tests/test_git_containment.py",
+      "detail": "The failure-export regression ControllerCleanupTests.test_failed_evidence_export_retains_assertion_source_hashes_and_original_inventory builds a synthetic contract with base_sha '585caf7d…'. After the runner pin changes, this test must use the same new base (63e232e22a769f409e381e34dfe0ef1add766d8e) so that it still reaches the intended failure writer rather than the preflight mismatch. Change only that literal and keep every assertion. Adding a small deterministic test that the stale old base is rejected at preflight is allowed and in scope, but it must not weaken anything.",
+      "evidence": "test_git_containment.py ControllerCleanupTests failure-export test: contract = {'task_id': ..., 'base_sha': '585caf7d4c9dad20afd3beb38e5140d6dadf89e0', 'allowed_files': list(runner.EXPECTED_FILES), ...}; the test asserts failure['subcase']=='closed_status' and other fields that depend on getting past preflight."
+    },
+    {
+      "severity": "Low",
+      "blocking": false,
+      "file": "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md",
+      "detail": "Deferred. When it next appends to the report, the runner or Codex should record that this mandatory-final attempt failed at preflight on a stale base pin, with zero native scenarios run, and that the base is now 63e232e. Earlier report sections that cite base 585caf7 are historical and should be kept.",
+      "evidence": "The report repeatedly states 'Base remains 585caf7…', while the task.json base_sha is now 63e232e…."
+    }
+  ]
+}
