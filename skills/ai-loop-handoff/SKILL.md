@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Active approved PR #55 Medium security repair (2026-10-09)
+
+One Medium Security finding in original independent QA was verified as `INPUT_VALIDATION`, `FIX_BEFORE_MERGE` with `HIGH` confidence at `test_output_excerpts.py:46` (Issue #56). **Do not merge or waive** despite original role `PASS`. The original PR `67d02be6bc8cb3f237c5060edda3321f6d885bf3` remains Draft.
+
+The frozen specialist QA task is archived. **Current live `automation/ai-loop/task.json` is a different exact-head single-candidate repair** `C1-PR55-Medium-InputValidation-Fix-20261009`. The runner loads the original Mac-private Medium finding and independent assessor only after sha/revision/status/security checks; never copies raw review provider output into GitHub or tasks. Codex is allowed to change precisely `tools/llmtool/llmtool/test_output_excerpts.py` and `tools/llmtool/tests/test_test_output_excerpts.py`, with new positive/negative test coverage. Other cumulative PR files remain unchanged; no automatic repair retries or merge. Related/full Mac tests, ordinary Claude review and exact-new-head CI follow the revised bytes. **Formal dual Security + Functional QA must then be rerun on the new head**, not inherit old PASS.
+
+Operator only runs the precheck-gated standard script after exact-controller helper CI is green: `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. On STOP do not manually paste model prompts, force Git operations or restart old task. Coordinator owns reviewed repair and next security gate.
+
+
 ## PR #55 pending Medium risk disposition — privacy-safe one-command classification
 
 [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6069088872) records an exact-revision dual specialist `PASS`, but with **one non-blocking Medium Security finding** (plus seven Low findings). This is a **coordinator merge HOLD**, not an automatic waiver, and not a reason to rerun full C1 or make the user a prompt courier.
