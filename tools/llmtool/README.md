@@ -1,5 +1,9 @@
 # llmtool — Generic LLMTool Core
 
+## Development orchestration until native self-development (2026-10-09)
+
+The user's Mac-side work is limited to starting a **validated ai-loop script** and making material decisions; the user is not a Codex/Claude prompt courier. Coordinator writes Git-pinned `automation/ai-loop/task.md/task.json`; helper or system faults take a separate **maintenance-first** recovery path before returning to feature work. [AI-loop operator Skill](../../skills/ai-loop-handoff/SKILL.md) · [WORKFLOW](WORKFLOW.md) · [maintenance state](../../automation/ai-loop/MAINTENANCE_HANDOFF.md). This is a temporary development policy, **not** a claim that llmtool's native autonomous coding/executor is available. Current Issues #52/#53 block C1.
+
 llmtool is a read-only, provider-agnostic LLM CLI foundation.
 
 這是可攜的通用 LLM CLI，也是未來 orchestration 的底座。目前 production providers
