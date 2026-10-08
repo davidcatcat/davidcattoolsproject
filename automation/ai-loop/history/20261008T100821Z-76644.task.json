@@ -1,0 +1,144 @@
+{
+  "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
+  "mode": "implement_new_pr",
+  "pr_number": null,
+  "expected_head": "ceae425eacaa8729a9eb8d796e43304918a8c908",
+  "base_sha": "ceae425eacaa8729a9eb8d796e43304918a8c908",
+  "branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
+  "pr_title": "feat(llmtool): recover A11b.2.2.1 containment with supervisor group anchor",
+  "allowed_files": [
+    "tools/llmtool/llmtool/_git_containment.py",
+    "tools/llmtool/llmtool/_git_supervisor.py",
+    "tools/llmtool/llmtool/_git_containment_protocol.py",
+    "tools/llmtool/llmtool/_git_process_identity.py",
+    "tools/llmtool/llmtool/_git_containment_child.py",
+    "tools/llmtool/tests/test_git_containment.py",
+    "tools/llmtool/tests/run_containment_acceptance.py",
+    "tools/llmtool/tests/containment_probe_parent.py",
+    "tools/llmtool/tests/test_git_mutation.py",
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md"
+  ],
+  "required_files": [
+    "tools/llmtool/llmtool/_git_containment.py",
+    "tools/llmtool/llmtool/_git_supervisor.py",
+    "tools/llmtool/llmtool/_git_containment_protocol.py",
+    "tools/llmtool/llmtool/_git_process_identity.py",
+    "tools/llmtool/llmtool/_git_containment_child.py",
+    "tools/llmtool/tests/test_git_containment.py",
+    "tools/llmtool/tests/run_containment_acceptance.py",
+    "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md"
+  ],
+  "acceptance_report": "reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md",
+  "max_repairs": 4,
+  "timeout_seconds": 1800,
+  "ci_workflow": "llmtool-ci.yml",
+  "default_test_mode": "related",
+  "require_local_full": true,
+  "related_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "syntax",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_git_containment.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_git_mutation.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_git_intel.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_action_contract.py",
+      "-v"
+    ]
+  ],
+  "full_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=/usr/bin/python3"
+    ]
+  ],
+  "mandatory_tests": [
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "tools/llmtool/tests/run_containment_acceptance.py",
+      "--output",
+      "{mac_evidence}"
+    ]
+  ],
+  "mac_evidence": "mac-containment",
+  "publish_decision_checkpoint": true,
+  "codex_timeout_seconds": 10800,
+  "claude_timeout_seconds": 10800,
+  "failure_triage": {
+    "max_reviews": 4,
+    "repeat_limit": 2,
+    "allow_mac_repair": true
+  },
+  "sandbox_decision_recovery": {
+    "run_id": "20261008T100821Z-76644",
+    "control_sha": "2534621046491780dcbf7062856f148317edea2b",
+    "expected_head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
+    "summary_sha256": "4ba4ab9696ca0020e50eb0d951d18fb60d5b21ac163d936af22923390b5ae4ce",
+    "codex_result_sha256": "3e0778155ce211f1da82171af432b3a6e8fbb7212c7d8ee50bef1d5a6801a2f3",
+    "native_evidence_sha256": "c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc",
+    "repair_files": [
+      "tools/llmtool/tests/test_git_containment.py"
+    ]
+  }
+}

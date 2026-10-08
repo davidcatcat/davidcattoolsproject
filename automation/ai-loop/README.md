@@ -1,3 +1,36 @@
+# ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
+
+**The current control branch is now assigned to `C1-test-excerpts-20261009` on pinned
+`main@8e29024656f873431f6ad83e45015b57bfe381a9`.** Exact task contract and requirements:
+[task.json](task.json), [task.md](task.md). This task is **implementation_new_pr**,
+not a resumed A11b cleanup. Codex writes only the five allowlisted C1
+product/test/docs files; Claude performs read-only ordinary review;
+the Mac runner controls tests/branch/commit/CI and Draft PR. The user
+never needs to relay prompts manually. Security and formal QA remain
+independent gates; no auto-merge, no real product Git ADD.
+
+**Historical 76644 recovery is superseded by merged PR #49.**
+The former `task.json` and `task.md` are archived byte-for-byte in
+[history](history/) and remain retrievable from prior immutable
+control SHA `f09202c208871a60cc2f81adac3e7542cbd6e455`. Original evidence and runner state are
+preserved; no inference of a successful 76644 resume is made.
+Do **not** run `--resume 20261008T100821Z-76644` or edit/reset old
+candidate data. If the Mac checkout has unrelated/unpublished work,
+`--check` must STOP; do not force switch, stash or clean it.
+
+**Operator normal next command** (only once latest helper CI succeeds):
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --check && bash scripts/ai-loop.sh
+```
+A failing check means STOP and report, not manual prompt relay or
+switching to another checkout. The runner is a temporary bootstrap,
+not llmtool's permanent orchestrator. llmtool C1 remains a read-only
+function; its company-only token-saving benchmark is not part of this
+implementation run.
+
+---
+
 # ACTIVE COORDINATOR GUIDANCE — final acceptance and no manual prompt relay (2026-10-09)
 
 **Design is now recorded, not yet implemented.** Read
