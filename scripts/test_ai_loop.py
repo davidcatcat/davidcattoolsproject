@@ -2386,7 +2386,8 @@ class ClassificationDiagnosticTests(unittest.TestCase):
                 loop.validate_failure_review(value, task, HEAD, row['evidence_sha256'])
 
     def test_schema_encodes_existing_limits_and_exact_review_identity(self):
-        row = loop.failure_schema(HEAD, 'a'*64)['properties']
+        schema = loop.failure_schema(HEAD, 'a'*64)
+        row = schema['properties']
         self.assertEqual(row['reviewed_head']['enum'], [HEAD])
         self.assertEqual(row['reviewed_evidence_sha256']['enum'], ['a'*64])
         self.assertEqual(row['summary']['maxLength'], 2000)
@@ -2394,6 +2395,31 @@ class ClassificationDiagnosticTests(unittest.TestCase):
         for key in ('file', 'detail', 'evidence'):
             self.assertEqual(row['findings']['items']['properties'][key]['maxLength'], 2000)
         self.assertNotIn('enum', loop.failure_schema()['properties']['reviewed_head'])
+        self.assertEqual(schema['oneOf'], [
+            {'properties': {'decision': {'const': 'REPAIR'},
+                            'category': {'enum': ['CODE_BUG', 'TEST_BUG']}}},
+            {'properties': {'decision': {'const': 'NEEDS_DECISION'},
+                            'category': {'const': 'SCOPE_OR_DESIGN'}}},
+            {'properties': {'decision': {'const': 'BLOCKED'},
+                            'category': {'const': 'ENVIRONMENT'}}}
+        ])
+
+    def test_validator_pair_matrix_matches_output_schema(self):
+        task = {'allowed_files': ['source.py']}
+        cases = [
+            ('REPAIR', 'CODE_BUG', True), ('REPAIR', 'TEST_BUG', True),
+            ('REPAIR', 'ENVIRONMENT', False), ('NEEDS_DECISION', 'SCOPE_OR_DESIGN', True),
+            ('NEEDS_DECISION', 'TEST_BUG', False), ('BLOCKED', 'ENVIRONMENT', True),
+            ('BLOCKED', 'CODE_BUG', False)]
+        for decision, category, valid in cases:
+            with self.subTest(decision=decision, category=category):
+                value = FailureCoordinationTests().decision()
+                value['decision'] = decision
+                value['category'] = category
+                if decision != 'REPAIR':
+                    value['findings'] = []
+                reasons = loop.failure_review_reasons(value, task, HEAD, 'a'*64)
+                self.assertEqual('CATEGORY_DECISION_MISMATCH' not in reasons, valid)
 
     def test_malformed_envelope_and_unexpected_fields_do_not_leak(self):
         for raw in ('not JSON PRIVATE_SECRET', json.dumps({'is_error': True, 'result': 'PRIVATE_SECRET'}),
