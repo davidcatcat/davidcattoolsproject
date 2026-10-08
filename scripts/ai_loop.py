@@ -1503,7 +1503,7 @@ def failure_schema(head=None, evidence_sha=None):
             {'properties': {'decision': {'const': 'REPAIR'},
                             'category': {'enum': ['CODE_BUG', 'TEST_BUG']}}},
             {'properties': {'decision': {'const': 'NEEDS_DECISION'},
-                            'category': {'const': 'SCOPE_OR_DESIGN'}}},
+                            'category': {'enum': ['CODE_BUG', 'TEST_BUG', 'SCOPE_OR_DESIGN']}}},
             {'properties': {'decision': {'const': 'BLOCKED'},
                             'category': {'const': 'ENVIRONMENT'}}}
         ]}
@@ -1520,7 +1520,8 @@ def failure_review_reasons(value, task, head, evidence_sha):
     if not isinstance(value, dict) or set(value) != set(failure_schema()['properties']):
         return ['CLASSIFICATION_SCHEMA']
     reasons = []
-    pairs = {'REPAIR': ('CODE_BUG', 'TEST_BUG'), 'NEEDS_DECISION': ('SCOPE_OR_DESIGN',),
+    pairs = {'REPAIR': ('CODE_BUG', 'TEST_BUG'),
+             'NEEDS_DECISION': ('CODE_BUG', 'TEST_BUG', 'SCOPE_OR_DESIGN'),
              'BLOCKED': ('ENVIRONMENT',)}
     decision = value['decision']
     if not isinstance(decision, str) or decision not in pairs:
@@ -1667,7 +1668,8 @@ def review_failure(root, logs, task, text, head, evidence_path, evidence_sha, ro
         'the exact failed evidence and referenced local test logs/source. Do not run commands/tests or edit. '
         'Classify REPAIR only for a reproducible blocking CODE_BUG/TEST_BUG within allowed_files; '
         'cite concrete file/test evidence and provide bounded repair guidance in detail. '
-        'NEEDS_DECISION is for scope/design/feature/roadmap/authorization changes. '
+        'Use NEEDS_DECISION when the root cause is CODE_BUG/TEST_BUG but required repair is outside allowed_files, '
+        'or for scope/design/feature/roadmap/authorization changes; category must still describe the root cause. '
         'BLOCKED is for auth/quota/environment or insufficient evidence; do not guess or retry providers. '
         'Optional Low/Note is deferred and must not trigger repairs. No failing required gate may be waived, '
         'no acceptance threshold/budget weakened, no stale-PID signaling or automatic merge. '
