@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI-loop Handoff"
+  short_description: "Single Mac launcher, safe helper maintenance and Codex-Claude coordination"
+  default_prompt: "Use $ai-loop-handoff to inspect the pinned Git task, coordinate through the validated ai-loop launcher, and recover helper/system faults through a separate reviewed maintenance script rather than asking the user to relay prompts."
