@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Active handoff: PR #55 dedicated dual specialist review
+
+Once C1 source was implemented, runner [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55) HEAD `67d02be6bc8cb3f237c5060edda3321f6d885bf3` passed ordinary code review and GitHub CI. **Current task.md/task.json now authorize a different task** `C1-PR55-Security-Functional-QA-20261009`, `mode=review_existing_pr`. Never run the old new-pr or prior `--resume`. The actual source/test task is archived in `automation/ai-loop/history/20261009-C1-issue51-completed-task.md/json`.
+
+The coordinator controls the one-use **`qa_gates=[security,functional_qa]`**, requiring immutable PR/base/HEAD/six-file diff, exact-head CI, clean source/index, related and full Mac tests, then **two separate read-only Claude sessions**, security first. No Codex/model-source writer calls, no PR HEAD mutation and no merge. Raw review details are retained privately, only fixed status/count/allowlisted path summaries go to [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56). A block in the first gate stops without running the second or claiming QA PASS. A dedicated model role review is not external human certification; coordinator signoff is still separate.
+
+Operator action once current runner helper CI is independently verified: **one standard launcher** `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. The operator never copies Claude/Codex prompts. Failures preserve evidence for a script-first recovery, not an unauthorized rerun.
+
+
 ## Actual frozen C1 recovery contract — 2026-10-09
 
 The private C1 Codex decision in run `20261008T185112Z-21061` concerned **missing task/launcher files in the main-based checkout**. These are deliberately held on the Git-pinned ai-loop control branch, and their full `TASK`/`CONTRACT` are provided by the runner. The runner now explicitly declares that authority and keeps all original allowlists/security checks; do not treat the absence as a human approval requirement or copy control files into main.
