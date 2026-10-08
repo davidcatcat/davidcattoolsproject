@@ -194,7 +194,7 @@ def load_task(root, control_sha):
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
     optional = {'required_files', 'mandatory_tests', 'mac_evidence', 'require_local_full',
                 'pr_title', 'acceptance_report', 'publish_decision_checkpoint', 'initial_quota_recovery',
-                'initial_timeout_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
+                'initial_timeout_recovery', 'initial_decision_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
                 'acceptance_failure_recovery', 'stopped_failure_recovery',
                 'review_failure_recovery', 'sandbox_decision_recovery', 'failure_triage'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
@@ -265,6 +265,7 @@ def load_task(root, control_sha):
         if not metadata.get('require_local_full') or not metadata.get('acceptance_report'):
             raise Stop('Mac containment task must retain full local checks and report')
     if sum(k in metadata for k in ('initial_quota_recovery', 'initial_timeout_recovery',
+                                   'initial_decision_recovery',
                                    'acceptance_failure_recovery', 'stopped_failure_recovery',
                                    'review_failure_recovery', 'sandbox_decision_recovery')) > 1:
         raise Stop('only one explicit recovery can be active')
@@ -277,6 +278,17 @@ def load_task(root, control_sha):
                 or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery.get('run_id', ''))
                 or not re.fullmatch(r'[0-9a-f]{40}', recovery.get('control_sha', ''))):
             raise Stop('invalid initial recovery contract')
+    if 'initial_decision_recovery' in metadata:
+        recovery = metadata['initial_decision_recovery']
+        if (metadata['mode'] != 'implement_new_pr' or not isinstance(recovery, dict)
+                or set(recovery) != {'run_id', 'control_sha', 'codex_result_sha256'}
+                or not isinstance(recovery.get('run_id'), str)
+                or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', recovery['run_id'])
+                or not isinstance(recovery.get('control_sha'), str)
+                or not re.fullmatch(r'[0-9a-f]{40}', recovery['control_sha'])
+                or not isinstance(recovery.get('codex_result_sha256'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', recovery['codex_result_sha256'])):
+            raise Stop('invalid frozen initial decision recovery authority')
     if 'acceptance_failure_recovery' in metadata:
         recovery = metadata['acceptance_failure_recovery']
         keys = {'run_id', 'control_sha', 'expected_head', 'summary_sha256', 'evidence_sha256'}
@@ -809,6 +821,77 @@ def prepare_initial_resume(root, task, run_id, current_untracked, tracked_paths=
     return original, {'from_run': run_id, 'old_control_sha': policy['control_sha'],
         'partial_files': adopted, 'preserved_untracked': original,
         'prior_unrelated_integrity': 'UNVERIFIED', 'inherited_validation': 'NONE'}
+
+
+def prepare_initial_decision_resume(root, task, run_id, current_untracked, tracked_paths=()):
+    """Once-only C1 recovery when Codex made no changes and asked for missing control files."""
+    policy = task.get('initial_decision_recovery')
+    if not policy or run_id != policy['run_id']:
+        raise Stop('initial Codex decision recovery is not authorized')
+    if task.get('task_id') != 'C1-test-excerpts-20261009':
+        raise Stop('initial decision recovery task identity mismatch')
+    if tracked_paths or git(root, 'diff', '--cached', '--name-only'):
+        raise Stop('decision recovery requires a clean tracked/index state')
+    if (git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != task['base_sha']
+            or set(current_untracked).intersection(task['allowed_files'])):
+        raise Stop('stopped decision branch/HEAD/candidate changed; preserve work')
+    if json.loads(run(['gh', 'api', 'repos/' + IDENTITY
+            + '/pulls?state=all&head=davidcatcat:' + task['branch']], root)):
+        raise Stop('decision recovery branch already has a PR')
+    if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + task['branch']], root):
+        raise Stop('decision recovery branch already published')
+    old_dir = root / '.ai-loop' / run_id
+    def evidence(name):
+        path = old_dir / name
+        if (any(p.is_symlink() for p in (root / '.ai-loop', old_dir, path, *path.parents))
+                or not path.is_file() or path.stat().st_size > 1024 * 1024):
+            raise Stop('original decision evidence missing/unsafe: ' + name)
+        return path.read_bytes()
+    old_task, old_text = load_task(root, policy['control_sha'])
+    if ({k: v for k, v in task.items() if k != 'initial_decision_recovery'} != old_task
+            or json.loads(evidence('task.json')) != old_task
+            or evidence('task.md').decode('utf-8').strip() != old_text.strip()):
+        raise Stop('decision recovery changed the original frozen task contract')
+    origin = json.loads(evidence('provenance.json'))
+    summary = json.loads(evidence('summary.json'))
+    if (origin.get('root') != str(root) or origin.get('run_id') != run_id
+            or origin.get('control_sha') != policy['control_sha']
+            or origin.get('start_branch') != 'main'
+            or origin.get('start_head') != task['base_sha']
+            or origin.get('base') != task['base_sha']
+            or summary.get('status') != 'STOPPED'
+            or summary.get('branch') != task['branch']
+            or summary.get('head') != task['base_sha']
+            or summary.get('history') != []
+            or summary.get('reason') != 'command failed (exit 1): claude; see local logs'):
+        raise Stop('original stopped decision run provenance differs')
+    response = evidence('codex-0.json')
+    if hashlib.sha256(response).hexdigest() != policy['codex_result_sha256']:
+        raise Stop('original Codex decision SHA differs from published report')
+    decision = json.loads(response)
+    validate_result(decision, 'developer')
+    if (decision['status'] != 'NEEDS_DECISION'
+            or 'Required automation/ai-loop/task.json and scripts/ai-loop.sh are absent.'
+                not in decision['summary']
+            or 'No files changed' not in decision['summary']):
+        raise Stop('original Codex decision is not the exact missing-control handoff')
+    failed = json.loads(evidence('failure-0.json'))
+    if (failed.get('run_id') != run_id or failed.get('task_id') != task['task_id']
+            or failed.get('head') != task['base_sha']
+            or failed.get('phase') != 'developer'
+            or failed.get('gate_waived') is not False):
+        raise Stop('original failure evidence does not match frozen C1 decision')
+    provider = json.loads(evidence('failure-0-claude.raw.json'))
+    if (not isinstance(provider, dict) or provider.get('is_error') is not True
+            or provider.get('subtype') != 'success'):
+        raise Stop('original Claude failure envelope differs')
+    return current_untracked, {'from_run': run_id, 'kind': 'initial_decision',
+        'old_control_sha': policy['control_sha'], 'partial_files': {},
+        'private_evidence_files': {'codex-0.json': policy['codex_result_sha256']},
+        'prior_unrelated_integrity': 'UNVERIFIED',
+        'inherited_validation': 'NONE',
+        'preserved_untracked': current_untracked}
 
 
 def ensure_probe_inventory_absent(root, inventory, allow_host_only=False):
@@ -2802,7 +2885,8 @@ def main():
         original = untracked(root)
         recovery = None
         if args.resume:
-            prepare_resume = (prepare_sandbox_decision_resume if task.get('sandbox_decision_recovery')
+            prepare_resume = (prepare_initial_decision_resume if task.get('initial_decision_recovery')
+                              else prepare_sandbox_decision_resume if task.get('sandbox_decision_recovery')
                               else prepare_review_failure_resume if task.get('review_failure_recovery')
                               else prepare_stopped_failure_resume if task.get('stopped_failure_recovery')
                               else prepare_acceptance_resume if task.get('acceptance_failure_recovery')
@@ -2881,7 +2965,22 @@ def main():
         if recovery:
             check_scope(root, task, original, branch, head)
             claim_initial_resume(state, recovery, run_id, args.control_sha)
-        prompt = (('Implement the newly authorized task, then repair only within its scope. ' if new_task
+        authority_notice = (
+            'AUTHORITATIVE RUNNER HANDOFF: The runner has read and validated '
+            'automation/ai-loop/task.md and automation/ai-loop/task.json at frozen '
+            'Git control revision ' + args.control_sha + '. The complete TASK and '
+            'CONTRACT are embedded BELOW in this invocation. The control files '
+            'and scripts/ai-loop.sh are intentionally absent from the main-based '
+            'feature checkout; they exist on the separate automation/ai-loop '
+            'control branch. Their absence is NOT a missing authorization or '
+            'reason for NEEDS_DECISION. Do NOT recreate these files or expand '
+            'the edit scope. You may use the exact embedded allowed_files in '
+            'the pinned CONTRACT as the edit allowlist; if it conflicts with '
+            'actual security/scope requirements, STOP NEEDS_DECISION. '
+            'The runner alone controls task verification and Git publication. '
+            'This is coordination evidence, NOT permission to skip tests/review. ')
+        prompt = (authority_notice +
+                  ('Implement the newly authorized task, then repair only within its scope. ' if new_task
                    else 'Repair only the existing PR implementation within this task. ')
                   + 'Read AGENTS.md and skills/implement-feature/SKILL.md. '
                   'Do not stage, commit, push, merge, create worktrees, change task scope, or start another slice. '
@@ -2893,6 +2992,15 @@ def main():
                   'Return JSON matching the provided schema.\nTASK:\n' + text + '\nCONTRACT:\n' + json.dumps(task))
         history = []
         repair_reason = (None if recovery and recovery.get('kind') == 'stopped_failure' else
+                         ('Retry the original C1 task after a proven CONTROL-BRANCH HANDOFF '
+                          'misunderstanding, NOT a new authorization. The prior Codex call '
+                          'made ZERO allowed-file changes. The pinned TASK and CONTRACT are '
+                          'complete above; automation/ai-loop/task.json and scripts/ai-loop.sh '
+                          'are intentionally absent in the main-based worktree. Never create '
+                          'or edit them. Make only the five authorized llmtool files. '
+                          'No previous implementation, test, Claude review or PASS is '
+                          'inherited. Original evidence is frozen in recovery.json.')
+                         if recovery and recovery.get('kind') == 'initial_decision' else
                          ('Continue the existing partial implementation after an interrupted initial Codex call. '
                           'Read the existing allowed files before editing; do not restart from scratch. '
                           'Preserve historical report evidence and label all current gates pending. '
@@ -2979,6 +3087,11 @@ def main():
                     touched_after_codex = check_scope(root, task, original, branch, head)
                     ensure_review_repair_scope(task, recovery, round_no,
                                                touched_after_codex, result['status'])
+                    if result['status'] == 'NEEDS_DECISION' and not touched_after_codex:
+                        # A decision without source edits is not a CODE_BUG and
+                        # must not waste a Claude triage call or invent repair authority.
+                        raise Stop('Codex NEEDS_DECISION with no source edits; '
+                                   'original local decision preserved; no tests/review PASS')
                     if result['status'] != 'PASS':
                         if coordinator.policy:
                             repair_reason = coordinator.assess('developer', head, {'developer': result}, round_no, last_round)
