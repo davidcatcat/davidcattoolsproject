@@ -11,6 +11,48 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
+## Near-term release priority — cost-first native self-development (2026-10-09)
+
+**Primary goal:** make `llmtool` itself safely coordinate Codex CLI
+implementation, Claude CLI independent review, deterministic testing,
+bounded repair and authorized PR handoff for developing `llmtool`, while
+**measurably reducing premium model tokens at unchanged quality**.
+The current `ai-loop` script is a **temporary bootstrapping tool**:
+maintain necessary safety, but do not prioritize a second permanent
+formal review/QA orchestration stack in the temporary runner.
+
+The [native self-development MVP specification](NATIVE_SELF_DEV_MVP.md)
+is the detailed **proposed** priority/gate contract:
+
+- **C0 NOW:** use already merged A2.4/A2.5 text-only CLI providers,
+  A5 Git snapshot, A9 text-only roles and A10 context collection as
+  bounded development dogfood. This does **not** authorize repo edits
+  through those providers, or establish generic cost savings.
+- **C1 FIRST NEW DELIVERY:** deterministic real-format unittest/pytest
+  failure excerpt/coverage selector, followed by Company-only Phase 0
+  and quality-equivalent paired token measurement **before** enabling
+  any company triage route as a saving claim. Small-input PR #36 pilot
+  *increased* Codex token use 104.46% (54,849→112,144), whereas the
+  specific large-log L01 pipeline saved 39.82%/37.55% in two controlled
+  observations; neither result generalizes to every request.
+- **C2 FIRST NATIVE CODING MVP:** explicit authorized repo-bound
+  Codex development execution adapter/typed A11b actions, policy,
+  sandbox/process containment, real tests, read-only Claude review,
+  bounded repair, audit and approval barriers. This is **not implemented**
+  by A9/A10 or the existing pure-text CLI providers.
+- **C3 CUTOVER:** independent Security/Functional QA and real canonical-Mac
+  task acceptance, followed by verified llmtool self-development and
+  measurable task-level premium-token/quality/latency results. Freeze
+  or deprecate duplicate ai-loop orchestration only after parity.
+
+PR #49's synthetic A11b.2.2.1 containment has **Security/Functional QA PASS**,
+14/14 native Mac acceptance and 20/20 + 20/20 parent SIGKILL repetitions.
+It was **squash-merged** as `eb464628dd6096811c659cfdf663f364107a6ef4`.
+This does **not authorize real Git ADD**. PR #45 temporary helper remains Draft;
+future product-execution gates and A11b.2.2.2 require a separate design/review. Do **not** block initial read-only C0/C1 dogfood
+on A12 Telegram, optional A2.3 HTTP or a complete generic executor.
+A measured cost optimization cannot replace safety/QA gate PASS.
+
 ## Current milestone snapshot
 
 This table is the authoritative current-state summary. Historical validation reports
@@ -24,7 +66,7 @@ current roadmap.
 | P1 — Failure Usage Preservation | **DONE and merged** via PR #39 `56799527`; safe validated usage survives parseable provider failures without changing failure semantics | Use as observability/accounting foundation; no historical benchmark recomputation |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2 B5-GATED** | Review B5 containment design, then containment harness; real Git ADD remains prohibited |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2.1 synthetic containment DONE/merged via PR #49 `eb464628`** | A11b.2.2.2 real Git ADD requires separately reviewed design, product isolation, approval and hardening; not authorized |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
@@ -808,7 +850,8 @@ the retained controls below before introducing any side effect.
 Current sub-slice status:
 
 - **A11b.2.1 — deterministic Git ADD preflight/state verifier: DONE/merged via PR #43 `780970ab`.** It is internal/read-only, constructs but never executes the future ADD argv, and has no public mutation path.
-- **A11b.2.2 — internal Git ADD mutation: NOT STARTED / B5 design remediation / NOT AUTHORIZED.** PR #44 updates the [B5 spec](../../reports/llmtool_a11b2_2_b5_containment_failure_spec_20261007.md) for H1/H2/M1/M2/M3 and records [remediation dispositions](../../reports/llmtool_a11b2_2_b5_containment_spec_remediation_20261007.md). Independent targeted re-review is pending. A design PASS permits requesting separate slice authorization; it does not authorize implementation automatically. This documentation task authorizes none of 2.2.0, 2.2.1 or 2.2.2. Real `git add` stays prohibited until the separately authorized containment harness passes actual macOS signal/SIGKILL probes and independent review.
+- **A11b.2.2.1 — synthetic containment harness: DONE / squash-merged via PR #49 `eb464628`.** Independent Security re-review PASS, independent Functional QA PASS, Mac native 14/14 and SIGKILL 20+20 PASS on source-bound evidence. The versioned [B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md) supersedes the earlier fake-process topology for this slice only. Deferred LOW: S49-3 raw-FD rejection leak and QA49-N1 natural leader-exit permanent regression; P49-L1 fixture hook isolation is required before real product integration.
+- **A11b.2.2.2 — actual Git ADD mutation: NOT STARTED / NOT AUTHORIZED.** It still requires a separately reviewed B5 §14.1 product integration design (post-state semantics, fault hook isolation, host-thread/sandbox and approval constraints) and a new task contract. No synthetic test PASS or documentation task authorizes real `git add`.
 
 任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
 包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
