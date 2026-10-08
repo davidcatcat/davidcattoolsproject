@@ -1380,7 +1380,7 @@ class Probe:
         proof = {'host_pin_verified': False, 'host_signal': None,
                  'decision_before_reap': False, 'host_reaped': False,
                  'host_absent': False, 'supervisor_absent': False,
-                 'group_absent': False, 'members_absent': []}
+                 'group_absent': False, 'members_absent': [], 'inspection_eperm': False}
         self.fixture_cleanup = {'status': 'UNRESOLVED',
                                 'original_owned_processes': [original], 'evidence': proof}
         note = None
@@ -1418,14 +1418,22 @@ class Probe:
                             and row.get('containment_confirmed') is True for row in self.rows)
             if self.unbound_supervisor_pid is not None or (self.supervisor is None and not no_launch):
                 raise kernel.IdentityUnknown('probe group disappearance unconfirmed')
+            def inspected_absent(pid, group=False):
+                try:
+                    return kernel.absent(pid, group=group)
+                except PermissionError:
+                    # Passive inspection is inconclusive, never absence. Keep
+                    # polling within the same deadline without another signal.
+                    proof['inspection_eperm'] = True
+                    return False
             while time.monotonic() < deadline:
                 heartbeat()
-                proof['host_absent'] = kernel.absent(self.process.pid)
+                proof['host_absent'] = inspected_absent(self.process.pid)
                 proof['supervisor_absent'] = (self.supervisor is None
-                                              or kernel.absent(self.supervisor.pid))
+                                              or inspected_absent(self.supervisor.pid))
                 proof['group_absent'] = (self.supervisor is None
-                                         or kernel.absent(self.supervisor.pgid, group=True))
-                proof['members_absent'] = [{'pid': item.pid, 'absent': kernel.absent(item.pid)}
+                                         or inspected_absent(self.supervisor.pgid, group=True))
+                proof['members_absent'] = [{'pid': item.pid, 'absent': inspected_absent(item.pid)}
                                            for item in self.members.values()]
                 if (proof['host_absent'] and proof['supervisor_absent'] and proof['group_absent']
                         and all(item['absent'] for item in proof['members_absent'])):
@@ -1711,8 +1719,9 @@ class ControllerCleanupTests(unittest.TestCase):
 
     @contextmanager
     def model(self, *, note_exited=True, absent=True, identity_error=None, signal_error=None,
-              observed_identity=None):
+              observed_identity=None, inspection=None):
         probe = self.probe
+        kernel_absent = kernel.absent
         note = Mock()
         note.exited.return_value = note_exited
         clock = [1.0]
@@ -1738,6 +1747,14 @@ class ControllerCleanupTests(unittest.TestCase):
         def inspect(pid, group=False):
             self.assertIsNotNone(probe.process.returncode)
             self.events.append('inspect')
+            if inspection is not None:
+                # Exercise real absent() translation with synthetic read-only
+                # syscalls; no saved process ID is inspected or signaled.
+                with patch.object(os, 'kill', side_effect=lambda pid, number:
+                                  inspection(pid, number, False)), \
+                        patch.object(os, 'killpg', side_effect=lambda pid, number:
+                                     inspection(pid, number, True)):
+                    return kernel_absent(pid, group=group)
             return absent
         def pause(*args):
             self.assertLessEqual(args[-1], .005)
@@ -1861,6 +1878,56 @@ class ControllerCleanupTests(unittest.TestCase):
                 signal_host.assert_called_once_with(123, signal.SIGKILL)
                 signal_group.assert_not_called()
                 self.tearDown()
+
+    def inspection_permission_case(self, persistent):
+        targets = ((123, False), (456, False), (456, True), (457, False))
+        for target in targets:
+            with self.subTest(target=target):
+                self.setUp()
+                original = self.probe.inventory()
+                observations = dict.fromkeys(targets, 0)
+                def inspect(pid, number, group):
+                    self.assertEqual(number, 0)  # Only passive absence checks.
+                    self.assertIsNotNone(self.probe.process.returncode)
+                    self.probe.process.wait.assert_called_once()
+                    key = (pid, group)
+                    observations[key] += 1
+                    if key == target and (persistent or observations[key] == 1):
+                        raise PermissionError(errno.EPERM, 'synthetic inspection denied')
+                    raise ProcessLookupError(errno.ESRCH, 'synthetic process absent')
+                with self.model(inspection=inspect) as (note, host_signal, group_signal):
+                    if persistent:
+                        with self.assertRaisesRegex(kernel.IdentityUnknown,
+                                                    'probe group disappearance unconfirmed'):
+                            self.probe.cleanup(deadline=2)
+                        self.assertEqual(time.monotonic(), 2)
+                    else:
+                        self.probe.cleanup(deadline=2)
+                cleanup = self.probe.fixture_cleanup
+                self.assertEqual(cleanup['status'], 'UNRESOLVED' if persistent else 'RESOLVED')
+                self.assertEqual(cleanup['original_owned_processes'], [original])
+                proof = cleanup['evidence']
+                self.assertTrue(proof['inspection_eperm'])
+                self.assertTrue(proof['host_pin_verified'] and proof['decision_before_reap'])
+                self.assertTrue(proof['host_reaped'])
+                flags = (proof['host_absent'], proof['supervisor_absent'], proof['group_absent'],
+                         proof['members_absent'][0]['absent'])
+                for key, flag in zip(targets, flags):
+                    self.assertEqual(flag, not (persistent and key == target))
+                    self.assertGreaterEqual(observations[key], 2)
+                self.assertEqual(self.events[:4], ['verify', 'verify', 'signal', 'reap'])
+                host_signal.assert_called_once_with(123, signal.SIGKILL)
+                group_signal.assert_not_called()
+                note.close.assert_called_once()
+                self.assertEqual(self.probe in _FAILED_PROBES, persistent)
+                self.assertEqual(self.probe.cleanup_outcome, 'unresolved' if persistent else 'confirmed')
+                self.tearDown()
+
+    def test_transient_inspection_eperm_then_esrch_resolves_without_group_signal(self):
+        self.inspection_permission_case(False)
+
+    def test_persistent_inspection_eperm_expires_with_probe_retained_without_group_signal(self):
+        self.inspection_permission_case(True)
 
     def test_released_host_is_only_inspected_and_unknown_supervisor_blocks(self):
         self.probe.process.returncode = 0

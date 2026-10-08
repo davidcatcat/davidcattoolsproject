@@ -999,3 +999,78 @@ commit, push, merge, worktree, alternate checkout, task change or scope expansio
 occurred. The outer runner must rerun every pinned gate on changed bytes and append
 truthful final evidence. No historical PASS is inherited and no failed criterion
 is waived; independent security/functional acceptance and merge remain separate.
+
+## CURRENT mandatory-final passive-inspection EPERM repair — 2026-10-08
+
+Status: **PREPARED REPAIR CANDIDATE — CHANGED-BYTE RUNNER CHECKS PENDING**.
+This section appends current repair provenance; historical evidence above remains
+unchanged and no historical PASS applies to these changed bytes.
+
+### Authorization and implementation
+
+The supplied evidence-bound classification is **REPAIR / TEST_BUG**, phase
+`mandatory-final`, reviewed/entry HEAD
+`d940aaa500ec93f07f0542068f991b5aa862380d`, failure-evidence SHA-256
+`0ba673fe435ff743db963d8d5b25be6344477fe5fe178cf5bc895c99a93b8e09`.
+These evidence identifiers come from the supplied repair authorization; this call
+does not claim independent native execution or remote evidence verification.
+Local read-only Git inspection confirmed the canonical Mac root, repository
+`davidcatcat/davidcattoolsproject`, existing authorized feature branch, exact entry
+HEAD and clean tracked/index state. Unrelated untracked artifacts are preserved.
+The local current runner contract retains exact base
+`63e232e22a769f409e381e34dfe0ef1add766d8e` and the existing file allowlist.
+
+The blocking finding concerns only `Probe.cleanup` in
+`tools/llmtool/tests/test_git_containment.py`: a passive absence inspection returning
+EPERM aborted fixture cleanup immediately after owned-host cleanup/reap. Each host,
+supervisor, group and member inspection now catches `PermissionError`, sets its
+current absence result to false, records the bounded boolean
+`evidence.inspection_eperm`, and continues under the same existing deadline.
+EPERM never proves absence. Deadline expiry still raises
+`IdentityUnknown('probe group disappearance unconfirmed')`, leaves cleanup
+UNRESOLVED and retains the probe in `_FAILED_PROBES` with frozen original inventory.
+
+Two deterministic regression methods cover transient EPERM followed by ESRCH and
+persistent EPERM for each of the four inspected target types. They exercise the
+real `kernel.absent` translation through synthetic syscall mocks, require passive
+signal zero for inspections, and assert frozen inventory, host pin, host-only
+SIGKILL exactly once, decision-before-reap order, monitor closure and resolved or
+retained state. Persistent EPERM must exhaust the supplied two-second deadline;
+all unaffected absence flags remain truthful. These regressions are added,
+**NOT RUN in this call**. Existing assertions and primary-error retention tests
+remain intact.
+
+Only this report and the allowlisted test file change. Production containment,
+identity checks, signal authority, thresholds, two-second F1/six-second controller
+bounds, scenario list, no-skip rules, failure exit, PASS schema and source-hash
+binding remain unchanged. No new signals or host-signal retries are added.
+
+### Pending runner evidence and stopping state
+
+| Gate / disposition | Current status |
+| --- | --- |
+| Independent read-only absence guard for retained original fixture inventory | PENDING runner; any EPERM, retained PID or inspection error blocks native retry |
+| Syntax, related checks and new/existing cleanup regressions | PENDING runner |
+| Independent preliminary/final ordinary review and BLOCKER/HIGH disposition | PENDING runner |
+| Full suites under current venv and `/usr/bin/python3` | PENDING runner |
+| Harness/supervisor, FD inheritance, SIGINT/TERM/HUP and hung escalation | PENDING actual Mac runner |
+| Leader/descendant cleanup, PID/PGID reuse, kernel identity and non-reaping kqueue | PENDING actual Mac runner |
+| Framing, code/runtime binding and public/import boundaries | PENDING runner/native |
+| All fourteen native scenarios, zero skips, including plain x20/Popen x20 parent SIGKILL with <=2s disappearance | PENDING actual Mac runner |
+| Changed-byte hashes, final report evidence and exact final-HEAD CI | PENDING runner |
+| Draft PR/publication and READY_FOR_FINAL_REVIEW | PENDING runner; readiness not reached |
+| Independent security review and coordinator/functional acceptance | PENDING; no approval claimed |
+| Merge / next slice | NOT authorized |
+| Real product Git ADD, public mutation, approval issuer or audit bypass | None introduced or executed |
+| A11b.2.2.2/.3, A11b.3, A11c and A12 | Not started |
+
+The runner must independently prove absence of the retained original inventory
+from the failed invocation (host 51572, supervisor/PGID 51573, members 51574/51575)
+before the next native attempt. These are historical evidence IDs, never signal
+authority. This call performs no process inspection or cleanup against those IDs.
+
+Codex inspected the repair source and final diff using the implementation and
+ordinary diff-review workflows. No deterministic tests, syntax command, full suite,
+native probe or provider call ran here. No stage, commit, push, merge, worktree,
+alternate checkout or task/scope change occurred. All required gates must run
+again on changed bytes; the outer runner appends truthful final evidence.
