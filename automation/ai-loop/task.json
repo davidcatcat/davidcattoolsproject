@@ -2,8 +2,8 @@
   "task_id": "A11b.2.2.1-containment-f3-recovery-20261007",
   "mode": "implement_new_pr",
   "pr_number": null,
-  "expected_head": "63e232e22a769f409e381e34dfe0ef1add766d8e",
-  "base_sha": "63e232e22a769f409e381e34dfe0ef1add766d8e",
+  "expected_head": "ceae425eacaa8729a9eb8d796e43304918a8c908",
+  "base_sha": "ceae425eacaa8729a9eb8d796e43304918a8c908",
   "branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
   "pr_title": "feat(llmtool): recover A11b.2.2.1 containment with supervisor group anchor",
   "allowed_files": [
@@ -130,17 +130,22 @@
     "repeat_limit": 2,
     "allow_mac_repair": true
   },
-  "acceptance_failure_recovery": {
-    "run_id": "20261008T033528Z-35739",
-    "control_sha": "b65b31712abdb4f2809047911ba136944f320385",
-    "expected_head": "8bada855a99ce4660c66537922f3ad833b8669fb",
-    "summary_sha256": "7a10a6b35bf7a297d2a974ada90cb77cd33221eea05dfcac24551a4865b5a573",
-    "evidence_sha256": "d12a698dd959efb93164fe3174db7e473ca3e889a3b99057c92a127abdce2c9a",
-    "failure_scenario": "preflight",
-    "failure_evidence_sha256": "7ea19918439e64bfb488697a76dfc1f5dcad45b193cf39c1295635039f78facf",
-    "repair_files": [
-      "tools/llmtool/tests/run_containment_acceptance.py",
-      "tools/llmtool/tests/test_git_containment.py"
+  "stopped_failure_recovery": {
+    "run_id": "20261008T035727Z-43467",
+    "control_sha": "a831946fc75823e2a97296a4d5f33bc375f3dc8e",
+    "expected_head": "0dc05b75844f9caa4c4ccf9c28c8b21972fd25f9",
+    "old_base_sha": "63e232e22a769f409e381e34dfe0ef1add766d8e",
+    "summary_sha256": "1b4e242e582bdc2502f5063224dcd94e5a3e5cc93cc4665228db2a3a471de6c6",
+    "failure_round": 1,
+    "failure_evidence_sha256": "26d51d0a067e7b408998a2fd633645765d3f7f85a51fcb069689903bf1c94dd1",
+    "failure_phase": "full-final",
+    "classification_decision": "NEEDS_DECISION",
+    "classification_category": "TEST_BUG",
+    "classification_raw_sha256": "fcea8633beb151df4248a07e6749864a0f7ac7b38bd662ce1c4db73ef807ac5b",
+    "prior_mac_evidence_file": "mac-containment-0.json",
+    "prior_mac_evidence_sha256": "9baed935a39d56b6a0c8dd10e3a47da317b0ac972039d117c97881fdae411b83",
+    "upstream_paths": [
+      "tools/llmtool/tests/test_entrypoint_interrupt.py"
     ]
   }
 }
