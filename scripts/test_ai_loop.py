@@ -1384,6 +1384,83 @@ class DiagnosticsExportTests(unittest.TestCase):
             with self.assertRaises(loop.Stop):
                 loop.diagnostic_codex_outcome(root, logs, task)
 
+
+    def test_new_task_codex_diagnostic_uses_pinned_git_without_recovery_snapshot(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            run_id = '20261008T185112Z-21061'
+            logs = root / '.ai-loop' / run_id
+            logs.mkdir(parents=True)
+            base = '8' * 40
+            (root / 'existing.py').write_text('original')
+            loop.save_json(logs / 'provenance.json', {
+                'root': str(root), 'run_id': run_id,
+                'start_branch': 'main', 'start_head': base, 'base': base})
+            loop.save_json(logs / 'codex-0.json', {
+                'status': 'FAIL', 'summary': 'PRIVATE_PROVIDER_DETAILS'})
+            task = {'mode': 'implement_new_pr', 'base_sha': base,
+                    'branch': 'feat/llmtool-c1-test-excerpts-20261009',
+                    'allowed_files': ['existing.py', 'brand_new.py']}
+            state = {'existing_blob': 'oldblob', 'new_exists': False, 'staged': False,
+                     'head': base}
+            def fake_git(_root, *argv):
+                calls = {
+                    ('rev-parse', 'HEAD'): state['head'],
+                    ('branch', '--show-current'): task['branch'],
+                    ('diff', '--cached', '--name-only'): 'staged.py' if state['staged'] else '',
+                    ('rev-parse', base + ':existing.py'): 'oldblob',
+                    ('hash-object', '--', 'existing.py'): state['existing_blob'],
+                    ('hash-object', '--', 'brand_new.py'): 'newblob'}
+                if argv not in calls:
+                    raise AssertionError(argv)
+                return calls[argv]
+            def fake_command(argv, _root, **kwargs):
+                if argv == ['git', 'cat-file', '-e', base + ':existing.py']:
+                    return 0, '', ''
+                if argv == ['git', 'cat-file', '-e', base + ':brand_new.py']:
+                    return 1, '', 'missing'
+                raise AssertionError(argv)
+            with patch.object(loop, 'git', side_effect=fake_git), \
+                 patch.object(loop, 'command', side_effect=fake_command):
+                result = loop.diagnostic_codex_outcome(root, logs, task)
+                self.assertEqual(result['developer_status'], 'FAIL')
+                self.assertEqual(result['changed_allowed_files'], [])
+                self.assertFalse(result['repair_authorized'])
+                self.assertNotIn('PRIVATE_PROVIDER_DETAILS', json.dumps(result))
+                (root / 'brand_new.py').write_text('new code')
+                result = loop.diagnostic_codex_outcome(root, logs, task)
+                self.assertEqual(result['changed_allowed_files'], ['brand_new.py'])
+                state['existing_blob'] = 'changedblob'
+                result = loop.diagnostic_codex_outcome(root, logs, task)
+                self.assertEqual(result['changed_allowed_files'], ['brand_new.py', 'existing.py'])
+                state['staged'] = True
+                with self.assertRaisesRegex(loop.Stop, 'wrong Git provenance'):
+                    loop.diagnostic_codex_outcome(root, logs, task)
+                state['staged'] = False
+                state['head'] = 'a' * 40
+                with self.assertRaisesRegex(loop.Stop, 'wrong Git provenance'):
+                    loop.diagnostic_codex_outcome(root, logs, task)
+                state['head'] = base
+                (root / 'brand_new.py').unlink()
+                (root / 'brand_new.py').symlink_to(root / 'existing.py')
+                with self.assertRaisesRegex(loop.Stop, 'candidate path unsafe'):
+                    loop.diagnostic_codex_outcome(root, logs, task)
+
+    def test_new_task_codex_diagnostic_never_infers_base_without_pinned_proof(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '.ai-loop' / '20261008T185112Z-21061'
+            logs.mkdir(parents=True)
+            loop.save_json(logs / 'codex-0.json', {
+                'status': 'NEEDS_DECISION', 'summary': 'PRIVATE_AUTH'})
+            task = {'mode': 'implement_new_pr', 'base_sha': 'b' * 40,
+                    'branch': 'feat/example', 'allowed_files': ['missing.py']}
+            with self.assertRaisesRegex(loop.Stop, 'provenance missing'):
+                loop.diagnostic_codex_outcome(root, logs, task)
+            task['mode'] = 'review_existing_pr'
+            with self.assertRaisesRegex(loop.Stop, 'provenance missing'):
+                loop.diagnostic_codex_outcome(root, logs, task)
+
     def test_codex_recovery_disposition_is_specific_and_fail_closed(self):
         task = {'acceptance_report': 'reports/probe.md'}
         recovery = {'kind': 'acceptance_failure', 'failure_scenario': 'kqueue_non_reaping',
