@@ -945,6 +945,17 @@ def prepare_acceptance_resume(root, task, run_id, current_untracked, tracked_pat
         'evidence_files': evidence_files}
 
 
+def ensure_review_repair_scope(task, recovery, round_no, touched):
+    """Only the first review-failure repair may edit its two bound tests or pending report."""
+    if not recovery or recovery.get('kind') != 'review_failure' or round_no != 0:
+        return
+    authorized = set(recovery['repair_files']) | {task['acceptance_report']}
+    touched = set(touched)
+    if not touched.issubset(authorized) or not touched.intersection(recovery['repair_files']):
+        raise Stop('review recovery Codex edited outside two authorized test files '
+                   'or made no test-harness repair')
+
+
 def prepare_review_failure_resume(root, task, run_id, current_untracked, tracked_paths=()):
     """Exact bounded repair for a stopped FAIL code review; no model classification retry."""
     policy = task.get('review_failure_recovery')
@@ -2247,12 +2258,7 @@ def main():
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
                                    round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
                     touched_after_codex = check_scope(root, task, original, branch, head)
-                    if recovery and recovery.get('kind') == 'review_failure' and round_no == 0:
-                        approved = set(recovery['repair_files']) | {task['acceptance_report']}
-                        if (not set(touched_after_codex).issubset(approved)
-                                or not set(touched_after_codex).intersection(recovery['repair_files'])):
-                            raise Stop('review recovery Codex edited outside two authorized test files '
-                                       'or made no test-harness repair')
+                    ensure_review_repair_scope(task, recovery, round_no, touched_after_codex)
                     if result['status'] != 'PASS':
                         if coordinator.policy:
                             repair_reason = coordinator.assess('developer', head, {'developer': result}, round_no, last_round)
