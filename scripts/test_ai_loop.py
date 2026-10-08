@@ -1158,6 +1158,59 @@ class DiagnosticsExportTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.validate_public_triage(bad, task, run_id)
 
+    def test_codex_stopped_outcome_publishes_status_and_file_deltas_not_model_text(self):
+        with tempfile.TemporaryDirectory() as runtime:
+            root = Path(runtime)
+            logs = root / '.ai-loop' / '20261008T100821Z-76644'
+            logs.mkdir(parents=True)
+            tests = root / 'tools/llmtool/tests/test_git_containment.py'
+            tests.parent.mkdir(parents=True)
+            tests.write_text('unchanged source')
+            report = root / 'reports/probe.md'
+            report.parent.mkdir(parents=True)
+            report.write_text('pending gates')
+            allowed = ['tools/llmtool/tests/test_git_containment.py', 'reports/probe.md']
+            for name in allowed:
+                target = logs / 'recovery-inputs' / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes((root / name).read_bytes())
+            local = {'status': 'NEEDS_DECISION', 'summary': 'PRIVATE_CLAUDE_SECRET'}
+            loop.save_json(logs / 'codex-0.json', local)
+            task = {'allowed_files': allowed, 'acceptance_failure_recovery': {
+                'repair_files': [allowed[0]]}}
+            value = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(value['developer_status'], 'NEEDS_DECISION')
+            self.assertEqual(value['changed_allowed_files'], [])
+            self.assertEqual(value['repair_files_changed'], [])
+            self.assertEqual(value['result_sha256'], loop.digest(logs / 'codex-0.json'))
+            self.assertNotIn('PRIVATE_CLAUDE_SECRET', json.dumps(value))
+            report.write_text('updated report')
+            changed = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(changed['changed_allowed_files'], [allowed[1]])
+            self.assertEqual(changed['repair_files_changed'], [])
+            tests.write_text('fixed test')
+            fixed = loop.diagnostic_codex_outcome(root, logs, task)
+            self.assertEqual(fixed['repair_files_changed'], [allowed[0]])
+            (logs / 'codex-0.json').write_text('{"status":"PASS","summary":"x","extra":"SECRET"}')
+            with self.assertRaises(loop.Stop):
+                loop.diagnostic_codex_outcome(root, logs, task)
+
+    def test_codex_recovery_disposition_is_specific_and_fail_closed(self):
+        task = {'acceptance_report': 'reports/probe.md'}
+        recovery = {'kind': 'acceptance_failure', 'failure_scenario': 'kqueue_non_reaping',
+                    'repair_files': ['tools/llmtool/tests/test_git_containment.py']}
+        test = recovery['repair_files'][0]
+        loop.ensure_review_repair_scope(task, recovery, 0, [test], 'PASS')
+        for status, paths, marker in [
+                ('PASS', [], 'did not change'),
+                ('NEEDS_DECISION', [], 'requested a decision'),
+                ('FAIL', [], 'no authorized test change'),
+                ('PASS', ['tools/llmtool/llmtool/_git_process_identity.py'], 'outside')]:
+            with self.subTest(status=status, paths=paths):
+                with self.assertRaises(loop.Stop) as err:
+                    loop.ensure_review_repair_scope(task, recovery, 0, paths, status)
+                self.assertIn(marker, str(err.exception))
+
     def test_diagnostic_triage_is_non_authoritative_and_rejects_unsafe_run(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
