@@ -1,0 +1,625 @@
+{
+  "os_version": "15.7.9",
+  "platform": "darwin",
+  "python_version": "3.13.3",
+  "scenarios": {
+    "code_runtime_binding": {
+      "checks": 7,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "fd_inheritance": {
+      "checks": 9,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "hung_supervisor": {
+      "checks": 112,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "identity_reuse": {
+      "checks": 7,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "kqueue_non_reaping": {
+      "checks": 74,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "leader_exit_descendant": {
+      "checks": 8,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "macos_start_time": {
+      "checks": 5,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "parent_sigkill_plain": {
+      "checks": 267,
+      "repetitions": [
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86755
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005309498053975403,
+          "leader_absent": true,
+          "leader_pid": 86754,
+          "pgid": 86753
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86759
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011013215989805758,
+          "leader_absent": true,
+          "leader_pid": 86758,
+          "pgid": 86757
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86763
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011443031020462513,
+          "leader_absent": true,
+          "leader_pid": 86762,
+          "pgid": 86761
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86767
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005177616025321186,
+          "leader_absent": true,
+          "leader_pid": 86766,
+          "pgid": 86765
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86771
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011173972976393998,
+          "leader_absent": true,
+          "leader_pid": 86770,
+          "pgid": 86769
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86775
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006356375990435481,
+          "leader_absent": true,
+          "leader_pid": 86774,
+          "pgid": 86773
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86779
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011201946996152401,
+          "leader_absent": true,
+          "leader_pid": 86778,
+          "pgid": 86777
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86783
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011294013005681336,
+          "leader_absent": true,
+          "leader_pid": 86782,
+          "pgid": 86781
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86787
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005165188922546804,
+          "leader_absent": true,
+          "leader_pid": 86786,
+          "pgid": 86785
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86791
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.010915779042989016,
+          "leader_absent": true,
+          "leader_pid": 86790,
+          "pgid": 86789
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86795
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005221500992774963,
+          "leader_absent": true,
+          "leader_pid": 86794,
+          "pgid": 86793
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86799
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005590831977315247,
+          "leader_absent": true,
+          "leader_pid": 86798,
+          "pgid": 86797
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86803
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006054435041733086,
+          "leader_absent": true,
+          "leader_pid": 86802,
+          "pgid": 86801
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86807
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006272030062973499,
+          "leader_absent": true,
+          "leader_pid": 86806,
+          "pgid": 86805
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86811
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005716969026252627,
+          "leader_absent": true,
+          "leader_pid": 86810,
+          "pgid": 86809
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86815
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005161349079571664,
+          "leader_absent": true,
+          "leader_pid": 86814,
+          "pgid": 86813
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86819
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005267483065836132,
+          "leader_absent": true,
+          "leader_pid": 86818,
+          "pgid": 86817
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86823
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006371150026097894,
+          "leader_absent": true,
+          "leader_pid": 86822,
+          "pgid": 86821
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86833
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.010822259006090462,
+          "leader_absent": true,
+          "leader_pid": 86832,
+          "pgid": 86825
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86837
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.0063367439433932304,
+          "leader_absent": true,
+          "leader_pid": 86836,
+          "pgid": 86835
+        }
+      ],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "parent_sigkill_popen": {
+      "checks": 2889,
+      "repetitions": [
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86844
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.0063873749459162354,
+          "leader_absent": true,
+          "leader_pid": 86843,
+          "pgid": 86841
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86855
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.010557475034147501,
+          "leader_absent": true,
+          "leader_pid": 86854,
+          "pgid": 86852
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86860
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006144243059679866,
+          "leader_absent": true,
+          "leader_pid": 86859,
+          "pgid": 86857
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86865
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005852967035025358,
+          "leader_absent": true,
+          "leader_pid": 86864,
+          "pgid": 86862
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86870
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005696563050150871,
+          "leader_absent": true,
+          "leader_pid": 86869,
+          "pgid": 86867
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86875
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005617193062789738,
+          "leader_absent": true,
+          "leader_pid": 86874,
+          "pgid": 86872
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86880
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006342940032482147,
+          "leader_absent": true,
+          "leader_pid": 86879,
+          "pgid": 86877
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86885
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005655352026224136,
+          "leader_absent": true,
+          "leader_pid": 86884,
+          "pgid": 86882
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86891
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005117209977470338,
+          "leader_absent": true,
+          "leader_pid": 86890,
+          "pgid": 86888
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86896
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.010942328022792935,
+          "leader_absent": true,
+          "leader_pid": 86895,
+          "pgid": 86893
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86901
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.010956260026432574,
+          "leader_absent": true,
+          "leader_pid": 86900,
+          "pgid": 86898
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86906
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006248062942177057,
+          "leader_absent": true,
+          "leader_pid": 86905,
+          "pgid": 86903
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86912
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.0054938639514148235,
+          "leader_absent": true,
+          "leader_pid": 86911,
+          "pgid": 86909
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86920
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006174360052682459,
+          "leader_absent": true,
+          "leader_pid": 86919,
+          "pgid": 86917
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86928
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005407133023254573,
+          "leader_absent": true,
+          "leader_pid": 86927,
+          "pgid": 86925
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86936
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.006121931015513837,
+          "leader_absent": true,
+          "leader_pid": 86935,
+          "pgid": 86933
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86943
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.01104643999133259,
+          "leader_absent": true,
+          "leader_pid": 86942,
+          "pgid": 86940
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86953
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011069817002862692,
+          "leader_absent": true,
+          "leader_pid": 86951,
+          "pgid": 86949
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86960
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.011869569076225162,
+          "leader_absent": true,
+          "leader_pid": 86959,
+          "pgid": 86957
+        },
+        {
+          "containment_confirmed": true,
+          "descendant_pids": [
+            86967
+          ],
+          "descendants_absent": true,
+          "group_absent": true,
+          "identity_verified": true,
+          "latency_seconds": 0.005557804019190371,
+          "leader_absent": true,
+          "leader_pid": 86966,
+          "pgid": 86964
+        }
+      ],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "protocol_framing": {
+      "checks": 24,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "public_import_boundary": {
+      "checks": 115,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sighup": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sigint": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    },
+    "sigterm": {
+      "checks": 25,
+      "repetitions": [],
+      "skipped": 0,
+      "status": "PASS"
+    }
+  },
+  "schema_version": 1,
+  "tested_sha256": {
+    "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+    "tools/llmtool/llmtool/_git_containment_child.py": "f70e0a41fdb13fadc280010cebc5565db29d6f9de542dce4e7bd31d743dcbfa6",
+    "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+    "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+    "tools/llmtool/llmtool/_git_supervisor.py": "0083bcbfef19e8c222f769caa7053d2828f216640029fd5a18174d07adadc6b4",
+    "tools/llmtool/tests/containment_probe_parent.py": "6264aee1d135e631032cca09e0d9349fc47f5d5474ab9d4af270573b64f27022",
+    "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+    "tools/llmtool/tests/test_git_containment.py": "50b290ed1cf420c2a2806ca6517d450a26b39be87bb6a23abcc58182c28a2652",
+    "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728"
+  }
+}

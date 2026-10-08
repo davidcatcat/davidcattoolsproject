@@ -1,0 +1,35 @@
+[1/14] fd_inheritance START
+[1/14] fd_inheritance PASS 0.457s
+[2/14] sigint START
+[2/14] sigint PASS 1.442s
+[3/14] sigterm START
+[3/14] sigterm PASS 1.450s
+[4/14] sighup START
+[4/14] sighup PASS 1.512s
+[5/14] hung_supervisor START
+closed_status native anchor {"kernel_rows":[{"micros":127672,"pgid":86686,"pid":86686,"ppid":86685,"seconds":1791458604,"status":5,"uid":501},{"micros":127672,"pgid":86686,"pid":86686,"ppid":86685,"seconds":1791458604,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":3,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[{"micros":127672,"pgid":86686,"pid":86686,"ppid":86685,"seconds":1791458604,"status":2,"uid":501}]}
+fixture_failure_unresolved {"evidence":{"decision_before_reap":true,"group_absent":true,"host_absent":true,"host_pin_verified":true,"host_reaped":true,"host_signal":"SIGKILL","inspection_eperm":false,"members_absent":[{"absent":true,"pid":86722},{"absent":true,"pid":86723}],"supervisor_absent":true},"original_owned_processes":[{"host_identity":{"micros":614995,"pgid":86720,"pid":86720,"ppid":86641,"seconds":1791458611,"sid":86720,"uid":501},"members":[{"micros":819504,"pgid":86721,"pid":86722,"ppid":86721,"seconds":1791458611,"sid":86721,"uid":501},{"micros":908880,"pgid":86721,"pid":86723,"ppid":86722,"seconds":1791458611,"sid":86721,"uid":501}],"pid":86720,"supervisor":{"micros":725766,"pgid":86721,"pid":86721,"ppid":86720,"seconds":1791458611,"sid":86721,"uid":501}}],"status":"RESOLVED"}
+fixture_failure_closed_status {"evidence":{"decision_before_reap":true,"group_absent":true,"host_absent":true,"host_pin_verified":true,"host_reaped":true,"host_signal":"SIGKILL","inspection_eperm":false,"members_absent":[{"absent":true,"pid":86726}],"supervisor_absent":true},"original_owned_processes":[{"host_identity":{"micros":844181,"pgid":86724,"pid":86724,"ppid":86641,"seconds":1791458612,"sid":86724,"uid":501},"members":[{"micros":47384,"pgid":86725,"pid":86726,"ppid":86725,"seconds":1791458613,"sid":86725,"uid":501}],"pid":86724,"supervisor":{"micros":953597,"pgid":86725,"pid":86725,"ppid":86724,"seconds":1791458612,"sid":86725,"uid":501}}],"status":"RESOLVED"}
+[5/14] hung_supervisor PASS 13.129s
+[6/14] leader_exit_descendant START
+[6/14] leader_exit_descendant PASS 0.477s
+[7/14] identity_reuse START
+[7/14] identity_reuse PASS 0.458s
+[8/14] macos_start_time START
+[8/14] macos_start_time PASS 0.001s
+[9/14] kqueue_non_reaping START
+kqueue_non_reaping native anchor {"anchor":{"micros":423835,"pgid":86740,"pid":86740,"ppid":86641,"seconds":1791458615,"sid":86740,"uid":501},"registration":"NOTE_EXIT","unreaped":true,"verification":{"kernel_rows":[{"micros":423835,"pgid":86740,"pid":86740,"ppid":86641,"seconds":1791458615,"status":5,"uid":501},{"micros":423835,"pgid":86740,"pid":86740,"ppid":86641,"seconds":1791458615,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":2,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[]},"zombie_first":false}
+kqueue_non_reaping native anchor {"anchor":{"micros":589923,"pgid":86741,"pid":86741,"ppid":86641,"seconds":1791458615,"sid":86741,"uid":501},"registration":"ESRCH_AFTER_OWNED_ZOMBIE","unreaped":true,"verification":{"kernel_rows":[{"micros":589923,"pgid":86741,"pid":86741,"ppid":86641,"seconds":1791458615,"status":5,"uid":501},{"micros":589923,"pgid":86741,"pid":86741,"ppid":86641,"seconds":1791458615,"status":5,"uid":501}],"kernel_status":5,"mode":"owned-zombie","observations":2,"sid_query":"ESRCH","sid_source":"launch-continuity","transition_rows":[]},"zombie_first":true}
+[9/14] kqueue_non_reaping PASS 0.344s
+[10/14] protocol_framing START
+[10/14] protocol_framing PASS 0.163s
+[11/14] code_runtime_binding START
+[11/14] code_runtime_binding PASS 0.381s
+[12/14] public_import_boundary START
+[Running]
+[12/14] public_import_boundary PASS 0.881s
+[13/14] parent_sigkill_plain START
+[13/14] parent_sigkill_plain PASS 8.249s
+[14/14] parent_sigkill_popen START
+[Running]
+[14/14] parent_sigkill_popen PASS 24.847s

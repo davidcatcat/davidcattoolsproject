@@ -1,0 +1,11 @@
+{
+  "root": "/Users/davidsun/git/davidcataiporject/davidcattoolsproject",
+  "run_id": "20261008T110815Z-78652",
+  "control_sha": "59d3ce80ec7f2718782099374f2a2eb65d3dddcc",
+  "base": "ceae425eacaa8729a9eb8d796e43304918a8c908",
+  "start_head": "59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad",
+  "start_branch": "feat/llmtool-a11b2-2-1-containment-f3-recovery-20261007",
+  "local_test_mode": "related",
+  "venv_python": "Python 3.13.3",
+  "system_python": "Python 3.9.6"
+}
