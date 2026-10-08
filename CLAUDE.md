@@ -1,5 +1,9 @@
 # Repository Guidance
 
+## ai-loop-only operator collaboration before llmtool cutover
+
+Apply [ai-loop-handoff](skills/ai-loop-handoff/SKILL.md) for llmtool development until independently accepted A11b/A11c native execution. The Mac user launches a vetted script, **not** manually copies prompts between Codex and Claude. Coordinator writes the exact Git task contract; Codex makes scoped changes and Claude performs independent read-only review under runner control. On runner/CI/OS STOP, freeze user work and fix orchestration through a separate pinned maintenance script; do not hijack C1, relax dirty-tree checks, auto-merge, or falsely claim handoff markdown is executable. Issue #52/#53 still blocks C1.
+
 This repository is the user's toolbox and reusable Agent Skills library.
 
 ## Skill design
