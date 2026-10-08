@@ -502,3 +502,40 @@ This section supersedes earlier helper language requiring manual coordinator
 handoff after every ordinary native failure. It does not waive security/Mac/merge
 gates, authorize real llmtool mutation, implement product orchestration/A11c/A12,
 or change roadmap/milestone state. Success stops at READY_FOR_FINAL_REVIEW.
+
+## AI-loop final acceptance — no manual Codex/Claude prompt handoff (2026-10-09)
+
+The user should issue an engineering goal and make material decisions, **not**
+manually relay ordinary Codex prompts, Claude reviews and routine test results.
+Use the pinned control-branch `task.md`/`task.json` and the canonical Mac
+`scripts/ai-loop.sh` orchestration path for **supported** implementation/review
+tasks. Only the Mac operator runs the local launcher, normally with a no-model
+`--check` preflight. The runner coordinates the ordinary Codex/Claude loop
+and bounded deterministic tests. Stop for an actual design/permission/safety
+decision rather than asking the user to shuttle text between models.
+
+**Capability boundary:** Today's `scripts/ai_loop.py` includes Codex
+implementation/repair, Claude **ordinary** review, tested-byte capture,
+bounded failure coordination, CI and Mac gate logic; it does **not** implement
+the separately required **formal independent Security Review** and
+**Functional QA Acceptance** as an automated review-only task. No agent may
+convert ordinary review PASS into either gate, merge permission, real product
+Git mutation or an A11b.2.2.2 authorization.
+
+The review-only design, reviewer evidence isolation, independently verified
+runner trust root, source/hash/host provenance, pre-registered QA matrix,
+least-privilege comment publishing, no-source-edit role, fail-closed negative
+challenges and safe control-task migration are specified in
+[ai-loop final acceptance design](../../automation/ai-loop/FINAL_ACCEPTANCE_DESIGN.md).
+That specification is **not yet implemented**. Keep PR #45 Draft and require
+an independent security review of the automation itself before activation or
+merge; do not ask the operator to rerun stale `76644` one-use recovery as a
+new task.
+
+The standalone PR #49 A11b.2.2.1 synthetic-containment code has received
+independent security re-review and independent Functional QA PASS, including
+native Mac 14/14 and 20+20 parent SIGKILL, with source-hash-bound evidence.
+Verify the latest head's CI and coordinator merge decision separately; these
+reports do not certify PR #45, and PR #49's outstanding LOW findings must
+be resolved before product integration as specified. There is no permission
+to begin real Git ADD from acceptance reports alone.
