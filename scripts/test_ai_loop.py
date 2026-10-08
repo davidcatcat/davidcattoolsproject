@@ -352,6 +352,7 @@ class NativeResumeTests(unittest.TestCase):
 
     def test_scenario_schema_is_bounded_and_legacy_sigint_still_loads(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
         task['acceptance_failure_recovery'] = {'run_id': self.run_id, 'control_sha': '1'*40,
             'expected_head': '2'*40, 'summary_sha256': '3'*64, 'evidence_sha256': '4'*64,
@@ -373,6 +374,7 @@ class NativeResumeTests(unittest.TestCase):
 
     def test_preflight_recovery_schema_is_bounded_to_allowlisted_test_files(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
         task['acceptance_failure_recovery'] = {
             'run_id': self.run_id, 'control_sha': '1'*40, 'expected_head': '2'*40,
@@ -479,6 +481,7 @@ class NativeResumeTests(unittest.TestCase):
 
     def test_new_schema_binds_failure_and_allows_only_one_recovery_policy(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('review_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
         task['acceptance_failure_recovery'] = {'run_id': self.run_id, 'control_sha': '1'*40,
             'expected_head': '2'*40, 'summary_sha256': '3'*64, 'evidence_sha256': '4'*64}
@@ -803,6 +806,7 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
 
     def test_out_of_scope_recovery_schema_is_strict(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('review_failure_recovery', None)
         task.pop('acceptance_failure_recovery', None)
         task.pop('stopped_failure_recovery', None)
         task['stopped_failure_recovery'] = {
@@ -858,6 +862,7 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
 
     def test_stopped_recovery_schema_is_strict_and_mutually_exclusive(self):
         task = json.loads((Path(__file__).parents[1]/'automation/ai-loop/task.json').read_text())
+        task.pop('review_failure_recovery', None)
         task.pop('acceptance_failure_recovery', None)
         task['stopped_failure_recovery'] = {
             'run_id': self.run_id, 'control_sha': '1'*40, 'expected_head': '2'*40,
