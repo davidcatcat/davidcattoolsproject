@@ -331,7 +331,7 @@ class NativeResumeTests(unittest.TestCase):
             with patch.object(loop, 'ensure_probe_inventory_absent') as absent:
                 original, recovery = loop.prepare_acceptance_resume(
                     root, task, self.run_id, current)
-            absent.assert_called_once_with(root, owned)
+            absent.assert_called_once_with(root, owned, allow_host_only=True)
             self.assertEqual(recovery['failure_scenario'], 'kqueue_non_reaping')
             self.assertEqual(recovery['inherited_validation'], 'NONE')
             self.assertEqual(set(recovery['private_evidence_files']),
@@ -369,6 +369,25 @@ class NativeResumeTests(unittest.TestCase):
                 with patch.object(loop, 'ensure_probe_inventory_absent'):
                     with self.assertRaises(loop.Stop):
                         loop.prepare_acceptance_resume(root, task, self.run_id, current)
+
+    def test_kqueue_host_only_inventory_requires_explicit_permission_and_absence(self):
+        inventory = [{'pid': 72468, 'host_identity': {'pid': 72468},
+                      'supervisor': {}}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(loop.Stop):
+                loop.ensure_probe_inventory_absent(root, inventory)
+            with patch.object(loop, 'command', return_value=(1, '', '')) as check:
+                loop.ensure_probe_inventory_absent(root, inventory, allow_host_only=True)
+            self.assertEqual(check.call_args.args[0],
+                ['/bin/ps', '-ww', '-p', '72468', '-o', 'pid='])
+            with patch.object(loop, 'command', return_value=(0, '72468\n', '')):
+                with self.assertRaises(loop.Stop):
+                    loop.ensure_probe_inventory_absent(root, inventory, allow_host_only=True)
+            bad = [{'pid': 72468, 'host_identity': {'pid': 72468},
+                    'supervisor': {}, 'members': [{'pid': 72500}]}]
+            with self.assertRaises(loop.Stop):
+                loop.ensure_probe_inventory_absent(root, bad, allow_host_only=True)
 
     def test_kqueue_recovery_repair_scope_is_test_only(self):
         task = {'acceptance_report': 'reports/validation.md'}
