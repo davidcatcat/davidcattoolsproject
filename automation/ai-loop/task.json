@@ -130,19 +130,17 @@
     "repeat_limit": 2,
     "allow_mac_repair": true
   },
-  "stopped_failure_recovery": {
-    "run_id": "20261007T183516Z-7365",
-    "control_sha": "98b1871be51128da8dcdcf6eb32c27e2af89fa14",
-    "expected_head": "474679ecda36da610a96e7ec84da39a5dd3ae33b",
-    "old_base_sha": "585caf7d4c9dad20afd3beb38e5140d6dadf89e0",
-    "summary_sha256": "6d5abc6c1770e2135379f776f728b07d625674fe5c246f858303b1e985065a0e",
-    "failure_round": 2,
-    "failure_evidence_sha256": "db07a8362b2349a0061637aaebd6782d3324640223e1ae52942a06a29841c585",
-    "failure_phase": "full-final",
-    "classification_rejection": "SUMMARY_TOO_LONG",
-    "mac_evidence_sha256": "51df9e877328f6da51b1d0b72ea0dad171229ab446dbbe3a97283c4dbcfc8dd0",
-    "upstream_paths": [
-      "tools/llmtool/tests/test_diagnostics_failure_matrix.py"
+  "acceptance_failure_recovery": {
+    "run_id": "20261008T033528Z-35739",
+    "control_sha": "b65b31712abdb4f2809047911ba136944f320385",
+    "expected_head": "8bada855a99ce4660c66537922f3ad833b8669fb",
+    "summary_sha256": "7a10a6b35bf7a297d2a974ada90cb77cd33221eea05dfcac24551a4865b5a573",
+    "evidence_sha256": "d12a698dd959efb93164fe3174db7e473ca3e889a3b99057c92a127abdce2c9a",
+    "failure_scenario": "preflight",
+    "failure_evidence_sha256": "7ea19918439e64bfb488697a76dfc1f5dcad45b193cf39c1295635039f78facf",
+    "repair_files": [
+      "tools/llmtool/tests/run_containment_acceptance.py",
+      "tools/llmtool/tests/test_git_containment.py"
     ]
   }
 }
