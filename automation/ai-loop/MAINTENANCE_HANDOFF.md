@@ -1,5 +1,7 @@
 # P0 maintenance handoff — Issue #52 and ai-loop self-recovery
 
+> **Current resolution (2026-10-09): Issue #52 CLOSED.** The one-use `--maintenance-issue52` bootstrap successfully preserved and published the candidate as `ab1f396b00ba11704f0b370a70bf1a31f85f2ee9`; Mac 210 tests PASS, read-only Claude PASS (operator log), and [exact-head GitHub CI](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37826584204) Python 3.9/3.14 210+15 PASS each. Operator reports local clean main and C1 not started. Issue #53 remains OPEN for **general reusable** maintenance/resume, not for this one-use repair. The historical incident narrative below describes pre-fix evidence and is retained for audit. C1 is approved for normal precheck using `.git/ai-loop/run.sh` but may only start if that precheck passes. No manual prompt relay or auto-merge.
+
 Status: **BLOCKED / NOT IMPLEMENTED / NOT AN AUTHORIZATION TO RUN C1** (2026-10-09).
 Owner: coordinator; Codex CLI is the source/test writer, Claude CLI the read-only independent reviewer. The Mac operator is **not** a prompt courier.
 
