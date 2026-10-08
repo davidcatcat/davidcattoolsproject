@@ -1,5 +1,14 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## Current PR #55 merge hold — one Medium Security finding (2026-10-09)
+
+The previous **read-only** C1 QA gate PASS and the later frozen severity-count report are both genuine, but do **not** grant merge authority. [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6069088872) proves **Security: 2 Low, 1 Medium; Functional QA: 5 Low, 0 Medium; no High/Critical** on original HEAD `67d02be6bc8cb3f237c5060edda3321f6d885bf3`. The Medium finding is flagged non-blocking by its model, but the coordinator imposes a conservative **merge HOLD** until independently categorized and dispositioned. Do not auto-mark READY, merge, or claim security fully accepted.
+
+A **single use, separately validated** `--qa-medium 20261008T202910Z-31100` mode has been added to ai-loop to confirm one frozen Medium finding with one bounded fresh **read-only** Claude call. It verifies the unchanged PR HEAD, private original QA records and SHA first, then publishes only validated enums (risk category, action, confidence, allowlisted file/line) to Issue #56. All rationale, review details, provider output and original test data remain local; no source, Git index, PR or merge mutations and no rerunning the previously PASS full tests. The operation is idempotent if the private assessment already passed, avoiding repeated premium calls. Treat its output as **additional evidence**, not permission to merge. If it classifies FIX_BEFORE_MERGE, the coordinator prepares a separate tightly scoped same-PR ai-loop/Codex repair and exact-new-HEAD tests/reviews. If ambiguous, preserve STOP and escalate only a real decision. Do not forward prompts.
+
+**Only after exact-controller HEAD helper CI Python 3.9/3.14 PASS:** authorized Mac command `bash .git/ai-loop/run.sh --qa-medium 20261008T202910Z-31100`. Do not run normal C1/QA again.
+
+
 ## Active: PR #55 exact-head independent QA (Issue #56, 2026-10-09)
 
 The live Git task is now **`C1-PR55-Security-Functional-QA-20261009`**, replacing the completed C1 source-implementation task, which is frozen under `automation/ai-loop/history/20261009-C1-issue51-completed-task.md/json`. **Do not rerun new C1 or old `--resume`**. Target is unchanged Draft PR #55 at `67d02be6bc8cb3f237c5060edda3321f6d885bf3`; current task `mode=review_existing_pr`, `qa_gates=[security,functional_qa]`, zero repairs/zero Codex writers. All six changed files (five product authorized paths plus runner report) are pinned.
