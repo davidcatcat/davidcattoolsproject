@@ -15,7 +15,7 @@ The coordinator writes and publishes the exact Git-pinned `automation/ai-loop/ta
 
 Verify the latest Git control SHA, task, branch/base, remote PR/CI, actual canonical Mac status, dependencies and independent gates. Then the **single standard launcher** is:
 
-`bash scripts/ai-loop.sh --check && bash scripts/ai-loop.sh`
+`bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh` (verified cached launcher under Git metadata; the `scripts/ai-loop.sh` path is not tracked on `main`)
 
 The `--check` is a preflight, not a new model prompt. `--resume RUN_ID` may be used only for a specifically pinned and supported frozen recovery contract, never for an unrelated historical run. The canonical Mac repository is `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Do not make an alternate clone/worktree.
 
@@ -32,9 +32,10 @@ On runner/launcher/CI errors, failed tests, macOS temp/symlink problems, process
 
 ## Current gate / cost / future cutover (2026-10-09)
 
-- Issue #52: the Mac has an uncommitted `scripts/test_ai_loop.py` Codex patch; helper suite **reported 210/210 PASS** with a physical TMPDIR. Claude independent review, publication and helper CI 3.9/3.14 have **not** been established.
-- Issue #53: a separate helper self-maintenance/adopt-dirty/resume script is **NOT IMPLEMENTED**. The active `task.md/task.json` still targets C1 Issue #51, which remains NOT STARTED. See `automation/ai-loop/MAINTENANCE_HANDOFF.md`.
-- Spend zero model tokens on deterministic diagnostics where possible; send bounded logs/diffs to premium models and enforce budgets. Never trade away safety, independent review or exact-head checks to reduce cost.
+- **Issue #52 CLOSED as completed**: the operator's one-use `--maintenance-issue52` launcher automatically tested the dirty candidate (Mac 210/210 PASS), obtained read-only Claude review PASS, published only `scripts/test_ai_loop.py` as `ab1f396b00ba11704f0b370a70bf1a31f85f2ee9`, and reconciled local main clean. Exact-head [GitHub helper CI](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37826584204) confirmed Python 3.9 and 3.14 both PASS: 210 main helper tests + 15 one-use maintenance safety tests in each matrix.
+- **C1 Issue #51 is now precheck-authorized, but NOT STARTED.** `automation/ai-loop/task.md/task.json` remain pinned to main `8e29024656f873431f6ad83e45015b57bfe381a9`. Coordinator must confirm current remote and branch absence before launch; operator runs one vetted cached entrypoint `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. On STOP, preserve evidence and coordinate script-first repair, never manual Codex/Claude prompt relay.
+- **Issue #53 remains OPEN** for general reusable maintenance/adopt-dirty/resume behavior. A one-use bootstrap was proven, not universal self-repair; do not misrepresent pending safety/QA work as complete. This remaining generalization does not, by itself, block an otherwise clean ordinary C1 task.
+- Spend zero model tokens on deterministic diagnostics where possible; send bounded logs/diffs to premium models and enforce budgets. Never sacrifice safety, independent review or exact-head checks for cost.
 - Cut over only when llmtool-native execution passes approved actions, real code/test/review/repair/recovery/CI, required Mac/Security/QA evidence, and measured tokens/cost/quality. Keep ai-loop a fallback until that acceptance; do not build a second permanent orchestration platform.
 
 ## Completion criteria
