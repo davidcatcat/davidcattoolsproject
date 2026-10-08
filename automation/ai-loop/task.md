@@ -1,3 +1,69 @@
+# CURRENT — 76644 sandbox-decision recovery, 2026-10-08
+
+Run `20261008T100821Z-76644` returned Codex developer_status
+`NEEDS_DECISION`, with **zero modified allowed files**.
+The operator read the private Codex decision reason on Mac:
+"No files changed. Candidate, contract and evidence hashes match, but the
+sandbox denied the required fresh read-only process-absence check. Recovery
+rules block edits on inspection errors. The outer runner must establish
+absence proof outside the sandbox before repair."
+
+This is a separation-of-authority issue, not Mac containment PASS, not a
+developer patch and not permission to escalate sandbox or skip PID validation.
+Original A11b candidate HEAD remains
+`59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad`.
+The 76644 immutable Codex decision JSON SHA-256 is
+`3e0778155ce211f1da82171af432b3a6e8fbb7212c7d8ee50bef1d5a6801a2f3`,
+source-free Git projection:
+`https://github.com/davidcatcat/davidcattoolsproject/blob/59f1f7a0033e440bcb306c58680be87f7c934c61/reports/ai-loop/diagnostics/20261008T100821Z-76644/round-0-codex/codex.json`.
+
+Control contract has one new `sandbox_decision_recovery` tied to:
+- original `76644` control SHA `2534621046491780dcbf7062856f148317edea2b`;
+- exact original candidate HEAD above and main
+  `ceae425eacaa8729a9eb8d796e43304918a8c908`;
+- `76644` summary hash
+  `4ba4ab9696ca0020e50eb0d951d18fb60d5b21ac163d936af22923390b5ae4ce`;
+- exact Codex raw output SHA-256 above;
+- original `64433` Mac native failure hash
+  `c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc`;
+- exactly one initially repairable test:
+  `tools/llmtool/tests/test_git_containment.py`, optionally append a truthful
+  pending note to the original validation report.
+
+The **Mac outer runner**, not Codex sandbox, must reperform the
+read-only host-only process absence check on the frozen cleanup inventory:
+once at `--check`, AGAIN at formal `--resume`, both before calling any model.
+It must check exact task/provenance/candidate, all ten original file digests,
+original recovery bytes and original Codex decision. If PID proof fails, STOP;
+do not signal previous PIDs, relax process permissions or fabricate evidence.
+
+On actual resume, `recovery.json` records
+`outer_absence_check.status=ABSENT_AT_PRECHECK` with
+`authority=MAC_RUNNER` and original native inventory/evidence digests.
+This is only a PRECONDITION at the check time, **not** a Mac native containment
+PASS. Codex must read that handoff and must NOT rerun host `ps`/lsof/kill in
+its restricted sandbox as a duplicate gate. If it has a NEW unmet
+process-ownership precondition, return NEEDS_DECISION. Codex is authorized
+only to change the already approved kqueue test in the one file and keep all
+non-reaping/identity requirements; do not touch production modules or signal
+code. The outer runner must rerun related checks, both full Python suites,
+and all fourteen native Mac scenarios on changed bytes, then ordinary
+independent review and exact-head CI before any Draft PR. No previous tests
+or native scenarios are inherited; no auto-merge.
+
+Operator command (only after matching control helper CI SUCCESS):
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T100821Z-76644 --check && \
+bash scripts/ai-loop.sh --resume 20261008T100821Z-76644
+```
+
+Do not rerun used `64433` recovery, manually reset/change the stopped
+candidate, create worktrees outside the canonical repo, or upload private
+Codex/free-form/source logs. This is a one-use authorization, not an
+unbounded retry loop.
+
 # CURRENT — 76644 Codex decision gate confirmed (2026-10-08)
 
 The Mac operator ran `bash scripts/ai-loop.sh --diagnose 20261008T100821Z-76644`.
