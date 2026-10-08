@@ -1,3 +1,56 @@
+# CURRENT — 76644 stopped without any allowed-file changes (2026-10-08)
+
+Last attempted Mac recovery: `20261008T100821Z-76644`, control
+`2534621046491780dcbf7062856f148317edea2b`. It was the
+first bounded Codex repair of kqueue-only failure `64433`. The
+operator's recovery precheck PASSED, but the runner stopped immediately
+after Codex, before related tests or ordinary Claude review:
+`bounded recovery Codex edited outside authorized test files or made no
+first-round test-harness repair`.
+
+Published diagnostic
+`https://github.com/davidcatcat/davidcattoolsproject/blob/665754111934ca6a510dc1345614dd6cdca41e1e/reports/ai-loop/diagnostics/20261008T100821Z-76644/index.md`
+shows original HEAD `59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad`.
+All ten allowed-file SHA-256 values, including the test and report,
+are IDENTICAL to the frozen `64433` candidate. Therefore no
+successful test-harness source fix is evidenced. No testing, native
+acceptance, new Claude review, feature publication or merge happened.
+
+The existing check was *correct to STOP*, but its error merged distinct
+causes (forbidden path / zero source edits / provider NEEDS_DECISION).
+The runner now reports these states separately and does not treat a
+PASS claim with no changed test file as proof of repair.
+
+**Do not rerun `--resume 64433` (one-use consumed), signal old
+PIDs, manually clean/alter the unpublished branch, or start full/native
+checks.** The original Codex developer JSON remains on the Mac, not on
+Git. It is unknown at this point whether it returned PASS, FAIL or
+NEEDS_DECISION. No diagnosis or source fix can be asserted from the
+structured JSON until it is examined.
+
+After helper CI success, use the no-model diagnostic action:
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --diagnose 20261008T100821Z-76644
+```
+
+It verifies exact original control and current stopped HEAD, reads
+local `codex-0.json`, compares the ten candidate files against the
+original `recovery-inputs` snapshots, and publishes *only* status,
+Codex-output SHA-256 and allowlisted changed-file names as a
+source-free `round-0-codex` Git diagnostic. Provider summary, stdout,
+stderr, private source and candidate internals remain on the Mac.
+There are no model/test calls or changes to source, index or candidate.
+An original `round-0-triage` is published separately.
+
+Once the exact Codex status is confirmed, build the next single-use
+bounded recovery from the 76644 evidence if and only if its semantics
+support a safe repair; do not automatically authorize another provider
+call against unchanged bytes. All fourteen Mac native cases, both
+full suites, security/QA assessment and Draft PR publication are
+still pending.
+
 # CURRENT — A11b kqueue-only native failure recovery (64433), 2026-10-08
 
 The operator ran `bash scripts/ai-loop.sh --diagnose 20261008T064055Z-64433`
