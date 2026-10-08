@@ -1,3 +1,74 @@
+# CURRENT — A11b kqueue-only native failure recovery (64433), 2026-10-08
+
+The operator ran `bash scripts/ai-loop.sh --diagnose 20261008T064055Z-64433`
+successfully. Immutable Git report:
+`https://github.com/davidcatcat/davidcattoolsproject/blob/c0db1d9195040212d23d5020876b5d5602419b16/reports/ai-loop/diagnostics/20261008T064055Z-64433/round-0-triage/index.md`.
+It confirms `kqueue_non_reaping` / `ProcessLookupError` / `ESRCH` at
+`test_git_containment.py:2334` (`ExitNote(pid)` registration) and
+`_git_process_identity.py:148`, cleanup `RESOLVED` with no currently
+retained owned processes, normal Claude review `SUCCESS_ENVELOPE` and
+failure-coordination Claude `ERROR_ENVELOPE`. No classifier authorization is
+claimed from the latter.
+
+Current unpublished A11b candidate:
+`59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad`.
+Current pinned main:
+`ceae425eacaa8729a9eb8d796e43304918a8c908`.
+Exactly five related tests, read-only ordinary review and both full Python
+suites passed on this stopped HEAD, but ONLY eight of fourteen Mac native
+scenarios ran and PASS. Native acceptance is still FAIL. Original native error
+is an untrusted test failure to investigate, not proof of product safety.
+
+The bounded `acceptance_failure_recovery` contract now pins:
+- run `20261008T064055Z-64433`, control
+  `3c08dba54e6ac59db8385816ad51f2faaeacabee`;
+- candidate HEAD `59381d49a0f3992f1edd6ac5c8e1fd5a87d3cdad`;
+- local summary SHA-256
+  `05f13f97a570ed41b70b69e9e2be246689d35c539eba020f7668d18ad804efb5`;
+- Mac native evidence SHA-256
+  `c2b223ec0350917cb925ddbd28cb7b6d96ab4deff81c463d6113b165a254d9dc`;
+- round-0 raw failure evidence SHA-256
+  `fd6b86c56af6836c08226ac762e5cf3fffa181eaab441d8b17762388848c08f5`;
+- sole permitted initial test repair
+  `tools/llmtool/tests/test_git_containment.py` (and optional truthful PENDING
+  note in existing acceptance report). No production module edits authorized.
+
+Preflight checks original Git-pinned task/provenance/HEAD, raw failing evidence
+and hashes, exact eight prior scenario names and zero skips, native traceback and
+ESRCH, expected failure-line source, and that Claude's failure classification
+was an **error envelope**, not a successful classification. It requires a
+**fresh read-only absence check** of the originally owned native process
+inventory. Saved PIDs may NEVER be signaled by the recovery coordinator.
+Any discrepancy must STOP before a provider call or source change.
+
+Bounded repair instruction to Codex:
+- Keep the before-exit `kqueue NOTE_EXIT` registration and event behavior
+  intact, including proof of unreaped ownership/identity.
+- For `zombie_first=True`, after verifying the same owned child is a zombie
+  without reaping it, acknowledge that Darwin may refuse a *new*
+  `EVFILT_PROC` registration with ESRCH. Test this expected platform behavior
+  without accepting arbitrary ESRCH as success. Alternate successful
+  registration/event behavior must remain valid only with equivalent proof.
+- No skip, xfail, new filter fallback masquerading as exit notification,
+  time/threshold weakening, extra signals, source/product module change,
+  acceptance-script change, or deleted negative tests.
+- All **fourteen** native scenarios remain mandatory, including both
+  parent-SIGKILL ×20 configurations with the unchanged <=2s requirement.
+- All related checks, both full suites, ordinary independent review, and
+  final exact-HEAD CI must rerun on changed bytes. Prior PASS is not inherited.
+- Independent security/QA and merge authorization remain pending.
+
+First Mac action after helper CI turns green (zero-model precheck):
+
+```sh
+cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+bash scripts/ai-loop.sh --resume 20261008T064055Z-64433 --check
+```
+
+Only if precheck PASS, execute the same command without `--check`.
+Do NOT resume 60914 or any earlier run, cherry-pick, manually reset, signal
+saved PIDs, publish the feature branch, skip native cases, or merge.
+
 # CURRENT — A11b native failure, deterministic diagnosis, 2026-10-08
 
 Run `20261008T064055Z-64433` STOPPED on unpublished candidate
