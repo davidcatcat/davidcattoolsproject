@@ -1,5 +1,33 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
+## AI-led team operating model
+
+This project's delivery responsibility is documented in
+[ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). The **owner**
+defines the tool's functionality, outcomes, constraints and acceptance,
+while the **AI coordinator** acts as technical PM: task scoping, Codex
+implementation, independent Claude review/QA, follow-up tracking and
+authorized safe Git merges. The owner is not an agent prompt courier or
+routine technical signoff authority. Only genuine product/scope/risk
+decisions, or a needed Mac-local command when no execution access exists,
+should interrupt the owner.
+
+The Mac-local `.git/ai-loop/run.sh` is operator-owned and SHA-pinned.
+Do not overwrite it or request approval for a new control SHA on the
+strength of GitHub/Linux CI alone: supply exact SHA/diff, real Mac
+validation and reviewer evidence. New controller approval is **separate**
+from routine Git merge delegation. The C1 local-only excerpts feature
+does not authorize sending excerpts to company/external providers
+(Issue #63 remains open). The frozen `--qa-low*` route is not a
+normal product release gate.
+
+A coordinator may decide a documented **nonblocking Low** disposition
+within the approved product boundary and leave a concise follow-up; it
+must not invent extra product blockers/one-off tools. Required failing
+security, QA or Mac/runtime gates remain blocking regardless of the
+owner's general merge delegation. This document describes workflow,
+not an installed autonomous Mac executor or background service.
+
 ## Execution environment
 
 Use Codex Cloud when selected by the user for repository investigation, development,

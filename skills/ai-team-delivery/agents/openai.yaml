@@ -1,0 +1,4 @@
+interface:
+  display_name: "AI Team Delivery"
+  short_description: "Coordinate requirement-led coding, review, QA and delegated safe merges"
+  default_prompt: "Use $ai-team-delivery to respect the user's product-goal role, the AI coordinator's bounded technical and merge responsibility, independent developer/reviewer gates, and the Mac-only operator/SHA approval boundary."

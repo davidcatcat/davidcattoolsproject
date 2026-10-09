@@ -1,5 +1,33 @@
 # Codex repository guidance
 
+## AI team delivery and delegated authority
+
+**Always read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) at the
+start of product development, review, QA handoff or Git publication.**
+The user is the requirements owner/product acceptor, **not** the day-to-day
+PM, source-code reviewer, prompt courier or Mac test diagnostician. ChatGPT,
+when available as the authorized coordinator, owns technical planning,
+Codex/Claude delegation, evidence reconciliation, routine Low-risk
+dispositions and eligible PR merges under delegated scope. Codex is normally
+the sole implementation writer; Claude (or a separately evidenced reviewer)
+performs the independent review. The same agent's own checks do not become
+independent QA or a security-review gate.
+
+Do not ask the user to manage AI-to-AI prompts, repeatedly say "next step",
+or perform routine Git/PM decisions. The user can act as the **physical Mac
+operator** when the coordinator lacks that access; supply only a validated,
+bounded instruction and diagnose its output yourself. Never claim that Mac,
+provider or remote steps ran unless their evidence is present. New Mac
+controller execution is subject to the **operator-approved SHA pin** and
+separate approval: general merge delegation does not unlock the controller
+or provider egress. Respect the STOP on frozen `--qa-low*` modes.
+
+Escalate material product/risk/authority changes, not every nonblocking
+technical Low. Distinguish who proposed a technical judgment, who accepted
+the product direction, who authorized Git work and who actually executed
+it. Apply [safe-git](skills/safe-git/SKILL.md) and the relevant
+independent evidence gates before merging.
+
 ## Canonical repository and pre-change checks
 
 The canonical local Mac project repository directory is:
