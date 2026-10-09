@@ -1,5 +1,5 @@
 {
-  "task_id": "C1-PR55-PostFix-Security-Functional-QA-20261009",
+  "task_id": "C1-PR55-SecurityFail-ResourceFix-20261009",
   "mode": "review_existing_pr",
   "pr_number": 55,
   "expected_head": "d5ecfce9f7e28da2983affb235dd942d51388723",
@@ -75,8 +75,16 @@
       "PYTHON=/usr/bin/python3"
     ]
   ],
-  "qa_gates": [
-    "security",
-    "functional_qa"
-  ]
+  "qa_security_fail_repair": {
+    "run_id": "20261008T221753Z-44339",
+    "head": "d5ecfce9f7e28da2983affb235dd942d51388723",
+    "finding_sha256": "44460d77ccd8bb3224db90dfa71920653d9a6d64b908aa22d79dc1b12c0996e1",
+    "diff_sha256": "6662b084538b44f3ad9f7ee873f5c08d23d60cef2b4c49e849c6d0de0c1613f2",
+    "category": "RESOURCE_EXHAUSTION",
+    "action": "FIX_BEFORE_MERGE",
+    "confidence": "HIGH",
+    "line": 42,
+    "source_file": "tools/llmtool/llmtool/test_output_excerpts.py",
+    "test_file": "tools/llmtool/tests/test_test_output_excerpts.py"
+  }
 }
