@@ -36,6 +36,18 @@ conflicting later clarifications with evidence; do not assert the owner
 personally wrote the technical analysis or never consented without resolving
 the conversation records.
 
+**llmtool product direction:** The [single A11 roadmap](tools/llmtool/ROADMAP.md)
+and [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md) govern
+current milestones: C0–C3 are historical A delivery/measurement aliases,
+not a second code path or sequential product gate. **Use existing
+SHA-approved temporary ai-loop** for Codex/Claude coordination until
+native llmtool passes A11c canonical Mac acceptance and can replace it.
+A11b.2.2.2 is design/review-only next (Issue #70), not approved real
+Git ADD. C1 excerpt egress needs Issue #66's safety gate before
+any permitted model data transfer, but full company cost benchmarks
+do not block offline A11b design. Report evidence and risks, not
+new permanent ai-loop automation.
+
 ## Skill design
 
 - Keep each skill small, composable, and focused on one recurring workflow.
@@ -68,11 +80,14 @@ the conversation records.
 - Use `company-llm-delegation` for bounded development-time delegation to the company LLM through llmtool; it is not a quality gate.
 - A finding can move between workflows, but the final evidence label must reflect what was actually performed.
 
-For llmtool's current roadmap, A11a is DONE; QG-S1 and QG-QA1 are PASS/CLOSED
-per their merged reports and formal QA round-2 APPROVE. A11b is IN PROGRESS:
-A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 as a data-only
-slice, A11b.2 is NOT STARTED, and execution remains unavailable. QG-S1 future
-controls remain required. A11c is NOT STARTED and A12 is future optional.
+For llmtool, A11a is DONE and QG-S1/QG-QA1 are PASS/CLOSED.
+A11b remains IN PROGRESS: A11b.1 data-only contract DONE/merged via
+PR #32; A11b.2.1 read-only Git preflight DONE/merged via PR #43;
+A11b.2.2.1 **synthetic-only** containment DONE/merged via PR #49.
+A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED; its
+design, independent Security review, implementation and Mac gates
+remain. A11c is NOT STARTED and A12 future optional. Refer to the
+[Roadmap](tools/llmtool/ROADMAP.md) for current status.
 
 On the actual Mac with company VPN, use `company-llm-delegation` for the
 cost-aware dogfood path: deterministic evidence first, bounded permitted company
