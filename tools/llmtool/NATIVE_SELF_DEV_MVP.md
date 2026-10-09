@@ -1,6 +1,7 @@
 # llmtool native self-development MVP — cost-first release plan
 
 Status: **PROPOSED / DESIGN ONLY / NO IMPLEMENTATION AUTHORITY** (2026-10-09).
+**Status distinction (2026-10-09 update):** This document remains the proposed **native execution and C1b/C1c measurement plan**, not permission to enable provider/data egress or C2 execution. Its **C1a deterministic local unittest/pytest subset is already implemented** by merged [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55); JUnit XML remains unsupported. The next bounded product task is [C1b.0 post-truncation privacy gate, Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), part of [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). Company-only C1b Phase 0, C1c cost/quality evaluation and native self-development C2/C3 are not yet implemented or authorized. Preserve the historical proposal below as design intent, not as shipped acceptance evidence.
 Starting baseline: `main@ceae425eacaa8729a9eb8d796e43304918a8c908`.
 This is a prioritized plan, not a claim that native autonomous code execution or
 measurable general token savings has already shipped.
