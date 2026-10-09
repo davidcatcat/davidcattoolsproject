@@ -11,49 +11,37 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
-## Near-term release priority — cost-first native self-development (2026-10-09)
+## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
-**Implementation status update (2026-10-09):** C1a deterministic local unittest/pytest failure excerpts **DONE / merged** through [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55), merge `27bee10a9ffbab90fd088172ef3aea03fde80556`, with specialist Security/Functional QA PASS and 3 ACCEPT / 3 DEFER nonblocking Low dispositions. **Next engineering work is C1b.0** offline final-excerpt sensitive validation [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) under the parent [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). C1b company-only Phase 0 and C1c premium-token savings measurements remain **NOT STARTED**; no provider egress is authorized. The C1a scope supports unittest/pytest; JUnit XML remains unsupported. This status supersedes the historical *FIRST NEW DELIVERY* planning label below without changing the original staged design.
+**Authoritative priority and numbering:** A0–A12 are the product milestones.
+The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcatcat/davidcattoolsproject/pull/50) are **historical release/measurement aliases**, not separate tracks, duplicate executors or new sequential blockers. Keep the labels when citing old issues, tests and reports, but **all new plans, status and work contracts must name their owning A milestone**. Preserve PR #50 and subsequent historical evidence unchanged. The [Claude review](https://github.com/davidcatcat/davidcattoolsproject/pull/69) documents why much of C was already planned under A; the owner confirmed this consolidation and the temporary-runner transition after that review.
 
-**Primary goal:** make `llmtool` itself safely coordinate Codex CLI
-implementation, Claude CLI independent review, deterministic testing,
-bounded repair and authorized PR handoff for developing `llmtool`, while
-**measurably reducing premium model tokens at unchanged quality**.
-The current `ai-loop` script is a **temporary bootstrapping tool**:
-maintain necessary safety, but do not prioritize a second permanent
-formal review/QA orchestration stack in the temporary runner.
+**Product goal:** `llmtool` coordinates scoped Codex CLI implementation, independent Claude CLI review, deterministic tests, bounded repair, permitted Git/PR publication and optional permitted company-LLM triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
-The [native self-development MVP specification](NATIVE_SELF_DEV_MVP.md)
-is the detailed **proposed** priority/gate contract:
+### One A-roadmap with legacy C references (no duplicate implementation)
 
-- **C0 NOW:** use already merged A2.4/A2.5 text-only CLI providers,
-  A5 Git snapshot, A9 text-only roles and A10 context collection as
-  bounded development dogfood. This does **not** authorize repo edits
-  through those providers, or establish generic cost savings.
-- **C1 FIRST NEW DELIVERY:** deterministic real-format unittest/pytest
-  failure excerpt/coverage selector, followed by Company-only Phase 0
-  and quality-equivalent paired token measurement **before** enabling
-  any company triage route as a saving claim. Small-input PR #36 pilot
-  *increased* Codex token use 104.46% (54,849→112,144), whereas the
-  specific large-log L01 pipeline saved 39.82%/37.55% in two controlled
-  observations; neither result generalizes to every request.
-- **C2 FIRST NATIVE CODING MVP:** explicit authorized repo-bound
-  Codex development execution adapter/typed A11b actions, policy,
-  sandbox/process containment, real tests, read-only Claude review,
-  bounded repair, audit and approval barriers. This is **not implemented**
-  by A9/A10 or the existing pure-text CLI providers.
-- **C3 CUTOVER:** independent Security/Functional QA and real canonical-Mac
-  task acceptance, followed by verified llmtool self-development and
-  measurable task-level premium-token/quality/latency results. Freeze
-  or deprecate duplicate ai-loop orchestration only after parity.
+| Existing C alias, for old evidence only | **A owner / disposition** | Current truth / gate |
+| --- | --- | --- |
+| C0 read-only dogfood | **A2/A5/A9/A10**, development-time usage of existing capabilities; A11a diagnostics | Available only as bounded text/read-only assistance; not real code execution or general cost-savings proof |
+| C1a deterministic test excerpts | **A11a diagnostics support / A11c preparation** | DONE / merged via [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55) (`27bee10a`); opt-in **local-only** unittest/pytest output; no JUnit XML and no provider export authorization |
+| C1b.0 final-excerpt privacy fix | **A11c data-boundary prerequisite** for routes that export C1 excerpts | OPEN [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), under [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). Must pass before any excerpt is sent to company/external LLM; **not a prerequisite for local A11b.2.2.2 design** |
+| C1b Company-only Phase 0; C1c paired Token savings | **A11c provider-route reliability, QA and cost measurement** | NOT STARTED. Only on authorized provider data paths, pre-registered quality/usage and trust boundaries; not a blanket prerequisite for designing the native local executor |
+| C2 native self-development execution | **A11b Action/Policy/Executor, then A11c integration** | A11b.2.2.1 synthetic containment DONE; **A11b.2.2.2 real Git ADD NOT STARTED / NOT AUTHORIZED** |
+| C3 ai-loop cutover | **A11c real-world acceptance and transition** | NOT STARTED; require actual Mac tasks, Security/Functional QA and comparable behavior before cutover |
 
-PR #49's synthetic A11b.2.2.1 containment has **Security/Functional QA PASS**,
-14/14 native Mac acceptance and 20/20 + 20/20 parent SIGKILL repetitions.
-It was **squash-merged** as `eb464628dd6096811c659cfdf663f364107a6ef4`.
-This does **not authorize real Git ADD**. PR #45 temporary helper remains Draft;
-future product-execution gates and A11b.2.2.2 require a separate design/review. Do **not** block initial read-only C0/C1 dogfood
-on A12 Telegram, optional A2.3 HTTP or a complete generic executor.
-A measured cost optimization cannot replace safety/QA gate PASS.
+**Next critical-path engineering work:** [A11b.2.2.2 design inputs, Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70): B5 §14.1 post-state and fail-closed semantics, P49-L1 fixture-hook isolation, S49-3/QA49-N2 raw-FD cleanup, QA49-N1 leader-exit regression, supported host/runtime F4 and required Git/sandbox/approval/audit controls. **First write a bounded design spec, independently Security-review it, and only then create a separately authorized product implementation slice.** No real `git add` is allowed by this documentation change or previous synthetic PASS. A11b.3–6 action approval/repair controls and A11c real-world verification remain required.
+
+**Parallel nonblocking safety work:** [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) may proceed as a narrowly scoped, independently tested C1 excerpt-output fix. Its completion is a hard gate for the specific excerpt **egress** path, not for offline A11b design or offline tests. It does **not** sanitize arbitrary diff/source/log data; those exports need separate permission and data-boundary review. Defer full company-only Phase 0 and paid-model cost benchmarking until an applicable route is actually usable; if quality/cost evidence is poor, disable that cost route without declaring a failed executor secure or a token-saving claim proven.
+
+### Temporary collaboration until native llmtool passes acceptance
+
+**Continue to use the existing `ai-loop` for temporary Codex + Claude coordination while A11b/A11c are incomplete**; the workflow is task → existing approved SHA-pinned Mac launcher (when Mac access is actually necessary) → bounded Codex development → independent Claude review/tests/repair → audited Draft PR/STOP → coordinator merge decision after required gates. This does **not** mean `llmtool` can execute this workflow today. Do not require the owner to relay ordinary prompts or act as PM.
+
+The operator-owned `.git/ai-loop/run.sh` and controller approval SHA are separate trust boundaries. **Do not overwrite, repoint or silently approve a new control SHA** under ordinary Git merge delegation. For necessary controller fixes, require exact diff/SHA, independent review and applicable Mac acceptance. Maintain temporary `ai-loop` for **critical security, correctness, reliability and compatibility only**; do not add a second permanent QA/orchestration stack or revive frozen `--qa-low*` routes. [PR #45](https://github.com/davidcatcat/davidcattoolsproject/pull/45) remains Draft and is **not** a native product milestone.
+
+**Cutover gate (A11c):** llmtool must independently pass canonical-Mac real development tasks (documentation change, bug fix, failed-review repair), bounded approvals, timeouts/child cleanup, source-bound tests, independent Security/Functional QA and safe failure/dirty-tree STOP. Confirm ordinary task → one llmtool command → Codex/Claude/test/repair → audited PR or NEEDS_DECISION, without human prompt relay, before retiring the duplicate temporary runner. Measure quality, token and latency on representative eligible routes; do not claim savings without evidence or force company routing when it fails. Retain ai-loop as an explicitly controlled fallback until parity.
+
+**Optional work is not a prerequisite for this transition:** A2.3 Anthropic HTTP API, A12 Telegram, a dashboard, and full C1b/C1c cost studies are not blanket blockers for starting/designing A11b. Never waive required security, permission, Mac, QA or specific provider-egress gates.
 
 ## Current milestone snapshot
 
@@ -547,7 +535,7 @@ post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b is IN PROGRESS; A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32
 (`e5525f18`) as a data-only slice. A11b.2.1 is DONE/merged via PR #43 (`780970ab`);
-A11b.2.2 remains NOT STARTED / B5 design remediation, NOT AUTHORIZED. A11c remains
+A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 real Git ADD remains NOT STARTED / NOT AUTHORIZED. A11c remains
 NOT STARTED. Execution remains
 future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
@@ -557,7 +545,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2.1 DONE/merged (PR #43); A11b.2.2 NOT AUTHORIZED | Data-only contract and read-only ADD preflight; executor and recovery deferred | B5 design remediation pending independent targeted re-review; no implementation authorization |
+| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2.1 DONE/merged (PR #43); A11b.2.2.1 synthetic DONE/merged; A11b.2.2.2 NOT AUTHORIZED | Data-only contract, read-only ADD preflight and synthetic containment delivered; real executor and recovery deferred | B5 design remediation pending independent targeted re-review; no implementation authorization |
 | A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -731,7 +719,7 @@ company result adopted/overridden、schema/identifier validity；**省 token 但
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2 B5 design remediation / NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2.1 synthetic containment DONE/merged via PR #49；A11b.2.2.2 B5 design / real Git ADD NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE

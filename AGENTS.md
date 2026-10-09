@@ -28,6 +28,17 @@ the product direction, who authorized Git work and who actually executed
 it. Apply [safe-git](skills/safe-git/SKILL.md) and the relevant
 independent evidence gates before merging.
 
+**llmtool product direction:** Read
+[the single A11 roadmap](tools/llmtool/ROADMAP.md) and the canonical
+[ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md).
+C0–C3 are legacy A-delivery labels; do not create another C
+milestone/implementation stream. Continue coordinating Codex/Claude via
+the existing approved SHA-pinned **temporary ai-loop** until A11c
+real-world acceptance proves native llmtool parity. A11b.2.2.2 next
+requires design and independent Security review (Issue #70);
+real Git mutation is not authorized. Keep C1 excerpt export safety
+(Issue #66) distinct from offline local executor design.
+
 ## Canonical repository and pre-change checks
 
 The canonical local Mac project repository directory is:
@@ -149,11 +160,14 @@ When a gate finds a real defect, preserve its reproducer/evidence, fix through t
 implementation workflow, and re-run the affected gate. Do not start the next milestone
 while a required gate is unresolved.
 
-For llmtool, A11a is DONE; QG-S1 and QG-QA1 are PASS/CLOSED based on the merged
-security report and formal QA round-2 APPROVE. A11b is IN PROGRESS: A11b.1 Typed
-Action & Approval Contract is DONE/merged via PR #32 and remains data-only with no
-execution or mutation capability; A11b.2 is NOT STARTED. QG-S1 future execution
-controls remain required. A11c is NOT STARTED; A12 is future optional.
+For llmtool, A11a is DONE and QG-S1/QG-QA1 are PASS/CLOSED. A11b is
+IN PROGRESS: A11b.1 data-only contract DONE/merged via PR #32,
+A11b.2.1 read-only Git preflight DONE/merged via PR #43, and
+A11b.2.2.1 synthetic containment DONE/merged via PR #49. The
+A11b.2.2.2 product real Git ADD remains NOT STARTED / NOT AUTHORIZED,
+pending separate design, Security review and implementation approval;
+A11c is NOT STARTED and A12 is future optional. The current
+[Roadmap](tools/llmtool/ROADMAP.md) is the status authority.
 
 ## Default Cloud agent roles
 

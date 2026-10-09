@@ -1,7 +1,17 @@
 # llmtool native self-development MVP — cost-first release plan
 
+> **Historical C-labelled delivery proposal, not an additional milestone system.** The
+> authoritative implementation roadmap is [A11 in ROADMAP.md](ROADMAP.md).
+> On 2026-10-09 the requirements owner confirmed **C0–C3 are consolidated
+> back into the original A architecture and gates**. This file preserves the
+> original C terminology for traceability; all new product task contracts and
+> progress status use **A11b/A11c**, with C only as a legacy measurement alias.
+> **ai-loop remains the temporary SHA-approved Codex/Claude coordination runner
+> until native llmtool passes real Mac acceptance**, not a second product.
+> No existing permission, security, QA, Mac or provider egress gate is waived.
+
 Status: **PROPOSED / DESIGN ONLY / NO IMPLEMENTATION AUTHORITY** (2026-10-09).
-**Status distinction (2026-10-09 update):** This document remains the proposed **native execution and C1b/C1c measurement plan**, not permission to enable provider/data egress or C2 execution. Its **C1a deterministic local unittest/pytest subset is already implemented** by merged [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55); JUnit XML remains unsupported. The next bounded product task is [C1b.0 post-truncation privacy gate, Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), part of [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). Company-only C1b Phase 0, C1c cost/quality evaluation and native self-development C2/C3 are not yet implemented or authorized. Preserve the historical proposal below as design intent, not as shipped acceptance evidence.
+**Status distinction (2026-10-09 update):** This document remains the proposed **native execution and C1b/C1c measurement plan**, not permission to enable provider/data egress or C2 execution. Its **C1a deterministic local unittest/pytest subset is already implemented** by merged [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55); JUnit XML remains unsupported. The currently prepared C1b.0 privacy repair is a parallel, provider-egress-blocking follow-up [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) under [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63); the **mainline next design task is A11b.2.2.2 / Issue #70**, not another C roadmap. Company-only C1b Phase 0, C1c cost/quality evaluation and native self-development C2/C3 are not yet implemented or authorized. Preserve the historical proposal below as design intent, not as shipped acceptance evidence.
 Starting baseline: `main@ceae425eacaa8729a9eb8d796e43304918a8c908`.
 This is a prioritized plan, not a claim that native autonomous code execution or
 measurable general token savings has already shipped.
@@ -183,17 +193,45 @@ freeze/deprecate its duplicated orchestration. Do not demand completion
 of optional A2.3 Anthropic HTTP API, A12 Telegram or a general-purpose
 dashboard before this vertical slice.
 
-## Decisions and sequencing
+## Decisions and sequencing — current A11 authority (2026-10-09)
 
-1. **PR #49:** **DONE / squash-merged** as `eb464628dd6096811c659cfdf663f364107a6ef4` after independent Security and Functional QA. Still **no** real Git ADD or A11b.2.2.2 implementation permission.
-2. **C1 first** (real test excerpt selector + benchmark), because the
-   immediate aim is measurable token reduction using already available
-   read-only llmtool.
-3. **C2 next** (safe native self-development) on a fresh exact-main base
-   after relevant A11b gates. Draft implementation task allowlist and
-   tests independently; do not reuse old `76644` ai-loop recovery.
-4. Preserve security/QA and cost gates independently. Report actual
-   GitHub/CI status before any future merge/cutover decision.
+This updates **ordering and ownership only**, not the historical C0–C3
+acceptance designs above. See the sole A↔C mapping in
+[ROADMAP.md](ROADMAP.md).
+
+1. **A11b product critical path:** PR #49 synthetic-only containment is DONE
+   (`eb464628dd6096811c659cfdf663f364107a6ef4`). Next: write the
+   A11b.2.2.2 B5 §14.1 product-integration **design spec** and obtain
+   independent Security review ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)).
+   A separate authorization, test/evidence contract and approval gate must
+   precede real Git ADD implementation. A11b.3–6 remain required for actual
+   Codex-driven execution, retries and Git side effects.
+2. **A11c output-safety task (legacy C1b.0):** [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
+   may run as a bounded, independently reviewed parallel fix; it gates C1
+   excerpts **before they leave the local process for any provider**.
+   It does not block local A11b design and does not sanitize arbitrary diff,
+   source code, other logs or all reviewer payloads. Evaluate actual
+   external-data exports separately before using Claude/company/Codex.
+3. **A11c company route and savings acceptance (legacy C1b Phase 0/C1c):**
+   retain the pre-registered company-only reliability, quality, usage
+   accounting and paired premium-token checks for permitted routes.
+   Run when there is a realistic usable route; **not** as a blanket
+   prerequisite for starting the local native executor. Do not claim
+   generic cost savings from the existing limited pilots.
+4. **A11c native self-development & cutover (legacy C2/C3 outcomes):**
+   prove canonical Mac scoped documentation and bug/failed-review cases,
+   controlled Codex development, independent Claude review, tests,
+   bounded repair, approved PR publication and fail-closed STOP. Only
+   when llmtool meets equivalent Security/Functional QA and operational
+   evidence can it replace the **currently active temporary ai-loop**
+   collaboration workflow. Until then, maintain the existing operator
+   SHA-approved launcher and only fix its essential security/stability
+   faults; do not build a second controller product.
+5. Do not renumber A milestones or rewrite prior validation reports,
+   PR evidence or this proposal's original requirement paragraphs.
+   General delegated merge authority is **not** Mac controller-SHA
+   approval, model provider export authorization or permission to skip
+   the required independent/Mac gates.
 
 **Not a deployment timeline:** phase gates, not dates. Code/CI/natively
 observed behaviors determine launch availability; the planned future
