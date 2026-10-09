@@ -186,5 +186,76 @@ class FrozenReviewCacheTests(unittest.TestCase):
             self.assertTrue((state / ("code-review-" + revision + ".raw.json")).is_file())
 
 
+class BundledBootstrapIntegrityTests(unittest.TestCase):
+    def test_inventory_helper_must_match_git_blob(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = Path(directory) / "ai_loop_qa_low_inventory.py"
+            p.write_bytes(b"# inventory content\n")
+            with patch("ai_loop_qa_low_disposition.git",
+                       side_effect=["a" * 40, "b" * 40]) as git_mock:
+                with self.assertRaisesRegex(Stop, "does not match"):
+                    review_module.verify_bootstrap_blob(
+                        p, "f" * 40, "scripts/ai_loop_qa_low_inventory.py")
+            self.assertEqual(git_mock.call_count, 2)
+
+    def test_arbitrary_git_paths_are_not_source_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = Path(directory) / "untrusted.py"
+            p.write_bytes(b"pass\n")
+            with patch("ai_loop_qa_low_disposition.git") as git_mock:
+                with self.assertRaisesRegex(Stop, "unsafe local bootstrap"):
+                    review_module.verify_bootstrap_blob(
+                        p, "f" * 40, "scripts/not_authorized.py")
+                git_mock.assert_not_called()
+
+
+class PublicationReconciliationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name)
+        self.key = "qa-low-20261009T050558Z-60868-" + "a" * 64
+        self.body = "safe metadata\npublication " + self.key
+
+    def test_remote_existing_record_prevents_repeat_post(self):
+        records = json.dumps([{"id": 12, "body": self.body}])
+        with patch.object(review_module, "command", return_value=records) as cmd:
+            self.assertEqual(review_module.publish_sanitized_once(
+                self.state, self.body, self.key), "verified publication")
+        cmd.assert_called_once()
+        self.assertEqual((self.state / "published").read_text().strip(),
+                         hashlib.sha256(self.body.encode()).hexdigest())
+
+    def test_new_publication_checks_api_receipt(self):
+        responses = ["[]", json.dumps({"id": 77, "body": self.body})]
+        with patch.object(review_module, "command",
+                          side_effect=responses) as cmd:
+            review_module.publish_sanitized_once(self.state, self.body, self.key)
+        self.assertEqual(cmd.call_count, 2)
+        self.assertTrue((self.state / "published").exists())
+
+    def test_conflicting_publication_stops_without_post(self):
+        old = json.dumps([{"id": 12, "body": self.key + "\nold disposition"}])
+        with patch.object(review_module, "command", return_value=old) as cmd:
+            with self.assertRaisesRegex(Stop, "different disposition"):
+                review_module.publish_sanitized_once(self.state, self.body, self.key)
+        cmd.assert_called_once()
+        self.assertFalse((self.state / "published").exists())
+
+    def test_full_page_fails_closed_instead_of_unverified_post(self):
+        raw = json.dumps([{"id": n, "body": "other"} for n in range(100)])
+        with patch.object(review_module, "command", return_value=raw) as cmd:
+            with self.assertRaisesRegex(Stop, "exhaustively"):
+                review_module.publish_sanitized_once(self.state, self.body, self.key)
+        cmd.assert_called_once()
+
+    def test_invalid_public_identity_stops_before_network(self):
+        with patch.object(review_module, "command") as cmd:
+            with self.assertRaises(Stop):
+                review_module.publish_sanitized_once(
+                    self.state, self.body, "user-written-public-id")
+        cmd.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
