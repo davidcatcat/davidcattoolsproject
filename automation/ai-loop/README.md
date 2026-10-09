@@ -1,5 +1,14 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## CURRENT HANDOFF 2026-10-09 — preserve Codex FAIL candidate; run tests without re-writing
+
+The most recent one-candidate Security resource-exhaustion fix **STOPPED before testing**, not because of a test failure: Codex returned structured `FAIL` while stating it had prepared edits in the two authorized C1 module/test files. Run `20261009T041323Z-53171`; [privacy-safe Git diagnostic](https://github.com/davidcatcat/davidcattoolsproject/blob/1530d51b7310eecb069e2ea98f2d4957da006c8a/reports/ai-loop/diagnostics/20261009T041323Z-53171/index.md). Original product PR #55 remains OPEN/Draft at `d5ecfce9f7e28da2983affb235dd942d51388723`. The **new edits remain UNCOMMITTED ON THE MAC**; do not run normal launch, reset, switch branch, stash, or call Codex again.
+
+**Live `automation/ai-loop/task.json` adds `failed_codex_candidate_recovery` only**: hard pins original control HEAD, run ID, original STOPPED summary digest, and exact captured SHA256 for the two modified paths. A dedicated `--resume RUN_ID` code path verifies both dirty source file hashes, two-file edit scope, original task.md/task.json/provenance/STOPPED developer FAIL, frozen Git PR/HEAD and no active Codex before making a private snapshot. The original Codex `FAIL` stays `FAIL`, and **no Codex/AI writer is invoked**; then the runner performs *fresh* related tests, both Mac full suites, read-only ordinary Claude code review, exact-head GitHub CI and truthful same-PR publication only if all PASS. Strict one-use recovery: STOP on any mismatch, no blind retry.
+
+After coordinator confirms **latest control-head Helper CI Python 3.9 + 3.14 PASS**, the Mac operator's ONLY action is `bash .git/ai-loop/run.sh --resume 20261009T041323Z-53171`. Never run the normal `--check && run` while this candidate is intentionally dirty. Operator never relays raw AI prompts/logs or performs Git cleanup. Even after this validation, new HEAD needs **fresh independent Security and Functional QA** and explicit coordinator final decision. No merge or company provider egress, C1b/C1c benchmark or cost-savings claim.
+
+
 ## ACTIVE (2026-10-09): PR #55 Security FAIL — Medium/blocking RESOURCE_EXHAUSTION fix
 
 The post-first-fix independent Security gate **FAILED** on PR #55 exact HEAD `d5ecfce9f7e28da2983affb235dd942d51388723`; Functional QA did not start. [Frozen Issue #56 assessment](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6074021352) confirms **Medium, blocking, RESOURCE_EXHAUSTION, FIX_BEFORE_MERGE, HIGH confidence**, `test_output_excerpts.py:42`, source finding SHA `44460d77ccd8bb3224db90dfa71920653d9a6d64b908aa22d79dc1b12c0996e1`. This is in the JWT-sensitive regex branch; the precise input exploit stays in Mac-private security findings. PR #55 stays Draft with unchanged HEAD until a new reviewed candidate is published.
