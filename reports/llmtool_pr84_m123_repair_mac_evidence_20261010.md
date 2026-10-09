@@ -122,3 +122,38 @@
 - 在 Mac 上發現 6 個由假 `codex`（`--model test-model`）留下、已存活約 26 小時的孤兒程序，已被 launchd 收養。時間點與一次缺少相依套件的 `/usr/bin/python3` 全套測試吻合，可能是測試在失敗路徑上沒有清理。我沒有終止這些程序。
 
 你需要做：無
+
+## 6. 補充（2026-10-10）：M1 CI 修正提案 PR #87 已在 3.9 與 3.14 通過
+
+Coordinator 決定（PR #84 留言）：保留 `file_hash`，不 skip，不對共用 tool cache 執行 chmod，改用 **job 自有、經驗證的 Python**。
+
+- **提案：** [Draft PR #87](https://github.com/davidcatcat/davidcattoolsproject/pull/87)
+  - base 是 PR #84 分支 `863fed0`，所以 diff 只有 workflow；CI 會連同完整的 F1 程式一起跑。
+  - head 是 `ba5cdb7`。
+- **`Job-owned verified Python` 步驟的做法：**
+  1. 把 setup-python 的安裝目錄（`sys.base_prefix`）複製到 `$RUNNER_TEMP/job-python`；
+  2. **只對這份複本**執行 `chmod -R go-w`；
+  3. 逐項驗證，任一項失敗都會印出是哪一項：
+     - 直譯器是一般檔案，不是 symlink；
+     - 擁有者是 job UID；
+     - 直譯器沒有 `022` 權限位；
+     - 複本內除了 symlink 以外沒有任何可寫檔案（Linux 上 symlink 一律顯示 0777，所以排除）；
+     - 直譯器的 **sha256 與來源相同**；
+     - 複本實際是從 `RUNNER_TEMP` 執行；
+  4. 用 `JOB_PYTHON` 安裝依賴並執行 `make check`。
+- **第一版失敗：** 寫入檢查把 symlink 也算進去了。已修正，並為每項檢查加上具名錯誤訊息。
+- **結果**（run 37983532746，exact head `ba5cdb7`）：
+
+| Job | 結果 |
+| --- | --- |
+| Python 3.9 | **SUCCESS**：Ran 1340 tests, OK（skipped=24，都是只能在 macOS 執行的原生測試） |
+| Python 3.14 | **SUCCESS**：Ran 1340 tests, OK（skipped=24） |
+
+**殘留風險（提供給 reviewer）：** 共用 library 也是從同一個 tool cache 複製來的，沒有另外對照 pinned 參考雜湊；這些位元組的信任根是 `actions/setup-python`。產品檢查只對直譯器執行檔計算雜湊。
+
+**仍待：**
+- 由我以外的 reviewer 進行獨立的 workflow 審查；
+- coordinator 把 PR #87 整合進 PR #84，之後重跑 PR #84 的 exact-head CI；
+- 最終的獨立 Security 與 Functional QA。
+
+你需要做：無
