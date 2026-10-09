@@ -1,5 +1,16 @@
 # ACTIVE — C1 Issue #51 test-excerpt parser (2026-10-09)
 
+## ACTIVE (2026-10-09): PR #55 Security FAIL — Medium/blocking RESOURCE_EXHAUSTION fix
+
+The post-first-fix independent Security gate **FAILED** on PR #55 exact HEAD `d5ecfce9f7e28da2983affb235dd942d51388723`; Functional QA did not start. [Frozen Issue #56 assessment](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6074021352) confirms **Medium, blocking, RESOURCE_EXHAUSTION, FIX_BEFORE_MERGE, HIGH confidence**, `test_output_excerpts.py:42`, source finding SHA `44460d77ccd8bb3224db90dfa71920653d9a6d64b908aa22d79dc1b12c0996e1`. This is in the JWT-sensitive regex branch; the precise input exploit stays in Mac-private security findings. PR #55 stays Draft with unchanged HEAD until a new reviewed candidate is published.
+
+Previous successful/failed post-fix QA task is archived under `automation/ai-loop/history/20261009-C1-PR55-PostFix-Security-FAIL-task.md/json`. Live `task.md/task.json` now authorize **one-candidate same-PR repair** `C1-PR55-SecurityFail-ResourceFix-20261009` via pinned `qa_security_fail_repair`. Runner first verifies exact local Security FAIL (role record, task, run, diff SHA, Medium/true blocking flag, finding hash) and the independent risk assessment, then supplies the bounded original private rationale to Codex as *untrusted evidence*, never to GitHub. Codex can only change **both** `tools/llmtool/llmtool/test_output_excerpts.py` and `tools/llmtool/tests/test_test_output_excerpts.py`; the broader seven-path PR inventory is **not** new write permission. `max_repairs=0`; no automatic retry or second PR.
+
+Fresh related tests, both full Mac suites, ordinary separate Claude code review and exact-new-head GitHub CI remain mandatory. The **next** independent Security and Functional QA require another explicitly authorized task on the changed HEAD: previous FAIL cannot become PASS by inference. No merge, external-provider egress, C1b company-only run or C1c savings benchmark.
+
+**Operator command only after exact-current-control-head helper CI (3.9 and 3.14) succeeds and coordinator approves:** `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. Precheck is no-model and fail-closed on missing private findings, unexpected branch/HEAD or modified files. Do not manually pass Codex/Claude prompts, rerun old `--resume`, or start ordinary QA.
+
+
 ## ACTIVE: PR #55 post-fix Security FAIL — frozen single-finding triage (2026-10-09)
 
 The fresh post-Medium-fix independent Security review on PR #55 exact HEAD `d5ecfce9f7e28da2983affb235dd942d51388723` **FAILED with one actionable finding**. The affected path is `tools/llmtool/llmtool/test_output_excerpts.py`; [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6070341161) pins QA run `20261008T221753Z-44339` and cumulative-diff SHA256 `6662b084538b44f3ad9f7ee873f5c08d23d60cef2b4c49e849c6d0de0c1613f2`. Fresh related + both Mac full tests PASS and GitHub CI 3.9/3.14 PASS, but Security **FAIL** overrides those technical gates. The runner skipped Functional QA as intended, and Draft PR #55 must **NOT MERGE**.
