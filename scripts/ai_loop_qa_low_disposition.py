@@ -181,19 +181,24 @@ def validate_dispositions(result, inventory):
 
 
 
-def verify_bootstrap_blob(script_path, revision):
-    """Authenticate exact Git blob bytes; never compare a stripped command string.
+def verify_bootstrap_blob(script_path, revision, repo_path="scripts/ai_loop_qa_low_disposition.py"):
+    """Compare the entire immutable Git blob, not normalized command stdout.
 
-    Both 'git show' helpers normalize stdout for prompts. That normalization
-    must not be used as an integrity check on an executable Python file.
-    Git hash-object (without -w) hashes the real read-only file bytes.
+    Only the two bundled executable helpers may be source-attested. An
+    attacker cannot redirect the comparison to an arbitrary Git pathname.
     """
     if not re.fullmatch(r"[0-9a-f]{40}", revision):
         raise Stop("runner was not loaded from a SHA-addressed bootstrap")
+    approved = {
+        "scripts/ai_loop_qa_low_disposition.py",
+        "scripts/ai_loop_qa_low_inventory.py",
+    }
     script_path = Path(script_path)
-    if script_path.is_symlink() or not script_path.is_file():
+    if (repo_path not in approved or script_path.name != repo_path.rsplit("/", 1)[1]
+            or any(p.is_symlink() for p in (script_path, *script_path.parents))
+            or not script_path.is_file()):
         raise Stop("unsafe local bootstrap source")
-    expected = git("rev-parse", revision + ":scripts/ai_loop_qa_low_disposition.py")
+    expected = git("rev-parse", revision + ":" + repo_path)
     observed = git("hash-object", "--", str(script_path))
     if (not re.fullmatch(r"[0-9a-f]{40,64}", expected)
             or not re.fullmatch(r"[0-9a-f]{40,64}", observed)
@@ -205,6 +210,8 @@ def code_review(state):
     """Independent code review before private finding data enters another model."""
     revision = Path(__file__).resolve().parent.name
     verify_bootstrap_blob(Path(__file__), revision)
+    verify_bootstrap_blob(Path(__file__).with_name("ai_loop_qa_low_inventory.py"),
+                          revision, "scripts/ai_loop_qa_low_inventory.py")
     names = ("scripts/ai_loop_qa_low_inventory.py",
              "scripts/ai_loop_qa_low_disposition.py",
              "scripts/test_ai_loop_qa_low_inventory.py",
