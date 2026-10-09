@@ -95,6 +95,32 @@ def check_state():
             or pr.get("base", {}).get("sha") != BASE
             or pr.get("base", {}).get("ref") != "main"):
         raise Stop("product PR changed or is not Ready for Review")
+    # Every invocation verifies the actual fetched controller commit, not just
+    # an older PR/check SHA; fail before spending any model tokens.
+    control_sha = Path(__file__).resolve().parent.name
+    if not re.fullmatch("[a-f0-9]{40}", control_sha):
+        raise Stop("control bootstrap has no immutable revision")
+    workflow = json.loads(command("gh", "api", "-X", "GET",
+        "repos/" + REPO + "/actions/runs",
+        "-f", "branch=automation/ai-loop", "-f", "per_page=60"))
+    eligible = [run for run in workflow.get("workflow_runs", [])
+                if run.get("head_sha") == control_sha
+                and run.get("name") == "ai-loop helper CI"
+                and run.get("status") == "completed"
+                and run.get("conclusion") == "success"]
+    if not eligible:
+        raise Stop("exact controller HEAD helper CI is not SUCCESS")
+    run_id = eligible[0].get("id")
+    if type(run_id) is not int:
+        raise Stop("controller CI run ID invalid")
+    jobs = json.loads(command("gh", "api", "repos/" + REPO
+        + "/actions/runs/" + str(run_id) + "/jobs?per_page=100"))
+    names = {job.get("name"): job.get("conclusion")
+             for job in jobs.get("jobs", [])}
+    if (names.get("helper (3.9)") != "success"
+            or names.get("helper (3.14)") != "success"):
+        raise Stop("exact controller Python 3.9/3.14 CI jobs not both SUCCESS")
+
     # Remote base and exact CI remain separate source-of-truth checks.
     command("git", "fetch", "--no-tags", "origin",
             "refs/heads/main:refs/remotes/origin/main")
