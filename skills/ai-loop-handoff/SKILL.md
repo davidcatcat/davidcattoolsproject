@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## CURRENT ACTIVE: script-only rescue of frozen Codex FAIL candidate, NOT a second writer
+
+The local PR #55 second security repair run `20261009T041323Z-53171` STOPPED at the **structured Codex `FAIL`**, before deterministic tests. The retained Mac workspace contains edited `test_output_excerpts.py` and its regression tests, **UNCOMMITTED**. Its source hashes and old summary SHA are pinned by [privacy-safe report](https://github.com/davidcatcat/davidcattoolsproject/blob/1530d51b7310eecb069e2ea98f2d4957da006c8a/reports/ai-loop/diagnostics/20261009T041323Z-53171/index.md). Original failing Security finding in Issue #56 is **still binding**.
+
+Active `task.json` `failed_codex_candidate_recovery` permits **only one-use** `bash .git/ai-loop/run.sh --resume 20261009T041323Z-53171` after current exact control CI 3.9/3.14 PASS. Recovery strictly authenticates original Codex **FAIL** and dirty two-file byte hashes against the Git diagnostic, revalidates original contract + branch/HEAD and snapshots original code evidence, then deliberately **skips Codex**. Only independent related/full tests, ordinary read-only Claude review and exact new HEAD product CI can pass/reject candidate. A technical test/review PASS does not retroactively make Codex status PASS. The PR remains Draft and formal specialist Security + Functional QA on any new HEAD remains mandatory.
+
+Do not ask the operator to manually paste provider prompts/results, run `git reset/checkout/stash`, retry ordinary task or skip tests. If the hashed candidate differs, fail closed and preserve all local work for coordinator analysis. No auto merge/provider egress/C1b/C1c savings.
+
+
 ## Active 2026-10-09: PR #55 second narrow security fix (one Codex candidate)
 
 The post-fix independent Security role on PR #55 `d5ecfce9f7e28da2983affb235dd942d51388723` returned **FAIL** (one Medium **blocking** `RESOURCE_EXHAUSTION` in `test_output_excerpts.py:42`, HIGH confidence; [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6074021352)). Functional QA was intentionally skipped. This is not a build/test failure and not a review PASS. Prior code-review and CI green don't waive the blocker.
