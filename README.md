@@ -15,6 +15,7 @@ This repository currently provides:
 - `security-review` — threat-model and security-review a change/system using evidence, trust boundaries, CWE/CVSS where applicable, and OWASP verification references.
 - `qa-validation` — exercise public/user-facing behavior with explicit PASS/FAIL/BLOCKED/NOT-TESTED evidence.
 - `safe-git` — safely fetch, synchronize, commit, and push Git changes.
+- `ai-team-delivery` — coordinate delegated AI product delivery, independent reviews, Mac operator handoffs, technical decisions, and safe merges without treating the requirements owner as the PM.
 - `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
 - `company-llm-delegation` — route deterministic work away from LLMs and delegate only bounded permitted triage through llmtool to the configured company provider.
 
