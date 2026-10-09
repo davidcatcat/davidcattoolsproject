@@ -100,6 +100,21 @@ def check_state():
             "refs/heads/main:refs/remotes/origin/main")
     if git("rev-parse", "origin/main") != BASE:
         raise Stop("main base moved; prior QA not an unchanged base")
+    changed = set(git("diff", "--name-only", BASE, PR_HEAD).splitlines())
+    expected = {
+        "tools/llmtool/llmtool/test_output_excerpts.py",
+        "tools/llmtool/llmtool/cli.py",
+        "tools/llmtool/tests/test_test_output_excerpts.py",
+        "tools/llmtool/tests/test_cli.py",
+        "tools/llmtool/README.md",
+        "reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md",
+        "reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md",
+        "reports/ai-loop/C1-PR55-SecurityFail-ResourceFix-20261009-20261009T043757Z-54800.md",
+    }
+    patch = git("diff", "--no-ext-diff", "--no-textconv", BASE, PR_HEAD)
+    if changed != expected or hashlib.sha256(patch.encode("utf-8")).hexdigest() != DIFF_SHA:
+        raise Stop("source inventory/diff hash differs from frozen QA")
+
     runs = json.loads(command("gh", "api",
         "repos/" + REPO + "/actions/runs/37885712383"))
     if (runs.get("head_sha") != PR_HEAD or
