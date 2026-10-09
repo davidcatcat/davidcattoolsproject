@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Offline, no-provider tests of six-Low final disposition schema and privacy."""
 import unittest
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 from ai_loop_qa_low_disposition import (
-    ACTIONS, PR_HEAD, QA_RUN, Stop, validate_dispositions,
+    ACTIONS, PR_HEAD, QA_RUN, Stop, validate_dispositions, verify_bootstrap_blob,
 )
 
 
@@ -85,6 +88,61 @@ class DispositionTests(unittest.TestCase):
         value["dispositions"][1]["provider_output"] = "SECRET"
         with self.assertRaises(Stop):
             validate_dispositions(value, inventory())
+
+
+class BootstrapBlobAuthenticationTests(unittest.TestCase):
+    """No repo checkout or model/provider calls: mock only read-only Git metadata."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.source = Path(self.temp.name) / "ai_loop_qa_low_disposition.py"
+        self.source.write_bytes(b"#!/usr/bin/env python3\nprint('safe')\n")
+        self.revision = "a" * 40
+        self.blob = "b" * 40
+
+    def test_matching_exact_blob_is_accepted(self):
+        with patch("ai_loop_qa_low_disposition.git", side_effect=[self.blob, self.blob]) as git_mock:
+            verify_bootstrap_blob(self.source, self.revision)
+        self.assertEqual(git_mock.call_count, 2)
+        self.assertEqual(git_mock.call_args_list[0].args,
+                         ("rev-parse", self.revision + ":scripts/ai_loop_qa_low_disposition.py"))
+        self.assertEqual(git_mock.call_args_list[1].args,
+                         ("hash-object", "--", str(self.source)))
+        self.assertNotIn("-w", git_mock.call_args_list[1].args)
+
+    def test_mismatched_blob_stops_before_model(self):
+        with patch("ai_loop_qa_low_disposition.git",
+                   side_effect=[self.blob, "c" * 40]):
+            with self.assertRaisesRegex(Stop, "Git blob does not match"):
+                verify_bootstrap_blob(self.source, self.revision)
+
+    def test_invalid_git_blob_stops(self):
+        with patch("ai_loop_qa_low_disposition.git",
+                   side_effect=["not-a-sha", self.blob]):
+            with self.assertRaises(Stop):
+                verify_bootstrap_blob(self.source, self.revision)
+
+    def test_invalid_revision_stops_without_git_call(self):
+        with patch("ai_loop_qa_low_disposition.git") as git_mock:
+            with self.assertRaisesRegex(Stop, "SHA-addressed"):
+                verify_bootstrap_blob(self.source, "main")
+            git_mock.assert_not_called()
+
+    def test_symlink_stops_without_git_call(self):
+        link = Path(self.temp.name) / "symlink.py"
+        link.symlink_to(self.source)
+        with patch("ai_loop_qa_low_disposition.git") as git_mock:
+            with self.assertRaisesRegex(Stop, "unsafe local bootstrap"):
+                verify_bootstrap_blob(link, self.revision)
+            git_mock.assert_not_called()
+
+    def test_missing_source_stops(self):
+        self.source.unlink()
+        with patch("ai_loop_qa_low_disposition.git") as git_mock:
+            with self.assertRaises(Stop):
+                verify_bootstrap_blob(self.source, self.revision)
+            git_mock.assert_not_called()
 
 
 if __name__ == "__main__":
