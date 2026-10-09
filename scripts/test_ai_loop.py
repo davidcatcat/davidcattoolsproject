@@ -326,6 +326,126 @@ class PR55MediumRepairAuthorityTests(unittest.TestCase):
                 loop.verify_pr55_medium_repair(root, task)
 
 
+class FailedCodexEditedCandidateResumeTests(unittest.TestCase):
+    """Codex FAIL with edited source is never PASS; reuse exact bytes only for tests."""
+
+    @contextmanager
+    def fixture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            logs=root/'.ai-loop'/'20261009T041323Z-53171'
+            logs.mkdir(parents=True)
+            files=[
+                'tools/llmtool/llmtool/test_output_excerpts.py',
+                'tools/llmtool/tests/test_test_output_excerpts.py']
+            old_head='d5ecfce9f7e28da2983affb235dd942d51388723'
+            control='423580283c35be98f1e8fa760a8dc27626c52da3'
+            sha_report='3469bb8103584e61937205e8a80aaf170827c9facc6d47756742eaf1100705f4'
+            contract={'task_id':'C1-PR55-SecurityFail-ResourceFix-20261009',
+                'mode':'review_existing_pr','pr_number':55,
+                'expected_head':old_head,
+                'base_sha':'8e29024656f873431f6ad83e45015b57bfe381a9',
+                'branch':'feat/llmtool-c1-test-excerpts-20261009',
+                'allowed_files':files,'max_repairs':0}
+            original=contract.copy()
+            contents={}
+            for i,p in enumerate(files):
+                dest=root/p
+                dest.parent.mkdir(parents=True,exist_ok=True)
+                data=('candidate bytes, source '+str(i)).encode()
+                dest.write_bytes(data)
+                contents[p]=hashlib.sha256(data).hexdigest()
+            contract['failed_codex_candidate_recovery']={
+                'run_id':logs.name,'control_sha':control,
+                'original_summary_sha256':sha_report,
+                'source_sha256':contents}
+            summary={'status':'STOPPED','run_id':logs.name,
+                'task_id':contract['task_id'],'head':old_head,
+                'branch':contract['branch'],'history':[],
+                'reason':'Codex reported FAIL: Repair candidate prepared in exactly the two authorized files. Tests pending.'}
+            oldcodex={'status':'FAIL','summary':
+                'Repair candidate prepared in exactly the two authorized files. Tests pending.'}
+            loop.save_json(logs/'task.json',original)
+            loop.save_json(logs/'provenance.json',{
+                'root':str(root),'run_id':logs.name,'control_sha':control,
+                'base':contract['base_sha'],'start_head':old_head,
+                'start_branch':contract['branch']})
+            loop.save_json(logs/'codex-0.json',oldcodex)
+            loop.save_json(logs/'summary.json',summary)
+            (logs/'task.md').write_text('original frozen task')
+            encoded=(logs/'summary.json').read_bytes()
+            real_sha=hashlib.sha256
+            def digest_sha(raw):
+                if raw==encoded:
+                    return Mock(hexdigest=Mock(return_value=sha_report))
+                return real_sha(raw)
+            def git(_root,*args):
+                if args==('branch','--show-current'):
+                    return contract['branch']
+                if args==('rev-parse','HEAD'):
+                    return old_head
+                if args==('diff','--cached','--name-only'):
+                    return ''
+                if args==('diff','--name-only','-z','HEAD'):
+                    return '\0'.join(files)+'\0'
+                if args==('ls-files','--others','--exclude-standard','-z'):
+                    return ''
+                if len(args)==3 and args[0]=='hash-object':
+                    return 'candidate-blob'
+                if len(args)==2 and args[0]=='rev-parse' and args[1].startswith('HEAD:'):
+                    return 'original-blob'
+                raise AssertionError(args)
+            with patch.object(loop,'git',side_effect=git), \
+                 patch.object(loop,'load_task',return_value=(original,'original frozen task')), \
+                 patch.object(loop,'read_pr',return_value={'head':{'sha':old_head},'draft':True}), \
+                 patch.object(loop,'ensure_no_active_runner_codex',return_value=None), \
+                 patch.object(loop.hashlib,'sha256',side_effect=digest_sha):
+                yield root,logs,contract,files
+
+    def test_fail_status_exact_modified_bytes_can_only_enter_fresh_validation(self):
+        with self.fixture() as (root,logs,task,files):
+            original,policy=loop.prepare_failed_codex_candidate_resume(
+                root,task,logs.name,{},files)
+            self.assertEqual(original,{})
+            self.assertEqual(policy['kind'],'failed_codex_candidate')
+            self.assertEqual(policy['previous_codex_status'],'FAIL')
+            self.assertEqual(set(policy['partial_files']),set(files))
+            self.assertEqual(policy['inherited_validation'],'NONE')
+            with patch.object(loop,'codex') as codex:
+                self.assertEqual(policy['previous_codex_status'],'FAIL')
+                codex.assert_not_called()
+
+    def test_tampered_candidate_file_and_unrelated_dirty_path_stop(self):
+        with self.fixture() as (root,logs,task,files):
+            (root/files[0]).write_text('UNAUTHORIZED changed bytes')
+            with self.assertRaisesRegex(loop.Stop,'hash/symlink drift'):
+                loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files)
+            with self.assertRaisesRegex(loop.Stop,'dirty-file scope'):
+                loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files[:1])
+
+    def test_nonfail_codex_cannot_be_promoted_to_pass(self):
+        with self.fixture() as (root,logs,task,files):
+            saved=logs/'codex-0.json'
+            record=json.loads(saved.read_text())
+            record['status']='PASS'
+            loop.save_json(saved,record)
+            with self.assertRaisesRegex(loop.Stop,'original developer FAIL'):
+                loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files)
+
+    def test_sha_contract_and_symlink_path_fail_closed(self):
+        with self.fixture() as (root,logs,task,files):
+            task['failed_codex_candidate_recovery']['source_sha256'][files[0]]='f'*64
+            with self.assertRaisesRegex(loop.Stop,'hash/symlink drift'):
+                loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files)
+            task['failed_codex_candidate_recovery']['source_sha256'][files[0]]=loop.digest(root/files[0])
+            p=root/files[1]
+            old=p.read_bytes()
+            p.unlink()
+            p.symlink_to(root/files[0])
+            with self.assertRaisesRegex(loop.Stop,'hash/symlink drift'):
+                loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files)
+
+
 class PR55BlockingResourceRepairTests(unittest.TestCase):
     """Authorization requires a real frozen FAIL, not an inferred QA PASS."""
 
