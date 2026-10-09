@@ -56,6 +56,30 @@ Hard guardrails:
 
 ## Merge evidence discipline
 
+## Delegated PR management and audit attribution
+
+The requirements owner has **delegated routine technical PR/merge decisions**
+to the AI coordinator within accepted product goals; do not ask them to
+act as PM, review each Low finding or hand-carry Codex/Claude prompts.
+Follow [ai-team-delivery](../ai-team-delivery/SKILL.md). Delegation
+does not waive independent gates, Mac validation, product/provider
+permissions, or the local controller-SHA approval requirement.
+
+After verifying all contract-required evidence, the coordinator can
+merge an eligible exact-head PR without repeatedly asking "may I merge?".
+Keep blocker/unfinished PRs Draft or Open, close genuinely obsolete PRs
+with a reason, and retain immutable evidence. Do not merge a failing
+controller helper just because Linux CI is green. Never treat the
+Mac operator's ability to type a command as permission for that command
+to run arbitrary new Git-fetched code.
+
+In the audit trail record **technical disposition author, reviewer,
+product scope confirmation, delegated merge authority, Git executor,**
+and exact refs separately. Do not attribute the coordinator's detailed
+risk analysis to the owner. Do not equate "delegated technical choice"
+with new powers to export credentials/data, spend unapproved funds,
+bypass branch protection or lower a required security gate.
+
 Before merge, verify the latest PR/head SHA and use exact-head checks. A report-only
 or documentation commit after a previously green implementation creates a new head;
 verify that head's required CI rather than citing only the older run. After merge,
