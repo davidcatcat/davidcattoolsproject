@@ -61,25 +61,39 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
-## Native self-development MVP — new cost-first priority
+## A11 native self-development — single product roadmap, interim ai-loop
 
-The nearest llmtool product goal is **not** expanding the temporary
-`ai-loop` launcher. The objective is llmtool's own scoped
-Codex CLI development → Claude CLI independent review → real tests →
-bounded repair → audited PR handoff, with quality-preserving **measured
-premium-token reduction** from selective company-model delegation.
+The product goal is **native llmtool-directed Codex CLI development,
+independent Claude CLI review, real tests, bounded repair and safe PR
+handoff**, with measured and quality-preserving Token savings when those
+routes are genuinely eligible. **A11b/A11c are the only active product
+milestones for that goal.** Historical C0–C3 are consolidated back into
+[the single A roadmap](ROADMAP.md) and documented only as legacy labels
+in [the original proposal](NATIVE_SELF_DEV_MVP.md). Do not implement
+a second C executor, QA framework or release line.
 
-[Release sequence and acceptance requirements](NATIVE_SELF_DEV_MVP.md):
-**C0** read-only llmtool development dogfood available now; **C1**
-deterministic real-test-output excerpt selection and company-only
-reliability/token benchmark; **C2** safety-reviewed native repository
-execution vertical slice; **C3** actual Mac self-development acceptance
-and ai-loop cutover. C1's deterministic opt-in utility is described below;
-its company-only Phase 0 and paired benchmark remain future, separately
-authorized steps. C2/C3 are proposed, **not yet implemented**.
-Existing Claude/Codex CLI providers are intentionally **text-only**
-and do not grant edit/test/Git capabilities. A11b process containment
-does not itself authorize real Git ADD or general execution.
+**Before llmtool can replace it, keep the existing operator SHA-pinned
+temporary `ai-loop` to coordinate Codex and Claude** through required
+tests/reviews and an audited PR handoff. This is a temporary operating
+workflow, **not a native llmtool feature**; its controller/launcher must
+not be silently changed or approved. Limit runner repairs to essential
+security/correctness/compatibility, not a second permanent product.
+The requirements owner supplies goals and product acceptance; the AI
+team owns technical management, development and evidence-backed review.
+
+**Immediate native milestone:** A11b.2.2.1 synthetic containment is
+merged; A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED.
+Design the next bounded executor slice and obtain independent Security
+review first ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)).
+A11c later performs real Mac Codex/Claude self-development acceptance
+and cutover. The merged local-only test-excerpt helper (legacy C1a,
+[PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55))
+stays available. Its final-output privacy follow-up
+([Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66))
+must pass before those excerpts go to **any provider**. Company-only
+reliability/Token benchmarks belong in A11c; full benchmarks do not
+block local A11b design, and other model-bound source/log/diff exports
+require their own independent data-boundary review and authorization.
 
 Cost evidence is route-specific: small PR #36 pilot was token-negative
 (Codex usage increased by 104.46%); one large-log L01 research pipeline
@@ -646,6 +660,12 @@ configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 comman
 及 A8 regression；目前有 A6 deterministic validator 及 analyze-log 窄 post-check，但從不執行建議命令。
 
 ## C1 — Offline captured-test excerpts
+
+**A-roadmap ownership:** this already merged, opt-in read-only utility is
+A11 diagnostics support / A11c evidence preparation; `C1` is retained
+here only for links to historical tests and PRs. No company/external
+LLM export is authorized until the separately reviewed output boundary
+and actual provider-data policy are satisfied.
 
 Inspect one explicitly selected raw Python test-output capture, using the exit
 code recorded by the caller when those tests ran:
