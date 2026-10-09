@@ -45,6 +45,11 @@ Because they are symlinks, updating this repository with `git pull` also updates
 
 The installer will not overwrite a real directory that already exists at a destination path.
 
+After adding a **new** skill directory, run the installer again on the Mac to create
+its new links. An existing symlink tracks future repo updates; `git pull` alone
+does not create a link for a newly introduced skill. Check local branch/dirty
+state before syncing, and do not replace the operator-owned ai-loop launcher.
+
 ## Recommended workflow
 
 Skills are deliberately separated by evidence type. A normal code review is not a
