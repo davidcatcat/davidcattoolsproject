@@ -6,8 +6,11 @@
 > back into the original A architecture and gates**. This file preserves the
 > original C terminology for traceability; all new product task contracts and
 > progress status use **A11b/A11c**, with C only as a legacy measurement alias.
-> **ai-loop remains the temporary SHA-approved Codex/Claude coordination runner
+> **ai-loop remains the temporary AI-reviewed Codex/Claude coordination runner
 > until native llmtool passes real Mac acceptance**, not a second product.
+> The owner reports its Mac launcher now executes the latest control branch
+> and appends local run history, without per-SHA `--approve`; the AI team
+> owns the pre-publication review/security/CI/Mac release gate.
 > No existing permission, security, QA, Mac or provider egress gate is waived.
 
 Status: **PROPOSED / DESIGN ONLY / NO IMPLEMENTATION AUTHORITY** (2026-10-09).
@@ -224,14 +227,17 @@ acceptance designs above. See the sole A↔C mapping in
    bounded repair, approved PR publication and fail-closed STOP. Only
    when llmtool meets equivalent Security/Functional QA and operational
    evidence can it replace the **currently active temporary ai-loop**
-   collaboration workflow. Until then, maintain the existing operator
-   SHA-approved launcher and only fix its essential security/stability
+   collaboration workflow. Until then, maintain the user-reported
+   auto-updating controller launcher **under AI-controlled pre-publication
+   reviews and required tests**, and fix only essential security/stability
    faults; do not build a second controller product.
 5. Do not renumber A milestones or rewrite prior validation reports,
    PR evidence or this proposal's original requirement paragraphs.
-   General delegated merge authority is **not** Mac controller-SHA
-   approval, model provider export authorization or permission to skip
-   the required independent/Mac gates.
+   Controller change/release authority is delegated to AI: do not
+   request per-SHA Mac approval. General Git merge delegation still
+   does **not** authorize unreviewed auto-executed controller commits,
+   model provider export, broader host/network permissions or permission
+   to skip required independent/Mac gates.
 
 **Not a deployment timeline:** phase gates, not dates. Code/CI/natively
 observed behaviors determine launch availability; the planned future
