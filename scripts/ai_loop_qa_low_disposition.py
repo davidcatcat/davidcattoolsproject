@@ -278,6 +278,53 @@ def code_review(state):
         target.chmod(0o600)
     print("[QA Low] Independent controller code review PASS.")
 
+
+def publish_sanitized_once(state, body, public_key):
+    """Reconcile the Issue comment before posting, including post-success crash.
+
+    A write after GitHub accepted the comment may be interrupted before the
+    local marker is saved. A re-run must identify the exact comment remotely,
+    rather than post the same six findings twice.
+    """
+    if not re.fullmatch(r"qa-low-[0-9]{8}T[0-9]{6}Z-[0-9]+-[a-f0-9]{64}", public_key):
+        raise Stop("invalid source-bound public report identity")
+    if public_key not in body or len(body.encode("utf-8")) > 16 * 1024:
+        raise Stop("public report failed source identity or size constraints")
+    fingerprint = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    marker = state / "published"
+    if marker.exists():
+        if safe_file(marker, 256).decode("ascii").strip() != fingerprint:
+            raise Stop("previous public-report marker disagrees with assessment")
+        return "previously published"
+
+    # Avoid a second POST after a network return/marker crash, without exposing
+    # any private model text. Fail closed if the API response is not exhaustive.
+    comments = json.loads(command(
+        "gh", "api", "-X", "GET",
+        "repos/" + REPO + "/issues/56/comments?per_page=100"))
+    if not isinstance(comments, list) or len(comments) >= 100:
+        raise Stop("cannot exhaustively reconcile prior Issue publications")
+    matches = [c for c in comments if isinstance(c, dict)
+               and isinstance(c.get("body"), str)
+               and public_key in c["body"]]
+    if len(matches) > 1:
+        raise Stop("multiple preexisting Issue publications for same source")
+    if matches:
+        if matches[0]["body"] != body:
+            raise Stop("Issue already has different disposition for frozen QA")
+    else:
+        response = command("gh", "api", "--method", "POST",
+                           "repos/" + REPO + "/issues/56/comments",
+                           "-f", "body=" + body)
+        record = json.loads(response)
+        if (not isinstance(record, dict) or record.get("body") != body
+                or type(record.get("id")) is not int):
+            raise Stop("Issue publication could not be verified")
+    with marker.open("x", encoding="ascii") as output:
+        output.write(fingerprint + "\n")
+    marker.chmod(0o600)
+    return "verified publication"
+
 def main():
     if len(sys.argv) != 3 or sys.argv[1] != "--qa-low":
         raise Stop("expected exactly --qa-low " + QA_RUN)
@@ -381,12 +428,14 @@ def main():
         result_file.chmod(0o600)
     # No approval is given even for ACCEPT. Coordinator reviews the fixed enums.
     action_by_sha = {r["finding_sha256"]: r["action"] for r in rows}
+    public_key = ("qa-low-" + QA_RUN + "-" + inventory["qa_record_sha256"])
     lines = [
         "### Six Low findings: read-only model-assisted disposition (NOT merge approval)",
         "", "- PR HEAD: `" + PR_HEAD + "`",
         "- Original QA run: `" + QA_RUN + "`",
         "- QA diff SHA256: `" + DIFF_SHA + "`",
         "- Original QA record SHA256: `" + inventory["qa_record_sha256"] + "`",
+        "- Publication key: `" + public_key + "`",
         "- Detail/rationale: Mac-private; not published",
         "", "| Role | Finding SHA256 | Allowed file | Disposition |",
         "| --- | --- | --- | --- |",
@@ -397,16 +446,8 @@ def main():
                      action_by_sha[r["finding_sha256"]] + " |")
     lines.append("\nCoordinator individual signoff PENDING; merge NOT authorized.")
     public = "\n".join(lines)
-    marker = state / "published"
-    if marker.exists():
-        if safe_file(marker, 256).strip() != hashlib.sha256(public.encode()).hexdigest().encode():
-            raise Stop("previous public-report marker disagrees with assessment")
-    else:
-        check_state()
-        command("gh", "api", "--method", "POST",
-                "repos/" + REPO + "/issues/56/comments", "-f", "body=" + public)
-        marker.write_text(hashlib.sha256(public.encode()).hexdigest() + "\n")
-        marker.chmod(0o600)
+    check_state()
+    publish_sanitized_once(state, public, public_key)
     print("[QA Low] Six original findings classified and safe metadata published.")
     print("[QA Low] Coordinator signoff/merge remain PENDING.")
 
