@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Live Security FAIL triage rather than re-running C1/QA (2026-10-09)
+
+PR #55 HEAD `d5ecfce9f7e28da2983affb235dd942d51388723` has passed deterministic local/GitHub checks but **fresh Security FAIL** at [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6070341161), run `20261008T221753Z-44339`, 1 actionable finding in `test_output_excerpts.py`. Functional QA was **not started**. No new code, CI, merge, or accepted risk follows from that failure. Never re-run ordinary C1/QA, let the user manually shuttle private model prompts/results, or call a model to override FAIL.
+
+The temporary controller now provides **`bash .git/ai-loop/run.sh --qa-security-fail 20261008T221753Z-44339`**: verify original frozen task, exact PR and cumulative diff SHA, private `claude-201.json` and `qa-pr55.json`, and matching original public Issue comment. Only then perform one isolated bounded read-only Claude *risk classification* if no prior saved output exists; reuse existing result without model replay otherwise. Public GitHub output is exclusively controlled enums (category, action, confidence) plus severity, blocking status, source file/line and hashes; raw model text/credentials remain local. The earlier Security FAIL and merge block stay binding.
+
+Operator invocation authorized **only after exact-current-control-head Python 3.9/3.14 Helper CI PASS**. Coordinator must separately authorize any narrowly scoped Codex correction on the same PR HEAD, rerun tests and specialist QA on new source. No auto-merge, no provider routing and no token-cost claim.
+
+
 ## Current exact-head handoff — post-Medium-fix QA on PR #55
 
 PR #55 remains Draft/unmerged at source HEAD `d5ecfce9f7e28da2983affb235dd942d51388723`. Codex's targeted original Medium fix passed both Mac full suites per runner and exact-head GitHub CI Python 3.9/3.14. This is **not** equivalent to the independent Security and Functional QA acceptance: those old PASS records target the original `67d02be6` source and became stale.
