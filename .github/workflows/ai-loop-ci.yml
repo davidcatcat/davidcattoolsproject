@@ -8,6 +8,8 @@ on:
     paths:
       - 'scripts/ai_loop.py'
       - 'scripts/ai_loop_qa_low_inventory.py'
+      - 'scripts/ai_loop_qa_low_disposition.py'
+      - 'scripts/test_ai_loop_qa_low_disposition.py'
       - 'scripts/test_ai_loop_qa_low_inventory.py'
       - 'scripts/ai_loop_maintenance.py'
       - 'scripts/test_ai_loop_maintenance.py'
@@ -46,7 +48,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Python syntax
-        run: python -m py_compile scripts/ai_loop.py scripts/test_ai_loop.py scripts/ai_loop_maintenance.py scripts/test_ai_loop_maintenance.py scripts/ai_loop_qa_low_inventory.py scripts/test_ai_loop_qa_low_inventory.py
+        run: python -m py_compile scripts/ai_loop.py scripts/test_ai_loop.py scripts/ai_loop_maintenance.py scripts/test_ai_loop_maintenance.py scripts/ai_loop_qa_low_inventory.py scripts/test_ai_loop_qa_low_inventory.py scripts/ai_loop_qa_low_disposition.py scripts/test_ai_loop_qa_low_disposition.py
       - name: Bash launcher syntax
         run: bash -n scripts/ai-loop.sh
       - name: Offline helper regression suite
@@ -57,3 +59,6 @@ jobs:
 
       - name: Frozen QA inventory negative tests
         run: python scripts/test_ai_loop_qa_low_inventory.py
+
+      - name: Private disposition schema negative tests
+        run: python scripts/test_ai_loop_qa_low_disposition.py
