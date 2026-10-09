@@ -39,12 +39,34 @@ _SENSITIVE = re.compile(
     r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
     r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|'
     r'\b(?:bearer|basic)\s+\S+|'
     r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
     r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.IGNORECASE)
+_JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
+_JWT_START = re.compile(r'\beyJ', re.IGNORECASE)
+_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
+
+
+def _sensitive_jwt(text):
+    # Consume maximal, non-overlapping segments once. A JWT's first two
+    # segments must end at dots; its last may end at an internal word boundary.
+    # Each bounded prefix search / anchored tail match scans at most one
+    # segment, never the remaining source from every overlapping eyJ start.
+    # Retain re.IGNORECASE's Unicode letters and the original word boundaries.
+    previous_end, first, second = None, False, False
+    for segment in _JWT_SEGMENT.finditer(text):
+        start, end = segment.span()
+        adjacent = (previous_end is not None and start == previous_end + 1
+                    and text[previous_end] == '.')
+        if adjacent and second and _JWT_END.match(text, start):
+            return True
+        second = adjacent and first and end - start >= 8
+        first = (end - start >= 11
+                 and _JWT_START.search(text, start, end - 8) is not None)
+        previous_end = end
+    return False
 
 
 def _sensitive_url(text):
@@ -178,7 +200,7 @@ def _lines(raw):
            or (c == '\r' and (i + 1 == len(text) or text[i + 1] != '\n'))
            for i, c in enumerate(text)):
         raise _error('source contains binary or unsafe controls')
-    if _SENSITIVE.search(text) or _sensitive_url(text):
+    if _SENSITIVE.search(text) or _sensitive_jwt(text) or _sensitive_url(text):
         raise _error('source contains sensitive-content indicators')
     if raw.count(b'\n') > MAX_SOURCE_LINES:
         raise _error('source line count exceeds bound')

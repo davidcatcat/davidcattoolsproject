@@ -130,6 +130,28 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), raw)
         return json.loads(completed.stdout)
 
+    def near_limit_capture(self, prefix, unit, suffix=b''):
+        size = MAX_FILE_BYTES - 1 - len(prefix) - len(suffix)
+        raw = prefix + (unit * (size // len(unit) + 1))[:size] + suffix
+        self.assertEqual(len(raw), MAX_FILE_BYTES - 1)
+        return raw
+
+    def assert_sensitive_with_deadline(self, raw):
+        # The entire child stdout must decode to this fixed object, and the
+        # deadline helper also requires empty stderr and an unchanged capture.
+        self.assertEqual(self.select_with_deadline(raw), {
+            'error': 'test-excerpts: source contains sensitive-content indicators; details omitted',
+        })
+
+    def assert_unknown_with_deadline(self, raw):
+        result = self.select_with_deadline(raw)
+        self.assert_provenance(result, raw)
+        self.assert_incomplete(result, 'unknown_format')
+        self.assertEqual(result['test_status'], 'FAILED')
+        self.assertEqual(result['test_exit_code'], 1)
+        self.assertEqual(result['failure_ids'], [])
+        self.assertEqual(result['excerpts'], [])
+
     def test_unittest_failure_error_duplicate_ids_and_counts(self):
         raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('ERROR', ERROR_ID, ERROR_BODY),
                                 ('FAIL', FAIL_ID, FAIL_BODY.replace('evidence', 'second'))])
@@ -359,7 +381,8 @@ class TestOutputExcerptsTests(unittest.TestCase):
                           'Authorization: Bearer FIXTURE_VALUE', 'token="FIXTURE_VALUE"',
                           '-----BEGIN PRIVATE KEY-----', 'AKIA' + 'A' * 16,
                           'github_pat_' + 'a' * 24, 'https://user:FIXTURE_VALUE@example.invalid',
-                          'sk-' + 'a' * 24):
+                          'sk-' + 'a' * 24,
+                          'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8):
             with self.subTest(indicator=indicator):
                 self.path.write_bytes(indicator.encode() + b'\n' + UNIT_FAILURE)
                 with self.assertRaises(LLMToolError) as caught:
@@ -367,6 +390,89 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertNotIn('FIXTURE_VALUE', str(caught.exception))
                 self.assertNotIn(indicator, str(caught.exception))
                 self.assertNotIn(str(self.path), str(caught.exception))
+
+    def test_jwt_shapes_preserve_case_segments_and_word_boundaries(self):
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        tokens = (jwt, jwt.upper(), 'prefix-' + jwt, 'prefix.' + jwt,
+                  'eyJ-' * 6 + jwt, jwt + '-trailer', jwt + '.extra',
+                  'eyJ' + '_' * 8 + '.' + '-' * 8 + '.' + '_' * 8,
+                  'eyJ' + '\u0130' * 8 + '.' + '\u017f' * 8 + '.' + '\u212a' * 8,
+                  'eyJaaaaaaaa.bbbbbbbb.-------a',
+                  'eyJaaaaaaaa.bbbbbbbb.aaaaaaa-測')
+        for token in tokens:
+            with self.subTest(token=token):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + token)])
+                self.assert_sensitive_with_deadline(raw)
+
+    def test_non_jwt_shapes_preserve_supported_report_coverage(self):
+        tokens = ('eyJaaaaaaa.bbbbbbbb.cccccccc',
+                  'eyJaaaaaaaa.bbbbbbb.cccccccc',
+                  'eyJaaaaaaaa.bbbbbbbb.ccccccc',
+                  'eyJaaaaaaaa.bbbbbbbb.--------',
+                  'eyJaaaaaaaa.bbbbbbbb.aaaaaaa-!',
+                  'eyJaaaaaaaa..bbbbbbbb.cccccccc',
+                  'eyJaaaaaaaa.bbbbbbbb',
+                  'eyJaaaaaaaa/bbbbbbbb.cccccccc',
+                  'aeyJaaaaaaaa.bbbbbbbb.cccccccc',
+                  '測eyJaaaaaaaa.bbbbbbbb.cccccccc')
+        for token in tokens:
+            with self.subTest(token=token):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + token)])
+                result = self.select(raw)
+                self.assertEqual(result['status'], 'COMPLETE')
+                self.assertEqual(result['test_status'], 'FAILED')
+                self.assertEqual(result['failure_ids'], [FAIL_ID])
+
+    def test_near_limit_jwt_scan_completes_without_false_success(self):
+        # Repeated boundary-bearing prefixes, missing dots, and short or
+        # boundary-less segments must complete rather than time out or leak.
+        cases = ((b'', b'eyJ-'), (b'', b'EyJ-'), (b'', b'eyJa'),
+                 (b'', b'eyJ_'), (b'', b'eyJaaaaaaa.'),
+                 (b'eyJaaaaaaaa.', b'eyJ-'),
+                 (b'eyJaaaaaaaa.', b'aaaaaaa.'),
+                 (b'eyJaaaaaaaa.aaaaaaaa.', b'-'))
+        for prefix, unit in cases:
+            with self.subTest(prefix=prefix, unit=unit):
+                self.assert_unknown_with_deadline(self.near_limit_capture(prefix, unit))
+
+    def test_near_limit_jwt_credentials_remain_rejected(self):
+        # Exercise unbounded first, second and third segments, including a
+        # tail whose valid word boundary precedes its final hyphen.
+        cases = ((b'', b'eyJ-', b'.aaaaaaaa.aaaaaaaa\n'),
+                 (b'eyJaaaaaaaa.', b'eyJ-', b'.aaaaaaaa\n'),
+                 (b'eyJaaaaaaaa.aaaaaaaa.', b'-', b'a\n'),
+                 (b'eyJaaaaaaaa.aaaaaaaa.', b'a-', b'!\n'))
+        for prefix, unit, suffix in cases:
+            with self.subTest(prefix=prefix, unit=unit):
+                self.assert_sensitive_with_deadline(self.near_limit_capture(prefix, unit, suffix))
+
+    def test_near_limit_other_sensitive_branches_have_explicit_oracles(self):
+        # Fixed-width keys and prefix patterns without a required suffix
+        # must not hide a timeout behind a generic rejection. Also cover the
+        # unbounded PEM/whitespace runs with both missing and present suffixes.
+        cases = (
+            (b'-----BEGIN ', b'A', b'', False),
+            (b'-----BEGIN ', b'A', b' PRIVATE KEY-----', True),
+            (b'', b'AKIA' + b'A' * 15 + b'-', b'', False),
+            (b'', b'AKIA' + b'A' * 15 + b'-', b'-AKIA' + b'A' * 16, True),
+            (b'', b'sk-' + b'a' * 11 + b'!', b'', False),
+            (b'sk-', b'a', b'', True),
+            (b'', b'ghp_' + b'a' * 19 + b'!', b'', False),
+            (b'github_pat_', b'a', b'', True),
+            (b'', b'xoxb-' + b'a' * 19 + b'!', b'', False),
+            (b'xoxb-', b'a', b'', True),
+            (b'bearer', b' ', b'', False),
+            (b'basic', b' ', b'FIXTURE_VALUE', True),
+            (b'token', b' ', b'', False),
+            (b'password', b' ', b'=', True),
+        )
+        for prefix, unit, suffix, sensitive in cases:
+            with self.subTest(prefix=prefix, unit=unit, sensitive=sensitive):
+                raw = self.near_limit_capture(prefix, unit, suffix)
+                if sensitive:
+                    self.assert_sensitive_with_deadline(raw)
+                else:
+                    self.assert_unknown_with_deadline(raw)
 
     def test_near_limit_url_scan_completes_without_false_success(self):
         cases = ((b'', b'a'), (b'', b'7'), (b'', b'+.-'), (b'', b'a7+.-'),
