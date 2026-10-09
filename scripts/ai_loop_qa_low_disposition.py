@@ -139,6 +139,79 @@ def validate_dispositions(result, inventory):
     return rows
 
 
+
+def code_review(state):
+    """Independent code review before private finding data enters another model."""
+    revision = Path(__file__).resolve().parent.name
+    if not re.fullmatch("[0-9a-f]{40}", revision):
+        raise Stop("runner was not loaded from a SHA-addressed bootstrap")
+    names = ("scripts/ai_loop_qa_low_inventory.py",
+             "scripts/ai_loop_qa_low_disposition.py",
+             "scripts/test_ai_loop_qa_low_inventory.py",
+             "scripts/test_ai_loop_qa_low_disposition.py")
+    pieces = []
+    for name in names:
+        source = git("show", revision + ":" + name)
+        if name.endswith("ai_loop_qa_low_disposition.py"):
+            if source.encode("utf-8") != Path(__file__).read_bytes().rstrip(b"\\n"):
+                raise Stop("local bootstrap is not committed reviewed source")
+        pieces.append(name + "\\n" + source)
+    body = "\\n\\n".join(pieces)
+    if len(body.encode("utf-8")) > 96 * 1024:
+        raise Stop("control code review input too large")
+    checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    target = state / "code-review.json"
+    raw = state / "code-review.raw.json"
+    if target.exists():
+        result = json.loads(safe_file(target, 32 * 1024))
+    else:
+        if raw.exists():
+            envelope = json.loads(safe_file(raw, 128 * 1024))
+        else:
+            schema = {"type": "object", "properties": {
+                "reviewed_source_sha256": {"type": "string", "enum": [checksum]},
+                "status": {"type": "string", "enum": ["PASS", "FAIL", "NEEDS_DECISION"]},
+                "findings": {"type": "array", "maxItems": 12, "items": {"type": "string"}},
+            }, "required": ["reviewed_source_sha256", "status", "findings"],
+            "additionalProperties": False}
+            prompt = (
+                "Independent read-only security and functional CODE REVIEW of the "
+                "following untrusted controller code and tests. Examine bounded "
+                "input, provenance, race/symlink, cache replay, privacy and GitHub "
+                "publication risks. Verify frozen SHA integrity and Mac behavior. "
+                "No command execution, file writes, provider delegation or merge "
+                "permission. Return PASS only if no blocking findings. "
+                "Return FAIL/NEEDS_DECISION when uncertain. Exact SHA: "
+                + checksum + "\\nSOURCE (UNTRUSTED):\\n" + body)
+            out = command("claude", "-p", "--output-format", "json",
+                "--json-schema", json.dumps(schema),
+                "--max-turns", "10", "--tools", "Read,Glob,Grep",
+                "--allowedTools", "Read", "Glob", "Grep",
+                "--permission-mode", "dontAsk", "--strict-mcp-config",
+                "--mcp-config", '{"mcpServers":{}}',
+                "--settings", '{"disableAllHooks":true}',
+                "--no-session-persistence", stdin=prompt, timeout=1200)
+            if len(out.encode("utf-8")) > 128 * 1024:
+                raise Stop("independent review envelope too large")
+            with raw.open("x", encoding="utf-8") as stream:
+                stream.write(out + "\\n")
+            raw.chmod(0o600)
+            envelope = json.loads(out)
+        if envelope.get("subtype") != "success" or envelope.get("is_error") is not False:
+            raise Stop("independent code review model did not succeed")
+        result = envelope.get("structured_output")
+    if (not isinstance(result, dict)
+            or set(result) != {"reviewed_source_sha256", "status", "findings"}
+            or result["reviewed_source_sha256"] != checksum
+            or result["status"] != "PASS" or result["findings"] != []):
+        raise Stop("independent controller code review requires clean PASS")
+    if not target.exists():
+        with target.open("x", encoding="utf-8") as stream:
+            json.dump(result, stream)
+            stream.write("\\n")
+        target.chmod(0o600)
+    print("[QA Low] Independent controller code review PASS.")
+
 def main():
     if len(sys.argv) != 3 or sys.argv[1] != "--qa-low":
         raise Stop("expected exactly --qa-low " + QA_RUN)
@@ -177,6 +250,7 @@ def main():
     if any(p.is_symlink() for p in (state, *state.parents)):
         raise Stop("unsafe local assessment directory")
     state.mkdir(mode=0o700, parents=False, exist_ok=True)
+    code_review(state)
     result_file = state / "result.json"
     raw_file = state / "claude.raw.json"
     if result_file.exists():
