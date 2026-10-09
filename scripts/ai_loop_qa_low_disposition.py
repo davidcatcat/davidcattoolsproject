@@ -181,11 +181,30 @@ def validate_dispositions(result, inventory):
 
 
 
+def verify_bootstrap_blob(script_path, revision):
+    """Authenticate exact Git blob bytes; never compare a stripped command string.
+
+    Both 'git show' helpers normalize stdout for prompts. That normalization
+    must not be used as an integrity check on an executable Python file.
+    Git hash-object (without -w) hashes the real read-only file bytes.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise Stop("runner was not loaded from a SHA-addressed bootstrap")
+    script_path = Path(script_path)
+    if script_path.is_symlink() or not script_path.is_file():
+        raise Stop("unsafe local bootstrap source")
+    expected = git("rev-parse", revision + ":scripts/ai_loop_qa_low_disposition.py")
+    observed = git("hash-object", "--", str(script_path))
+    if (not re.fullmatch(r"[0-9a-f]{40,64}", expected)
+            or not re.fullmatch(r"[0-9a-f]{40,64}", observed)
+            or observed != expected):
+        raise Stop("local bootstrap Git blob does not match pinned control revision")
+
+
 def code_review(state):
     """Independent code review before private finding data enters another model."""
     revision = Path(__file__).resolve().parent.name
-    if not re.fullmatch("[0-9a-f]{40}", revision):
-        raise Stop("runner was not loaded from a SHA-addressed bootstrap")
+    verify_bootstrap_blob(Path(__file__), revision)
     names = ("scripts/ai_loop_qa_low_inventory.py",
              "scripts/ai_loop_qa_low_disposition.py",
              "scripts/test_ai_loop_qa_low_inventory.py",
@@ -193,9 +212,6 @@ def code_review(state):
     pieces = []
     for name in names:
         source = git("show", revision + ":" + name)
-        if name.endswith("ai_loop_qa_low_disposition.py"):
-            if source.encode("utf-8") != Path(__file__).read_bytes().rstrip(b"\n"):
-                raise Stop("local bootstrap is not committed reviewed source")
         pieces.append(name + "\n" + source)
     body = "\n\n".join(pieces)
     if len(body.encode("utf-8")) > 96 * 1024:
