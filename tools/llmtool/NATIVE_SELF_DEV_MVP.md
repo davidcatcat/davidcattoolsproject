@@ -9,7 +9,8 @@
 > **ai-loop remains the temporary AI-reviewed Codex/Claude coordination runner
 > until native llmtool passes real Mac acceptance**, not a second product.
 > The owner reports its Mac launcher now executes the latest control branch
-> and appends local run history, without per-SHA `--approve`; the AI team
+> and appends local `.git/ai-loop/run-history.log` on each invocation,
+> without per-SHA `--approve`; the AI team
 > owns the pre-publication review/security/CI/Mac release gate.
 > No existing permission, security, QA, Mac or provider egress gate is waived.
 
