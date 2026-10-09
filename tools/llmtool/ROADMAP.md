@@ -13,6 +13,8 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 
 ## Near-term release priority — cost-first native self-development (2026-10-09)
 
+**Implementation status update (2026-10-09):** C1a deterministic local unittest/pytest failure excerpts **DONE / merged** through [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55), merge `27bee10a9ffbab90fd088172ef3aea03fde80556`, with specialist Security/Functional QA PASS and 3 ACCEPT / 3 DEFER nonblocking Low dispositions. **Next engineering work is C1b.0** offline final-excerpt sensitive validation [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) under the parent [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). C1b company-only Phase 0 and C1c premium-token savings measurements remain **NOT STARTED**; no provider egress is authorized. The C1a scope supports unittest/pytest; JUnit XML remains unsupported. This status supersedes the historical *FIRST NEW DELIVERY* planning label below without changing the original staged design.
+
 **Primary goal:** make `llmtool` itself safely coordinate Codex CLI
 implementation, Claude CLI independent review, deterministic testing,
 bounded repair and authorized PR handoff for developing `llmtool`, while
