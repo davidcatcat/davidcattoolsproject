@@ -158,7 +158,7 @@ def main():
         raise Stop("original QA task/provenance mismatch")
     inventory = frozen_inventory(private / "qa-pr55.json")
     original_qa = json.loads(safe_file(private / "qa-pr55.json", 256 * 1024))
-    state = ROOT / ".ai-loop" / "qa-low-disposition-" + QA_RUN if False else ROOT / ".ai-loop" / ("qa-low-disposition-" + QA_RUN)
+    state = ROOT / ".ai-loop" / ("qa-low-disposition-" + QA_RUN)
     if any(p.is_symlink() for p in (state, *state.parents)):
         raise Stop("unsafe local assessment directory")
     state.mkdir(mode=0o700, parents=False, exist_ok=True)
