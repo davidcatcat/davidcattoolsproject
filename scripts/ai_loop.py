@@ -1759,8 +1759,8 @@ def prepare_failed_codex_candidate_resume(root, task, run_id, original_untracked
             or provenance.get('base') != task['base_sha']
             or provenance.get('start_head') != sha
             or provenance.get('start_branch') != task['branch']
-            or summary.get('run_id') != run_id
-            or summary.get('task_id') != task['task_id']
+            # STOPPED summary intentionally has no run_id/task_id fields;
+            # identity comes from frozen task/provenance and the directory name.
             or summary.get('status') != 'STOPPED'
             or summary.get('head') != sha
             or summary.get('branch') != task['branch']
