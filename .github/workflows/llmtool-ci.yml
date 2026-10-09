@@ -44,12 +44,15 @@ jobs:
           cp -a "$src" "$dst"
           chmod -R go-w "$dst"
           exe="$dst/${src_exe#"$src"/}"
-          test -f "$exe" && test ! -L "$exe"
-          test "$(stat -c %u "$exe")" = "$(id -u)"
-          test $(( 0$(stat -c %a "$exe") & 022 )) -eq 0
-          test -z "$(find "$dst" -perm /022 -print -quit)"
-          test "$(sha256sum < "$exe")" = "$(sha256sum < "$src_exe")"
-          "$exe" -c 'import os,sys; assert os.path.realpath(sys.executable).startswith(os.environ["RUNNER_TEMP"])'
+          fail() { echo "::error::job-owned Python check failed: $1"; exit 1; }
+          { test -f "$exe" && test ! -L "$exe"; } || fail "interpreter is not a regular file"
+          test "$(stat -c %u "$exe")" = "$(id -u)" || fail "interpreter not owned by job user"
+          test $(( 0$(stat -c %a "$exe") & 022 )) -eq 0 || fail "interpreter group/other writable"
+          # Symlinks always report 0777 on Linux; their targets are checked.
+          test -z "$(find "$dst" ! -type l -perm /022 -print -quit)" || fail "writable file left in copy"
+          test "$(sha256sum < "$exe")" = "$(sha256sum < "$src_exe")" || fail "interpreter bytes differ"
+          "$exe" -c 'import os,sys; assert os.path.realpath(sys.executable).startswith(os.environ["RUNNER_TEMP"])' \
+            || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
         run: |
