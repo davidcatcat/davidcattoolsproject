@@ -217,6 +217,110 @@ class C1SpecialistQAGatesTests(unittest.TestCase):
                     loop.independent_qa_pr55(root, logs, task, 'task', {})
                 review.assert_not_called()
 
+class PR55FinalJWTReviewTests(unittest.TestCase):
+    """Final source-revision QA is fresh, two-role and cannot inherit old PASS."""
+
+    @contextmanager
+    def qa_case(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            head='ee8180bc3ad5c455b63e493fee9f2955a90c5463'
+            paths=[
+                'tools/llmtool/llmtool/test_output_excerpts.py',
+                'tools/llmtool/llmtool/cli.py',
+                'tools/llmtool/tests/test_test_output_excerpts.py',
+                'tools/llmtool/tests/test_cli.py',
+                'tools/llmtool/README.md',
+                'reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md',
+                'reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md',
+                'reports/ai-loop/C1-PR55-SecurityFail-ResourceFix-20261009-20261009T043757Z-54800.md']
+            for p in paths:
+                file=root/p
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text('fixed, private dummy file')
+            logs=root/'.ai-loop'/'20261009T140000Z-4242'
+            logs.mkdir(parents=True)
+            task={
+                'task_id':'C1-PR55-PostJWT-Security-Functional-QA-20261009',
+                'mode':'review_existing_pr','pr_number':55,
+                'branch':'feat/llmtool-c1-test-excerpts-20261009',
+                'expected_head':head,
+                'base_sha':'8e29024656f873431f6ad83e45015b57bfe381a9',
+                'allowed_files':paths,
+                'qa_gates':['security','functional_qa'], 'max_repairs':0,
+                'timeout_seconds':1800,'ci_workflow':'llmtool-ci.yml'}
+            before={p:(root/p).read_bytes() for p in paths}
+            def git(_root,*args):
+                table={
+                    ('branch','--show-current'):task['branch'],
+                    ('rev-parse','HEAD'):head,
+                    ('status','--porcelain'):'',
+                    ('diff','--name-only','-z',task['base_sha'],head):'\0'.join(paths)+'\0',
+                    ('diff','--no-ext-diff','--no-textconv',task['base_sha'],head):
+                        'diff --git a/test_output_excerpts.py b/test_output_excerpts.py\n+_sensitive_jwt'
+                }
+                if args not in table:
+                    raise AssertionError(args)
+                return table[args]
+            with patch.object(loop,'git',side_effect=git), \
+                 patch.object(loop,'check_scope',return_value=[]), \
+                 patch.object(loop,'read_pr',return_value={'head':{'sha':head},'draft':True}), \
+                 patch.object(loop,'wait_ci',return_value=[{'conclusion':'success'}]):
+                yield root,logs,task,head,before
+
+    def test_new_head_two_independent_reviews_have_specific_jwt_attack_rubric(self):
+        with self.qa_case() as (root,logs,task,head,before):
+            calls,public,suites=[],[],[]
+            def reviewer(_root,_logs,prompt,number,timeout,reviewed):
+                calls.append((number,prompt,reviewed))
+                return {'status':'PASS','reviewed_head':head,
+                        'summary':'PRIVATE-JWT-REVIEW','findings':[]}
+            with patch.object(loop,'tests',side_effect=lambda *args:suites.append(args[4]) or True), \
+                 patch.object(loop,'claude',side_effect=reviewer), \
+                 patch.object(loop,'run',side_effect=lambda args,_root:public.append(args[-1]) or '{"id":1}'):
+                loop.independent_qa_pr55(root,logs,task,'post-JWT authoritative contract',{})
+            self.assertEqual(suites,['related','full-final'])
+            self.assertEqual([n for n,_,_ in calls],[201,202])
+            self.assertEqual([h for _,_,h in calls],[head,head])
+            self.assertIn('MANDATORY FINAL JWT/URL SECURITY REGRESSION',calls[0][1])
+            self.assertIn('previous Medium',calls[0][1])
+            self.assertIn('MANDATORY FINAL JWT/URL FUNCTIONAL REGRESSION',calls[1][1])
+            self.assertEqual(before,{p:(root/p).read_bytes() for p in task['allowed_files']})
+            self.assertEqual(json.loads((logs/'qa-pr55.json').read_text())['qa_result'],'PASS')
+            self.assertEqual(len(public),1)
+            self.assertNotIn('PRIVATE-JWT-REVIEW',public[0])
+
+    def test_new_head_medium_even_model_pass_blocks_functional_qa(self):
+        with self.qa_case() as (root,logs,task,head,before):
+            calls,public=[],[]
+            def reviewer(_root,_logs,prompt,number,timeout,reviewed):
+                calls.append(number)
+                return {'status':'PASS','reviewed_head':head,
+                    'summary':'PRIVATE-JWT-RISK-DETAIL',
+                    'findings':[{'severity':'Medium','blocking':False,
+                        'file':task['allowed_files'][0],
+                        'detail':'PRIVATE-ISSUE-DETAIL',
+                        'evidence':'PRIVATE-ISSUE-EVIDENCE'}]}
+            with patch.object(loop,'tests',return_value=True), \
+                 patch.object(loop,'claude',side_effect=reviewer), \
+                 patch.object(loop,'run',side_effect=lambda args,_root:public.append(args[-1]) or '{"id":1}'):
+                with self.assertRaisesRegex(loop.Stop,'specialist review not PASS'):
+                    loop.independent_qa_pr55(root,logs,task,'postfix task',{})
+            self.assertEqual(calls,[201])
+            self.assertEqual(json.loads((logs/'qa-pr55.json').read_text())['qa_result'],'STOPPED')
+            self.assertEqual(len(public),1)
+            self.assertNotIn('PRIVATE-ISSUE-',public[0])
+            self.assertNotIn('PRIVATE-JWT-RISK-',public[0])
+
+    def test_older_head_draft_or_eight_path_inventory_drifts_before_models(self):
+        with self.qa_case() as (root,logs,task,head,before):
+            task['allowed_files']=task['allowed_files'][:-1]
+            with patch.object(loop,'tests') as suites,patch.object(loop,'claude') as reviewer:
+                with self.assertRaisesRegex(loop.Stop,'changed-file inventory'):
+                    loop.independent_qa_pr55(root,logs,task,'bad inventory',{})
+                suites.assert_not_called()
+                reviewer.assert_not_called()
+
 class PR55MediumRepairAuthorityTests(unittest.TestCase):
     """The one original private Medium finding is the ONLY new writer authority."""
 
