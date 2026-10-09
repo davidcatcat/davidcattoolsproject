@@ -1,0 +1,9 @@
+{
+  "status": "STOPPED",
+  "head": "a6487b20095350c2ba3b443a6b90dd5235115b0b",
+  "branch": "feat/a11b222-f1-private-git-add-20261010-r2",
+  "run_id": "20261009T161637Z-85947",
+  "task_id": "A11b222-F1-PrivateGitADD-R2-20261010",
+  "source_summary_sha256": "6c40a43d0cc36a4ea373c59ef740d5dd8d6584463ebd1a85eaa37cfe7999cb3a",
+  "rounds": []
+}
