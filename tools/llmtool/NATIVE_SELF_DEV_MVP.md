@@ -1,7 +1,7 @@
 # llmtool native self-development MVP — cost-first release plan
 
 > **Historical C-labelled delivery proposal, not an additional milestone system.** The
-> authoritative implementation roadmap is [A11 in ROADMAP.md](ROADMAP.md#a11-single-delivery-roadmap--llmtool-replaces-temporary-ai-loop-owner-decision-2026-10-09).
+> authoritative implementation roadmap is [A11 in ROADMAP.md](ROADMAP.md).
 > On 2026-10-09 the requirements owner confirmed **C0–C3 are consolidated
 > back into the original A architecture and gates**. This file preserves the
 > original C terminology for traceability; all new product task contracts and
@@ -11,7 +11,7 @@
 > No existing permission, security, QA, Mac or provider egress gate is waived.
 
 Status: **PROPOSED / DESIGN ONLY / NO IMPLEMENTATION AUTHORITY** (2026-10-09).
-**Status distinction (2026-10-09 update):** This document remains the proposed **native execution and C1b/C1c measurement plan**, not permission to enable provider/data egress or C2 execution. Its **C1a deterministic local unittest/pytest subset is already implemented** by merged [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55); JUnit XML remains unsupported. The next bounded product task is [C1b.0 post-truncation privacy gate, Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), part of [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). Company-only C1b Phase 0, C1c cost/quality evaluation and native self-development C2/C3 are not yet implemented or authorized. Preserve the historical proposal below as design intent, not as shipped acceptance evidence.
+**Status distinction (2026-10-09 update):** This document remains the proposed **native execution and C1b/C1c measurement plan**, not permission to enable provider/data egress or C2 execution. Its **C1a deterministic local unittest/pytest subset is already implemented** by merged [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55); JUnit XML remains unsupported. The currently prepared C1b.0 privacy repair is a parallel, provider-egress-blocking follow-up [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) under [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63); the **mainline next design task is A11b.2.2.2 / Issue #70**, not another C roadmap. Company-only C1b Phase 0, C1c cost/quality evaluation and native self-development C2/C3 are not yet implemented or authorized. Preserve the historical proposal below as design intent, not as shipped acceptance evidence.
 Starting baseline: `main@ceae425eacaa8729a9eb8d796e43304918a8c908`.
 This is a prioritized plan, not a claim that native autonomous code execution or
 measurable general token savings has already shipped.
@@ -197,7 +197,7 @@ dashboard before this vertical slice.
 
 This updates **ordering and ownership only**, not the historical C0–C3
 acceptance designs above. See the sole A↔C mapping in
-[ROADMAP.md](ROADMAP.md#a11-single-delivery-roadmap--llmtool-replaces-temporary-ai-loop-owner-decision-2026-10-09).
+[ROADMAP.md](ROADMAP.md).
 
 1. **A11b product critical path:** PR #49 synthetic-only containment is DONE
    (`eb464628dd6096811c659cfdf663f364107a6ef4`). Next: write the
