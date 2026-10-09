@@ -306,5 +306,33 @@ class ControllerCacheForgeryTests(unittest.TestCase):
         self.check()
 
 
+class PrivateEvidenceNoFollowTests(unittest.TestCase):
+    def test_regular_private_record_reads_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = Path(directory) / "private.json"
+            p.write_bytes(b'{"ok":true}')
+            self.assertEqual(review_module.safe_file(p, 2048), b'{"ok":true}')
+
+    def test_parent_symlink_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            actual = root / "real"
+            actual.mkdir()
+            (actual / "record.json").write_bytes(b"private")
+            (root / "redirect").symlink_to(actual, target_is_directory=True)
+            with self.assertRaises(Stop):
+                review_module.safe_file(root / "redirect" / "record.json", 2048)
+
+    def test_hardlinked_record_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = Path(directory) / "original.json"
+            p.write_bytes(b"private")
+            second = Path(directory) / "other.json"
+            import os
+            os.link(p, second)
+            with self.assertRaises(Stop):
+                review_module.safe_file(second, 2048)
+
+
 if __name__ == "__main__":
     unittest.main()
