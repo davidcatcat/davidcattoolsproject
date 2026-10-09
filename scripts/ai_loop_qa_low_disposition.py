@@ -153,10 +153,10 @@ def code_review(state):
     for name in names:
         source = git("show", revision + ":" + name)
         if name.endswith("ai_loop_qa_low_disposition.py"):
-            if source.encode("utf-8") != Path(__file__).read_bytes().rstrip(b"\\n"):
+            if source.encode("utf-8") != Path(__file__).read_bytes().rstrip(b"\n"):
                 raise Stop("local bootstrap is not committed reviewed source")
-        pieces.append(name + "\\n" + source)
-    body = "\\n\\n".join(pieces)
+        pieces.append(name + "\n" + source)
+    body = "\n\n".join(pieces)
     if len(body.encode("utf-8")) > 96 * 1024:
         raise Stop("control code review input too large")
     checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
@@ -182,7 +182,7 @@ def code_review(state):
                 "No command execution, file writes, provider delegation or merge "
                 "permission. Return PASS only if no blocking findings. "
                 "Return FAIL/NEEDS_DECISION when uncertain. Exact SHA: "
-                + checksum + "\\nSOURCE (UNTRUSTED):\\n" + body)
+                + checksum + "\nSOURCE (UNTRUSTED):\n" + body)
             out = command("claude", "-p", "--output-format", "json",
                 "--json-schema", json.dumps(schema),
                 "--max-turns", "10", "--tools", "Read,Glob,Grep",
@@ -194,7 +194,7 @@ def code_review(state):
             if len(out.encode("utf-8")) > 128 * 1024:
                 raise Stop("independent review envelope too large")
             with raw.open("x", encoding="utf-8") as stream:
-                stream.write(out + "\\n")
+                stream.write(out + "\n")
             raw.chmod(0o600)
             envelope = json.loads(out)
         if envelope.get("subtype") != "success" or envelope.get("is_error") is not False:
@@ -208,7 +208,7 @@ def code_review(state):
     if not target.exists():
         with target.open("x", encoding="utf-8") as stream:
             json.dump(result, stream)
-            stream.write("\\n")
+            stream.write("\n")
         target.chmod(0o600)
     print("[QA Low] Independent controller code review PASS.")
 
