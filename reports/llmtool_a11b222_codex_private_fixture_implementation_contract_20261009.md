@@ -60,8 +60,9 @@ If an escaped/unknown process cannot be proven gone, this single action is **una
 
 ```text
 new reviewed standalone sealed Host: single thread, default SIGCHLD
-  -> direct owned supervisor: new session, PID=PGID=SID
-     -> fixed Git ADD child + all descendants: inherit supervisor PGID/SID
+  -> direct owned supervisor: start_new_session=True, PID=PGID=SID
+     -> fixed Git ADD child + all descendants: start_new_session=False,
+                                               inherit supervisor PGID/SID
 ```
 
 Supervisor self last-act may signal **current group** only after its own live identity check; host may signal group only while holding freshly verified **unreaped direct supervisor** ownership/identity. Kill decision precedes reap. Never signal unrelated remembered PGID after ownership lost. A real Git descendant that calls `setsid`/`setpgid` or otherwise escapes the supervisor group means `containment_confirmed=false`, `STATE_UNKNOWN / USER_ACTION_REQUIRED`, **never `APPLIED`**. If descendant identity/completeness cannot be proved, fail closed; absence of a conveniently visible child is not proof that none escaped.
