@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Active 2026-10-09: PR #55 second narrow security fix (one Codex candidate)
+
+The post-fix independent Security role on PR #55 `d5ecfce9f7e28da2983affb235dd942d51388723` returned **FAIL** (one Medium **blocking** `RESOURCE_EXHAUSTION` in `test_output_excerpts.py:42`, HIGH confidence; [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6074021352)). Functional QA was intentionally skipped. This is not a build/test failure and not a review PASS. Prior code-review and CI green don't waive the blocker.
+
+Previous QA task is archived as `automation/ai-loop/history/20261009-C1-PR55-PostFix-Security-FAIL-task.md/json`. Current control `task.md/task.json` carry **`C1-PR55-SecurityFail-ResourceFix-20261009`**: exact frozen first source HEAD, SHA-bound original Mac-private Security FAIL and independent classifier, and a **two-file only** Codex edit policy. Runner enforces unchanged Git state and original source-diff SHA before any paid agent call; Codex is allowed to fix the sensitive-data matching resource complexity in **only** the module and its specific regression test file. Keep URL credential/no-follow/fail-closed protections, do not publish raw provider/source review logs. Exactly one writer candidate, 0 automatic repair retries. Then runner-owned related/full Mac tests, read-only ordinary review, exact-new-head GitHub CI; fresh specialist Security/Functional QA must still be run on new HEAD before merge.
+
+Mac operator runs only `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh` **after** coordinator checks latest exact-controller Python 3.9/3.14 helper CI. On any STOP preserve work; never manually ferry AI prompts, paste private reports or override the blocking FAIL. No merge/provider egress/Phase 0/token-cost claims.
+
+
 ## Live Security FAIL triage rather than re-running C1/QA (2026-10-09)
 
 PR #55 HEAD `d5ecfce9f7e28da2983affb235dd942d51388723` has passed deterministic local/GitHub checks but **fresh Security FAIL** at [Issue #56](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6070341161), run `20261008T221753Z-44339`, 1 actionable finding in `test_output_excerpts.py`. Functional QA was **not started**. No new code, CI, merge, or accepted risk follows from that failure. Never re-run ordinary C1/QA, let the user manually shuttle private model prompts/results, or call a model to override FAIL.
