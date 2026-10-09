@@ -13,16 +13,23 @@ until full company Phase 0 / paid-token benchmarking completes.
 Real Git ADD remains NOT AUTHORIZED until a separately approved
 design, implementation contract, Security/QA and Mac gates.
 
-**While native llmtool cannot yet coordinate Codex/Claude, keep using the
-existing approved `ai-loop` as the temporary collaboration mechanism.**
-Use only the current owner-approved SHA-pinned Mac launcher when needed,
-with a bounded task, independent Claude review and required Mac
-acceptance. The user is a *physical Mac command operator* only when
-access is unavailable, not an AI prompt courier. No unapproved changes
-to the Mac launcher or controller SHA, Git automation or provider
-data egress are implied. Restrict temporary-controller changes to
-necessary security, correctness or compatibility, not a second
-permanent QA/orchestration platform.
+**While native llmtool cannot yet coordinate Codex/Claude, keep using
+the existing `ai-loop` as the temporary collaboration mechanism.**
+The owner reports the Mac-local launcher now automatically fetches/
+executes the latest `automation/ai-loop` tip and writes
+`.git/ai-loop/run-history.log`; it does not require a per-version
+`--approve`. Treat the remote branch as an **executable release**:
+distinct AI developer/reviewer, exact diff/SHA, appropriate specialist
+Security gate and exact-head helper CI/native Mac acceptance must
+pass **before publication**. Follow the canonical
+[ai-team-delivery Skill](../../skills/ai-team-delivery/SKILL.md);
+a run log is not a safety or approval gate. The user only operates
+the Mac physically if no AI access is available; do not ask them
+to relay model prompts or approve each controller revision. This
+local launcher change is user-reported and not remotely verified.
+Keep ai-loop changes limited to security, correctness and compatibility,
+not another permanent orchestration platform. Provider data egress
+remains separately gated.
 
 **Cutover happens in A11c, not by renaming C3:** prove on the canonical
 Mac that one llmtool task can run a scoped Codex/Claude/test/repair
@@ -46,11 +53,15 @@ routine technical signoff authority. Only genuine product/scope/risk
 decisions, or a needed Mac-local command when no execution access exists,
 should interrupt the owner.
 
-The Mac-local `.git/ai-loop/run.sh` is operator-owned and SHA-pinned.
-Do not overwrite it or request approval for a new control SHA on the
-strength of GitHub/Linux CI alone: supply exact SHA/diff, real Mac
-validation and reviewer evidence. New controller approval is **separate**
-from routine Git merge delegation. The C1 local-only excerpts feature
+The Mac-local `.git/ai-loop/run.sh` is user-edited and, per the owner,
+now executes the latest control branch without per-SHA approval.
+AI owns independent controller-change review, helper CI, applicable
+Mac validation, executable-tip publication and safe recovery. Do not
+confuse the user's `run-history.log` with verified Mac behavior:
+the untracked local launcher/log cannot be inspected through GitHub.
+**No unreviewed tip may be released for auto-execution**; a failing
+or inconclusive review/test blocks publication, not a new request
+for routine operator approval. The C1 local-only excerpts feature
 does not authorize sending excerpts to company/external providers
 (Issue #63 remains open). The frozen `--qa-low*` route is not a
 normal product release gate.
