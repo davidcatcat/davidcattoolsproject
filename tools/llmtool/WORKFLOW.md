@@ -13,23 +13,27 @@ until full company Phase 0 / paid-token benchmarking completes.
 Real Git ADD remains NOT AUTHORIZED until a separately approved
 design, implementation contract, Security/QA and Mac gates.
 
-**While native llmtool cannot yet coordinate Codex/Claude, keep using
-the existing `ai-loop` as the temporary collaboration mechanism.**
-The owner reports the Mac-local launcher now automatically fetches/
-executes the latest `automation/ai-loop` tip and writes
-`.git/ai-loop/run-history.log`; it does not require a per-version
-`--approve`. Treat the remote branch as an **executable release**:
-distinct AI developer/reviewer, exact diff/SHA, appropriate specialist
-Security gate and exact-head helper CI/native Mac acceptance must
-pass **before publication**. Follow the canonical
-[ai-team-delivery Skill](../../skills/ai-team-delivery/SKILL.md);
-a run log is not a safety or approval gate. The user only operates
-the Mac physically if no AI access is available; do not ask them
-to relay model prompts or approve each controller revision. This
-local launcher change is user-reported and not remotely verified.
-Keep ai-loop changes limited to security, correctness and compatibility,
-not another permanent orchestration platform. Provider data egress
-remains separately gated.
+**Until native llmtool can coordinate Codex/Claude, use the
+standard Git-provided temporary `ai-loop` launcher and controller.**
+The owner confirms the Mac entrypoint is again the original
+`.git/ai-loop/run.sh` shortcut to the tracked `scripts/ai-loop.sh`,
+without a locally customized script. The Git launcher fetches the
+latest `automation/ai-loop` revision, caches the corresponding tracked
+shell/Python files and executes the Python controller with
+`--control-sha` for that invocation. No per-revision owner signoff
+is required. The tracked source behavior is verified in Git; real
+Mac checkout and execution still need Mac evidence.
+
+**AI owns the controller release:** review the immutable candidate
+diff on a non-executable staging ref, obtain independent technical/
+Security review where applicable, validate exact candidate with
+helper CI and required Mac probes, then publish the unchanged
+reviewed revision to the executable branch. Missing evidence is
+a STOP; do not treat a latest-tip fetch as a release gate. See the
+single [ai-team-delivery Skill](../../skills/ai-team-delivery/SKILL.md).
+No second permanent controller, no model prompt couriering by the owner,
+and no relaxed provider egress permissions.
+
 
 **Cutover happens in A11c, not by renaming C3:** prove on the canonical
 Mac that one llmtool task can run a scoped Codex/Claude/test/repair
@@ -53,15 +57,15 @@ routine technical signoff authority. Only genuine product/scope/risk
 decisions, or a needed Mac-local command when no execution access exists,
 should interrupt the owner.
 
-The Mac-local `.git/ai-loop/run.sh` is user-edited and, per the owner,
-now executes the latest control branch without per-SHA approval.
-AI owns independent controller-change review, helper CI, applicable
-Mac validation, executable-tip publication and safe recovery. Do not
-confuse the user's `run-history.log` with verified Mac behavior:
-the untracked local launcher/log cannot be inspected through GitHub.
-**No unreviewed tip may be released for auto-execution**; a failing
-or inconclusive review/test blocks publication, not a new request
-for routine operator approval. The C1 local-only excerpts feature
+The Mac-local `.git/ai-loop/run.sh` is the standard
+Git-version shortcut restored by the owner; no custom launcher
+is in scope. The tracked control-branch `scripts/ai-loop.sh` and
+`scripts/ai_loop.py` are the reviewed source of execution.
+AI owns technical review, staged CI and applicable Mac checks before
+promoting control revisions; publishing an unreviewed latest tip is
+not permitted. The user is only a physical Mac operator if tools
+cannot access the Mac. Do not infer that GitHub source inspection
+proves the current local symlink/launch state.  The C1 local-only excerpts feature
 does not authorize sending excerpts to company/external providers
 (Issue #63 remains open). The frozen `--qa-low*` route is not a
 normal product release gate.
