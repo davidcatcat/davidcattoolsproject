@@ -87,6 +87,12 @@ def parser_for_cli():
     add_options(chat)
     git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
     git.add_argument("--json", action="store_true", help="output snapshot as JSON")
+    excerpts = sub.add_parser("test-excerpts", help="Select bounded captured-test evidence offline; never run tests")
+    excerpts.add_argument("--file", required=True, help="one explicit captured UTF-8 regular file")
+    excerpts.add_argument("--exit-code", required=True, type=int, help="captured test exit (-127 through 255)")
+    excerpts.add_argument("--json", action="store_true", required=True, help="output version-1 evidence JSON")
+    excerpts.add_argument("--max-excerpt-bytes", type=int, default=2048, help="128 through 2048 original bytes per excerpt")
+    excerpts.add_argument("--max-excerpts", type=int, default=32, help="1 through 32 excerpts; total capped at 16 KiB")
     add_feedback_parser(sub)
     add_benchmark_parser(sub, add_options)
     add_orchestration_parser(sub)
@@ -269,9 +275,29 @@ def _run_ask(args):
         observe('close')
 
 
+def _run_test_excerpts(args):
+    from .test_output_excerpts import select_test_excerpts
+    output = select_test_excerpts(args.file, args.exit_code,
+                                  max_excerpt_bytes=args.max_excerpt_bytes,
+                                  max_excerpts=args.max_excerpts)
+    # Parser delivery success cannot hide a failed captured run, even on EPIPE.
+    result = (args.exit_code if args.exit_code > 0 else
+              1 if args.exit_code or output['status'] == 'INCOMPLETE'
+              or output['test_status'] == 'FAILED' else 0)
+    try:
+        print(json.dumps(output, ensure_ascii=True, indent=2))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        silence_broken_pipe(sys.stdout)
+        sys.stdout = None
+    return result
+
+
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
+        if args.command == 'test-excerpts':
+            return _run_test_excerpts(args)
         if args.command in ('action', 'approval'):
             return run_action_contract(args)
         if args.command == 'ask':

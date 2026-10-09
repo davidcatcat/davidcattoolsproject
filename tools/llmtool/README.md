@@ -74,7 +74,9 @@ premium-token reduction** from selective company-model delegation.
 deterministic real-test-output excerpt selection and company-only
 reliability/token benchmark; **C2** safety-reviewed native repository
 execution vertical slice; **C3** actual Mac self-development acceptance
-and ai-loop cutover. C1/C2/C3 are proposed, **not yet implemented**.
+and ai-loop cutover. C1's deterministic opt-in utility is described below;
+its company-only Phase 0 and paired benchmark remain future, separately
+authorized steps. C2/C3 are proposed, **not yet implemented**.
 Existing Claude/Codex CLI providers are intentionally **text-only**
 and do not grant edit/test/Git capabilities. A11b process containment
 does not itself authorize real Git ADD or general execution.
@@ -643,6 +645,96 @@ Live smoke test 曾發現 `analyze-log` 建議 `cat /etc/company/app/config.yaml
 configuration。這個案例已列入 Roadmap A3 skills 安全要求、A6 command safety validator
 及 A8 regression；目前有 A6 deterministic validator 及 analyze-log 窄 post-check，但從不執行建議命令。
 
+## C1 — Offline captured-test excerpts
+
+Inspect one explicitly selected raw Python test-output capture, using the exit
+code recorded by the caller when those tests ran:
+
+```sh
+llmtool test-excerpts --file captured-tests.log --exit-code 1 --json
+llmtool test-excerpts --file captured-tests.log --exit-code 1 --json \
+  --max-excerpt-bytes 1024 --max-excerpts 8
+```
+
+This opt-in command performs deterministic local parsing only. It does not run
+tests, invoke a shell, inspect Git, scan the repository, read stdin, resolve user
+configuration or credentials, call a provider, or write the capture. `--file`,
+`--exit-code` and `--json` are required; provider options are unsupported.
+Supply original captured stdout/stderr, never a model summary. The caller is
+responsible for the capture's origin and truthful exit metadata: matching a
+report's syntax does not authenticate its contents or test execution.
+
+Version-1 JSON keeps evidence and test outcome separate:
+
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | `1` |
+| `source` | Original SHA-256 and byte size; opaque `sha256:<digest>` reference to the caller-retained local capture; no input path echo |
+| `test_exit_code` | Unchanged caller-supplied integer, -127 through 255; negative values represent captured signal termination |
+| `detected_format` | `unittest`, `pytest`, `mixed`, or `unknown` |
+| `status` | `COMPLETE` or `INCOMPLETE` for known failure-ID coverage, never a test PASS |
+| `test_status` | `FAILED` for a nonzero exit or observed/reported failures; otherwise `UNKNOWN` or `NO_FAILURES_REPORTED`, never a claim that every test ran or passed |
+| `failure_ids` / `failure_sources` | IDs in first-observed order, deduplicated without renaming; occurrence counts, kinds and the first raw header anchor |
+| `excerpts` / `summary_sources` | Source references and original UTF-8 byte ranges, `[start_byte, end_byte)`; excerpts also include exact text, ID/kind and a truncation flag |
+| `coverage` | Reported/observed failure counts, unittest run count (pytest: unknown/null), complete-ID/unknown/omission flags and fixed unknown-reason codes |
+| `omitted` | Counts of omitted IDs/excerpts, truncated excerpts, unselected failure-block bytes and unselected source bytes |
+
+`COMPLETE` requires one supported terminal report with consistent failure/error
+counts and exit metadata. It does not mean complete traceback content: bounded
+excerpts can be truncated or omitted while all known IDs remain covered. A
+nonzero exit always remains `FAILED`, including when parsing is `INCOMPLETE`.
+The command returns the supplied positive exit code (1–255), or 1 for a negative
+captured exit, inconsistent metadata, incomplete coverage or rejected input.
+It returns 0 only with a zero captured exit and a complete report of no failures.
+Even a closed output pipe cannot turn a failed capture into command success.
+
+Supported failure anchors are standard unittest `FAIL:`/`ERROR:` headers with
+their separators and traceback blocks, plus `Ran ...` and `FAILED (...)`/`OK`
+summaries; and pytest `FAILED file.py::test` / `ERROR file.py::test` short-summary
+lines (including parametrized node IDs and collection-error file IDs), with the
+short-summary banner and terminal outcome totals. Pytest excerpts contain the
+justifying summary line, not guessed traceback locations. Chained unittest
+tracebacks are retained within the block budget. Repeated IDs still count as
+separate failure occurrences. Missing/partial summaries, malformed or ambiguous
+IDs, mismatched totals, multiple/mixed runs, unterminated captures, unfamiliar
+formats (including JUnit XML), and unsupported outcome structures produce
+`INCOMPLETE` and explicit unknowns. Complex unittest subtest/class-setup counts,
+ExceptionGroup layouts, custom reporters and unusual pytest node spellings may
+remain incomplete; no root cause or assertion outcome is inferred.
+
+Bounds: source ≤1 MiB and ≤32,768 LF lines; explicit path ≤4,096 UTF-8 bytes and
+64 components; ID ≤512 bytes, at most 128 emitted unique IDs. Pytest header
+content is limited to 8 KiB and 16 possible ` - ` delimiters. Each excerpt is
+at most 2,048 original bytes (configurable down to 128), at most 32 excerpts
+(configurable down to 1), with a fixed 16 KiB combined excerpt budget. Excerpt
+ends align to UTF-8 boundaries; boilerplate/full-log dumping is avoided.
+ID-limit overflow makes coverage incomplete; excerpt limits have explicit
+omission/truncation counts. The original capture remains available locally by
+the caller's file selection and hash; the utility neither copies nor freezes it.
+
+File access requires POSIX no-follow directory/file descriptors. Every path
+component must be physical; symlinks, directories, FIFOs, hardlinks, credential
+locations, `.git`, oversized files, malformed UTF-8/binary controls and detected
+file/directory identity or byte-count drift are rejected. On macOS use physical
+paths such as `/private/tmp`, rather than the `/tmp` or `/var` symlink aliases.
+ANSI escapes, bidi/invisible format controls and lone carriage returns are
+rejected; ordinary Unicode, tabs, LF and CRLF are supported. Capture uncolored
+output upstream (for example pytest's `--color=no`); this utility never executes
+that upstream command. JSON escapes Unicode/control spelling safely on stdout;
+stderr uses fixed categories without input paths, content or exception details.
+
+Recognizable credential assignments, authorization values, key/token patterns
+and credential-bearing URLs anywhere in the capture cause rejection before
+any excerpt is printed. This conservative indicator check can reject benign
+fixtures and does not discover every secret. Excerpts may contain sensitive
+test data or traceback paths and remain **local evidence**. C1 authorizes no
+transfer to company or external models: a separately reviewed permission and
+redaction gate is required before any future handoff. No automatic routing,
+executor, approval, Git mutation, or measured savings is provided. Deterministic
+excerpt selection is not a token/cost benchmark; company-only Phase 0 on real
+48 KiB+ captures and any paired premium-token measurement are future, separately
+authorized work described in [the C1 plan](NATIVE_SELF_DEV_MVP.md).
+
 ## OpenAI-compatible no-thinking 與共用輸出契約
 
 `enable_thinking` 是 OpenAI-compatible 實作的**可選 provider-specific 行為**，
@@ -1033,8 +1125,9 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
 及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
 明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 與 A10 retrieval 不寫檔。
-不自動讀取 SSH、keychain 或任意 secret file；明確提供的文字、pipe、`--file`
-內容會完整傳給 gateway，請自行移除不應傳送的秘密。
+不自動讀取 SSH、keychain 或任意 secret file；模型命令明確提供的文字、pipe、`--file`
+內容會完整傳給 gateway，請自行移除不應傳送的秘密。離線 `test-excerpts` 只處理
+明確指定的本機 capture，不傳給任何 provider。
 工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
 
 ## 開發與驗證
