@@ -4,6 +4,7 @@ from dataclasses import replace
 import errno
 import fcntl
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -56,23 +57,53 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 78)
         self.assertNotIn(b'PRIVATE', result.stdout+result.stderr)
 
+    # endpoints() checks the exact FD inventory of the *current* process, as the
+    # freshly spawned Host does. Run it in a clean child (close_fds + pass_fds)
+    # so FDs left open by unrelated tests in this interpreter cannot decide it.
+    ENDPOINTS_CHILD = (
+        'import json, os, sys\n'
+        'from llmtool import _git_add_private as p\n'
+        'spec = json.loads(sys.argv[1])\n'
+        'if spec["extra_dir"]:\n'
+        '    os.open("/", os.O_RDONLY | os.O_DIRECTORY)\n'
+        'expected = {int(fd): getattr(os, mode) for fd, mode in spec["expected"].items()}\n'
+        'try:\n'
+        '    p.endpoints(expected)\n'
+        'except p.AdmissionRejected:\n'
+        '    print("REJECTED")\n'
+        'else:\n'
+        '    print("ACCEPTED", all(not os.get_inheritable(fd) for fd in expected))\n')
+
+    def endpoints_in_child(self, passed, expected, extra_dir=False):
+        spec = {'expected': {str(fd): mode for fd, mode in expected.items()},
+                'extra_dir': extra_dir}
+        result = subprocess.run(
+            [PYTHON, '-I', '-c', self.ENDPOINTS_CHILD, json.dumps(spec)],
+            pass_fds=passed, close_fds=True, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.decode().strip()
+
     def test_fixed_fifo_requires_read_access_and_exact_inventory(self):
         r, w = os.pipe()
         try:
-            p.endpoints({r: os.O_RDONLY, w: os.O_WRONLY})
-            with self.assertRaises(p.AdmissionRejected):
-                p.endpoints({r: os.O_RDONLY})
-            with self.assertRaises(p.AdmissionRejected):
-                p.endpoints({r: os.O_WRONLY, w: os.O_RDONLY})
-            self.assertFalse(os.get_inheritable(r))
+            both = (r, w)
+            self.assertEqual(self.endpoints_in_child(
+                both, {r: 'O_RDONLY', w: 'O_WRONLY'}), 'ACCEPTED True')
+            self.assertEqual(self.endpoints_in_child(
+                both, {r: 'O_RDONLY'}), 'REJECTED')
+            self.assertEqual(self.endpoints_in_child(
+                both, {r: 'O_WRONLY', w: 'O_RDONLY'}), 'REJECTED')
+            self.assertEqual(self.endpoints_in_child(
+                both, {r: 'O_RDONLY', w: 'O_WRONLY'}, extra_dir=True), 'REJECTED')
         finally:
             os.close(r); os.close(w)
         with tempfile.TemporaryFile() as regular:
-            with self.assertRaises(p.AdmissionRejected):
-                p.endpoints({regular.fileno(): os.O_RDONLY})
+            self.assertEqual(self.endpoints_in_child(
+                (regular.fileno(),), {regular.fileno(): 'O_RDONLY'}), 'REJECTED')
         with socket.socket() as sock:
-            with self.assertRaises(p.AdmissionRejected):
-                p.endpoints({sock.fileno(): os.O_RDONLY})
+            self.assertEqual(self.endpoints_in_child(
+                (sock.fileno(),), {sock.fileno(): 'O_RDONLY'}), 'REJECTED')
 
     def test_absent_file_socket_write_pipe_and_extra_fd_refuse_host(self):
         # Test process controls its own FD3 before invoking actual Host code;

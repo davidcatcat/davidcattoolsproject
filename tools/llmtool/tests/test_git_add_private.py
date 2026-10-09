@@ -240,6 +240,15 @@ class SemanticTests(unittest.TestCase):
 @unittest.skipUnless(sys.platform == 'darwin' and os.geteuid() != 0, 'native Mac required')
 class NativeFixtureTests(unittest.TestCase):
     def test_natural_leader_exit_descendant_cleanup_permanent_regression(self):
+        # The probe parent runs as `sys.executable -I`, which cannot see a
+        # repo-local llmtool. Where the product is not installed for this
+        # interpreter (e.g. /usr/bin/python3) the probe exits before evidence;
+        # the .venv suite and native acceptance (leader_exit_descendant) cover it.
+        importable = subprocess.run([sys.executable, '-I', '-c', 'import llmtool'],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=30).returncode == 0
+        if not importable:
+            self.skipTest('llmtool not installed for sys.executable -I probe parent')
         from test_git_containment import AcceptanceScenarios
         scenarios = AcceptanceScenarios()
         self.assertEqual(scenarios.leader_exit_descendant(), [])
