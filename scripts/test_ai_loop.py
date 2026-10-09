@@ -326,6 +326,125 @@ class PR55MediumRepairAuthorityTests(unittest.TestCase):
                 loop.verify_pr55_medium_repair(root, task)
 
 
+class PR55BlockingResourceRepairTests(unittest.TestCase):
+    """Authorization requires a real frozen FAIL, not an inferred QA PASS."""
+
+    @contextmanager
+    def evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = root / '.ai-loop' / '20261008T221753Z-44339'
+            logs.mkdir(parents=True)
+            head = 'd5ecfce9f7e28da2983affb235dd942d51388723'
+            source = 'tools/llmtool/llmtool/test_output_excerpts.py'
+            testfile = 'tools/llmtool/tests/test_test_output_excerpts.py'
+            finding = {'severity': 'Medium', 'blocking': True, 'file': source,
+                'detail': 'PRIVATE-FAIL-DETAIL',
+                'evidence': 'PRIVATE-FAIL-ORIGINAL-EVIDENCE'}
+            review = {'status':'FAIL', 'reviewed_head':head,
+                'summary':'PRIVATE-SECURITY-FAIL', 'findings':[finding]}
+            sha_finding = hashlib.sha256(json.dumps(
+                finding, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            task = {'task_id': 'C1-PR55-SecurityFail-ResourceFix-20261009',
+                'pr_number': 55,
+                'expected_head': head,
+                'base_sha': '8e29024656f873431f6ad83e45015b57bfe381a9',
+                'branch': 'feat/llmtool-c1-test-excerpts-20261009',
+                'qa_security_fail_repair': {
+                    'head': head,
+                    'run_id': logs.name,
+                    'diff_sha256': '6662b084538b44f3ad9f7ee873f5c08d23d60cef2b4c49e849c6d0de0c1613f2',
+                    'finding_sha256': sha_finding,
+                    'category': 'RESOURCE_EXHAUSTION',
+                    'action': 'FIX_BEFORE_MERGE',
+                    'confidence': 'HIGH', 'line': 42,
+                    'source_file': source, 'test_file': testfile}}
+            loop.save_json(logs/'task.json', {
+                'task_id':'C1-PR55-PostFix-Security-Functional-QA-20261009',
+                'pr_number':55, 'expected_head':head,
+                'qa_gates':['security','functional_qa']})
+            loop.save_json(logs/'provenance.json',
+                {'root':str(root), 'run_id':logs.name})
+            loop.save_json(logs/'claude-201.json', review)
+            loop.save_json(logs/'qa-pr55.json', {
+                'run_id':logs.name, 'head':head, 'pr':55,
+                'diff_sha256':task['qa_security_fail_repair']['diff_sha256'],
+                'qa_result':'STOPPED','tests_related':'PASS',
+                'tests_full_local':'PASS','merge_authorized':False,
+                'roles':[{'role':'security', **review}]})
+            result_dir = root/'.ai-loop'/'qa-postfix-security-fail-issue56'
+            result_dir.mkdir()
+            loop.save_json(result_dir/'assessment.json', {
+                'reviewed_head':head, 'original_finding_sha256':sha_finding,
+                'category':'RESOURCE_EXHAUSTION',
+                'action':'FIX_BEFORE_MERGE', 'confidence':'HIGH',
+                'source_path':source,'line':42,
+                'private_reason':'PRIVATE-ROOT-CAUSE-TECHNICAL-JUSTIFICATION'})
+            original_hash = hashlib.sha256
+            diff = 'unchanged-pr55-fixture-patch'
+            def mock_sha(content):
+                if content == diff.encode():
+                    return Mock(hexdigest=Mock(return_value=task['qa_security_fail_repair']['diff_sha256']))
+                return original_hash(content)
+            def git(_root, *args):
+                values = {
+                    ('rev-parse','HEAD'):head,
+                    ('branch','--show-current'):task['branch'],
+                    ('status','--porcelain'):'',
+                    ('diff','--no-ext-diff','--no-textconv',task['base_sha'],head):diff}
+                if args not in values:
+                    raise AssertionError(args)
+                return values[args]
+            with patch.object(loop,'git',side_effect=git), \
+                 patch.object(loop.hashlib,'sha256',side_effect=mock_sha):
+                yield root,logs,task,finding
+
+    def test_frozen_security_fail_can_authorize_only_source_and_test(self):
+        with self.evidence() as (root,logs,task,finding):
+            with patch.object(loop,'codex') as codex, \
+                 patch.object(loop,'claude') as claude:
+                reason=loop.verify_pr55_security_fail_repair(root,task)
+                codex.assert_not_called()
+                claude.assert_not_called()
+            self.assertIn('RESOURCE_EXHAUSTION',reason)
+            self.assertIn(finding['detail'],reason)
+            self.assertIn(finding['evidence'],reason)
+            self.assertIn(task['qa_security_fail_repair']['test_file'],reason)
+            self.assertIn('CANNOT be inherited',reason)
+
+    def test_modified_old_security_finding_or_false_pass_never_authorizes(self):
+        with self.evidence() as (root,logs,task,finding):
+            original=logs/'claude-201.json'
+            a=json.loads(original.read_text())
+            a['status']='PASS'
+            loop.save_json(original,a)
+            with self.assertRaises(loop.Stop):
+                loop.verify_pr55_security_fail_repair(root,task)
+            a['status']='FAIL'
+            loop.save_json(original,a)
+            task['qa_security_fail_repair']['finding_sha256']='f'*64
+            with self.assertRaisesRegex(loop.Stop,'risk authority mismatch'):
+                loop.verify_pr55_security_fail_repair(root,task)
+
+    def test_wrong_independent_risk_decision_or_symlink_parent_stops(self):
+        with self.evidence() as (root,logs,task,finding):
+            resultdir=root/'.ai-loop'/'qa-postfix-security-fail-issue56'
+            assessment=resultdir/'assessment.json'
+            row=json.loads(assessment.read_text())
+            row['action']='NEEDS_DEEPER_REVIEW'
+            loop.save_json(assessment,row)
+            with self.assertRaisesRegex(loop.Stop,'risk authority mismatch'):
+                loop.verify_pr55_security_fail_repair(root,task)
+            row['action']='FIX_BEFORE_MERGE'
+            loop.save_json(assessment,row)
+            renamed=root/'outside-risk-evidence'
+            resultdir.rename(renamed)
+            resultdir.symlink_to(renamed, target_is_directory=True)
+            with self.assertRaisesRegex(loop.Stop,'private evidence missing/unsafe'):
+                loop.verify_pr55_security_fail_repair(root,task)
+
+
 class PostFixSecurityFailTriageTests(unittest.TestCase):
     """No untrusted Security FAIL text may reach GitHub or become merge PASS."""
 
