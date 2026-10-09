@@ -73,13 +73,15 @@ reliability/paid-token studies must not block offline local A11b design.
 
 **Until A11c Mac-based independent acceptance proves llmtool can run
 Codex+Claude+tests+bounded repair and produce an audited Draft PR or STOP,
-continue using the existing approved SHA-pinned `ai-loop` as the
-temporary AI collaboration tool.** Don't ask the owner to courier prompts.
-Don't add permanent runner infrastructure or update the Mac launcher
-without the required separate SHA/diff, independent review and Mac
-approval. Preserve the failed/frozen `--qa-low*` prohibition. After
-parity, deprecate duplicate runner orchestration; keep essential
-security/fallback controls until explicit safe decommission.
+continue using the Git-provided temporary `ai-loop` controller.** The owner
+confirms the Mac `.git/ai-loop/run.sh` entrypoint has been restored to
+the standard Git launcher shortcut; there is **no custom local launcher
+script** and no per-revision owner approval process. AI is accountable
+for technical controller reviews, safe publication, test evidence and
+recovery. Do not make the owner shuttle prompts. The legacy/frozen
+`--qa-low*` routes remain prohibited; keep only essential temporary
+runner maintenance until native llmtool reaches parity.
+
 
 ## Delivery loop, within available access
 
@@ -116,13 +118,47 @@ expected result and safe failure/recovery. Do not ask the owner to shuttle
 prompts, paste private raw review data, manage clones/worktrees, or interpret
 test failures as the technical PM. Coordinate later steps from reported output.
 
-The Mac-local `.git/ai-loop/run.sh` is operator-owned and **SHA-pinned**:
-new control branch tips must not run without a separate explicit local
-controller-SHA approval. General PR merge delegation does not authorize
-silently updating this local trust root. Do not replace the launcher or request
-`--approve` without identifying exact old/new SHA, diff, independent review,
-real Mac tests and why the new code is necessary. Its approved execution path
-has **not** been independently validated by GitHub documentation alone.
+**Launcher truth (Git source + owner report).** The tracked
+`scripts/ai-loop.sh` in `automation/ai-loop` fetches the current
+remote control-branch revision at each invocation, materializes its
+tracked `scripts/ai-loop.sh` and `scripts/ai_loop.py` into a
+revision-scoped cache under `.git/ai-loop/bootstrap/<commit>/`,
+refreshes the `.git/ai-loop/run.sh` symlink to the cached Git shell
+entrypoint, and launches Python with an explicit `--control-sha`.
+The owner confirms the Mac entrypoint is restored to this Git version,
+without local custom scripts. The **tracked Git script is readable
+and verifiable**; its current deployment/symlink target and completed
+runtime behavior still require actual Mac evidence. Do not describe
+it as a custom per-revision approval launcher or claim any local
+run-history file exists unless directly observed.
+
+**AI-owned controller change/release gate:**
+- Updating `automation/ai-loop` changes **Mac-executable content on a
+  later launch**. An AI reviewer distinct from the developer must review
+  old/new immutable SHAs, full diff and task/runtime scope. Require
+  dedicated independent Security review for changes involving shell or
+  process execution, file/Git mutations, network, credentials, provider
+  exports, launcher or trust boundaries.
+- Verify the candidate's exact bytes via a non-executable staging/ref
+  and relevant helper Python 3.9/3.14 CI; require a Mac-native
+  validation of the same reviewed candidate whenever necessary.
+  Only then may an authorized AI publisher promote those **unchanged**
+  reviewed bytes to the executable control tip. Reverify destination
+  tip identity and prevent races; on missing/failed/inconclusive gates,
+  **STOP publication**. This is an obligatory procedure, **not an
+  already-enforced GitHub branch-protection claim**.
+- On actual execution, capture the fetched/executed revision, verified
+  task identity, status/error and sanitized diagnostics using available
+  evidence. A SHA identifies executed bytes but does not itself prove
+  safe release; absence of a verified audit record is not PASS.
+  Never upload Mac-private raw logs, tokens or credentials.
+- The owner delegates ordinary controller technical signoff,
+  publication and rollback to AI; **do not request their approval
+  of routine revisions**. This does not authorize uncontrolled
+  source changes, arbitrary commands, provider data export or
+  relaxing independent QA/security/Mac gates. AI cannot mutate
+  untracked Mac `.git/` files via a GitHub documentation edit.
+
 
 Use local-Mac or macOS CI evidence for Mac-specific path/process behavior.
 Linux-only Python CI does not prove macOS behavior (e.g. `/var` symlinks).

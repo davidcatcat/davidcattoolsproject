@@ -35,9 +35,35 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 ### Temporary collaboration until native llmtool passes acceptance
 
-**Continue to use the existing `ai-loop` for temporary Codex + Claude coordination while A11b/A11c are incomplete**; the workflow is task → existing approved SHA-pinned Mac launcher (when Mac access is actually necessary) → bounded Codex development → independent Claude review/tests/repair → audited Draft PR/STOP → coordinator merge decision after required gates. This does **not** mean `llmtool` can execute this workflow today. Do not require the owner to relay ordinary prompts or act as PM.
+**Continue using the Git-version `ai-loop` as the temporary
+Codex + Claude coordinator while A11b/A11c are incomplete.** The
+owner confirms the Mac-local `.git/ai-loop/run.sh` is restored as
+the original shortcut to the tracked `scripts/ai-loop.sh`;
+there is no separate custom Mac launcher. The tracked Git shell
+entrypoint fetches the current `automation/ai-loop` branch revision
+and launches the matching `scripts/ai_loop.py` with the exact
+`--control-sha`. AI coordinates development, independent review,
+tests/repair and audited Draft PR/STOP; the user need not relay
+model prompts or approve ordinary technical controller updates.
+This does not mean llmtool has a native executor today, nor
+prove local Mac behavior without actual runtime evidence.
 
-The operator-owned `.git/ai-loop/run.sh` and controller approval SHA are separate trust boundaries. **Do not overwrite, repoint or silently approve a new control SHA** under ordinary Git merge delegation. For necessary controller fixes, require exact diff/SHA, independent review and applicable Mac acceptance. Maintain temporary `ai-loop` for **critical security, correctness, reliability and compatibility only**; do not add a second permanent QA/orchestration stack or revive frozen `--qa-low*` routes. [PR #45](https://github.com/davidcatcat/davidcattoolsproject/pull/45) remains Draft and is **not** a native product milestone.
+**AI-reviewed controller releases:** The latest control branch
+is Mac-executable on the next Git-launcher invocation. AI owns
+technical review, independent Security checks for any execution/
+Git/credential/network/data boundary changes, exact candidate
+helper CI and applicable Mac tests. Test the candidate via
+a separate staging reference, then promote only the unchanged
+reviewed revision to the executable control tip; on missing/
+inconclusive evidence STOP, rather than publishing unreviewed
+remote code. Publishing a Git commit and recording its SHA
+is not itself release authorization. This is a documented
+AI-controlled workflow, **not proof that branch protection
+enforces these controls**. Keep `ai-loop` limited to essential
+correctness/security/compatibility and do not revive frozen
+`--qa-low*` routes. [PR #45](https://github.com/davidcatcat/davidcattoolsproject/pull/45)
+remains Draft, not a native llmtool milestone.
+
 
 **Cutover gate (A11c):** llmtool must independently pass canonical-Mac real development tasks (documentation change, bug fix, failed-review repair), bounded approvals, timeouts/child cleanup, source-bound tests, independent Security/Functional QA and safe failure/dirty-tree STOP. Confirm ordinary task → one llmtool command → Codex/Claude/test/repair → audited PR or NEEDS_DECISION, without human prompt relay, before retiring the duplicate temporary runner. Measure quality, token and latency on representative eligible routes; do not claim savings without evidence or force company routing when it fails. Retain ai-loop as an explicitly controlled fallback until parity.
 

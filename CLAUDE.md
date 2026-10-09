@@ -21,11 +21,19 @@ Do not send findings as hash-only tables when a bounded, authorized,
 readable review is needed for an actual decision.
 
 The owner may run a bounded Mac command only because agents lack local
-access. Do not claim Linux checks validate macOS behavior. The Mac-owned
-ai-loop launcher is SHA-pinned: do not replace it, approve a different
-controller commit, or run frozen `--qa-low*` routes based solely on Git
-merge authority. Model/provider execution rights and data egress remain
-separate. See [safe-git](skills/safe-git/SKILL.md) for merge checks.
+access. Do not claim Linux checks validate macOS behavior. The owner
+confirms `.git/ai-loop/run.sh` is restored to the tracked Git launcher
+shortcut, with no custom local script. The control branch's tracked
+`scripts/ai-loop.sh` fetches the current control SHA and executes
+`scripts/ai_loop.py` from its revision-scoped cache. AI must review
+and verify the proposed control revision independently **before**
+promoting new bytes to the executable tip; staging checks/required
+Mac evidence must remain exact-revision-bound. No routine owner
+technical signoff. Do not run frozen `--qa-low*` routes. The local
+symlink/run state is user-reported; do not claim Mac proof from a GitHub
+source read. Provider/data egress remains separately authorized.
+See [ai-team-delivery](skills/ai-team-delivery/SKILL.md)
+and [safe-git](skills/safe-git/SKILL.md) for the single release gate.
 
 When writing audit/retrospective reports, distinguish **proposer,
 reviewer, requirements confirmer, delegated authorizer, technical decision
@@ -39,8 +47,9 @@ the conversation records.
 **llmtool product direction:** The [single A11 roadmap](tools/llmtool/ROADMAP.md)
 and [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md) govern
 current milestones: C0–C3 are historical A delivery/measurement aliases,
-not a second code path or sequential product gate. **Use existing
-SHA-approved temporary ai-loop** for Codex/Claude coordination until
+not a second code path or sequential product gate. **Use the current
+AI-reviewed, latest-control-branch temporary ai-loop** for Codex/Claude
+coordination until
 native llmtool passes A11c canonical Mac acceptance and can replace it.
 A11b.2.2.2 is design/review-only next (Issue #70), not approved real
 Git ADD. C1 excerpt egress needs Issue #66's safety gate before

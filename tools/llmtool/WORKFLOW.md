@@ -13,16 +13,27 @@ until full company Phase 0 / paid-token benchmarking completes.
 Real Git ADD remains NOT AUTHORIZED until a separately approved
 design, implementation contract, Security/QA and Mac gates.
 
-**While native llmtool cannot yet coordinate Codex/Claude, keep using the
-existing approved `ai-loop` as the temporary collaboration mechanism.**
-Use only the current owner-approved SHA-pinned Mac launcher when needed,
-with a bounded task, independent Claude review and required Mac
-acceptance. The user is a *physical Mac command operator* only when
-access is unavailable, not an AI prompt courier. No unapproved changes
-to the Mac launcher or controller SHA, Git automation or provider
-data egress are implied. Restrict temporary-controller changes to
-necessary security, correctness or compatibility, not a second
-permanent QA/orchestration platform.
+**Until native llmtool can coordinate Codex/Claude, use the
+standard Git-provided temporary `ai-loop` launcher and controller.**
+The owner confirms the Mac entrypoint is again the original
+`.git/ai-loop/run.sh` shortcut to the tracked `scripts/ai-loop.sh`,
+without a locally customized script. The Git launcher fetches the
+latest `automation/ai-loop` revision, caches the corresponding tracked
+shell/Python files and executes the Python controller with
+`--control-sha` for that invocation. No per-revision owner signoff
+is required. The tracked source behavior is verified in Git; real
+Mac checkout and execution still need Mac evidence.
+
+**AI owns the controller release:** review the immutable candidate
+diff on a non-executable staging ref, obtain independent technical/
+Security review where applicable, validate exact candidate with
+helper CI and required Mac probes, then publish the unchanged
+reviewed revision to the executable branch. Missing evidence is
+a STOP; do not treat a latest-tip fetch as a release gate. See the
+single [ai-team-delivery Skill](../../skills/ai-team-delivery/SKILL.md).
+No second permanent controller, no model prompt couriering by the owner,
+and no relaxed provider egress permissions.
+
 
 **Cutover happens in A11c, not by renaming C3:** prove on the canonical
 Mac that one llmtool task can run a scoped Codex/Claude/test/repair
@@ -46,11 +57,15 @@ routine technical signoff authority. Only genuine product/scope/risk
 decisions, or a needed Mac-local command when no execution access exists,
 should interrupt the owner.
 
-The Mac-local `.git/ai-loop/run.sh` is operator-owned and SHA-pinned.
-Do not overwrite it or request approval for a new control SHA on the
-strength of GitHub/Linux CI alone: supply exact SHA/diff, real Mac
-validation and reviewer evidence. New controller approval is **separate**
-from routine Git merge delegation. The C1 local-only excerpts feature
+The Mac-local `.git/ai-loop/run.sh` is the standard
+Git-version shortcut restored by the owner; no custom launcher
+is in scope. The tracked control-branch `scripts/ai-loop.sh` and
+`scripts/ai_loop.py` are the reviewed source of execution.
+AI owns technical review, staged CI and applicable Mac checks before
+promoting control revisions; publishing an unreviewed latest tip is
+not permitted. The user is only a physical Mac operator if tools
+cannot access the Mac. Do not infer that GitHub source inspection
+proves the current local symlink/launch state.  The C1 local-only excerpts feature
 does not authorize sending excerpts to company/external providers
 (Issue #63 remains open). The frozen `--qa-low*` route is not a
 normal product release gate.

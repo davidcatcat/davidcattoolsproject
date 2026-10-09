@@ -63,7 +63,18 @@ to the AI coordinator within accepted product goals; do not ask them to
 act as PM, review each Low finding or hand-carry Codex/Claude prompts.
 Follow [ai-team-delivery](../ai-team-delivery/SKILL.md). Delegation
 does not waive independent gates, Mac validation, product/provider
-permissions, or the local controller-SHA approval requirement.
+permissions, or the AI-owned controller **pre-publication** review
+and exact-revision release gate. Routine controller technical
+acceptance is delegated to AI, not the owner. The standard Git
+`run.sh` shortcut executes the control branch's tracked
+`scripts/ai-loop.sh` and matching cached Python controller; any
+control-tip update may affect the next Mac execution. Validate
+immutable candidate bytes on a non-executable staging reference:
+independent Security review where applicable, exact-candidate
+helper CI and required Mac acceptance **before promoting the
+same revision to the executable tip**. Record the executed commit
+and privacy-safe outcome through actually observed evidence,
+not by assuming a custom local logging mechanism exists.
 
 After verifying all contract-required evidence, the coordinator can
 merge an eligible exact-head PR without repeatedly asking "may I merge?".

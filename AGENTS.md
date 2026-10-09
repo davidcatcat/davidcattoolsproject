@@ -17,10 +17,19 @@ Do not ask the user to manage AI-to-AI prompts, repeatedly say "next step",
 or perform routine Git/PM decisions. The user can act as the **physical Mac
 operator** when the coordinator lacks that access; supply only a validated,
 bounded instruction and diagnose its output yourself. Never claim that Mac,
-provider or remote steps ran unless their evidence is present. New Mac
-controller execution is subject to the **operator-approved SHA pin** and
-separate approval: general merge delegation does not unlock the controller
-or provider egress. Respect the STOP on frozen `--qa-low*` modes.
+provider or remote steps ran unless their evidence is present. The
+owner confirms that `.git/ai-loop/run.sh` is the original tracked
+Git-version shortcut, not a custom launcher. On the control branch
+`scripts/ai-loop.sh` fetches the current Git revision and runs
+`scripts/ai_loop.py` from a revision-scoped cache. AI, not the
+owner, owns independently reviewed staged controller releases,
+exact-candidate helper CI and applicable Mac acceptance **before**
+moving the executable control tip. Ordinary technical revisions
+do not require owner-by-owner confirmation. This Git source inspection
+does not establish actual local Mac invocation/checkout evidence.
+ Respect the frozen
+`--qa-low*` STOP and separate provider-egress permissions. See the
+canonical [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md).
 
 Escalate material product/risk/authority changes, not every nonblocking
 technical Low. Distinguish who proposed a technical judgment, who accepted
@@ -33,7 +42,7 @@ independent evidence gates before merging.
 [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md).
 C0–C3 are legacy A-delivery labels; do not create another C
 milestone/implementation stream. Continue coordinating Codex/Claude via
-the existing approved SHA-pinned **temporary ai-loop** until A11c
+the AI-reviewed, automatically updated **temporary ai-loop** until A11c
 real-world acceptance proves native llmtool parity. A11b.2.2.2 next
 requires design and independent Security review (Issue #70);
 real Git mutation is not authorized. Keep C1 excerpt export safety

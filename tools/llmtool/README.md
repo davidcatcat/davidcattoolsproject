@@ -72,12 +72,21 @@ milestones for that goal.** Historical C0–C3 are consolidated back into
 in [the original proposal](NATIVE_SELF_DEV_MVP.md). Do not implement
 a second C executor, QA framework or release line.
 
-**Before llmtool can replace it, keep the existing operator SHA-pinned
-temporary `ai-loop` to coordinate Codex and Claude** through required
-tests/reviews and an audited PR handoff. This is a temporary operating
-workflow, **not a native llmtool feature**; its controller/launcher must
-not be silently changed or approved. Limit runner repairs to essential
-security/correctness/compatibility, not a second permanent product.
+**Before llmtool can replace it, keep the existing temporary
+`ai-loop` to coordinate Codex and Claude** through required
+tests/reviews and an audited PR handoff. The owner confirms the standard Git-version `.git/ai-loop/run.sh`
+shortcut has been restored; there is no Mac-only custom launcher.
+The tracked control-branch `scripts/ai-loop.sh` fetches the latest
+revision and executes matching cached `scripts/ai_loop.py` with
+its exact control revision. The Git source is inspectable, but
+current local symlink/runtime state requires Mac evidence. AI, not
+the owner, handles controller review and publication: independently
+review and test the candidate on a non-executable staging reference
+before promoting unchanged bytes to the runnable control branch.
+A latest-tip fetch does not replace a release security gate. This is
+a temporary operating workflow, **not a native llmtool feature**.
+Limit runner repairs to essential security/correctness/compatibility,
+not a second permanent product.
 The requirements owner supplies goals and product acceptance; the AI
 team owns technical management, development and evidence-backed review.
 
