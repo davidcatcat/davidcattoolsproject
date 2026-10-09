@@ -18,13 +18,16 @@ or perform routine Git/PM decisions. The user can act as the **physical Mac
 operator** when the coordinator lacks that access; supply only a validated,
 bounded instruction and diagnose its output yourself. Never claim that Mac,
 provider or remote steps ran unless their evidence is present. The
-owner reports Mac-local ai-loop now runs the latest control branch and
-records invocations at `.git/ai-loop/run-history.log`, without a
-per-commit `--approve` step. **AI is responsible for independent
-controller review, exact-head CI/Mac gates and release BEFORE the
-executable branch tip moves**, not the owner. This local behavior has
-not been independently validated in this GitHub-only review; logging
-alone proves neither code integrity nor safety. Respect the frozen
+owner confirms that `.git/ai-loop/run.sh` is the original tracked
+Git-version shortcut, not a custom launcher. On the control branch
+`scripts/ai-loop.sh` fetches the current Git revision and runs
+`scripts/ai_loop.py` from a revision-scoped cache. AI, not the
+owner, owns independently reviewed staged controller releases,
+exact-candidate helper CI and applicable Mac acceptance **before**
+moving the executable control tip. Ordinary technical revisions
+do not require owner-by-owner confirmation. This Git source inspection
+does not establish actual local Mac invocation/checkout evidence.
+ Respect the frozen
 `--qa-low*` STOP and separate provider-egress permissions. See the
 canonical [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md).
 
