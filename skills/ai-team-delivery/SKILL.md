@@ -73,18 +73,15 @@ reliability/paid-token studies must not block offline local A11b design.
 
 **Until A11c Mac-based independent acceptance proves llmtool can run
 Codex+Claude+tests+bounded repair and produce an audited Draft PR or STOP,
-continue using the temporary `ai-loop` as the AI collaboration tool.**
-Per the requirements owner's updated 2026-10-09 delegation, the Mac-local
-launcher is **reported** to fetch/execute the latest
-`automation/ai-loop` control branch automatically and log each
-invocation to `.git/ai-loop/run-history.log`. AI owns controller
-change review/release; **no per-version owner SHA confirmation or
-`--approve` handoff is part of this workflow**. This is a reported
-local change, *not* independently inspected or proven safe here.
-Apply the independent pre-publication controller gate below;
-don't make the owner courier prompts. Preserve the frozen
-`--qa-low*` prohibition. After product parity, deprecate duplicated
-runner orchestration and keep essential fallback controls.
+continue using the Git-provided temporary `ai-loop` controller.** The owner
+confirms the Mac `.git/ai-loop/run.sh` entrypoint has been restored to
+the standard Git launcher shortcut; there is **no custom local launcher
+script** and no per-revision owner approval process. AI is accountable
+for technical controller reviews, safe publication, test evidence and
+recovery. Do not make the owner shuttle prompts. The legacy/frozen
+`--qa-low*` routes remain prohibited; keep only essential temporary
+runner maintenance until native llmtool reaches parity.
+
 
 ## Delivery loop, within available access
 
@@ -121,46 +118,46 @@ expected result and safe failure/recovery. Do not ask the owner to shuttle
 prompts, paste private raw review data, manage clones/worktrees, or interpret
 test failures as the technical PM. Coordinate later steps from reported output.
 
-The owner reports having changed the Mac-local `.git/ai-loop/run.sh`
-to execute the **latest** `automation/ai-loop` branch, without a
-manual per-commit `--approve` step, and append executions to
-`.git/ai-loop/run-history.log`. This untracked `.git/` launcher
-and log are not visible through a GitHub checkout; **do not claim to
-have inspected, tested or secured them merely because the owner
-reported the change**. A run-history entry is audit evidence, not
-a code-integrity check, independent approval or proof of correctness.
+**Launcher truth (Git source + owner report).** The tracked
+`scripts/ai-loop.sh` in `automation/ai-loop` fetches the current
+remote control-branch revision at each invocation, materializes its
+tracked `scripts/ai-loop.sh` and `scripts/ai_loop.py` into a
+revision-scoped cache under `.git/ai-loop/bootstrap/<commit>/`,
+refreshes the `.git/ai-loop/run.sh` symlink to the cached Git shell
+entrypoint, and launches Python with an explicit `--control-sha`.
+The owner confirms the Mac entrypoint is restored to this Git version,
+without local custom scripts. The **tracked Git script is readable
+and verifiable**; its current deployment/symlink target and completed
+runtime behavior still require actual Mac evidence. Do not describe
+it as a custom per-revision approval launcher or claim any local
+run-history file exists unless directly observed.
 
-**AI-owned control-branch release gate (before moving the executable tip):**
-- Treat each update to `automation/ai-loop` as **potential Mac code
-  execution on the next invocation**, not as a routine docs push.
-  Freeze and record old/new immutable commit SHA, full diff and
-  control-task/runtime inputs; developer and independent reviewer
-  must be distinct. A second reviewer or specialist Security review
-  is mandatory for changed process execution, Git mutation, launch,
-  data egress, credentials, permissions, logging or trust boundaries.
-- Run relevant controller tests, helper CI Python 3.9/3.14 and any
-  required native Mac acceptance for the **exact code that would
-  execute**. Publish/repoint control tip only after the coordinator
-  has checked evidence, reviewer findings, scopes, runtime gates,
-  branch protection and release safety. If any gate is missing,
-  inconclusive or failing: **STOP publication and execution**.
-  No bypass through a model's own assertion of PASS.
-- No automatic latest-tip run may be treated as *safe just because*
-  it is newest, or because a log was written. On each observed run,
-  retain exact fetched/executed SHA, start/end or termination,
-  outcome, task identity, source/provenance and only privacy-safe
-  diagnostics in local `run-history.log`. Never upload raw secrets
-  or full private run logs to GitHub. A mismatch, unexpected tip
-  movement or unavailable audit evidence requires STOP and
-  AI-directed investigation/rollback using verified refs.
-- **The owner delegates ordinary controller technical review,
-  publication and safe rollback decisions to AI**; do not request
-  their approval of each SHA or require `--approve`. Escalate
-  only genuine new trust/credential/network authority or
-  irreversible business-scope risk. This delegation does not
-  authorize arbitrary commands, unreviewed remote code, provider
-  data egress or rewriting/removing the user's local launcher.
-  AI cannot silently modify the Mac's `.git/` files from GitHub.
+**AI-owned controller change/release gate:**
+- Updating `automation/ai-loop` changes **Mac-executable content on a
+  later launch**. An AI reviewer distinct from the developer must review
+  old/new immutable SHAs, full diff and task/runtime scope. Require
+  dedicated independent Security review for changes involving shell or
+  process execution, file/Git mutations, network, credentials, provider
+  exports, launcher or trust boundaries.
+- Verify the candidate's exact bytes via a non-executable staging/ref
+  and relevant helper Python 3.9/3.14 CI; require a Mac-native
+  validation of the same reviewed candidate whenever necessary.
+  Only then may an authorized AI publisher promote those **unchanged**
+  reviewed bytes to the executable control tip. Reverify destination
+  tip identity and prevent races; on missing/failed/inconclusive gates,
+  **STOP publication**. This is an obligatory procedure, **not an
+  already-enforced GitHub branch-protection claim**.
+- On actual execution, capture the fetched/executed revision, verified
+  task identity, status/error and sanitized diagnostics using available
+  evidence. A SHA identifies executed bytes but does not itself prove
+  safe release; absence of a verified audit record is not PASS.
+  Never upload Mac-private raw logs, tokens or credentials.
+- The owner delegates ordinary controller technical signoff,
+  publication and rollback to AI; **do not request their approval
+  of routine revisions**. This does not authorize uncontrolled
+  source changes, arbitrary commands, provider data export or
+  relaxing independent QA/security/Mac gates. AI cannot mutate
+  untracked Mac `.git/` files via a GitHub documentation edit.
 
 
 Use local-Mac or macOS CI evidence for Mac-specific path/process behavior.
