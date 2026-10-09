@@ -57,6 +57,30 @@ required gates; seek goal-level confirmation if the actual risk tradeoff changes
 the accepted product promise. Do **not** create a permanent automation subsystem
 for a one-time risk decision. Keep unresolved follow-ups open.
 
+### Product delivery direction: A11 only; interim ai-loop (owner decision 2026-10-09)
+
+For `llmtool`, **A11b/A11c are the single authoritative development
+roadmap**; historical C0–C3 labels describe overlapping delivery and
+measurement work, **not separate milestones, agent executors or blockers**.
+Use the single owner mapping and real status in
+[the Roadmap](../../tools/llmtool/ROADMAP.md). The current product critical
+path is **A11b.2.2.2 bounded design / independent Security review**
+([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)),
+not restarting the C programme. C1 excerpt privacy
+([Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66))
+is a parallel **provider-egress** safety obligation; full company
+reliability/paid-token studies must not block offline local A11b design.
+
+**Until A11c Mac-based independent acceptance proves llmtool can run
+Codex+Claude+tests+bounded repair and produce an audited Draft PR or STOP,
+continue using the existing approved SHA-pinned `ai-loop` as the
+temporary AI collaboration tool.** Don't ask the owner to courier prompts.
+Don't add permanent runner infrastructure or update the Mac launcher
+without the required separate SHA/diff, independent review and Mac
+approval. Preserve the failed/frozen `--qa-low*` prohibition. After
+parity, deprecate duplicate runner orchestration; keep essential
+security/fallback controls until explicit safe decommission.
+
 ## Delivery loop, within available access
 
 1. Read the owner's goal and repo/skill guidance; pin task ID, allowed files,
