@@ -1,10 +1,10 @@
 {
-  "task_id": "A11b222-F1-PrivateGitADD-20261009",
+  "task_id": "A11b222-F1-PrivateGitADD-R2-20261010",
   "mode": "implement_new_pr",
   "pr_number": null,
-  "expected_head": "1f1fe91c4ecd48762c48fdd1e3b5f8c347673c5c",
-  "base_sha": "1f1fe91c4ecd48762c48fdd1e3b5f8c347673c5c",
-  "branch": "feat/a11b222-f1-private-git-add-20261009",
+  "expected_head": "a6487b20095350c2ba3b443a6b90dd5235115b0b",
+  "base_sha": "a6487b20095350c2ba3b443a6b90dd5235115b0b",
+  "branch": "feat/a11b222-f1-private-git-add-20261010-r2",
   "allowed_files": [
     "tools/llmtool/llmtool/_git_containment.py",
     "tools/llmtool/llmtool/_git_supervisor.py",
@@ -18,13 +18,13 @@
     "tools/llmtool/tests/run_containment_acceptance.py",
     "tools/llmtool/tests/test_git_add_private.py",
     "tools/llmtool/tests/test_git_add_authority.py",
-    "reports/llmtool_a11b222_f1_mac_acceptance_20261009.md"
+    "reports/llmtool_a11b222_f1_r2_mac_acceptance_20261010.md"
   ],
   "required_files": [
     "tools/llmtool/llmtool/_git_add_host.py",
     "tools/llmtool/tests/test_git_add_private.py"
   ],
-  "pr_title": "feat(llmtool): A11b.2.2.2 F1 private disposable-fixture Git ADD integration",
+  "pr_title": "feat(llmtool): A11b.2.2.2 F1-r2 private disposable-fixture Git ADD integration",
   "default_test_mode": "related",
   "max_repairs": 2,
   "timeout_seconds": 3600,
@@ -32,7 +32,7 @@
   "claude_timeout_seconds": 2400,
   "ci_workflow": "llmtool-ci.yml",
   "require_local_full": true,
-  "acceptance_report": "reports/llmtool_a11b222_f1_mac_acceptance_20261009.md",
+  "acceptance_report": "reports/llmtool_a11b222_f1_r2_mac_acceptance_20261010.md",
   "mac_evidence": "mac-containment",
   "related_tests": [
     [
