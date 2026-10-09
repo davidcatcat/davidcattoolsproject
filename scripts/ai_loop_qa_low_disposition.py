@@ -230,6 +230,13 @@ def code_review(state):
     raw = state / ("code-review-" + revision + ".raw.json")
     if target.exists():
         result = json.loads(safe_file(target, 32 * 1024))
+        if not raw.is_file():
+            raise Stop("cached controller PASS lacks original private model envelope")
+        envelope = json.loads(safe_file(raw, 128 * 1024))
+        if (not isinstance(envelope, dict) or envelope.get("subtype") != "success"
+                or envelope.get("is_error") is not False
+                or envelope.get("structured_output") != result):
+            raise Stop("cached controller PASS disagrees with original model response")
     else:
         if raw.exists():
             envelope = json.loads(safe_file(raw, 128 * 1024))
@@ -373,6 +380,13 @@ def main():
     raw_file = state / ("claude-" + revision + ".raw.json")
     if result_file.exists():
         result = json.loads(safe_file(result_file, 128 * 1024))
+        if not raw_file.is_file():
+            raise Stop("cached disposition lacks original private model envelope")
+        envelope = json.loads(safe_file(raw_file, 256 * 1024))
+        if (not isinstance(envelope, dict) or envelope.get("subtype") != "success"
+                or envelope.get("is_error") is not False
+                or envelope.get("structured_output") != result):
+            raise Stop("cached risk assessment differs from original model response")
     else:
         if raw_file.exists():
             envelope = json.loads(safe_file(raw_file, 256 * 1024))
