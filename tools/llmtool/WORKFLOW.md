@@ -1,5 +1,39 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
+## Single A-roadmap and interim controller (owner decision 2026-10-09)
+
+**A11b and A11c are the only active native delivery milestones.**
+The C0–C3 names in older plans are historical outcome/measurement
+labels mapped **once** in [the authoritative ROADMAP](ROADMAP.md),
+not separate development backlogs. Use A11b.2.2.2 for the next
+**design-only** executor/safe-Git integration task ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70));
+separately retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
+for C1 excerpt egress privacy. Do not hold offline A11b design
+until full company Phase 0 / paid-token benchmarking completes.
+Real Git ADD remains NOT AUTHORIZED until a separately approved
+design, implementation contract, Security/QA and Mac gates.
+
+**While native llmtool cannot yet coordinate Codex/Claude, keep using the
+existing approved `ai-loop` as the temporary collaboration mechanism.**
+Use only the current owner-approved SHA-pinned Mac launcher when needed,
+with a bounded task, independent Claude review and required Mac
+acceptance. The user is a *physical Mac command operator* only when
+access is unavailable, not an AI prompt courier. No unapproved changes
+to the Mac launcher or controller SHA, Git automation or provider
+data egress are implied. Restrict temporary-controller changes to
+necessary security, correctness or compatibility, not a second
+permanent QA/orchestration platform.
+
+**Cutover happens in A11c, not by renaming C3:** prove on the canonical
+Mac that one llmtool task can run a scoped Codex/Claude/test/repair
+cycle and return a verified Draft PR or explicit STOP, with independent
+Security/Functional QA and no manual prompt handoff. Only then
+freeze/retire overlapping ai-loop orchestration. C1 excerpt output must
+not cross any company/external LLM boundary without its final-output
+safety gate and explicit authorization; other source/log/diff exports
+need their own distinct trust review. Claim Token savings only after
+quality-equivalent, attributable measurements for the actual route.
+
 ## AI-led team operating model
 
 This project's delivery responsibility is documented in
@@ -301,7 +335,9 @@ Current llmtool state: A11a DONE; QG-S1 PASS/CLOSED (required future design
 controls retained), QG-QA1 PASS/CLOSED through merged PR #31 and formal QA
 round-2 APPROVE. A11b is IN PROGRESS: A11b.1 Typed Action & Approval Contract is
 DONE/merged via PR #32 (`e5525f18`) as a data-only slice with offline validation
-and no execution/mutation; A11b.2 is NOT STARTED. A11c is NOT STARTED; A12 is
+and no execution/mutation; A11b.2.1 read-only Git preflight and
+A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
+A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED. A11c is NOT STARTED; A12 is
 future optional. Historical reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.
@@ -438,5 +474,8 @@ For the authorized synthetic containment slice, use the versioned
 [B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md)
 with the historical B5 spec. It records the supervisor-owned group, direct-child
 parent anchor, self-group last act and retained operator-wait obligations.
-Real Git ADD and A11b.2.2.2 remain unauthorized; PR #49 remains Draft pending
-fresh verification and independent Security Re-review and functional QA.
+PR #49 synthetic-only containment is DONE / squash-merged as `eb464628dd6096811c659cfdf663f364107a6ef4`,
+with independent Security/Functional QA and native Mac evidence. Its historical
+Draft/verification gates are closed for this synthetic slice only. Real Git ADD
+and A11b.2.2.2 remain NOT STARTED / NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
+tracks the independent integration design and deferred controls.
