@@ -73,13 +73,18 @@ reliability/paid-token studies must not block offline local A11b design.
 
 **Until A11c Mac-based independent acceptance proves llmtool can run
 Codex+Claude+tests+bounded repair and produce an audited Draft PR or STOP,
-continue using the existing approved SHA-pinned `ai-loop` as the
-temporary AI collaboration tool.** Don't ask the owner to courier prompts.
-Don't add permanent runner infrastructure or update the Mac launcher
-without the required separate SHA/diff, independent review and Mac
-approval. Preserve the failed/frozen `--qa-low*` prohibition. After
-parity, deprecate duplicate runner orchestration; keep essential
-security/fallback controls until explicit safe decommission.
+continue using the temporary `ai-loop` as the AI collaboration tool.**
+Per the requirements owner's updated 2026-10-09 delegation, the Mac-local
+launcher is **reported** to fetch/execute the latest
+`automation/ai-loop` control branch automatically and log each
+invocation to `.git/ai-loop/run-history.log`. AI owns controller
+change review/release; **no per-version owner SHA confirmation or
+`--approve` handoff is part of this workflow**. This is a reported
+local change, *not* independently inspected or proven safe here.
+Apply the independent pre-publication controller gate below;
+don't make the owner courier prompts. Preserve the frozen
+`--qa-low*` prohibition. After product parity, deprecate duplicated
+runner orchestration and keep essential fallback controls.
 
 ## Delivery loop, within available access
 
@@ -116,13 +121,47 @@ expected result and safe failure/recovery. Do not ask the owner to shuttle
 prompts, paste private raw review data, manage clones/worktrees, or interpret
 test failures as the technical PM. Coordinate later steps from reported output.
 
-The Mac-local `.git/ai-loop/run.sh` is operator-owned and **SHA-pinned**:
-new control branch tips must not run without a separate explicit local
-controller-SHA approval. General PR merge delegation does not authorize
-silently updating this local trust root. Do not replace the launcher or request
-`--approve` without identifying exact old/new SHA, diff, independent review,
-real Mac tests and why the new code is necessary. Its approved execution path
-has **not** been independently validated by GitHub documentation alone.
+The owner reports having changed the Mac-local `.git/ai-loop/run.sh`
+to execute the **latest** `automation/ai-loop` branch, without a
+manual per-commit `--approve` step, and append executions to
+`.git/ai-loop/run-history.log`. This untracked `.git/` launcher
+and log are not visible through a GitHub checkout; **do not claim to
+have inspected, tested or secured them merely because the owner
+reported the change**. A run-history entry is audit evidence, not
+a code-integrity check, independent approval or proof of correctness.
+
+**AI-owned control-branch release gate (before moving the executable tip):**
+- Treat each update to `automation/ai-loop` as **potential Mac code
+  execution on the next invocation**, not as a routine docs push.
+  Freeze and record old/new immutable commit SHA, full diff and
+  control-task/runtime inputs; developer and independent reviewer
+  must be distinct. A second reviewer or specialist Security review
+  is mandatory for changed process execution, Git mutation, launch,
+  data egress, credentials, permissions, logging or trust boundaries.
+- Run relevant controller tests, helper CI Python 3.9/3.14 and any
+  required native Mac acceptance for the **exact code that would
+  execute**. Publish/repoint control tip only after the coordinator
+  has checked evidence, reviewer findings, scopes, runtime gates,
+  branch protection and release safety. If any gate is missing,
+  inconclusive or failing: **STOP publication and execution**.
+  No bypass through a model's own assertion of PASS.
+- No automatic latest-tip run may be treated as *safe just because*
+  it is newest, or because a log was written. On each observed run,
+  retain exact fetched/executed SHA, start/end or termination,
+  outcome, task identity, source/provenance and only privacy-safe
+  diagnostics in local `run-history.log`. Never upload raw secrets
+  or full private run logs to GitHub. A mismatch, unexpected tip
+  movement or unavailable audit evidence requires STOP and
+  AI-directed investigation/rollback using verified refs.
+- **The owner delegates ordinary controller technical review,
+  publication and safe rollback decisions to AI**; do not request
+  their approval of each SHA or require `--approve`. Escalate
+  only genuine new trust/credential/network authority or
+  irreversible business-scope risk. This delegation does not
+  authorize arbitrary commands, unreviewed remote code, provider
+  data egress or rewriting/removing the user's local launcher.
+  AI cannot silently modify the Mac's `.git/` files from GitHub.
+
 
 Use local-Mac or macOS CI evidence for Mac-specific path/process behavior.
 Linux-only Python CI does not prove macOS behavior (e.g. `/var` symlinks).
