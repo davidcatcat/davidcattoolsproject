@@ -53,26 +53,50 @@ def git(*args):
 
 
 def safe_file(path, limit):
-    if any(p.is_symlink() for p in (path, *path.parents)):
-        raise Stop("unsafe private evidence path")
+    """Bounded immutable read via no-follow descriptors for EVERY path component.
+
+    Checking Path.is_symlink() followed by opening the full pathname permits a
+    swapped parent-directory symlink. Open each directory with O_NOFOLLOW
+    relative to its already-verified parent, and never follow the final entry.
+    """
+    path = Path(path)
+    if not path.is_absolute() or path.name in ("", ".", ".."):
+        raise Stop("private evidence path must be absolute")
+    if type(limit) is not int or not 0 < limit <= 256 * 1024:
+        raise Stop("invalid private evidence byte bound")
+    parents = []
+    fd = None
     try:
-        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as e:
-        raise Stop("required private evidence missing or unreadable") from e
-    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        rootfd = os.open("/", flags)
+        parents.append(rootfd)
+        current = rootfd
+        for part in path.parts[1:-1]:
+            if part in ("", ".", ".."):
+                raise Stop("unsafe private evidence traversal")
+            nextfd = os.open(part, flags, dir_fd=current)
+            parents.append(nextfd)
+            current = nextfd
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current)
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit:
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_size > limit):
             raise Stop("private evidence not a bounded regular file")
-        with os.fdopen(os.dup(fd), "rb") as f:
-            data = f.read(limit + 1)
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            data = stream.read(limit + 1)
         after = os.fstat(fd)
-        if (len(data) > limit or len(data) != before.st_size or
-            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        if (len(data) > limit or len(data) != before.st_size
+                or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                    != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
             raise Stop("private evidence changed while reading")
         return data
+    except OSError as exc:
+        raise Stop("private evidence missing, symlinked or unreadable") from exc
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        for parent_fd in reversed(parents):
+            os.close(parent_fd)
 
 
 def check_state():
