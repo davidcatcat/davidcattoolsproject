@@ -1,0 +1,19 @@
+{
+  "zip_sha256": "4abf756303bc58455d3810b401851c857acae59a0ccab5fe5d7da13eae54daa5",
+  "captured_sha256": {
+    "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+    "tools/llmtool/llmtool/_git_supervisor.py": "1abbe281cdb1442ac69569b4d3089b5954034c77c2bbe3b25f2bc429a058c8c0",
+    "tools/llmtool/llmtool/_git_containment_protocol.py": "ed1752b19b703f3909283c9d7f72b3ecc9f92ea3734729061be518fb95fdab68",
+    "tools/llmtool/llmtool/_git_process_identity.py": "4f57cc5c5dd5f3309b2c0a6054eab2e5ab44c0f0b08fcb0af896a5318efbfe17",
+    "tools/llmtool/llmtool/git_mutation.py": "25fe6514ad9f4eed6f15d4a691b59e3d66440ebd8cff949a38a328dc65467ed8",
+    "tools/llmtool/tests/test_git_containment.py": "d49b97d29658ad2b06a538091879f26149687dd7063c2e5d1b77070c1d83b795",
+    "tools/llmtool/tests/test_git_mutation.py": "1e8ae555fe9ed2aeae2a5d738b2635829db9cae6b1c1f7d743ce37b1bb6d0728",
+    "tools/llmtool/tests/run_containment_acceptance.py": "24a3dfe924249b6f12f1c01bfd02947b8dfcb5e89e88fc162cb3bdc53643f58a",
+    "reports/llmtool_a11b222_f1_mac_acceptance_20261009.md": "7952921d04619a73fe684a4278398b0ae296f682bc15ca4eaa2afcdc0134b0dd",
+    "evidence/summary.json": "721f0d5c9b36497d236f36528eb3ccf43c5ebdde1a9129f2c30d345f739bcc43",
+    "evidence/task.json": "8c2eae536599d18b8ec7454fc803a0509fba6faccc855aa159d06cac37f4f3da",
+    "evidence/provenance.json": "c41f6d111e479d60bf587c83ac3537b239f46034fb68820af60c82aea532dc4d",
+    "evidence/triage-public.json": "9c65a63abca2ec2e562be602140c3940c7909153ae8982acdb40410f71cfb167"
+  },
+  "source_files_published": false
+}
