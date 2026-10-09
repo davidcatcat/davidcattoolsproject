@@ -22,16 +22,18 @@ readable review is needed for an actual decision.
 
 The owner may run a bounded Mac command only because agents lack local
 access. Do not claim Linux checks validate macOS behavior. The owner
-reports the Mac-local ai-loop launcher now executes the latest control
-branch without per-SHA `--approve`, recording each invocation in
-`.git/ai-loop/run-history.log`. **AI must independently review and
-validate the exact new controller bytes BEFORE publishing the executable
-branch tip**; a run log is not security approval. Do not ask the owner
-to approve routine controller commits. The local launcher behavior is
-not GitHub-verifiable until inspected on the Mac. Do not run frozen
-`--qa-low*` routes. Provider/data egress remains a separate authority.
-See [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for the single
-release gate and [safe-git](skills/safe-git/SKILL.md) for Git checks.
+confirms `.git/ai-loop/run.sh` is restored to the tracked Git launcher
+shortcut, with no custom local script. The control branch's tracked
+`scripts/ai-loop.sh` fetches the current control SHA and executes
+`scripts/ai_loop.py` from its revision-scoped cache. AI must review
+and verify the proposed control revision independently **before**
+promoting new bytes to the executable tip; staging checks/required
+Mac evidence must remain exact-revision-bound. No routine owner
+technical signoff. Do not run frozen `--qa-low*` routes. The local
+symlink/run state is user-reported; do not claim Mac proof from a GitHub
+source read. Provider/data egress remains separately authorized.
+See [ai-team-delivery](skills/ai-team-delivery/SKILL.md)
+and [safe-git](skills/safe-git/SKILL.md) for the single release gate.
 
 When writing audit/retrospective reports, distinguish **proposer,
 reviewer, requirements confirmer, delegated authorizer, technical decision
