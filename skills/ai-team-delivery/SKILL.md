@@ -44,11 +44,66 @@ when `safe-git` confirms readiness. Separate these three concepts:
    permission to execute commands, access the Mac, export data, use credentials,
    activate a provider, spend money or bypass a guard.
 
-Escalate to the owner for a genuine change in objectives, material unresolved
-risk requiring a business choice, unforeseen financial/data exposure, trust
-boundary/permission expansion, irreversible or destructive action, or a needed
-Mac-local operation. Do not label a failed/missing **required** gate as Low or
-ACCEPT just to reach merge.
+### P0 — sole owner escalation rule (owner decision 2026-10-10)
+
+**The requirements owner is not the technical repair/review/approval loop.**
+AI handles technical STOP, NEEDS_DECISION, Codex failures, design inconsistencies,
+ordinary Git/PR/CI and review findings, routine control changes and safe
+recovery among the AI team, with independent Security/QA gates whenever
+required. Never ask the owner to interpret a SHA, judge an architecture or
+relay AI-to-AI instructions. **Technical STOP still means STOP unsafe work**:
+preserve evidence, investigate and independently review before resuming;
+it does not mean ignore failing gates or make up missing authority.
+
+Only escalate **a plain yes/no question** to the owner for:
+
+1. **Product behavior materially mismatches the requested function**
+   and a genuine product-acceptance/requirements decision is necessary.
+2. **Administrator/root-level privileges are needed**, including
+   `sudo`, an administrator password or a system privilege prompt.
+3. **The proposed action may modify macOS core/system state**, including
+   system settings, `/System`, `/Library`, `/usr` other than `/usr/local`,
+   system LaunchDaemons, kernel extensions, TCC privacy/security permissions,
+   system firewall/network settings or system-wide software installs.
+
+When one applies, explain **in one short ordinary-language sentence**
+what *yes* changes and what *no* prevents. Do not bury the decision
+under CI, gate or SHA details. If the action is safely avoidable, do
+not expand the scope merely to ask for approval. User-level
+`~/Library/LaunchAgents`, repository files and `.git/` changes are
+not by themselves P0 Mac-core changes; nevertheless autonomous
+execution of a remote controller or persistent background agent is a
+**separate technical threat boundary** and requires source/permission
+review, exact-SHA CI, applicable native tests and safe fail-closed
+operation before any installation. P0 is not authority to implement P3.
+
+**Unconfirmed proposals:** charging new fees/subscriptions and adding
+new data exports outside the already-authorized Mac/company/provider
+trust boundary were suggested as possible *additional* owner escalation
+categories in [PR #77](https://github.com/davidcatcat/davidcattoolsproject/pull/77).
+The owner has **not yet explicitly adopted those as P0 categories**.
+Do not invent a new cost or external-data authorization in their
+absence; rely only on existing explicit spend/provider/egress scopes.
+An action requiring unavailable financial/data-export permission
+must safely STOP that action until the distinct authorization exists;
+do not covertly spend or export, and do not suggest that user silence
+consents. Existing authorized provider routes remain governed by
+their own privacy, credential and egress policies.
+
+**Handoff and review conventions (proposal adoption, not installed automation):**
+- For independent Claude review, place `CLAUDE-REVIEW-REQUEST: PR #N HEAD <SHA>`
+  with exact source, scope, independent Security/Functional or ordinary
+  review type and explicit questions in GitHub. A label/comment is a
+  handoff record, **not** evidence a Claude scheduler ran. Scheduled
+  review and Mac auto-launch require separate implementation and gates.
+- End each requirements-owner update with exactly one practical line
+  `你需要做：無`, or `你需要做：<一個必要的動作或白話 yes/no 問題>`.
+  Technical failures instead have AI next steps in GitHub, not
+  a demand for owner diagnosis or another manual Claude/Codex prompt.
+- This Skill is the **single normative owner-escalation source**.
+  AGENTS, CLAUDE, WORKFLOW and ROADMAP may link here; do not copy
+  divergent versions of this rule. Later P6 cleanup is documentation,
+  not a precondition for the F1 implementation task.
 
 When all remaining findings are documented **nonblocking Low**, present readable
 findings, technical recommendations and one follow-up issue for genuinely deferred
@@ -64,7 +119,7 @@ roadmap**; historical C0–C3 labels describe overlapping delivery and
 measurement work, **not separate milestones, agent executors or blockers**.
 Use the single owner mapping and real status in
 [the Roadmap](../../tools/llmtool/ROADMAP.md). The current product critical
-path is **A11b.2.2.2 bounded design / independent Security review**
+path is **A11b.2.2.2 F1 private disposable-fixture implementation (contract accepted), with independent Security/Functional QA before product integration**
 ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)),
 not restarting the C programme. C1 excerpt privacy
 ([Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66))
