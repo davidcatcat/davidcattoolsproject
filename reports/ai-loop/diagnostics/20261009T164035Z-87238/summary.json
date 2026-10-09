@@ -1,0 +1,86 @@
+{
+  "status": "STOPPED",
+  "head": "9a8f9c3cd5be5318cea22e3088cd48e16e7dad10",
+  "branch": "feat/a11b222-f1-private-git-add-20261010-r3",
+  "run_id": "20261009T164035Z-87238",
+  "task_id": "A11b222-F1-PrivateGitADD-R3-20261010",
+  "source_summary_sha256": "c4a06f5c7eaab38a37ce2096d333cd76b88c7cd078ca1465f53996bfa574fb0c",
+  "rounds": [
+    {
+      "round": 0,
+      "head": "0b679537c487ae3eaa21702d64c96ec89ff88145",
+      "tests": "FAIL",
+      "tested_sha256": {
+        "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+        "tools/llmtool/llmtool/_git_supervisor.py": "ff8de98fd060002c57b0dbb8ea22cdfb2bfaa8f721f997fa3a3b0daecbbbd479",
+        "tools/llmtool/llmtool/_git_containment_protocol.py": "1ebafea87a884db60548e3382954fdc32879e903384a299277f4ed2eba344874",
+        "tools/llmtool/llmtool/_git_process_identity.py": "bd1738a07926e61a6d4aae80c575f3dc3ea8185ab9e200421046df0fce7b65f3",
+        "tools/llmtool/llmtool/git_mutation.py": "011eb61f6160bec4f03164bcf8abb94adccb1b3d5971bda5afe1c8b45b46467f",
+        "tools/llmtool/llmtool/_git_add_host.py": "492324a012a84ee92ee32c1d5e4bca7967ae4f42f3b78242f90ac76e59ac91b5",
+        "tools/llmtool/llmtool/_git_add_private.py": "8399ed5170894e89c5445c5d4e85793d63d80a24c0304be0a5ca42a3fb777879",
+        "tools/llmtool/tests/test_git_containment.py": "44faf19c7693e079ba559d2b0daa86e2f01e983cc23f533c857a86e2ffd99135",
+        "tools/llmtool/tests/test_git_mutation.py": "10ba02f26923cc37733050112aa7c916521fffda0e56510797cb26d5bb94ae2f",
+        "tools/llmtool/tests/run_containment_acceptance.py": "93aaf8df719e425e2d933445773ee6fa670e6bf75de254a78d74ad3ef0620d80",
+        "tools/llmtool/tests/test_git_add_private.py": "05da897ed0a55a94f9a25ac7da39df1df24c8d40515706ec71726cdb6f609d16",
+        "tools/llmtool/tests/test_git_add_authority.py": "524187f40391a71c30f9c6af8fbc4bf2a6e2a8b0d0feee3c3e99fdd30dbc0c7d",
+        "reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md": "6b0a06e074f51912da7ed154a6d18f3c589128a6d4f72a0891d26443f3b72104"
+      },
+      "developer": {
+        "status": "PASS"
+      }
+    },
+    {
+      "round": 1,
+      "head": "0b679537c487ae3eaa21702d64c96ec89ff88145",
+      "tests": "FAIL",
+      "tested_sha256": {
+        "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+        "tools/llmtool/llmtool/_git_supervisor.py": "ff8de98fd060002c57b0dbb8ea22cdfb2bfaa8f721f997fa3a3b0daecbbbd479",
+        "tools/llmtool/llmtool/_git_containment_protocol.py": "1ebafea87a884db60548e3382954fdc32879e903384a299277f4ed2eba344874",
+        "tools/llmtool/llmtool/_git_process_identity.py": "bd1738a07926e61a6d4aae80c575f3dc3ea8185ab9e200421046df0fce7b65f3",
+        "tools/llmtool/llmtool/git_mutation.py": "011eb61f6160bec4f03164bcf8abb94adccb1b3d5971bda5afe1c8b45b46467f",
+        "tools/llmtool/llmtool/_git_add_host.py": "492324a012a84ee92ee32c1d5e4bca7967ae4f42f3b78242f90ac76e59ac91b5",
+        "tools/llmtool/llmtool/_git_add_private.py": "8399ed5170894e89c5445c5d4e85793d63d80a24c0304be0a5ca42a3fb777879",
+        "tools/llmtool/tests/test_git_containment.py": "44faf19c7693e079ba559d2b0daa86e2f01e983cc23f533c857a86e2ffd99135",
+        "tools/llmtool/tests/test_git_mutation.py": "10ba02f26923cc37733050112aa7c916521fffda0e56510797cb26d5bb94ae2f",
+        "tools/llmtool/tests/run_containment_acceptance.py": "93aaf8df719e425e2d933445773ee6fa670e6bf75de254a78d74ad3ef0620d80",
+        "tools/llmtool/tests/test_git_add_private.py": "87c0d6180795dcd6e21bb262e211fc74254cc081336c5e752998721854b24234",
+        "tools/llmtool/tests/test_git_add_authority.py": "524187f40391a71c30f9c6af8fbc4bf2a6e2a8b0d0feee3c3e99fdd30dbc0c7d",
+        "reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md": "6b0a06e074f51912da7ed154a6d18f3c589128a6d4f72a0891d26443f3b72104"
+      },
+      "developer": {
+        "status": "PASS"
+      }
+    },
+    {
+      "round": 2,
+      "head": "9a8f9c3cd5be5318cea22e3088cd48e16e7dad10",
+      "tests": "PASS",
+      "tested_sha256": {
+        "tools/llmtool/llmtool/_git_containment.py": "bf5b71192b096873f0ed57b90484e3eee08f17c02f7818fab0bc5a591a83391c",
+        "tools/llmtool/llmtool/_git_supervisor.py": "ff8de98fd060002c57b0dbb8ea22cdfb2bfaa8f721f997fa3a3b0daecbbbd479",
+        "tools/llmtool/llmtool/_git_containment_protocol.py": "1ebafea87a884db60548e3382954fdc32879e903384a299277f4ed2eba344874",
+        "tools/llmtool/llmtool/_git_process_identity.py": "bd1738a07926e61a6d4aae80c575f3dc3ea8185ab9e200421046df0fce7b65f3",
+        "tools/llmtool/llmtool/git_mutation.py": "011eb61f6160bec4f03164bcf8abb94adccb1b3d5971bda5afe1c8b45b46467f",
+        "tools/llmtool/llmtool/_git_add_host.py": "492324a012a84ee92ee32c1d5e4bca7967ae4f42f3b78242f90ac76e59ac91b5",
+        "tools/llmtool/llmtool/_git_add_private.py": "8399ed5170894e89c5445c5d4e85793d63d80a24c0304be0a5ca42a3fb777879",
+        "tools/llmtool/tests/test_git_containment.py": "44faf19c7693e079ba559d2b0daa86e2f01e983cc23f533c857a86e2ffd99135",
+        "tools/llmtool/tests/test_git_mutation.py": "10ba02f26923cc37733050112aa7c916521fffda0e56510797cb26d5bb94ae2f",
+        "tools/llmtool/tests/run_containment_acceptance.py": "93aaf8df719e425e2d933445773ee6fa670e6bf75de254a78d74ad3ef0620d80",
+        "tools/llmtool/tests/test_git_add_private.py": "87c0d6180795dcd6e21bb262e211fc74254cc081336c5e752998721854b24234",
+        "tools/llmtool/tests/test_git_add_authority.py": "8014088758918d31cec3bfc6ef0244bc47955a4ba28d88832ee534c5856b5f8c",
+        "reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md": "d752eebf5f7b7e3c5ed13ff7746e902284db30c9c84d9b0d4e2a11e1e3179259"
+      },
+      "developer": {
+        "status": "PASS"
+      },
+      "review": {
+        "status": "PASS",
+        "reviewed_head": "9a8f9c3cd5be5318cea22e3088cd48e16e7dad10"
+      },
+      "final_full": {
+        "status": "FAIL"
+      }
+    }
+  ]
+}
