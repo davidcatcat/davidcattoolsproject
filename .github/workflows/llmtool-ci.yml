@@ -32,12 +32,31 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
         with:
           python-version: ${{ matrix.python-version }}
+      # The trusted-runtime check (wire.file_hash) refuses an interpreter that
+      # group/other can rewrite; some runner-image tool caches ship 0777. Run
+      # on a job-owned copy instead of weakening the check or chmod-ing the
+      # shared tool cache, and prove the copy is byte-identical.
+      - name: Job-owned verified Python
+        run: |
+          src="$(python -c 'import sys; print(sys.base_prefix)')"
+          src_exe="$(python -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+          dst="$RUNNER_TEMP/job-python"
+          cp -a "$src" "$dst"
+          chmod -R go-w "$dst"
+          exe="$dst/${src_exe#"$src"/}"
+          test -f "$exe" && test ! -L "$exe"
+          test "$(stat -c %u "$exe")" = "$(id -u)"
+          test $(( 0$(stat -c %a "$exe") & 022 )) -eq 0
+          test -z "$(find "$dst" -perm /022 -print -quit)"
+          test "$(sha256sum < "$exe")" = "$(sha256sum < "$src_exe")"
+          "$exe" -c 'import os,sys; assert os.path.realpath(sys.executable).startswith(os.environ["RUNNER_TEMP"])'
+          echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
         run: |
-          python -m pip install --requirement tools/llmtool/requirements-ci.txt
-          python -m pip install --no-deps -e tools/llmtool
+          "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
+          "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Offline canonical checks
-        run: make -C tools/llmtool check
+        run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
       - name: Working tree is clean
         run: |
           status=$(git status --porcelain)
