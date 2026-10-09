@@ -197,7 +197,8 @@ def load_task(root, control_sha):
                 'initial_timeout_recovery', 'initial_decision_recovery', 'codex_timeout_seconds', 'claude_timeout_seconds',
                 'acceptance_failure_recovery', 'stopped_failure_recovery',
                 'review_failure_recovery', 'sandbox_decision_recovery', 'failure_triage',
-                'qa_gates', 'qa_medium_repair', 'qa_security_fail_repair'}
+                'qa_gates', 'qa_medium_repair', 'qa_security_fail_repair',
+                'failed_codex_candidate_recovery'}
     if not required.issubset(metadata) or set(metadata) - required - optional or not re.fullmatch(r'[A-Za-z0-9._-]+', metadata['task_id']):
         raise Stop('invalid task contract')
     if not re.fullmatch(r'[0-9a-f]{40}', metadata['base_sha']) or not metadata['branch'].startswith('feat/'):
@@ -281,6 +282,20 @@ def load_task(root, control_sha):
                 or metadata.get('initial_decision_recovery')
                 or metadata.get('require_local_full') is not True):
             raise Stop('invalid frozen C1 PR55 Medium fix contract')
+    if 'failed_codex_candidate_recovery' in metadata:
+        policy = metadata['failed_codex_candidate_recovery']
+        expected = {'run_id': '20261009T041323Z-53171',
+                    'control_sha': '423580283c35be98f1e8fa760a8dc27626c52da3',
+                    'original_summary_sha256': '3469bb8103584e61937205e8a80aaf170827c9facc6d47756742eaf1100705f4',
+                    'source_sha256': {
+                        'tools/llmtool/llmtool/test_output_excerpts.py': 'b89b948dd236482bf6a1580135849d6b31debde354eee3fc394659727252c56b',
+                        'tools/llmtool/tests/test_test_output_excerpts.py': '66c1995076c2327a7d9323c0f8fe5061a06e273b8b2e12efa569298a78c069ac'}}
+        if (policy != expected or metadata['task_id'] != 'C1-PR55-SecurityFail-ResourceFix-20261009'
+                or metadata['mode'] != 'review_existing_pr' or metadata['pr_number'] != 55
+                or metadata['expected_head'] != 'd5ecfce9f7e28da2983affb235dd942d51388723'
+                or metadata['max_repairs'] != 0 or not metadata.get('qa_security_fail_repair')
+                or metadata.get('failure_triage') or metadata.get('qa_gates')):
+            raise Stop('invalid failed-Codex candidate validation-only recovery contract')
     if 'qa_security_fail_repair' in metadata:
         proof = {
             'run_id': '20261008T221753Z-44339',
@@ -1679,6 +1694,93 @@ def integrate_recovery_base(root, task, logs, recovery):
     recovery['integrated_head'] = head
     save_json(logs / 'recovery.json', recovery)
     return head
+
+
+def prepare_failed_codex_candidate_resume(root, task, run_id, original_untracked, tracked_paths=()):
+    """Resume ONLY deterministic validation of frozen edited bytes, no Codex replay.
+
+    Original developer FAIL remains FAIL; never turn the result into PASS.
+    An independent runner test + Claude review must authorize any publication.
+    """
+    policy = task.get('failed_codex_candidate_recovery')
+    if not policy or run_id != policy['run_id']:
+        raise Stop('failed-Codex candidate resume is not explicitly authorized')
+    sha = task['expected_head']
+    if (git(root, 'branch', '--show-current') != task['branch']
+            or git(root, 'rev-parse', 'HEAD') != sha
+            or git(root, 'diff', '--cached', '--name-only')):
+        raise Stop('stopped candidate moved branch/HEAD/index; preserve it')
+    read_pr(root, task, sha)
+    if set(tracked_paths) != set(policy['source_sha256']):
+        raise Stop('stopped candidate dirty-file scope differs from frozen two-file proof')
+    if set(original_untracked).intersection(task['allowed_files']):
+        raise Stop('stopped candidate untracked authorized-file collision')
+    if set(changed(root)) != set(policy['source_sha256']):
+        raise Stop('stopped candidate includes unexpected uncommitted changes')
+    total = 0
+    for name, expected_hash in policy['source_sha256'].items():
+        p = root / name
+        if (any(x.is_symlink() for x in (p, *p.parents))
+                or not p.is_file() or p.stat().st_size > 2 * 1024 * 1024
+                or digest(p) != expected_hash):
+            raise Stop('frozen failed-Codex candidate source hash/symlink drift: ' + name)
+        if git(root, 'hash-object', '--', name) == git(root, 'rev-parse', 'HEAD:' + name):
+            raise Stop('frozen candidate file unchanged despite Codex claim: ' + name)
+        total += p.stat().st_size
+    if total > 4 * 1024 * 1024:
+        raise Stop('failed-Codex candidate exceeds snapshot budget')
+    old_task, old_markdown = load_task(root, policy['control_sha'])
+    if ({k:v for k,v in task.items() if k != 'failed_codex_candidate_recovery'} != old_task):
+        raise Stop('failed-Codex recovery modified original edit/test/review contract')
+    logs = root / '.ai-loop' / run_id
+    def read_private(name, sha256=None):
+        p = logs / name
+        if (any(x.is_symlink() for x in (logs, p, *p.parents))
+                or not p.is_file() or p.stat().st_size > 1024 * 1024):
+            raise Stop('original failed-Codex evidence absent/unsafe: ' + name)
+        data = p.read_bytes()
+        if sha256 and hashlib.sha256(data).hexdigest() != sha256:
+            raise Stop('frozen failed-Codex record hash mismatch: ' + name)
+        return data, json.loads(data)
+    prior_task = read_private('task.json')[1]
+    summary = read_private('summary.json', policy['original_summary_sha256'])[1]
+    provenance = read_private('provenance.json')[1]
+    codex_bytes, codex_record = read_private('codex-0.json')
+    validate_result(codex_record, 'developer')
+    md = logs / 'task.md'
+    if (any(x.is_symlink() for x in (md, *md.parents))
+            or not md.is_file() or md.stat().st_size > 1024 * 1024
+            or md.read_text(encoding='utf-8').strip() != old_markdown.strip()):
+        raise Stop('original failed-Codex task.md changed')
+    if (prior_task != old_task
+            or provenance.get('root') != str(root)
+            or provenance.get('run_id') != run_id
+            or provenance.get('control_sha') != policy['control_sha']
+            or provenance.get('base') != task['base_sha']
+            or provenance.get('start_head') != sha
+            or provenance.get('start_branch') != task['branch']
+            or summary.get('run_id') != run_id
+            or summary.get('task_id') != task['task_id']
+            or summary.get('status') != 'STOPPED'
+            or summary.get('head') != sha
+            or summary.get('branch') != task['branch']
+            or summary.get('history') != []
+            or not str(summary.get('reason','')).startswith('Codex reported FAIL:')
+            or codex_record['status'] != 'FAIL'
+            or not codex_record['summary'].startswith(
+                'Repair candidate prepared in exactly the two authorized files.')):
+        raise Stop('original developer FAIL/provenance not the approved validation-only case')
+    # Do not let a still-active Codex agent mutate the restored candidate.
+    ensure_no_active_runner_codex(root)
+    return original_untracked, {
+        'kind': 'failed_codex_candidate',
+        'from_run': run_id, 'old_control_sha': policy['control_sha'],
+        'starting_head': sha, 'partial_files': dict(policy['source_sha256']),
+        'preserved_untracked': dict(original_untracked),
+        'inherited_validation': 'NONE',
+        'previous_codex_status': 'FAIL',
+        'previous_codex_result_sha256': hashlib.sha256(codex_bytes).hexdigest(),
+        'evidence_files': {'summary.json': policy['original_summary_sha256']}}
 
 
 def snapshot_recovery(root, logs, recovery):
@@ -3762,7 +3864,8 @@ def main():
         original = untracked(root)
         recovery = None
         if args.resume:
-            prepare_resume = (prepare_initial_decision_resume if task.get('initial_decision_recovery')
+            prepare_resume = (prepare_failed_codex_candidate_resume if task.get('failed_codex_candidate_recovery')
+                              else prepare_initial_decision_resume if task.get('initial_decision_recovery')
                               else prepare_sandbox_decision_resume if task.get('sandbox_decision_recovery')
                               else prepare_review_failure_resume if task.get('review_failure_recovery')
                               else prepare_stopped_failure_resume if task.get('stopped_failure_recovery')
@@ -3799,7 +3902,7 @@ def main():
             # Validate Mac-private prior review *before* any paid agent call.
             # In --check this is read-only and must not alter candidate state.
             verify_pr55_medium_repair(root, task)
-        if task.get('qa_security_fail_repair'):
+        if task.get('qa_security_fail_repair') and not (recovery and recovery.get('kind') == 'failed_codex_candidate'):
             verify_pr55_security_fail_repair(root, task)
         if args.check:
             print('PRECHECK PASS. No models started; no source changes.', flush=True)
@@ -3879,8 +3982,9 @@ def main():
         history = []
         medium_reason = verify_pr55_medium_repair(root, task) if task.get('qa_medium_repair') else None
         security_reason = (verify_pr55_security_fail_repair(root, task)
-                           if task.get('qa_security_fail_repair') else None)
-        repair_reason = (security_reason if security_reason is not None else
+                           if task.get('qa_security_fail_repair') and not (recovery and recovery.get('kind') == 'failed_codex_candidate') else None)
+        repair_reason = (None if recovery and recovery.get('kind') == 'failed_codex_candidate' else
+                         security_reason if security_reason is not None else
                          medium_reason if medium_reason is not None else
                          None if recovery and recovery.get('kind') == 'stopped_failure' else
                          ('Retry the original C1 task after a proven CONTROL-BRANCH HANDOFF '
@@ -3971,7 +4075,8 @@ def main():
                 raise Stop('existing PR cumulative diff exceeds the pinned task scope')
             last_round = task['max_repairs'] - 1 if (native_recovery or coordinator.policy and new_task) else task['max_repairs']
             for round_no in range(last_round + 1):
-                result = None
+                result = (dict(status='FAIL', summary='Original Codex FAIL, exact candidate files recovered for independent verification; not a developer PASS')
+                          if recovery and recovery.get('kind') == 'failed_codex_candidate' else None)
                 if repair_reason is not None:
                     result = codex(root, logs, prompt + '\nREPAIR EVIDENCE:\n' + repair_reason,
                                    round_no, task.get('codex_timeout_seconds', task['timeout_seconds']))
@@ -4011,6 +4116,11 @@ def main():
                                       + checkpoint_error, file=sys.stderr, flush=True)
                         raise Stop('Codex reported ' + result['status'] + ': ' + result['summary'])
                 coordinator.require_changed_repair()
+                if recovery and recovery.get('kind') == 'failed_codex_candidate':
+                    # Validate exact two-file bytes once more immediately before fresh tests.
+                    for name, expected in recovery['partial_files'].items():
+                        if digest(root / name) != expected:
+                            raise Stop('recovered candidate changed before first deterministic test')
                 if any(not (root / p).is_file() or (root / p).is_symlink() for p in task.get('required_files', [])):
                     raise Stop('required implementation/test/report artifacts missing; no empty-suite PASS')
                 tested_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
