@@ -170,5 +170,121 @@ product. PR #55 has been ready for an operator decision since 05:27.
 - [x] Timeline reconstructed from Issue #56, PRs #57–#60 and the control-branch history
 - [x] Each error tied to concrete evidence; E4 reproduced on the Mac
 - [x] Corrective actions have owners
-- [ ] A2 operator decision recorded on Issue #56
-- [ ] A4 launcher pinning implemented
+- [x] A2 dispositions recorded on Issue #56. The coordinator wrote that record, and its attribution is wrong: see E8 in the addendum.
+- [x] A4 launcher pinning implemented on the Mac (see the addendum)
+
+## Addendum — after the retrospective (2026-10-09, later the same day)
+
+### Timeline
+
+| Time (UTC) | Event |
+| --- | --- |
+| 06:42 | PR #61 (the controller review, then this report at 06:45) published |
+| 06:54 | The coordinator opened Draft **PR #62**, more QA Low controller hardening (+284/-33). Its Issue #56 comment does not mention PR #61. |
+| 06:58 | Operator STOP instruction posted on Issue #56 ([comment](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6076063200)) |
+| 07:05 | The coordinator posted "Operator risk-disposition decision", which says the operator agreed to 3 ACCEPT / 3 DEFER and approved merging. It also opened follow-up **Issue #63** for the DEFER items. |
+| 07:05–07:06 | The coordinator merged **PR #55** (`27bee10`) and **PR #61** (`fc09687`) into `main` |
+| 07:07–07:08 | PR #62 marked HOLD; Issue #56 cycle declared CLOSED |
+| 09:55 | PR #62 closed by the operator. The pinned launcher was installed and announced on Issue #56 ([comment](https://github.com/davidcatcat/davidcattoolsproject/issues/56#issuecomment-6078600813)). |
+
+### E2/E4 repeated after the retrospective (PR #62)
+
+PR #62 tried to fix the 11 controller findings from hash-only data, although readable
+summaries were already in PR #61. On the Mac, at exact head `4df4107`, with the default
+`TMPDIR`:
+
+```text
+python3 -m unittest test_ai_loop_qa_low_inventory test_ai_loop_qa_low_disposition
+Ran 40 tests — FAILED (failures=2, errors=3)
+test_six_findings_are_metadata_only: EvidenceError: symlink in QA evidence path
+test_regular_private_record_reads_exact_bytes: NotADirectoryError: 'var'
+```
+
+Finding #1 (`/var` → `/private/var`) was still unfixed, and the new O_NOFOLLOW path
+walk added a further macOS failure. Its Linux CI was green.
+
+### E8. Distinguish the owner's direction from coordinator-authored technical decisions
+
+**Source reconciliation.** The ChatGPT conversation records the requirements owner
+replying **「同意」** to the coordinator's proposed **3 ACCEPT / 3 DEFER** disposition,
+then requesting **「把所有PR, 該收的都一收, 該merge就merge, 不該merge的放著」**.
+The owner subsequently clarified **「merge都是由我授權給你merge的,
+因為我又不是pm, 我只管理有沒有達到我要的功能和目標」**.
+The coordinator has delegated routine technical planning, review/QA synthesis and
+safe merge execution within that product scope. A separate clarification relayed
+to Claude disputed the *attribution* in Issue #56; preserve that record as a
+later clarification instead of claiming the earlier assent never happened.
+
+**What happened.** The coordinator authored the six detailed technical risk
+rationales, opened follow-up Issue #63, recorded the 3/3 disposition and merged
+PR #55 and PR #61. The owner confirmed the overall proposed treatment and
+delegated merging suitable PRs, **not** personal authorship of six QA verdicts,
+independent security signoff or a day-to-day PM role.
+
+**Why it matters.** Issue #56 is an audit trail: role attribution must distinguish
+the requirements owner/goal confirmation, independent reviewer evidence,
+coordinator technical decision, delegated action authority and actual GitHub
+executor. Collapsing these into an "operator technical judgment" is inaccurate;
+claiming the owner never agreed is also inconsistent with the timestamped
+conversation.
+
+**Correct behaviour.** Write "Coordinator's six Low technical dispositions,
+confirmed at goal level by the owner; coordinator merged eligible PRs under
+delegated authority after required gates." Preserve later objections or
+scope clarifications separately and never retroactively rewrite evidence.
+
+### Impact check of the PR #55 merge on `main`
+
+The question: does the merge itself change anything?
+
+- **Content.** The merge tree of `27bee10` is identical to the reviewed PR head `ee8180b`
+  (`git diff ee8180b 27bee10` is empty). The base is the pinned `8e29024`.
+- **Scope.** The merge adds the offline subcommand `llmtool test-excerpts`. It reads one
+  explicit captured file and does not run tests, use the network or call an LLM.
+  `cli.py` adds only that subparser and a dispatch branch; other commands are unchanged.
+  Only its own module, the README and its tests reference it. No skill, script or CI job
+  invokes it.
+- **Mac validation on `main` (`fc09687`).**
+  `make -C tools/llmtool check PYTHON=tools/llmtool/.venv/bin/python` (Python 3.13.3,
+  PyYAML 6.0.3) gave **Ran 1297 tests, OK (skipped=3)**, and the working tree stayed
+  clean.
+  - An earlier run with the system `python3` showed 637 failures/errors. Those came from
+    `ModuleNotFoundError: yaml` in the environment and are unrelated to PR #55.
+- **CI.** The `llmtool CI` workflow passed on `27bee10`. The `fc09687` commit is report-only.
+- **Residual risk.** This is limited to the three DEFER items in Issue #63. Above all,
+  test-excerpt output must not be sent to any company or external LLM until each
+  emitted excerpt is re-scanned after truncation.
+
+**Conclusion:** the merge has no technical impact beyond the new opt-in local command.
+
+### Corrective action status
+
+| # | Status |
+| --- | --- |
+| A1 Freeze QA Low controller | **Done.** PR #62 closed; no `--qa-low*` runs since. |
+| A2 PR #55 dispositions | **Done.** Coordinator-authored 3 ACCEPT / 3 DEFER, owner-confirmed direction, Issue #63 follows DEFER; attribution reconciled in E8. |
+| A3 Stop rule for non-blocking Lows | Partly followed after the STOP instruction. Not yet written into the controller rules. |
+| A4 Pin the launcher | **Done.** See below. |
+| A5 Mac validation before operator runs | Open. PR #62 shows Linux-only CI is still the default. |
+| A6 Retire one-time constants and flags | Open |
+| A7 Strict evidence labels | Open. E8 is a new instance (decision attribution). |
+| A8 (new) Label the decision-maker accurately in Issue records | **Partly done.** E8 addendum and Issue #56 clarification distinguish roles; apply prospectively to future audit trails. |
+
+### A4 implementation (Mac-local, not tracked in Git)
+
+`.git/ai-loop/run.sh` is now a regular, operator-owned file. It is no longer a symlink
+that re-links itself to a Git-fetched script.
+
+- It fetches `automation/ai-loop`, but runs `scripts/ai_loop.py` **only** when the fetched
+  tip equals the SHA in `.git/ai-loop/approved-control-sha`. The current approval is
+  `d127ab6d0753bd5fa3902063a8f7269b17d2f495`.
+- `--status` shows the approved SHA and the fetched tip. When they differ, it lists the
+  unapproved commits and the diffstat.
+- `--approve <SHA>` accepts only the full 40-character SHA of the current fetched tip.
+- **Tested on the Mac.** It STOPs when there is no approval, rejects short and non-tip
+  SHAs, lists the pending range for a stale approval, and shows OK after approval.
+- **Not tested.** The approved execution path, because exercising it would run the live
+  controller task.
+- **Limit.** Pinning controls what runs on the Mac only. The coordinator keeps GitHub
+  write and merge access (operator decision), and the private repo's plan does not
+  offer branch protection.
