@@ -359,8 +359,9 @@ class FailedCodexEditedCandidateResumeTests(unittest.TestCase):
                 'run_id':logs.name,'control_sha':control,
                 'original_summary_sha256':sha_report,
                 'source_sha256':contents}
-            summary={'status':'STOPPED','run_id':logs.name,
-                'task_id':contract['task_id'],'head':old_head,
+            # Match the runner's actual STOPPED summary: run_id/task_id live
+            # in provenance/task.json, not the STOPPED summary itself.
+            summary={'status':'STOPPED','head':old_head,
                 'branch':contract['branch'],'history':[],
                 'reason':'Codex reported FAIL: Repair candidate prepared in exactly the two authorized files. Tests pending.'}
             oldcodex={'status':'FAIL','summary':
