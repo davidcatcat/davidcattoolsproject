@@ -1,0 +1,9 @@
+{
+  "status": "STOPPED",
+  "head": "d5ecfce9f7e28da2983affb235dd942d51388723",
+  "branch": "feat/llmtool-c1-test-excerpts-20261009",
+  "run_id": "20261009T041323Z-53171",
+  "task_id": "C1-PR55-SecurityFail-ResourceFix-20261009",
+  "source_summary_sha256": "3469bb8103584e61937205e8a80aaf170827c9facc6d47756742eaf1100705f4",
+  "rounds": []
+}

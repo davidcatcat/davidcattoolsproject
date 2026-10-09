@@ -1,0 +1,17 @@
+{
+  "zip_sha256": "905c2a9689524dd68a60fd93a0ac26743cb8a22489d011d344360523dfed3ad1",
+  "captured_sha256": {
+    "tools/llmtool/llmtool/test_output_excerpts.py": "b89b948dd236482bf6a1580135849d6b31debde354eee3fc394659727252c56b",
+    "tools/llmtool/llmtool/cli.py": "ac53f448aaf6b1ea726a26fb587a94be20b5957ad8131f21dc89a92912639ed8",
+    "tools/llmtool/tests/test_test_output_excerpts.py": "66c1995076c2327a7d9323c0f8fe5061a06e273b8b2e12efa569298a78c069ac",
+    "tools/llmtool/tests/test_cli.py": "4e2940ea28cfc0c32109d8cede5ed7bab84643b4779826b3e1c1b183b6727765",
+    "tools/llmtool/README.md": "72b96fd9552d273930e8350e6023bec374123daa756b037b1a72fe21748ea69b",
+    "reports/ai-loop/C1-test-excerpts-20261009-20261008T192953Z-22876.md": "c84aff27a6d303cb648c3e23956abb4aca3780bc02ba7e78759c9472780bf626",
+    "reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md": "6c828345593c58cbbaf6a0d0721c575d408da91dc1cb68a34ce09ed573fb07f8",
+    "evidence/summary.json": "3469bb8103584e61937205e8a80aaf170827c9facc6d47756742eaf1100705f4",
+    "evidence/task.json": "5037a2b4675c77f0fe7d5bce42dc605c16e856dccb977d458c4ffd4c3ac562fd",
+    "evidence/provenance.json": "6341f7f11fb9b235d5dd4d279ee814e0fb21f51f56330e72d82eafb0df56aef3",
+    "evidence/triage-public.json": "4a50b344d4f37bce4f07a01d0bafe91c5b5e1bfdc2ec76019a903b4d2213fcd4"
+  },
+  "source_files_published": false
+}
