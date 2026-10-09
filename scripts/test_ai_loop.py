@@ -283,7 +283,7 @@ class PR55FinalJWTReviewTests(unittest.TestCase):
             self.assertEqual([n for n,_,_ in calls],[201,202])
             self.assertEqual([h for _,_,h in calls],[head,head])
             self.assertIn('MANDATORY FINAL JWT/URL SECURITY REGRESSION',calls[0][1])
-            self.assertIn('previous Medium',calls[0][1])
+            self.assertIn('original Medium blocking failure',calls[0][1])
             self.assertIn('MANDATORY FINAL JWT/URL FUNCTIONAL REGRESSION',calls[1][1])
             self.assertEqual(before,{p:(root/p).read_bytes() for p in task['allowed_files']})
             self.assertEqual(json.loads((logs/'qa-pr55.json').read_text())['qa_result'],'PASS')
