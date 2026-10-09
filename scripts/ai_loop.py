@@ -340,11 +340,17 @@ def load_task(root, control_sha):
             # Immutable first review remains valid history, never reused on new bytes.
             '67d02be6bc8cb3f237c5060edda3321f6d885bf3': (
                 'C1-PR55-Security-Functional-QA-20261009', exact_c1_paths),
-            # Post-fix review must include the separate truthful runner report.
+            # First URL fix on an older HEAD, now historical and not reusable.
             'd5ecfce9f7e28da2983affb235dd942d51388723': (
                 'C1-PR55-PostFix-Security-Functional-QA-20261009',
                 exact_c1_paths + [
                     'reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md']),
+            # Latest second risk repair, backed by distinct Mac & GitHub CI.
+            'ee8180bc3ad5c455b63e493fee9f2955a90c5463': (
+                'C1-PR55-PostJWT-Security-Functional-QA-20261009',
+                exact_c1_paths + [
+                    'reports/ai-loop/C1-PR55-Medium-InputValidation-Fix-20261009-20261008T213245Z-37499.md',
+                    'reports/ai-loop/C1-PR55-SecurityFail-ResourceFix-20261009-20261009T043757Z-54800.md']),
         }
         expected_profile = qa_revisions.get(metadata['expected_head'])
         if (expected_profile is None
@@ -359,6 +365,8 @@ def load_task(root, control_sha):
                 or metadata.get('require_local_full') is not True
                 or metadata.get('failure_triage')
                 or metadata.get('qa_medium_repair')
+                or metadata.get('qa_security_fail_repair')
+                or metadata.get('failed_codex_candidate_recovery')
                 or metadata.get('acceptance_report')
                 or metadata.get('mandatory_tests')
                 or metadata.get('initial_decision_recovery')):
@@ -2947,8 +2955,39 @@ def independent_qa_pr55(root, logs, task, task_text, untracked_original):
         raise Stop('QA deterministic tests changed source/worktree state')
     results = []
     for index, role in enumerate(task['qa_gates']):
+        final_jwt = head == 'ee8180bc3ad5c455b63e493fee9f2955a90c5463'
         post_fix = head == 'd5ecfce9f7e28da2983affb235dd942d51388723'
-        focused = ('Post-fix security regression: independently inspect the prior '
+        focused = (
+            'MANDATORY FINAL JWT/URL SECURITY REGRESSION: Independently inspect '
+            'the latest second, blocked-Medium RESOURCE_EXHAUSTION fix in '
+            '_sensitive_jwt, _JWT_SEGMENT/_JWT_START/_JWT_END, and the unchanged '
+            'earlier _sensitive_url fix. Previous Security FAIL at original '
+            'test_output_excerpts.py:42 was binding and is NOT waived. '
+            'Perform adversarial source-level complexity reasoning on multiple '
+            'overlapping eyJ prefixes, long malformed first/middle/tail '
+            'segments, up to 1 MiB inputs, regex Unicode IGNORECASE and word '
+            'boundaries; ensure no quadratic work or invalid credentials '
+            'accepted. Investigate false negatives for legitimate JWTs and '
+            'false positives for ordinary harmless captures, including '
+            'near-limit tests and one-to-many risk across regex branches. '
+            'Also review all sensitive-output before print and the no-follow '
+            'file-opening boundaries. Explicitly state whether the original '
+            'Medium blocking failure is fixed on THESE exact source bytes; '
+            'a prior Claude ordinary-code-review PASS is not independent '
+            'Security clearance. Provide anchored source/test evidence. '
+            if final_jwt and role == 'security' else
+            'MANDATORY FINAL JWT/URL FUNCTIONAL REGRESSION: Independently inspect '
+            'the new _sensitive_jwt segment scanner and regression tests. '
+            'Verify valid/invalid JWT cases, segment delimiters, overlapping '
+            'prefixes, Unicode/word-boundary equivalence, near-1 MiB bounded '
+            'subprocess execution with real failure and non-failure oracles. '
+            'Check stderr/stdout suppression for sensitive captures, exit '
+            'metadata fidelity, unittest/pytest positive and negative '
+            'examples, and doc CLI claims. New HEAD does not inherit previous '
+            'functional QA statuses. Do not mark full PASS solely because '
+            'a 5-second subprocess deadline passed. '
+            if final_jwt else
+            'Post-fix security regression: independently inspect the prior '
             'Medium INPUT_VALIDATION risk from URL credential detection. '
             'Verify adversarial near-1-MiB patterns cannot trigger catastrophic '
             'regex backtracking or quadratic scan behavior; positive and '
