@@ -86,5 +86,14 @@
     "line": 42,
     "source_file": "tools/llmtool/llmtool/test_output_excerpts.py",
     "test_file": "tools/llmtool/tests/test_test_output_excerpts.py"
+  },
+  "failed_codex_candidate_recovery": {
+    "run_id": "20261009T041323Z-53171",
+    "control_sha": "423580283c35be98f1e8fa760a8dc27626c52da3",
+    "original_summary_sha256": "3469bb8103584e61937205e8a80aaf170827c9facc6d47756742eaf1100705f4",
+    "source_sha256": {
+      "tools/llmtool/llmtool/test_output_excerpts.py": "b89b948dd236482bf6a1580135849d6b31debde354eee3fc394659727252c56b",
+      "tools/llmtool/tests/test_test_output_excerpts.py": "66c1995076c2327a7d9323c0f8fe5061a06e273b8b2e12efa569298a78c069ac"
+    }
   }
 }
