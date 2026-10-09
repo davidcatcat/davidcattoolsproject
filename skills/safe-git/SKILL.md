@@ -63,7 +63,15 @@ to the AI coordinator within accepted product goals; do not ask them to
 act as PM, review each Low finding or hand-carry Codex/Claude prompts.
 Follow [ai-team-delivery](../ai-team-delivery/SKILL.md). Delegation
 does not waive independent gates, Mac validation, product/provider
-permissions, or the local controller-SHA approval requirement.
+permissions, or the AI-owned controller **pre-publication** review
+and exact-revision release gate. The owner no longer performs
+per-controller-SHA `--approve`. Because the Mac launcher is
+reported to execute the latest control-branch tip, pushing to
+`automation/ai-loop` is an executable release: check the exact
+diff, independent Security review when applicable, helper CI and
+required Mac acceptance **before moving the branch tip**. The
+untracked `.git/ai-loop/run-history.log` is local audit evidence,
+not a review or trust-root substitute.
 
 After verifying all contract-required evidence, the coordinator can
 merge an eligible exact-head PR without repeatedly asking "may I merge?".
