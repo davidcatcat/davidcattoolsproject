@@ -217,8 +217,10 @@ def code_review(state):
     if len(body.encode("utf-8")) > 96 * 1024:
         raise Stop("control code review input too large")
     checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    target = state / "code-review.json"
-    raw = state / "code-review.raw.json"
+    # Existing failed audit bytes from older controller revisions remain frozen.
+    # Never reuse another revision's non-PASS envelope as the new audit result.
+    target = state / ("code-review-" + revision + ".json")
+    raw = state / ("code-review-" + revision + ".raw.json")
     if target.exists():
         result = json.loads(safe_file(target, 32 * 1024))
     else:
@@ -308,8 +310,13 @@ def main():
         raise Stop("unsafe local assessment directory")
     state.mkdir(mode=0o700, parents=False, exist_ok=True)
     code_review(state)
-    result_file = state / "result.json"
-    raw_file = state / "claude.raw.json"
+    # Preserve older private evidence; risk classification must also be
+    # newly obtained for each immutable controller source revision.
+    revision = Path(__file__).resolve().parent.name
+    if not re.fullmatch("[a-f0-9]{40}", revision):
+        raise Stop("source-bound QA low cache requires pinned control revision")
+    result_file = state / ("result-" + revision + ".json")
+    raw_file = state / ("claude-" + revision + ".raw.json")
     if result_file.exists():
         result = json.loads(safe_file(result_file, 128 * 1024))
     else:
