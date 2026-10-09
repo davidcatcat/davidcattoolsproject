@@ -113,7 +113,7 @@ def pinned():
 def boundary_check():
     private = {'_git_containment.py', '_git_supervisor.py',
                '_git_containment_protocol.py', '_git_process_identity.py',
-               '_git_containment_child.py'}
+               '_git_containment_child.py', '_git_add_private.py', '_git_add_host.py'}
     markers = tuple(name[:-3] for name in private)
     checked = 0
     for path in PACKAGE.rglob('*.py'):

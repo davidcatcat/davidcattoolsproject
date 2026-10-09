@@ -28,6 +28,20 @@ EXPECTED_FILES = (
     'tools/llmtool/tests/containment_probe_parent.py',
     'tools/llmtool/tests/test_git_mutation.py',
     'reports/llmtool_a11b2_2_1_containment_f3_recovery_validation_20261007.md')
+F1_FILES = (
+    'tools/llmtool/llmtool/_git_containment.py',
+    'tools/llmtool/llmtool/_git_supervisor.py',
+    'tools/llmtool/llmtool/_git_containment_protocol.py',
+    'tools/llmtool/llmtool/_git_process_identity.py',
+    'tools/llmtool/llmtool/git_mutation.py',
+    'tools/llmtool/llmtool/_git_add_host.py',
+    'tools/llmtool/llmtool/_git_add_private.py',
+    'tools/llmtool/tests/test_git_containment.py',
+    'tools/llmtool/tests/test_git_mutation.py',
+    'tools/llmtool/tests/run_containment_acceptance.py',
+    'tools/llmtool/tests/test_git_add_private.py',
+    'tools/llmtool/tests/test_git_add_authority.py',
+    'reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md')
 
 
 def hashes(contract):
@@ -64,9 +78,13 @@ def main():
         if len(raw_contract) > 128*1024:
             raise ValueError('contract size limit')
         contract = wire.strict_load(raw_contract)
-        if (contract['task_id'] != 'A11b.2.2.1-containment-f3-recovery-20261007'
-                or contract['base_sha'] != 'ceae425eacaa8729a9eb8d796e43304918a8c908'
-                or tuple(contract['allowed_files']) != EXPECTED_FILES):
+        old = (contract['task_id'] == 'A11b.2.2.1-containment-f3-recovery-20261007'
+            and contract['base_sha'] == 'ceae425eacaa8729a9eb8d796e43304918a8c908'
+            and tuple(contract['allowed_files']) == EXPECTED_FILES)
+        f1 = (contract['task_id'] == 'A11b222-F1-PrivateGitADD-R3-20261010'
+            and contract['base_sha'] == '0b679537c487ae3eaa21702d64c96ec89ff88145'
+            and tuple(contract['allowed_files']) == F1_FILES)
+        if not (old or f1):
             raise ValueError('pinned runner contract mismatch')
         if any(not (ROOT/name).is_file() for name in contract['required_files']):
             raise ValueError('required artifact missing')
