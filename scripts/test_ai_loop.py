@@ -326,6 +326,131 @@ class PR55MediumRepairAuthorityTests(unittest.TestCase):
                 loop.verify_pr55_medium_repair(root, task)
 
 
+class PostFixSecurityFailTriageTests(unittest.TestCase):
+    """No untrusted Security FAIL text may reach GitHub or become merge PASS."""
+
+    @contextmanager
+    def evidence(self, *, assessor_error=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            logs = root / '.ai-loop' / '20261008T221753Z-44339'
+            logs.mkdir(parents=True)
+            head = 'd5ecfce9f7e28da2983affb235dd942d51388723'
+            filepath = 'tools/llmtool/llmtool/test_output_excerpts.py'
+            task = {'task_id': 'C1-PR55-PostFix-Security-Functional-QA-20261009',
+                    'pr_number':55, 'qa_gates':['security','functional_qa'],
+                    'base_sha':'8e29024656f873431f6ad83e45015b57bfe381a9',
+                    'branch':'feat/llmtool-c1-test-excerpts-20261009',
+                    'expected_head':head, 'allowed_files':[filepath]}
+            finding = {'severity':'High', 'blocking':True, 'file':filepath,
+                       'detail':'PRIVATE-BLOCKING-FINDING-TEXT',
+                       'evidence':'PRIVATE-SOURCE-LINE-EVIDENCE'}
+            review = {'status':'FAIL', 'reviewed_head':head,
+                      'summary':'PRIVATE-SECURITY-FAIL-SUMMARY', 'findings':[finding]}
+            loop.save_json(logs / 'task.json', task)
+            loop.save_json(logs / 'provenance.json',
+                           {'run_id':logs.name, 'root':str(root)})
+            loop.save_json(logs / 'qa-pr55.json', {
+                'run_id':logs.name, 'head':head, 'pr':55,
+                'diff_sha256':'6662b084538b44f3ad9f7ee873f5c08d23d60cef2b4c49e849c6d0de0c1613f2',
+                'qa_result':'STOPPED', 'tests_related':'PASS', 'tests_full_local':'PASS',
+                'merge_authorized':False, 'product_provider_egress_authorized':False,
+                'roles':[{'role':'security', **review}]})
+            loop.save_json(logs / 'claude-201.json', review)
+            digest = hashlib.sha256(json.dumps(
+                finding, sort_keys=True, ensure_ascii=False,
+                separators=(',', ':')).encode()).hexdigest()
+            structured = {'reviewed_head':head, 'original_finding_sha256':digest,
+                          'category':'RESOURCE_EXHAUSTION',
+                          'action':'FIX_BEFORE_MERGE', 'confidence':'HIGH',
+                          'source_path':filepath, 'line':55,
+                          'private_reason':'PRIVATE-ENGINEERING-ROOT-CAUSE'}
+            posts, model_calls = [], []
+            original_sha = hashlib.sha256
+            def fake_sha(raw):
+                if raw == b'frozen-diff-fixture':
+                    result = Mock()
+                    result.hexdigest.return_value = ('6662b084538b44f3ad9f7ee873f5c08d23d60cef2b4c49e849c6d0de0c1613f2')
+                    return result
+                return original_sha(raw)
+            def fake_git(_root, *args):
+                if args == ('branch','--show-current'):
+                    return task['branch']
+                if args == ('rev-parse','HEAD'):
+                    return head
+                if args == ('status','--porcelain'):
+                    return ''
+                if args == ('diff','--no-ext-diff','--no-textconv',task['base_sha'],head):
+                    return 'frozen-diff-fixture'
+                raise AssertionError(args)
+            old_public = ('QA task/control run: ' + chr(96) + task['task_id']
+                + chr(96) + ' / ' + chr(96) + logs.name
+                + chr(96) + '\n- security: **FAIL**; 1 findings;')
+            def fake_run(argv, _root, **kwargs):
+                if argv and argv[0] == 'claude':
+                    model_calls.append((argv,kwargs.get('stdin')))
+                    kwargs['stdout_path'].write_text(json.dumps({
+                        'subtype':'success', 'is_error':assessor_error,
+                        'structured_output':structured}),encoding='utf-8')
+                    return ''
+                if argv[:2] == ['gh','api'] and '--method' not in argv:
+                    return json.dumps([{'body':old_public}] + [
+                        {'body':item.removeprefix('body=')} for item in posts])
+                if argv[:4] == ['gh','api','--method','POST']:
+                    posts.append(argv[-1])
+                    return '{"id":987}'
+                raise AssertionError(argv)
+            with patch.object(loop,'git',side_effect=fake_git), \
+                 patch.object(loop,'run',side_effect=fake_run), \
+                 patch.object(loop,'read_pr',return_value={'head':{'sha':head},'draft':True}), \
+                 patch.object(loop.hashlib,'sha256',side_effect=fake_sha):
+                yield root,logs,task,finding,structured,posts,model_calls
+
+    def test_single_source_bound_reviewer_publishes_enums_only_and_reuses(self):
+        with self.evidence() as (root,logs,task,finding,structured,posts,calls):
+            loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(len(calls),1)
+            self.assertIn('PRIVATE-BLOCKING-FINDING-TEXT',calls[0][1])
+            self.assertIn('Read,Glob,Grep',calls[0][0])
+            self.assertEqual(len(posts),1)
+            self.assertIn('RESOURCE_EXHAUSTION',posts[0])
+            self.assertIn('FIX_BEFORE_MERGE',posts[0])
+            for secret in ('PRIVATE-BLOCKING','PRIVATE-SOURCE','PRIVATE-ENGINEERING'):
+                self.assertNotIn(secret,posts[0])
+            report = root/'.ai-loop'/'qa-postfix-security-fail-issue56'/'assessment.json'
+            self.assertEqual(json.loads(report.read_text()),structured)
+            loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(len(calls),1)
+            self.assertEqual(len(posts),1)
+
+    def test_original_fail_and_frozen_sha_are_required_before_model_call(self):
+        with self.evidence() as (root,logs,task,finding,structured,posts,calls):
+            source=logs/'claude-201.json'
+            old=json.loads(source.read_text())
+            old['status']='PASS'
+            loop.save_json(source,old)
+            with self.assertRaises(loop.Stop):
+                loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(calls,[])
+            self.assertEqual(posts,[])
+            loop.save_json(source,{'status':'FAIL','reviewed_head':task['expected_head'],
+                'summary':'untrusted','findings':[]})
+            with self.assertRaises(loop.Stop):
+                loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(calls,[])
+
+    def test_error_envelope_never_posts_or_creates_authority(self):
+        with self.evidence(assessor_error=True) as (root,logs,task,finding,structured,posts,calls):
+            with self.assertRaisesRegex(loop.Stop,'did not finish successfully'):
+                loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(len(calls),1)
+            self.assertEqual(posts,[])
+            self.assertFalse((root/'.ai-loop'/'qa-postfix-security-fail-issue56'/'assessment.json').exists())
+            with self.assertRaisesRegex(loop.Stop,'did not finish successfully'):
+                loop.assess_postfix_security_fail(root,logs,task)
+            self.assertEqual(len(calls),1, 'existing failed raw output cannot trigger hidden replay')
+
+
 class FrozenPR55MediumRiskTests(unittest.TestCase):
     """A separate bounded local classification, not a security approval."""
 
