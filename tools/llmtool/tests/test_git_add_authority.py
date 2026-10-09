@@ -43,7 +43,17 @@ class AdmissionTests(unittest.TestCase):
     def test_product_manifest_excludes_all_fake_artifacts(self):
         self.assertFalse(any('tests/' in name or 'child' in name or name == '_git_containment.py'
                              for name in p.ARTIFACTS))
-        binding = p.runtime()
+        try:
+            binding = p.runtime()
+        except wire.ProtocolFailure:
+            # Keep the rejection (no skip, no weaker file_hash); report only
+            # which trusted-runtime predicate the interpreter metadata trips.
+            st = os.stat(os.path.realpath(sys.executable))
+            self.fail('interpreter rejected: regular={} mode={:o} group_other_write={} '
+                      'uid_is_euid={} uid_is_root={} size_over_64MiB={}'.format(
+                          stat.S_ISREG(st.st_mode), stat.S_IMODE(st.st_mode),
+                          bool(st.st_mode & 0o022), st.st_uid == os.geteuid(),
+                          st.st_uid == 0, st.st_size > 64*1024*1024))
         self.assertEqual(set(binding['manifest']), set(p.ARTIFACTS))
         p.verify_runtime(binding)
         binding['manifest']['_git_add_host.py'] = '0'*64
@@ -300,16 +310,25 @@ class FixtureAdmissionTests(unittest.TestCase):
         with self.assertRaises(p.AdmissionRejected):
             p.fixture_check(self.fixture, self.action, self.nonce)
 
-    def test_marker_symlink_owner_ambiguity_and_toplevel_mismatch(self):
+    def test_marker_symlink_refuses(self):
         marker = self.root/p.MARKER
         saved = self.root/'saved-marker'
         marker.rename(saved); marker.symlink_to(saved)
         with self.assertRaises(p.AdmissionRejected):
             p.fixture_check(self.fixture, self.action, self.nonce)
-        marker.unlink(); saved.rename(marker)
-        with patch.object(g._Reads, 'query', return_value=b'/wrong\n'):
+
+    def test_toplevel_mismatch_reaches_query_and_refuses(self):
+        # Fresh, untouched fixture from setUp: every earlier provenance check
+        # must pass, so only the patched top-level answer can cause refusal.
+        p.fixture_check(self.fixture, self.action, self.nonce)
+        reads = []
+        def wrong_toplevel(reads_self, kind):
+            reads.append(kind)
+            return b'/wrong\n'
+        with patch.object(g._Reads, 'query', wrong_toplevel):
             with self.assertRaises(p.AdmissionRejected):
                 p.fixture_check(self.fixture, self.action, self.nonce)
+        self.assertEqual(reads, [g._Read.TOPLEVEL])
 
     def test_malicious_helpers_includes_and_attributes_refuse_before_spawn(self):
         config = self.repo/'.git/config'
