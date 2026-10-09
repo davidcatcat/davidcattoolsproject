@@ -3695,6 +3695,7 @@ def verify_pr55_security_fail_repair(root, task):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
+    parser.add_argument('--qa-low', metavar='RUN_ID', help='frozen PR55 six-Low privacy-safe final assessment; no merge')
     parser.add_argument('--maintenance-issue52', action='store_true',
                         help='one-use pinned runner maintenance; never starts the active C1 task')
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
@@ -3718,6 +3719,8 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
+    if args.qa_low and (args.install_launcher or args.check or args.resume or args.test_mode or args.maintenance_issue52 or args.publish_diagnostics or args.diagnose or args.qa_security_fail or args.qa_medium or args.qa_findings or args.inspect_decision):
+        parser.error('--qa-low is a standalone frozen assessment')
     if args.maintenance_issue52 and (args.install_launcher or args.check or args.test_mode or args.resume
                                      or args.diagnose or args.inspect_decision or args.qa_findings or args.qa_medium or args.qa_security_fail or args.publish_diagnostics):
         parser.error('--maintenance-issue52 is exclusive; it does not run C1')
@@ -3761,6 +3764,31 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
+        if args.qa_low:
+            # Explicitly isolated from the live C1 task; no accidental QA replay.
+            if args.qa_low != '20261009T050558Z-60868':
+                raise Stop('unknown fixed six-Low QA run')
+            directory = state / 'bootstrap' / args.control_sha
+            if any(p.is_symlink() for p in (directory, *directory.parents)):
+                raise Stop('QA Low bootstrap path unsafe')
+            directory.mkdir(parents=True, exist_ok=True)
+            for name in ('ai_loop_qa_low_inventory.py', 'ai_loop_qa_low_disposition.py'):
+                source = git(root, 'show', args.control_sha + ':scripts/' + name) + '\n'
+                if len(source.encode('utf-8')) > 64 * 1024:
+                    raise Stop('QA Low helper exceeds source budget')
+                target = directory / name
+                if target.exists():
+                    if target.is_symlink() or target.read_text(encoding='utf-8') != source:
+                        raise Stop('QA Low helper bootstrap collision')
+                else:
+                    with target.open('x', encoding='utf-8') as out:
+                        out.write(source)
+                    target.chmod(0o600)
+            rc = subprocess.run([sys.executable, str(directory / 'ai_loop_qa_low_disposition.py'),
+                                '--qa-low', args.qa_low], cwd=str(root), check=False).returncode
+            if rc:
+                raise Stop('six-Low assessment stopped; evidence preserved, no merge')
+            return
         if args.maintenance_issue52:
             # Bootstrap exactly the one-use maintenance runner pinned to this
             # fetched control revision. The live C1 task is never loaded or run.
