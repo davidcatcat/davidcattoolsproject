@@ -5,6 +5,15 @@ description: Coordinate llmtool development and recovery through Git-pinned ai-l
 
 # AI-loop handoff — one Mac script, no prompt courier
 
+## Active 2026-10-09: final independent PR #55 Security + Functional QA on fixed JWT HEAD
+
+Source PR #55 is OPEN/Draft, exact repaired HEAD `ee8180bc3ad5c455b63e493fee9f2955a90c5463`. Original Security FAIL at `d5ecfce9` (Medium/blocking `RESOURCE_EXHAUSTION` in `test_output_excerpts.py:42`) remains historically binding until **fresh independent Security role verification on new source bytes**. Prior Codex `FAIL` was never reclassified: verified frozen two-file edits were reused via one-use resume without another writer, then related + both Mac full suites, read-only ordinary Claude review PASS; exact-head product CI Python 3.9/3.14 SUCCESS (1,297, 1 skip each). These do NOT replace specialist security review.
+
+The prior repair task has been archived under `automation/ai-loop/history/20261009-C1-PR55-SecurityFail-ResourceFix-completed-task.md/json`. Current exact task `C1-PR55-PostJWT-Security-Functional-QA-20261009` authorizes **read-only** Security and, if clean, Functional QA for the exact 8-file cumulative PR HEAD; zero Codex calls, zero auto retries, no Git/write actions, no merge. Runner first validates PR Draft/HEAD/base, exact source inventory and exact-head CI plus fresh related and both Mac full suites; then independent role-isolated Claude review with hostile-input and JWT/URL performance regression focus. Any Medium+ or blocking finding **even on reviewer PASS** means STOPPED. Publish only sanitized role/count/path metadata to Issue #56; private source examples and full reviews stay Mac-local. A clean model dual-role result still awaits coordinator signoff and merge decision, not automatic use of self-development tools or provider egress.
+
+**Only next Mac operator action after exact latest control helper CI PASS on 3.9/3.14:** `bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh`. Avoid old `--resume`, manual agent prompts, Git cleanup and C1b/C1c cost-saving claims. Preserve all evidence on STOP.
+
+
 ## CURRENT ACTIVE: script-only rescue of frozen Codex FAIL candidate, NOT a second writer
 
 The local PR #55 second security repair run `20261009T041323Z-53171` STOPPED at the **structured Codex `FAIL`**, before deterministic tests. The retained Mac workspace contains edited `test_output_excerpts.py` and its regression tests, **UNCOMMITTED**. Its source hashes and old summary SHA are pinned by [privacy-safe report](https://github.com/davidcatcat/davidcattoolsproject/blob/1530d51b7310eecb069e2ea98f2d4957da006c8a/reports/ai-loop/diagnostics/20261009T041323Z-53171/index.md). Original failing Security finding in Issue #56 is **still binding**.
