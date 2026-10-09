@@ -31,11 +31,23 @@ def canonical_sha(value):
 
 
 def _read_regular(path):
-    """Reject symlinks, non-regular sources and oversized evidence before parsing."""
+    """Reject a swapped parent symlink and bound every raw QA input read."""
     import os
     import stat
-    fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    path = Path(path)
+    if not path.is_absolute():
+        raise EvidenceError("QA evidence path must be absolute")
+    dirs, fd = [], None
     try:
+        parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        dirs.append(parent)
+        for part in path.parts[1:-1]:
+            if part in ("", ".", ".."):
+                raise EvidenceError("unsafe QA parent path")
+            parent = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                             dir_fd=parent)
+            dirs.append(parent)
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent)
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_BYTES:
             raise EvidenceError("unsafe or oversized QA record")
@@ -47,8 +59,13 @@ def _read_regular(path):
                 != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
             raise EvidenceError("QA record mutated during read")
         return data
+    except OSError as exc:
+        raise EvidenceError("QA source path missing or symlinked") from exc
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        for directory in reversed(dirs):
+            os.close(directory)
 
 
 def frozen_inventory(qa_path):
