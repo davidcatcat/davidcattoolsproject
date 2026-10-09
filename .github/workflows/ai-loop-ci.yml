@@ -21,6 +21,10 @@ on:
   pull_request:
     paths:
       - 'scripts/ai_loop.py'
+      - 'scripts/ai_loop_qa_low_inventory.py'
+      - 'scripts/ai_loop_qa_low_disposition.py'
+      - 'scripts/test_ai_loop_qa_low_disposition.py'
+      - 'scripts/test_ai_loop_qa_low_inventory.py'
       - 'scripts/test_ai_loop.py'
       - 'scripts/ai-loop.sh'
       - 'automation/ai-loop/**'
