@@ -74,14 +74,16 @@ a second C executor, QA framework or release line.
 
 **Before llmtool can replace it, keep the existing temporary
 `ai-loop` to coordinate Codex and Claude** through required
-tests/reviews and an audited PR handoff. The owner reports the Mac
-launcher now runs the latest `automation/ai-loop` tip without
-per-SHA `--approve` and logs runs privately under
-`.git/ai-loop/run-history.log`. This local change remains
-**unverified from GitHub**. AI, not the user, handles controller
-review and publishing, with distinct independent review and exact-head
-helper CI/Mac gates **before** executable code reaches that branch.
-Run history does not replace code review or prove safety. This is
+tests/reviews and an audited PR handoff. The owner confirms the standard Git-version `.git/ai-loop/run.sh`
+shortcut has been restored; there is no Mac-only custom launcher.
+The tracked control-branch `scripts/ai-loop.sh` fetches the latest
+revision and executes matching cached `scripts/ai_loop.py` with
+its exact control revision. The Git source is inspectable, but
+current local symlink/runtime state requires Mac evidence. AI, not
+the owner, handles controller review and publication: independently
+review and test the candidate on a non-executable staging reference
+before promoting unchanged bytes to the runnable control branch.
+A latest-tip fetch does not replace a release security gate. This is
 a temporary operating workflow, **not a native llmtool feature**.
 Limit runner repairs to essential security/correctness/compatibility,
 not a second permanent product.
