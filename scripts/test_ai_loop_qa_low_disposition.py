@@ -257,5 +257,54 @@ class PublicationReconciliationTests(unittest.TestCase):
         cmd.assert_not_called()
 
 
+class ControllerCacheForgeryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.state = Path(self.temp.name)
+        self.revision = "e" * 40
+        names = (
+            "scripts/ai_loop_qa_low_inventory.py",
+            "scripts/ai_loop_qa_low_disposition.py",
+            "scripts/test_ai_loop_qa_low_inventory.py",
+            "scripts/test_ai_loop_qa_low_disposition.py",
+        )
+        body = "\n\n".join(name + "\nsource" for name in names)
+        self.sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        self.result = {"reviewed_source_sha256": self.sha,
+                       "status": "PASS", "findings": []}
+        self.cached = self.state / ("code-review-" + self.revision + ".json")
+        self.raw = self.state / ("code-review-" + self.revision + ".raw.json")
+        self.cached.write_text(json.dumps(self.result), encoding="utf-8")
+
+    def check(self):
+        fake_script = str(self.state / self.revision / "ai_loop_qa_low_disposition.py")
+        with (patch.object(review_module, "__file__", fake_script),
+              patch.object(review_module, "verify_bootstrap_blob"),
+              patch.object(review_module, "git", return_value="source"),
+              patch.object(review_module, "command") as claude_command):
+            with self.assertRaises(Stop):
+                review_module.code_review(self.state)
+            claude_command.assert_not_called()
+
+    def test_cached_pass_without_private_envelope_is_blocked(self):
+        self.check()
+
+    def test_nonpass_private_envelope_cannot_be_upgraded_by_cache(self):
+        self.raw.write_text(json.dumps({
+            "subtype": "success", "is_error": False,
+            "structured_output": {"reviewed_source_sha256": self.sha,
+                                  "status": "FAIL", "findings": ["real finding"]},
+        }), encoding="utf-8")
+        self.check()
+
+    def test_error_envelope_cannot_back_cached_pass(self):
+        self.raw.write_text(json.dumps({
+            "subtype": "error", "is_error": True,
+            "structured_output": self.result,
+        }), encoding="utf-8")
+        self.check()
+
+
 if __name__ == "__main__":
     unittest.main()
