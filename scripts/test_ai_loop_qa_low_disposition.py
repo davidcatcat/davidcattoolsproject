@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """Offline, no-provider tests of six-Low final disposition schema and privacy."""
 import unittest
+import json
+import hashlib
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
+import ai_loop_qa_low_disposition as review_module
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
@@ -143,6 +149,41 @@ class BootstrapBlobAuthenticationTests(unittest.TestCase):
             with self.assertRaises(Stop):
                 verify_bootstrap_blob(self.source, self.revision)
             git_mock.assert_not_called()
+
+
+class FrozenReviewCacheTests(unittest.TestCase):
+    def test_old_failed_cache_does_not_poison_new_controller_sha(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            prior = state / "code-review.raw.json"
+            prior.write_text('{"status":"FAIL","findings":["PRIVATE"]}')
+            revision = "a" * 40
+            filename = state / revision / "ai_loop_qa_low_disposition.py"
+            filenames = (
+                "scripts/ai_loop_qa_low_inventory.py",
+                "scripts/ai_loop_qa_low_disposition.py",
+                "scripts/test_ai_loop_qa_low_inventory.py",
+                "scripts/test_ai_loop_qa_low_disposition.py",
+            )
+            body = "\n\n".join(x + "\n" + "synthetic source" for x in filenames)
+            digest = hashlib.sha256(body.encode()).hexdigest()
+            envelope = json.dumps({
+                "subtype": "success", "is_error": False,
+                "structured_output": {
+                    "reviewed_source_sha256": digest,
+                    "status": "PASS", "findings": [],
+                },
+            })
+            with (patch.object(review_module, "__file__", str(filename)),
+                  patch.object(review_module, "verify_bootstrap_blob"),
+                  patch.object(review_module, "git", return_value="synthetic source"),
+                  patch.object(review_module, "command", return_value=envelope) as model):
+                review_module.code_review(state)
+            model.assert_called_once()
+            self.assertEqual(prior.read_text(),
+                             '{"status":"FAIL","findings":["PRIVATE"]}')
+            self.assertTrue((state / ("code-review-" + revision + ".json")).is_file())
+            self.assertTrue((state / ("code-review-" + revision + ".raw.json")).is_file())
 
 
 if __name__ == "__main__":

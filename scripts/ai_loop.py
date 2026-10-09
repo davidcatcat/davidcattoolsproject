@@ -3696,6 +3696,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--control-sha', required=True)
     parser.add_argument('--qa-low', metavar='RUN_ID', help='frozen PR55 six-Low privacy-safe final assessment; no merge')
+    parser.add_argument('--qa-low-review-diagnose', metavar='RUN_ID', help='privacy-safe review STOP diagnosis; no source change or QA replay')
     parser.add_argument('--maintenance-issue52', action='store_true',
                         help='one-use pinned runner maintenance; never starts the active C1 task')
     parser.add_argument('--check', action='store_true', help='fetch/check only; no models or code edits')
@@ -3719,7 +3720,13 @@ def main():
     mode.add_argument('--related', dest='test_mode', action='store_const', const='related', help='local related tests; full suite in CI')
     mode.add_argument('--full', dest='test_mode', action='store_const', const='full', help='also require local full suite on final tested bytes')
     args = parser.parse_args()
-    if args.qa_low and (args.install_launcher or args.check or args.resume or args.test_mode or args.maintenance_issue52 or args.publish_diagnostics or args.diagnose or args.qa_security_fail or args.qa_medium or args.qa_findings or args.inspect_decision):
+    if args.qa_low_review_diagnose and (args.qa_low or args.install_launcher or args.check
+                                       or args.resume or args.test_mode or args.maintenance_issue52
+                                       or args.publish_diagnostics or args.diagnose
+                                       or args.qa_security_fail or args.qa_medium
+                                       or args.qa_findings or args.inspect_decision):
+        parser.error('--qa-low-review-diagnose is independent and read-only')
+    if args.qa_low and (args.qa_low_review_diagnose or args.install_launcher or args.check or args.resume or args.test_mode or args.maintenance_issue52 or args.publish_diagnostics or args.diagnose or args.qa_security_fail or args.qa_medium or args.qa_findings or args.inspect_decision):
         parser.error('--qa-low is a standalone frozen assessment')
     if args.maintenance_issue52 and (args.install_launcher or args.check or args.test_mode or args.resume
                                      or args.diagnose or args.inspect_decision or args.qa_findings or args.qa_medium or args.qa_security_fail or args.publish_diagnostics):
@@ -3764,6 +3771,34 @@ def main():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise Stop('another ai-loop is already running')
+        if args.qa_low_review_diagnose:
+            # Frozen non-PASS review only. No change to live task/C1/product.
+            if args.qa_low_review_diagnose != '20261009T050558Z-60868':
+                raise Stop('unknown frozen QA Low reviewer identity')
+            directory = state / 'bootstrap' / args.control_sha
+            if any(p.is_symlink() for p in (directory, *directory.parents)):
+                raise Stop('diagnostic bootstrap path unsafe')
+            directory.mkdir(parents=True, exist_ok=True)
+            for name in ('ai_loop_qa_low_inventory.py', 'ai_loop_qa_low_disposition.py',
+                         'ai_loop_qa_low_diagnose.py'):
+                source = git(root, 'show', args.control_sha + ':scripts/' + name) + '\n'
+                if len(source.encode('utf-8')) > 64 * 1024:
+                    raise Stop('bounded diagnostic bootstrap source too large')
+                target = directory / name
+                if target.exists():
+                    if target.is_symlink() or target.read_text(encoding='utf-8') != source:
+                        raise Stop('diagnostic bootstrap source collision')
+                else:
+                    with target.open('x', encoding='utf-8') as stream:
+                        stream.write(source)
+                    target.chmod(0o600)
+            rc = subprocess.run([sys.executable,
+                                 str(directory / 'ai_loop_qa_low_diagnose.py'),
+                                 '--qa-low-review-diagnose', args.qa_low_review_diagnose],
+                                cwd=str(root), check=False).returncode
+            if rc:
+                raise Stop('frozen QA Low diagnostic stopped; original review and QA preserved')
+            return
         if args.qa_low:
             # Explicitly isolated from the live C1 task; no accidental QA replay.
             if args.qa_low != '20261009T050558Z-60868':
