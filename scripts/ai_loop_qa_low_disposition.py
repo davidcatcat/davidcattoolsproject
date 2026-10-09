@@ -158,6 +158,21 @@ def main():
         raise Stop("original QA task/provenance mismatch")
     inventory = frozen_inventory(private / "qa-pr55.json")
     original_qa = json.loads(safe_file(private / "qa-pr55.json", 256 * 1024))
+    # Bind each private role report to the signed summary; no replay from an
+    # unrelated QA session or swapped role payload may be accepted.
+    if (prov.get("control_sha") != "8f2a3bffa400fa030c3945b04dcd7bfdcb0a199d"
+            or original_task.get("expected_head") != PR_HEAD):
+        raise Stop("original QA control/task source changed")
+    for index, role in enumerate(("security", "functional_qa"), 201):
+        raw_role = json.loads(safe_file(private / ("claude-%d.json" % index), 256 * 1024))
+        published = next((r for r in original_qa["roles"] if r["role"] == role), None)
+        if (not isinstance(raw_role, dict) or not isinstance(published, dict)
+                or raw_role.get("status") != "PASS"
+                or raw_role.get("reviewed_head") != PR_HEAD
+                or published.get("reviewed_head") != PR_HEAD
+                or raw_role.get("findings") != published.get("findings")
+                or raw_role.get("summary") != published.get("summary")):
+            raise Stop("original QA role and final record disagree")
     state = ROOT / ".ai-loop" / ("qa-low-disposition-" + QA_RUN)
     if any(p.is_symlink() for p in (state, *state.parents)):
         raise Stop("unsafe local assessment directory")
