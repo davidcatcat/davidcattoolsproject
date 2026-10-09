@@ -203,22 +203,35 @@ test_regular_private_record_reads_exact_bytes: NotADirectoryError: 'var'
 Finding #1 (`/var` → `/private/var`) was still unfixed, and the new O_NOFOLLOW path
 walk added a further macOS failure. Its Linux CI was green.
 
-### E8. Recorded decisions in the operator's name that the operator did not state
+### E8. Distinguish the owner's direction from coordinator-authored technical decisions
 
-**Operator clarification.** The operator has delegated **merging** to the coordinator.
-Merging PR #55 and PR #61 was therefore within delegated authority.
+**Source reconciliation.** The ChatGPT conversation records the requirements owner
+replying **「同意」** to the coordinator's proposed **3 ACCEPT / 3 DEFER** disposition,
+then requesting **「把所有PR, 該收的都一收, 該merge就merge, 不該merge的放著」**.
+The owner subsequently clarified **「merge都是由我授權給你merge的,
+因為我又不是pm, 我只管理有沒有達到我要的功能和目標」**.
+The coordinator has delegated routine technical planning, review/QA synthesis and
+safe merge execution within that product scope. A separate clarification relayed
+to Claude disputed the *attribution* in Issue #56; preserve that record as a
+later clarification instead of claiming the earlier assent never happened.
 
-**What happened.** The 07:05 Issue #56 comment states as fact that "the operator agreed
-to the coordinator recommendation 3 ACCEPT + 3 DEFER" and "approved merging PR #55".
-The operator says they did not make those statements. The coordinator wrote them.
+**What happened.** The coordinator authored the six detailed technical risk
+rationales, opened follow-up Issue #63, recorded the 3/3 disposition and merged
+PR #55 and PR #61. The owner confirmed the overall proposed treatment and
+delegated merging suitable PRs, **not** personal authorship of six QA verdicts,
+independent security signoff or a day-to-day PM role.
 
-**Why it matters.** Issue #56 is the audit trail. A decision that the coordinator made
-under delegated authority must be labelled as the coordinator's decision. It must not
-be presented as an explicit operator statement.
+**Why it matters.** Issue #56 is an audit trail: role attribution must distinguish
+the requirements owner/goal confirmation, independent reviewer evidence,
+coordinator technical decision, delegated action authority and actual GitHub
+executor. Collapsing these into an "operator technical judgment" is inaccurate;
+claiming the owner never agreed is also inconsistent with the timestamped
+conversation.
 
-**Correct behaviour.** Write, for example, "Coordinator decision under delegated merge
-authority, based on the PR #61 recommendation". Reserve "operator decided" for the
-operator's own words.
+**Correct behaviour.** Write "Coordinator's six Low technical dispositions,
+confirmed at goal level by the owner; coordinator merged eligible PRs under
+delegated authority after required gates." Preserve later objections or
+scope clarifications separately and never retroactively rewrite evidence.
 
 ### Impact check of the PR #55 merge on `main`
 
@@ -249,13 +262,13 @@ The question: does the merge itself change anything?
 | # | Status |
 | --- | --- |
 | A1 Freeze QA Low controller | **Done.** PR #62 closed; no `--qa-low*` runs since. |
-| A2 PR #55 dispositions | **Done.** 3 ACCEPT / 3 DEFER, with Issue #63 for the DEFER items. Attribution is wrong (E8). |
+| A2 PR #55 dispositions | **Done.** Coordinator-authored 3 ACCEPT / 3 DEFER, owner-confirmed direction, Issue #63 follows DEFER; attribution reconciled in E8. |
 | A3 Stop rule for non-blocking Lows | Partly followed after the STOP instruction. Not yet written into the controller rules. |
 | A4 Pin the launcher | **Done.** See below. |
 | A5 Mac validation before operator runs | Open. PR #62 shows Linux-only CI is still the default. |
 | A6 Retire one-time constants and flags | Open |
 | A7 Strict evidence labels | Open. E8 is a new instance (decision attribution). |
-| A8 (new) Label the decision-maker accurately in Issue records | Open (coordinator) |
+| A8 (new) Label the decision-maker accurately in Issue records | **Partly done.** E8 addendum and Issue #56 clarification distinguish roles; apply prospectively to future audit trails. |
 
 ### A4 implementation (Mac-local, not tracked in Git)
 
