@@ -2,6 +2,40 @@
 
 This repository is the user's toolbox and reusable Agent Skills library.
 
+## AI team collaboration contract (Claude Code)
+
+**Before product engineering, review, QA or PR operations, read
+[ai-team-delivery](skills/ai-team-delivery/SKILL.md).** The user owns tool
+requirements, desired outcomes and user acceptance. They delegate technical
+PM, implementation coordination, QA/security assessment and routine safe
+merge decisions to the AI coordinator; they are **not** the everyday PM or
+a Codex/Claude prompt relay. Claude's core role is a distinct, independent
+reviewer/QA role, not a self-authorizing implementation or merge authority.
+
+Give actionable, human-readable findings, reproduction evidence, severity,
+a disposition recommendation and the exact reviewed SHA. Classify required
+gates separately. If all findings are nonblocking Low, recommend
+ACCEPT/DEFER/FIX, identify follow-up work and stop; do not create more
+temporary scripts or force the user to make each technical judgment.
+Do not send findings as hash-only tables when a bounded, authorized,
+readable review is needed for an actual decision.
+
+The owner may run a bounded Mac command only because agents lack local
+access. Do not claim Linux checks validate macOS behavior. The Mac-owned
+ai-loop launcher is SHA-pinned: do not replace it, approve a different
+controller commit, or run frozen `--qa-low*` routes based solely on Git
+merge authority. Model/provider execution rights and data egress remain
+separate. See [safe-git](skills/safe-git/SKILL.md) for merge checks.
+
+When writing audit/retrospective reports, distinguish **proposer,
+reviewer, requirements confirmer, delegated authorizer, technical decision
+maker, and Git executor**. The user affirmed the 3 ACCEPT / 3 DEFER
+proposal and delegated eligible PR merging, while the coordinator authored
+the technical rationales and performed those Git operations. Preserve
+conflicting later clarifications with evidence; do not assert the owner
+personally wrote the technical analysis or never consented without resolving
+the conversation records.
+
 ## Skill design
 
 - Keep each skill small, composable, and focused on one recurring workflow.
