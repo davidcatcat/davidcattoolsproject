@@ -2297,3 +2297,31 @@ QG-S1 controls and separate design/review. A11c is NOT STARTED; A12 is future op
 Cloud/offline tests and packaging are required for this slice; no Mac/live provider,
 VPN/auth/session or real execution acceptance is required or claimed.
 See the [A11b.1 validation report](../../reports/llmtool_a11b1_action_approval_contract_validation_20261005.md).
+
+## A11b.5 V1 — Offline task verification and run budgets (data only)
+
+This is a first, partial A11b.5 slice. It adds two pure modules with no CLI and no
+executor, and changes no run status, schema or exit code. **A11b.5 is not complete:**
+recovery policy, real evidence producers and runtime enforcement still need an executor.
+
+- **`llmtool.task_verification`.**
+  - It checks a pinned `TaskContract` (version, digest, scope, acceptance criteria)
+    against caller-supplied `EvidenceRecord`s and returns `PASS`, `FAIL`, `INCOMPLETE`
+    or `NOT_TESTED`.
+  - The verdict is deterministic and does not depend on evidence order.
+  - Any of these keeps the result from being `PASS`:
+    - missing, interrupted, partial or not-run evidence;
+    - evidence for another contract version, run or subject;
+    - a model's own success claim.
+  - Any failed criterion makes the result `FAIL`. An unpinned contract evaluates nothing.
+  - This is **structural verification only**: it cannot prove a command ran.
+    `VERIFIED ≠ DONE`, and `authorized` is always `False`.
+- **`llmtool.run_budget`.**
+  - It holds explicit call, repair (at most 2), wall-clock and input/output token budgets.
+  - Usage covers preparation, retry, repair, escalation and review calls.
+  - Unknown usage or elapsed time is `UNKNOWN`, never zero and never "within budget".
+  - A known partial sum over the limit is `EXCEEDED`.
+  - `admit_next()` is a pure predicate that grants nothing.
+  - `detect_repeated_failure()` matches an exact `(action digest, failure code)` pair.
+  - Open question: a provider that never reports usage blocks a second call while a
+    token budget is set.
