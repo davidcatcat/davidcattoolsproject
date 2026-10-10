@@ -30,6 +30,18 @@ Find the first meaningful failure, reproduce it, and make the smallest correct f
 - Do not delete failing coverage unless the user explicitly changes the requirement.
 - Prefer a minimal patch over opportunistic refactoring during incident repair.
 
+## Reusable incident knowledge
+
+Before diagnosing a repeated CI failure or Actions-cost issue, consult the
+[CI Knowledge Base](../../docs/ci/README.md) and compare its historic claim
+with the **current** workflow, commit, run and billing evidence. After a
+verified fix, update the relevant existing CI page only when the root cause
+or preventive rule can be reused. Include affected SHA, run/PR/Issue links,
+actual acceptance results and unresolved limits; distinguish observed from
+estimated savings. Prefer a separate documentation batch over a report-only
+commit on an already validated release candidate. Knowledge-base text
+never substitutes for required CI, independent review, or native Mac gates.
+
 ## Completion criteria
 
 - Root cause is explained.
