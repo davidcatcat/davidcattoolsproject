@@ -69,7 +69,56 @@
 - 重要原始程式：`tools/llmtool/llmtool/action_contract.py` 中 `ApprovalValidation.authorized` **固定為 False**（正確：沒有真的 issuer）；`TrustedApprovalContext` 不能當驗證 user 身分；`git_mutation.py` 是 read-only preflight；`_git_add_host.py` 明示 sealed F1 fixture-only。不可為了進度把 `authorized` 直接改 True，或用模型說「approved」當簽核。
 - [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) 的 local test excerpt **外送隱私安全門檻**可並行，但在通過前不得把相關內容送公司／外部模型；原始 source/diff/log 的跨邊界傳送另需授權，不會因 C1a 本地功能存在而自動准許。公司模型節省 Token 的證據仍**限於特定 benchmark 路由**，不能廣告成所有任務已驗證節省。
 
-## 4. 新對話先執行什麼（可用的接手指令）
+## 4. 使用者與 AI 協作規則，以及回報給使用者的固定格式
+
+> **本節是新對話需沿用的溝通／交付習慣。** 實際技術權限、P0 升級規則、安全驗收與 Git 操作仍以 [ai-team-delivery Skill](../skills/ai-team-delivery/SKILL.md)／[safe-git Skill](../skills/safe-git/SKILL.md) 為準；這裡**不創造額外授權**。
+
+### 4.1 如何合作（使用者只負責目標、使用體驗與必要決策）
+
+| 角色 | 預設職責 | 不該丟給使用者 |
+| --- | --- | --- |
+| **使用者（需求／產品驗收）** | 用白話描述要達成什麼、目前實際用起來哪裡不對、功能是否符合需求；必要時執行一條無法遠端代跑的 Mac 命令 | 轉貼 Codex／Claude 提示、判斷 test harness、看每個 commit/CI、處理日常 merge |
+| **ChatGPT（coordinator／技術 PM）** | 先讀 repo，定義當前階段、依賴、工作範圍、驗收標準；安排開發／獨立 QA、分級 Bug、控制成本；在既有權限與完整 gate 下直接合併並記錄 GitHub | 自稱已啟動不能連的 Mac agent、無證據說測試通過、在真正安全問題上偷放行 |
+| **Codex（預設 Developer／單一 writer）** | 照已核准 Task Contract 實作、加最小必要回歸、跑相關及 release 規定的測試、回報精確 SHA／證據 | 自己審查簽核自己、擴大實作／權限／成本、任意清理使用者 Git 變更 |
+| **Claude（預設獨立 Reviewer）** | 對同一個精確 SHA 做設計、程式、安全／功能審查，具體列出可重現問題與 `APPROVE/REQUEST_CHANGES`，證據留原 PR／Issue | 每輪額外開 report-only PR、把一般 review 當成真正執行的 Mac QA、無授權改原作者的檔案 |
+| **公司 LLM（可用時、經授權）** | 對允許輸出的最小資料做便宜分析／triage，將品質與 Token 成本如實記錄 | 取得不曾授權的 source/log/secret，因便宜而代替必要獨立驗證 |
+
+- **先事實，後決策，最後執行**：查即時 GitHub 主幹／PR／Issue／CI，再告訴使用者目前做到哪裡；不要只重述上次記憶。檢查或發布 GitHub comment **不是** Mac 上的 Codex／Claude 執行。
+- **少打擾、不中斷**：使用者常只說 `review repo`、`下一步`。應自行完成可做的 repo review／決策／允許的 Git 操作並回報結果，**不要自動要求使用者轉貼提示或對每次 Low 問題簽核**。不擅自觸發未授權的真 repo mutation、付費、provider 資料外送。
+- **P0 唯一直接需求方升級**依 canonical Skill：功能方向與原需求有重大差異需決定；需要系統管理員／root 權限；可能修改 macOS 核心／系統狀態。用一個白話 yes/no 問題說明兩種後果；其他工程問題由 AI 自己處理。另有既存費用、資料外送授權邊界，欠授權就停止相應操作，不推定沉默同意。
+- **Mac 無法由這段 ChatGPT 直接操作**時，只能在必要時提供**一條**已核對的最小操作命令，說明預期輸出與失敗 STOP；不要把整個 Agent 協作工作轉交使用者。關機時不能假裝 ai-loop/llmtool 繼續在本機執行。只有真正設定且能核對的遠端 executor／排程才能聲稱持續執行。
+- **Security 和成本共同收斂**：使用者優先，能用的正常功能先交付；但仍要守住 fail-closed／正確結果／權限與必要 QA。Codex 兩次同根因失敗即升級技術決策，不做無限新測試框架，非阻擋 Low 留 backlog。保留有價值的回歸測試，優先重用。
+
+### 4.2 每次報告給使用者的格式（繁體中文、先結論、短而具體）
+
+**預設 5～7 行即可**；簡單問題只需一兩段，重大 review／安全決策才加表格與細節。不要把 CI 日誌、測試案例、整段 AI 提示直接傾倒給使用者。
+
+1. **結論（第一句）**：直說 `已完成／可合併／不能合併／尚未啟動／目前在 A11b.X`，不要先鋪長篇故事。
+2. **已做事項（實際動作）**：誰做了什麼；附精簡的 PR／Issue／Commit 網址。分開說 `已發布 comment`、`已推送程式`、`已合併 main`，不可把它們當同一件事。
+3. **驗證與 QA**：列真正已執行的 CI、測試數量與平台、是否非作者、安全／功能驗收、exact SHA；未做寫 `NOT_VERIFIED / PENDING`，不要把自己讀 source 當成 Mac PASS。
+4. **風險／阻擋**：只突出影響使用者或 release 的問題；寫明 **Severity／Priority／是否阻擋這個功能**，區分 blocker 與 nonblocking LOW。不要因 F2 Hold 就宣稱已合併 A0–A11a 都不可用。
+5. **下一步（已安排或可立即執行）**：具體到 `誰／做什麼／在哪張 PR 或 Issue／完成門檻`；有實際工具就先做再回報，不要每輪丟回「要不要我做？」。若只能規劃而沒有 executor，明講尚未啟動。
+6. **最後單獨一行**：嚴格用 `你需要做：無`，或 `你需要做：<一個真正必要的簡單動作或 P0 白話 yes/no 問題>`；這是 canonical Skill 已記載的規範。
+
+**簡短實例（僅回報形式，不是現在的 live 狀態）：**
+
+> **結論：** A11b.3 的設計已完成審查；F2 程式尚未授權開發。  
+> **已完成：** Claude 非作者審查已貼在 Issue #N；我已接受 2 項必要修正。  
+> **驗證：** 設計審查 PASS；尚無 Mac 實作測試（NOT_VERIFIED）。  
+> **風險：** 真實 repo 修改仍為 Release Blocker，不影響現有 F1 fixture 功能。  
+> **下一步：** Codex 只實作 D1 離線授權資料契約，完成後再獨立驗收。  
+> **你需要做：無。**
+
+### 4.3 使用者常見指令如何回覆
+
+- **`review repo`**：主動查最新 main／open PR／Issue／CI／新 Claude 報告與必要 code diff → 一句結論 → 是否可 Merge、為何 → 可安全做的事情直接做 → 交付連結與下一步；沒獨立簽核要誠實標明。
+- **`下一步`／`執行下一步`**：讀 Roadmap 和既有決策，不重做已完成項目；先處理依賴與當前 blocker，再產生小範圍工作成果，不停在空泛計畫或要求使用者選模型。
+- **`有 bug`／`測試失敗`**：先確認真使用者影響，區分 production bug、test bug、環境限制；用獨立最小 oracle，再依 SEV/Priority/release blocker 決策。除非涉及真正 blocking safety，不自動打開更多輪測試框架。
+- **`進度呢`／`做到哪了`**：報具體 A milestone、已合併、待驗收、到 A11c 還缺什麼；不要把 Draft／設計／GitHub Issue 當 DONE。
+- **`我要關 Mac／開新對話`**：清楚說什麼不會繼續跑，保存 repo 中的交接 SHA、控制器執行與停機限制、下一個明確切片；不要承諾無實際排程／executor 的背景工作。
+
+---
+## 5. 新對話先執行什麼（可用的接手指令）
 
 1. **讀本檔，然後從 GitHub live 查** `main`、所有 open PR、Issue #97 最新 comments、PR #96 merge/CI、`AGENTS.md`／`skills/ai-team-delivery/SKILL.md`／`tools/llmtool/ROADMAP.md`／`WORKFLOW.md`。不要依照過去聊天中的「未合併 #96」舊快照回答。
 2. **優先取得 Issue #97 的獨立 Claude 設計／Security 審查**；若已出現，逐項決策並縮成 D1 離線 non-mutating 的最小實作契約。尚未有獨立 review 時不可把 Issue 討論稱作已核准的實作。
@@ -77,7 +126,7 @@
 4. 後續 D2 / F2 real-repo mutation 需要不同的可信權限、sandbox、rollback 與 Mac 獨立驗收。**禁止用現有 F1 fixture-only 程式直接對 canonical/user repository 做 Git ADD**。完成後才考慮 A11c 真實協作任務的 Draft PR 或 STOP 驗收。
 5. 不新增 review-only PR；審查結論在原 Issue／產品 PR 中。用 `Severity / Priority / feature-scoped Release Blocker` 處置問題；真正阻擋項目不可被成本上限豁免。
 
-## 5. 最重要的連結與證據
+## 6. 最重要的連結與證據
 
 - Repo：[davidcatcat/davidcattoolsproject](https://github.com/davidcatcat/davidcattoolsproject)
 - [PR #84 — F1 已合併](https://github.com/davidcatcat/davidcattoolsproject/pull/84) ／ [獨立最終 QA](https://github.com/davidcatcat/davidcattoolsproject/pull/84#issuecomment-6099745776)
@@ -88,9 +137,9 @@
 - [Issue #66 — C1 excerpt provider-egress 隱私](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
 - [Issue #83 — 舊 directory-FD 成長調查](https://github.com/davidcatcat/davidcattoolsproject/issues/83)
 
-## 6. 新對話的第一句（可直接貼）
+## 7. 新對話的第一句（可直接貼）
 
-> 請先用 GitHub 讀 `davidcatcat/davidcattoolsproject` 的 `reports/llmtool_conversation_handoff_20261011.md`，再查最新 main／PR／Issue #97 與 AGENTS／Skills／ROADMAP／WORKFLOW。延續 A11b：PR #84 F1 已合併、PR #96 Bug 政策已合併，下一步評估 Issue #97 的非作者設計審查並推動 D1（可信授權、離線不修改 repo）。你負責 PM／審查協調與允許的 Git 工作，不要讓我手動在 Claude/Codex 之間貼提示；不可自行擴權為 F2 真實 Git 操作。先做 repo review 與明確下一步。
+> 請先用 GitHub 讀 `davidcatcat/davidcattoolsproject` 的 `reports/llmtool_conversation_handoff_20261011.md`（**尤其是第 4 節「使用者與 AI 協作＋固定回報格式」**），再查最新 main／PR／Issue #97 與 AGENTS／Skills／ROADMAP／WORKFLOW。延續 A11b：PR #84 F1 已合併、PR #96 Bug 政策已合併，下一步評估 Issue #97 的非作者設計審查並推動 D1（可信授權、離線不修改 repo）。你負責 PM／審查協調與允許的 Git 工作，不要讓我手動在 Claude/Codex 之間貼提示；不可自行擴權為 F2 真實 Git 操作。先做 repo review 與明確下一步。
 
 ---
 
