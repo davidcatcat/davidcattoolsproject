@@ -1,7 +1,13 @@
 name: llmtool CI
 
+# Feature branches are tested through their pull request, not again on push:
+# a branch push plus its PR used to run the same commit twice (Issue #99).
+# main keeps its post-merge run; workflow_dispatch is the manual check for a
+# ref without a PR.
 on:
   push:
+    branches:
+      - main
     paths:
       - 'tools/llmtool/**'
       - '.github/workflows/llmtool-ci.yml'
@@ -9,12 +15,13 @@ on:
     paths:
       - 'tools/llmtool/**'
       - '.github/workflows/llmtool-ci.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -26,9 +33,38 @@ jobs:
       matrix:
         python-version: ['3.9', '3.14']
     steps:
+      # Test the PR's own head commit, not GitHub's temporary merge commit
+      # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
+      # Without the merge ref, merge coverage holds only if the head already
+      # contains the PR base; otherwise fail rather than pass untested. The
+      # base is fixed at event time, so the merge itself must still recheck
+      # live main and bind to this head (Issue #99 / PR #100).
+      - name: Source revision
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
         with:
           python-version: ${{ matrix.python-version }}
