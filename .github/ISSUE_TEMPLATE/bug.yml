@@ -1,0 +1,44 @@
+name: Bug report
+description: Report an observable problem; AI coordinator owns severity, triage and release decisions.
+title: "[BUG] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe what you experienced. You do not need to judge Security,
+        severity, which AI to use, or whether a PR can be merged.
+        The coordinator classifies the issue under the ai-team-delivery policy.
+  - type: textarea
+    id: observed
+    attributes:
+      label: What did you observe?
+      description: The user-visible failure, incorrect result or interrupted workflow.
+      placeholder: "The tool reported success, but the expected result was missing."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How can we reproduce it? (optional)
+      description: Steps, input shape, environment, or expected result. Omit tokens, credentials and private logs.
+    validations:
+      required: false
+  - type: textarea
+    id: coordinator-triage
+    attributes:
+      label: AI coordinator triage (not required from the reporter)
+      description: Filled after evidence-based independent assessment; do not guess.
+      value: |
+        - User journey / impact:
+        - Affected release and reachability:
+        - Evidence / reproducer / exact SHA:
+        - Severity: UNCLASSIFIED (SEV-0 / SEV-1 / SEV-2 / SEV-3)
+        - Priority: UNCLASSIFIED (NOW / NEXT / BACKLOG / WONT_FIX)
+        - Affected-release blocker: UNCLASSIFIED (YES / NO)
+        - Independent downgrade / reviewer:
+        - Verified workaround or isolation:
+        - Responsible owner and target milestone:
+        - Attempts/budget used; next decision:
+        - Decision rationale / known limitations:
+    validations:
+      required: false
