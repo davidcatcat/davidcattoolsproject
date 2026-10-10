@@ -256,8 +256,9 @@ def frame(value):
 
 class Reader:
     """Incremental reader never reserves a peer-declared unbounded buffer."""
-    def __init__(self, fd):
+    def __init__(self, fd, *, validate_message=True):
         self.fd, self.buffer, self.size = fd, bytearray(), None
+        self.validate_message = validate_message
         os.set_blocking(fd, False)
 
     def read(self):
@@ -283,7 +284,8 @@ class Reader:
                 raw = bytes(self.buffer)
                 self.buffer.clear()
                 self.size = None
-                return validate(strict_load(raw))
+                value = strict_load(raw)
+                return validate(value) if self.validate_message else value
 
     def receive(self, deadline):
         while True:
@@ -332,7 +334,17 @@ def file_hash(path):
     # file/origin/digest checks detect drift, not privilege isolation from an
     # administrator able to replace a Homebrew installation directory.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, 'rb') as stream:
+    try:
+        stream = os.fdopen(fd, 'rb')
+    except BaseException:
+        # Wrapping can fail (notably for a directory). Preserve that exception
+        # even if closing the still-raw owned descriptor also fails.
+        try:
+            os.close(fd)
+        except BaseException:
+            pass
+        raise
+    with stream:
         before = os.fstat(stream.fileno())
         if (not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022
                 or before.st_uid not in (0, os.geteuid()) or before.st_size > 64*1024*1024):

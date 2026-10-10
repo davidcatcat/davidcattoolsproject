@@ -64,9 +64,16 @@ def _main():
         if own.pid != own.pgid or own.pid != own.sid:
             return 78
         control, status = _endpoints()
-        reader = wire.Reader(control[0])
+        reader = wire.Reader(control[0], validate_message=False)
         handshake_deadline = time.monotonic()+2
         start = reader.receive(handshake_deadline)
+        # Product admission is a distinct schema/domain/manifest. It never
+        # selects a fake case, fault hook or fake-child executable.
+        if (type(start) is dict
+                and start.get('domain') == 'A11b.2.2.2/git-add/internal/v1'):
+            return _product_main(start, own, control, status)
+        wire.validate(start)
+        reader.validate_message = True
         if (start['type'] != 'START' or start['pipes'] != [control[2], status[2]]
                 or Identity.parse(start['launch']) != own
                 or Identity.parse(start['parent']) != identity(os.getppid())):
@@ -220,6 +227,134 @@ def _main():
     finally:
         if note is not None:
             note.close()
+
+
+def _product_main(start, own, control, status):
+    from . import _git_add_private as private
+    from . import _git_process_identity as kernel
+    child = note = None
+    spawned = False
+    request = None
+    recorded = [None]
+    try:
+        private.standalone('_git_supervisor')
+        if (set(start) != {'domain', 'type', 'request', 'parent', 'launch', 'pipes'}
+                or start['type'] != 'START'
+                or start['domain'] != private.DOMAIN
+                or start['pipes'] != [control[2], status[2]]
+                or Identity.parse(start['launch']) != own
+                or Identity.parse(start['parent']) != identity(os.getppid())):
+            private.reject()
+        request = start['request']
+        action = private.validate_frame(request)
+        if start['parent']['ppid'] != request['parent']['pid']:
+            private.reject()
+        private.verify_runtime(request['runtime'])
+        nonce = request['nonce']
+        def record(number, frame):
+            if recorded[0] is None:
+                recorded[0] = number
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, record)
+        reader = private.Reader(control[0])
+        def emit(kind, **extra):
+            private.send(status[0], {'domain': private.DOMAIN, 'type': kind,
+                'nonce': nonce, **extra}, time.monotonic()+1)
+        emit('READY', digest=private.digest(request), supervisor=own.data())
+        # Supervisor-owned exact final gate, independent of caller and Host.
+        kernel.git_inventory(own)  # Missing libproc enumeration refuses pre-Git.
+        host_check()
+        _, plan = private.verify_request(request)
+        private.fixture_check(request['fixture'], action, nonce)
+        if Identity.parse(start['parent']) != identity(os.getppid()):
+            private.reject()
+        if Identity.parse(request['parent']) != identity(request['parent']['pid']):
+            private.reject()
+        if recorded[0] is not None or select.select([control[0]], [], [], 0)[0]:
+            _last_act(own)
+        child = subprocess.Popen(plan.future_add_argv, cwd=plan.repository_root,
+            env=dict(plan.future_environment), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            close_fds=True, pass_fds=(), start_new_session=False)
+        spawned = True
+        bound = kernel.owned_git_identity(child, own)
+        emit('CHILD_IDENTITY', child=bound.data())
+        note = ExitNote(child.pid)
+        for stream in (child.stdout, child.stderr):
+            os.set_blocking(stream.fileno(), False)
+        counts = [0, 0]
+        deadline = time.monotonic()+request['timeout']
+        while True:
+            if select.select([control[0]], [], [], 0)[0] or recorded[0] is not None:
+                # Any control bytes (including partial malformed CANCEL) or
+                # EOF are cancellation, never a second START or authority.
+                _last_act(own)
+            kernel.git_inventory(own, bound)
+            for i, stream in enumerate((child.stdout, child.stderr)):
+                try:
+                    counts[i] += len(os.read(stream.fileno(), 65536))
+                except BlockingIOError:
+                    pass
+            if max(counts) > wire.LIMIT or time.monotonic() >= deadline:
+                _last_act(own)
+            if note.exited():
+                row = kernel._info(child.pid, 3, kernel._BSD)
+                if row.status != 5:
+                    select.select([control[0]], [], [], .005)
+                    continue
+                if (row.ppid != own.pid or row.pgid != own.pgid
+                        or row.uid != own.uid or row.seconds != bound.seconds
+                        or row.micros != bound.micros):
+                    raise kernel.IdentityUnknown('kernel identity changed')
+                # Non-consuming BSD exit status. Git remains unreaped until
+                # Host's fresh anchor group decision kills this supervisor.
+                code = os.waitstatus_to_exitcode(row.xstatus)
+                emit('TERMINAL', code='MUTATION_GIT_EXIT', exit_code=code)
+                while True:
+                    kernel.git_inventory(own, bound)
+                    if recorded[0] is not None:
+                        _last_act(own)
+                    if select.select([control[0]], [], [], .005)[0]:
+                        # Only an exact FINALIZE earns a positive verdict, and
+                        # only after one more passing inventory. Any other byte,
+                        # partial frame or EOF stays plain cancellation.
+                        try:
+                            request_final = reader.read()
+                        except BaseException:
+                            request_final = None
+                        if request_final == {'domain': private.DOMAIN,
+                                             'type': 'FINALIZE', 'nonce': nonce}:
+                            kernel.git_inventory(own, bound)  # Unknown → retained.
+                            emit('FINALIZED')
+                        _last_act(own)  # Nothing is emitted after this.
+            select.select([control[0]], [], [], .005)
+    except kernel.IdentityUnknown as original_error:
+        if spawned:
+            # An escape/identity uncertainty cannot be fixed by killing just
+            # the remembered group. Preserve ownership for Host operator-wait.
+            try:
+                private.send(status[0], {'domain': private.DOMAIN, 'type': 'TERMINAL',
+                    'nonce': request['nonce'], 'code': 'MUTATION_STATE_UNKNOWN',
+                    'exit_code': None}, time.monotonic()+1)
+            except BaseException:
+                pass
+            while True:
+                try:
+                    select.select([], [], [], .05)
+                except BaseException:
+                    pass  # Retain original_error, child, note and endpoints.
+        return 78
+    except BaseException:
+        if spawned:
+            _last_act(own)
+        if request is not None:
+            try:
+                private.send(status[0], {'domain': private.DOMAIN, 'type': 'TERMINAL',
+                    'nonce': request['nonce'], 'code': 'MUTATION_START_FAILED',
+                    'exit_code': None}, time.monotonic()+1)
+            except BaseException:
+                pass
+        return 78
 
 
 if __name__ == '__main__':

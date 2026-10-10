@@ -90,6 +90,10 @@ class GitAddPreflight:
     bound_blobs: tuple[BoundBlob, ...]
     future_add_argv: tuple[str, ...]
     future_environment: tuple[tuple[str, str], ...]
+    branch: str
+    git_identity: tuple[int, int]
+    config_sha256: str
+    attributes_sha256: str
 
 
 def git_blob_oid(content, object_format):
@@ -262,7 +266,7 @@ def _parse_index(raw, object_format):
 
 
 def _environment(root, readonly):
-    env = {'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C',
+    env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
         'GIT_DIR': root+'/.git', 'GIT_WORK_TREE': root,
         'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
         'GIT_ATTR_NOSYSTEM': '1', 'GIT_NO_LAZY_FETCH': '1',
@@ -285,6 +289,7 @@ class _Read(Enum):
     TREE = 5
     ATTRIBUTES = 6
     IGNORE = 7
+    TOPLEVEL = 8
 
 
 def _cleanup_read_process(process, selector):
@@ -346,6 +351,7 @@ class _Reads:
             _Read.TREE: ('ls-tree', '-r', '-z', '--full-tree', 'HEAD'),
             _Read.ATTRIBUTES: ('check-attr', '-z') + ATTRIBUTES + ('--',) + self.paths,
             _Read.IGNORE: ('ls-files', '--others', '--ignored', '--exclude-standard', '-z', '--') + self.paths,
+            _Read.TOPLEVEL: ('rev-parse', '--show-toplevel'),
         }
         if type(query) is not _Read:
             _reject('Git inspection unavailable')
@@ -606,7 +612,10 @@ def preflight_git_add(action):
                 action.repository.root_device, action.repository.root_inode, head, object_format,
                 index_sha, paths, action.expected_state.digest, index, blobs,
                 _prefix()+('add', '--')+paths,
-                tuple(sorted(_environment(action.repository.canonical_root, False).items())))
+                tuple(sorted(_environment(action.repository.canonical_root, False).items())),
+                branch.rstrip(b'\n').decode('utf-8'), git_identity[:2],
+                hashlib.sha256(_read_file(gitfd, 'config', METADATA_LIMIT, 'unsafe config')[0]).hexdigest(),
+                hashlib.sha256(repr(attr_sources).encode('utf-8')).hexdigest())
     except GitPreflightError:
         raise
     except LLMToolError:

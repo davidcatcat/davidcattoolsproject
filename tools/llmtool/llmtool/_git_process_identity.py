@@ -136,6 +136,67 @@ def host_check():
         raise NotSupported('non-reaping Darwin notification required')
 
 
+def owned_git_identity(process, supervisor):
+    """Observe an unreaped direct Git child, including fast Darwin exit.
+
+    Only the closed ADD supervisor uses this: its trusted fixed Git executable
+    inherits the supervisor SID and cannot run repository helpers. A zombie
+    lacks getsid; two BSD SZOMB rows prove the owned child's inherited group,
+    not a general zombie-session query or signaling authority.
+    """
+    if process.returncode is not None or supervisor.pid != os.getpid():
+        raise IdentityUnknown('kernel identity changed')
+    try:
+        value = identity(process.pid)
+    except ProcessLookupError as error:
+        if error.errno != errno.ESRCH:
+            raise
+        first = _info(process.pid, 3, _BSD)
+        second = _info(process.pid, 3, _BSD)
+        names = ('pid', 'ppid', 'uid', 'pgid', 'seconds', 'micros')
+        if (first.status != 5 or second.status != 5
+                or any(getattr(first, k) != getattr(second, k) for k in names)):
+            raise IdentityUnknown('kernel identity changed')
+        value = Identity(second.pid, second.pgid, supervisor.sid, second.uid,
+                         second.ppid, second.seconds, second.micros)
+    if (value.pid != process.pid or value.ppid != supervisor.pid
+            or value.uid != supervisor.uid or value.pgid != supervisor.pgid
+            or value.sid != supervisor.sid):
+        raise IdentityUnknown('kernel identity changed')
+    return value
+
+
+def git_inventory(supervisor, child=None):
+    """Bounded libproc group/child enumeration, observations never kill authority.
+
+    F1 rejects *any* helper. Static executable-surface checks additionally prove
+    no repo-controlled helper can appear/escape between inventory snapshots.
+    This is not a process sandbox against hostile same-UID concurrency.
+    """
+    lib = ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+    query = lib.proc_listpids
+    query.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
+    query.restype = ctypes.c_int
+    def pids(kind, number):
+        rows = (ctypes.c_int * 4096)()
+        size = ctypes.sizeof(rows)
+        ctypes.set_errno(0)
+        count = query(kind, number, rows, size)
+        error = ctypes.get_errno()
+        if error or count < 0 or count >= size or count % ctypes.sizeof(ctypes.c_int):
+            raise IdentityUnknown('kernel identity unavailable')
+        return {pid for pid in rows[:count//ctypes.sizeof(ctypes.c_int)] if pid > 0}
+    # Public libproc PROC_PGRP_ONLY=2, PROC_PPID_ONLY=6.
+    members = pids(2, supervisor.pgid)
+    expected = {supervisor.pid} | ({child.pid} if child is not None else set())
+    descendants = pids(6, child.pid) if child is not None else set()
+    children = pids(6, supervisor.pid)
+    if (supervisor.pid not in members or members - expected or descendants
+            or children - ({child.pid} if child is not None else set())):
+        raise IdentityUnknown('kernel identity changed')
+    return sorted(members)
+
+
 class ExitNote:
     def __init__(self, pid):
         self.pid = pid
