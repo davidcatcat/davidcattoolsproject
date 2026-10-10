@@ -414,6 +414,250 @@ class ProductInventoryFailureTests(unittest.TestCase):
                             os.close(fd)  # Anonymous pipes owned by this unit test.
 
 
+class TerminalFinalizationTests(unittest.TestCase):
+    """R84-S2: GIT_EXIT is not final; only FINALIZED, EOF and own exit are."""
+    Retained = ProductInventoryFailureTests.Retained
+    observe_retention = ProductInventoryFailureTests.observe_retention
+    supervisor_failure = ProductInventoryFailureTests.supervisor_failure
+
+    def run_host(self, value, own, stream, exits_after, eof=True):
+        """Real Host loop over a scripted status stream (list items or errors).
+
+        exits_after: number of reads after which the supervisor ExitNote fires.
+        Returns ('UNKNOWN', incident) when the Host enters operator-wait, else
+        ('SETTLED', result); either way records cleanup decisions in self.calls.
+        """
+        held, poll = {}, [0]
+        process, anchor, note, signals = Mock(pid=own.pid), Mock(), Mock(), Mock()
+        signals.first = None
+        reader = Mock()
+        script = list(stream)
+        def read():
+            if script:
+                item = script.pop(0)
+                if isinstance(item, BaseException):
+                    raise item
+                return item
+            if eof:
+                raise EOFError()
+            return None
+        reader.read.side_effect = read
+        note.exited.side_effect = lambda: reader.read.call_count >= exits_after
+        def select(read, write, exceptional, timeout):
+            if not read and timeout == .05:
+                poll[0] += 1
+            return [], [], []
+        saved_trace = sys.gettrace()
+        with patch.object(host, 'Signals', return_value=signals), \
+                patch.object(host.subprocess, 'Popen', return_value=process), \
+                patch.object(kernel, 'identity', side_effect=lambda pid:
+                    kernel.Identity.parse(value['parent']) if pid == value['parent']['pid'] else own), \
+                patch.object(kernel, 'Anchor', return_value=anchor), \
+                patch.object(kernel, 'ExitNote', return_value=note), \
+                patch.object(kernel, 'absent', return_value=True), \
+                patch.object(p, 'Reader', return_value=reader), patch.object(p, 'send') as send, \
+                patch.object(host.select, 'select', side_effect=select), \
+                patch.object(host, '_emit') as emit, \
+                patch.object(host, '_FINALIZE_SECONDS', .2, create=True), \
+                patch.object(p, 'post_state', return_value={}) as post_state, \
+                patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as signal_pid:
+            try:
+                sys.settrace(self.observe_retention(host._unknown, poll, held))
+                try:
+                    result = host._execute(value, None, None)
+                    outcome = ('SETTLED', result)
+                except self.Retained:
+                    outcome = ('UNKNOWN', emit.call_args.args[0])
+                    self.assertIs(held['ownership']['anchor'], anchor)
+                    for fd in held['ownership']['fds']:
+                        os.fstat(fd)
+            finally:
+                sys.settrace(saved_trace)
+                for fd in held.get('ownership', {}).get('fds', []):
+                    os.close(fd)  # Anonymous pipes owned by this unit test.
+        self.calls = {'kill_group': anchor.kill_group.call_count, 'reap': anchor.reap.call_count,
+                      'post_state': post_state.call_args_list, 'killpg': group.call_count,
+                      'kill': signal_pid.call_count, 'restore': signals.restore.call_count,
+                      'sent': [c.args[1]['type'] for c in send.call_args_list[1:]]}
+        return outcome
+
+    def frames(self, value, own, *kinds):
+        bound = kernel.Identity(102, 101, 101, 501, 101, 1, 2)
+        made = {'READY': {'type': 'READY', 'digest': p.digest(value), 'supervisor': own.data()},
+                'CHILD': {'type': 'CHILD_IDENTITY', 'child': bound.data()},
+                'EXIT': {'type': 'TERMINAL', 'code': 'MUTATION_GIT_EXIT', 'exit_code': 0},
+                'UNKNOWN': {'type': 'TERMINAL', 'code': 'MUTATION_STATE_UNKNOWN', 'exit_code': None},
+                'FINALIZED': {'type': 'FINALIZED'}}
+        return [dict(made[k], domain=p.DOMAIN, nonce=value['nonce']) if k in made else k
+                for k in kinds]
+
+    def assert_unknown_without_cleanup(self, outcome):
+        self.assertEqual(outcome[0], 'UNKNOWN')
+        self.assertEqual(outcome[1]['outcome'], 'STATE_UNKNOWN')
+        self.assertFalse(outcome[1]['containment_confirmed'])
+        self.assertEqual((self.calls['kill_group'], self.calls['reap'], self.calls['post_state'],
+                          self.calls['killpg'], self.calls['kill'], self.calls['restore']),
+                         (0, 0, [], 0, 0, 0))
+
+    def test_unknown_after_git_exit_is_never_finalized_or_cleaned(self):
+        # Independent R84-S2 reproduction: the real supervisor emits EXIT, then
+        # UNKNOWN on an inventory error; the Host must consume and honour it.
+        for error in (errno.EPERM, errno.ENOMEM):
+            with self.subTest(errno=error):
+                value, own, messages = self.supervisor_failure(error, True, terminal_hold=True)
+                self.assertEqual([m.get('code', m['type']) for m in messages],
+                    ['READY', 'CHILD_IDENTITY', 'MUTATION_GIT_EXIT', 'MUTATION_STATE_UNKNOWN'])
+                self.assert_unknown_without_cleanup(self.run_host(value, own, messages, 99))
+
+    def test_finalized_eof_and_own_exit_settle_as_git_exit(self):
+        value, own, _ = self.supervisor_failure(errno.EPERM, False)
+        outcome = self.run_host(value, own,
+            self.frames(value, own, 'READY', 'CHILD', 'EXIT', 'FINALIZED'), 4)
+        self.assertEqual(outcome[0], 'SETTLED')
+        self.assertEqual(outcome[1]['code'], 'MUTATION_GIT_EXIT')
+        self.assertEqual(self.calls['sent'], ['FINALIZE'])
+        self.assertEqual((self.calls['kill_group'], self.calls['reap']), (1, 1))
+        self.assertEqual(self.calls['post_state'][0].kwargs, {'exit_code': 0, 'interrupted': False})
+
+    def test_any_other_post_exit_ending_is_unknown_without_cleanup(self):
+        value, own, _ = self.supervisor_failure(errno.EPERM, False)
+        cases = {
+            'exit without FINALIZED': (('READY', 'CHILD', 'EXIT'), 3),
+            'FINALIZED then UNKNOWN': (('READY', 'CHILD', 'EXIT', 'FINALIZED', 'UNKNOWN'), 99),
+            'duplicate FINALIZED': (('READY', 'CHILD', 'EXIT', 'FINALIZED', 'FINALIZED'), 99),
+            'FINALIZED before EXIT': (('READY', 'CHILD', 'FINALIZED'), 99),
+            'second terminal': (('READY', 'CHILD', 'EXIT', 'EXIT'), 99),
+        }
+        for label, (kinds, exits_after) in cases.items():
+            with self.subTest(case=label):
+                self.assert_unknown_without_cleanup(
+                    self.run_host(value, own, self.frames(value, own, *kinds), exits_after))
+        with self.subTest(case='never finalizes or exits (deadline)'):
+            self.assert_unknown_without_cleanup(self.run_host(value, own,
+                self.frames(value, own, 'READY', 'CHILD', 'EXIT'), 10**9, eof=False))
+
+
+class SupervisorFinalizeTests(unittest.TestCase):
+    """Supervisor side of R84-S2: FINALIZED only after a passing final inventory."""
+    class LastAct(BaseException):
+        pass
+    Retained = ProductInventoryFailureTests.Retained
+
+    def run_supervisor(self, control, final_inventory_errno=None):
+        value = request()
+        control_bytes = control(value)
+        own = kernel.Identity(101, 101, 101, 501, 99, 1, 1)
+        peer = kernel.Identity(99, 99, 99, 501, value['parent']['pid'], 1, 1)
+        bound = kernel.Identity(102, 101, 101, 501, 101, 1, 2)
+        messages, inventories = [], [0]
+        with ExitStack() as stack:
+            pipes = []
+            for _ in range(4):
+                pair = os.pipe()
+                pipes.extend(pair)
+                for fd in pair:
+                    stack.callback(os.close, fd)
+            cr, cw, sr, sw, out, outw, err, errw = pipes
+            endpoints = [[os.fstat(fd).st_dev, os.fstat(fd).st_ino] for fd in (cr, sw)]
+            start = {'domain': p.DOMAIN, 'type': 'START', 'request': value,
+                'parent': peer.data(), 'launch': own.data(), 'pipes': endpoints}
+            child = Mock(pid=bound.pid, returncode=None)
+            child.stdout.fileno.return_value = out
+            child.stderr.fileno.return_value = err
+            note = Mock()
+            note.exited.return_value = True
+            plan = SimpleNamespace(future_add_argv=('/usr/bin/git', 'add', '--', 'target.txt'),
+                repository_root='/unused-disposable-fixture', future_environment={})
+            stack.enter_context(patch.object(supervisor.subprocess, 'Popen', return_value=child))
+            def inventory(supervised, child=None):
+                # After EXIT: call 1 is the routine monitor poll; call 2 is the
+                # final inventory run only after an exact FINALIZE was read.
+                if control_written[0]:
+                    inventories[0] += 1
+                    if final_inventory_errno is not None and inventories[0] == 2:
+                        raise kernel.IdentityUnknown('kernel identity unavailable')
+                return [own.pid] + ([child.pid] if child is not None else [])
+            control_written = [False]
+            stack.enter_context(patch.object(kernel, 'git_inventory', side_effect=inventory))
+            stack.enter_context(patch.object(p, 'standalone'))
+            stack.enter_context(patch.object(p, 'verify_runtime'))
+            stack.enter_context(patch.object(p, 'verify_request', return_value=(None, plan)))
+            stack.enter_context(patch.object(p, 'fixture_check'))
+            def send(fd, message, deadline):
+                messages.append(message)
+                if message['type'] == 'TERMINAL' and message['code'] == 'MUTATION_GIT_EXIT':
+                    os.write(cw, control_bytes)  # Host's next action after EXIT.
+                    control_written[0] = True
+            stack.enter_context(patch.object(p, 'send', side_effect=send))
+            stack.enter_context(patch.object(supervisor, 'identity', side_effect=lambda pid:
+                kernel.Identity.parse(value['parent']) if pid == value['parent']['pid'] else peer))
+            stack.enter_context(patch.object(supervisor, 'host_check'))
+            stack.enter_context(patch.object(supervisor.signal, 'signal'))
+            stack.enter_context(patch.object(kernel, 'owned_git_identity', return_value=bound))
+            stack.enter_context(patch.object(supervisor, 'ExitNote', return_value=note))
+            row = SimpleNamespace(status=5, ppid=own.pid, pgid=own.pgid, uid=own.uid,
+                                  seconds=bound.seconds, micros=bound.micros, xstatus=0)
+            stack.enter_context(patch.object(kernel, '_info', return_value=row))
+            last_act = stack.enter_context(patch.object(supervisor, '_last_act',
+                                                        side_effect=self.LastAct()))
+            poll, held = [0], {}
+            real_select = supervisor.select.select
+            def select(read, write, exceptional, timeout):
+                if not read and timeout == .05:
+                    poll[0] += 1  # Retention loop; it swallows exceptions.
+                    return [], [], []
+                return real_select(read, write, exceptional, 0)
+            stack.enter_context(patch.object(supervisor.select, 'select', side_effect=select))
+            saved_trace = sys.gettrace()
+            observer = ProductInventoryFailureTests.observe_retention(self, supervisor._product_main, poll, held)
+            try:
+                sys.settrace(observer)
+                supervisor._product_main(start, own,
+                    (cr, os.O_RDONLY, endpoints[0]), (sw, os.O_WRONLY, endpoints[1]))
+                ended = 'returned'
+            except self.LastAct:
+                ended = 'last_act'
+            except ProductInventoryFailureTests.Retained:
+                ended = 'retained'
+            finally:
+                sys.settrace(saved_trace)
+        self.inventory_calls_after_exit = inventories[0]
+        return ended, [m.get('code', m['type']) for m in messages], last_act.call_count
+
+    @staticmethod
+    def frame(kind, nonce=None):
+        def make(value):
+            raw = p.canonical({'domain': p.DOMAIN, 'type': kind,
+                               'nonce': value['nonce'] if nonce is None else nonce})
+            return len(raw).to_bytes(4, 'big') + raw
+        return make
+
+    def test_exact_finalize_emits_finalized_then_own_last_act(self):
+        ended, sent, acts = self.run_supervisor(self.frame('FINALIZE'))
+        self.assertEqual(ended, 'last_act')
+        self.assertEqual(sent, ['READY', 'CHILD_IDENTITY', 'MUTATION_GIT_EXIT', 'FINALIZED'])
+        # The real _last_act never returns; this mock raises, so the generic
+        # handler may call it once more. FINALIZED was the last emission.
+        self.assertGreaterEqual(acts, 1)
+
+    def test_other_control_bytes_cancel_without_finalized(self):
+        for label, raw in (('cancel', self.frame('CANCEL')), ('garbage', lambda value: b'\x00\x00'),
+                           ('wrong nonce', self.frame('FINALIZE', '0'*64))):
+            with self.subTest(control=label):
+                ended, sent, acts = self.run_supervisor(raw)
+                self.assertEqual(ended, 'last_act')
+                self.assertNotIn('FINALIZED', sent)
+                self.assertEqual(sent[-1], 'MUTATION_GIT_EXIT')
+
+    def test_failed_final_inventory_is_unknown_never_finalized(self):
+        ended, sent, acts = self.run_supervisor(self.frame('FINALIZE'), errno.EPERM)
+        self.assertEqual(ended, 'retained')
+        self.assertEqual(self.inventory_calls_after_exit, 2)
+        self.assertEqual(sent[-1], 'MUTATION_STATE_UNKNOWN')
+        self.assertNotIn('FINALIZED', sent)
+        self.assertEqual(acts, 0)
+
+
 class RetentionTests(unittest.TestCase):
     def test_uncertain_anchor_retains_owned_resources_no_reap_or_restore(self):
         value = request()

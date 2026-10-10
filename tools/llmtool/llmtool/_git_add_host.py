@@ -34,6 +34,10 @@ class Signals:
             signal.signal(number, previous)
 
 
+# Upper bound for the supervisor's positive final verdict after GIT_EXIT.
+_FINALIZE_SECONDS = 5
+
+
 def _emit(value):
     private.send(1, value, time.monotonic()+1)
 
@@ -68,7 +72,7 @@ def _execute(request, action, plan):
     owned = {'fds': [], 'signals': signals, 'process': None, 'anchor': None,
              'note': None, 'bound': None, 'primary': None}
     child = None
-    ready = terminal = False
+    ready = terminal = finalized = settled = False
     exit_code, primary = None, 'MUTATION_START_FAILED'
     interrupted, escaped = False, False
     cleanup_errors = []
@@ -106,6 +110,7 @@ def _execute(request, action, plan):
             'pipes': pipes}, deadline)
         reader = private.Reader(sr)
         ready = terminal = cancelled = False
+        eof = False
         stop = deadline+request['timeout']
         while time.monotonic() < stop:
             # Original launcher liveness is independently observed even though
@@ -119,12 +124,23 @@ def _execute(request, action, plan):
                 stop = min(stop, time.monotonic()+1)
                 private.send(cw, {'domain': private.DOMAIN, 'type': 'CANCEL',
                     'nonce': request['nonce']}, stop)
-            value = reader.read()
+            value = None
+            if not eof:
+                try:
+                    value = reader.read()
+                except EOFError:
+                    # Every supervisor write precedes its exit; EOF ends the
+                    # stream, so no queued UNKNOWN can remain unread.
+                    eof = True
             if value is not None:
                 if (type(value) is not dict or value.get('domain') != private.DOMAIN
                         or value.get('nonce') != request['nonce']):
                     private.reject()
                 kind = value.get('type')
+                if kind == 'TERMINAL' and value.get('code') == 'MUTATION_STATE_UNKNOWN':
+                    # Uncertainty overrides any earlier terminal or FINALIZED.
+                    escaped = True
+                    private.reject()
                 if kind == 'READY' and not ready and set(value) == {'domain', 'type', 'nonce', 'digest', 'supervisor'}:
                     if (value['digest'] != private.digest(request)
                             or kernel.Identity.parse(value['supervisor']) != bound):
@@ -137,12 +153,9 @@ def _execute(request, action, plan):
                         escaped = True
                         private.reject()
                 elif kind == 'TERMINAL' and ready and not terminal and set(value) == {'domain', 'type', 'nonce', 'code', 'exit_code'}:
-                    if value['code'] not in ('MUTATION_GIT_EXIT', 'MUTATION_START_FAILED', 'MUTATION_STATE_UNKNOWN'):
+                    if value['code'] not in ('MUTATION_GIT_EXIT', 'MUTATION_START_FAILED'):
                         private.reject()
                     if value['exit_code'] is not None and (type(value['exit_code']) is not int or not -255 <= value['exit_code'] <= 255):
-                        private.reject()
-                    if value['code'] == 'MUTATION_STATE_UNKNOWN':
-                        escaped = True
                         private.reject()
                     if value['code'] == 'MUTATION_GIT_EXIT' and child is None:
                         private.reject()
@@ -150,14 +163,36 @@ def _execute(request, action, plan):
                     if not interrupted:
                         primary = value['code']
                     terminal = True
-                    break
+                    if value['code'] == 'MUTATION_START_FAILED':
+                        settled = True  # No Git was spawned; supervisor exits.
+                        break
+                    # GIT_EXIT is not final: the supervisor may still observe
+                    # uncertainty. Ask for its positive final verdict instead.
+                    private.send(cw, {'domain': private.DOMAIN, 'type': 'FINALIZE',
+                        'nonce': request['nonce']}, time.monotonic()+1)
+                    stop = min(stop, time.monotonic()+_FINALIZE_SECONDS)
+                elif kind == 'FINALIZED' and terminal and not finalized and set(value) == {'domain', 'type', 'nonce'}:
+                    finalized = True
                 else:
                     private.reject()
             if owned['note'].exited():
-                primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
-                break
+                if finalized and eof:
+                    # FINALIZED, end of stream, then the supervisor's own
+                    # last act: the only positive post-Git settlement.
+                    settled = True
+                    break
+                if not finalized:
+                    primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
+                    break
+                # Finalized and exited: keep reading until EOF.
+            elif eof:
+                if not finalized:
+                    primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
+                    break
+                select.select([], [], [], .005)  # Await the bound ExitNote.
+                continue
             select.select([sr], [], [], .005)
-        if not terminal and not interrupted:
+        if not settled and not interrupted:
             primary, interrupted = 'MUTATION_TIMEOUT', True
     except BaseException as error:
         owned['primary'] = error
@@ -170,7 +205,7 @@ def _execute(request, action, plan):
                 # After READY a lost/partial status cannot prove that the
                 # supervisor did not observe an escape before reporting broke.
                 # Retain the anchor, even if the numeric group looks absent.
-                if escaped or (ready and not terminal) or owned['anchor'] is None:
+                if escaped or (ready and not settled) or owned['anchor'] is None:
                     raise kernel.IdentityUnknown('kernel identity changed')
                 cleanup_deadline = time.monotonic()+5
                 owned['anchor'].kill_group(deadline=cleanup_deadline)

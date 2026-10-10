@@ -312,8 +312,21 @@ def _product_main(start, own, control, status):
                 emit('TERMINAL', code='MUTATION_GIT_EXIT', exit_code=code)
                 while True:
                     kernel.git_inventory(own, bound)
-                    if select.select([control[0]], [], [], .005)[0] or recorded[0] is not None:
+                    if recorded[0] is not None:
                         _last_act(own)
+                    if select.select([control[0]], [], [], .005)[0]:
+                        # Only an exact FINALIZE earns a positive verdict, and
+                        # only after one more passing inventory. Any other byte,
+                        # partial frame or EOF stays plain cancellation.
+                        try:
+                            request_final = reader.read()
+                        except BaseException:
+                            request_final = None
+                        if request_final == {'domain': private.DOMAIN,
+                                             'type': 'FINALIZE', 'nonce': nonce}:
+                            kernel.git_inventory(own, bound)  # Unknown → retained.
+                            emit('FINALIZED')
+                        _last_act(own)  # Nothing is emitted after this.
             select.select([control[0]], [], [], .005)
     except kernel.IdentityUnknown as original_error:
         if spawned:
