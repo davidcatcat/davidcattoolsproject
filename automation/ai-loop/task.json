@@ -1,39 +1,32 @@
 {
-  "task_id": "A11b222-F1-PrivateGitADD-R3-20261010",
+  "task_id": "A11b3-D1-OfflineAuthorization-20261011",
   "mode": "implement_new_pr",
   "pr_number": null,
-  "expected_head": "0b679537c487ae3eaa21702d64c96ec89ff88145",
-  "base_sha": "0b679537c487ae3eaa21702d64c96ec89ff88145",
-  "branch": "feat/a11b222-f1-private-git-add-20261010-r3",
+  "expected_head": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
+  "base_sha": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
+  "branch": "feat/a11b3-d1-offline-authorization-20261011",
   "allowed_files": [
-    "tools/llmtool/llmtool/_git_containment.py",
-    "tools/llmtool/llmtool/_git_supervisor.py",
-    "tools/llmtool/llmtool/_git_containment_protocol.py",
-    "tools/llmtool/llmtool/_git_process_identity.py",
-    "tools/llmtool/llmtool/git_mutation.py",
-    "tools/llmtool/llmtool/_git_add_host.py",
-    "tools/llmtool/llmtool/_git_add_private.py",
-    "tools/llmtool/tests/test_git_containment.py",
-    "tools/llmtool/tests/test_git_mutation.py",
-    "tools/llmtool/tests/run_containment_acceptance.py",
-    "tools/llmtool/tests/test_git_add_private.py",
-    "tools/llmtool/tests/test_git_add_authority.py",
-    "reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md"
+    "tools/llmtool/llmtool/authorization_policy.py",
+    "tools/llmtool/llmtool/authorization_ledger.py",
+    "tools/llmtool/tests/test_authorization_policy.py",
+    "tools/llmtool/tests/test_authorization_ledger.py",
+    "tools/llmtool/tests/test_action_contract.py",
+    "tools/llmtool/README.md"
   ],
   "required_files": [
-    "tools/llmtool/llmtool/_git_add_host.py",
-    "tools/llmtool/tests/test_git_add_private.py"
+    "tools/llmtool/llmtool/authorization_policy.py",
+    "tools/llmtool/llmtool/authorization_ledger.py",
+    "tools/llmtool/tests/test_authorization_policy.py",
+    "tools/llmtool/tests/test_authorization_ledger.py"
   ],
-  "pr_title": "feat(llmtool): A11b.2.2.2 F1-r3 private disposable-fixture Git ADD integration",
+  "pr_title": "feat(llmtool): A11b.3 D1 offline trusted policy and one-use receipts",
   "default_test_mode": "related",
   "max_repairs": 2,
   "timeout_seconds": 3600,
   "codex_timeout_seconds": 3000,
   "claude_timeout_seconds": 2400,
   "ci_workflow": "llmtool-ci.yml",
-  "require_local_full": true,
-  "acceptance_report": "reports/llmtool_a11b222_f1_r3_mac_acceptance_20261010.md",
-  "mac_evidence": "mac-containment",
+  "require_local_full": false,
   "related_tests": [
     [
       "make",
@@ -52,7 +45,7 @@
       "-s",
       "tools/llmtool/tests",
       "-p",
-      "test_git_add_private.py",
+      "test_authorization_policy.py",
       "-v"
     ],
     [
@@ -65,7 +58,7 @@
       "-s",
       "tools/llmtool/tests",
       "-p",
-      "test_git_add_authority.py",
+      "test_authorization_ledger.py",
       "-v"
     ],
     [
@@ -78,7 +71,7 @@
       "-s",
       "tools/llmtool/tests",
       "-p",
-      "test_git_mutation.py",
+      "test_action_contract.py",
       "-v"
     ]
   ],
@@ -96,42 +89,6 @@
       "tools/llmtool",
       "check",
       "PYTHON=/usr/bin/python3"
-    ]
-  ],
-  "mandatory_tests": [
-    [
-      "env",
-      "PYTHONPATH=tools/llmtool",
-      "tools/llmtool/.venv/bin/python",
-      "-m",
-      "unittest",
-      "discover",
-      "-s",
-      "tools/llmtool/tests",
-      "-p",
-      "test_git_add_private.py",
-      "-v"
-    ],
-    [
-      "env",
-      "PYTHONPATH=tools/llmtool",
-      "tools/llmtool/.venv/bin/python",
-      "-m",
-      "unittest",
-      "discover",
-      "-s",
-      "tools/llmtool/tests",
-      "-p",
-      "test_git_add_authority.py",
-      "-v"
-    ],
-    [
-      "env",
-      "PYTHONPATH=tools/llmtool",
-      "tools/llmtool/.venv/bin/python",
-      "tools/llmtool/tests/run_containment_acceptance.py",
-      "--output",
-      "{mac_evidence}"
     ]
   ]
 }
