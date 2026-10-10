@@ -194,13 +194,15 @@ class ReceiptBinding(ContractValue):
             _integer(getattr(self, name))
         for name in ('root_inode', 'parent_inode'):
             _integer(getattr(self, name), minimum=1)
-        if (self.action_kind != ActionKind.FILE_CREATE.value or
-                self.decision != Decision.ALLOW_WITH_TRUSTED_RECEIPT.value or
-                self.issuer_class != IssuerClass.POLICY_CONTRACT.value or
-                self.effect_kind != EffectKind.FAKE_FILE_CREATE.value or
+        labels = (self.action_kind, self.decision, self.issuer_class, self.effect_kind)
+        if (any(type(label) is not str for label in labels) or
+                labels != (ActionKind.FILE_CREATE.value, Decision.ALLOW_WITH_TRUSTED_RECEIPT.value,
+                           IssuerClass.POLICY_CONTRACT.value, EffectKind.FAKE_FILE_CREATE.value) or
                 self.target_absent is not True):
             raise LLMToolError('receipt binding invalid; details omitted')
         object.__setattr__(self, 'action_paths', _scope(self.action_paths))
+        if self.target_path not in self.action_paths:
+            raise LLMToolError('receipt binding invalid; details omitted')
         _path(self.canonical_root, absolute=True)
         _path(self.target_path)
         _identifier(self.policy_id)
@@ -231,6 +233,8 @@ class PolicyDecision:
             raise LLMToolError('authorization decision invalid; details omitted')
         if self.binding is not None:
             _typed(self.binding, ReceiptBinding)
+        # One-shot marker: dataclasses.replace() of a decision cannot re-validate.
+        object.__setattr__(self, '_origin', None)
 
     @property
     def status(self):
@@ -264,22 +268,19 @@ def decide(action, policy, *, issuer, observed, redeem_run_id,
         return _deny(DecisionCode.INVALID_REQUEST)
     if requirements & SEPARATE_AUTHORITY:
         return _deny(DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)
-    if requirements & OWNER_P0:
-        # D1 has no authenticated owner channel: a P0 waits, never auto-allows.
-        return _result(Decision.WAITING_APPROVAL, DecisionCode.OWNER_P0_REQUIRED if interactive
-                       else DecisionCode.OWNER_P0_NON_INTERACTIVE)
     if action.kind is not ActionKind.FILE_CREATE:
         return _deny(DecisionCode.UNSUPPORTED_ACTION)
     if issuer is None:
         return _deny(DecisionCode.NO_ISSUER)
-    if not isinstance(issuer, HostIssuer):
-        return _deny(DecisionCode.UNTRUSTED_ISSUER)
     try:
+        if not isinstance(issuer, HostIssuer):
+            return _deny(DecisionCode.UNTRUSTED_ISSUER)
         issuer_class, capability_id = issuer.issuer_class, issuer.capability_id
         if issuer_class is not IssuerClass.POLICY_CONTRACT:
             return _deny(DecisionCode.UNTRUSTED_ISSUER)
         _identifier(capability_id)
-        vouched = issuer.vouches_for(policy.digest)
+        policy_digest = policy.digest
+        vouched = issuer.vouches_for(policy_digest)
     except Exception:
         return _deny(DecisionCode.UNTRUSTED_ISSUER)
     if vouched is not True:
@@ -289,6 +290,12 @@ def decide(action, policy, *, issuer, observed, redeem_run_id,
     if (action.kind not in policy.kinds or any(p not in policy.scope for p in action.scope) or
             policy.effect_kind is not EffectKind.FAKE_FILE_CREATE):
         return _deny(DecisionCode.OUT_OF_CONTRACT)
+    # Only an action already inside a host-vouched contract reaches the owner:
+    # untrusted, missing or out-of-contract authority is denied, not escalated.
+    # D1 has no authenticated owner channel, so a P0 waits and never auto-allows.
+    if requirements & OWNER_P0:
+        return _result(Decision.WAITING_APPROVAL, DecisionCode.OWNER_P0_REQUIRED if interactive
+                       else DecisionCode.OWNER_P0_NON_INTERACTIVE)
     target = action.payload.target
     if (observed.repository != action.repository or
             observed.head != action.repository.expected_head or
@@ -301,7 +308,7 @@ def decide(action, policy, *, issuer, observed, redeem_run_id,
         action.task.contract_digest, action.digest, action.kind.value, action.scope,
         action.payload.new_content_sha256, repository.repository_id, repository.canonical_root,
         repository.root_device, repository.root_inode, observed.head, observed.index_sha256,
-        observed.worktree_sha256, policy.policy_id, policy.version, policy.digest,
+        observed.worktree_sha256, policy.policy_id, policy.version, policy_digest,
         Decision.ALLOW_WITH_TRUSTED_RECEIPT.value, issuer_class.value, capability_id,
         redeem_run_id, policy.effect_kind.value, target.path, True,
         observed.parent_device, observed.parent_inode)

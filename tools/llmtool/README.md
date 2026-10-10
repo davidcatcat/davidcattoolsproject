@@ -2321,6 +2321,8 @@ stays `False`.
   `WAITING_APPROVAL`, including in non-TTY/background use. New cost and new data export
   are separate authorizations: they `DENY` with `SEPARATE_AUTHORIZATION_REQUIRED` and
   are never implied. An out-of-contract action is `DENY` (`OUT_OF_CONTRACT`), not P0.
+  Only an action inside a host-vouched contract can reach the P0 wait; an untrusted,
+  unvouched or out-of-contract request is denied, not escalated to the owner.
 - **Receipt binding.** A receipt is bound to:
   - task, run and contract;
   - the action digest, kind, paths and content;
@@ -2340,6 +2342,8 @@ stays `False`.
   - A crash before or after the fake effect leaves `CONSUMED`. `recover()` turns that
     into `EFFECT_UNKNOWN`, which needs a fresh decision.
   - Replay, restart and a second racing process are refused.
+  - One decision binding yields at most one receipt in any status; a new run needs a new
+    decision.
 - **Fail-closed store checks.** The store must be an existing regular 0600 file owned
   by the euid, with a single link, opened with `O_NOFOLLOW`. Its directory must not be
   writable by group or other, and its device/inode is rechecked on every transaction.
@@ -2351,4 +2355,8 @@ stays `False`.
   - APFS mode, symlink and lock semantics need native Mac evidence; Linux CI does not
     prove them.
   - Nothing here protects against malicious code running as the same user.
+  - `redeem()` does not re-check policy revocation: a receipt is trusted for at most its TTL
+    (≤ 1 hour).
+  - The host must place the store outside every repository root and worktree; D1 does not
+    enforce this.
   - Real repository effects (F2) remain NOT AUTHORIZED.

@@ -14,7 +14,28 @@ writable by group/other, with its device/inode rechecked before every
 transaction. Corrupt, locked, missing or swapped stores and host clock
 rollback below the durable high-water mark fail closed. fullfsync is
 requested for macOS, but power-loss durability is NOT_VERIFIED. None of this
-protects against malicious code running as the same user.
+protects against malicious code running as the same user: the path checks,
+SQLite's own reopen of the path and the auxiliary journal are only
+race-free against other users, and ancestor directories are not checked.
+
+A failed create() leaves a file that open() rejects (LEDGER_CORRUPT) and
+create() refuses; the host must remove it deliberately. Anyone able to call
+redeem() with a receipt's nonce can burn it (DENIED/EXPIRED) by presenting a
+mismatch; that is deliberate fail-closed behavior and needs a fresh decision.
+recover() is for restart only: run while another process is between consume
+and finalization, it makes that redemption report EFFECT_UNKNOWN (never a
+repeated effect or a false success).
+
+At most one receipt ever exists per exact binding, in any status: issuing the
+same decision again is NOT_ALLOWED. The redeem run id is part of the binding,
+so a new run needs a new decide() call.
+
+Host responsibilities / accepted D1 limits: redeem() does not re-check
+policy or issuer revocation; it trusts the decision at issue time for at most
+the receipt TTL (<= MAX_APPROVAL_SECONDS), so a host that revokes must stop
+redeeming itself. The host chooses the store path and must place it outside
+any repository root or worktree (where repository tooling could commit, clean
+or replace it); D1 does not enforce that.
 """
 
 import abc
@@ -35,7 +56,7 @@ SCHEMA_VERSION = 1
 BUSY_TIMEOUT_SECONDS = 2.0
 _SCHEMA = (
     'CREATE TABLE clock (id INTEGER PRIMARY KEY CHECK (id = 1), high_water INTEGER NOT NULL)',
-    'CREATE TABLE receipts (nonce TEXT PRIMARY KEY, binding TEXT NOT NULL, '
+    'CREATE TABLE receipts (nonce TEXT PRIMARY KEY, binding TEXT NOT NULL UNIQUE, '
     'issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK '
     "(status IN ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN', 'DENIED', 'EXPIRED')), "
     'redeem_run_id TEXT)',
@@ -173,6 +194,8 @@ class ReceiptLedger:
                 os.close(directory)
         except sqlite3.Error as error:
             _fail(_sqlite_failure(error))
+        except OSError:
+            _fail(LedgerCode.LEDGER_UNAVAILABLE)
         finally:
             os.close(fd)
         return cls.open(path, clock=clock)
@@ -194,14 +217,20 @@ class ReceiptLedger:
         except OSError:
             _fail(LedgerCode.LEDGER_INSECURE)
         try:
-            st = os.fstat(self._fd)
-            _secure_file(st)
-            self._identity = (st.st_dev, st.st_ino)
-            self._check_identity()
-            self._db = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS, isolation_level=None)
-            self._check_identity()
-            self._configure(self._db)
-            self._verify_schema()
+            try:
+                st = os.fstat(self._fd)
+                _secure_file(st)
+                self._identity = (st.st_dev, st.st_ino)
+                self._check_identity()
+                self._db = sqlite3.connect(path, timeout=BUSY_TIMEOUT_SECONDS,
+                                           isolation_level=None)
+                self._check_identity()
+                self._configure(self._db)
+                self._verify_schema()
+            except sqlite3.Error as error:
+                _fail(_sqlite_failure(error))
+            except OSError:
+                _fail(LedgerCode.LEDGER_UNAVAILABLE)
         except BaseException:
             self.close()
             raise
@@ -231,11 +260,13 @@ class ReceiptLedger:
                 "SELECT count(*) FROM sqlite_master WHERE type NOT IN ('table', 'index') "
                 "OR (type = 'index' AND sql IS NOT NULL)").fetchone()[0]
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
+            # A schema-less (e.g. half-created) store is corrupt, not unavailable.
+            if tables != [(s,) for s in _SCHEMA] or others or version != SCHEMA_VERSION:
+                _fail(LedgerCode.LEDGER_CORRUPT)
             rows = self._db.execute('SELECT id FROM clock').fetchall()
         except sqlite3.Error as error:
             _fail(_sqlite_failure(error))
-        if (tables != [(s,) for s in _SCHEMA] or others or version != SCHEMA_VERSION or
-                rows != [(1,)]):
+        if rows != [(1,)]:
             _fail(LedgerCode.LEDGER_CORRUPT)
 
     def _check_identity(self):
@@ -258,12 +289,13 @@ class ReceiptLedger:
                 _fail(LedgerCode.LEDGER_INSECURE)
 
     def close(self):
-        if self._db is not None:
-            self._db.close()
-            self._db = None
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        db, fd, self._db, self._fd = self._db, self._fd, None, None
+        try:
+            if db is not None:
+                db.close()
+        finally:
+            if fd is not None:
+                os.close(fd)
 
     def __enter__(self):
         return self
@@ -281,15 +313,13 @@ class ReceiptLedger:
             now = self._clock()
         except Exception:
             _fail(LedgerCode.CLOCK_INVALID)
-        if type(now) is float and math.isfinite(now):
+        if type(now) is float and math.isfinite(now) and now >= 0:
             now = int(now)
         if type(now) is not int or not 0 <= now <= MAX_EPOCH:
             _fail(LedgerCode.CLOCK_INVALID)
         try:
+            # Inside the try so an interrupt right after BEGIN still rolls back.
             self._db.execute('BEGIN IMMEDIATE')
-        except sqlite3.Error as error:
-            _fail(_sqlite_failure(error))
-        try:
             high_water = self._db.execute('SELECT high_water FROM clock WHERE id = 1').fetchone()
             if high_water is None or type(high_water[0]) is not int:
                 _fail(LedgerCode.LEDGER_CORRUPT)
@@ -318,8 +348,13 @@ class ReceiptLedger:
         with self._transaction() as now:
             if now + ttl_seconds > MAX_EPOCH:
                 _fail(LedgerCode.CLOCK_INVALID)
-            self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?, NULL)',
-                             (nonce, decision.binding.to_json(), now, now + ttl_seconds, 'ISSUED'))
+            try:
+                self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?, NULL)',
+                                 (nonce, decision.binding.to_json(), now, now + ttl_seconds,
+                                  'ISSUED'))
+            except sqlite3.IntegrityError:
+                # This exact binding already has a receipt (any status).
+                _fail(LedgerCode.NOT_ALLOWED)
         return Receipt(decision.binding, now, now + ttl_seconds, nonce)
 
     def _set(self, nonce, status, expected):
@@ -348,7 +383,7 @@ class ReceiptLedger:
             if (stored != binding.to_json() or issued_at != receipt.issued_at or
                     expires_at != receipt.expires_at):
                 denial = RedeemCode.RECEIPT_TAMPERED
-            elif redeem_run_id != binding.redeem_run_id:
+            elif type(redeem_run_id) is not str or redeem_run_id != binding.redeem_run_id:
                 denial = RedeemCode.RUN_MISMATCH
             elif effect_kind is not EffectKind.FAKE_FILE_CREATE or effect_kind.value != binding.effect_kind:
                 denial = RedeemCode.SINK_MISMATCH
@@ -369,8 +404,10 @@ class ReceiptLedger:
         # (after it, before finalization) both leave CONSUMED -> EFFECT_UNKNOWN.
         try:
             sink.apply(binding)
-        except Exception:
+        except BaseException as error:
             self._finish(receipt.nonce, 'EFFECT_UNKNOWN')
+            if not isinstance(error, Exception):
+                raise
             return RedeemResult(RedeemCode.EFFECT_UNKNOWN)
         if not self._finish(receipt.nonce, 'EFFECT_DONE'):
             return RedeemResult(RedeemCode.EFFECT_UNKNOWN)

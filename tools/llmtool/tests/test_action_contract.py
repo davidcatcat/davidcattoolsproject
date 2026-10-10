@@ -465,3 +465,380 @@ class StrictContractTests(unittest.TestCase):
                 replace(action, **kwargs)
         with self.assertRaises(LLMToolError):
             replace(action.payload.target.state, file_type='REGULAR')
+
+
+# --- A11b.3 D1 end-to-end journeys (Issue #97): legacy contract -> decide ->
+# ledger issue -> redeem -> fake sink. Helpers are imported lazily because
+# test_authorization_policy itself imports this module.
+import io
+import os
+import sqlite3
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+_CANONICAL_REPO = Path(__file__).resolve().parents[3]
+
+
+def _d1():
+    from llmtool import authorization_ledger as ledger
+    from llmtool import authorization_policy as policy
+    import test_authorization_policy as helpers
+    return policy, ledger, helpers
+
+
+class _JourneyClock:
+    def __init__(self, now=1000):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def _journey_sink_class():
+    policy, ledger, _ = _d1()
+
+    class RecordingSink(ledger.EffectSink):
+        """Synthetic sink: records bindings in memory, touches no file."""
+
+        def __init__(self, error=None):
+            self.calls, self.error = [], error
+
+        @property
+        def effect_kind(self):
+            return policy.EffectKind.FAKE_FILE_CREATE
+
+        def apply(self, binding):
+            self.calls.append(binding)
+            if self.error is not None:
+                raise self.error
+    return RecordingSink
+
+
+class D1AuthorizationJourneyTests(unittest.TestCase):
+    """User journeys across the legacy contract, D1 policy and one-use ledger."""
+
+    def setUp(self):
+        self.p, self.l, self.h = _d1()
+        self.Sink = _journey_sink_class()
+        tmp = tempfile.TemporaryDirectory(prefix='d1-journey-')
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.ledger_dir = self.root / 'ledger'
+        self.ledger_dir.mkdir(mode=0o700)
+        os.chmod(self.ledger_dir, 0o700)
+        self.ledger_path = self.ledger_dir / 'receipts.sqlite3'
+        self.clock = _JourneyClock()
+        self.ledger = self.l.ReceiptLedger.create(self.ledger_path, clock=self.clock)
+        self.addCleanup(lambda: self.ledger.close())
+
+    # -- helpers ---------------------------------------------------------
+    def decide(self, action, policy=None, **changes):
+        policy = policy or self.h.make_policy(action)
+        values = dict(issuer=self.h.FakeHostIssuer(policy), observed=self.h.make_observed(action),
+                      redeem_run_id=self.h.REDEEM_RUN)
+        values.update(changes)
+        return self.p.decide(action, policy, **values)
+
+    def redeem(self, receipt, action=None, ledger=None, sink=None, **observed_changes):
+        sink = sink if sink is not None else self.Sink()
+        observed = self.h.make_observed(action or self.h.make_create(), **observed_changes)
+        result = (ledger or self.ledger).redeem(receipt, redeem_run_id=self.h.REDEEM_RUN,
+                                                observed=observed, sink=sink)
+        return result, sink
+
+    def receipt_rows(self):
+        db = sqlite3.connect('file:%s?mode=ro' % self.ledger_path, uri=True)
+        try:
+            return db.execute('SELECT status FROM receipts ORDER BY rowid').fetchall()
+        finally:
+            db.close()
+
+    def assertNoAuthority(self, decision, sink=None):
+        """No ALLOW, no ledger receipt and no sink call can follow this decision."""
+        self.assertIs(type(decision), self.p.PolicyDecision)
+        self.assertIsNot(decision.decision, self.p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        self.assertIsNone(decision.binding)
+        with self.assertRaises(self.l.LedgerError) as caught:
+            self.ledger.issue(decision, ttl_seconds=60)
+        self.assertIs(caught.exception.code, self.l.LedgerCode.NOT_ALLOWED)
+        if sink is not None:
+            self.assertEqual(sink.calls, [])
+
+    # -- (a) forged approval ----------------------------------------------
+    def test_user_attested_legacy_approval_never_yields_allow_or_receipt(self):
+        action = self.h.make_create()
+        approval = make_approval(action)
+        context = c.TrustedApprovalContext(approval.digest)
+        validation = c.validate_approval(action, approval, current_state=action.expected_state,
+                                         expected_nonce=approval.nonce, now=150,
+                                         trusted_context=context)
+        self.assertIs(validation.code, c.ApprovalCode.USER_ATTESTED)
+        self.assertTrue(validation.trusted_user_source)
+        self.assertFalse(validation.authorized)
+        parsed = c.parse_approval(approval.to_json())
+        forged_issuers = (approval, parsed, approval.to_dict(), approval.to_json(), validation,
+                          validation.to_dict(), context, {'source': 'USER', 'trusted': True},
+                          {'receipt_id': approval.nonce}, 'USER', True)
+        sink = self.Sink()
+        for issuer in forged_issuers:
+            with self.subTest(issuer=type(issuer).__name__):
+                decision = self.decide(action, issuer=issuer)
+                self.assertIs(decision.decision, self.p.Decision.DENY)
+                self.assertIn(decision.code, (self.p.DecisionCode.NO_ISSUER,
+                                              self.p.DecisionCode.UNTRUSTED_ISSUER))
+                self.assertNoAuthority(decision, sink)
+        # The attested approval/validation themselves are not ledger input either.
+        for value in (approval, validation, context, approval.to_dict()):
+            with self.subTest(issue=type(value).__name__):
+                with self.assertRaises(self.l.LedgerError) as caught:
+                    self.ledger.issue(value, ttl_seconds=60)
+                self.assertIs(caught.exception.code, self.l.LedgerCode.NOT_ALLOWED)
+        # A receipt handle built around the approval nonce is unknown to the ledger.
+        forged = self.l.Receipt(self.h.allow(action).binding, 1000, 1060, approval.nonce)
+        result, sink = self.redeem(forged, action)
+        self.assertIs(result.code, self.l.RedeemCode.RECEIPT_UNKNOWN)
+        self.assertFalse(result.effect_done)
+        self.assertEqual(sink.calls, [])
+        self.assertEqual(self.receipt_rows(), [])
+
+    # -- (b) action / contract mismatch -----------------------------------
+    def test_action_contract_mismatch_is_denied_before_and_after_issue(self):
+        action = self.h.make_create()
+        policy = self.h.make_policy(action)
+        other_task = replace(action.task, contract_digest='c'*64)
+        cases = {
+            'kind outside contract': (make_action(c.ActionKind.FILE_WRITE), policy,
+                                      self.p.DecisionCode.UNSUPPORTED_ACTION),
+            'path outside contract': (action, self.h.make_policy(action, scope=('file.txt',)),
+                                      self.p.DecisionCode.OUT_OF_CONTRACT),
+            'different contract digest': (replace(action, task=other_task), policy,
+                                          self.p.DecisionCode.POLICY_BINDING_MISMATCH),
+        }
+        sink = self.Sink()
+        for label, (candidate, candidate_policy, code) in cases.items():
+            with self.subTest(label=label):
+                decision = self.decide(candidate, candidate_policy,
+                                       issuer=self.h.FakeHostIssuer(candidate_policy),
+                                       observed=self.h.make_observed(action))
+                self.assertIs(decision.decision, self.p.Decision.DENY)
+                self.assertIs(decision.code, code)
+                self.assertNoAuthority(decision, sink)
+        # A legacy approval for action A does not bind a different action B.
+        other = replace(action, action_id='action-2')
+        self.assertEqual(c.validate_approval(other, make_approval(action),
+                         current_state=other.expected_state, expected_nonce='8'*64,
+                         now=150).code, c.ApprovalCode.BINDING_MISMATCH)
+        # A receipt issued for action A cannot be retargeted to action B's digest.
+        receipt = self.ledger.issue(self.decide(action), ttl_seconds=60)
+        retargeted = replace(receipt, binding=replace(receipt.binding, action_digest=other.digest))
+        result, sink = self.redeem(retargeted, action)
+        self.assertIs(result.code, self.l.RedeemCode.RECEIPT_TAMPERED)
+        self.assertEqual(sink.calls, [])
+        self.assertEqual(self.redeem(receipt, action)[0].code, self.l.RedeemCode.REPLAY)
+        self.assertEqual(self.ledger.status(receipt.nonce), 'DENIED')
+
+    # -- (c) HEAD / index / worktree drift between issue and redeem --------
+    def test_repository_state_change_between_issue_and_redeem_denies_without_effect(self):
+        action = self.h.make_create()
+        drift = {'HEAD': dict(head='c'*40), 'index': dict(index_sha256='c'*64),
+                 'worktree': dict(worktree_sha256='c'*64), 'parent': dict(parent_inode=31),
+                 'target created': dict(target_absent=False)}
+        for index, (label, change) in enumerate(drift.items()):
+            with self.subTest(label=label):
+                # One receipt per decision binding: each drift case gets its own action.
+                action = replace(action, action_id='drift-%d' % index)
+                receipt = self.ledger.issue(self.decide(action), ttl_seconds=60)
+                result, sink = self.redeem(receipt, action, **change)
+                self.assertIs(result.code, self.l.RedeemCode.BINDING_MISMATCH)
+                self.assertFalse(result.effect_done)
+                self.assertEqual(sink.calls, [])
+                self.assertEqual(self.ledger.status(receipt.nonce), 'DENIED')
+                # Restoring the old state later does not revive the receipt.
+                again, sink = self.redeem(receipt, action)
+                self.assertIs(again.code, self.l.RedeemCode.REPLAY)
+                self.assertEqual(sink.calls, [])
+
+    # -- (d) policy tampering ----------------------------------------------
+    def test_recreated_policy_with_same_id_but_other_scope_has_no_authority(self):
+        action = self.h.make_create()
+        reviewed = self.h.make_policy(action, scope=('file.txt',))
+        issuer = self.h.FakeHostIssuer(reviewed)
+        tampered = (self.h.make_policy(action),  # same id/version, widened scope
+                    self.h.make_policy(action, scope=('file.txt', 'other.txt', 'third.txt')))
+        sink = self.Sink()
+        for policy in tampered:
+            with self.subTest(scope=policy.scope):
+                self.assertEqual((policy.policy_id, policy.version),
+                                 (reviewed.policy_id, reviewed.version))
+                self.assertNotEqual(policy.digest, reviewed.digest)
+                decision = self.decide(action, policy, issuer=issuer)
+                self.assertIs(decision.code, self.p.DecisionCode.UNTRUSTED_POLICY)
+                self.assertNoAuthority(decision, sink)
+        # Swapping the policy digest inside an issued receipt is detected.
+        policy = self.h.make_policy(action)
+        receipt = self.ledger.issue(self.decide(action, policy), ttl_seconds=60)
+        swapped = replace(receipt, binding=replace(receipt.binding, policy_digest=reviewed.digest))
+        result, sink = self.redeem(swapped, action)
+        self.assertIs(result.code, self.l.RedeemCode.RECEIPT_TAMPERED)
+        self.assertEqual(sink.calls, [])
+
+    # -- (e) missing authority ----------------------------------------------
+    def test_missing_or_wrong_authority_never_reaches_ledger_or_sink(self):
+        action = self.h.make_create()
+        policy = self.h.make_policy(action)
+        cases = {
+            'no issuer': (None, self.p.DecisionCode.NO_ISSUER),
+            'issuer vouches nothing': (self.h.FakeHostIssuer(), self.p.DecisionCode.UNTRUSTED_POLICY),
+            'owner P0 issuer': (self.h.FakeHostIssuer(policy, issuer_class=self.p.IssuerClass.OWNER_P0),
+                                self.p.DecisionCode.UNTRUSTED_ISSUER),
+        }
+        sink = self.Sink()
+        for label, (issuer, code) in cases.items():
+            with self.subTest(label=label):
+                decision = self.decide(action, policy, issuer=issuer)
+                self.assertIs(decision.code, code)
+                self.assertNoAuthority(decision, sink)
+        never_issued = self.l.Receipt(self.h.allow(action).binding, 1000, 1060, 'e'*64)
+        result, sink = self.redeem(never_issued, action)
+        self.assertIs(result.code, self.l.RedeemCode.RECEIPT_UNKNOWN)
+        self.assertEqual(sink.calls, [])
+        self.assertEqual(self.receipt_rows(), [])
+
+    # -- (f) non-TTY owner P0 -----------------------------------------------
+    def test_non_tty_owner_p0_waits_and_piped_yes_cannot_approve(self):
+        action = self.h.make_create()
+        sink = self.Sink()
+        piped = io.StringIO('yes\ny\nAPPROVE\n')
+        with patch('sys.stdin', piped), \
+                patch('builtins.input', side_effect=AssertionError('decide must not prompt')):
+            self.assertFalse(sys.stdin.isatty())
+            for requirement in sorted(self.p.OWNER_P0, key=lambda r: r.value):
+                for interactive in (False, True):
+                    with self.subTest(requirement=requirement.value, interactive=interactive):
+                        decision = self.decide(action, requirements=frozenset((requirement,)),
+                                               interactive=interactive)
+                        self.assertIs(decision.decision, self.p.Decision.WAITING_APPROVAL)
+                        self.assertIs(decision.code, self.p.DecisionCode.OWNER_P0_REQUIRED
+                                      if interactive else self.p.DecisionCode.OWNER_P0_NON_INTERACTIVE)
+                        self.assertEqual(decision.status, 'NEEDS_APPROVAL')
+                        self.assertNoAuthority(decision, sink)
+        self.assertEqual(piped.read(), 'yes\ny\nAPPROVE\n')  # stdin was never consumed
+        for requirement in sorted(self.p.SEPARATE_AUTHORITY, key=lambda r: r.value):
+            with self.subTest(separate=requirement.value):
+                decision = self.decide(action, requirements=frozenset((requirement,)))
+                self.assertIs(decision.code, self.p.DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)
+                self.assertNoAuthority(decision, sink)
+        self.assertEqual(self.receipt_rows(), [])
+
+    # -- (g) replay after restart -------------------------------------------
+    def test_replay_after_restart_and_after_crash_never_repeats_effect(self):
+        action = self.h.make_create()
+        receipt = self.ledger.issue(self.decide(action), ttl_seconds=60)
+        result, sink = self.redeem(receipt, action)
+        self.assertIs(result.code, self.l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(sink.calls, [receipt.binding])
+        # The same decision cannot mint a second receipt (one per binding).
+        with self.assertRaises(self.l.LedgerError) as caught:
+            self.ledger.issue(self.decide(action), ttl_seconds=60)
+        self.assertIs(caught.exception.code, self.l.LedgerCode.NOT_ALLOWED)
+        crash_action = replace(action, action_id='action-crash')
+        crashed = self.ledger.issue(self.decide(crash_action), ttl_seconds=60)
+        with self.assertRaises(SystemExit):  # in-process stand-in for a crash after consume
+            self.redeem(crashed, crash_action, sink=self.Sink(error=SystemExit(17)))
+        self.ledger.close()
+        raw = json.loads(receipt.binding.to_json())
+        raw['action_paths'] = tuple(raw['action_paths'])
+        # The handle a caller persisted before the restart, rebuilt from its data.
+        rebuilt = self.l.Receipt(self.p.ReceiptBinding(**raw), receipt.issued_at,
+                                 receipt.expires_at, receipt.nonce)
+        with self.l.ReceiptLedger.open(self.ledger_path, clock=self.clock) as restarted:
+            # The crash may already be recorded as unknown; recover() is idempotent.
+            self.assertIn(restarted.recover(), (0, 1))
+            self.assertEqual(restarted.recover(), 0)
+            self.assertEqual(restarted.status(receipt.nonce), 'EFFECT_DONE')
+            self.assertEqual(restarted.status(crashed.nonce), 'EFFECT_UNKNOWN')
+            for handle, bound in ((receipt, action), (crashed, crash_action), (rebuilt, action)):
+                again, sink = self.redeem(handle, bound, ledger=restarted)
+                self.assertIs(again.code, self.l.RedeemCode.REPLAY)
+                self.assertFalse(again.effect_done)
+                self.assertEqual(sink.calls, [])
+        self.assertEqual(self.receipt_rows(), [('EFFECT_DONE',), ('EFFECT_UNKNOWN',)])
+
+    # -- (h) zero real repository mutation ----------------------------------
+    @staticmethod
+    def _snapshot(base):
+        state = {}
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            for name in sorted(dirnames + filenames):
+                path = os.path.join(dirpath, name)
+                st = os.lstat(path)
+                content = None
+                if os.path.isfile(path) and not os.path.islink(path):
+                    with open(path, 'rb') as handle:
+                        content = handle.read()
+                state[os.path.relpath(path, base)] = (st.st_mode, st.st_ino, st.st_size,
+                                                      st.st_mtime_ns, content)
+        st = os.lstat(base)
+        state['.'] = (st.st_mode, st.st_ino, st.st_mtime_ns)
+        return state
+
+    @staticmethod
+    def _git_status():
+        env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
+        try:
+            done = subprocess.run(['git', '-C', str(_CANONICAL_REPO), 'status', '--porcelain=v1',
+                                   '--untracked-files=all'], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, env=env, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return done.stdout if done.returncode == 0 else None
+
+    def test_full_allowed_journey_mutates_no_repository_and_only_writes_ledger(self):
+        git_before = self._git_status()
+        if git_before is None:
+            self.skipTest('canonical repository git status unavailable')
+        repo = self.root / 'repo'
+        (repo / 'src' / 'pkg').mkdir(parents=True)
+        (repo / '.git').mkdir()
+        files = {'README.md': b'synthetic\n', 'src/pkg/module.py': b'X = 1\n',
+                 'other.txt': b'keep me\n', '.git/HEAD': b'ref: refs/heads/main\n'}
+        for name, data in files.items():
+            (repo / name).write_bytes(data)
+        os.utime(repo / 'README.md', ns=(1_000_000_000, 1_000_000_000))
+        canonical = os.path.realpath(str(repo))
+        st = os.stat(canonical)
+        base = self.h.make_create()
+        binding = c.RepositoryBinding('3'*64, canonical, st.st_dev, st.st_ino, '4'*40)
+        action = replace(base, repository=binding)
+        policy = self.h.make_policy(action)
+        observed = self.h.make_observed(action, parent_device=st.st_dev, parent_inode=st.st_ino)
+        self.assertFalse((repo / action.payload.target.path).exists())
+        repo_before = self._snapshot(canonical)
+        root_before = sorted(os.listdir(self.root))
+        tripwire = AssertionError('D1 journey must not spawn processes or open sockets')
+        with patch('subprocess.Popen', side_effect=tripwire), \
+                patch('socket.socket', side_effect=tripwire), \
+                patch('os.system', side_effect=tripwire):
+            decision = self.p.decide(action, policy, issuer=self.h.FakeHostIssuer(policy),
+                                     observed=observed, redeem_run_id=self.h.REDEEM_RUN)
+            self.assertIs(decision.decision, self.p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+            self.assertEqual(decision.status, 'FAKE_POLICY_ALLOWED')
+            receipt = self.ledger.issue(decision, ttl_seconds=60)
+            sink = self.Sink()
+            result = self.ledger.redeem(receipt, redeem_run_id=self.h.REDEEM_RUN,
+                                        observed=observed, sink=sink)
+        self.assertIs(result.code, self.l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(sink.calls, [decision.binding])
+        self.assertEqual(sink.calls[0].canonical_root, canonical)
+        self.assertEqual(self._snapshot(canonical), repo_before)
+        self.assertFalse((repo / action.payload.target.path).exists())
+        self.assertEqual(sorted(os.listdir(self.root)), root_before)
+        self.assertEqual(sorted(os.listdir(self.ledger_dir)), ['receipts.sqlite3'])
+        ledger_stat = os.lstat(self.ledger_path)
+        self.assertEqual(ledger_stat.st_mode & 0o777, 0o600)
+        self.assertEqual(os.lstat(self.ledger_dir).st_mode & 0o777, 0o700)
+        self.assertFalse(str(self.ledger_path).startswith(canonical + os.sep))
+        self.assertEqual(self._git_status(), git_before)

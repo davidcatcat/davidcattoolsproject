@@ -1,6 +1,7 @@
 """A11b.3 D1 policy decisions: host-vouched contracts only, no forged authority."""
 
 import ast
+import dataclasses
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -13,6 +14,16 @@ from test_action_contract import make_action, make_approval
 
 PACKAGE = Path(__file__).resolve().parents[1] / 'llmtool'
 REDEEM_RUN = 'a'*32
+
+
+class FrozenSubclass(frozenset):
+    pass
+
+
+def Subclassed(value, model):
+    # Same field values, but a subclass instance rather than the exact model type.
+    sub = type('Sub' + model.__name__, (model,), {})
+    return sub(**{f.name: getattr(value, f.name) for f in dataclasses.fields(model)})
 
 
 class FakeHostIssuer(p.HostIssuer):
@@ -129,9 +140,28 @@ class PolicyDecisionTests(unittest.TestCase):
                   c.TrustedApprovalContext(make_approval(action).digest))
         for issuer in forged:
             with self.subTest(issuer=type(issuer).__name__):
-                result = allow(action, issuer=issuer)
-                self.assertIs(result.decision, p.Decision.DENY)
-                self.assertIn(result.code, (p.DecisionCode.NO_ISSUER, p.DecisionCode.UNTRUSTED_ISSUER))
+                self.assertDecision(allow(action, issuer=issuer), p.Decision.DENY,
+                                    p.DecisionCode.NO_ISSUER if issuer is None
+                                    else p.DecisionCode.UNTRUSTED_ISSUER)
+
+        class DuckIssuer:
+            # Looks like a host issuer, but is not one.
+            issuer_class = p.IssuerClass.POLICY_CONTRACT
+            capability_id = 'test-fake-host'
+            trusted = True
+            source = 'USER'
+
+            def vouches_for(self, policy_digest):
+                return True
+
+        class HostileClass:
+            @property
+            def __class__(self):
+                raise RuntimeError('hostile isinstance')
+        for issuer in (DuckIssuer(), HostileClass()):
+            with self.subTest(issuer=type(issuer).__name__):
+                self.assertDecision(allow(action, issuer=issuer),
+                                    p.Decision.DENY, p.DecisionCode.UNTRUSTED_ISSUER)
 
     def test_owner_p0_issuer_or_broken_issuer_cannot_mint_routine_grant(self):
         policy = make_policy()
@@ -149,6 +179,30 @@ class PolicyDecisionTests(unittest.TestCase):
         self.assertDecision(allow(policy=policy, issuer=Raising(policy)),
                             p.Decision.DENY, p.DecisionCode.UNTRUSTED_ISSUER)
 
+        class RaisingClass(FakeHostIssuer):
+            @property
+            def issuer_class(self):
+                raise RuntimeError('host failure')
+
+        class RaisingCapability(FakeHostIssuer):
+            @property
+            def capability_id(self):
+                raise RuntimeError('host failure')
+
+        class Text(str):
+            pass
+        for issuer in (RaisingClass(policy), RaisingCapability(policy),
+                       FakeHostIssuer(policy, capability_id=Text('test-fake-host'))):
+            with self.subTest(issuer=type(issuer).__name__):
+                self.assertDecision(allow(policy=policy, issuer=issuer),
+                                    p.Decision.DENY, p.DecisionCode.UNTRUSTED_ISSUER)
+
+        class TruthyInt(FakeHostIssuer):
+            def vouches_for(self, policy_digest):
+                return 1
+        self.assertDecision(allow(policy=policy, issuer=TruthyInt(policy)),
+                            p.Decision.DENY, p.DecisionCode.UNTRUSTED_POLICY)
+
     def test_canonical_owner_p0_is_exactly_three_classes_and_waits(self):
         self.assertEqual({r.value for r in p.OWNER_P0}, {'OWNER_P0_PRODUCT_MISMATCH',
                          'OWNER_P0_ADMIN_PRIVILEGE', 'OWNER_P0_MACOS_SYSTEM'})
@@ -160,6 +214,35 @@ class PolicyDecisionTests(unittest.TestCase):
                     result = allow(requirements=frozenset((requirement,)), interactive=interactive)
                     self.assertDecision(result, p.Decision.WAITING_APPROVAL, code)
                     self.assertEqual(result.status, 'NEEDS_APPROVAL')
+
+    def test_owner_p0_is_reached_only_inside_a_vouched_contract(self):
+        # A model-authored, unvouched, issuer-less or out-of-contract request is
+        # denied, never escalated to the owner as a P0 prompt (Issue #97 R5).
+        p0 = frozenset((p.Requirement.OWNER_P0_ADMIN_PRIVILEGE,))
+        action, policy = make_create(), make_policy()
+        denied = (
+            (dict(issuer=None), p.DecisionCode.NO_ISSUER),
+            (dict(issuer=FakeHostIssuer(make_policy(version=2))), p.DecisionCode.UNTRUSTED_POLICY),
+            (dict(issuer=FakeHostIssuer(policy, issuer_class=p.IssuerClass.OWNER_P0)),
+             p.DecisionCode.UNTRUSTED_ISSUER),
+        )
+        for interactive in (True, False):
+            for change, code in denied:
+                with self.subTest(code=code, interactive=interactive):
+                    self.assertDecision(allow(action, policy, requirements=p0,
+                                              interactive=interactive, **change), p.Decision.DENY, code)
+            narrow = make_policy(action, scope=('file.txt',))
+            self.assertDecision(allow(action, narrow, requirements=p0, interactive=interactive),
+                                p.Decision.DENY, p.DecisionCode.OUT_OF_CONTRACT)
+            git = make_action(c.ActionKind.GIT_OPERATION)
+            self.assertDecision(allow(git, make_policy(), make_observed(), requirements=p0,
+                                      interactive=interactive),
+                                p.Decision.DENY, p.DecisionCode.UNSUPPORTED_ACTION)
+            # Inside the vouched contract the same P0 waits for the owner.
+            self.assertDecision(allow(action, policy, requirements=p0, interactive=interactive),
+                                p.Decision.WAITING_APPROVAL,
+                                p.DecisionCode.OWNER_P0_REQUIRED if interactive
+                                else p.DecisionCode.OWNER_P0_NON_INTERACTIVE)
 
     def test_new_cost_or_egress_stops_and_is_never_p0_or_implied(self):
         for requirement in p.SEPARATE_AUTHORITY:
@@ -194,6 +277,12 @@ class PolicyDecisionTests(unittest.TestCase):
             'head': dict(head='c'*40),
             'target path': dict(target_path='other.txt'),
             'target present': dict(target_absent=False),
+            'repository id': dict(repository=replace(action.repository, repository_id='c'*64)),
+            'canonical root': dict(repository=replace(action.repository,
+                                                      canonical_root='/synthetic/other')),
+            'root device': dict(repository=replace(action.repository, root_device=11)),
+            'repository head': dict(repository=replace(action.repository, expected_head='c'*40)),
+            'head length': dict(head='c'*64),
         }
         for label, change in cases.items():
             with self.subTest(label=label):
@@ -208,6 +297,11 @@ class PolicyDecisionTests(unittest.TestCase):
             dict(observed=make_observed(action).to_dict()), dict(redeem_run_id='A'*32),
             dict(redeem_run_id='a'*31), dict(requirements={'NEW_COST'}),
             dict(requirements=frozenset(('OWNER_P0_ADMIN_PRIVILEGE',))), dict(interactive=1),
+            dict(interactive=None), dict(redeem_run_id=None), dict(requirements=None),
+            dict(requirements=FrozenSubclass()),
+            dict(requirements=FrozenSubclass((p.Requirement.NEW_COST,))),
+            dict(action=Subclassed(action, c.Action)), dict(policy=Subclassed(policy, p.PolicyContract)),
+            dict(observed=Subclassed(make_observed(action), p.ObservedState)),
         )
         for change in cases:
             with self.subTest(change=sorted(change)):
@@ -223,6 +317,12 @@ class PolicyDecisionTests(unittest.TestCase):
         binding = allow().binding
         with self.assertRaises(LLMToolError):
             p.PolicyDecision(p.Decision.ALLOW_WITH_TRUSTED_RECEIPT, p.DecisionCode.POLICY_ALLOWED, binding)
+        denied = allow(requirements=frozenset((p.Requirement.NEW_COST,)))
+        self.assertIs(denied.code, p.DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)
+        for forged in (dict(decision=p.Decision.ALLOW_WITH_TRUSTED_RECEIPT,
+                            code=p.DecisionCode.POLICY_ALLOWED, binding=binding), {}):
+            with self.subTest(forged=sorted(forged)), self.assertRaises(LLMToolError):
+                replace(denied, **forged)
         with self.assertRaises(TypeError):
             p.PolicyDecision(**{'decision': 'ALLOW_WITH_TRUSTED_RECEIPT', 'code': 'POLICY_ALLOWED'})
         raw = json.loads(binding.to_json())
@@ -231,6 +331,19 @@ class PolicyDecisionTests(unittest.TestCase):
                              ('target_absent', False), ('target_absent', 1)):
             with self.subTest(field=field, value=value), self.assertRaises(LLMToolError):
                 p.ReceiptBinding(**{**raw, 'action_paths': tuple(raw['action_paths']), field: value})
+
+        class Text(str):
+            pass
+        raw['action_paths'] = tuple(raw['action_paths'])
+        self.assertEqual(p.ReceiptBinding(**raw), binding)
+        for field, value in (('action_kind', c.ActionKind.FILE_CREATE),
+                             ('decision', p.Decision.ALLOW_WITH_TRUSTED_RECEIPT),
+                             ('issuer_class', p.IssuerClass.POLICY_CONTRACT),
+                             ('effect_kind', p.EffectKind.FAKE_FILE_CREATE),
+                             ('decision', Text('ALLOW_WITH_TRUSTED_RECEIPT')),
+                             ('target_path', 'zzz.txt')):
+            with self.subTest(field=field, value=type(value).__name__), self.assertRaises(LLMToolError):
+                p.ReceiptBinding(**{**raw, field: value})
         for model in (p.PolicyContract, p.ObservedState):
             with self.assertRaises(TypeError):
                 model(trusted=True)
@@ -247,6 +360,16 @@ class PolicyDecisionTests(unittest.TestCase):
                       (c.ActionKind.FILE_CREATE, c.ActionKind.FILE_CREATE), ('FILE_CREATE',)):
             with self.subTest(kinds=kinds), self.assertRaises(LLMToolError):
                 make_policy(kinds=kinds)
+        scope = list(policy.scope)
+        listed = make_policy(scope=scope)
+        scope.append('zzz.txt')
+        self.assertEqual(listed.scope, policy.scope)
+        self.assertEqual(listed.digest, policy.digest)
+        for name, value in (('scope', ('file.txt', 'other.txt', 'zzz.txt')),
+                            ('kinds', tuple(c.ActionKind)), ('version', 2)):
+            with self.subTest(name=name), self.assertRaises(dataclasses.FrozenInstanceError):
+                setattr(policy, name, value)
+        self.assertEqual(policy.digest, make_policy().digest)
 
 
 class NoProductionAuthorityTests(unittest.TestCase):

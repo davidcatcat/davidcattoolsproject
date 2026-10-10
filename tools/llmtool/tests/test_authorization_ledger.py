@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from llmtool import authorization_ledger as l
 from llmtool import authorization_policy as p
-from test_authorization_policy import REDEEM_RUN, allow, make_create, make_observed
+from test_authorization_policy import REDEEM_RUN, allow, make_create, make_observed, make_policy
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent
@@ -66,6 +66,22 @@ class Sink(l.EffectSink):
         if spec['crash'] == 'after_effect':
             os._exit(17)
 
+if spec['crash'] == 'before_commit':
+    # Die after the CONSUMED update but before its COMMIT (hot journal left).
+    import sqlite3
+
+    class CrashBeforeCommit(sqlite3.Connection):
+        consumed = False
+
+        def execute(self, sql, *args):
+            if sql.startswith("UPDATE receipts SET status = 'CONSUMED'"):
+                CrashBeforeCommit.consumed = True
+            elif sql == 'COMMIT' and CrashBeforeCommit.consumed:
+                os._exit(17)
+            return super().execute(sql, *args)
+    real_connect = sqlite3.connect
+    sqlite3.connect = lambda *a, **k: real_connect(*a, factory=CrashBeforeCommit, **k)
+
 if spec['wait']:
     sys.stdin.readline()
 try:
@@ -89,7 +105,19 @@ class LedgerCase(unittest.TestCase):
         self.addCleanup(lambda: self.ledger.close())
 
     def issue(self, ledger=None, ttl=60, **changes):
+        # One receipt per exact binding: each helper issue gets its own decision
+        # (a distinct reviewed policy version) unless a policy is given.
+        if 'policy' not in changes:
+            self.versions = getattr(self, 'versions', 100) + 1
+            changes['policy'] = make_policy(version=self.versions)
         return (ledger or self.ledger).issue(allow(**changes), ttl_seconds=ttl)
+
+    def count_receipts(self):
+        db = sqlite3.connect(self.path)
+        try:
+            return db.execute('SELECT count(*) FROM receipts').fetchone()[0]
+        finally:
+            db.close()
 
     def redeem(self, receipt, ledger=None, sink=None, run=REDEEM_RUN, observed=None):
         sink = sink or FakeSink()
@@ -153,8 +181,7 @@ class ReceiptLifecycleTests(LedgerCase):
             with self.subTest(ttl=ttl):
                 self.assertLedgerError(l.LedgerCode.NOT_ALLOWED, self.ledger.issue, allow(),
                                        ttl_seconds=ttl)
-        count = sqlite3.connect(self.path).execute('SELECT count(*) FROM receipts').fetchone()[0]
-        self.assertEqual(count, 0)
+        self.assertEqual(self.count_receipts(), 0)
 
     def test_forged_or_tampered_receipt_never_reaches_the_sink(self):
         receipt = self.issue()
@@ -223,6 +250,55 @@ class ReceiptLifecycleTests(LedgerCase):
         self.assertIs(self.redeem(receipt, observed=observed.to_dict())[0].code,
                       l.RedeemCode.BINDING_MISMATCH)
 
+    def test_one_decision_yields_at_most_one_receipt_in_any_status(self):
+        decision = allow()
+        receipt = self.ledger.issue(decision, ttl_seconds=60)
+        self.assertLedgerError(l.LedgerCode.NOT_ALLOWED, self.ledger.issue, decision,
+                               ttl_seconds=60)
+        self.assertEqual(self.count_receipts(), 1)
+        result, sink = self.redeem(receipt)
+        self.assertIs(result.code, l.RedeemCode.FAKE_EFFECT_DONE)
+        calls = list(sink.calls)
+        for _ in range(3):
+            self.assertLedgerError(l.LedgerCode.NOT_ALLOWED, self.ledger.issue, decision,
+                                   ttl_seconds=60)
+            # A fresh decide() for the same action, run and policy is the same binding.
+            self.assertLedgerError(l.LedgerCode.NOT_ALLOWED, self.ledger.issue, allow(),
+                                   ttl_seconds=30)
+            self.assertIs(self.redeem(receipt)[0].code, l.RedeemCode.REPLAY)
+        self.assertEqual(calls, [receipt.binding])
+        self.assertEqual(self.count_receipts(), 1)
+        self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_DONE')
+        # A new redeem run is a new decision and binding.
+        other = self.ledger.issue(allow(redeem_run_id='b'*32), ttl_seconds=60)
+        self.assertIs(self.redeem(other, run='b'*32)[0].code, l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(self.count_receipts(), 2)
+
+    def test_run_id_must_be_the_exact_bound_string(self):
+        class AlwaysEqual(str):
+            def __eq__(self, other):
+                return True
+
+            def __ne__(self, other):
+                return False
+            __hash__ = str.__hash__
+        for run in (AlwaysEqual('b'*32), AlwaysEqual(REDEEM_RUN), None, b'a'*32):
+            with self.subTest(run=type(run).__name__):
+                receipt = self.issue()
+                result, sink = self.redeem(receipt, run=run)
+                self.assertIs(result.code, l.RedeemCode.RUN_MISMATCH)
+                self.assertEqual(sink.calls, [])
+                self.assertEqual(self.ledger.status(receipt.nonce), 'DENIED')
+
+    def test_last_valid_second_redeems_and_expiry_boundary_is_exclusive(self):
+        receipt = self.issue(ttl=60)
+        self.clock.now = 1059.9
+        self.assertIs(self.redeem(receipt)[0].code, l.RedeemCode.FAKE_EFFECT_DONE)
+        receipt = self.issue(ttl=1)
+        self.assertEqual((receipt.issued_at, receipt.expires_at), (1059, 1060))
+        self.clock.now = 1060
+        self.assertIs(self.redeem(receipt)[0].code, l.RedeemCode.EXPIRED)
+
     def test_expiry_is_host_clock_based_and_final(self):
         receipt = self.issue(ttl=60)
         self.clock.now = 1060
@@ -254,6 +330,17 @@ class ReceiptLifecycleTests(LedgerCase):
             self.assertLedgerError(l.LedgerCode.CLOCK_INVALID, self.redeem, receipt, reopened)
         self.assertLedgerError(l.LedgerCode.CLOCK_INVALID, l.ReceiptLedger.open, self.path, clock=1000)
 
+    def test_negative_clock_is_invalid_even_on_a_fresh_store(self):
+        path = self.dir / 'fresh.sqlite3'
+        for bad in (-0.5, -0.0 - 1e-9, -1):
+            with self.subTest(clock=bad):
+                with l.ReceiptLedger.create(path, clock=lambda: bad) as fresh:
+                    self.assertLedgerError(l.LedgerCode.CLOCK_INVALID, fresh.status, 'f'*64)
+                    self.assertLedgerError(l.LedgerCode.CLOCK_INVALID, fresh.issue, allow(),
+                                           ttl_seconds=60)
+                    self.assertLedgerError(l.LedgerCode.CLOCK_INVALID, fresh.recover)
+                os.replace(path, self.dir / ('used-%d.sqlite3' % len(os.listdir(self.dir))))
+
     def test_sink_failure_is_effect_unknown_never_success(self):
         receipt = self.issue()
         result, sink = self.redeem(receipt, sink=FakeSink(error=RuntimeError('fake sink failed')))
@@ -262,6 +349,19 @@ class ReceiptLifecycleTests(LedgerCase):
         self.assertEqual(len(sink.calls), 1)
         self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_UNKNOWN')
         self.assertIs(self.redeem(receipt)[0].code, l.RedeemCode.REPLAY)
+
+    def test_sink_base_exception_is_recorded_unknown_then_reraised(self):
+        for error in (KeyboardInterrupt(), SystemExit(3)):
+            with self.subTest(error=type(error).__name__):
+                receipt = self.issue()
+                sink = FakeSink(error=error)
+                with self.assertRaises(type(error)):
+                    self.redeem(receipt, sink=sink)
+                self.assertEqual(len(sink.calls), 1)
+                self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_UNKNOWN')
+                result, again = self.redeem(receipt)
+                self.assertIs(result.code, l.RedeemCode.REPLAY)
+                self.assertEqual(again.calls, [])
 
     def test_finalization_failure_reports_effect_unknown(self):
         receipt = self.issue()
@@ -281,6 +381,23 @@ class ReceiptLifecycleTests(LedgerCase):
 
 
 class CrashAndRaceTests(LedgerCase):
+    def test_crash_before_consume_commit_rolls_back_to_one_usable_receipt(self):
+        receipt = self.issue()
+        child = self.child(receipt, crash='before_commit')
+        out, err = child.communicate(timeout=60)
+        self.assertEqual(child.returncode, 17, err)
+        self.assertEqual(out, '')
+        self.assertTrue(Path(str(self.path) + '-journal').exists())
+        self.assertEqual(self.effects(), [])
+        # The hot journal is rolled back: nothing was consumed, nothing to recover.
+        self.assertEqual(self.ledger.status(receipt.nonce), 'ISSUED')
+        self.assertEqual(self.ledger.recover(), 0)
+        result, sink = self.redeem(receipt)
+        self.assertIs(result.code, l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(sink.calls, [receipt.binding])
+        self.assertIs(self.redeem(receipt)[0].code, l.RedeemCode.REPLAY)
+        self.assertFalse(Path(str(self.path) + '-journal').exists())
+
     def test_crash_in_either_window_never_repeats_or_reports_success(self):
         for window, effects in (('before_effect', 0), ('after_effect', 1)):
             with self.subTest(window=window):
@@ -298,19 +415,22 @@ class CrashAndRaceTests(LedgerCase):
                 self.ledger = l.ReceiptLedger.open(self.path, clock=self.clock)
                 self.assertEqual(self.ledger.recover(), 1)
                 self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_UNKNOWN')
+                self.assertEqual(self.ledger.recover(), 0)
+                self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_UNKNOWN')
                 result, sink = self.redeem(receipt)
                 self.assertIs(result.code, l.RedeemCode.REPLAY)
                 self.assertEqual(sink.calls, [])
                 self.assertEqual(len(self.effects()), effects)
 
     def test_two_processes_racing_one_receipt_produce_one_effect(self):
-        for attempt in range(3):
+        for attempt in range(5):
             with self.subTest(attempt=attempt):
                 log = self.dir / 'effects.log'
                 if log.exists():
                     log.write_text('')
                 receipt = self.issue()
-                children = [self.child(receipt, wait=True) for _ in range(2)]
+                # Children import first and block; all are released together.
+                children = [self.child(receipt, wait=True) for _ in range(4)]
                 for child in children:
                     child.stdin.write('go\n')
                     child.stdin.flush()
@@ -319,7 +439,7 @@ class CrashAndRaceTests(LedgerCase):
                     out, err = child.communicate(timeout=60)
                     self.assertEqual(child.returncode, 0, err)
                     outputs.append(out.strip())
-                self.assertEqual(sorted(outputs), ['FAKE_EFFECT_DONE', 'REPLAY'])
+                self.assertEqual(sorted(outputs), ['FAKE_EFFECT_DONE'] + ['REPLAY'] * 3)
                 self.assertEqual(self.effects(), [receipt.binding.action_digest])
                 self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_DONE')
 
@@ -416,6 +536,32 @@ class StoreSecurityTests(LedgerCase):
             handle.write(b'\xff' * 400)
         self.assertLedgerError(l.LedgerCode.LEDGER_CORRUPT, self.open, damaged)
 
+    def test_os_and_sqlite_failures_surface_only_as_ledger_errors(self):
+        broken = sqlite3.OperationalError('unable to open database file')
+        with patch.object(l.sqlite3, 'connect', side_effect=broken):
+            self.assertLedgerError(l.LedgerCode.LEDGER_UNAVAILABLE, self.open)
+        with patch.object(l.sqlite3, 'connect', side_effect=sqlite3.DatabaseError('x')):
+            self.assertLedgerError(l.LedgerCode.LEDGER_CORRUPT, self.open)
+        with patch.object(l.os, 'fstat', side_effect=OSError(5, 'EIO')):
+            self.assertLedgerError(l.LedgerCode.LEDGER_UNAVAILABLE, self.open)
+        with patch.object(l.os, 'fsync', side_effect=OSError(5, 'EIO')):
+            self.assertLedgerError(l.LedgerCode.LEDGER_UNAVAILABLE, l.ReceiptLedger.create,
+                                   self.dir / 'fsync.sqlite3', clock=self.clock)
+        with patch.object(l.os, 'fchmod', side_effect=OSError(1, 'EPERM')):
+            self.assertLedgerError(l.LedgerCode.LEDGER_UNAVAILABLE, l.ReceiptLedger.create,
+                                   self.dir / 'fchmod.sqlite3', clock=self.clock)
+        self.open().close()
+
+    def test_failed_create_leaves_a_store_that_never_opens_or_recreates(self):
+        path = self.dir / 'half.sqlite3'
+        with patch.object(l, '_SCHEMA', l._SCHEMA + ('CREATE TABLE broken (',)):
+            self.assertLedgerError(l.LedgerCode.LEDGER_UNAVAILABLE, l.ReceiptLedger.create, path,
+                                   clock=self.clock)
+        self.assertEqual(os.lstat(path).st_mode & 0o777, 0o600)
+        self.assertLedgerError(l.LedgerCode.LEDGER_CORRUPT, self.open, path)
+        self.assertLedgerError(l.LedgerCode.LEDGER_INSECURE, l.ReceiptLedger.create, path,
+                               clock=self.clock)
+
     def test_locked_store_times_out_closed_without_issuing(self):
         holder = sqlite3.connect(self.path, isolation_level=None)
         holder.execute('BEGIN EXCLUSIVE')
@@ -424,11 +570,12 @@ class StoreSecurityTests(LedgerCase):
                 self.assertLedgerError(l.LedgerCode.LEDGER_LOCKED, self.open)
             self.ledger._db.execute('PRAGMA busy_timeout = 100')
             self.assertLedgerError(l.LedgerCode.LEDGER_LOCKED, self.issue)
+            self.assertLedgerError(l.LedgerCode.LEDGER_LOCKED, self.ledger.status, 'f'*64)
+            self.assertLedgerError(l.LedgerCode.LEDGER_LOCKED, self.ledger.recover)
         finally:
             holder.execute('ROLLBACK')
             holder.close()
-        count = sqlite3.connect(self.path).execute('SELECT count(*) FROM receipts').fetchone()[0]
-        self.assertEqual(count, 0)
+        self.assertEqual(self.count_receipts(), 0)
 
 
 if __name__ == '__main__':
