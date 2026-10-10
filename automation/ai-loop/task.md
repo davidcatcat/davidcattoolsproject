@@ -1,10 +1,10 @@
-# ACTIVE TASK CANDIDATE — Issue #97 A11b.3 D1 offline trusted authorization (STAGING ONLY)
+# ACTIVE — Issue #97 A11b.3 D1 offline trusted authorization
 
-**This is a bounded new source development task, NOT a new permanent controller.** This task remains on a **non-executable staging ref** until the existing ai-loop controller release gate is satisfied. Do not claim Codex/Claude/Mac has executed from publishing task files. Target product repository is the existing canonical Mac checkout only: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Do not create another checkout/worktree.
+**This is a bounded source development task, NOT a new permanent controller.** Every task update must be reviewed on a **non-executable staging ref** and pass its own release gate before the revised task reaches the live control branch. Publishing task files does NOT launch Codex/Claude/Mac. Target product repository is the existing canonical Mac checkout only: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Do not create another checkout/worktree.
 
 ## Evidence and exact decisions
 
-- Product starting point: `main@7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a` (re-fetch and require exact match before spending model tokens).
+- Product starting point: `main@2cd337e082a3b152d862e16346b9e191a5570d25` (re-fetch and require exact match before spending model tokens). This base includes CI-only PR #100; it introduces no D1 code/authorization change.
 - [Issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97): D1 offline-only; F2 and real Git ADD NOT AUTHORIZED.
 - [Independent Claude design/Security review](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100267699): CHANGE, R1–R5.
 - [Coordinator final decision](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100293002): ACCEPT R1–R4; ACCEPT R5 with canonical P0 correction. This authorizes ONLY D1 source development, not production issuer/real execution. [Fresh repo review](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6100369027) found no new F1 blocker.

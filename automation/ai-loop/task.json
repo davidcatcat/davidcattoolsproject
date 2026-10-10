@@ -2,8 +2,8 @@
   "task_id": "A11b3-D1-OfflineAuthorization-20261011",
   "mode": "implement_new_pr",
   "pr_number": null,
-  "expected_head": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
-  "base_sha": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
+  "expected_head": "2cd337e082a3b152d862e16346b9e191a5570d25",
+  "base_sha": "2cd337e082a3b152d862e16346b9e191a5570d25",
   "branch": "feat/a11b3-d1-offline-authorization-20261011",
   "allowed_files": [
     "tools/llmtool/llmtool/authorization_policy.py",
