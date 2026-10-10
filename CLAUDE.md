@@ -51,8 +51,13 @@ not a second code path or sequential product gate. **Use the current
 AI-reviewed, latest-control-branch temporary ai-loop** for Codex/Claude
 coordination until
 native llmtool passes A11c canonical Mac acceptance and can replace it.
-A11b.2.2.2 is design/review-only next (Issue #70), not approved real
-Git ADD. C1 excerpt egress needs Issue #66's safety gate before
+A11b.2.2.2 **private disposable-fixture-only F1 Git ADD is DONE/merged
+via PR #84** after independent Security/Functional QA. **F2 real
+user-repository Git mutation remains NOT AUTHORIZED** and requires a
+separate action/approval/sandbox contract. Use the canonical
+user-impact-first defect policy in ai-team-delivery; no automatic
+third repair or waiver of mandatory gates. C1 excerpt egress needs
+Issue #66's safety gate before
 any permitted model data transfer, but full company cost benchmarks
 do not block offline A11b design. Report evidence and risks, not
 new permanent ai-loop automation.
