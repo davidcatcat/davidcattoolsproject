@@ -130,9 +130,9 @@ These are **three separate decisions**, not one label:
   unauthorized mutation/exfiltration, or breached mandatory authority boundary.
 - `SEV-1` high: core functionality is unusable or materially incorrect,
   including a false success result or a fail-open required safety check.
-- `SEV-2` medium: bounded, uncommon or recoverable functional defect with a
-  verified workaround; still a **release blocker** if the released feature
-  actually reaches an unsafe or false-success path.
+- `SEV-2` medium: bounded or recoverable functional defect; record any
+  *independently verified* workaround if one exists. It remains a **release
+  blocker** if the delivered feature reaches an unsafe or false-success path.
 - `SEV-3` low/informational: nonfunctional wording, cosmetics, extra
   assertions or quality improvements with no uncovered mandatory invariant.
 
@@ -186,9 +186,7 @@ roadmap**; historical C0–C3 labels describe overlapping delivery and
 measurement work, **not separate milestones, agent executors or blockers**.
 Use the single owner mapping and real status in
 [the Roadmap](../../tools/llmtool/ROADMAP.md). The current product critical
-path has **A11b.2.2.2 F1 private disposable-fixture-only Git ADD DONE/merged via PR #84 (`46b17b13`) with independent Security/Functional QA**. Next define the separately authorized F2/user-repository mutation contract and A11b.3 approval semantics; the F1 merge grants neither F2 nor A11c cutover.
-([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)),
-not restarting the C programme. C1 excerpt privacy
+path has **A11b.2.2.2 F1 private disposable-fixture-only Git ADD DONE/merged via PR #84 (`46b17b13`) with independent Security/Functional QA**. Next define the separate F2/user-repository mutation contract and A11b.3 approval semantics in [Issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97); the F1 merge grants neither F2 nor A11c cutover. The historical F1 [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70) remains audit evidence, not another C-programme milestone. C1 excerpt privacy
 ([Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66))
 is a parallel **provider-egress** safety obligation; full company
 reliability/paid-token studies must not block offline local A11b design.
