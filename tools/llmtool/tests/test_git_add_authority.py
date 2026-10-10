@@ -392,7 +392,9 @@ class ProductInventoryFailureTests(unittest.TestCase):
                         self.assertEqual(incident['user_action'], 'USER_ACTION_REQUIRED')
                         self.assertFalse(incident['containment_confirmed'])
                         self.assertEqual(reader.read.call_count, len(messages))
-                        self.assertEqual(note.exited.call_count, len(messages)-1)
+                        # Exit evidence is consulted only after the stream reaches EOF
+                        # (R84-S2-M1); here UNKNOWN ends the stream first.
+                        self.assertEqual(note.exited.call_count, 0)
                         self.assertIs(held['ownership']['process'], process)
                         self.assertIs(held['ownership']['anchor'], anchor)
                         self.assertIs(held['ownership']['note'], note)
@@ -420,7 +422,8 @@ class TerminalFinalizationTests(unittest.TestCase):
     observe_retention = ProductInventoryFailureTests.observe_retention
     supervisor_failure = ProductInventoryFailureTests.supervisor_failure
 
-    def run_host(self, value, own, stream, exits_after, eof=True):
+    def run_host(self, value, own, stream, exits_after, eof=True, signal_after=None,
+                 parent_lost_after=None, real_pipe=False):
         """Real Host loop over a scripted status stream (list items or errors).
 
         exits_after: number of reads after which the supervisor ExitNote fires.
@@ -428,21 +431,48 @@ class TerminalFinalizationTests(unittest.TestCase):
         ('SETTLED', result); either way records cleanup decisions in self.calls.
         """
         held, poll = {}, [0]
-        process, anchor, note, signals = Mock(pid=own.pid), Mock(), Mock(), Mock()
-        signals.first = None
+        process, anchor, note = Mock(pid=own.pid), Mock(), Mock()
         reader = Mock()
-        script = list(stream)
-        def read():
-            if script:
-                item = script.pop(0)
-                if isinstance(item, BaseException):
-                    raise item
-                return item
-            if eof:
-                raise EOFError()
-            return None
-        reader.read.side_effect = read
+        class Signals:
+            def install(self): pass
+            def restore(self): self.restored = getattr(self, 'restored', 0) + 1
+            @property
+            def first(self):
+                if signal_after is not None and reader.read.call_count >= signal_after:
+                    return signal.SIGTERM
+                return None
+        signals = Signals()
+        if real_pipe:
+            # Causal order of a fast supervisor: FINALIZED written, writer
+            # closed, exit observable, all before the Host's next read.
+            r, w = os.pipe()
+            for frame in stream:
+                raw = p.canonical(frame)
+                os.write(w, len(raw).to_bytes(4, 'big') + raw)
+            os.close(w)
+            real = p.Reader(r)
+            reader.read.side_effect = real.read
+            exits_after = 0
+        else:
+            script = list(stream)
+            def read():
+                if script:
+                    item = script.pop(0)
+                    if isinstance(item, BaseException):
+                        raise item
+                    return item
+                if eof:
+                    raise EOFError()
+                return None
+            reader.read.side_effect = read
         note.exited.side_effect = lambda: reader.read.call_count >= exits_after
+        parent = kernel.Identity.parse(value['parent'])
+        def identity(pid):
+            if pid == parent.pid:
+                if parent_lost_after is not None and reader.read.call_count >= parent_lost_after:
+                    raise kernel.IdentityUnknown('launcher gone')
+                return parent
+            return own
         def select(read, write, exceptional, timeout):
             if not read and timeout == .05:
                 poll[0] += 1
@@ -450,8 +480,7 @@ class TerminalFinalizationTests(unittest.TestCase):
         saved_trace = sys.gettrace()
         with patch.object(host, 'Signals', return_value=signals), \
                 patch.object(host.subprocess, 'Popen', return_value=process), \
-                patch.object(kernel, 'identity', side_effect=lambda pid:
-                    kernel.Identity.parse(value['parent']) if pid == value['parent']['pid'] else own), \
+                patch.object(kernel, 'identity', side_effect=identity), \
                 patch.object(kernel, 'Anchor', return_value=anchor), \
                 patch.object(kernel, 'ExitNote', return_value=note), \
                 patch.object(kernel, 'absent', return_value=True), \
@@ -475,9 +504,11 @@ class TerminalFinalizationTests(unittest.TestCase):
                 sys.settrace(saved_trace)
                 for fd in held.get('ownership', {}).get('fds', []):
                     os.close(fd)  # Anonymous pipes owned by this unit test.
+        if real_pipe:
+            os.close(r)
         self.calls = {'kill_group': anchor.kill_group.call_count, 'reap': anchor.reap.call_count,
                       'post_state': post_state.call_args_list, 'killpg': group.call_count,
-                      'kill': signal_pid.call_count, 'restore': signals.restore.call_count,
+                      'kill': signal_pid.call_count, 'restore': getattr(signals, 'restored', 0),
                       'sent': [c.args[1]['type'] for c in send.call_args_list[1:]]}
         return outcome
 
@@ -518,6 +549,32 @@ class TerminalFinalizationTests(unittest.TestCase):
         self.assertEqual(self.calls['sent'], ['FINALIZE'])
         self.assertEqual((self.calls['kill_group'], self.calls['reap']), (1, 1))
         self.assertEqual(self.calls['post_state'][0].kwargs, {'exit_code': 0, 'interrupted': False})
+
+    def test_finalized_already_queued_when_exit_is_observed_still_settles(self):
+        # R84-S2-M1: ExitNote is process-exit evidence, not proof the status
+        # stream was consumed. FINALIZED + EOF are queued before the next read.
+        value, own, _ = self.supervisor_failure(errno.EPERM, False)
+        outcome = self.run_host(value, own,
+            self.frames(value, own, 'READY', 'CHILD', 'EXIT', 'FINALIZED'), 0, real_pipe=True)
+        self.assertEqual(outcome[0], 'SETTLED')
+        self.assertEqual(outcome[1]['code'], 'MUTATION_GIT_EXIT')
+        self.assertEqual(self.calls['post_state'][0].kwargs, {'exit_code': 0, 'interrupted': False})
+        # Exit visible early, FINALIZED genuinely absent: UNKNOWN, not a hang.
+        self.assert_unknown_without_cleanup(self.run_host(value, own,
+            self.frames(value, own, 'READY', 'CHILD', 'EXIT'), 0, real_pipe=True))
+
+    def test_interruption_after_git_exit_never_settles(self):
+        # R84-S2-M2: signal or launcher loss latched after EXIT, before or after
+        # FINALIZED, keeps UNKNOWN even if FINALIZED, EOF and exit follow.
+        value, own, _ = self.supervisor_failure(errno.EPERM, False)
+        stream = self.frames(value, own, 'READY', 'CHILD', 'EXIT', 'FINALIZED')
+        for label, kwargs in (('signal before FINALIZED', {'signal_after': 3}),
+                              ('signal after FINALIZED', {'signal_after': 4}),
+                              ('parent loss before FINALIZED', {'parent_lost_after': 3}),
+                              ('parent loss after FINALIZED', {'parent_lost_after': 4})):
+            with self.subTest(case=label):
+                self.assert_unknown_without_cleanup(self.run_host(value, own, stream, 4, **kwargs))
+                self.assertIn('CANCEL', self.calls['sent'])
 
     def test_any_other_post_exit_ending_is_unknown_without_cleanup(self):
         value, own, _ = self.supervisor_failure(errno.EPERM, False)

@@ -175,23 +175,32 @@ def _execute(request, action, plan):
                     finalized = True
                 else:
                     private.reject()
-            if owned['note'].exited():
-                if finalized and eof:
-                    # FINALIZED, end of stream, then the supervisor's own
-                    # last act: the only positive post-Git settlement.
-                    settled = True
-                    break
-                if not finalized:
-                    primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
-                    break
-                # Finalized and exited: keep reading until EOF.
-            elif eof:
-                if not finalized:
-                    primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
-                    break
+            if not eof:
+                # ExitNote is process-exit evidence only. Decide nothing about
+                # FINALIZED until the bounded stream has been read to EOF.
+                select.select([sr], [], [], .005)
+                continue
+            if not finalized:
+                primary, interrupted = 'MUTATION_SUPERVISOR_LOST', True
+                break
+            if not owned['note'].exited():
                 select.select([], [], [], .005)  # Await the bound ExitNote.
                 continue
-            select.select([sr], [], [], .005)
+            if cancelled or signals.first is not None:
+                # An interruption latched after GIT_EXIT is never undone by a
+                # later FINALIZED/EOF/exit; it stays uncertain and retained.
+                break
+            try:
+                same_parent = kernel.identity(request['parent']['pid']).data() == request['parent']
+            except (OSError, kernel.IdentityUnknown):
+                same_parent = False
+            if not same_parent:
+                primary, interrupted = 'MUTATION_INTERRUPTED', True
+                break
+            # FINALIZED, then end of stream, then the supervisor's own last
+            # act, uninterrupted: the only positive post-Git settlement.
+            settled = True
+            break
         if not settled and not interrupted:
             primary, interrupted = 'MUTATION_TIMEOUT', True
     except BaseException as error:
