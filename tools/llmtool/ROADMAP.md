@@ -595,7 +595,7 @@ NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2.1 DONE/merged (PR #43); A11b.2.2.1 synthetic DONE/merged; A11b.2.2.2 NOT AUTHORIZED | Data-only contract, read-only ADD preflight and synthetic containment delivered; real executor and recovery deferred | B5 design remediation pending independent targeted re-review; no implementation authorization |
+| A11b — IN PROGRESS; A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and private F1 A11b.2.2.2 PR #84 DONE/merged | Data-only contract, preflight, synthetic containment and **disposable-fixture-only F1** delivered; F2 general mutation and recovery remain future work | Separate F2 Security-reviewed contract and A11b.3–6 gates required; F2 NOT AUTHORIZED |
 | A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -769,7 +769,7 @@ company result adopted/overridden、schema/identifier validity；**省 token 但
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2.1 synthetic containment DONE/merged via PR #49；A11b.2.2.2 B5 design / real Git ADD NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2.1 synthetic containment DONE/merged via PR #49；A11b.2.2.2 F1 disposable-fixture Git ADD DONE/merged PR #84, F2 real-repo mutation NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE
