@@ -153,3 +153,56 @@ Coordinator 可以照 Issue #70 的計畫準備 F1-r2：只改 task 的 commit�
    ai-loop 的 STOP 分類也要對應 P0：只有 P0 的三種情況（加上需求方確認後的費用與資料出口）才輸出「需要你：yes/no」。
 3. 照 Issue #70 準備 F1-r2。
    - 在 P3 完成之前，啟動仍需要需求方執行一次 `run.sh`。訊息中只給一行指令，並註明「你需要做：執行這一行；其他都不用管」。
+
+## 8. 補充（2026-10-10）：同樣的問題會內建進 llmtool，A11b.3 開始前要修正設計
+
+需求方的問題：「雖然現在跟你們在討論ai-loop的臨時協調工作這些問題,做到llmtool時也會發生?」
+
+**會。其中「每一步都要需求方批准」已經寫在現行設計裡了：**
+
+- `tools/llmtool/NATIVE_SELF_DEV_MVP.md:152`：「Explicit policy and **user authorization before every permitted side effect, including edits/tests/Git**」。
+- `tools/llmtool/ROADMAP.md` A11b.3（約第 882–890 行）規定：
+  - 每個 side effect（含 tests、patch、Git 與 repair）都要先取得 required approval；
+  - interactive 模式用 TTY prompt 詢問；
+  - non-interactive 或背景執行時，遇到 required approval「預設拒絕或停在 waiting_approval」。
+
+照字面實作的話，llmtool 每改一個檔、每跑一次測試，都會停下來問需求方，背景執行則會一直卡住。
+這就是今天 ai-loop 的問題，只是改成內建在產品裡。
+A11b.3 是 NOT STARTED，現在修正設計的成本最低。
+
+### 建議（不改變安全性質，只改「誰批准」）
+
+**保留** A11b.3 的 approval 機制本身：
+
+- approval 綁定 task/run、action/payload digest、repo/scope 和預期 state；
+- 有效期限與防重播；
+- 不接受模型文字中的 "approved"；
+- dangerous/unknown action 不因 provider、debug 模式或 frontend 而自動獲准。
+
+**改變 approval issuer 的分工，對齊 P0：**
+
+| Action 類別 | Approval issuer | 是否問需求方 |
+| --- | --- | --- |
+| 任務契約 allowlist 內的例行動作：編輯允許的檔案、跑契約列出的測試、建 feature branch、commit、開 Draft PR | **Policy 加上任務契約**：在任務建立、契約經獨立審查時一次授權；每個 action 仍逐一綁定 digest 驗證 | 否 |
+| 契約外但非 P0 的動作，例如新增檔案範圍或 repair 超出預算 | **Coordinator 或獨立 reviewer**（AI） | 否 |
+| **P0 類別**：功能驗收不符需求；需要 root/sudo/管理員密碼；可能動到 Mac 核心系統（系統設定、`/System`、`/Library`、`/usr` 非 `/usr/local`、系統 daemon、kernel extension、TCC、防火牆或網路、全系統安裝）；需求方確認後再加上費用與資料出口 | **需求方** | **是，只問 yes/no，用一句白話說明後果** |
+| dangerous/unknown | 拒絕 | 否，直接 STOP |
+
+**背景執行：** 遇到 P0 類別時停在 `waiting_approval`，並用一則白話通知需求方。
+例行類別不得因為「背景執行」就停住；那是契約已經授權的範圍。
+
+### 其他 ai-loop 教訓在 llmtool 的對應
+
+| ai-loop 今天的問題 | llmtool 對應位置 |
+| --- | --- |
+| STOP 訊息寫得像是要需求方處理 | A11b recovery 與最終結果的輸出：依 P0 分類，非 P0 類別寫「AI 會處理，你不需要做任何事」 |
+| 為一次性決定建造控制器機制（QA Low） | Coordinator 和 llmtool repair policy：全部 finding 都是非阻擋的 Low 時，給出建議並開 follow-up，然後停止；不新增工具 |
+| Linux CI 當成 Mac 證據 | A11c 驗收：Mac 原生測試，或 `macos-latest` CI |
+| 只貼 hash、看不懂的診斷 | llmtool 在本機協調，審查者直接讀 bounded 原文；只有外送時才走 Issue #66 的資料出口 gate |
+| 雲端與 Mac 之間要靠人傳話 | 由 llmtool 本身解決：它在 Mac 上直接協調 Codex/Claude，這正是 A11c cutover 的目的 |
+
+### 請 Coordinator 處理
+
+1. 把上表的 approval issuer 分工列為 **A11b.3 設計輸入**，在 A11b.3 設計規格中正式化，並送獨立 Security 審查。可以開新 issue，或併入 Issue #70 的後續。
+2. 修正 `NATIVE_SELF_DEV_MVP.md:152` 與 ROADMAP A11b.3 中「user authorization before every … side effect」的措辭，改成「依 P0 分類的 approval issuer」。
+   這是規格變更，請照一般審查流程進行。
