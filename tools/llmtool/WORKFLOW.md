@@ -372,8 +372,10 @@ round-2 APPROVE. A11b is IN PROGRESS: A11b.1 Typed Action & Approval Contract is
 DONE/merged via PR #32 (`e5525f18`) as a data-only slice with offline validation
 and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
-A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED. A11c is NOT STARTED; A12 is
-future optional. Historical reports retain their original checkpoint status.
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
+via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
+AUTHORIZED. A11c is NOT STARTED; A12 future optional. Historical
+reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.
 
@@ -511,6 +513,9 @@ with the historical B5 spec. It records the supervisor-owned group, direct-child
 parent anchor, self-group last act and retained operator-wait obligations.
 PR #49 synthetic-only containment is DONE / squash-merged as `eb464628dd6096811c659cfdf663f364107a6ef4`,
 with independent Security/Functional QA and native Mac evidence. Its historical
-Draft/verification gates are closed for this synthetic slice only. Real Git ADD
-and A11b.2.2.2 remain NOT STARTED / NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
-tracks the independent integration design and deferred controls.
+Draft/verification gates are closed for this synthetic slice only.
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** subsequently
+passed independent Security/Functional QA and was merged via
+[PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84).
+F2 real-repository mutation remains NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
+retains the historical integration design and deferred controls.
