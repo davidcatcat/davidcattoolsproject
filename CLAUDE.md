@@ -97,10 +97,12 @@ new permanent ai-loop automation.
 For llmtool, A11a is DONE and QG-S1/QG-QA1 are PASS/CLOSED.
 A11b remains IN PROGRESS: A11b.1 data-only contract DONE/merged via
 PR #32; A11b.2.1 read-only Git preflight DONE/merged via PR #43;
-A11b.2.2.1 **synthetic-only** containment DONE/merged via PR #49.
-A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED; its
-design, independent Security review, implementation and Mac gates
-remain. A11c is NOT STARTED and A12 future optional. Refer to the
+A11b.2.2.1 **synthetic-only** containment DONE/merged via PR #49;
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** DONE/merged
+via PR #84 (`46b17b13`) with independent Security/Functional QA.
+**F2 user-repository Git mutation is NOT AUTHORIZED** until separate
+contract, Security review and native acceptance. A11c is NOT STARTED
+and A12 future optional. Refer to the
 [Roadmap](tools/llmtool/ROADMAP.md) for current status.
 
 On the actual Mac with company VPN, use `company-llm-delegation` for the
