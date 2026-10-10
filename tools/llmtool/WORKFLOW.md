@@ -5,13 +5,9 @@
 **A11b and A11c are the only active native delivery milestones.**
 The C0–C3 names in older plans are historical outcome/measurement
 labels mapped **once** in [the authoritative ROADMAP](ROADMAP.md),
-not separate development backlogs. Use A11b.2.2.2 for the next
-**design-only** executor/safe-Git integration task ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70));
-separately retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
-for C1 excerpt egress privacy. Do not hold offline A11b design
-until full company Phase 0 / paid-token benchmarking completes.
-Real Git ADD remains NOT AUTHORIZED until a separately approved
-design, implementation contract, Security/QA and Mac gates.
+not separate development backlogs. **A11b.2.2.2 private disposable-fixture-only F1 Git ADD** was independently accepted and merged as PR #84 (`46b17b13`). The separate [F2 real-repository mutation and A11b.3 approval design](https://github.com/davidcatcat/davidcattoolsproject/issues/97) is next; **F2 execution remains NOT AUTHORIZED**. The historical F1 records remain in [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70).
+Retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) separately for C1 excerpt egress privacy. Offline A11b design does not wait for full company Phase 0 / paid-token benchmarking.
+Only F1's private disposable-fixture Git ADD is implemented and reviewed. **Real user-repository/public Git ADD (F2) remains NOT AUTHORIZED** pending its own approved contract, Security/QA and Mac gates.
 
 **Until native llmtool can coordinate Codex/Claude, use the
 standard Git-provided temporary `ai-loop` launcher and controller.**
@@ -76,6 +72,28 @@ must not invent extra product blockers/one-off tools. Required failing
 security, QA or Mac/runtime gates remain blocking regardless of the
 owner's general merge delegation. This document describes workflow,
 not an installed autonomous Mac executor or background service.
+
+### Bug report → user-impact triage → bounded release
+
+Apply the [canonical ai-team-delivery defect policy](../../skills/ai-team-delivery/SKILL.md#user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92),
+adopted in [Issue #92](https://github.com/davidcatcat/davidcattoolsproject/issues/92).
+For every report capture the actual user journey, reproducible evidence
+and SHA, Severity, Priority, **affected release blocker** and reviewer
+disposition. A Medium false success or reachable fail-open still blocks
+its own release. Another feature already isolated in main may continue.
+Unclassified product/test failures keep only their affected required gate
+on HOLD until independently distinguished. Test replacements must verify
+the same behavior/invariants on the same SHA and required platform.
+
+First reuse targeted user smoke/regressions; run required full Mac/CI,
+functional and security gates at release time. A confirmed root-cause
+family gets at most two failed repair attempts before coordinator
+reassessment; overall review/token/time escalation does not waive a
+failing mandatory gate. Place independent QA in the feature PR or
+tracking Issue instead of opening a new report-only PR for every round.
+Only the requirements owner's three P0 cases in the Skill require
+direct owner yes/no escalation; provider egress and spending still
+require distinct pre-existing authorization.
 
 ## Execution environment
 
@@ -352,8 +370,10 @@ round-2 APPROVE. A11b is IN PROGRESS: A11b.1 Typed Action & Approval Contract is
 DONE/merged via PR #32 (`e5525f18`) as a data-only slice with offline validation
 and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
-A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED. A11c is NOT STARTED; A12 is
-future optional. Historical reports retain their original checkpoint status.
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
+via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
+AUTHORIZED. A11c is NOT STARTED; A12 future optional. Historical
+reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.
 
@@ -491,6 +511,9 @@ with the historical B5 spec. It records the supervisor-owned group, direct-child
 parent anchor, self-group last act and retained operator-wait obligations.
 PR #49 synthetic-only containment is DONE / squash-merged as `eb464628dd6096811c659cfdf663f364107a6ef4`,
 with independent Security/Functional QA and native Mac evidence. Its historical
-Draft/verification gates are closed for this synthetic slice only. Real Git ADD
-and A11b.2.2.2 remain NOT STARTED / NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
-tracks the independent integration design and deferred controls.
+Draft/verification gates are closed for this synthetic slice only.
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** subsequently
+passed independent Security/Functional QA and was merged via
+[PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84).
+F2 real-repository mutation remains NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
+retains the historical integration design and deferred controls.

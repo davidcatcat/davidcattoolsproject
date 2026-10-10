@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); real A11b.2.2.2 Git ADD remains NOT AUTHORIZED pending reviewed integration design.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); A11b.2.2.2 F1 private disposable-fixture-only Git ADD is DONE/merged via PR #84 (`46b17b13`) after independent Security/Functional QA. F2 real-repository mutation remains NOT AUTHORIZED.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -90,10 +90,11 @@ not a second permanent product.
 The requirements owner supplies goals and product acceptance; the AI
 team owns technical management, development and evidence-backed review.
 
-**Immediate native milestone:** A11b.2.2.1 synthetic containment is
-merged; A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED.
-Design the next bounded executor slice and obtain independent Security
-review first ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)).
+**Current native milestone:** A11b.2.2.1 synthetic containment and
+A11b.2.2.2 F1 private disposable-fixture-only Git ADD are merged (PR #49,
+PR #84 respectively). **F2 user-repository Git mutation remains NOT AUTHORIZED**.
+Design the next separate action/approval/containment/rollback contract with
+independent Security review first ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)).
 A11c later performs real Mac Codex/Claude self-development acceptance
 and cutover. The merged local-only test-excerpt helper (legacy C1a,
 [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55))
@@ -120,7 +121,7 @@ are never treated as the same claim.
 | A11a — Observability & Diagnostics | **DONE** | Structured diagnostics, opt-in safe metadata store, runs/trace/doctor, failure handling |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged; A11b.2.1 DONE/merged; A11b.2.2.1 synthetic containment DONE/merged PR #49** | Actual Git mutation remains prohibited; A11b.2.2.2 integration/sandbox/approval design and review required |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and sealed F1 PR #84 DONE/merged** | F2 real user-repo mutation NOT AUTHORIZED; next separate Security-reviewed F2 and A11b.3 approval design |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate route-by-task delegation, independent verification and real task acceptance; no blanket company-first policy |
 
 ### Company-LLM routing evidence after Round 3

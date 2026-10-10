@@ -43,9 +43,12 @@ independent evidence gates before merging.
 C0–C3 are legacy A-delivery labels; do not create another C
 milestone/implementation stream. Continue coordinating Codex/Claude via
 the AI-reviewed, automatically updated **temporary ai-loop** until A11c
-real-world acceptance proves native llmtool parity. A11b.2.2.2 next
-requires design and independent Security review (Issue #70);
-real Git mutation is not authorized. Keep C1 excerpt export safety
+real-world acceptance proves native llmtool parity. A11b.2.2.2 private
+**disposable-fixture-only F1 Git ADD is DONE/merged via PR #84** with
+independent Security/Functional QA. F2 user-repository Git mutation is
+**not authorized** until a separately reviewed approval/execution contract.
+Apply the canonical user-impact-first defect triage in the Skill;
+keep C1 excerpt export safety
 (Issue #66) distinct from offline local executor design.
 
 ## Canonical repository and pre-change checks
@@ -172,10 +175,12 @@ while a required gate is unresolved.
 For llmtool, A11a is DONE and QG-S1/QG-QA1 are PASS/CLOSED. A11b is
 IN PROGRESS: A11b.1 data-only contract DONE/merged via PR #32,
 A11b.2.1 read-only Git preflight DONE/merged via PR #43, and
-A11b.2.2.1 synthetic containment DONE/merged via PR #49. The
-A11b.2.2.2 product real Git ADD remains NOT STARTED / NOT AUTHORIZED,
-pending separate design, Security review and implementation approval;
-A11c is NOT STARTED and A12 is future optional. The current
+A11b.2.2.1 synthetic containment DONE/merged via PR #49, and
+A11b.2.2.2 **private fixture-only F1** DONE/merged via PR #84 (`46b17b13`)
+after independent Security/Functional QA and Mac native acceptance.
+**F2 real user-repository mutation is NOT AUTHORIZED**, pending a separate
+approval/sandbox/audit contract; A11b overall and A11c are NOT DONE.
+A12 is future optional. The current
 [Roadmap](tools/llmtool/ROADMAP.md) is the status authority.
 
 ## Default Cloud agent roles

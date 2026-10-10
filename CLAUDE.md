@@ -51,8 +51,13 @@ not a second code path or sequential product gate. **Use the current
 AI-reviewed, latest-control-branch temporary ai-loop** for Codex/Claude
 coordination until
 native llmtool passes A11c canonical Mac acceptance and can replace it.
-A11b.2.2.2 is design/review-only next (Issue #70), not approved real
-Git ADD. C1 excerpt egress needs Issue #66's safety gate before
+A11b.2.2.2 **private disposable-fixture-only F1 Git ADD is DONE/merged
+via PR #84** after independent Security/Functional QA. **F2 real
+user-repository Git mutation remains NOT AUTHORIZED** and requires a
+separate action/approval/sandbox contract. Use the canonical
+user-impact-first defect policy in ai-team-delivery; no automatic
+third repair or waiver of mandatory gates. C1 excerpt egress needs
+Issue #66's safety gate before
 any permitted model data transfer, but full company cost benchmarks
 do not block offline A11b design. Report evidence and risks, not
 new permanent ai-loop automation.
@@ -92,10 +97,12 @@ new permanent ai-loop automation.
 For llmtool, A11a is DONE and QG-S1/QG-QA1 are PASS/CLOSED.
 A11b remains IN PROGRESS: A11b.1 data-only contract DONE/merged via
 PR #32; A11b.2.1 read-only Git preflight DONE/merged via PR #43;
-A11b.2.2.1 **synthetic-only** containment DONE/merged via PR #49.
-A11b.2.2.2 real Git ADD is NOT STARTED / NOT AUTHORIZED; its
-design, independent Security review, implementation and Mac gates
-remain. A11c is NOT STARTED and A12 future optional. Refer to the
+A11b.2.2.1 **synthetic-only** containment DONE/merged via PR #49;
+A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** DONE/merged
+via PR #84 (`46b17b13`) with independent Security/Functional QA.
+**F2 user-repository Git mutation is NOT AUTHORIZED** until separate
+contract, Security review and native acceptance. A11c is NOT STARTED
+and A12 future optional. Refer to the
 [Roadmap](tools/llmtool/ROADMAP.md) for current status.
 
 On the actual Mac with company VPN, use `company-llm-delegation` for the

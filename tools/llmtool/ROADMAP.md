@@ -26,12 +26,37 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 | C1a deterministic test excerpts | **A11a diagnostics support / A11c preparation** | DONE / merged via [PR #55](https://github.com/davidcatcat/davidcattoolsproject/pull/55) (`27bee10a`); opt-in **local-only** unittest/pytest output; no JUnit XML and no provider export authorization |
 | C1b.0 final-excerpt privacy fix | **A11c data-boundary prerequisite** for routes that export C1 excerpts | OPEN [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), under [Issue #63](https://github.com/davidcatcat/davidcattoolsproject/issues/63). Must pass before any excerpt is sent to company/external LLM; **not a prerequisite for local A11b.2.2.2 design** |
 | C1b Company-only Phase 0; C1c paired Token savings | **A11c provider-route reliability, QA and cost measurement** | NOT STARTED. Only on authorized provider data paths, pre-registered quality/usage and trust boundaries; not a blanket prerequisite for designing the native local executor |
-| C2 native self-development execution | **A11b Action/Policy/Executor, then A11c integration** | A11b.2.2.1 synthetic containment DONE; **A11b.2.2.2 real Git ADD NOT STARTED / NOT AUTHORIZED** |
+| C2 native self-development execution | **A11b Action/Policy/Executor, then A11c integration** | A11b.2.2.1 synthetic containment DONE; **A11b.2.2.2 F1 disposable-fixture-only Git ADD DONE/merged via PR #84**. F2 user-repository mutation remains **NOT AUTHORIZED** |
 | C3 ai-loop cutover | **A11c real-world acceptance and transition** | NOT STARTED; require actual Mac tasks, Security/Functional QA and comparable behavior before cutover |
 
-**Next critical-path engineering work:** [A11b.2.2.2 design inputs, Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70): B5 §14.1 post-state and fail-closed semantics, P49-L1 fixture-hook isolation, S49-3/QA49-N2 raw-FD cleanup, QA49-N1 leader-exit regression, supported host/runtime F4 and required Git/sandbox/approval/audit controls. **First write a bounded design spec, independently Security-review it, and only then create a separately authorized product implementation slice.** No real `git add` is allowed by this documentation change or previous synthetic PASS. A11b.3–6 action approval/repair controls and A11c real-world verification remain required.
+**Next critical path after F1 delivery:** [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84) merged **private disposable-fixture-only Git ADD** to `main@46b17b13` after independent Security/Functional QA, exact-head CI and Mac native acceptance. F1 does **not** grant F2/public/user-repository mutation. Next define a separate **F2 real user-repository action and approval contract** (scope, authentic issuer, sandbox/same-UID/detached escape, rollback/audit), obtain independent Security review, then authorize a distinct implementation slice. A11b.3–6 and A11c real-world verification remain required.
 
 **Parallel nonblocking safety work:** [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) may proceed as a narrowly scoped, independently tested C1 excerpt-output fix. Its completion is a hard gate for the specific excerpt **egress** path, not for offline A11b design or offline tests. It does **not** sanitize arbitrary diff/source/log data; those exports need separate permission and data-boundary review. Defer full company-only Phase 0 and paid-model cost benchmarking until an applicable route is actually usable; if quality/cost evidence is poor, disable that cost route without declaring a failed executor secure or a token-saving claim proven.
+
+### F1 delivery, defect triage and A11c prerequisites
+
+The [user-impact-first defect policy](../../skills/ai-team-delivery/SKILL.md)
+is the normative source for Severity (`SEV-0..SEV-3`), Priority,
+feature-scoped Release Blocker, independent downgrades and finite repair.
+[Issue #92](https://github.com/davidcatcat/davidcattoolsproject/issues/92)
+records the accepted decision and review. Two failed fixes for a confirmed
+root-cause family trigger coordinator disposition, not attempt 3 or automatic
+waiver. Existing mandatory security, functional and native gates remain.
+
+| Work | Status / dependency |
+| --- | --- |
+| Existing A0–A11a and pre-F1 mainline functions | Usable; not blocked by a new F2 design |
+| C1 excerpt privacy [#66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) | Independent parallel issue; must pass before provider excerpt egress |
+| Interim ai-loop safety/correctness maintenance | Parallel only; temporary, separately approved executable-control releases |
+| A11b.3 approval issuer and A11b.5–6 non-mutation budgets/failure gates | Next bounded design work, independently reviewed |
+| F2 real user-repository mutation | **Design only, not implemented/authorized** until new security/action/approval gates |
+| A11b overall DONE and A11c native self-development cutover | **Not yet**; requires real execution/approval/rollback/integration evidence, independent Mac QA |
+
+The [F1 independent final review](https://github.com/davidcatcat/davidcattoolsproject/pull/84#issuecomment-6099745776)
+and [merge](https://github.com/davidcatcat/davidcattoolsproject/commit/46b17b13d2d656247ffd7243ae935996f8f0a482)
+prove only the **sealed private fixture** scope, not detached-escape E2E
+or arbitrary user-repository Git operations. R84-L1/L2 remain nonblocking
+LOW follow-ups and do not justify new repair loops.
 
 ### Temporary collaboration until native llmtool passes acceptance
 
@@ -62,7 +87,7 @@ AI-controlled workflow, **not proof that branch protection
 enforces these controls**. Keep `ai-loop` limited to essential
 correctness/security/compatibility and do not revive frozen
 `--qa-low*` routes. [PR #45](https://github.com/davidcatcat/davidcattoolsproject/pull/45)
-remains Draft, not a native llmtool milestone.
+was closed without merging the temporary controller into main; it is not a native llmtool milestone.
 
 
 **Cutover gate (A11c):** llmtool must independently pass canonical-Mac real development tasks (documentation change, bug fix, failed-review repair), bounded approvals, timeouts/child cleanup, source-bound tests, independent Security/Functional QA and safe failure/dirty-tree STOP. Confirm ordinary task → one llmtool command → Codex/Claude/test/repair → audited PR or NEEDS_DECISION, without human prompt relay, before retiring the duplicate temporary runner. Measure quality, token and latency on representative eligible routes; do not claim savings without evidence or force company routing when it fails. Retain ai-loop as an explicitly controlled fallback until parity.
@@ -82,7 +107,7 @@ current roadmap.
 | P1 — Failure Usage Preservation | **DONE and merged** via PR #39 `56799527`; safe validated usage survives parseable provider failures without changing failure semantics | Use as observability/accounting foundation; no historical benchmark recomputation |
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
-| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 DONE/merged via PR #32 `e5525f18`; A11b.2.1 DONE/merged via PR #43 `780970ab`; A11b.2.2.1 synthetic containment DONE/merged via PR #49 `eb464628`** | A11b.2.2.2 real Git ADD requires separately reviewed design, product isolation, approval and hardening; not authorized |
+| A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
 | A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
@@ -561,9 +586,8 @@ post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b is IN PROGRESS; A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32
 (`e5525f18`) as a data-only slice. A11b.2.1 is DONE/merged via PR #43 (`780970ab`);
-A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 real Git ADD remains NOT STARTED / NOT AUTHORIZED. A11c remains
-NOT STARTED. Execution remains
-future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git ADD** is DONE/merged via PR #84. A11c remains
+NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
@@ -571,7 +595,7 @@ future work; no executor is provided. A2.3 Anthropic HTTP API 仍未實作，不
 | A11a — DONE; A11a.1–7 + post-acceptance B1–B7 fixes merged through PR #26 (`2761ce10`) | 統一 diagnostics、明確 opt-in metadata persistence；無 executor/hooks engine/automatic routing/retry/fallback/escalation | DONE |
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
-| A11b — IN PROGRESS; A11b.1 DONE/merged (PR #32); A11b.2.1 DONE/merged (PR #43); A11b.2.2.1 synthetic DONE/merged; A11b.2.2.2 NOT AUTHORIZED | Data-only contract, read-only ADD preflight and synthetic containment delivered; real executor and recovery deferred | B5 design remediation pending independent targeted re-review; no implementation authorization |
+| A11b — IN PROGRESS; A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and private F1 A11b.2.2.2 PR #84 DONE/merged | Data-only contract, preflight, synthetic containment and **disposable-fixture-only F1** delivered; F2 general mutation and recovery remain future work | Separate F2 Security-reviewed contract and A11b.3–6 gates required; F2 NOT AUTHORIZED |
 | A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
@@ -745,7 +769,7 @@ company result adopted/overridden、schema/identifier validity；**省 token 但
 ### A11.0 — Documentation / Roadmap Sync
 
 - 同步現行 README / ROADMAP 的 milestone status；歷史 validation reports 保留原時間點語意，後續 checkpoint 另加註。
-- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2.1 synthetic containment DONE/merged via PR #49；A11b.2.2.2 B5 design / real Git ADD NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
+- A10 = DONE and merged；A11a = DONE and merged through PR #26；QG-S1/QG-QA1 PASS/CLOSED；A11b.1 DONE/merged via PR #32 (`e5525f18`)；P1 failure-usage preservation DONE/merged via PR #39 (`56799527`)；A11b.2.1 DONE/merged via PR #43 (`780970ab`)；A11b.2.2.1 synthetic containment DONE/merged via PR #49；A11b.2.2.2 F1 disposable-fixture Git ADD DONE/merged PR #84, F2 real-repo mutation NOT AUTHORIZED；A11c adopts route-by-task evidence；A12 = future optional frontend。
 - 不以「大致完成」取代逐 milestone 的 validation evidence。
 
 ## A11a — Observability & Diagnostics ✅ DONE
@@ -867,7 +891,8 @@ Current sub-slice status:
 
 - **A11b.2.1 — deterministic Git ADD preflight/state verifier: DONE/merged via PR #43 `780970ab`.** It is internal/read-only, constructs but never executes the future ADD argv, and has no public mutation path.
 - **A11b.2.2.1 — synthetic containment harness: DONE / squash-merged via PR #49 `eb464628`.** Independent Security re-review PASS, independent Functional QA PASS, Mac native 14/14 and SIGKILL 20+20 PASS on source-bound evidence. The versioned [B5 self-anchor amendment](../../reports/llmtool_pr49_b5_self_anchor_amendment_20261008.md) supersedes the earlier fake-process topology for this slice only. Deferred LOW: S49-3 raw-FD rejection leak and QA49-N1 natural leader-exit permanent regression; P49-L1 fixture hook isolation is required before real product integration.
-- **A11b.2.2.2 — actual Git ADD mutation: NOT STARTED / NOT AUTHORIZED.** It still requires a separately reviewed B5 §14.1 product integration design (post-state semantics, fault hook isolation, host-thread/sandbox and approval constraints) and a new task contract. No synthetic test PASS or documentation task authorizes real `git add`.
+- **A11b.2.2.2 — F1 private disposable-fixture-only Git ADD: DONE/merged via PR #84, `46b17b13`.** Independent Lorentz Security and Euclid/Gibbs Functional QA approved exact head `82ce120`; Python 3.9/3.14 CI and Mac native acceptance passed. S1/S2/M1/M2 blockers CLOSED, R84-L1/L2 LOW accepted as nonblocking. C3 detached-escape E2E remains **NOT_VERIFIED** under the accepted trusted-same-UID and pre-spawn suppression premises; this does not prove generic OS sandbox security. No public CLI, arbitrary repository Git ADD or F2 authority delivered.
+- **F2 general user-repository mutation: NOT STARTED / NOT AUTHORIZED.** Requires a new Security-reviewed action/approval/sandbox/rollback/audit and native acceptance contract. Fixture-only F1 approval cannot be reused as F2 authority.
 
 任何 executor Git command 都必須沿用 A5/Git Intelligence 已驗證的 hardening 原則，
 包括必要的 safe `-c` overrides、`GIT_CONFIG_NOSYSTEM`、pager/filter/textconv/fsmonitor/
