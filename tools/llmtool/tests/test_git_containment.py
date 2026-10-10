@@ -637,6 +637,112 @@ class LibprocBoundaryTests(unittest.TestCase):
                 self.assertNotIn(b'SYNTHETIC_SECRET', wire.canonical(data))
 
 
+class GitInventoryBoundaryTests(unittest.TestCase):
+    """Real inventory decisions; only the native proc_listpids call is replaced."""
+    def setUp(self):
+        self.own = kernel.Identity(101, 101, 101, 501, 99, 1, 1)
+        self.child = kernel.Identity(102, 101, 101, 501, 101, 1, 2)
+
+    def rows(self, child):
+        return [([101, 102], 0, None), ([], 0, None), ([102], 0, None)] if child else [
+            ([101], 0, None), ([], 0, None)]
+
+    @contextmanager
+    def native_query(self, rows):
+        script = iter(rows)
+        get_errno = ctypes.get_errno
+        saved_errno = get_errno()
+        calls = []
+        def call(kind, number, output, size):
+            values, error, returned = next(script)
+            calls.append((kind, number, size, get_errno()))
+            for i, pid in enumerate(values):
+                output[i] = pid
+            ctypes.set_errno(error)
+            return len(values)*ctypes.sizeof(ctypes.c_int) if returned is None else returned
+        query = Mock(side_effect=call)
+        with patch.object(kernel.ctypes, 'CDLL',
+                return_value=SimpleNamespace(proc_listpids=query)) as library:
+            try:
+                yield calls
+                library.assert_called_once_with('/usr/lib/libproc.dylib', use_errno=True)
+                self.assertEqual(query.argtypes, [ctypes.c_uint32, ctypes.c_uint32,
+                    ctypes.c_void_p, ctypes.c_int])
+                self.assertIs(query.restype, ctypes.c_int)
+            finally:
+                ctypes.set_errno(saved_errno)
+
+    def test_zero_count_with_errno_rejects_every_inventory_before_and_after_git(self):
+        for child in (None, self.child):
+            for position in range(len(self.rows(child))):
+                for error in (errno.EPERM, errno.ENOMEM):
+                    with self.subTest(child=child is not None, query=position, errno=error):
+                        rows = self.rows(child)
+                        rows[position] = ([], error, 0)
+                        with self.native_query(rows) as calls:
+                            with self.assertRaisesRegex(kernel.IdentityUnknown,
+                                    '^kernel identity unavailable$'):
+                                kernel.git_inventory(self.own, child)
+                            self.assertEqual(len(calls), position+1)
+
+    def test_legitimate_empty_children_and_descendants_are_accepted(self):
+        for child in (None, self.child):
+            with self.subTest(child=child is not None), self.native_query(self.rows(child)) as calls:
+                self.assertEqual(kernel.git_inventory(self.own, child),
+                                 [101, 102] if child else [101])
+                self.assertEqual([(kind, pid) for kind, pid, _, _ in calls],
+                                 [(2, 101), (6, 102), (6, 101)] if child else [(2, 101), (6, 101)])
+
+    def test_stale_errno_is_cleared_before_every_successful_query(self):
+        real_get_errno = ctypes.get_errno
+        def captured_then_stale():
+            value = real_get_errno()
+            ctypes.set_errno(errno.EIO)  # A stale value before the next query.
+            return value
+        for child in (None, self.child):
+            with self.subTest(child=child is not None), self.native_query(self.rows(child)) as calls:
+                ctypes.set_errno(errno.EIO)
+                with patch.object(kernel.ctypes, 'get_errno', side_effect=captured_then_stale) as capture:
+                    self.assertEqual(kernel.git_inventory(self.own, child),
+                                     [101, 102] if child else [101])
+                self.assertEqual(capture.call_count, len(calls))
+                self.assertTrue(all(incoming == 0 for _, _, _, incoming in calls))
+
+    def test_errno_rejects_nonempty_output_at_every_query(self):
+        for child in (None, self.child):
+            for position in range(len(self.rows(child))):
+                for error in (errno.EPERM, errno.ENOMEM):
+                    rows = self.rows(child)
+                    rows[position] = ([101] if position == 0 else [102], error, None)
+                    with self.subTest(child=child is not None, query=position, errno=error), \
+                            self.native_query(rows) as calls:
+                        with self.assertRaisesRegex(kernel.IdentityUnknown,
+                                '^kernel identity unavailable$'):
+                            kernel.git_inventory(self.own, child)
+                        self.assertEqual(len(calls), position+1)
+
+    def test_invalid_count_remains_rejected_at_every_query(self):
+        capacity = 4096*ctypes.sizeof(ctypes.c_int)
+        for child in (None, self.child):
+            for position in range(len(self.rows(child))):
+                for returned in (-1, 3, capacity, capacity+4):
+                    rows = self.rows(child)
+                    rows[position] = ([], 0, returned)
+                    with self.subTest(child=child is not None, query=position, returned=returned), \
+                            self.native_query(rows):
+                        with self.assertRaisesRegex(kernel.IdentityUnknown,
+                                '^kernel identity unavailable$'):
+                            kernel.git_inventory(self.own, child)
+
+    def test_membership_drift_remains_rejected(self):
+        for rows in ([([101, 999], 0, None), ([], 0, None), ([102], 0, None)],
+                     [([101, 102], 0, None), ([999], 0, None), ([102], 0, None)],
+                     [([101, 102], 0, None), ([], 0, None), ([102, 999], 0, None)]):
+            with self.subTest(rows=rows), self.native_query(rows):
+                with self.assertRaisesRegex(kernel.IdentityUnknown, '^kernel identity changed$'):
+                    kernel.git_inventory(self.own, self.child)
+
+
 class IdentityTests(unittest.TestCase):
     def setUp(self):
         self.bound = kernel.Identity(123, 123, 123, os.geteuid(), os.getpid(), 1, 2)

@@ -180,8 +180,10 @@ def git_inventory(supervisor, child=None):
     def pids(kind, number):
         rows = (ctypes.c_int * 4096)()
         size = ctypes.sizeof(rows)
+        ctypes.set_errno(0)
         count = query(kind, number, rows, size)
-        if count < 0 or count >= size or count % ctypes.sizeof(ctypes.c_int):
+        error = ctypes.get_errno()
+        if error or count < 0 or count >= size or count % ctypes.sizeof(ctypes.c_int):
             raise IdentityUnknown('kernel identity unavailable')
         return {pid for pid in rows[:count//ctypes.sizeof(ctypes.c_int)] if pid > 0}
     # Public libproc PROC_PGRP_ONLY=2, PROC_PPID_ONLY=6.

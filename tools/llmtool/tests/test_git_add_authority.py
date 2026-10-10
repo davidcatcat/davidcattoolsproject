@@ -1,10 +1,13 @@
 """Admission, target provenance, helper denial and retained ownership regressions."""
 import ast
+from contextlib import ExitStack
+import ctypes
 from dataclasses import replace
 import errno
 import fcntl
 import hashlib
 import json
+import linecache
 import os
 from pathlib import Path
 import shutil
@@ -213,6 +216,202 @@ class AdmissionTests(unittest.TestCase):
             with self.assertRaises(kernel.NotSupported): kernel.host_check()
         with patch.object(p.sys, 'gettrace', return_value=object()):
             with self.assertRaises(kernel.NotSupported): p.standalone('_git_add_host')
+
+
+class ProductInventoryFailureTests(unittest.TestCase):
+    """Deterministic production failure paths, without launching or signaling Git.
+
+    A trace stops at the retention loop or try header after two real loop polls.
+    It observes retained locals without adding an exit hook to product code.
+    Native containment remains a separate acceptance gate.
+    """
+    class Retained(BaseException):
+        pass
+
+    def observe_retention(self, function, poll, held):
+        def trace(frame, event, arg):
+            if frame.f_code is not function.__code__:
+                return None
+            if (event == 'line' and poll[0] >= 2
+                    and linecache.getline(frame.f_code.co_filename, frame.f_lineno).strip()
+                        in ('while True:', 'try:')):
+                # Python 3.9 does not repeat the constant-while header event.
+                # The try header is also outside its protected body.
+                held.update(frame.f_locals)
+                raise self.Retained()
+            return trace
+        return trace
+
+    def supervisor_failure(self, error, after_spawn, direct_children=False, terminal_hold=False):
+        value = request()
+        own = kernel.Identity(101, 101, 101, 501, 99, 1, 1)
+        peer = kernel.Identity(99, 99, 99, 501, value['parent']['pid'], 1, 1)
+        bound = kernel.Identity(102, 101, 101, 501, 101, 1, 2)
+        value['fixture']['root'] = '/unused-disposable-fixture'
+        messages, held, poll, queries = [], {}, [0], []
+        saved_errno, saved_trace = ctypes.get_errno(), sys.gettrace()
+        with ExitStack() as stack:
+            pipes = []
+            for _ in range(4):
+                pair = os.pipe()
+                pipes.extend(pair)
+                for fd in pair:
+                    stack.callback(os.close, fd)
+            cr, cw, sr, sw, out, outw, err, errw = pipes
+            endpoints = [[os.fstat(fd).st_dev, os.fstat(fd).st_ino] for fd in (cr, sw)]
+            start = {'domain': p.DOMAIN, 'type': 'START', 'request': value,
+                'parent': peer.data(), 'launch': own.data(), 'pipes': endpoints}
+            child = Mock(pid=bound.pid, returncode=None)
+            child.stdout.fileno.return_value = out
+            child.stderr.fileno.return_value = err
+            note = Mock()
+            note.exited.return_value = terminal_hold
+            plan = SimpleNamespace(future_add_argv=('/usr/bin/git', 'add', '--', 'target.txt'),
+                repository_root='/unused-disposable-fixture', future_environment={})
+            spawn = stack.enter_context(patch.object(supervisor.subprocess, 'Popen', return_value=child))
+            def query(kind, number, rows, size):
+                self.assertEqual(ctypes.get_errno(), 0)
+                queries.append((kind, number))
+                failure = ((not after_spawn and (kind, number) == (6, own.pid))
+                    or (after_spawn and spawn.called
+                        and len(queries) > (5 if terminal_hold else 2)
+                        and (kind, number) == (6, own.pid if direct_children else bound.pid)))
+                values = ([] if kind == 6 else [own.pid, bound.pid] if spawn.called else [own.pid])
+                if kind == 6 and number == own.pid and spawn.called:
+                    values = [bound.pid]
+                if failure:
+                    ctypes.set_errno(error)
+                    return 0
+                for i, pid in enumerate(values):
+                    rows[i] = pid
+                return len(values)*ctypes.sizeof(ctypes.c_int)
+            stack.enter_context(patch.object(kernel.ctypes, 'CDLL',
+                return_value=SimpleNamespace(proc_listpids=Mock(side_effect=query))))
+            stack.enter_context(patch.object(p, 'standalone'))
+            stack.enter_context(patch.object(p, 'verify_runtime'))
+            stack.enter_context(patch.object(p, 'verify_request', return_value=(None, plan)))
+            stack.enter_context(patch.object(p, 'fixture_check'))
+            stack.enter_context(patch.object(p, 'send', side_effect=lambda fd, message, deadline: messages.append(message)))
+            stack.enter_context(patch.object(supervisor, 'identity', side_effect=lambda pid:
+                kernel.Identity.parse(value['parent']) if pid == value['parent']['pid'] else peer))
+            stack.enter_context(patch.object(supervisor, 'host_check'))
+            stack.enter_context(patch.object(supervisor.signal, 'signal'))
+            stack.enter_context(patch.object(kernel, 'owned_git_identity', return_value=bound))
+            stack.enter_context(patch.object(supervisor, 'ExitNote', return_value=note))
+            row = SimpleNamespace(status=5, ppid=own.pid, pgid=own.pgid, uid=own.uid,
+                                  seconds=bound.seconds, micros=bound.micros, xstatus=0)
+            stack.enter_context(patch.object(kernel, '_info', return_value=row))
+            last_act = stack.enter_context(patch.object(supervisor, '_last_act'))
+            group = stack.enter_context(patch.object(kernel.os, 'killpg'))
+            signal_pid = stack.enter_context(patch.object(kernel.os, 'kill'))
+            def select(read, write, exceptional, timeout):
+                if not read and timeout == .05:
+                    poll[0] += 1
+                return [], [], []
+            stack.enter_context(patch.object(supervisor.select, 'select', side_effect=select))
+            try:
+                sys.settrace(self.observe_retention(supervisor._product_main, poll, held))
+                if after_spawn:
+                    with self.assertRaises(self.Retained):
+                        supervisor._product_main(start, own,
+                            (cr, os.O_RDONLY, endpoints[0]), (sw, os.O_WRONLY, endpoints[1]))
+                    self.assertIs(held['child'], child)
+                    self.assertIs(held['note'], note)
+                    self.assertIs(held['request'], value)
+                    self.assertIsInstance(held['original_error'], kernel.IdentityUnknown)
+                    self.assertTrue(held['spawned'])
+                    self.assertEqual(poll[0], 2)
+                    for fd in (held['control'][0], held['status'][0], out, err):
+                        os.fstat(fd)
+                    self.assertEqual(messages[-1]['code'], 'MUTATION_STATE_UNKNOWN')
+                    self.assertIsNone(messages[-1]['exit_code'])
+                    spawn.assert_called_once()
+                else:
+                    self.assertEqual(supervisor._product_main(start, own,
+                        (cr, os.O_RDONLY, endpoints[0]), (sw, os.O_WRONLY, endpoints[1])), 78)
+                    spawn.assert_not_called()
+                    self.assertEqual([message['type'] for message in messages], ['READY'])
+                    self.assertEqual(queries, [(2, own.pid), (6, own.pid)])
+                child.wait.assert_not_called()
+                child.poll.assert_not_called()
+                child.terminate.assert_not_called()
+                child.kill.assert_not_called()
+                note.close.assert_not_called()
+                last_act.assert_not_called()
+                group.assert_not_called()
+                signal_pid.assert_not_called()
+            finally:
+                sys.settrace(saved_trace)
+                ctypes.set_errno(saved_errno)
+        return value, own, messages
+
+    def test_inventory_errno_before_spawn_never_launches_git(self):
+        for error in (errno.EPERM, errno.ENOMEM):
+            with self.subTest(errno=error):
+                self.supervisor_failure(error, False)
+
+    def test_inventory_errno_after_spawn_retains_ownership_without_signaling(self):
+        for error in (errno.EPERM, errno.ENOMEM):
+            for direct in (False, True):
+                for terminal in (False, True):
+                    with self.subTest(errno=error, children=direct, terminal_hold=terminal):
+                        self.supervisor_failure(error, True, direct, terminal)
+
+    def test_inventory_unknown_reaches_host_operator_wait_without_cleanup_or_retry(self):
+        for error in (errno.EPERM, errno.ENOMEM):
+            with self.subTest(errno=error):
+                value, own, messages = self.supervisor_failure(error, True)
+                held, poll = {}, [0]
+                process, anchor, note, signals = Mock(pid=own.pid), Mock(), Mock(), Mock()
+                signals.first = None
+                note.exited.return_value = False
+                reader = Mock()
+                reader.read.side_effect = messages
+                def select(read, write, exceptional, timeout):
+                    if not read and timeout == .05:
+                        poll[0] += 1
+                    return [], [], []
+                saved_trace = sys.gettrace()
+                with patch.object(host, 'Signals', return_value=signals), \
+                        patch.object(host.subprocess, 'Popen', return_value=process) as spawn, \
+                        patch.object(kernel, 'identity', side_effect=lambda pid:
+                            kernel.Identity.parse(value['parent']) if pid == value['parent']['pid'] else own), \
+                        patch.object(kernel, 'Anchor', return_value=anchor), \
+                        patch.object(kernel, 'ExitNote', return_value=note), \
+                        patch.object(p, 'Reader', return_value=reader), patch.object(p, 'send'), \
+                        patch.object(host.select, 'select', side_effect=select), \
+                        patch.object(host, '_emit') as emit, \
+                        patch.object(p, 'post_state') as post_state, \
+                        patch.object(kernel.os, 'killpg') as group, patch.object(kernel.os, 'kill') as signal_pid:
+                    try:
+                        sys.settrace(self.observe_retention(host._unknown, poll, held))
+                        with self.assertRaises(self.Retained):
+                            host._execute(value, None, None)
+                        incident = emit.call_args.args[0]
+                        self.assertEqual(incident['outcome'], 'STATE_UNKNOWN')
+                        self.assertEqual(incident['user_action'], 'USER_ACTION_REQUIRED')
+                        self.assertFalse(incident['containment_confirmed'])
+                        self.assertEqual(reader.read.call_count, len(messages))
+                        self.assertEqual(note.exited.call_count, len(messages)-1)
+                        self.assertIs(held['ownership']['process'], process)
+                        self.assertIs(held['ownership']['anchor'], anchor)
+                        self.assertIs(held['ownership']['note'], note)
+                        for fd in held['ownership']['fds']:
+                            os.fstat(fd)
+                        self.assertEqual(poll[0], 2)
+                        spawn.assert_called_once()
+                        anchor.kill_group.assert_not_called()
+                        anchor.reap.assert_not_called()
+                        process.wait.assert_not_called()
+                        note.close.assert_not_called()
+                        signals.restore.assert_not_called()
+                        post_state.assert_not_called()
+                        group.assert_not_called()
+                        signal_pid.assert_not_called()
+                    finally:
+                        sys.settrace(saved_trace)
+                        for fd in held.get('ownership', {}).get('fds', []):
+                            os.close(fd)  # Anonymous pipes owned by this unit test.
 
 
 class RetentionTests(unittest.TestCase):
