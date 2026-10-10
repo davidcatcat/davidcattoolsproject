@@ -5,10 +5,8 @@
 **A11b and A11c are the only active native delivery milestones.**
 The C0–C3 names in older plans are historical outcome/measurement
 labels mapped **once** in [the authoritative ROADMAP](ROADMAP.md),
-not separate development backlogs. **A11b.2.2.2 private disposable-fixture-only F1 Git ADD was independently accepted and merged as PR #84 (`46b17b13`).** Next define the separate **F2 real-repository mutation** contract and A11b.3 approval issuer; F2 execution remains NOT AUTHORIZED ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70));
-separately retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
-for C1 excerpt egress privacy. Do not hold offline A11b design
-until full company Phase 0 / paid-token benchmarking completes.
+not separate development backlogs. **A11b.2.2.2 private disposable-fixture-only F1 Git ADD** was independently accepted and merged as PR #84 (`46b17b13`). The separate [F2 real-repository mutation and A11b.3 approval design](https://github.com/davidcatcat/davidcattoolsproject/issues/97) is next; **F2 execution remains NOT AUTHORIZED**. The historical F1 records remain in [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70).
+Retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) separately for C1 excerpt egress privacy. Offline A11b design does not wait for full company Phase 0 / paid-token benchmarking.
 Only F1's private disposable-fixture Git ADD is implemented and reviewed. **Real user-repository/public Git ADD (F2) remains NOT AUTHORIZED** pending its own approved contract, Security/QA and Mac gates.
 
 **Until native llmtool can coordinate Codex/Claude, use the
