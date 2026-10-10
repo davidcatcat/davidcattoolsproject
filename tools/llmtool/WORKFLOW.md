@@ -5,13 +5,11 @@
 **A11b and A11c are the only active native delivery milestones.**
 The C0–C3 names in older plans are historical outcome/measurement
 labels mapped **once** in [the authoritative ROADMAP](ROADMAP.md),
-not separate development backlogs. Use A11b.2.2.2 for the next
-**design-only** executor/safe-Git integration task ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70));
+not separate development backlogs. **A11b.2.2.2 private disposable-fixture-only F1 Git ADD was independently accepted and merged as PR #84 (`46b17b13`).** Next define the separate **F2 real-repository mutation** contract and A11b.3 approval issuer; F2 execution remains NOT AUTHORIZED ([Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70));
 separately retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66)
 for C1 excerpt egress privacy. Do not hold offline A11b design
 until full company Phase 0 / paid-token benchmarking completes.
-Real Git ADD remains NOT AUTHORIZED until a separately approved
-design, implementation contract, Security/QA and Mac gates.
+Only F1's private disposable-fixture Git ADD is implemented and reviewed. **Real user-repository/public Git ADD (F2) remains NOT AUTHORIZED** pending its own approved contract, Security/QA and Mac gates.
 
 **Until native llmtool can coordinate Codex/Claude, use the
 standard Git-provided temporary `ai-loop` launcher and controller.**
@@ -76,6 +74,28 @@ must not invent extra product blockers/one-off tools. Required failing
 security, QA or Mac/runtime gates remain blocking regardless of the
 owner's general merge delegation. This document describes workflow,
 not an installed autonomous Mac executor or background service.
+
+### Bug report → user-impact triage → bounded release
+
+Apply the [canonical ai-team-delivery defect policy](../../skills/ai-team-delivery/SKILL.md#user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92),
+adopted in [Issue #92](https://github.com/davidcatcat/davidcattoolsproject/issues/92).
+For every report capture the actual user journey, reproducible evidence
+and SHA, Severity, Priority, **affected release blocker** and reviewer
+disposition. A Medium false success or reachable fail-open still blocks
+its own release. Another feature already isolated in main may continue.
+Unclassified product/test failures keep only their affected required gate
+on HOLD until independently distinguished. Test replacements must verify
+the same behavior/invariants on the same SHA and required platform.
+
+First reuse targeted user smoke/regressions; run required full Mac/CI,
+functional and security gates at release time. A confirmed root-cause
+family gets at most two failed repair attempts before coordinator
+reassessment; overall review/token/time escalation does not waive a
+failing mandatory gate. Place independent QA in the feature PR or
+tracking Issue instead of opening a new report-only PR for every round.
+Only the requirements owner's three P0 cases in the Skill require
+direct owner yes/no escalation; provider egress and spending still
+require distinct pre-existing authorization.
 
 ## Execution environment
 
