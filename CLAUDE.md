@@ -74,6 +74,10 @@ new permanent ai-loop automation.
 - Do not duplicate the same rule across multiple skills when one skill can be invoked from another.
 - Keep evidence types separate: ordinary review, bug hunt, security review, QA, runtime validation, and Git publication are different workflows.
 
+## CI incident knowledge base
+
+For GitHub Actions failures, unexpected usage or CI-cost decisions, read [CI Knowledge Base](docs/ci/README.md) and the [debug-ci Skill](skills/debug-ci/SKILL.md) before repeating an investigation. After a verified reusable fix, update the existing knowledge entry with SHA-bound evidence; do not append report-only commits to a tested release candidate.
+
 ## Engineering behavior
 
 - Inspect before modifying unfamiliar code.

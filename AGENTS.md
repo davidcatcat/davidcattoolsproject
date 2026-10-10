@@ -147,6 +147,10 @@ from that repository and name only files belonging to the task.
   start the next milestone or merge main.
 - Provider != Profile != Role != Agent != Skill. Capability/role/model identity never grants execution authority.
 
+## CI incident knowledge base
+
+Before diagnosing CI failures or cost regressions, consult [CI Knowledge Base](docs/ci/README.md) and follow [debug-ci](skills/debug-ci/SKILL.md). Add a concise reusable, evidence-linked lesson after a confirmed fix; do not create report-only commits that change an already reviewed release HEAD.
+
 ## Repository workflows
 
 `AGENTS.md` is Codex-specific guidance; `CLAUDE.md` is Claude-specific guidance.

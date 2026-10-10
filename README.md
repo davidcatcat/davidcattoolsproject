@@ -2,6 +2,11 @@
 
 Personal AI-assisted engineering tools and reusable Agent Skills.
 
+## CI knowledge base
+
+- [CI Knowledge Base](docs/ci/README.md) — 維運問題、GitHub Actions 用量、成本分析及驗證過的修復經驗。
+- 處理 CI 事件請先查本知識庫；重複可用的結論依 [debug-ci Skill](skills/debug-ci/SKILL.md) 整理。原 Issue、PR、Run 與確切 SHA 保留為可追溯證據。
+
 ## Skills
 
 This repository currently provides:
