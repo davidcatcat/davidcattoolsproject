@@ -121,6 +121,7 @@ class FailureMatrixTests(unittest.TestCase):
         self.assertNotIn('type=fallback', err.getvalue())
         self.assertNotIn(b'"type":"retry"', persisted)
         self.assertNotIn(b'"type":"fallback"', persisted)
+        return err.getvalue()
 
     def test_http_status_failures_persisted_and_secondary_store_faults(self):
         for kind in ('openai', 'openai-compatible'):
@@ -202,6 +203,33 @@ class FailureMatrixTests(unittest.TestCase):
                                     cause={'process_status': 7} if failure == 'failure' else None, setup=setup,
                                     timeout_seconds=0.2 if failure == 'timeout' else 2)
                     self.assertEqual(spawns[0].call_count, 0 if failure == 'missing' else 1)
+
+    def test_cli_spawn_permission_error_redacts_sensitive_data(self):
+        # A11b.6: the CLI exists but cannot be started (EACCES). The OS error
+        # text carries a fake password/token; no real provider is launched.
+        executable = self.base / 'fake-provider'
+        executable.write_text('#!/bin/sh\nexit 99\n')
+        executable.chmod(0o700)
+        password = 'PRIVATE_A11B6_PASSWORD_hunter2'
+        detail = 'PRIVATE_A11B6_SPAWN_DETAIL'
+        for kind in ('claude-cli', 'codex-cli'):
+            module = 'llmtool.providers.' + kind.replace('-', '_')
+            for mode in ('', 'verbose', 'debug'):
+                spawns = []
+                def setup(stack):
+                    stack.enter_context(patch(module + '.shutil.which', return_value=str(executable)))
+                    spawns.append(stack.enter_context(patch(module + '.subprocess.Popen', side_effect=PermissionError(
+                        13, detail + ' password=' + password + ' token=' + SECRET, str(executable)))))
+                with self.subTest(kind=kind, mode=mode or 'normal'):
+                    serial = self.serial + 1
+                    stderr = self.invoke(kind, 'PROVIDER_RUNTIME_ERROR', mode=mode, setup=setup,
+                                         timeout_seconds=2)
+                    self.assertEqual(spawns[0].call_count, 1)
+                    state = self.base / ('state-' + str(serial))
+                    persisted = b''.join(path.read_bytes() for path in state.rglob('*') if path.is_file())
+                    for marker in (password, detail, SECRET, str(executable), 'PermissionError', 'Errno'):
+                        self.assertNotIn(marker, stderr)
+                        self.assertNotIn(marker.encode(), persisted)
 
     def test_concurrent_same_run_writes_serialize_and_invalid_sequence_fails_closed(self):
         for invalid in (False, True):
