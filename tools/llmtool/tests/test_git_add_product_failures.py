@@ -539,6 +539,45 @@ def wait_gone(item, seconds):
     return False
 
 
+def pipe_endpoint(pid, fd):
+    """(own handle, peer handle) of a pipe FD via libproc PROC_PIDFDPIPEINFO.
+
+    struct pipe_fdinfo = proc_fileinfo (24) + pipe_info: vinfo_stat (136),
+    pipe_handle, pipe_peerhandle. A peer handle of 0 means no process anywhere
+    still holds the other end, so a write to this end must fail with EPIPE.
+    """
+    buf = ctypes.create_string_buffer(184)
+    size = _libproc.proc_pidfdinfo(pid, fd, 6, buf, ctypes.sizeof(buf))
+    if size != ctypes.sizeof(buf):
+        raise kernel.IdentityUnknown('harness pipe inventory unavailable')
+    raw = buf.raw
+    return (int.from_bytes(raw[160:168], sys.byteorder),
+            int.from_bytes(raw[168:176], sys.byteorder))
+
+
+def prove_structural_retention(host, supervisor, write_handle, seconds):
+    """Retention proof when no status reader can receive the incident frame.
+
+    Normal Host completion reaps its exited supervisor and exits within its
+    own deadlines; only the _unknown path keeps that bound supervisor zombie
+    unreaped while staying alive. Holding this for longer than every product
+    deadline (run budget, 2 s handshake, 5 s cleanup) plus margin is the
+    evidence; elapsed liveness alone never is. Grants teardown authority only.
+    """
+    started = time.monotonic()
+    while time.monotonic() - started < seconds:
+        row = observed_start(supervisor.pid)
+        if (not live(host) or not supervisor.note.exited() or row.status != SZOMB
+                or row.ppid != host.pid or supervisor.pid not in children(host.pid)
+                or any(getattr(row, key) != getattr(supervisor.bound, key)
+                       for key in ('pid', 'uid', 'seconds', 'micros'))):
+            raise AssertionError('Host did not retain its unreaped supervisor anchor')
+        if pipe_endpoint(host.pid, 1) != (write_handle, 0):
+            raise AssertionError('Host status pipe changed or regained a reader')
+        time.sleep(.05)
+    host.retained = True
+
+
 @unittest.skipUnless(sys.platform == 'darwin' and os.geteuid() != 0, 'native Mac required')
 class ProductFailureTests(unittest.TestCase):
     def setUp(self):
@@ -691,6 +730,42 @@ class ProductFailureTests(unittest.TestCase):
         self.assertIsNotNone(wait_absent(git, 5), 'git survived launcher loss')
         self.assertIsNotNone(wait_absent(supervisor, 5), 'supervisor survived launcher loss')
         self.observe_retained(driver, host)
+
+    def test_last_status_reader_closed_after_ready_epipe_retains_unknown(self):
+        """C2: the Host's incident report hits a real EPIPE and changes nothing."""
+        driver, host, supervisor, git = self.run_frozen()
+        write_handle, peer = pipe_endpoint(host.pid, 1)
+        own_handle, own_peer = pipe_endpoint(os.getpid(), driver.host_status)
+        # The duplicate is exactly the Host status pipe's read end.
+        self.assertEqual((peer, own_peer), (own_handle, write_handle))
+        os.close(driver.host_status)
+        driver.host_status = None
+        # The live launcher still reads; nothing has been reported yet.
+        self.assertEqual(pipe_endpoint(host.pid, 1), (write_handle, own_handle))
+        self.assertTrue(driver.launch.send(signal.SIGKILL))
+        driver.driver.wait(timeout=5)
+        # Kernel closes the launcher's descriptors before its exit is
+        # observable; the Host reports only after observing that loss. So the
+        # report is written with no reader left anywhere: a genuine EPIPE.
+        self.assertEqual(pipe_endpoint(host.pid, 1), (write_handle, 0),
+                         'a Host status reader still exists')
+        self.assertIsNotNone(wait_absent(supervisor, 10), 'supervisor survived launcher loss')
+        self.assertIsNotNone(wait_absent(git, 10), 'git survived launcher loss')
+        prove_structural_retention(host, supervisor, write_handle,
+                                   driver.timeout + 2 + 5 + 1.0)
+        self.assertNotIn('RESULT', driver.lines)
+        self.assertNotIn('FRAME', driver.lines)
+
+    def test_structural_retention_rejects_reaped_or_released_anchor(self):
+        driver, host, supervisor, git = self.run_frozen()
+        write_handle, _ = pipe_endpoint(host.pid, 1)
+        # Before any incident the supervisor is alive, not an unreaped zombie.
+        with self.assertRaisesRegex(AssertionError, 'unreaped supervisor anchor'):
+            prove_structural_retention(host, supervisor, write_handle, .2)
+        self.assertFalse(host.retained)
+        self.assertTrue(host.send(signal.SIGTERM))
+        self.assert_retained_unknown(self.line(driver, 'FRAME', 10))
+        host.retained = True  # Frame-proven; restores normal teardown authority.
 
     def test_supervisor_death_after_ready_retains_unknown_and_git(self):
         driver, host, supervisor, git = self.run_frozen()
