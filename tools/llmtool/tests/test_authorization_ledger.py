@@ -6,6 +6,8 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 import unittest
@@ -576,6 +578,119 @@ class StoreSecurityTests(LedgerCase):
             holder.execute('ROLLBACK')
             holder.close()
         self.assertEqual(self.count_receipts(), 0)
+
+
+class AdmissionAfterLockTests(LedgerCase):
+    """Codex PR #103 D1-R2-01/02: admit time and store only once the lock is held."""
+
+    def contended_redeem(self, receipt, release_at=None, busy=5.0):
+        # Real SQLite writer contention: another connection holds the write
+        # lock while the redeem waits in BEGIN IMMEDIATE.
+        holder = sqlite3.connect(self.path, isolation_level=None)
+        holder.execute('BEGIN IMMEDIATE')
+        started, outcome, sink = threading.Event(), {}, FakeSink()
+
+        def worker():
+            ledger = l.ReceiptLedger.open(self.path, clock=self.clock)
+            try:
+                started.set()
+                outcome['result'] = ledger.redeem(receipt, redeem_run_id=REDEEM_RUN,
+                                                  observed=make_observed(), sink=sink)
+            except l.LedgerError as error:
+                outcome['error'] = error.code
+            finally:
+                ledger.close()
+        try:
+            with patch.object(l, 'BUSY_TIMEOUT_SECONDS', busy):
+                thread = threading.Thread(target=worker)
+                thread.start()
+                self.assertTrue(started.wait(10))
+                time.sleep(0.3)  # the worker is now blocked in BEGIN IMMEDIATE
+                if release_at is not None:
+                    self.clock.now = release_at
+                    holder.execute('ROLLBACK')
+                thread.join(15)
+                self.assertFalse(thread.is_alive())
+        finally:
+            if holder.in_transaction:
+                holder.execute('ROLLBACK')
+            holder.close()
+        return outcome, sink
+
+    def test_lock_released_after_expiry_is_expired_without_effect(self):
+        receipt = self.issue(ttl=1)  # issued 1000, expires 1001
+        outcome, sink = self.contended_redeem(receipt, release_at=1002)
+        self.assertIs(outcome['result'].code, l.RedeemCode.EXPIRED)
+        self.assertEqual(sink.calls, [])
+        self.assertEqual(self.ledger.status(receipt.nonce), 'EXPIRED')
+
+    def test_lock_released_before_expiry_redeems_once(self):
+        receipt = self.issue(ttl=2)  # issued 1000, expires 1002
+        outcome, sink = self.contended_redeem(receipt, release_at=1001)
+        self.assertIs(outcome['result'].code, l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(sink.calls, [receipt.binding])
+        self.assertEqual(self.ledger.status(receipt.nonce), 'EFFECT_DONE')
+
+    def test_lock_never_released_times_out_closed(self):
+        receipt = self.issue(ttl=60)
+        outcome, sink = self.contended_redeem(receipt, busy=0.2)
+        self.assertIs(outcome['error'], l.LedgerCode.LEDGER_LOCKED)
+        self.assertEqual(sink.calls, [])
+        self.assertEqual(self.ledger.status(receipt.nonce), 'ISSUED')
+
+    def make_inner(self):
+        inner = self.dir / 'inner'
+        inner.mkdir(mode=0o700)
+        path = inner / 'receipts.sqlite3'
+        ledger = l.ReceiptLedger.create(path, clock=self.clock)
+        self.addCleanup(ledger.close)
+        return inner, path, ledger
+
+    def assertAllRefused(self, ledger, receipt, code=l.LedgerCode.LEDGER_INSECURE):
+        sink = FakeSink()
+        self.assertLedgerError(code, self.issue, ledger)
+        self.assertLedgerError(code, self.redeem, receipt, ledger, sink)
+        self.assertLedgerError(code, ledger.recover)
+        self.assertLedgerError(code, ledger.status, receipt.nonce)
+        self.assertEqual(sink.calls, [])
+
+    def test_open_ledger_refuses_after_directory_becomes_shared(self):
+        inner, path, ledger = self.make_inner()
+        receipt = self.issue(ledger)
+        for mode in (0o777, 0o770, 0o702):
+            with self.subTest(mode=oct(mode)):
+                os.chmod(inner, mode)
+                try:
+                    self.assertAllRefused(ledger, receipt)
+                finally:
+                    os.chmod(inner, 0o700)
+        result, sink = self.redeem(receipt, ledger)
+        self.assertIs(result.code, l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(len(sink.calls), 1)
+
+    def test_open_ledger_refuses_replaced_or_symlinked_directory(self):
+        inner, path, ledger = self.make_inner()
+        receipt = self.issue(ledger)
+        moved = self.dir / 'inner-moved'
+        os.rename(inner, moved)
+        # A different directory now holds the very same database inode.
+        inner.mkdir(mode=0o700)
+        os.rename(moved / 'receipts.sqlite3', path)
+        self.assertEqual(os.lstat(path).st_nlink, 1)
+        self.assertAllRefused(ledger, receipt)
+        # The original directory back behind a symlink is refused as well.
+        os.rename(path, moved / 'receipts.sqlite3')
+        inner.rmdir()
+        inner.symlink_to(moved, target_is_directory=True)
+        self.assertAllRefused(ledger, receipt)
+        self.assertEqual(self.count_receipts_at(moved / 'receipts.sqlite3'), ['ISSUED'])
+
+    def count_receipts_at(self, path):
+        db = sqlite3.connect(path)
+        try:
+            return [row[0] for row in db.execute('SELECT status FROM receipts')]
+        finally:
+            db.close()
 
 
 if __name__ == '__main__':

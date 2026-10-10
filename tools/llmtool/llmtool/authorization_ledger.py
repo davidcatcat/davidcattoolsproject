@@ -10,8 +10,10 @@ and is never reported as success. This is at-most-once, not exactly-once.
 
 The store must be an existing private file: owned by this euid, mode 0600,
 regular, single-link, opened without following symlinks, in a directory not
-writable by group/other, with its device/inode rechecked before every
-transaction. Corrupt, locked, missing or swapped stores and host clock
+writable by group/other. The file's device/inode and the directory's type,
+owner, mode and device/inode are rechecked before and after the write lock is
+taken for every transaction, and the host clock is read only once the lock is
+held. Corrupt, locked, missing or swapped stores and host clock
 rollback below the durable high-water mark fail closed. fullfsync is
 requested for macOS, but power-loss durability is NOT_VERIFIED. None of this
 protects against malicious code running as the same user: the path checks,
@@ -145,6 +147,7 @@ def _secure_directory(path):
     if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or
             stat.S_IMODE(st.st_mode) & 0o022):
         _fail(LedgerCode.LEDGER_INSECURE)
+    return st.st_dev, st.st_ino
 
 
 def _secure_file(st):
@@ -209,7 +212,7 @@ class ReceiptLedger:
 
     def __init__(self, path, clock):
         self._path, self._clock, self._db, self._fd = path, clock, None, None
-        _secure_directory(os.path.dirname(path))
+        self._directory = _secure_directory(os.path.dirname(path))
         try:
             self._fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0))
         except FileNotFoundError:
@@ -270,6 +273,10 @@ class ReceiptLedger:
             _fail(LedgerCode.LEDGER_CORRUPT)
 
     def _check_identity(self):
+        # The containing directory is rechecked too: an open ledger whose
+        # directory became shared, a symlink or a different directory is refused.
+        if _secure_directory(os.path.dirname(self._path)) != self._directory:
+            _fail(LedgerCode.LEDGER_INSECURE)
         try:
             st = os.lstat(self._path)
         except OSError:
@@ -305,21 +312,20 @@ class ReceiptLedger:
 
     @contextmanager
     def _transaction(self):
-        """BEGIN IMMEDIATE; yields the host time after the durable clock check."""
+        """BEGIN IMMEDIATE; yields the host time after the durable clock check.
+
+        Store admission and the host clock are both checked only after the
+        write lock is held: BEGIN can wait up to the busy timeout, and a time
+        sampled before that wait could authorize an already expired receipt.
+        """
         if self._db is None:
             _fail(LedgerCode.LEDGER_UNAVAILABLE)
         self._check_identity()
         try:
-            now = self._clock()
-        except Exception:
-            _fail(LedgerCode.CLOCK_INVALID)
-        if type(now) is float and math.isfinite(now) and now >= 0:
-            now = int(now)
-        if type(now) is not int or not 0 <= now <= MAX_EPOCH:
-            _fail(LedgerCode.CLOCK_INVALID)
-        try:
             # Inside the try so an interrupt right after BEGIN still rolls back.
             self._db.execute('BEGIN IMMEDIATE')
+            self._check_identity()
+            now = self._now()
             high_water = self._db.execute('SELECT high_water FROM clock WHERE id = 1').fetchone()
             if high_water is None or type(high_water[0]) is not int:
                 _fail(LedgerCode.LEDGER_CORRUPT)
@@ -336,6 +342,17 @@ class ReceiptLedger:
             if isinstance(error, sqlite3.Error):
                 _fail(_sqlite_failure(error))
             raise
+
+    def _now(self):
+        try:
+            now = self._clock()
+        except Exception:
+            _fail(LedgerCode.CLOCK_INVALID)
+        if type(now) is float and math.isfinite(now) and now >= 0:
+            now = int(now)
+        if type(now) is not int or not 0 <= now <= MAX_EPOCH:
+            _fail(LedgerCode.CLOCK_INVALID)
+        return now
 
     def issue(self, decision, *, ttl_seconds):
         """Record one receipt for an ALLOW decision made by decide()."""

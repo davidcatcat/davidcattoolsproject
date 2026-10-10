@@ -2346,7 +2346,9 @@ stays `False`.
     decision.
 - **Fail-closed store checks.** The store must be an existing regular 0600 file owned
   by the euid, with a single link, opened with `O_NOFOLLOW`. Its directory must not be
-  writable by group or other, and its device/inode is rechecked on every transaction.
+  writable by group or other. The file and its directory (type, owner, mode,
+  device/inode) are rechecked on every transaction, after the write lock is held, and the
+  host clock is read only once that lock is held.
   These all fail closed:
   - a missing, symlinked, swapped, corrupt or locked store;
   - a host clock below the durable high-water mark.
