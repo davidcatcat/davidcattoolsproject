@@ -136,6 +136,39 @@ class FailureMatrixTests(unittest.TestCase):
                     with self.subTest(kind=kind, status=status, fault=fault):
                         self.invoke(kind, code, cause={'http_status': status}, store_fault=fault, setup=setup)
 
+    def test_http_client_and_gateway_statuses_redact_retry_after_without_retry(self):
+        # A11b.6 row 2: statuses outside the 401/403/429/500/503 matrix above.
+        retry_after = 'PRIVATE_A11B6_RETRY_AFTER_' + SECRET
+        injected = 'X-A11B6-Injected'
+        for kind in ('openai', 'openai-compatible'):
+            prefix = 'OpenAI API HTTP ' if kind == 'openai' else 'gateway HTTP '
+            for status in (400, 404, 408, 502, 504):
+                for mode in ('', 'verbose', 'debug'):
+                    body = io.BytesIO((RAW + SECRET + retry_after).encode())
+                    def setup(stack, status=status, body=body):
+                        headers = {'Retry-After': retry_after, 'Set-Cookie': SECRET,
+                                   injected: RAW}
+                        opener = Mock()
+                        opener.open.side_effect = HTTPError(
+                            'https://private.invalid/v1?key=' + SECRET, status,
+                            RAW + SECRET + '\r\n' + injected + ': ' + retry_after, headers, body)
+                        stack.enter_context(patch('urllib.request.build_opener', return_value=opener))
+                        self.addCleanup(opener.open.assert_called_once)
+                    with self.subTest(kind=kind, status=status, mode=mode):
+                        stderr = self.invoke(kind, 'PROVIDER_HTTP_ERROR', mode=mode,
+                                             cause={'http_status': status}, setup=setup)
+                        # Reached the provider's HTTPError handler, which closes the body.
+                        self.assertEqual(stderr.splitlines()[0], 'llmtool: ' + prefix + str(status) +
+                                         '; response body omitted')
+                        self.assertTrue(body.closed)
+                        persisted = b''.join(path.read_bytes() for path in self.base.glob('state-*/**/*')
+                                             if path.is_file())
+                        self.assertTrue(persisted)
+                        for marker in (retry_after, 'Retry-After', 'Set-Cookie', injected,
+                                       'private.invalid', 'key='):
+                            self.assertNotIn(marker, stderr)
+                            self.assertNotIn(marker.encode(), persisted)
+
     def test_http_transport_failures_all_output_modes_without_retry(self):
         for kind in ('openai', 'openai-compatible'):
             for failure, code in ((socket.timeout(RAW), 'PROVIDER_TIMEOUT'),
