@@ -375,6 +375,22 @@ class ParserAndRunnerTests(unittest.TestCase):
         self.assertNotIn('PRIVATE', str(error.exception))
         self.assertIn('diagnostics exceed', str(error.exception))
 
+    def test_git_spawn_permission_error_sanitized(self):
+        reason = 'PRIVATE_A11B6_REASON secret=FAKE_TEST_TOKEN'
+        secret_path = '/synthetic/secret-path'
+        denied = PermissionError(errno.EACCES, reason, secret_path)
+        with patch('llmtool.git_intel.subprocess.Popen', side_effect=denied) as spawn:
+            with self.assertRaises(LLMToolError) as error:
+                gi._GitRunner(Path.cwd()).run(gi.ROOT)
+        spawn.assert_called_once()
+        message = str(error.exception)
+        self.assertEqual(message, 'Git could not be started; details omitted')
+        for private in (reason, 'FAKE_TEST_TOKEN', secret_path, str(denied),
+                        'PermissionError', 'Traceback', '[Errno 13]'):
+            self.assertNotIn(private, message)
+        self.assertTrue(error.exception.__suppress_context__)
+        self.assertIsNone(error.exception.__cause__)
+
     def test_missing_git_sanitized(self):
         with patch('llmtool.git_intel.subprocess.Popen', side_effect=FileNotFoundError('PRIVATE')):
             with self.assertRaises(LLMToolError) as error:
