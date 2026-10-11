@@ -2298,6 +2298,71 @@ Cloud/offline tests and packaging are required for this slice; no Mac/live provi
 VPN/auth/session or real execution acceptance is required or claimed.
 See the [A11b.1 validation report](../../reports/llmtool_a11b1_action_approval_contract_validation_20261005.md).
 
+## A11b.3 D1 — Offline policy decision and one-use receipt ledger (synthetic only)
+
+D1 (Issue #97) adds `llmtool.authorization_policy` and `llmtool.authorization_ledger`.
+They decide and record **fake** grants only. There is no CLI, model-JSON or parser route
+into them, no production issuer and no real effect. `ApprovalValidation.authorized`
+stays `False`.
+
+- **Decision.** `decide()` returns `DENY`, `WAITING_APPROVAL` or
+  `ALLOW_WITH_TRUSTED_RECEIPT`, shown as `DENIED`, `NEEDS_APPROVAL` or
+  `FAKE_POLICY_ALLOWED`, never `APPLIED`. It only supports a synthetic `FILE_CREATE`.
+- **What it takes to ALLOW.** All of the following must hold:
+  - a host-injected `HostIssuer` of class `POLICY_CONTRACT` vouches for the exact
+    immutable `PolicyContract` digest;
+  - the action is inside that contract;
+  - the host-observed state matches: repository, HEAD, target absent.
+
+  A model-written contract, `source=USER`, `trusted=true` or a receipt id grants
+  nothing. Routine contracted actions do not ask the owner.
+- **Owner P0 and separate authority.** Owner P0 is exactly the three classes in
+  `skills/ai-team-delivery`: product mismatch, admin/root, macOS system. These return
+  `WAITING_APPROVAL`, including in non-TTY/background use. New cost and new data export
+  are separate authorizations: they `DENY` with `SEPARATE_AUTHORIZATION_REQUIRED` and
+  are never implied. An out-of-contract action is `DENY` (`OUT_OF_CONTRACT`), not P0.
+  Only an action inside a host-vouched contract can reach the P0 wait; an untrusted,
+  unvouched or out-of-contract request is denied, not escalated to the owner.
+- **Receipt binding.** A receipt is bound to:
+  - task, run and contract;
+  - the action digest, kind, paths and content;
+  - repository identity, HEAD, index and worktree;
+  - policy id, version and digest;
+  - issuer class and capability;
+  - the redeeming run;
+  - the effect kind;
+  - the parent directory identity, target absence, expiry and nonce.
+
+  Redemption rechecks a fresh host-observed state.
+- **The ledger.** It is SQLite with a rollback journal, `synchronous=FULL` and
+  `fullfsync=ON`. A receipt moves `ISSUED → CONSUMED → EFFECT_DONE | EFFECT_UNKNOWN`
+  (or `DENIED` / `EXPIRED`). Consumption is a conditional update in `BEGIN IMMEDIATE`,
+  committed before the sink runs.
+- **Crash, replay and race behavior.** This is at-most-once, not exactly-once:
+  - A crash before or after the fake effect leaves `CONSUMED`. `recover()` turns that
+    into `EFFECT_UNKNOWN`, which needs a fresh decision.
+  - Replay, restart and a second racing process are refused.
+  - One decision binding yields at most one receipt in any status; a new run needs a new
+    decision.
+- **Fail-closed store checks.** The store must be an existing regular 0600 file owned
+  by the euid, with a single link, opened with `O_NOFOLLOW`. Its directory must not be
+  writable by group or other. The file and its directory (type, owner, mode,
+  device/inode) are rechecked on every transaction, after the write lock is held, and the
+  host clock is read only once that lock is held.
+  These all fail closed:
+  - a missing, symlinked, swapped, corrupt or locked store;
+  - a host clock below the durable high-water mark.
+- **Limits.**
+  - Power-loss durability on macOS is NOT_VERIFIED.
+  - APFS mode, symlink and lock semantics need native Mac evidence; Linux CI does not
+    prove them.
+  - Nothing here protects against malicious code running as the same user.
+  - `redeem()` does not re-check policy revocation: a receipt is trusted for at most its TTL
+    (≤ 1 hour).
+  - The host must place the store outside every repository root and worktree; D1 does not
+    enforce this.
+  - Real repository effects (F2) remain NOT AUTHORIZED.
+
 ## A11b.5 V1 — Offline task verification and run budgets (data only)
 
 This is a first, partial A11b.5 slice. It adds two pure modules with no CLI and no
