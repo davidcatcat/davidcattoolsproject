@@ -2396,3 +2396,36 @@ recovery policy, real evidence producers and runtime enforcement still need an e
   - `detect_repeated_failure()` matches an exact `(action digest, failure code)` pair.
   - A provider that never reports usage blocks a second call while a token budget
     is set (`USAGE_UNKNOWN`). This is the chosen fail-closed default.
+
+## A11b.4 P1 — Offline Patch Safety Preflight (no effects)
+
+`llmtool.patch_safety.preflight()` checks a single existing typed `Action` for
+`FILE_CREATE`, `FILE_WRITE` or `FILE_DELETE`. The caller separately supplies the
+action digest, task binding, authorized literal scope, expected `RepositoryState`
+and current state. These are structural pins, **not authenticated observations**.
+The expected files must exactly match the action's before-state, and current state
+must equal the full expectation, including repository/root/HEAD and any index pin.
+File Actions do not bind an index themselves; an omitted index remains NOT_VERIFIED.
+
+CREATE needs matching new bytes and an absent target. WRITE/DELETE need matching
+preimage and recovery-image bytes; WRITE also needs matching new bytes. Images are
+immutable bytes, at most 1 MiB each, including empty bytes. Only modes 0600/0644
+are supported in this conservative P1 subset. Existing typed path/type/link
+validators are reused; scope escapes, case/Unicode aliases and file/ancestor
+collisions are refused. There is no unified-diff parser or CLI.
+
+Results are `VERIFIED_STRUCTURE`, `REJECTED` or `NOT_VERIFIED`, with fixed safe
+reason codes. Missing images stop at NOT_VERIFIED; contradictions are rejected.
+Successful results carry the action/before-state digests, affected path, expected
+postimage content/size/mode commitment and recovery evidence committing to the
+before-file state (including metadata) and supplied image digest. **No image bytes
+are retained or serialized; these commitments are not a stored backup.** Failure
+results omit paths, images and plans. All results have `ready_to_execute=False`
+and `rollback_authorized=False`.
+
+Live filesystem identity, clean Git state, host authority, path-race resistance and
+safe rollback remain NOT_VERIFIED even when the supplied structure matches. P1
+does no I/O, Git commands, apply/undo or D1 receipt redemption. Future P2 needs
+separately reviewed native isolated preflight/apply and rollback acceptance;
+authenticated observations, policy, sandbox and recovery storage are still needed.
+**A11b.4 is not complete; F2 real repository mutation remains NOT AUTHORIZED.**
