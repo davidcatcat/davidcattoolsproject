@@ -247,7 +247,12 @@ or make token savings a security/QA acceptance substitute.
 ## 1. Establish repository and scope
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
-Local Mac root remains `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Local Mac canonical root remains `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+Only after a separately reviewed Mac activation gate may Codex and Claude use
+their two fixed owned developer worktrees for source/ordinary tests; see the
+[safe-git exception](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
+Do not create or use them merely because this policy document is merged.
+Required F1 containment/native canonical acceptance still uses canonical.
 In Cloud discover the task-configured checkout; do not create a clone/worktree to
 repair a missing repository. Verify the repository is `davidcatcat/davidcattoolsproject`.
 
@@ -419,7 +424,10 @@ A screenshot/model assertion without tested revision is insufficient evidence.
 
 ## 5. Verify on the actual Mac
 
-Start at the canonical Mac repository, inspect branch/status and preserve unrelated work.
+Run required native/canonical acceptance only at the original canonical Mac
+repository; inspect branch/status and preserve unrelated work. A developer
+worktree's ordinary tests never substitute for native canonical checks, and
+its venv must resolve llmtool imports within its own registered root.
 Fetch the published feature branch using safe-git; establish the intended tested SHA
 without blindly pulling, resetting, stashing or overwriting changes. If existing work
 prevents switching safely, report the blocker. Do not use `/private/tmp` worktrees.

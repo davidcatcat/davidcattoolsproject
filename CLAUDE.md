@@ -12,6 +12,15 @@ merge decisions to the AI coordinator; they are **not** the everyday PM or
 a Codex/Claude prompt relay. Claude's core role is a distinct, independent
 reviewer/QA role, not a self-authorizing implementation or merge authority.
 
+**Owner-approved, NOT YET ACTIVATED developer-worktree exception:** Codex and
+Claude may each use only one reviewed fixed linked Git worktree after the
+[safe-git policy](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
+and Mac acceptance gates pass (Issue #110). Until then use the canonical
+single-writer CHECKOUT-CLAIM/RELEASE handoff. Claude's developer role for an
+assigned small task is independent of review of that same source. No agent may
+create unapproved clones, worktrees or project archive copies, or check out
+`main` in a developer worktree. Canonical native acceptance remains unchanged.
+
 Give actionable, human-readable findings, reproduction evidence, severity,
 a disposition recommendation and the exact reviewed SHA. Classify required
 gates separately. If all findings are nonblocking Low, recommend

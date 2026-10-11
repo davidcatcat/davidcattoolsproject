@@ -59,9 +59,12 @@ The canonical local Mac project repository directory is:
 /Users/davidsun/git/davidcataiporject/davidcattoolsproject
 ```
 
-Local Mac project work must be performed from this canonical repository: source changes,
-unit tests, targeted tests, canonical tests, smoke tests, validation, documentation
-work, Git inspection, and staging/commit/push when sandbox permissions permit.
+Local Mac project work uses this canonical repository unless the **two fixed,
+independently reviewed developer-worktree exception** in
+[safe-git](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
+has passed its activation gates. Approval permits only the specified Codex/Claude
+roots for their own development and tests; this docs change does NOT activate or
+provision them. Canonical remains the integrator and required native acceptance root.
 
 Before any repository-changing work, verify:
 
@@ -72,8 +75,9 @@ git branch --show-current
 git status --short --branch
 ```
 
-For local Mac work, the root must resolve exactly to
-`/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
+For local Mac work, the root must resolve exactly to the canonical path above,
+or **after separately verified activation only**, the assigned agent's one
+fixed registered root under the safe-git policy. Any other Mac path is STOP.
 For user-selected Codex Cloud work, use only the checkout configured for that task.
 Discover its root with Git and verify it is `davidcatcat/davidcattoolsproject`;
 do not assume `/workspace` is the repository. Record environment, root, branch,
@@ -89,9 +93,10 @@ Read [llmtool development workflow](tools/llmtool/WORKFLOW.md) when using Cloud 
 handing verification between Cloud and Mac. Keep Mac-only VPN/auth/local-service
 checks pending until verified on the actual Mac; complete independent Cloud work.
 
-Codex must NOT create or use:
+Codex must NOT create or use alternate project checkouts beyond the explicitly
+authorized, **not-yet-activated two fixed linked-worktree exception**:
 
-- Git worktrees
+- Unregistered Git worktrees, including extra or temporary worktrees
 - Independent clones, including milestone clones
 - Sibling project repositories
 - Nested Git repositories
@@ -101,15 +106,17 @@ Codex must NOT create or use:
   (the task-configured Codex Cloud checkout is allowed)
 
 Do not invent alternate project workspaces or move this project. The former
-independent-clone/worktree workflow is deprecated and must not be reused.
+independent-clone/worktree workflow remains prohibited; only the narrowly
+approved, separately activated fixed-root arrangement in safe-git is eligible.
 
 ## Testing and runtime isolation
 
-Local Mac project tests and validation must be launched from
-`/Users/davidsun/git/davidcataiporject/davidcattoolsproject`; Cloud checks must use
-that task's verified configured checkout. This includes unit,
-targeted, canonical, smoke, provider integration, regression, Git, and documentation
-validation. Do not create separate project checkouts for testing.
+Mac developer unit/targeted/regression checks must run from canonical until
+activation of the reviewed two fixed worktree roots; after activation they may
+run only inside the agent's registered root and own Python venv. Required native
+F1 containment and canonical acceptance stay in the unchanged canonical root.
+Cloud checks use the task's verified configured checkout. No other project
+checkout, worktree, copy or clone is allowed for testing.
 
 Test-generated temporary files may use normal temporary directories only when
 required by the test/runtime itself. The llmtool `codex-cli` provider may continue
@@ -193,4 +200,6 @@ For future Codex Cloud tasks, use Developer `gpt-6.1-sol` / high,
 independent read-only Reviewer `gpt-6.1-sol` / high, and a bounded Git agent
 `gpt-5.6-luna` / low when available. Reviewer replaces the previous Astra default.
 Read [the role and handoff rules](tools/llmtool/WORKFLOW.md#default-codex-cloud-agent-roles--user-decision-2026-10-04).
-Keep one Git writer, verify model availability, and preserve all existing review/merge gates.
+Keep one writer in canonical until reviewed activation; afterward keep one
+writer **per** registered worktree and serialize shared-ref/canonical operations.
+Verify model availability and preserve all existing review/merge gates.
