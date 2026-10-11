@@ -107,6 +107,11 @@ that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
 This Cloud exception does not authorize worktrees, independent/milestone clones,
 sibling/nested repositories, or alternate local Mac checkouts.
+Separately, [safe-git](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
+records the owner-approved exception for two fixed Codex/Claude developer
+worktrees. General use is currently **DISABLED**: only a specifically authorized
+Issue #115 pre-activation pilot may use them, and formal activation requires a
+later independently reviewed and merged activation-status PR.
 
 Follow the [llmtool development workflow](tools/llmtool/WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
