@@ -124,6 +124,87 @@ independent native gate verdict before any ACTIVE-status PR.
 
 ## Before changing Git state
 
+### Required daily executable preflight (B-min)
+
+Before source/Git mutation in a claimed workspace, run the same
+[read-only gate](preflight.py) used by the regression tests. This does not
+authorize a workspace, replace CLAIM/RELEASE, activate the fixed worktrees,
+or turn PID attribution into an automated check. First establish the permitted
+task/root and sole writer cooperatively; existing idle PIDs alone are not conflicts.
+
+Use explicit, independently established expected values, not values freshly
+derived from whatever checkout happens to be present. The gate checks root,
+branch, common-dir, origin, pinned HEAD, owner/mode and symlink/ACL constraints,
+logical index and file inventories, and the own-root Python import. It never
+stages, commits, fetches, installs, cleans or kills. Exit **0** prints exactly
+`PASS: read-only preflight`; exit **1** prints a fixed sanitized STOP; invalid
+arguments exit **2**. Any nonzero result means preserve state and stop mutation.
+
+Run from the authorized workspace with its already trusted Python:
+
+```sh
+python3 -B -I /absolute/reviewed/source/skills/safe-git/preflight.py \
+  --root /absolute/authorized/root --branch explicit-owned-branch \
+  --common-dir /absolute/expected/common-dir \
+  --origin git@github.com:davidcatcat/davidcattoolsproject.git \
+  --head FULL_APPROVED_HEAD_SHA --uid EXPECTED_OWNER_UID \
+  --root-mode APPROVED_OCTAL_MODE --parent-mode APPROVED_PARENT_MODE \
+  --baseline /absolute/private/reviewed-baseline.json
+```
+
+Replace each placeholder with the task's pinned value; do not blindly substitute
+current Git output as an expectation. The implementation uses `/usr/bin/git`, a
+sanitized environment with global/system config excluded, hooks/fsmonitor off,
+and no optional locks. Repo-local settings and the installed venv must already
+be trusted. This gate deliberately does not run Git filters to compare content.
+
+The baseline is an explicit reviewed allowlisted inventory, not a requirement
+that ignored files be absent. It is a regular nonsymlink owner file, mode **0600**,
+with exactly four SHA256 fields: `index`, `tracked`, `untracked`, `ignored`.
+Index hashes Git's NUL-delimited staged entries. The file hashes are SHA256 of
+ASCII JSON (compact separators, sorted unique Git paths), each record containing
+path, lstat mode and SHA256 of bytes (symlink target bytes, without following).
+All current ignored files, including authoritative venv data, are covered.
+Untracked/ignored additions, removals, mode and content drift reject. Do not use
+an empty ignored baseline or silently refresh it after an unexpected change.
+
+For an initially known-safe, claimed checkout, obtain candidate inventory using
+the implementation's `inventory(Path(root))` function, then review/classify the
+actual untracked/ignored paths locally before saving those four hashes in the
+private baseline. Candidate collection is **not PASS**, grants no write authority,
+and must not replace an existing approved baseline. After an authorized edit,
+stage, commit, or expected generated artifact, reconcile the allowed delta and
+explicitly re-pin the baseline/HEAD before the next gate. Do not bless unknown
+files. Keep sensitive inventory paths/contents local. A task requiring a different
+allowlist must record that expectation, not weaken comparison.
+
+The own venv is fixed at `tools/llmtool/.venv`; its directory must not be a symlink.
+Its normal interpreter symlink to the trusted Python installation is allowed.
+The gate checks `sys.prefix` before importing, then requires `sys.executable`,
+`sys.prefix` and resolved `llmtool.__file__` to belong to that root. Python's
+already-installed `.pth` startup code still belongs to the trusted runtime
+boundary; this is not a sandbox for executing an untrusted venv. `-B` avoids new
+bytecode. Inventory is checked again after the import.
+
+Supported boundary: ordinary files/symlinks; macOS ACLs must be absent or consist
+solely of `deny delete` entries (the default home ACL, granting no access), and
+no group/world-writable ancestors except root-owned sticky system-temp ancestors.
+Submodules/special files or unreadable/changing inventories fail closed. This
+is cooperative same-UID race protection, not an atomic lock or protection against
+a malicious same-UID writer. Check active tasks/children separately; no lease or
+PID-only takeover. No G6/G7 authority is conferred.
+
+Targeted validation (no provider/lifecycle suite):
+
+```sh
+python3 -B -I -m unittest discover -s skills/safe-git -p test_preflight.py -v
+```
+
+These tests initialize their own disposable synthetic Git repositories and
+pip-free venvs; they invoke the actual daily CLI for both PASS and STOP, including
+real import provenance drift. They do not create project clones/worktrees or
+exercise the interrupted fake CLI fixtures tracked in Issue #122.
+
 Run:
 
 ```bash
