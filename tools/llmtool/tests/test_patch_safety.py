@@ -6,6 +6,7 @@ import json
 import socket
 import subprocess
 import time
+import unicodedata
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 import unittest
@@ -196,6 +197,25 @@ class PatchSafetyTests(unittest.TestCase):
         target = replace(action.payload.target, path='資料.txt')
         action = replace(action, scope=('資料.txt',), payload=replace(action.payload, target=target))
         self.assertIs(inspect(action).status, p.PatchStatus.VERIFIED_STRUCTURE)
+
+    def test_nfc_alias_accepted_by_contract_path_rejects_as_collision(self):
+        # R108-F1: these pass action_contract._path (unlike 'e\u0301.txt'), so only
+        # the NFC check in patch_safety._collision can stop them.
+        for alias, canonical in (('\u212b.txt', '\u00c5.txt'), ('\uf900.txt', '\u8c48.txt')):
+            for kind in (c.ActionKind.FILE_CREATE, c.ActionKind.FILE_WRITE, c.ActionKind.FILE_DELETE):
+                with self.subTest(alias=alias, kind=kind):
+                    self.assertEqual(unicodedata.normalize('NFC', alias), canonical)
+                    self.assertEqual(c._path(alias), alias)
+                    action = proposal(kind)
+                    target = replace(action.payload.target, path=alias)
+                    aliased = replace(action, scope=(alias,), payload=replace(action.payload, target=target))
+                    self.assertStopped(inspect(aliased), p.PatchCode.PATH_COLLISION)
+                    self.assertStopped(inspect(action, authorized_scope=tuple(sorted(action.scope + (alias,)))),
+                                       p.PatchCode.PATH_COLLISION)
+                    # Control: the NFC spelling of the same name is an ordinary path.
+                    target = replace(target, path=canonical)
+                    plain = replace(action, scope=(canonical,), payload=replace(action.payload, target=target))
+                    self.assertIs(inspect(plain).status, p.PatchStatus.VERIFIED_STRUCTURE)
 
     def test_credentials_traversal_control_and_symlink_types_reuse_contract_validation(self):
         for path in ('../x', '/absolute', 'src/../x', '.git/config', '.env', 'src/id_rsa',
