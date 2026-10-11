@@ -135,8 +135,10 @@ task/root and sole writer cooperatively; existing idle PIDs alone are not confli
 Use explicit, independently established expected values, not values freshly
 derived from whatever checkout happens to be present. The gate checks root,
 branch, common-dir, origin, pinned HEAD, owner/mode and symlink/ACL constraints,
-logical index and file inventories, and the own-root Python import. It never
-stages, commits, fetches, installs, cleans or kills. Exit **0** prints exactly
+logical index and file inventories, and the own-root Python import. Repository
+checks never write the checkout or Git state. Optional candidate/report modes
+create only new private evidence files outside monitored roots. It never
+stages, commits, fetches, installs, cleans or kills. Normal exit **0** prints exactly
 `PASS: read-only preflight`; exit **1** prints a fixed sanitized STOP; invalid
 arguments exit **2**. Any nonzero result means preserve state and stop mutation.
 
@@ -152,7 +154,9 @@ python3 -B -I /absolute/reviewed/source/skills/safe-git/preflight.py \
   --baseline /absolute/private/reviewed-baseline.json
 ```
 
-Replace each placeholder with the task's pinned value; do not blindly substitute
+Invoke the implementation from a reviewed pinned source SHA and verify its file
+SHA256 before loading it; do not trust an arbitrary checkout's copy. Replace
+each placeholder with the task's pinned value; do not blindly substitute
 current Git output as an expectation. The implementation uses `/usr/bin/git`, a
 sanitized environment with global/system config excluded, hooks/fsmonitor off,
 and no optional locks. Repo-local settings and the installed venv must already
@@ -160,19 +164,53 @@ be trusted. This gate deliberately does not run Git filters to compare content.
 
 The baseline is an explicit reviewed allowlisted inventory, not a requirement
 that ignored files be absent. It is a regular nonsymlink owner file, mode **0600**,
-with exactly four SHA256 fields: `index`, `tracked`, `untracked`, `ignored`.
-Index hashes Git's NUL-delimited staged entries. The file hashes are SHA256 of
-ASCII JSON (compact separators, sorted unique Git paths), each record containing
-path, lstat mode and SHA256 of bytes (symlink target bytes, without following).
+with exactly four per-path lists: `index`, `tracked`, `untracked`, `ignored`.
+Index records are `[path, git-mode, blob-id, stage]` from NUL-delimited entries.
+File records are `[path, lstat-mode, SHA256]`, sorted by unique Git paths;
+symlink hashes use link target bytes without following. These records allow
+local added/removed/changed-path comparison, including logical index changes.
 All current ignored files, including authoritative venv data, are covered.
 Untracked/ignored additions, removals, mode and content drift reject. Do not use
 an empty ignored baseline or silently refresh it after an unexpected change.
 
-For an initially known-safe, claimed checkout, obtain candidate inventory using
-the implementation's `inventory(Path(root))` function, then review/classify the
-actual untracked/ignored paths locally before saving those four hashes in the
-private baseline. Candidate collection is **not PASS**, grants no write authority,
-and must not replace an existing approved baseline. After an authorized edit,
+For an initially known-safe, claimed checkout, create a candidate with this
+actual CLI (the same explicit identity/mode arguments as above):
+
+```sh
+python3 -B -I /absolute/reviewed/source/skills/safe-git/preflight.py \
+  --root /absolute/authorized/root --branch explicit-owned-branch \
+  --common-dir /absolute/expected/common-dir \
+  --origin git@github.com:davidcatcat/davidcattoolsproject.git \
+  --head FULL_APPROVED_HEAD_SHA --uid EXPECTED_OWNER_UID \
+  --root-mode APPROVED_OCTAL_MODE --parent-mode APPROVED_PARENT_MODE \
+  --write-candidate /absolute/private-0700-directory/new-candidate.json
+```
+
+Candidate mode validates identity/path and stable inventory, creates a new
+0600 file, and prints exactly `CANDIDATE: review required` (exit 0). It does
+**not** check the candidate against an approved baseline or execute the Python
+import gate; it is never PASS, never auto-promotes/replaces an approved baseline,
+and grants no mutation authority. The old aggregate-hash format is rejected;
+review a new per-path candidate explicitly rather than auto-migrating it.
+
+For daily checks or reconciliation, add
+`--report /absolute/private-0700-directory/new-diff.json` to the normal
+`--baseline` command above. The report lists only added/removed/changed paths
+per category, never raw content. A clean check has empty delta lists; an inventory
+mismatch writes the report and still returns STOP/exit 1. Identity/path/invalid
+baseline failures may stop before any trustworthy delta can be produced, so a
+report is not guaranteed on every rejection. A failed report write also STOPs.
+
+All new outputs require a nonsymlink owner-only 0700 parent, safe ancestors,
+and destinations outside canonical, the fixed-workspace parent, the inspected
+root and its common-dir. Files are created O_EXCL/O_NOFOLLOW with mode 0600.
+Existing files/symlinks are never overwritten; partial evidence stays preserved
+on failure. Use a fresh filename for every attempt. Baseline and report paths,
+including sensitive filenames, stay local and must not be committed/uploaded.
+
+Compare the private report and candidate against the approved task allowlist
+before explicitly selecting that candidate as the next `--baseline`. Never
+blindly collect/re-pin after STOP. After an authorized edit,
 stage, commit, or expected generated artifact, reconcile the allowed delta and
 explicitly re-pin the baseline/HEAD before the next gate. Do not bless unknown
 files. Keep sensitive inventory paths/contents local. A task requiring a different

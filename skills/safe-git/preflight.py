@@ -1,4 +1,4 @@
-"""Read-only daily Git preflight; explicit reviewed expectations, no mutation."""
+"""Daily read-only repository gate with optional private evidence outputs."""
 import argparse
 import hashlib
 import json
@@ -100,12 +100,77 @@ def inventory(root):
     untracked = git(root, "ls-files", "--others", "--exclude-standard", "-z")
     ignored = git(root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
     def records(names):
-        values = [file_record(root, n) for n in sorted(set(names)) if n]
-        return digest(json.dumps(values, ensure_ascii=True,
-                                 separators=(",", ":")).encode("ascii"))
-    return {"index": digest(index), "tracked": records(tracked),
+        return [file_record(root, n) for n in sorted(set(names)) if n]
+    entries = []
+    for raw in index.split(b"\0"):
+        if raw:
+            meta, separator, name = raw.partition(b"\t")
+            require(separator == b"\t")
+            mode, blob, stage = meta.decode("ascii").split()
+            entries.append([os.fsdecode(name), mode, blob, stage])
+    return {"index": entries, "tracked": records(tracked),
             "untracked": records(untracked.split(b"\0")),
             "ignored": records(ignored.split(b"\0"))}
+
+
+def validate_inventory(data):
+    require(isinstance(data, dict) and set(data) == {"index", "tracked", "untracked", "ignored"})
+    for category, entries in data.items():
+        require(isinstance(entries, list))
+        seen = set()
+        for entry in entries:
+            require(isinstance(entry, list) and len(entry) == (4 if category == "index" else 3))
+            name = entry[0]
+            require(isinstance(name, str) and bool(name) and "\0" not in name)
+            path = Path(name)
+            require(not path.is_absolute() and ".." not in path.parts)
+            if category == "index":
+                require(all(isinstance(value, str) for value in entry[1:]))
+                require(bool(re.fullmatch(r"[0-7]{6}", entry[1])))
+                require(bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", entry[2])))
+                require(entry[3] in ("0", "1", "2", "3"))
+                key = (name, entry[3])
+            else:
+                require(type(entry[1]) is int and isinstance(entry[2], str))
+                require(bool(re.fullmatch(r"[0-9a-f]{64}", entry[2])))
+                key = name
+            require(key not in seen)
+            seen.add(key)
+
+
+def private_write(path, value, root, common, uid):
+    path = Path(path)
+    require(path.is_absolute() and path == Path(os.path.abspath(path)))
+    protected = [root, common,
+                 Path("/Users/davidsun/git/davidcataiporject/davidcattoolsproject"),
+                 Path("/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject")]
+    require(all(path != parent and parent not in path.parents for parent in protected))
+    directory(path.parent, uid, 0o700)
+    data = (json.dumps(value, ensure_ascii=True, sort_keys=True) + "\n").encode("ascii")
+    # Existing files/symlinks are errors. Preserve partial files on write failure.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        info = os.fstat(stream.fileno())
+        require(info.st_uid == uid and stat.S_IMODE(info.st_mode) == 0o600)
+        stream.write(data)
+        stream.flush()
+        require(path.lstat().st_ino == info.st_ino)
+
+
+def delta(expected, observed):
+    result = {}
+    for category in expected:
+        def grouped(entries):
+            values = {}
+            for entry in entries:
+                values.setdefault(entry[0], []).append(entry[1:])
+            return values
+        old, new = grouped(expected[category]), grouped(observed[category])
+        result[category] = {"added": sorted(new.keys() - old.keys()),
+                            "removed": sorted(old.keys() - new.keys()),
+                            "changed": sorted(name for name in old.keys() & new.keys()
+                                              if old[name] != new[name])}
+    return result
 
 
 def repository_identity(root):
@@ -125,7 +190,14 @@ def check(args):
     require(repository_identity(root) == expected_identity)
     common = Path(args.common_dir)
     directory(common, args.uid)
+    if args.write_candidate:
+        observed = inventory(root)
+        require(inventory(root) == observed)
+        require(repository_identity(root) == expected_identity)
+        private_write(args.write_candidate, observed, root, common, args.uid)
+        return "CANDIDATE: review required"
     baseline = Path(args.baseline)
+    directory(baseline.parent, args.uid, 0o700)
     info = baseline.lstat()
     require(stat.S_ISREG(info.st_mode) and info.st_uid == args.uid
             and stat.S_IMODE(info.st_mode) == 0o600)
@@ -134,8 +206,12 @@ def check(args):
         expected = json.load(stream)
         require(identity(os.fstat(stream.fileno())) == identity(info))
     require(identity(baseline.lstat()) == identity(info))
+    validate_inventory(expected)
     observed = inventory(root)
-    require(expected == observed)
+    if expected != observed:
+        if args.report:
+            private_write(args.report, delta(expected, observed), root, common, args.uid)
+        raise Rejected()
     python = root / "tools/llmtool/.venv/bin/python"
     directory(python.parent.parent, args.uid)
     script = ("import json,sys,pathlib; "
@@ -146,11 +222,18 @@ def check(args):
     require(Path(executable) == python and Path(prefix) == python.parent.parent)
     module = Path(module).resolve(strict=True)
     require(root in module.parents)
-    require(inventory(root) == observed)
+    after = inventory(root)
+    if after != observed:
+        if args.report:
+            private_write(args.report, delta(expected, after), root, common, args.uid)
+        raise Rejected()
     require(repository_identity(root) == expected_identity)
     directory(root, args.uid, int(args.root_mode, 8))
     directory(root.parent, args.uid, int(args.parent_mode, 8))
     directory(common, args.uid)
+    if args.report:
+        private_write(args.report, delta(expected, observed), root, common, args.uid)
+    return "PASS: read-only preflight"
 
 
 class Parser(argparse.ArgumentParser):
@@ -160,18 +243,24 @@ class Parser(argparse.ArgumentParser):
 
 def main(argv=None):
     parser = Parser(description=__doc__)
-    for name in ("root", "branch", "common-dir", "origin", "head", "baseline",
+    for name in ("root", "branch", "common-dir", "origin", "head",
                  "root-mode", "parent-mode"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument("--uid", type=int, required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--baseline")
+    mode.add_argument("--write-candidate")
+    parser.add_argument("--report")
     args = parser.parse_args(argv)
+    if args.write_candidate and args.report:
+        parser.error("report requires baseline")
     try:
-        check(args)
+        message = check(args)
     except (Rejected, OSError, ValueError, KeyError, TypeError, AssertionError,
             subprocess.SubprocessError):
         print("STOP: preflight rejected", file=sys.stderr)
         return 1
-    print("PASS: read-only preflight")
+    print(message)
     return 0
 
 
