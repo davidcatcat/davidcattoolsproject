@@ -127,8 +127,13 @@ Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
 When the user chooses Codex Cloud, use only the repository checkout configured for
 that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
-This Cloud exception does not authorize worktrees, independent/milestone clones,
-sibling/nested repositories, or alternate local Mac checkouts.
+This Cloud exception does not authorize new project checkouts. Separately, the
+owner approved **only two fixed linked developer worktrees** (Codex/Claude)
+subject to independent policy review and Mac activation gates in
+[safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
+The exception is NOT ACTIVATED by policy documentation; all other worktrees,
+archive project copies, independent/milestone clones and alternate local Mac
+checkouts remain forbidden.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
@@ -150,7 +155,8 @@ llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](WORKFLOW.md
 - 任務開始先列出 Cloud-capable / Mac-required / not-required 驗收項目。
 - Cloud 可完成開發、review、offline/mock tests、build、CI 與已授權的 feature branch/PR。
 - 只有依賴實際 Mac 的 VPN、既有 provider auth、macOS sandbox、本機檔案或服務的
-  必要驗證才交給 Mac；保留 canonical Mac path，不允許另建本機 checkout/worktree。
+  必要驗證才交給 Mac；canonical Mac path 保留原樣；只有 safe-git 明列的兩個
+  固定 developer worktree 在獨立審查及 Mac 驗收後才可啟用，其他 checkout 禁止。
 - 每個交接報告綁定 implementation SHA，附 prerequisites、commands、expected
   marker/exit、Cloud/CI 結果和 Mac pending checks。
 - 必要本機驗證未完成時標示 LOCAL VERIFICATION REQUIRED / MERGE BLOCKED；

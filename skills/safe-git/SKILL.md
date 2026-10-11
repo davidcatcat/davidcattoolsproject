@@ -7,6 +7,84 @@ description: Safely inspect, synchronize, commit, and push Git changes. Use when
 
 Treat remote history and unrelated local work as protected state.
 
+## Owner-approved two-agent developer worktree exception (NOT ACTIVATED)
+
+The requirements owner explicitly approved **at most two fixed, reviewed linked Git
+worktrees** for trusted Codex CLI and Claude CLI development in
+[Issue #110](https://github.com/davidcatcat/davidcattoolsproject/issues/110#issuecomment-6106421018).
+This is a narrowly scoped exception to the former canonical-only prohibition,
+**not** general permission to create project checkouts, clones, Git archive copies
+or arbitrary temporary worktrees. This policy is **NOT ACTIVATED** by a docs commit
+or PR merge: first obtain an independent exact-head policy/Security review, an
+accepted staging/provisioning plan, and Mac safety-acceptance evidence. Until then
+use the original single canonical writer and the claim/release handoff below.
+
+Canonical integrator and required native acceptance root (must never be moved
+or cleaned as part of allocation):
+`/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
+
+The **only** eligible fixed developer roots, once separately staged and activated:
+- Codex CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex`
+- Claude CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude`
+
+### Immediate single-checkout handoff (active now)
+
+Before branch/source/Git writes in the shared canonical root, verify its exact
+root, branch, HEAD, remote, tracked/untracked state and whether another agent's
+test/child process is using it. The writer posts
+`CHECKOUT-CLAIM <agent> <task-branch> <observed-HEAD>` in the task's GitHub
+handoff. A PR publication or review request is **not** a release. When source
+is published and all owned tests/descendants have stopped, return safely to
+`main` only if clean, verify tracked/untracked data and HEAD, then post
+`CHECKOUT-RELEASE <agent> main <HEAD>`. If unsafe, post HOLD with evidence
+without switching/cleaning. Audit comments are **not atomic locks**: the next
+agent must independently verify exclusive local ownership and fresh state.
+Never infer current local ownership from a historical comment or bare PID.
+
+### Once two fixed worktrees are independently activated
+
+- Only an approved integrator/provisioner may stage a new linked worktree at
+  one of the two exact, empty, verified roots. Check parent ownership, 0700
+  permissions, symlink/ACL risks, canonical common-dir identity and existing
+  Git worktree/branch inventory first. Preexisting data or ambiguous identity
+  means STOP/preserve; no overwrite, auto-adopt, prune or delete.
+- The canonical checkout keeps local `main`. **Neither agent worktree may
+  check out `main`**, another agent's task branch or `automation/ai-loop`.
+  Each agent owns one worktree and one unique task branch at a time; verify
+  root, common-dir, HEAD, branch, staged/unstaged/untracked/ignored contents
+  and allowlisted files before every mutation. No concurrent writers in a
+  single worktree; do not switch a root underneath running tests.
+- Each developer worktree needs its **own venv, editable install, build/cache
+  and test state**, not a symlink to the canonical venv. Record
+  `sys.executable`, `llmtool.__file__`, root and exact source SHA; if
+  imports resolve to canonical or a peer worktree, STOP and invalidate that
+  test evidence. Do not assume `-I` protects a shared editable install.
+- Confine stage/commit to explicit allowed paths, push only one's owned ref
+  (no force), publish Draft PR and freeze exact HEAD for review. An independent
+  reviewer cannot self-approve authored changes. Shared worktree provisioning,
+  ref integrations, destructive Git maintenance and canonical Mac native
+  acceptance stay serialized with the integrator. Bounded ordinary
+  `git fetch origin` is permitted within an authorized worktree subject to
+  known-safe Git environment/config and conflict/lock handling.
+- No `reset --hard`, `clean`, arbitrary stash, forced checkout/push,
+  `gc`, `prune`, `worktree remove/move/repair`, shared config mutation,
+  unattended process kill or automatic workspace cleanup. Preserve dirty,
+  ignored and unknown user data, commits and active descendants on crash or
+  failed validation. Fall back to the single canonical writer on uncertainty.
+- Git linked worktrees share refs and object storage. Same-UID permissions
+  and advisory ownership are **cooperative race protection, not an OS security
+  sandbox**. This exception does **not** authorize llmtool F2/model-initiated
+  real-repository mutation, credential access, new provider egress, admin/root
+  operations or CI/Runner/ai-loop controller changes.
+- Before general two-agent use, record a **real Mac pilot** showing canonical
+  branch/HEAD/index and user files unchanged; distinct worktree HEAD/index and
+  peer-independent changes during overlapping small tasks; correct dedicated
+  venv/import paths; no branch/owner/symlink bypass; preservation after a
+  simulated interruption; two SHA-bound Draft PR/CI/review paths. Native F1
+  containment acceptance must still execute only from canonical. If a
+  required check is absent/failed, keep parallel mode DISABLED and preserve
+  all work.
+
 ## Before changing Git state
 
 Run:

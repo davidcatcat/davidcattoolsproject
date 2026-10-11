@@ -210,7 +210,10 @@ runner maintenance until native llmtool reaches parity.
 2. Inspect the repo first. Choose the smallest product-focused solution and
    bounded budget; avoid speculative controller/QA orchestration.
 3. Ask the developer to implement and test. Collect SHA-bound, reproducible
-   diagnostics; keep one source/Git writer at a time.
+   diagnostics; keep one source/Git writer in canonical until a separately
+   reviewed two-fixed-worktree pilot is activated; then one writer per owned
+   workspace and one integrator for shared refs/native canonical acceptance.
+   Follow [safe-git](../safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
 4. Run an independent review and required functional, security, runtime and
    platform tests. A normal review is **not** a security or QA gate.
 5. On a reproducible defect, retain evidence, repair within the scope, rerun
