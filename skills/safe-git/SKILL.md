@@ -14,16 +14,29 @@ worktrees** for trusted Codex CLI and Claude CLI development in
 [Issue #110](https://github.com/davidcatcat/davidcattoolsproject/issues/110#issuecomment-6106421018).
 This is a narrowly scoped exception to the former canonical-only prohibition,
 **not** general permission to create project checkouts, clones, Git archive copies
-or arbitrary temporary worktrees. This policy is **NOT ACTIVATED** by a docs commit
-or PR merge: first obtain an independent exact-head policy/Security review, an
-accepted staging/provisioning plan, and Mac safety-acceptance evidence. Until then
-use the original single canonical writer and the claim/release handoff below.
+or arbitrary temporary worktrees.
+
+**Operational mode: DISABLED for general parallel development.** Owner approval
+and a merged documentation PR are NOT permission to provision or use worktrees.
+A pre-activation **limited Mac pilot** is a separate exception, narrowly gated
+below; it does not change this general DISABLED mode. Until such a pilot is
+independently authorized, use the original single canonical writer and
+the claim/release handoff below.
+
+**Formal activation record:** After the #115 pilot passes all required Mac,
+independent-review and canonical-preservation gates, a separately reviewed and
+merged **activation-status documentation PR** must change the operational mode
+here to ACTIVE and cite the exact #115 native evidence, approved roots and
+policy/source SHAs. Until that PR merges, normal two-agent development remains
+DISABLED. Keep this section's heading/anchor stable when changing the status,
+so the existing policy links remain valid.
 
 Canonical integrator and required native acceptance root (must never be moved
 or cleaned as part of allocation):
 `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
 
-The **only** eligible fixed developer roots, once separately staged and activated:
+The **only** eligible fixed developer roots, during an explicitly authorized
+#115 limited pilot or after formal activation:
 - Codex CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex`
 - Claude CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude`
 
@@ -41,9 +54,33 @@ without switching/cleaning. Audit comments are **not atomic locks**: the next
 agent must independently verify exclusive local ownership and fresh state.
 Never infer current local ownership from a historical comment or bare PID.
 
-### Once two fixed worktrees are independently activated
+### Pre-activation limited Mac pilot (NOT general activation)
 
-- Only an approved integrator/provisioner may stage a new linked worktree at
+Before any real-project worktree is created, the #115 native plan must be
+independently Security/Functional reviewed at exact source/command revision.
+A coordinator's separate, explicit **PILOT_SCOPE_AUTHORIZED** record in #115
+must identify the named Mac executor, approved immutable policy SHA, exact
+two fixed paths, owned task branches, allowed preflight/provision/test commands
+and stop/retention criteria. A generic issue comment, review request, expired
+CLAIM/RELEASE, or this docs change is NOT pilot authority. The executor must
+independently confirm the current canonical checkout, no other writer or
+descendants, owner/permissions, no symlink/path escape, Git common-dir/branch
+inventory and preservation of all unknown data. If any identity, plan or
+permission differs, STOP without provisioning or changing any Git state.
+
+**Only within that approved pilot scope**, its named executor may provision
+and test the two exact linked worktrees while normal developer parallel use
+remains DISABLED. The pilot may run bounded overlapping **test/fixture-only
+or otherwise separately approved small development tasks**, without touching
+canonical source/user data or converting the pilot into unrestricted feature
+development. The pilot never authorizes llmtool F2 model-initiated mutation.
+A verified fail-closed test or recovered interrupted session is evidence to
+review, not an automatic activation. The coordinator must obtain an
+independent native gate verdict before any ACTIVE-status PR.
+
+### Controls for both the limited pilot and formally activated development
+
+- Only the named, approved integrator/provisioner may stage a linked worktree at
   one of the two exact, empty, verified roots. Check parent ownership, 0700
   permissions, symlink/ACL risks, canonical common-dir identity and existing
   Git worktree/branch inventory first. Preexisting data or ambiguous identity

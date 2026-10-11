@@ -75,9 +75,11 @@ git branch --show-current
 git status --short --branch
 ```
 
-For local Mac work, the root must resolve exactly to the canonical path above,
-or **after separately verified activation only**, the assigned agent's one
-fixed registered root under the safe-git policy. Any other Mac path is STOP.
+For local Mac work, the root must resolve exactly to the canonical path above.
+Only a **named executor during a separately authorized, bounded #115 pilot**
+may provision/validate one of the two safe-git fixed roots before activation.
+After separately reviewed and merged activation-status documentation, each
+agent may use only its assigned fixed root. Any other Mac path is STOP.
 For user-selected Codex Cloud work, use only the checkout configured for that task.
 Discover its root with Git and verify it is `davidcatcat/davidcattoolsproject`;
 do not assume `/workspace` is the repository. Record environment, root, branch,
@@ -93,10 +95,13 @@ Read [llmtool development workflow](tools/llmtool/WORKFLOW.md) when using Cloud 
 handing verification between Cloud and Mac. Keep Mac-only VPN/auth/local-service
 checks pending until verified on the actual Mac; complete independent Cloud work.
 
-Codex must NOT create or use alternate project checkouts beyond the explicitly
-authorized, **not-yet-activated two fixed linked-worktree exception**:
+Codex must NOT independently create alternate project checkouts. Only a
+named, separately authorized integrator/provisioner may create the **two
+fixed developer worktree roots named in safe-git**, for an independently
+approved limited #115 pilot or after formally recorded activation. Until
+then they are not usable for ordinary development. Prohibited:
 
-- Unregistered Git worktrees, including extra or temporary worktrees
+- Any other Git worktree, including extra or temporary project worktrees
 - Independent clones, including milestone clones
 - Sibling project repositories
 - Nested Git repositories
@@ -111,10 +116,12 @@ approved, separately activated fixed-root arrangement in safe-git is eligible.
 
 ## Testing and runtime isolation
 
-Mac developer unit/targeted/regression checks must run from canonical until
-activation of the reviewed two fixed worktree roots; after activation they may
-run only inside the agent's registered root and own Python venv. Required native
-F1 containment and canonical acceptance stay in the unchanged canonical root.
+Mac developer unit/targeted/regression checks must run from canonical unless
+the named #115 pilot executor is running **only the independently approved,
+bounded pilot checks** in the two fixed roots. After the activation-status PR
+is reviewed and merged, assigned developers may run ordinary checks in their
+own fixed root and dedicated Python venv. Required native F1 containment and
+canonical acceptance stay in the unchanged canonical root.
 Cloud checks use the task's verified configured checkout. No other project
 checkout, worktree, copy or clone is allowed for testing.
 

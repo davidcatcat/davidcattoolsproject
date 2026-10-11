@@ -248,10 +248,13 @@ or make token savings a security/QA acceptance substitute.
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
 Local Mac canonical root remains `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-Only after a separately reviewed Mac activation gate may Codex and Claude use
-their two fixed owned developer worktrees for source/ordinary tests; see the
+Ordinary Codex/Claude development in their two fixed owned worktrees is
+DISABLED until a separately reviewed **activation-status PR** is merged.
+Before that, a named Mac executor may use ONLY the independently reviewed and
+explicitly authorized, time/task/path-limited #115 pilot scope to provision and
+validate those fixed roots; see the
 [safe-git exception](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-Do not create or use them merely because this policy document is merged.
+Do not create or use worktrees merely because this policy document is merged.
 Required F1 containment/native canonical acceptance still uses canonical.
 In Cloud discover the task-configured checkout; do not create a clone/worktree to
 repair a missing repository. Verify the repository is `davidcatcat/davidcattoolsproject`.
