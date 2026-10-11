@@ -218,6 +218,13 @@ class VerificationCode(str, Enum):
     EVIDENCE_NOT_RUN = 'EVIDENCE_NOT_RUN'
 
 
+# Rejected evidence (other than an ignored model claim) or an unpinned contract
+# keeps the aggregate from PASS/NOT_TESTED even when every criterion agrees.
+_CAPPING = frozenset({VerificationCode.CONTRACT_NOT_PINNED, VerificationCode.BINDING_MISMATCH,
+                      VerificationCode.SUBJECT_MISMATCH, VerificationCode.UNKNOWN_CRITERION,
+                      VerificationCode.SOURCE_KIND_MISMATCH})
+
+
 @dataclass(frozen=True)
 class VerificationFinding(ContractValue):
     code: VerificationCode
@@ -264,11 +271,18 @@ class VerificationResult(ContractValue):
         _hex(self.contract_digest)
         _hex(self.subject_digest, (40, 64))
         _typed(self.status, VerificationStatus)
-        object.__setattr__(self, 'criteria',
-                           _collection(self.criteria, CriterionResult, MAX_CRITERIA))
+        criteria = _collection(self.criteria, CriterionResult, MAX_CRITERIA)
+        _unique_sorted(tuple(c.criterion_id for c in criteria))
         findings = _collection(self.findings, VerificationFinding, MAX_FINDINGS, 0)
         if tuple(sorted(findings, key=VerificationFinding.sort_key)) != findings:
             _invalid()
+        # The aggregate must follow from the contained data, so a reconstructed
+        # result cannot claim PASS over a FAIL criterion or a capping finding.
+        # This is consistency only: a well-formed result is still not audit proof.
+        capped = any(f.code in _CAPPING for f in findings)
+        if self.status is not _overall({c.status for c in criteria}, capped):
+            _invalid()
+        object.__setattr__(self, 'criteria', criteria)
         object.__setattr__(self, 'findings', findings)
 
     @property
@@ -281,6 +295,16 @@ class VerificationResult(ContractValue):
 
     def to_dict(self):
         return {**super().to_dict(), 'authorized': False}
+
+
+def _overall(states, capped):
+    if VerificationStatus.FAIL in states:
+        return VerificationStatus.FAIL
+    if not capped and states == {VerificationStatus.PASS}:
+        return VerificationStatus.PASS
+    if not capped and states == {VerificationStatus.NOT_TESTED}:
+        return VerificationStatus.NOT_TESTED
+    return VerificationStatus.INCOMPLETE
 
 
 def _rejection(record, kinds, binding, subject_digest):
@@ -348,15 +372,7 @@ def verify_task(contract, *, pinned_digest, run_id, subject_digest, evidence):
         status = max(found, key=_RANK.__getitem__, default=VerificationStatus.NOT_TESTED)
         criteria.append(CriterionResult(criterion.criterion_id, status,
                                         tuple(sorted(accepted[criterion.criterion_id]))))
-    states = {c.status for c in criteria}
-    if VerificationStatus.FAIL in states:
-        overall = VerificationStatus.FAIL
-    elif not capped and states == {VerificationStatus.PASS}:
-        overall = VerificationStatus.PASS
-    elif not capped and states == {VerificationStatus.NOT_TESTED}:
-        overall = VerificationStatus.NOT_TESTED
-    else:
-        overall = VerificationStatus.INCOMPLETE
+    overall = _overall({c.status for c in criteria}, capped)
     return VerificationResult(1, contract.digest, subject_digest, overall, tuple(criteria),
                               tuple(sorted(findings, key=VerificationFinding.sort_key)))
 

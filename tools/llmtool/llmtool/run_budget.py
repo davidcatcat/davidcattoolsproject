@@ -1,14 +1,16 @@
 """A11b.5 run budgets: pure immutable data and predicates, not an executor.
 
 All state is caller-supplied; no filesystem, provider, clock or subprocess is used.
-Nothing here grants, reserves or enforces anything at runtime yet (no executor):
-admit_next only reports which budget code applies to one more call. Missing usage
-or elapsed time is UNKNOWN, never zero; a known partial subtotal is reported as
-partial (unknown_calls > 0), never as a total. Unknown never counts as within.
+Nothing here grants, reserves or enforces anything at runtime yet (no executor).
+assess_budget is retrospective: used == limit is still WITHIN. admit_next is
+prospective: it denies one more call once any limit is reached, not only exceeded,
+so its *_EXCEEDED codes mean "no capacity left". Missing usage or elapsed time is
+UNKNOWN, never zero; a known partial subtotal is reported as partial
+(unknown_calls > 0), never as a total. Unknown never counts as within.
 
-Open coordinator question: admit_next denies admission (USAGE_UNKNOWN) once any
-recorded call lacks usage, so a provider that never reports usage cannot make a
-second call under a token budget until a policy for unreported usage is decided.
+Coordinator decision (PR #104): admit_next keeps denying admission (USAGE_UNKNOWN)
+once any recorded call lacks usage, so a provider that never reports usage cannot
+make a second call under a token budget; there is no "no token budget" bypass.
 """
 
 from dataclasses import dataclass
@@ -250,18 +252,30 @@ def admit_next(budget, ledger, phase):
     if ledger.repair_attempts + pending > budget.max_repair_attempts:
         return BudgetCode.REPAIR_LIMIT_REACHED
     assessment = assess_budget(budget, ledger)
-    wall = assessment.dimension(BudgetDimension.WALL_CLOCK).status
-    tokens = [assessment.dimension(d).status for d in
+    wall = assessment.dimension(BudgetDimension.WALL_CLOCK)
+    tokens = [assessment.dimension(d) for d in
               (BudgetDimension.INPUT_TOKENS, BudgetDimension.OUTPUT_TOKENS)]
-    if wall is BudgetStatus.EXCEEDED:
+    # Prospective, unlike assess_budget: a limit that is merely reached (used ==
+    # limit) leaves no capacity for another call, so it is denied as well.
+    if _exhausted(wall):
         return BudgetCode.WALL_CLOCK_EXCEEDED
-    if BudgetStatus.EXCEEDED in tokens:
+    if any(_exhausted(d) for d in tokens):
         return BudgetCode.TOKEN_BUDGET_EXCEEDED
-    if wall is BudgetStatus.UNKNOWN:
+    if wall.status is BudgetStatus.UNKNOWN:
         return BudgetCode.ELAPSED_UNKNOWN
-    if BudgetStatus.UNKNOWN in tokens:
+    if any(d.status is BudgetStatus.UNKNOWN for d in tokens):
         return BudgetCode.USAGE_UNKNOWN
     return BudgetCode.WITHIN_BUDGET
+
+
+def _exhausted(dimension):
+    """No capacity left: a zero limit, or known (possibly partial) use at the limit.
+
+    Unknown usage is >= 0, so both are provable even when some calls are unknown;
+    otherwise unknown stays unknown and is never read as zero.
+    """
+    return dimension.limit == 0 or (dimension.used is not None and
+                                    dimension.used >= dimension.limit)
 
 
 @dataclass(frozen=True)

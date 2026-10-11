@@ -162,7 +162,7 @@ class RunBudgetTest(unittest.TestCase):
         self.assertEqual(b.admit_next(roomy, out_only, P.RETRY), C.TOKEN_BUDGET_EXCEEDED)
 
     def test_unknown_usage_denied_admission(self):
-        # Open question: a provider that never reports usage blocks a second call.
+        # Coordinator decision: a provider that never reports usage blocks a second call.
         self.assertEqual(b.admit_next(budget(), ledger(), P.PRIMARY), C.WITHIN_BUDGET)
         self.assertEqual(b.admit_next(budget(), ledger([call()]), P.PRIMARY), C.USAGE_UNKNOWN)
 
@@ -175,6 +175,83 @@ class RunBudgetTest(unittest.TestCase):
         self.assertIs(a.status, S.WITHIN)
         self.assertEqual(b.admit_next(budget(max_provider_calls=6), ledger(calls), P.REVIEW),
                          C.CALL_LIMIT_REACHED)
+
+    def test_admission_denied_once_limit_reached(self):
+        # Retrospective assessment keeps used == limit WITHIN; admission does not.
+        cases = [  # (dimension, ledger factory by used value, denial code)
+            (D.WALL_CLOCK, lambda n: ledger(elapsed=n), 1000, C.WALL_CLOCK_EXCEEDED),
+            (D.INPUT_TOKENS, lambda n: ledger([call(n, 0)]), 100, C.TOKEN_BUDGET_EXCEEDED),
+            (D.OUTPUT_TOKENS, lambda n: ledger([call(0, n)]), 50, C.TOKEN_BUDGET_EXCEEDED),
+        ]
+        for dimension, make, limit, code in cases:
+            for used, status, admitted in ((limit - 1, S.WITHIN, C.WITHIN_BUDGET),
+                                           (limit, S.WITHIN, code),
+                                           (limit + 1, S.EXCEEDED, code)):
+                with self.subTest(dimension=dimension, used=used):
+                    a = b.assess_budget(budget(), make(used))
+                    self.assertIs(a.dimension(dimension).status, status)
+                    for phase in P:
+                        self.assertEqual(b.admit_next(budget(), make(used), phase), admitted)
+
+    def test_reviewer_exhaustion_reproducers_denied(self):
+        full = b.RunBudget(1, 4, 2, 1000, 100, 50)
+        self.assertEqual(b.admit_next(full, b.UsageLedger(
+            (b.CallUsage(P.PRIMARY, 100, 50),), 0, 0), P.PRIMARY), C.TOKEN_BUDGET_EXCEEDED)
+        self.assertEqual(b.admit_next(full, b.UsageLedger((), 0, 1000), P.PRIMARY),
+                         C.WALL_CLOCK_EXCEEDED)
+        zero = b.RunBudget(1, 4, 2, 1000, 0, 0)
+        self.assertEqual(b.admit_next(zero, b.UsageLedger((), 0, 0), P.PRIMARY),
+                         C.TOKEN_BUDGET_EXCEEDED)
+
+    def test_zero_token_limits_deny_every_admission(self):
+        for limits in ({'max_input_tokens': 0}, {'max_output_tokens': 0},
+                       {'max_input_tokens': 0, 'max_output_tokens': 0}):
+            zero = budget(**limits)
+            for calls in ((), [call()], [call(0, 0)]):
+                for phase in P:
+                    with self.subTest(limits=limits, calls=calls, phase=phase):
+                        self.assertEqual(b.admit_next(zero, ledger(calls), phase),
+                                         C.TOKEN_BUDGET_EXCEEDED)
+            # Retrospectively an empty or all-zero ledger is still within a zero limit.
+            self.assertIs(b.assess_budget(zero, ledger([call(0, 0)])).status, S.WITHIN)
+            self.assertIs(b.assess_budget(zero, ledger([call()])).status, S.UNKNOWN)
+
+    def test_single_axis_exhaustion_denies(self):
+        self.assertEqual(b.admit_next(budget(), ledger([call(100, 1)]), P.PRIMARY),
+                         C.TOKEN_BUDGET_EXCEEDED)
+        self.assertEqual(b.admit_next(budget(), ledger([call(1, 50)]), P.PRIMARY),
+                         C.TOKEN_BUDGET_EXCEEDED)
+        self.assertEqual(b.admit_next(budget(), ledger([call(99, 49)]), P.PRIMARY),
+                         C.WITHIN_BUDGET)
+        # Spread across phases, the sum still reaches the limit.
+        spread = ledger([call(50, 1, P.PREPARATION), call(50, 1, P.REVIEW)])
+        self.assertEqual(b.admit_next(budget(), spread, P.ESCALATION), C.TOKEN_BUDGET_EXCEEDED)
+
+    def test_exhaustion_with_unknown_usage(self):
+        # A known partial subtotal at the limit is provably exhausted (unknown >= 0).
+        at_limit = ledger([call(100, 1), call()])
+        self.assertIs(b.assess_budget(budget(), at_limit).dimension(D.INPUT_TOKENS).status,
+                      S.UNKNOWN)
+        self.assertEqual(b.admit_next(budget(), at_limit, P.RETRY), C.TOKEN_BUDGET_EXCEEDED)
+        # Below the limit, unknown stays unknown: never zero-filled into admission.
+        below = ledger([call(99, 1), call()])
+        self.assertEqual(b.admit_next(budget(), below, P.RETRY), C.USAGE_UNKNOWN)
+        self.assertEqual(b.admit_next(budget(), ledger([call()] * 3), P.RETRY),
+                         C.USAGE_UNKNOWN)
+        # Wall-clock exhaustion outranks unknown usage; unknown elapsed outranks usage.
+        self.assertEqual(b.admit_next(budget(), ledger([call()], elapsed=1000), P.RETRY),
+                         C.WALL_CLOCK_EXCEEDED)
+        self.assertEqual(b.admit_next(budget(), ledger([call(100, 1)], elapsed=None),
+                                      P.RETRY), C.TOKEN_BUDGET_EXCEEDED)
+        self.assertEqual(b.admit_next(budget(), ledger([call(1, 1)], elapsed=None), P.RETRY),
+                         C.ELAPSED_UNKNOWN)
+
+    def test_call_and_repair_limits_still_take_precedence(self):
+        spent = ledger([call(100, 50)] * 4, repairs=2, elapsed=1000)
+        self.assertEqual(b.admit_next(budget(), spent, P.PRIMARY), C.CALL_LIMIT_REACHED)
+        roomy = budget(max_provider_calls=8)
+        self.assertEqual(b.admit_next(roomy, spent, P.REPAIR), C.REPAIR_LIMIT_REACHED)
+        self.assertEqual(b.admit_next(roomy, spent, P.PRIMARY), C.WALL_CLOCK_EXCEEDED)
 
     def test_repeated_failure_exact_pair(self):
         self.assertIsNone(b.detect_repeated_failure([]))

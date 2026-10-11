@@ -2311,9 +2311,12 @@ recovery policy, real evidence producers and runtime enforcement still need an e
   - The verdict is deterministic and does not depend on evidence order.
   - Any of these keeps the result from being `PASS`:
     - missing, interrupted, partial or not-run evidence;
-    - evidence for another contract version, run or subject;
-    - a model's own success claim.
+    - evidence for another contract version, run or subject.
+  - A model's own success claim (`MODEL_CLAIM`) never satisfies a criterion. It is
+    recorded and ignored, so complete independent evidence can still give `PASS`.
   - Any failed criterion makes the result `FAIL`. An unpinned contract evaluates nothing.
+  - A `VerificationResult` whose status contradicts its criteria or findings is
+    rejected on construction. A well-formed result is still not proof of a review.
   - This is **structural verification only**: it cannot prove a command ran.
     `VERIFIED ≠ DONE`, and `authorized` is always `False`.
 - **`llmtool.run_budget`.**
@@ -2321,7 +2324,10 @@ recovery policy, real evidence producers and runtime enforcement still need an e
   - Usage covers preparation, retry, repair, escalation and review calls.
   - Unknown usage or elapsed time is `UNKNOWN`, never zero and never "within budget".
   - A known partial sum over the limit is `EXCEEDED`.
-  - `admit_next()` is a pure predicate that grants nothing.
+  - `assess_budget()` is retrospective: usage exactly at a limit is still within it.
+  - `admit_next()` is a pure predicate that grants nothing. It denies another call
+    once any wall-clock or token limit is reached, not only exceeded; a zero token
+    limit admits no call.
   - `detect_repeated_failure()` matches an exact `(action digest, failure code)` pair.
-  - Open question: a provider that never reports usage blocks a second call while a
-    token budget is set.
+  - A provider that never reports usage blocks a second call while a token budget
+    is set (`USAGE_UNKNOWN`). This is the chosen fail-closed default.

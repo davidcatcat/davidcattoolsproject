@@ -367,6 +367,47 @@ class EvidenceRecordTests(unittest.TestCase):
             result.status = S.FAIL
 
 
+    def test_result_rejects_contradictory_aggregate(self):
+        fail = verify(self.contract, [record(self.contract, 'c1-tests', 'e1', outcome=O.FAILED)]
+                      + all_pass(self.contract)[1:])
+        self.assertIs(fail.status, S.FAIL)
+        for status in (S.PASS, S.INCOMPLETE, S.NOT_TESTED):
+            with self.subTest(status=status), self.assertRaises(LLMToolError):
+                replace(fail, status=status)
+        passed = verify(self.contract, all_pass(self.contract))
+        failed_criterion = replace(passed.criteria[0], status=S.FAIL)
+        with self.assertRaises(LLMToolError):
+            replace(passed, criteria=(failed_criterion,) + passed.criteria[1:])
+        # A capping finding keeps an all-PASS criterion set from aggregating to PASS.
+        mismatch = t.VerificationFinding(C.SUBJECT_MISMATCH, 'c1-tests', 'e9')
+        with self.assertRaises(LLMToolError):
+            replace(passed, findings=(mismatch,))
+        self.assertIs(replace(passed, findings=(mismatch,), status=S.INCOMPLETE).status,
+                      S.INCOMPLETE)
+        # An ignored model claim alone does not cap PASS.
+        claim = t.VerificationFinding(C.MODEL_CLAIM_IGNORED, 'c1-tests', 'm1')
+        self.assertIs(replace(passed, findings=(claim,)).status, S.PASS)
+        unpinned = verify(self.contract, [], pinned_digest='f' * 64)
+        self.assertIs(unpinned.status, S.INCOMPLETE)
+        with self.assertRaises(LLMToolError):
+            replace(unpinned, status=S.NOT_TESTED)
+
+    def test_result_rejects_duplicate_or_unsorted_criteria(self):
+        passed = verify(self.contract, all_pass(self.contract))
+        first, second = passed.criteria[:2]
+        for criteria in ((first, first, second), (second, first)):
+            with self.subTest(criteria=criteria), self.assertRaises(LLMToolError):
+                replace(passed, criteria=criteria)
+
+    def test_every_verify_outcome_is_self_consistent(self):
+        outcomes = [all_pass(self.contract), [], all_pass(self.contract)[:2],
+                    [record(self.contract, 'c1-tests', 'e1', outcome=O.INTERRUPTED)],
+                    all_pass(self.contract) + [record(self.contract, 'c1-tests', 'e9',
+                                                      subject='0' * 40)]]
+        for evidence in outcomes:
+            result = verify(self.contract, evidence)
+            self.assertEqual(replace(result), result)
+
 class ContractTests(unittest.TestCase):
     def setUp(self):
         self.contract = make_contract()
