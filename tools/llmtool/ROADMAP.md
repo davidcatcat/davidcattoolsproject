@@ -108,7 +108,7 @@ current roadmap.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
-| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract proposal, review PENDING** | S1a accepted via PR #128; S1b docs-only contract review precedes implementation; full production integration/cutover retains A11b DONE + validation/review/route gates |
+| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract merged; Product A fake-only candidate, product review PENDING** | S1a accepted via PR #128; S1b contract merged via PR #129; A fake-only product review and B attestation/production-grant/route gates remain; full production integration/cutover retains A11b DONE + validation/review/route gates |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
@@ -598,7 +598,7 @@ post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b is IN PROGRESS; A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32
 (`e5525f18`) as a data-only slice. A11b.2.1 is DONE/merged via PR #43 (`780970ab`);
-A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git ADD** is DONE/merged via PR #84. A11c.1 S1a is DONE/MERGED via PR #128; S1b is a docs-only contract proposal with independent review PENDING and full production integration remains NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git ADD** is DONE/merged via PR #84. A11c.1 S1a is DONE/MERGED via PR #128; S1b contract is merged via PR #129; A is a fake-only product candidate with independent product review PENDING, real Claude BLOCKED pending B and full production integration remains NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
@@ -607,7 +607,7 @@ A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git A
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
 | A11b — IN PROGRESS; A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and private F1 A11b.2.2.2 PR #84 DONE/merged | Data-only contract, preflight, synthetic containment and **disposable-fixture-only F1** delivered; F2 general mutation and recovery remain future work | Separate F2 Security-reviewed contract and A11b.3–6 gates required; F2 NOT AUTHORIZED |
-| A11c — S1a DONE; S1b contract review PENDING | S1a offline event inspection；後續 route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | S1a product merged via PR #128; S1b contract needs non-author Security/Functional review and merge before implementation; full production integration retains A11b DONE、route evidence + validation report + external review |
+| A11c — S1a DONE; S1b A fake-only product review PENDING | S1a offline event inspection；後續 route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | S1a product merged via PR #128; S1b contract merged via PR #129; A fake-only product requires independent review; B production authority/route gates remain; full production integration retains A11b DONE、route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -859,8 +859,8 @@ must finish cleanly before A11b implementation starts.
 A11a's implementation, independent review, final acceptance, post-acceptance bug hunt,
 B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. This does
 **not** mean A11 as a whole is complete: QG-S1/QG-QA1 are closed pre-A11b gates, and
-A11b is IN PROGRESS; A11c.1 S1a is DONE/MERGED via PR #128. S1b is a docs-only
-contract proposal, review PENDING; full production integration NOT STARTED.
+A11b is IN PROGRESS; A11c.1 S1a is DONE/MERGED via PR #128. S1b contract merged via PR #129; A is a fake-only
+product candidate, review PENDING, real provider BLOCKED pending B; full production integration NOT STARTED.
 
 ## A11b — Execution, Approval & Recovery
 
@@ -1013,8 +1013,8 @@ real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
 | Slice | Boundary / next gate |
 | --- | --- |
 | **S1a — DONE/MERGED via PR #128** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`. Independent expectation input pins identity/source/epoch; bounded explicit files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
-| **S1b — docs-only contract proposal; review PENDING** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
-| **S1b-B — Production Enablement contract proposal; review PENDING** | Docs-only [B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft): host-owned reviewer launch + registered author worktree + actual Git observations; static Host Registration/Route Policy; `ProductionReviewIssuer`; durable one-use replay protection reusing `ReceiptLedger` with a separate provider-ledger file whose explicit provider-only layout records a write-once consume UTC day for the daily cap (D1 schema v1 unchanged); frozen A injection points. Shared authorization code changes need a separate scope amendment. Real Claude route stays NOT_AUTHORIZED/BLOCKED until A+B acceptance, native Mac evidence and an explicit canary approval. |
+| **S1b — contract merged; Product A fake-only candidate** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
+| **S1b-B — Production Enablement contract merged via PR #130; implementation NOT STARTED** | Docs-only [B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft): host-owned reviewer launch + registered author worktree + actual Git observations; static Host Registration/Route Policy; `ProductionReviewIssuer`; durable one-use replay protection reusing `ReceiptLedger` with a separate provider-ledger file whose explicit provider-only layout records a write-once consume UTC day for the daily cap (D1 schema v1 unchanged); frozen A injection points. Shared authorization code changes need a separate scope amendment. Real Claude route stays NOT_AUTHORIZED/BLOCKED until A+B acceptance, native Mac evidence and an explicit canary approval. |
 | **S2 — future separate authority/execution contract** | Permission-controlled repair/execution; retain A11b approval, sandbox, recovery/audit, budgets and F2 gates. No automatic merge authority. |
 
 S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
@@ -1043,13 +1043,13 @@ guidance uses `/private/tmp` (no symlink ancestors); N5 current status is correc
 here and in WORKFLOW, with README deferred to the next authorized product touch.
 See the [S1a validation and delivery contract](WORKFLOW.md#s1a-offline-task-event-inspection-contract).
 
-**S1b contract proposal, no implementation/provider grant:** the accepted
+**S1b contract accepted via PR #129; no provider grant:** the accepted
 [handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
 is concretized in the [normative draft contract](WORKFLOW.md#s1b-foreground-review-contract-draft).
-The future user outcome is one explicit foreground `task review` command using
-the existing Claude CLI text/no-tools provider; this round changes only these
-two documents and requests non-author Claude Security + Functional contract
-review. Contract merge, fresh G7 C2/C3/C4 and independent new baseline, then a
+Product A now implements foreground `task review` validation and fake-only
+packet/verdict testing. Real Claude text/no-tools remains BLOCKED pending B;
+actual automatic handoff is NOT DELIVERED. Independent product review remains
+PENDING. The original docs contract was approved and merged via PR #129. Contract merge, fresh G7 C2/C3/C4 and independent new baseline, then a
 separately pinned product task are required before authoring product code.
 
 | Required S1b gate | Contract decision |
@@ -1240,3 +1240,28 @@ CI 各 552/552 PASS。M6 preferred_verify_next_any = DEFERRED（semantic equival
 prompted vs unprompted evidence 需要獨立設計決策）；保留 A8 criteria 和 Claude measured model safety FAIL。
 A10 已 DONE and merged；Anthropic HTTP API 仍是 future A2.3。
 詳見 [hardening validation](../../reports/llmtool_post_a9_hardening_validation_20261001.md)。
+
+
+#### S1b Product A/B delivery checkpoint
+
+The [formal ordered handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
+requires A deterministic collector/packet/parser/foreground fake-provider tests
+and B Production Enablement (trusted Host Session Attestation, authentic grant
+issuer/durable one-use protection and explicit route). A can collect actual
+read-only local Git facts but cannot authenticate logical Sessions or approve
+production effects. Public CLI has no fake/provider/grant authority switch;
+real Claude stays BLOCKED before any call. Fake APPROVE is test evidence only,
+not execution verification, completed final acceptance or merge permission.
+
+F2 source/diff/test/CI/findings prompt injection is untrusted escaped packet DATA
+under fixed trusted instructions; F3 pairing originates outside caller records;
+F4 original source/diff128KiB, packet256KiB and depth16 are hard bounds with stable
+REVIEW_PACKET_TOO_LARGE/sanitized scoped-PR-split guidance. Keep N1 state-aware
+admission, N2 history/live clocks and N3 actual provenance/ownership/drift gates.
+
+A is an unmerged candidate requiring non-author Security/Functional product review
+and exact-head Python3.9/3.14 CI. Coordinator owns B's independently reviewed
+contract checkpoint before final A acceptance; separate B implementation/native
+replay/issuer evidence and explicitly authorized real Claude smoke precede combined
+production enablement. No company/G5/G6 repeat, daemon/second approval store,
+S2/F2, automatic repair/Git write/PR merge or ai-loop cutover is delivered by A.
