@@ -303,10 +303,13 @@ PR changing only ROADMAP.md/WORKFLOW.md, obtain non-author Claude CLI Security +
 Functional contract review and applicable exact-head CI, and have the authorized
 Coordinator/Integrator merge it. **Only after observed merge**, a safe C2/C3
 task boundary and the pinned implementation contract may product authoring start.
-This document prepares that contract; no command is implemented by this PR.
+The docs-only contract merged via [PR #127](https://github.com/davidcatcat/davidcattoolsproject/pull/127).
+The [accepted v1 product handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6123940052)
+resolved M1/L2 before coding; S1a offline inspection is now a product candidate,
+pending its own independent Security/Functional review and acceptance.
 
-S1a's planned user surface is
-`llmtool task inspect --contract <file> --events <file> --json`: read bounded
+S1a's user surface is
+`llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`: read bounded
 caller-supplied files, deterministically validate/replay Task Events, and emit a
 state snapshot plus a read-only handoff proposal. The input event file is retained
 by its caller; inspection does not append/write a ledger or authenticate it.
@@ -317,7 +320,8 @@ approval system unchanged.
 Required validation and evidence boundaries:
 
 - Pin expected task/run, contract version/digest, source SHA, epoch and role/root
-  bindings before replay; do not derive expectations solely from the event being
+  bindings in mandatory independent `--expect` before replay; reject expect/events
+  inode aliases. Keep TaskContract unchanged. Do not derive expectations from the event being
   checked. Bound file bytes, records, identities and evidence references. Reject
   unknown/duplicate JSON keys, malformed/truncated/oversize input and unsafe
   symlink/nonregular files without echoing raw input or secrets.
@@ -325,14 +329,18 @@ Required validation and evidence boundaries:
   branch, Task, Run, exact SHA and contract version/digest to those expectations.
   Wrong role/root/run/task/source/contract rejects; developer roots cannot claim
   `main` or a peer task branch. Developer identity cannot count as its own
-  independent reviewer. Provider/Profile/Role/Agent remain distinct concepts.
+  independent reviewer: reviewer agent ID **and** logical Session ID must each differ
+  from all pinned authors/developers. Unknown authorship is INCOMPLETE.
+  Provider/Profile/Role/Agent remain distinct concepts.
 - Require unique event IDs, the pinned epoch, strictly ordered sequence and
-  expected prior state. Reject duplicates, old epochs, replay/out-of-order events,
+  expected prior state; start at 1, then consecutive +1. Reject duplicates, old epochs, replay/out-of-order events,
   illegal state skips and post-terminal events. A changed SHA/contract/epoch
   invalidates old review/handoff evidence. Pin exact limits, sequence/resume rules,
   allowed transitions and stable exit/error taxonomy in the implementation
   contract before coding; no model may relax them.
 - Expiry validation uses an explicit observation-time input. Missing/ambiguous
+  UTC time is rejected; seconds-only `YYYY-MM-DDTHH:MM:SSZ`, no machine-clock default.
+  Independent heartbeat TTL is 1..86400 seconds. Missing/ambiguous
   time, expired heartbeat or clock rollback remains stale/unknown/incomplete;
   heartbeat loss does not prove a process died. No automatic resume, renewal,
   failure declaration, process kill or workspace cleanup. Missing identity or
@@ -463,8 +471,8 @@ and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
 A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
-AUTHORIZED. A11c.1 S1a is in contract preparation; product implementation and full
-production integration are NOT STARTED; A12 future optional. Historical
+AUTHORIZED. A11c.1 S1a is an offline product candidate with independent review/
+acceptance PENDING; full production integration is NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.

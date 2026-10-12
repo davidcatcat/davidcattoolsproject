@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); A11b.2.2.2 F1 private disposable-fixture-only Git ADD is DONE/merged via PR #84 (`46b17b13`) after independent Security/Functional QA. F2 real-repository mutation remains NOT AUTHORIZED.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); A11b.2.2.2 F1 private disposable-fixture-only Git ADD is DONE/merged via PR #84 (`46b17b13`) after independent Security/Functional QA. F2 real-repository mutation remains NOT AUTHORIZED.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c.1 S1a offline inspection is a product candidate pending independent review; full production Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -122,7 +122,7 @@ are never treated as the same claim.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and sealed F1 PR #84 DONE/merged** | F2 real user-repo mutation NOT AUTHORIZED; next separate Security-reviewed F2 and A11b.3 approval design |
-| A11c — Integration & Real-world Acceptance | **NOT STARTED** | Integrate route-by-task delegation, independent verification and real task acceptance; no blanket company-first policy |
+| A11c — Integration & Real-world Acceptance | **S1a offline candidate; independent review PENDING** | Contract accepted via PR #127; full production integration/real task acceptance NOT STARTED; no blanket company-first policy |
 
 ### Company-LLM routing evidence after Round 3
 
@@ -2303,7 +2303,9 @@ platforms fail closed. The pure contract API itself performs no filesystem acces
 A11b remains IN PROGRESS. Executor, real state preflight/TOCTOU protection, OS sandbox,
 trusted issuance/UI, replay ledger, durable audit-before-mutation, Git hardening,
 rollback, bounded repair and provider data-export policy remain deferred and require
-QG-S1 controls and separate design/review. A11c is NOT STARTED; A12 is future optional.
+QG-S1 controls and separate design/review. A11c.1 S1a offline inspection is implemented
+in the current candidate, pending independent review; full production integration
+and A11c.2 are NOT STARTED. A12 is future optional.
 Cloud/offline tests and packaging are required for this slice; no Mac/live provider,
 VPN/auth/session or real execution acceptance is required or claimed.
 See the [A11b.1 validation report](../../reports/llmtool_a11b1_action_approval_contract_validation_20261005.md).
@@ -2406,6 +2408,106 @@ recovery policy, real evidence producers and runtime enforcement still need an e
   - `detect_repeated_failure()` matches an exact `(action digest, failure code)` pair.
   - A provider that never reports usage blocks a second call while a token budget
     is set (`USAGE_UNKNOWN`). This is the chosen fail-closed default.
+
+## A11c.1 S1a — Offline task inspection (candidate; independent review pending)
+
+```sh
+llmtool task inspect --contract contract.json --expect expect.json \
+  --events events.jsonl --observed-at 2026-10-12T12:00:10Z --json
+```
+
+This command reads three explicit files and returns a reproducible reported-state
+snapshot and handoff **preview**. It does not observe live processes, run commands,
+call providers, launch agents, fetch/change Git, change PRs or write a journal.
+No config, credentials or stdin are discovered. Regular-file read access can update
+OS atime. S1b later integrates Claude CLI review; S2 execution/repair needs its own
+authority contract. A11b remains incomplete, F2 remains NOT AUTHORIZED, and interim
+ai-loop stays until independent canonical acceptance proves parity.
+
+The original contract is the unchanged `task_verification.TaskContract` JSON.
+Its existing canonical `digest` and `binding(run_id)` provide the expected task
+binding; the CLI never adds lifecycle fields to TaskContract. Select `--expect`
+independently of the event stream. A matching event cannot set its own expected
+identity, root, run, source or epoch. Even tampering **both** inputs is not approval:
+all bindings and supplied execution/review records remain caller claims.
+
+Version-1 expectation JSON has **exactly** these fields:
+
+| Field | Required value |
+| --- | --- |
+| `schema_version` | Integer 1 |
+| `task` | Existing TaskBinding: task_id, run_id (32 lowercase hex), contract_version, contract_digest; equals the original contract binding |
+| `source_sha`, `epoch` | Exact 40/64 lowercase hex SHA and positive integer epoch |
+| `initial_state`, `initial_sequence` | `QUEUED`, integer 0 |
+| `agents` | 1..32 AgentBinding records with DEVELOPER and REVIEWER participants |
+| `authored_by` | Up to 32 pinned DEVELOPER AgentBindings covering all assigned developers; null/empty or missing coverage is INCOMPLETE, never assumed independent |
+| `heartbeat_ttl_seconds` | Integer 1..86400; stale at observed time >= last timestamp + TTL, including terminal claims |
+| `check_digest`, `artifact_digests` | SHA-256 of supplied check metadata and sorted unique artifact SHA-256 list (up to 32) |
+
+AgentBinding fields are `agent_id`, `session_id`, `role` (DEVELOPER or REVIEWER),
+`root`, `common_dir` and `branch`. IDs are bounded literal identifiers; roots are
+literal absolute POSIX paths; common_dir ends in `/.git`. These paths are bindings,
+not permission or filesystem observations. Developer branch cannot be `main` or
+`automation/ai-loop`. A reviewer must have a distinct **agent ID AND Session ID**
+from every pinned author/developer, including historical authors. Provider brand,
+profile or OS UID is not consulted; a non-author instance of the same provider can
+be structurally independent. Actual review/authorship is still NOT_VERIFIED.
+
+Events are UTF-8 **JSONL**, one exact TaskEvent object per line, no blank records.
+Fields: `schema_version`, `event_id`, `sequence`, `epoch`, `task`, `source_sha`,
+`agent` (full AgentBinding), `kind` (STATE or RESUME), `state`, `prior_event_id`,
+`prior_state`, `timestamp`, `provenance_digest` (SHA-256 or null), `evidence`
+(existing EvidenceRecord array), `handoff` (HandoffRecord or null). Each binding
+equals the independent pins. Missing provenance digest yields INCOMPLETE; a
+non-null digest is only a claim, not authentic provenance. First event is sequence
+1, QUEUED, STATE, with null prior fields. Later IDs are unique, sequence is
+consecutive and prior fields must identify the immediately preceding event.
+
+Allowed transitions: QUEUED → STARTING → RUNNING → WAITING_REVIEW → COMPLETED;
+STARTING/RUNNING/WAITING_REVIEW may instead enter BLOCKED or FAILED.
+FAILED/COMPLETED are terminal. BLOCKED resumes only with explicit next-sequence
+RESUME → STARTING and a strictly later timestamp under fresh caller observation.
+No automatic resume or health inference. Timestamps and `--observed-at` use only
+`YYYY-MM-DDTHH:MM:SSZ`; no offset/fraction/default machine clock. Future timestamps
+and rollback reject. Changed source/contract/epoch needs a separately pinned replay.
+
+HandoffRecord fields: `task`, `source_sha`, `epoch`, `from_agent`, `to_agent`,
+`check_digest`, `artifact_digests`, `prior_event_id`, `outstanding_criteria`.
+On WAITING_REVIEW it binds the sending developer, assigned non-author reviewer,
+preceding RUNNING event and exact pinned digests. Outstanding criteria must equal
+the supplied-evidence verifier's unmet criteria. COMPLETED must come from the
+target reviewer; REVIEW evidence is accepted only from that bound reviewer.
+Evidence binds task/source; command digest and artifact references match the pins;
+IDs cannot be counted twice. MODEL_CLAIM satisfies no criterion.
+
+| Result / exit | Meaning |
+| --- | --- |
+| `SUCCESS` / 0 | Structure/replay and supplied required evidence metadata meet the pins; **not actual task success** |
+| `INCOMPLETE` or `STALE` / 1 | Missing/failed/partial supplied required evidence, unknown authorship/provenance, missing handoff, empty replay or expired heartbeat |
+| `INVALID` / 2 | Input/schema/binding/transition/clock failure; sanitized fixed reason code. Invalid CLI use also exits 2. |
+
+Output separates `reported_state`, `structural_validation`, `evidence_structure`
+and missing-evidence findings. `runtime_evidence_status` is **always NOT_VERIFIED**,
+`authorized` is **always false**; `runtime_missing_evidence` names the still-missing
+actual provenance/independent review attestation. Even a reported COMPLETED and
+structural evidence PASS never certify actual tests, review, VERIFIED or DONE.
+Preview has `triggered=false` and omits root/Session paths; hashes and ledger state
+grant no actions. Read-only inspection does not author an authenticated ledger.
+
+Inputs: contract retains existing 64 KiB/schema bounds; auxiliary files <=1 MiB,
+events <=128, raw/canonical event <=16 KiB, evidence <=32/event and <=128 total,
+agents/authors <=32, output <=1 MiB. Strict UTF-8/JSON, no coercions (including
+bool-as-int), duplicate/unknown/missing keys, unsafe controls or credential text.
+Input paths follow the existing literal POSIX spelling rules, reject traversal,
+symlink ancestors/leaf, devices/FIFOs, multi-link or unstable regular files. Held
+directory FDs, identity checks and bounded repeated-content reads detect drift;
+`--expect`/`--events` inode aliases reject before event parsing. Unsupported
+platforms fail closed. Same-UID checks are cooperative, not an OS sandbox.
+
+See [Issue #120's accepted v1 product contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6123940052)
+and the [workflow gates](WORKFLOW.md#s1a-offline-task-event-inspection-contract).
+Company Round 1–3 evidence/privacy/accounting rules remain unchanged; no provider
+or benchmark call and no new savings claim is part of S1a.
 
 ## A11b.4 P1 — Offline Patch Safety Preflight (no effects)
 

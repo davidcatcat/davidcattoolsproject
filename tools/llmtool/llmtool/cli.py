@@ -26,6 +26,7 @@ from .orchestration_cli import add_orchestration_parser, run_orchestration
 from .retrieval_cli import add_retrieval_parser, run_retrieval
 from .diagnostics_cli import add_diagnostics_parser, run_diagnostics
 from .action_contract_cli import add_action_contract_parsers, run_action_contract
+from .task_lifecycle_cli import add_task_parser, run_task_inspect
 
 
 def _validation_packet(filename):
@@ -99,6 +100,7 @@ def parser_for_cli():
     add_retrieval_parser(sub)
     add_diagnostics_parser(sub)
     add_action_contract_parsers(sub)
+    add_task_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -296,6 +298,8 @@ def _run_test_excerpts(args):
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
+        if args.command == 'task':
+            return run_task_inspect(args)
         if args.command == 'test-excerpts':
             return _run_test_excerpts(args)
         if args.command in ('action', 'approval'):
