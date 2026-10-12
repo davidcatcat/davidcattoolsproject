@@ -693,5 +693,102 @@ class AdmissionAfterLockTests(LedgerCase):
             db.close()
 
 
+class ProviderLedgerTests(unittest.TestCase):
+    """Provider mechanics with synthetic issuer; not Host attestation proof."""
+    def setUp(self):
+        from test_review_authority import Harness
+        from llmtool.review_authority import ProductionReviewIssuer
+        self.h=Harness(cap=1);self.addCleanup(self.h.close)
+        class MechanicsIssuer(ProductionReviewIssuer):
+            def matches(inner,call,observed): return observed.attested
+        self.issuer=MechanicsIssuer(self.h.pin,self.h.clock,self.h.observer,self.h.context)
+        self.base,_=self.h.binding()
+
+    def issue(self,tag='1',ttl=120):
+        call=replace(self.base,packet_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+        binding=p.ProviderReviewBinding(call)
+        observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
+        decision=p.decide_provider_review(binding,issuer=self.issuer,observed=observed)
+        self.assertIs(decision.decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        return self.h.ledger.issue_provider(decision,ttl_seconds=ttl),observed
+
+    def consume(self,receipt,observed):
+        return self.h.ledger.consume_provider(receipt,issuer=self.issuer,observed=observed)
+
+    def test_distinct_layout_cross_open_and_creation_nonce(self):
+        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(self.h.ledger_path,clock=self.h.clock.utc)
+        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(self.h.ledger_path,clock=self.h.clock.utc,
+            kind='PROVIDER_REVIEW',creation_nonce='0'*64)
+        path=self.h.hostdir/'d1.sqlite3'
+        with l.ReceiptLedger.create(path,clock=self.h.clock.utc):pass
+        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(path,clock=self.h.clock.utc,
+            kind='PROVIDER_REVIEW',creation_nonce=self.h.ledger.creation_nonce)
+
+    def test_same_object_new_redeem_run_never_reissued(self):
+        receipt,observed=self.issue()
+        call=replace(receipt.binding.call,redeem_run_id='e'*32,reviewer_launch_nonce='d'*32)
+        b=p.ProviderReviewBinding(call);o=p.ProviderObservedState(b.digest,call.source_sha,call.observation_digest,True)
+        decision=p.decide_provider_review(b,issuer=self.issuer,observed=o)
+        with self.assertRaises(l.LedgerError):self.h.ledger.issue_provider(decision,ttl_seconds=120)
+        self.assertTrue(self.consume(receipt,observed))
+        with self.assertRaises(l.LedgerError):self.consume(receipt,observed)
+
+    def test_atomic_cap_keeps_unconsumed_row_issued(self):
+        first,o1=self.issue('1');second,o2=self.issue('2')
+        self.assertTrue(self.consume(first,o1));self.assertFalse(self.consume(second,o2))
+        self.assertEqual(self.h.ledger.status(second.nonce),'ISSUED')
+        self.assertTrue(self.h.ledger.finalize_provider(first,'EFFECT_UNKNOWN'))
+        self.assertFalse(self.consume(second,o2))
+
+    def test_day_is_consume_day_not_issue_or_finalize_day(self):
+        self.h.fake.utc='2026-10-13T23:59:59Z'
+        receipt,o=self.issue('1')
+        self.h.fake.utc='2026-10-14T00:00:00Z'
+        self.assertTrue(self.consume(receipt,o))
+        row=self.h.ledger._db.execute('SELECT issued_at,consumed_at,consumed_day FROM receipts').fetchone()
+        self.assertNotEqual(row[0]//86400,row[2]);self.assertEqual(row[1]//86400,row[2])
+        self.h.fake.utc='2026-10-14T00:00:01Z'
+        self.h.ledger.finalize_provider(receipt,'EFFECT_DONE')
+        self.assertEqual(row,self.h.ledger._db.execute('SELECT issued_at,consumed_at,consumed_day FROM receipts').fetchone())
+
+    def test_recovery_unknown_remains_charged_and_write_once(self):
+        receipt,o=self.issue();self.assertTrue(self.consume(receipt,o))
+        charge=self.h.ledger._db.execute('SELECT consumed_at,consumed_day FROM receipts').fetchone()
+        self.assertEqual(self.h.ledger.recover(),1)
+        self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+        self.assertEqual(charge,self.h.ledger._db.execute('SELECT consumed_at,consumed_day FROM receipts').fetchone())
+        second,o2=self.issue('2');self.assertFalse(self.consume(second,o2))
+        self.assertFalse(self.h.ledger.finalize_provider(receipt,'EFFECT_DONE'))
+
+    def test_clock_rollback_denied_before_consume(self):
+        receipt,o=self.issue();self.h.fake.utc='2026-10-13T00:00:09Z'
+        with self.assertRaises(l.LedgerError) as caught:self.consume(receipt,o)
+        self.assertIs(caught.exception.code,l.LedgerCode.CLOCK_ROLLBACK)
+        self.h.fake.utc='2026-10-13T00:00:10Z'
+        self.assertEqual(self.h.ledger.status(receipt.nonce),'ISSUED')
+
+    def test_expiry_is_durable_zero_effect(self):
+        receipt,o=self.issue(ttl=1);self.h.fake.utc='2026-10-13T00:00:11Z'
+        self.assertFalse(self.consume(receipt,o));self.assertEqual(self.h.ledger.status(receipt.nonce),'EXPIRED')
+
+    def test_corrupt_consume_day_rejected(self):
+        receipt,o=self.issue();self.consume(receipt,o)
+        db=sqlite3.connect(self.h.ledger_path)
+        db.execute('PRAGMA ignore_check_constraints=ON');db.execute('UPDATE receipts SET consumed_day=0');db.commit();db.close()
+        with self.assertRaises(l.LedgerError) as caught:self.h.ledger.status(receipt.nonce)
+        self.assertIs(caught.exception.code,l.LedgerCode.LEDGER_CORRUPT)
+
+    def test_revocation_at_consume_denies_cached_admission(self):
+        receipt,o=self.issue()
+        self.h.hostdata['route_policies'][0]['revoked']=True;self.h.write_host()
+        self.assertFalse(self.consume(receipt,o));self.assertEqual(self.h.ledger.status(receipt.nonce),'DENIED')
+
+    def test_wrong_binding_burns_without_consuming_or_charging(self):
+        receipt,o=self.issue()
+        tampered=replace(receipt,binding=p.ProviderReviewBinding(replace(receipt.binding.call,packet_digest='9'*64)))
+        self.assertFalse(self.consume(tampered,o));self.assertEqual(self.h.ledger.status(receipt.nonce),'DENIED')
+        self.assertEqual(self.h.ledger._db.execute('SELECT consumed_at,consumed_day FROM receipts').fetchone(),(None,None))
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -9,8 +9,8 @@ from .task_lifecycle import parse_expectations, parse_events, inspect_task, Stat
 from .task_lifecycle_cli import read_task_file
 from .task_verification import parse_task_contract
 from .task_review import (load_json, reject, envelope, VERDICT_LIMIT,
-                          UnavailableReviewAuthority, run_review)
-from .task_review import review_authority_factory  # B's only future factory binding.
+                          UnavailableReviewAuthority, HostServices, run_review)
+from .review_authority import review_authority_factory
 from .task_review_collector import collect_local_facts
 
 
@@ -60,6 +60,8 @@ def run_task_review(args):
                                    'PRODUCTION_GRANT_REPLAY','APPROVED_PROVIDER_ROUTE'])
             else:
                 # Only accepted B host code may supply these services, never CLI input.
+                if type(services) is not HostServices:
+                    reject('REVIEW_HOST_SERVICES_INVALID')
                 result = run_review(ready,final,expect,events,services)
         exit_code = 0 if result['status'] == 'APPROVE' else 1
     except (LLMToolError,OSError,ValueError,TypeError,UnicodeError,RecursionError) as exc:
