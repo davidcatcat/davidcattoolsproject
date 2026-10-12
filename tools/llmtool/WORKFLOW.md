@@ -248,14 +248,19 @@ or make token savings a security/QA acceptance substitute.
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
 Local Mac canonical root remains `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-Ordinary Codex/Claude development in their two fixed owned worktrees is
-DISABLED until a separately reviewed **activation-status PR** is merged.
-Before that, a named Mac executor may use ONLY the independently reviewed and
-explicitly authorized, time/task/path-limited #115 pilot scope to provision and
-validate those fixed roots; see the
-[safe-git exception](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-Do not create or use worktrees merely because this policy document is merged.
-Required F1 containment/native canonical acceptance still uses canonical.
+Ordinary Codex/Claude development in **exactly the two existing, fixed,
+separately owned worktrees** becomes ACTIVE **only after** the independently
+reviewed G7 activation-status PR is merged to `main`; a draft/OPEN copy
+remains DISABLED. The [safe-git exception](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
+is the single normative policy. Before every task, require independently
+verified owner/root/session/branch/child state, clean worktree, bounded
+no-prune fetch, a fresh unique owned branch from verified `origin/main`,
+then own-root venv/import provenance and pinned preflight/baseline; see
+safe-git's activated task-turnover procedure. Retain the single-canonical
+CLAIM/RELEASE fallback on any uncertain or crashed state. Required native F1
+containment/acceptance stays canonical-only. No third checkout, F2
+repository mutation, historical process cleanup, CI/Runner or ai-loop
+control activation is authorized by G7.
 In Cloud discover the task-configured checkout; do not create a clone/worktree to
 repair a missing repository. Verify the repository is `davidcatcat/davidcattoolsproject`.
 
