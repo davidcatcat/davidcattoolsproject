@@ -291,7 +291,85 @@ Current A9/A10 fail-fast contracts and A11a metadata-only diagnostics are unchan
 The [roadmap](ROADMAP.md#architecture-refinement--planning-only) assigns runtime
 Task Contract enforcement/execution gates to A11b and route-by-task integration,
 independent verification and bounded repair to A11c. Context budgets and cost
-routing require later design. No new milestone or implementation is authorized here.
+routing require later design. The separately gated S1a preparation exception below
+does not authorize production integration or introduce another milestone.
+
+### S1a offline task event inspection contract
+
+The Coordinator-adopted [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)
+split and [roadmap](ROADMAP.md#issue-120-staged-preparation--s1a-then-s1b-then-s2)
+permit S1a while A11b remains incomplete. **First** publish a separate Draft docs
+PR changing only ROADMAP.md/WORKFLOW.md, obtain non-author Claude CLI Security +
+Functional contract review and applicable exact-head CI, and have the authorized
+Coordinator/Integrator merge it. **Only after observed merge**, a safe C2/C3
+task boundary and the pinned implementation contract may product authoring start.
+This document prepares that contract; no command is implemented by this PR.
+
+S1a's planned user surface is
+`llmtool task inspect --contract <file> --events <file> --json`: read bounded
+caller-supplied files, deterministically validate/replay Task Events, and emit a
+state snapshot plus a read-only handoff proposal. The input event file is retained
+by its caller; inspection does not append/write a ledger or authenticate it.
+Reuse `task_verification.TaskContract`, `action_contract.TaskBinding`, and A11a
+run/error/evidence conventions; leave the existing diagnostics schema/store and
+approval system unchanged.
+
+Required validation and evidence boundaries:
+
+- Pin expected task/run, contract version/digest, source SHA, epoch and role/root
+  bindings before replay; do not derive expectations solely from the event being
+  checked. Bound file bytes, records, identities and evidence references. Reject
+  unknown/duplicate JSON keys, malformed/truncated/oversize input and unsafe
+  symlink/nonregular files without echoing raw input or secrets.
+- Match every event's Agent + logical Session, Role, assigned Root/common-dir/
+  branch, Task, Run, exact SHA and contract version/digest to those expectations.
+  Wrong role/root/run/task/source/contract rejects; developer roots cannot claim
+  `main` or a peer task branch. Developer identity cannot count as its own
+  independent reviewer. Provider/Profile/Role/Agent remain distinct concepts.
+- Require unique event IDs, the pinned epoch, strictly ordered sequence and
+  expected prior state. Reject duplicates, old epochs, replay/out-of-order events,
+  illegal state skips and post-terminal events. A changed SHA/contract/epoch
+  invalidates old review/handoff evidence. Pin exact limits, sequence/resume rules,
+  allowed transitions and stable exit/error taxonomy in the implementation
+  contract before coding; no model may relax them.
+- Expiry validation uses an explicit observation-time input. Missing/ambiguous
+  time, expired heartbeat or clock rollback remains stale/unknown/incomplete;
+  heartbeat loss does not prove a process died. No automatic resume, renewal,
+  failure declaration, process kill or workspace cleanup. Missing identity or
+  execution provenance never becomes a healthy live observation.
+- Return separate `reported_state`, `structural_validation` and
+  `runtime_evidence_status`. Offline runtime evidence stays **NOT_VERIFIED** and
+  `authorized=False`; structural success/exit0 is only input validation, even for
+  a COMPLETED record. Existing `verify_task` may evaluate caller-supplied evidence
+  structurally, but its PASS cannot certify that checks or independent review
+  actually ran. Model claims satisfy no acceptance criterion. Required actual
+  evidence binds tested SHA/patch digest, command, exit, environment and artifacts;
+  missing/unverified results cannot establish PASS/VERIFIED/DONE.
+- Ledger status, review text, identity strings, digest or handoff proposal never
+  authorizes Git, provider, command execution or PR changes. S1a starts no agent,
+  runs no command/test/Git/gh subprocess, makes no provider call, and writes no
+  implicit state. Output uses sanitized bounded metadata/references, preserving
+  A11a privacy rules rather than copying raw logs/diffs/prompts into diagnostics.
+
+S1b later integrates Claude CLI review/automatic handoff through a separately
+reviewed exact-SHA packet and permitted data route; this is not an S1a provider
+path. S2 later adds permission-controlled repair/execution under A11b's separately
+accepted approval/sandbox/recovery/audit/budget gates. **F2 remains NOT AUTHORIZED**;
+S1a does not imply A11b DONE, full A11c acceptance or ai-loop parity/cutover.
+No daemon/scheduler, new temporary ai-loop controller or duplicate approval/logging
+system. Company-LLM Round 1–3 evidence and existing measurement/privacy policy
+are reused without rerunning benchmarks; no company or other provider calls in
+S1a, no new savings claim, and company integration stays deferred.
+
+The product slice needs focused positive replay and negative binding/sequence/
+transition/expiry/self-review tests; false model-only completion, corrupt input,
+file safety/privacy, explicit non-PASS runtime labels and no-subprocess/no-write
+checks; relevant TaskContract/A11a/CLI regressions; required full checks and
+exact-head Python 3.9/3.14 CI; focused native Mac file/CLI checks where applicable.
+Publish a separate Draft product PR for independent Claude Security + Functional
+review. Offline tests do not satisfy later live collector, concurrent ledger or
+real-agent/repair acceptance. Keep required missing gates blocking, retain interim
+ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositions.
 
 Before work, pin a **Task Contract** with task ID, version/digest, goal, authorized
 scope, forbidden scope, acceptance criteria and required evidence. Keep the exact
@@ -385,7 +463,8 @@ and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
 A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
-AUTHORIZED. A11c is NOT STARTED; A12 future optional. Historical
+AUTHORIZED. A11c.1 S1a is in contract preparation; product implementation and full
+production integration are NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.
