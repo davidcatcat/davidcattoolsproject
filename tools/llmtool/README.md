@@ -192,10 +192,15 @@ Git repository. Verify repository identity, branch, HEAD and working-tree state.
 This Cloud exception does not authorize worktrees, independent/milestone clones,
 sibling/nested repositories, or alternate local Mac checkouts.
 Separately, [safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-records the owner-approved exception for two fixed Codex/Claude developer
-worktrees. General use is currently **DISABLED**: only a specifically authorized
-Issue #115 pre-activation pilot may use them, and formal activation requires a
-later independently reviewed and merged activation-status PR.
+records the owner-approved exception for exactly two fixed Codex/Claude
+developer worktrees. General use becomes **ACTIVE only after** the
+independently reviewed G7 activation-status PR has merged into `main`;
+while this record is in an OPEN/Draft PR, general two-root use stays DISABLED.
+Each developer must use its own verified fixed root, unique task branch and
+dedicated venv; shared Git ref integration and native F1 acceptance remain
+canonical-only. Any uncertain or crashed state means STOP/preserve and fall
+back to single canonical CLAIM/RELEASE. No F2 mutation, additional checkouts,
+automated historical process cleanup or CI/Runner/ai-loop control is granted.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
