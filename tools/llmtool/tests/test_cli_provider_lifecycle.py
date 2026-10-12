@@ -1,4 +1,5 @@
 """DG-1: real CLI entry point, synthetic process trees, deterministic readiness."""
+import errno
 import json
 import os
 from pathlib import Path
@@ -104,6 +105,74 @@ def _bootstrap(function):
             'namespace[%r](*sys.argv[1:])') % (str(Path(__file__).resolve()), function)
 
 
+def _zombie_only_group(pgid, known_pids, pinned_pid=None):
+    """Read complete membership, not just the previously captured descendants."""
+    try:
+        result = subprocess.run(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
+                                capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    if (type(result.returncode) is not int or result.returncode != 0
+            or result.stderr != '' or not isinstance(result.stdout, str)):
+        return False
+    rows = {}
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if (len(fields) != 3
+                or any(not value.isascii() or not value.isdecimal() for value in fields[:2])):
+            return False
+        try:
+            pid, group = map(int, fields[:2])
+        except ValueError:
+            return False
+        if pid in rows:
+            return False
+        rows[pid] = (group, fields[2])
+    members = {pid: state for pid, (group, state) in rows.items() if group == pgid}
+    if (not members or not set(members) <= known_pids
+            or pinned_pid is not None and pinned_pid not in members
+            or any(rows[pid][0] != pgid for pid in known_pids if pid in rows)):
+        return False
+    # Z is the primary state; accept documented BSD/Linux ancillary flags only.
+    return all(state.startswith('Z') and all(flag in '<Nsl+AEVWLX' for flag in state[1:])
+               for state in members.values())
+
+
+def _kill_checked_group(pgid, *, checked_pgid, known_pids, pin=None):
+    if (type(pgid) is not int or pgid <= 1 or pgid != checked_pgid
+            or not known_pids or any(type(pid) is not int or pid <= 1 for pid in known_pids)
+            or len(set(known_pids)) != len(known_pids) or pgid not in known_pids
+            or pin is not None and (not isinstance(pin, subprocess.Popen)
+                                    or pin.pid != pgid or pin.returncode is not None)):
+        raise AssertionError('controlled group ownership unconfirmed')
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError as error:
+        # Darwin can deny even SIGKILL when every member is already a zombie.
+        # EPERM is not evidence by itself; preserve it on any ambiguous proof.
+        if (sys.platform != 'darwin' or error.errno != errno.EPERM
+                or not _zombie_only_group(pgid, set(known_pids),
+                                          pin.pid if pin is not None else None)):
+            raise
+
+
+def _teardown_runner_group(runner, verified, pids):
+    if (not isinstance(runner, subprocess.Popen) or runner.returncode is not None
+            or type(verified) is not bool):
+        raise AssertionError('watchdog runner ownership unconfirmed')
+    if verified:
+        _kill_checked_group(runner.pid, checked_pgid=runner.pid,
+                            known_pids=[runner.pid, *pids], pin=runner)
+    else:
+        # Startup release has not happened: only this owned direct child exists.
+        try:
+            runner.kill()
+        except ProcessLookupError:
+            pass
+
+
 def _interrupted_runner(directory, fault):
     """Actual unittest runner; its death must bypass its registered cleanup."""
     directory = Path(directory)
@@ -116,11 +185,12 @@ def _interrupted_runner(directory, fault):
     # watchdog dies during Popen/adoption, pipe EOF exits BEFORE any fork.
     if sys.stdin.buffer.read(1) != b'R':
         raise AssertionError('runner startup release missing')
-    source = FAKE.format(python=sys.executable, mode='waiting', lifetime=3,
+    # The legacy no-alarm label disables the short proof guard, never the
+    # independent lifetime safety net if the watchdog itself is lost.
+    source = FAKE.format(python=sys.executable, mode='waiting',
+        lifetime=20 if fault == 'no-alarm' else 3,
         starts=str(directory / 'starts'), capture=str(directory / 'capture.json'),
         release=str(directory / 'release'))
-    if fault == 'no-alarm':
-        source = source.replace('signal.alarm(lifetime)', 'signal.alarm(0)')
     executable = directory / 'stub.py'
     executable.write_text(source)
 
@@ -155,6 +225,7 @@ def _interruption_watchdog(directory, fault):
     """External owner: deadline and parent-pipe EOF both force pinned teardown."""
     directory = Path(directory)
     runner = None
+    released_at = None
     verified = decided = False
     report = {'natural_exit': False, 'remaining': None, 'fault': fault}
 
@@ -164,15 +235,7 @@ def _interruption_watchdog(directory, fault):
             # No poll/wait before this decision, no custom reaper. An actual
             # unreaped direct Popen child pins PID=PGID=SID; never signal after
             # wait. Captured grandchild numbers are observations, not authority.
-            if runner.returncode is not None:
-                raise AssertionError('watchdog runner ownership unconfirmed')
-            try:
-                if verified:
-                    os.killpg(runner.pid, signal.SIGKILL)
-                else:
-                    runner.kill()  # Still gated: no descendants can exist yet.
-            except ProcessLookupError:
-                pass
+            _teardown_runner_group(runner, verified, report.get('pids', []))
             decided = True
 
     def expire(number, frame):
@@ -197,6 +260,7 @@ def _interruption_watchdog(directory, fault):
             raise AssertionError('watchdog session mismatch')
         if fault == 'before-release':
             raise AssertionError('fixed startup-release failure')
+        released_at = time.monotonic()
         runner.stdin.write(b'R')
         runner.stdin.flush()
         runner.stdin.close()
@@ -243,6 +307,7 @@ def _interruption_watchdog(directory, fault):
                 time.sleep(.02)
             report['remaining'] = CLIProviderLifecycleTests._running(report['pids'])
         report['cleanup_ran'] = (directory / 'cleanup-ran').exists()
+        report['after_release'] = time.monotonic()-released_at if released_at is not None else None
         signal.alarm(0)
     print(json.dumps(report), flush=True)
     raise SystemExit(0 if report['natural_exit'] and report['remaining'] == {} else 1)
@@ -311,10 +376,8 @@ class CLIProviderLifecycleTests(unittest.TestCase):
             if self.evidence:
                 alive = self._running(self.evidence['pids'])
                 if any(row['pgid'] == self.evidence['pgid'] for row in alive.values()):
-                    try:
-                        os.killpg(self.evidence['pgid'], signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    _kill_checked_group(self.evidence['pgid'],
+                        checked_pgid=self.evidence['pids'][0], known_pids=self.evidence['pids'])
         except BaseException as error:
             secondary.append(error)
         finally:
@@ -653,6 +716,116 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             fixture.process.stderr.close.assert_called_once()
             remove.assert_called_once()
 
+    def permission_cleanup(self, path):
+        # Synthetic identities stay exclusively inside mocked operations and
+        # never reach this outer testcase's registered real fixture cleanup.
+        if path == 'watchdog':
+            runner = Mock(spec=subprocess.Popen, pid=123, returncode=None)
+            _teardown_runner_group(runner, True, [124, 125])
+        else:
+            fixture = CLIProviderLifecycleTests('runTest')
+            fixture.capture = self.directory / 'permission-mock.json'
+            fixture.process = None
+            fixture.evidence = {'pids': [123, 124, 125], 'pgid': 123, 'cwd': '/mock-runtime'}
+            with patch.object(fixture, '_running', return_value={123: {'pgid': 123}}), \
+                    patch.object(shutil, 'rmtree'):
+                fixture.cleanup_owned_fixture()
+
+    def test_darwin_permission_accepts_only_known_zombie_group(self):
+        for path in ('watchdog', 'fixture'):
+            with self.subTest(path=path):
+                denied = PermissionError(errno.EPERM, 'synthetic group denied')
+                inventory = Mock(returncode=0, stderr='', stdout='123 123 Zs\n124 123 Z+\n77 88 S\n')
+                with patch.object(sys, 'platform', 'darwin'), \
+                        patch.object(os, 'killpg', side_effect=denied) as kill, \
+                        patch.object(subprocess, 'run', return_value=inventory) as probe:
+                    self.permission_cleanup(path)
+                    kill.assert_called_once_with(123, signal.SIGKILL)
+                    probe.assert_called_once_with(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
+                                                  capture_output=True, text=True, timeout=5)
+
+    def test_darwin_permission_rejects_live_unknown_and_unverifiable_groups(self):
+        cases = {
+            'live': Mock(returncode=0, stderr='', stdout='123 123 Z\n124 123 S\n'),
+            'empty': Mock(returncode=0, stderr='', stdout='77 88 S\n'),
+            'unknown-member': Mock(returncode=0, stderr='', stdout='123 123 Z\n999 123 Z\n'),
+            'unknown-state': Mock(returncode=0, stderr='', stdout='123 123 ?\n'),
+            'unknown-flags': Mock(returncode=0, stderr='', stdout='123 123 Z?\n'),
+            'malformed': Mock(returncode=0, stderr='', stdout='123 123\n'),
+            'malformed-result': Mock(returncode=0, stderr=None, stdout='123 123 Z\n'),
+            'long-pid': Mock(returncode=0, stderr='', stdout='9'*5000+' 123 Z\n'),
+            'duplicate': Mock(returncode=0, stderr='', stdout='123 123 Z\n123 123 Z\n'),
+            'changed-group': Mock(returncode=0, stderr='', stdout='123 456 Z\n124 123 Z\n'),
+            'ps-failed': Mock(returncode=1, stderr='', stdout='123 123 Z\n'),
+            'ps-warning': Mock(returncode=0, stderr='synthetic warning', stdout='123 123 Z\n'),
+            'timeout': subprocess.TimeoutExpired('/bin/ps', 5),
+            'unavailable': OSError('synthetic unavailable'),
+        }
+        for path in ('watchdog', 'fixture'):
+            for name, inventory in cases.items():
+                with self.subTest(path=path, inventory=name):
+                    denied = PermissionError(errno.EPERM, 'synthetic group denied')
+                    with patch.object(sys, 'platform', 'darwin'), \
+                            patch.object(os, 'killpg', side_effect=denied), \
+                            patch.object(subprocess, 'run') as probe:
+                        if isinstance(inventory, BaseException):
+                            probe.side_effect = inventory
+                        else:
+                            probe.return_value = inventory
+                        with self.assertRaises(PermissionError) as raised:
+                            self.permission_cleanup(path)
+                        self.assertIs(raised.exception, denied)
+
+    def test_permission_requires_darwin_eperm_and_controlled_identity(self):
+        for path in ('watchdog', 'fixture'):
+            for platform, number in (('linux', errno.EPERM), ('darwin', errno.EACCES)):
+                with self.subTest(path=path, platform=platform, number=number), \
+                        patch.object(sys, 'platform', platform), \
+                        patch.object(os, 'killpg', side_effect=PermissionError(number, 'synthetic')), \
+                        patch.object(subprocess, 'run') as probe:
+                    with self.assertRaises(PermissionError):
+                        self.permission_cleanup(path)
+                    probe.assert_not_called()
+        with patch.object(os, 'killpg') as kill, patch.object(subprocess, 'run') as probe:
+            with self.assertRaises(AssertionError):
+                _kill_checked_group(456, checked_pgid=123, known_pids=[123, 124])
+            for runner in (None, Mock(spec=subprocess.Popen, pid=123, returncode=0)):
+                with self.assertRaises(AssertionError):
+                    _teardown_runner_group(runner, True, [124])
+            kill.assert_not_called()
+            probe.assert_not_called()
+        # Even a correct-looking group cannot replace the missing owned anchor.
+        runner = Mock(spec=subprocess.Popen, pid=123, returncode=None)
+        with patch.object(sys, 'platform', 'darwin'), \
+                patch.object(os, 'killpg', side_effect=PermissionError(errno.EPERM, 'synthetic')), \
+                patch.object(subprocess, 'run', return_value=Mock(
+                    returncode=0, stderr='', stdout='124 123 Z\n')):
+            with self.assertRaises(PermissionError):
+                _teardown_runner_group(runner, True, [124])
+
+    def test_denied_group_cleanup_preserves_original_drain_failure(self):
+        fixture = CLIProviderLifecycleTests('runTest')
+        fixture.capture = self.directory / 'permission-mock.json'
+        fixture.evidence = {'pids': [123, 124], 'pgid': 123, 'cwd': '/mock-runtime'}
+        fixture.process = Mock()
+        fixture.process.poll.return_value = None
+        failure = subprocess.TimeoutExpired('synthetic wrapper', 5)
+        fixture.process.communicate.side_effect = failure
+        with patch.object(fixture, '_running', return_value={123: {'pgid': 123}}), \
+                patch.object(sys, 'platform', 'darwin'), \
+                patch.object(os, 'killpg', side_effect=PermissionError(errno.EPERM, 'synthetic')), \
+                patch.object(subprocess, 'run', return_value=Mock(
+                    returncode=0, stderr='', stdout='123 123 Z\n124 123 S\n')), \
+                patch.object(shutil, 'rmtree') as remove:
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                fixture.cleanup_owned_fixture()
+            self.assertIs(raised.exception, failure)
+            self.assertEqual(failure.fixture_cleanup_errors, ('PermissionError',))
+            fixture.process.wait.assert_called_once_with(timeout=5)
+            fixture.process.stdout.close.assert_called_once()
+            fixture.process.stderr.close.assert_called_once()
+            remove.assert_called_once()
+
     def test_shared_fake_formatter_keeps_default_and_explicit_lifetime(self):
         arguments = {'python': sys.executable, 'mode': 'waiting', 'starts': str(self.starts),
                      'capture': str(self.capture), 'release': str(self.directory / 'release')}
@@ -723,6 +896,10 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         self.assertEqual(watchdog.returncode, 0 if fault == 'ordinary' else 1)
         if fault != 'ordinary':
             self.assertEqual(report['error'], 'AssertionError')
+            self.assertLess(report['after_release'], 20)
+            source = (directory / 'stub.py').read_text()
+            self.assertIn('lifetime = 20\n', source)
+            self.assertNotIn('signal.alarm(0)', source)
         print('R122 runner interruption: ' + json.dumps({'fault': fault,
             'seconds': round(time.monotonic()-started, 3), 'remaining': report['remaining']}))
 
