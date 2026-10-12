@@ -16,20 +16,43 @@ This is a narrowly scoped exception to the former canonical-only prohibition,
 **not** general permission to create project checkouts, clones, Git archive copies
 or arbitrary temporary worktrees.
 
-**Operational mode: DISABLED for general parallel development.** Owner approval
-and a merged documentation PR are NOT permission to provision or use worktrees.
-A pre-activation **limited Mac pilot** is a separate exception, narrowly gated
-below; it does not change this general DISABLED mode. Until such a pilot is
-independently authorized, use the original single canonical writer and
-the claim/release handoff below.
+**Operational mode: ACTIVE only when the independently reviewed activation-status
+documentation PR containing this record has merged into `main`.** While this
+record exists only on a PR branch, the published `main` policy remains
+**DISABLED**. Once merged, ordinary development is permitted to exactly one
+trusted Codex CLI in its fixed Codex worktree and one trusted Claude CLI in its
+fixed Claude worktree, each with a single owner/writer and an independently
+verified clean task boundary. The canonical integrator/native-acceptance root
+remains separate; activation is NOT permission for any additional project root.
 
-**Formal activation record:** After the #115 pilot passes all required Mac,
-independent-review and canonical-preservation gates, a separately reviewed and
-merged **activation-status documentation PR** must change the operational mode
-here to ACTIVE and cite the exact #115 native evidence, approved roots and
-policy/source SHAs. Until that PR merges, normal two-agent development remains
-DISABLED. Keep this section's heading/anchor stable when changing the status,
-so the existing policy links remain valid.
+**G7 activation evidence and immutable source bindings:**
+- Requirements-owner [narrow two-root approval in #110](https://github.com/davidcatcat/davidcattoolsproject/issues/110#issuecomment-6106421018); accepted policy base
+  `2ba7925d1bb7bc22732642f2358b1ba0aab5718c` (prior `main`),
+  reviewed G1 v2.1 [plan](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6107047473)
+  SHA256 `38708c1ec0ba77510cc66b008290a3bdf4404a62b7434ce0705ce371d3a0806d`,
+  and G1 [independent review](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6107190863).
+- G5 [independent native review](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6111243764)
+  and [Coordinator acceptance](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6111265049):
+  two overlapping real developer windows; separate own-root venvs, frozen
+  SHA-bound PRs #119 (`0cec8f47`) and #121 (`d9706353`) with CI/review.
+- G6 approved [native Annex DRAFT 2.1](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6112962040)
+  ROW-block SHA256 `12bf30daf33ee2a203de44e305172c4dc86d38f7ff94ba584dc7ed345df65118`;
+  r01-r07/r09 [independently accepted](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6113673728);
+  r08 invocation SHA256 `bc3048632aadecb2b5534eb3c97d9e2547c21fd353ec99a7cd16d47fcaf8c1d3`
+  [independently accepted](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6114027126);
+  r10 is evidence-only, satisfied by merged PR #125 (`2ba7925d1bb7bc22732642f2358b1ba0aab5718c`),
+  [exact-head CI](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/38199694423)
+  and [independent Mac evidence approval](https://github.com/davidcatcat/davidcattoolsproject/issues/122#issuecomment-6118492559).
+  See [G6 Coordinator consolidation](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6118538797).
+- G7 independent [activation-evidence verdict: PASS_ACTIVATE_TWO_ROOTS, conditional
+  C1-C6](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6118588175).
+  This activation-status PR itself still requires a **different, independent
+  exact-HEAD Security/Functional documentation review and applicable CI before
+  merge**. A review comment or OPEN/Draft PR does not activate anything.
+
+This historical section heading is deliberately retained to preserve existing
+Markdown anchors; the **Operational mode** line above, only on merged `main`,
+determines the actual state.
 
 Canonical integrator and required native acceptance root (must never be moved
 or cleaned as part of allocation):
@@ -121,6 +144,60 @@ independent native gate verdict before any ACTIVE-status PR.
   containment acceptance must still execute only from canonical. If a
   required check is absent/failed, keep parallel mode DISABLED and preserve
   all work.
+
+### Activated task turnover, session binding and safe fallback
+
+- **C2 session binding:** Each developer must open its own CLI with actual session
+  CWD set to its assigned fixed root. Codex uses the approved
+  `workspace-write` sandbox scoped to its **Codex** root, and Claude uses its
+  separately assigned **Claude** root. Check the effective session/root identity,
+  `git rev-parse --show-toplevel`, branch, common-dir and owned writable paths;
+  an app-server/helper PID ancestry alone is not an identity proof. Canonical
+  integrations, shared refs and native F1 acceptance remain serialized under
+  the integrator. A reviewer must not fetch in canonical as an unclaimed side effect.
+- **C3 branch turnover:** Existing pilot branches are already merged and must
+  not be silently reused for new work. Before each new task in an assigned root,
+  confirm the old task's tests/children have ended and all code/evidence is
+  published; verify the root is clean with **tracked, staged, unstaged,
+  untracked and ignored data preserved** and no conflicting writer, Git lock or
+  partial work. Establish task ownership and run the pinned read-only
+  `--baseline` preflight against its *already approved* old-branch baseline.
+  Perform only a verified, bounded no-prune/no-tags fetch of `origin/main`
+  into its own remote-tracking ref; verify remote HEAD, then create a fresh,
+  unique, agent-owned branch without force, for example
+  `git switch --no-track -c <agent-unique-task-branch> origin/main`.
+  **Never** use `git switch -B`, `-f`, `reset --hard`, `stash` or check out
+  `main`/the peer branch in a developer root. After switching, verify new
+  HEAD/source/working tree and use a separately reviewed, exact-branch new
+  inventory/baseline under the existing preflight process **before writing**;
+  never silently re-pin the old G6 or other approved baseline. The integrator
+  alone handles old branch-ref retirement under a separate reviewed scope;
+  developer agents must not prune/delete any ref or worktree.
+- **Per-root runtime:** After branch turnover, verify
+  `sys.executable`, `sys.prefix`, `llmtool.__file__` and
+  `pyvenv.cfg` `home` still resolve to the agent's own approved root/runtime;
+  an existing editable install may stay only if provenance remains correct.
+  Any missing dependency, interpreter drift, wrong-root import or need to
+  change/install packages is STOP pending a separately approved venv update.
+- **C4 operating limits:** G6 tested cooperative same-UID safety, **not OS
+  isolation**; claims are advisory, not atomic locks. Real crash containment
+  and actual malicious/accidental peer-venv poisoning were NOT_VERIFIED
+  (synthetic fail-closed cases were). Always check live writer/child/process
+  ownership and exact root/import provenance before mutation. On crash or
+  unknown partial state, **STOP and preserve**, fall back to the single
+  canonical CLAIM/RELEASE integrator route; never auto-clean/retry. On external
+  SSH/GitHub/auth errors, absolute git-dir/remote mismatch or shared-ref
+  conflict, STOP rather than assuming empty results. A failed fetch can grow
+  the object store; no transactional rollback is promised. Historical Mac
+  filesystem and interpreter skips remain documented, not silently converted
+  to PASS for unrelated future tests.
+- **C5 scope unchanged:** llmtool F2/model-initiated real-repository mutation is
+  NOT AUTHORIZED; native F1 containment remains canonical-only. No third
+  checkout/clone/archive copy, no worktree unlock/move/remove/prune, no
+  automated kill/cleanup of the historical 70 `test-model` PIDs, and no
+  new CI/Runner/ai-loop controller authority. G6 accepted evidence remains
+  private/preserved; links and hashes in GitHub are the durable record,
+  because `/private/tmp` can be cleared on restart or periodic maintenance.
 
 ## Before changing Git state
 
