@@ -843,8 +843,24 @@ Required additional semantics (each needs the scope amendment in B6):
    deadline has not passed; otherwise DENIED/EXPIRED with zero calls. This
    closes D1's documented "redeem does not recheck revocation" limit for the
    provider kind only.
-4. **Daily cap:** count of that route's CONSUMED/EFFECT_* rows in the current
-   UTC day, computed inside the same transaction; at cap -> NOT_ALLOWED.
+4. **Daily cap by durable consume day:** the provider ledger stores, per
+   receipt, a write-once `consumed_at` (trusted host UTC epoch seconds read
+   under the write lock after the existing high-water check) and
+   `consumed_day = floor(consumed_at / 86400)` (UTC day). Both are set in the
+   **same** conditional UPDATE that moves ISSUED -> CONSUMED, in the same
+   `BEGIN IMMEDIATE` transaction that first counts that route's rows with
+   `consumed_day` equal to the current UTC day and status in
+   {CONSUMED, EFFECT_DONE, EFFECT_UNKNOWN}; count >= cap -> NOT_ALLOWED,
+   row stays ISSUED, zero calls. The day is never derived from `issued_at`,
+   `expires_at`, the global clock high-water or a later status-update time.
+   Finalize (`EFFECT_DONE`/`EFFECT_UNKNOWN`) and `recover()` change only the
+   status, never `consumed_at`/`consumed_day`, so restart, recovery or late
+   finalization after midnight keeps the charge on the consume day. A
+   consumed-status row without both values, or with a day that disagrees
+   with `consumed_at`, is LEDGER_CORRUPT (fail closed). Because the clock
+   high-water is monotonic, consume days never move backward; host clock
+   rollback below it is CLOCK_INVALID before any count or consume. Admission
+   may pre-check the cap, but only the consume-time count is authoritative.
 5. **Recovery:** `recover()` runs only at host start-up under the host's
    exclusive lock; every CONSUMED row becomes EFFECT_UNKNOWN. EFFECT_UNKNOWN
    and any uncertain provider outcome (timeout, kill, crash after spawn) count
@@ -903,7 +919,20 @@ Proposed allowlist:
 - **Amend `authorization_ledger.py`:** accept a binding union (D1 `ReceiptBinding`
   or `ProviderReviewBinding`) with per-kind sink/observation match; B4 items 2–4
   apply to the provider kind only; D1 `FAKE_FILE_CREATE` path byte-for-byte
-  equivalent in behavior. Schema stays v1 (separate file), so no D1 migration.
+  equivalent in behavior.
+- **Provider-only storage/schema amendment (explicit, R1):** the provider
+  ledger file uses a **distinct provider layout**, not a reinterpretation of
+  D1 schema v1. It keeps the D1 `clock` table and receipt status machine and
+  adds `consumed_at INTEGER NULL`, `consumed_day INTEGER NULL`, the
+  route-policy digest and the B4.2 reviewed-object key (UNIQUE), with CHECK
+  constraints that consumed-status rows carry both consume values. The file
+  records its layout identity as an explicit stored kind tag
+  (`PROVIDER_REVIEW`) in addition to its version number; a numeric version
+  alone never identifies the layout. Opening a D1 file as a provider ledger,
+  or a provider file as a D1 ledger, is LEDGER_CORRUPT, fail closed. The D1
+  schema v1, its existing files, `create()`/`open()` results for D1 and all
+  D1 semantics stay unchanged; there is no D1 migration and no in-place
+  conversion. Still one `ReceiptLedger` engine and no new approval store.
 - **Tests:** add cases to `test_authorization_policy.py`/`test_authorization_ledger.py`;
   existing cases unchanged and must pass.
 - **One line** in A's `task_review_cli.py` factory, and `cli.py` subcommand
@@ -924,6 +953,7 @@ Proposed allowlist:
 | Two-process race | `BEGIN IMMEDIATE` + conditional UPDATE; exactly one rowcount 1 | Requires native Mac proof |
 | Crash windows | CONSUMED committed before spawn; `recover()` -> EFFECT_UNKNOWN; no retry | Possible paid call with lost result (accepted) |
 | Clock rollback | Ledger high-water; monotonic used only within one process | Power-loss durability NOT_VERIFIED |
+| Day-boundary undercount (R1) | Write-once `consumed_at`/`consumed_day` set atomically with CONSUMED; cap counted by consume day inside the consume transaction | Requires T0/T1 proof |
 | Ledger deleted/replaced | Host-file dev/inode + creation nonce | Same-UID can change both |
 | Revocation race | Redeem-time recheck in the consume transaction | None |
 | Data egress | v1 data classes, existing privacy screen of packet and rendered prompt | Screen may miss content; class restriction limits blast radius |
@@ -936,8 +966,8 @@ Proposed allowlist:
 
 | Stage | Content | Authority needed |
 | --- | --- | --- |
-| **T0 fake** (B PR, CI) | Fake provider + real ledger/host-file/issuer code: every B7 control, revocation between admit and consume, cap boundary, binding/route/data-class mismatch, missing/unsafe host file, FAKE label isolation, D1 regression unchanged | Accepted scope amendment; exact-head 3.9/3.14 CI; non-author review |
-| **T1 native Mac (fake provider)** | Real APFS ledger: two-process barrier race (one call, one REPLAY), SIGKILL after consume/before spawn and after response/before finalize -> EFFECT_UNKNOWN with no retry, ledger replace/delete/lock, clock rollback, owned-child cleanup | Independently reviewed bounded command on exact source; Linux CI cannot substitute |
+| **T0 fake** (B PR, CI) | Fake provider + real ledger/host-file/issuer code: every B7 control, revocation between admit and consume, cap boundary, R1 consume-day cases (issue 23:59:30 then consume 23:59:40 vs. 00:00:20 charges the respective UTC day; cap N-1 at 23:59:59 plus consume at 00:00:00 admits on the new day; finalize or `recover()` after midnight keeps the consume day; missing/inconsistent consume values and D1/provider layout cross-open -> LEDGER_CORRUPT), binding/route/data-class mismatch, missing/unsafe host file, FAKE label isolation, D1 regression unchanged | Accepted scope amendment; exact-head 3.9/3.14 CI; non-author review |
+| **T1 native Mac (fake provider)** | Real APFS ledger: two-process barrier race (one call, one REPLAY), two-process race at cap-1 across distinct receipts (exactly one CONSUMED, the other NOT_ALLOWED with zero calls), SIGKILL then restart/`recover()` keeps EFFECT_UNKNOWN counted on its consume day, clock rollback across midnight -> CLOCK_INVALID with no count or consume, SIGKILL after consume/before spawn and after response/before finalize -> EFFECT_UNKNOWN with no retry, ledger replace/delete/lock, clock rollback, owned-child cleanup | Independently reviewed bounded command on exact source; Linux CI cannot substitute |
 | **T2 canary** | One real call: small public repo diff, no sensitive data; verify one consume, verdict parse, cleanup, second run REPLAY with zero calls | Coordinator single-use route approval after A+B exact-head gates |
 | **T3 shadow** | >=5 real PRs reviewed by both the automatic no-tools review and the existing independent human-led review, plus seeded-defect fixtures (N1-style false SUCCESS, permission hole, prompt injection) | Coordinator enables per run |
 
