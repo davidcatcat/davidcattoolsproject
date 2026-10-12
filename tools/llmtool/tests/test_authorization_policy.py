@@ -376,18 +376,67 @@ class NoProductionAuthorityTests(unittest.TestCase):
     """R4: behavior above is primary; this static guard only supplements it."""
 
     def test_no_concrete_issuer_parser_or_public_route_in_package(self):
+        issuers, imports, d1_imports = set(), set(), set()
+        host_only = {'compose_host_services', 'ProductionReviewAuthority',
+                     'ProductionReviewerLauncher'}
         for path in sorted(PACKAGE.rglob('*.py')):
             tree = ast.parse(path.read_text(encoding='utf-8'))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ClassDef):
                     bases = {getattr(b, 'id', getattr(b, 'attr', None)) for b in node.bases}
-                    self.assertFalse(bases & {'HostIssuer', 'EffectSink'},
-                                     '%s defines %s' % (path.name, node.name))
+                    for base in bases & {'HostIssuer', 'EffectSink', 'ProductionReviewIssuer'}:
+                        issuers.add((path.name, node.name, base))
                 if isinstance(node, (ast.Import, ast.ImportFrom)) and path.stem not in (
                         'authorization_policy', 'authorization_ledger'):
                     names = {a.name for a in node.names} | {getattr(node, 'module', None) or ''}
-                    self.assertFalse(any('authorization_' in n for n in names),
-                                     '%s imports the D1 authorization modules' % path.name)
+                    if any('authorization_' in n for n in names):
+                        imports.add((path.name, getattr(node, 'module', None) or '',
+                                     frozenset(a.name for a in node.names)))
+                if (path.stem in ('authorization_policy', 'authorization_ledger') and
+                        isinstance(node, ast.ImportFrom) and node.level >= 1):
+                    d1_imports.add((path.name, node.level, node.module,
+                                   frozenset(a.name for a in node.names)))
+                if path.name != 'review_authority.py':
+                    if isinstance(node, ast.Name): self.assertNotIn(node.id, host_only)
+                    if isinstance(node, ast.Attribute): self.assertNotIn(node.attr, host_only)
+                    if isinstance(node, ast.alias):
+                        self.assertNotIn(node.name, host_only)
+                        self.assertNotIn(node.asname, host_only)
+            if path.name in ('task_review.py', 'review_authority.py'):
+                factories = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+                             and n.name == 'review_authority_factory']
+                self.assertEqual(len(factories), 1)
+                body = factories[0].body
+                if (body and isinstance(body[0], ast.Expr) and
+                        isinstance(body[0].value, ast.Constant) and type(body[0].value.value) is str):
+                    body = body[1:]
+                self.assertEqual([ast.dump(n) for n in body],
+                                 [ast.dump(ast.parse('return UnavailableReviewAuthority()').body[0])])
+        # R-A/R-B: exact reviewed additions, no filename-wide exemption.
+        self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer')})
+        self.assertEqual(imports, {
+            ('review_authority.py', 'authorization_policy', frozenset({
+                'HostIssuer', 'IssuerClass', 'Decision', 'ProviderReviewBinding',
+                'ProviderObservedState', 'decide_provider_review'})),
+            ('review_authority.py', 'authorization_ledger', frozenset({'ReceiptLedger', 'LedgerError'})),
+        })
+        # R-C: base relative dependencies plus only the accepted lazy increments.
+        self.assertEqual(d1_imports, {
+            ('authorization_policy.py', 1, 'action_contract', frozenset({
+                'Action','ActionKind','ContractValue','RepositoryBinding','TaskBinding',
+                '_collection','_digest','_hex','_identifier','_integer','_path','_scope','_typed'})),
+            ('authorization_policy.py', 1, 'errors', frozenset({'LLMToolError'})),
+            ('authorization_policy.py', 1, 'task_review', frozenset({'ReviewCallBinding'})),
+            ('authorization_policy.py', 1, 'task_review', frozenset({'digest'})),
+            ('authorization_policy.py', 1, 'review_authority', frozenset({'ProductionReviewIssuer'})),
+            ('authorization_ledger.py', 1, 'action_contract', frozenset({
+                'MAX_APPROVAL_SECONDS','MAX_EPOCH','ContractValue','_hex','_typed'})),
+            ('authorization_ledger.py', 1, 'authorization_policy', frozenset({
+                'Decision','EffectKind','ObservedState','PolicyDecision','ReceiptBinding',
+                'ProviderReviewBinding','ProviderPolicyDecision','decide_provider_review'})),
+            ('authorization_ledger.py', 1, 'errors', frozenset({'LLMToolError'})),
+            ('authorization_ledger.py', 1, 'task_lifecycle', frozenset({'utc_time'})),
+        })
         for name in ('authorization_policy.py', 'authorization_ledger.py'):
             source = (PACKAGE / name).read_text(encoding='utf-8')
             for forbidden in ('json.loads', 'subprocess', 'socket', 'urllib', 'argparse',
@@ -403,6 +452,35 @@ class NoProductionAuthorityTests(unittest.TestCase):
         self.assertIs(result.code, c.ApprovalCode.USER_ATTESTED)
         self.assertFalse(result.authorized)
         self.assertFalse(result.to_dict()['authorized'])
+
+
+class ProviderPolicyBoundaryTests(unittest.TestCase):
+    def test_production_review_issuer_cannot_authorize_d1_effect(self):
+        from test_review_authority import Harness
+        host = Harness()
+        self.addCleanup(host.close)
+        for requirements, code in (
+                (frozenset(), p.DecisionCode.UNTRUSTED_ISSUER),
+                (frozenset({p.Requirement.NEW_COST}), p.DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED),
+                (frozenset({p.Requirement.NEW_DATA_EGRESS}), p.DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)):
+            with self.subTest(requirements=requirements):
+                result = allow(issuer=host.issuer, requirements=requirements)
+                self.assertIs(result.decision, p.Decision.DENY)
+                self.assertIs(result.code, code)
+                self.assertIsNone(result.binding)
+
+    def test_d1_separate_authority_and_labels_unchanged(self):
+        result=allow(requirements=frozenset((p.Requirement.NEW_COST,p.Requirement.NEW_DATA_EGRESS)))
+        self.assertIs(result.decision,p.Decision.DENY)
+        self.assertIs(result.code,p.DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)
+        self.assertEqual(p.STATUS[p.Decision.ALLOW_WITH_TRUSTED_RECEIPT],'FAKE_POLICY_ALLOWED')
+
+    def test_data_fake_issuer_and_receipt_cannot_be_provider_grant(self):
+        from llmtool import review_authority as a,task_review as r
+        self.assertIsInstance(a.review_authority_factory(),r.UnavailableReviewAuthority)
+        denied=p.decide_provider_review({'issuer_class':'PRODUCTION_REVIEW'},issuer={'trusted':True},observed={})
+        self.assertIs(denied.decision,p.Decision.DENY)
+        with self.assertRaises(Exception):p.ProviderPolicyDecision(p.Decision.ALLOW_WITH_TRUSTED_RECEIPT,p.DecisionCode.POLICY_ALLOWED,None)
 
 
 if __name__ == '__main__':

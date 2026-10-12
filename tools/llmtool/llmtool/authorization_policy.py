@@ -51,6 +51,7 @@ class DecisionCode(str, Enum):
 class IssuerClass(str, Enum):
     POLICY_CONTRACT = 'POLICY_CONTRACT'
     OWNER_P0 = 'OWNER_P0'
+    PRODUCTION_REVIEW = 'PRODUCTION_REVIEW'
 
 
 class Requirement(str, Enum):
@@ -71,6 +72,7 @@ SEPARATE_AUTHORITY = frozenset((Requirement.NEW_COST, Requirement.NEW_DATA_EGRES
 
 class EffectKind(str, Enum):
     FAKE_FILE_CREATE = 'FAKE_FILE_CREATE'
+    PROVIDER_REVIEW_CALL = 'PROVIDER_REVIEW_CALL'
 
 
 def _kinds(value):
@@ -313,3 +315,88 @@ def decide(action, policy, *, issuer, observed, redeem_run_id,
         redeem_run_id, policy.effect_kind.value, target.path, True,
         observed.parent_device, observed.parent_inode)
     return _result(Decision.ALLOW_WITH_TRUSTED_RECEIPT, DecisionCode.POLICY_ALLOWED, binding)
+
+
+@dataclass(frozen=True)
+class ProviderReviewBinding(ContractValue):
+    """Distinct provider layout; the unchanged complete A call binding."""
+    call: object
+
+    def __post_init__(self):
+        from .task_review import ReviewCallBinding
+        _typed(self.call, ReviewCallBinding)
+        if self.call.issuer_class != IssuerClass.PRODUCTION_REVIEW.value:
+            raise LLMToolError('provider binding invalid; details omitted')
+
+    def to_dict(self):
+        values = dict(self.call.__dict__)
+        for name in ('ready_task','acceptance_task'): values[name] = values[name].to_dict()
+        return {'call':values}
+
+    @property
+    def digest(self):
+        return _digest('llmtool.provider-receipt-binding.v1', self)
+
+    @property
+    def object_key(self):
+        # Run/nonce changes cannot buy a second attempt for the same object.
+        from .task_review import digest
+        c = self.call
+        return digest((c.route_digest,c.source_sha,c.ready_task.contract_digest,
+                       c.acceptance_task.contract_digest,c.packet_digest),
+                      'llmtool.provider-reviewed-object.v1')
+
+
+@dataclass(frozen=True)
+class ProviderObservedState:
+    """Host-only observation; its construction is not attestation."""
+    binding_digest: str
+    source_sha: str
+    observation_digest: str
+    attested: bool
+
+    def __post_init__(self):
+        _hex(self.binding_digest); _hex(self.source_sha,(40,64)); _hex(self.observation_digest)
+        _typed(self.attested,bool)
+
+
+@dataclass(frozen=True)
+class ProviderPolicyDecision:
+    decision: Decision
+    code: DecisionCode
+    binding: Optional[ProviderReviewBinding]
+    _origin: object = field(default=None,repr=False,compare=False)
+
+    def __post_init__(self):
+        if (self._origin is not _DECIDED or type(self.decision) is not Decision or
+                type(self.code) is not DecisionCode or
+                (self.binding is not None) != (self.decision is Decision.ALLOW_WITH_TRUSTED_RECEIPT)):
+            raise LLMToolError('provider decision invalid; details omitted')
+        if self.binding is not None: _typed(self.binding,ProviderReviewBinding)
+        object.__setattr__(self,'_origin',None)
+
+
+def decide_provider_review(binding, *, issuer, observed,
+                           requirements=frozenset((Requirement.NEW_COST,Requirement.NEW_DATA_EGRESS))):
+    """Only this decision can cover vouched cost/data egress; D1 is unchanged."""
+    def result(decision,code,b=None):
+        return ProviderPolicyDecision(decision,code,b,_DECIDED)
+    try:
+        _typed(binding,ProviderReviewBinding); _typed(observed,ProviderObservedState)
+        _typed(requirements,frozenset)
+        if any(type(r) is not Requirement for r in requirements) or requirements & OWNER_P0:
+            return result(Decision.DENY,DecisionCode.SEPARATE_AUTHORIZATION_REQUIRED)
+        from .review_authority import ProductionReviewIssuer
+        if not isinstance(issuer,ProductionReviewIssuer) or issuer.issuer_class is not IssuerClass.PRODUCTION_REVIEW:
+            return result(Decision.DENY,DecisionCode.UNTRUSTED_ISSUER)
+        c=binding.call
+        if (issuer.capability_id != c.issuer_capability_id or
+                issuer.vouches_for(c.route_digest) is not True):
+            return result(Decision.DENY,DecisionCode.UNTRUSTED_POLICY)
+        if (not observed.attested or observed.binding_digest != binding.digest or
+                observed.source_sha != c.source_sha or observed.observation_digest != c.observation_digest or
+                issuer.matches(c,observed) is not True):
+            return result(Decision.DENY,DecisionCode.STATE_MISMATCH)
+    except Exception:
+        return result(Decision.DENY,DecisionCode.INVALID_REQUEST)
+    return result(Decision.ALLOW_WITH_TRUSTED_RECEIPT,DecisionCode.POLICY_ALLOWED,binding)

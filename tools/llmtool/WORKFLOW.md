@@ -389,7 +389,7 @@ ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositio
 ### S1b foreground review contract (DRAFT)
 
 **STATUS: contract accepted/merged via [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129)
-at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is a fake-only
+at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is an accepted/merged fake-only slice via PR #131; B1 is a
 candidate, independent product review PENDING. Real Claude remains BLOCKED;
 actual automatic handoff NOT DELIVERED, pending B.**
 This is the docs-only response to the accepted
@@ -735,7 +735,8 @@ not implement budget enforcement or an automatic cost router.
 
 **STATUS: B documentation contract ACCEPTED/MERGED via [PR #130](https://github.com/davidcatcat/davidcattoolsproject/pull/130)
 at `cfa6c73e26cf6a16bc3d8a2303a45a4a21904559`, independent R1 Security/Functional
-APPROVE. B implementation NOT STARTED; real Claude provider route
+APPROVE. B1 authority adapters/fake-first implementation is a product candidate,
+independent Security/Functional review PENDING; real Claude provider route
 NOT_AUTHORIZED/BLOCKED; production auto-handoff NOT DELIVERED.** This
 concretizes work item **B** of the merged
 [A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
@@ -909,8 +910,13 @@ class Clock(Protocol):
 
 #### B6. Proposed scope amendment for shared authorization code (not granted)
 
-B implementation needs a separately reviewed amendment before authoring.
-Proposed allowlist:
+The heading/anchor retains the original docs proposal. The Coordinator's explicit
+ISSUE120-S1B-B1 task instruction adopts the necessary-file amendment in the
+[formal handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6130032828)
+for source/tests/Draft PR, including narrow A-R1–R4 integration fixes in A modules
+and their tests. This task-specific authorization does not install Host policy,
+create a production ledger or authorize provider/data egress. The B1 product
+still requires non-author Security/Functional review. Original allowlist:
 
 - **New:** `tools/llmtool/llmtool/review_authority.py` (host file loader,
   `ProviderRoutePolicy`, `ProductionReviewIssuer`, ledger adapter, launcher,
@@ -1021,8 +1027,9 @@ A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
 A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
 AUTHORIZED. A11c.1 S1a is DONE/MERGED via PR #128; S1b contract is
-accepted via PR #129. Product A is a fake-only candidate, independent product
-review PENDING, real provider BLOCKED pending B;
+accepted via PR #129. Product A fake-only is accepted/merged via PR #131;
+B1 authority adapters/fake-first is a candidate pending independent product
+review; real provider BLOCKED pending B enablement;
 full production integration is NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
@@ -1257,3 +1264,68 @@ launch/unknown outcome stays EFFECT_UNKNOWN; finalization uncertainty overrides
 any parsed approval with REVIEW_FINALIZE_UNKNOWN, no retry or success promotion.
 A/B merge gates, B native durable replay and separately approved T2/T3 remain
 required. Constructor/claim/exit0 is never execution or Git/merge authorization.
+
+#### B1 authority adapters and fake-first acceptance
+
+`ISSUE120-S1B-B1` implements the accepted B contract's host-only adapters, with
+public `task review` factory still returning `UnavailableReviewAuthority`.
+`compose_host_services` is a trusted Python host API, not a CLI/JSON/env switch.
+Its immutable `HostServices` carries the existing four seams and pinned context;
+the issuer allocates a random reviewer nonce/redeem run before admission.
+No production Host path or policy is installed by this candidate.
+
+`HostPin` comes from independent Integrator publication: host-file SHA256,
+authorizer reference, pair digest, original packet-input digest and excluded
+repository roots. Constructors do not authenticate it. The host loader checks
+strict bounded static JSON, private file/directory ownership/modes, no-follow,
+single link/stable inode, root/ledger identities and executable/home provenance.
+The read-only `review-authority check --host <physical-file> --json` validates
+structure only: exit0/structural SUCCESS retains authorized=false, published-pin
+validation NOT_VERIFIED and zero calls. It does not open a ledger or issue grants.
+
+`HostAuthorshipObserver` uses actual own-root collector facts and separately
+provided trusted host baseline/writer capabilities. Missing gates, unknown
+author, wrong branch/root/source or caller expectation drift block the call.
+The fake tests supply synthetic facts/capabilities; no actual production
+Session/baseline/writer/CI authentication is claimed by these results.
+
+`ProductionReviewIssuer` re-loads CURRENT pinned registration/route, verifies
+validity/revocation and reconstructs the exact packet from independently held
+originals/pair/recorded pre-observation. Only `decide_provider_review` covers
+vouched provider cost/egress; D1 `decide` and its fake labels remain unchanged.
+The SAME ReceiptLedger explicitly creates/opens a separate PROVIDER_REVIEW
+layout with kind tag/creation nonce; there is no D1 migration. Atomic consume
+rechecks current policy, counts the route's durable UTC consume day and commits
+CONSUMED before launch. Object uniqueness ignores nonce/run; cap-blocked rows
+stay ISSUED. Finalize/recover never rewrite the consume charge; UNKNOWN counts,
+and clock rollback/corruption/cross-layout open fail closed.
+
+A-R1 fixed instructions define the strict verdict schema plus host echo values,
+without relaxing parsing. A-R2 permits only literal `/Users/<user>/...` and
+`/home/<username>/...` documentation placeholders with safe relative components;
+real home/private temp paths, known Session/root strings, auth paths and
+recognizable secrets stay denied. The temporary screening view changes no
+exported source/diff bytes/digests. This is not permission to export every file
+in this repository: unsafe complete originals still BLOCKED; any derived export
+view needs a separate contract/manifest. Independent privacy/schema acceptance
+remains required before T2/T3. A-R3 normalizes unexpected post-consume exceptions
+while retaining attempted-call/UNKNOWN/no-retry evidence. A-R4 uses one typed
+composition with matching CLI/factory/flow semantics.
+
+The launcher delegates to the existing Claude text/no-tools argv, isolated cwd,
+pipe limits and CLIProcessLifecycle. A committed token and matching packet precede
+one owned child; unreaped child/process-group identity and host nonce produce a
+launch-provenance digest. Text usage remains UNKNOWN. B1 tests use only a private
+temporary fake script/fake HOME; no installed Claude or network is invoked.
+
+The [independent native fixture-plan APPROVE](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6131224918)
+permits 18 authority +10 provider-ledger +2 policy +5 Darwin cases with a 120s
+outer bound, at most two fixture children, P1 isolated `-IB` shebangs and P2
+EOF fail-closed/owned-child timeout cleanup. They cover cap/object races, crash
+before commit/before effect/after response and durable recovery charges. Non-Darwin
+cases remain skips; fake native evidence does not establish real Claude or
+power-loss durability. Full regressions and exact-head3.9/3.14 CI accompany the
+Draft PR; non-author product Security/Functional and Coordinator's exact-source
+T1 release reconciliation remain separate gates. T2 real canary/T3 shadow and
+production installation/egress are still NOT_AUTHORIZED. No F2/S2, auto-repair,
+Git/PR mutation/merge, daemon/scheduler, second store or benchmark/G5/G6 rerun.

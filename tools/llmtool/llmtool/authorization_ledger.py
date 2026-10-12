@@ -51,7 +51,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .action_contract import MAX_APPROVAL_SECONDS, MAX_EPOCH, ContractValue, _hex, _typed
-from .authorization_policy import Decision, EffectKind, ObservedState, PolicyDecision, ReceiptBinding
+from .authorization_policy import (Decision, EffectKind, ObservedState, PolicyDecision, ReceiptBinding,
+                                   ProviderReviewBinding,ProviderPolicyDecision,decide_provider_review)
 from .errors import LLMToolError
 
 SCHEMA_VERSION = 1
@@ -64,6 +65,19 @@ _SCHEMA = (
     'redeem_run_id TEXT)',
 )
 _AUX_SUFFIXES = ('-journal', '-wal', '-shm')
+_PROVIDER_SCHEMA = (
+    _SCHEMA[0],
+    "CREATE TABLE ledger_meta (kind TEXT NOT NULL CHECK (kind = 'PROVIDER_REVIEW'), creation_nonce TEXT NOT NULL)",
+    'CREATE TABLE receipts (nonce TEXT PRIMARY KEY, binding TEXT NOT NULL UNIQUE, '
+    'issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK '
+    "(status IN ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN', 'DENIED', 'EXPIRED')), "
+    'redeem_run_id TEXT, consumed_at INTEGER NULL, consumed_day INTEGER NULL, '
+    'route_digest TEXT NOT NULL, object_key TEXT NOT NULL UNIQUE, '
+    "CHECK ((status IN ('CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN') AND "
+    "typeof(consumed_at) = 'integer' AND consumed_at >= 0 AND "
+    "typeof(consumed_day) = 'integer' AND consumed_day = consumed_at / 86400) OR "
+    "(status IN ('ISSUED','DENIED','EXPIRED') AND consumed_at IS NULL AND consumed_day IS NULL)))",
+)
 
 
 class LedgerCode(str, Enum):
@@ -105,11 +119,18 @@ class Receipt(ContractValue):
     nonce: str
 
     def __post_init__(self):
-        _typed(self.binding, ReceiptBinding)
+        if type(self.binding) not in (ReceiptBinding,ProviderReviewBinding):
+            raise LLMToolError('receipt invalid; details omitted')
         _hex(self.nonce)
         for name in ('issued_at', 'expires_at'):
             if type(getattr(self, name)) is not int:
                 raise LLMToolError('receipt invalid; details omitted')
+
+    def to_dict(self):
+        values=super().to_dict()
+        if type(self.binding) is ProviderReviewBinding:
+            values['binding']=self.binding.to_dict()
+        return values
 
 
 @dataclass(frozen=True)
@@ -169,7 +190,9 @@ class ReceiptLedger:
     """Use create() once, then open(); there is no default path."""
 
     @classmethod
-    def create(cls, path, *, clock):
+    def create(cls, path, *, clock, kind='D1'):
+        if kind not in ('D1','PROVIDER_REVIEW'): _fail(LedgerCode.NOT_ALLOWED)
+        creation_nonce = secrets.token_hex(32) if kind == 'PROVIDER_REVIEW' else None
         path = os.path.abspath(path)
         _secure_directory(os.path.dirname(path))
         try:
@@ -183,8 +206,10 @@ class ReceiptLedger:
             try:
                 cls._configure(db)
                 db.execute('BEGIN IMMEDIATE')
-                for statement in _SCHEMA:
+                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA):
                     db.execute(statement)
+                if creation_nonce is not None:
+                    db.execute('INSERT INTO ledger_meta VALUES (?, ?)',(kind,creation_nonce))
                 db.execute('INSERT INTO clock VALUES (1, 0)')
                 db.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
                 db.execute('COMMIT')
@@ -201,16 +226,21 @@ class ReceiptLedger:
             _fail(LedgerCode.LEDGER_UNAVAILABLE)
         finally:
             os.close(fd)
-        return cls.open(path, clock=clock)
+        return cls.open(path,clock=clock,kind=kind,creation_nonce=creation_nonce)
 
     @classmethod
-    def open(cls, path, *, clock):
+    def open(cls, path, *, clock, kind='D1', creation_nonce=None):
         """clock is the host's time source; callers never pass request times."""
         if not callable(clock):
             _fail(LedgerCode.CLOCK_INVALID)
-        return cls(os.path.abspath(path), clock)
+        if kind not in ('D1','PROVIDER_REVIEW'): _fail(LedgerCode.NOT_ALLOWED)
+        if kind == 'PROVIDER_REVIEW':
+            try: _hex(creation_nonce)
+            except LLMToolError: _fail(LedgerCode.LEDGER_CORRUPT)
+        return cls(os.path.abspath(path),clock,kind,creation_nonce)
 
-    def __init__(self, path, clock):
+    def __init__(self, path, clock, kind='D1', creation_nonce=None):
+        self.kind,self.creation_nonce = kind,creation_nonce
         self._path, self._clock, self._db, self._fd = path, clock, None, None
         self._directory = _secure_directory(os.path.dirname(path))
         try:
@@ -264,7 +294,11 @@ class ReceiptLedger:
                 "OR (type = 'index' AND sql IS NOT NULL)").fetchone()[0]
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
             # A schema-less (e.g. half-created) store is corrupt, not unavailable.
-            if tables != [(s,) for s in _SCHEMA] or others or version != SCHEMA_VERSION:
+            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA
+            if tables != [(s,) for s in schema] or others or version != SCHEMA_VERSION:
+                _fail(LedgerCode.LEDGER_CORRUPT)
+            if self.kind == 'PROVIDER_REVIEW' and self._db.execute(
+                    'SELECT kind,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.creation_nonce)]:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             rows = self._db.execute('SELECT id FROM clock').fetchall()
         except sqlite3.Error as error:
@@ -325,6 +359,8 @@ class ReceiptLedger:
             # Inside the try so an interrupt right after BEGIN still rolls back.
             self._db.execute('BEGIN IMMEDIATE')
             self._check_identity()
+            if self.kind == 'PROVIDER_REVIEW':
+                self._verify_schema()
             now = self._now()
             high_water = self._db.execute('SELECT high_water FROM clock WHERE id = 1').fetchone()
             if high_water is None or type(high_water[0]) is not int:
@@ -356,7 +392,7 @@ class ReceiptLedger:
 
     def issue(self, decision, *, ttl_seconds):
         """Record one receipt for an ALLOW decision made by decide()."""
-        if (type(decision) is not PolicyDecision or
+        if (self.kind != 'D1' or type(decision) is not PolicyDecision or
                 decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT):
             _fail(LedgerCode.NOT_ALLOWED)
         if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_APPROVAL_SECONDS:
@@ -381,7 +417,7 @@ class ReceiptLedger:
 
     def redeem(self, receipt, *, redeem_run_id, observed, sink):
         """Consume once, then run the fake sink; never repeats an effect."""
-        if type(receipt) is not Receipt:
+        if self.kind != 'D1' or type(receipt) is not Receipt or type(receipt.binding) is not ReceiptBinding:
             return RedeemResult(RedeemCode.RECEIPT_UNKNOWN)
         binding = receipt.binding
         try:
@@ -449,6 +485,62 @@ class ReceiptLedger:
             row = self._db.execute('SELECT status FROM receipts WHERE nonce = ?',
                                    (nonce,)).fetchone()
         return None if row is None else row[0]
+
+    def issue_provider(self, decision, *, ttl_seconds):
+        """Provider-only issuance, no launch; one object forever per route."""
+        if (self.kind != 'PROVIDER_REVIEW' or type(decision) is not ProviderPolicyDecision or
+                decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT or
+                type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_APPROVAL_SECONDS):
+            _fail(LedgerCode.NOT_ALLOWED)
+        b=decision.binding
+        from .task_lifecycle import utc_time
+        deadline=int(utc_time(b.call.deadline).timestamp())
+        nonce=secrets.token_hex(32)
+        with self._transaction() as now:
+            expires=min(now+ttl_seconds,deadline)
+            if not now < expires <= MAX_EPOCH: _fail(LedgerCode.NOT_ALLOWED)
+            try:
+                self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)',
+                    (nonce,b.to_json(),now,expires,'ISSUED',b.call.route_digest,b.object_key))
+            except sqlite3.IntegrityError: _fail(LedgerCode.NOT_ALLOWED)
+        return Receipt(b,now,expires,nonce)
+
+    def consume_provider(self, receipt, *, issuer, observed):
+        """Atomic CURRENT-policy recheck/cap count/consume; effect runs later."""
+        if self.kind != 'PROVIDER_REVIEW' or type(receipt) is not Receipt or type(receipt.binding) is not ProviderReviewBinding:
+            _fail(LedgerCode.NOT_ALLOWED)
+        b=receipt.binding
+        with self._transaction() as now:
+            row=self._db.execute('SELECT binding,issued_at,expires_at,status,route_digest,object_key '
+                                 'FROM receipts WHERE nonce=?',(receipt.nonce,)).fetchone()
+            if row is None or row[3] != 'ISSUED': _fail(LedgerCode.NOT_ALLOWED)
+            if row != (b.to_json(),receipt.issued_at,receipt.expires_at,'ISSUED',b.call.route_digest,b.object_key):
+                self._set(receipt.nonce,'DENIED','ISSUED'); return False
+            if not row[1] <= now < row[2]:
+                self._set(receipt.nonce,'EXPIRED','ISSUED'); return False
+            decision=decide_provider_review(b,issuer=issuer,observed=observed)
+            if decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT:
+                self._set(receipt.nonce,'DENIED','ISSUED'); return False
+            try: cap=issuer.daily_cap(b.call.route_digest)
+            except Exception: _fail(LedgerCode.NOT_ALLOWED)
+            if type(cap) is not int or not 1 <= cap <= 1000: _fail(LedgerCode.NOT_ALLOWED)
+            day=now//86400
+            count=self._db.execute("SELECT count(*) FROM receipts WHERE route_digest=? AND consumed_day=? "
+                "AND status IN ('CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN')",(b.call.route_digest,day)).fetchone()[0]
+            if count >= cap: return False  # Remains ISSUED, zero effect.
+            updated=self._db.execute("UPDATE receipts SET status='CONSUMED',redeem_run_id=?,consumed_at=?,consumed_day=? "
+                "WHERE nonce=? AND status='ISSUED'",(b.call.redeem_run_id,now,day,receipt.nonce))
+            return updated.rowcount == 1
+
+    def finalize_provider(self, receipt, status):
+        if (self.kind != 'PROVIDER_REVIEW' or type(receipt) is not Receipt or
+                type(receipt.binding) is not ProviderReviewBinding or status not in ('EFFECT_DONE','EFFECT_UNKNOWN')):
+            _fail(LedgerCode.NOT_ALLOWED)
+        with self._transaction():
+            row=self._db.execute('SELECT binding FROM receipts WHERE nonce=?',(receipt.nonce,)).fetchone()
+            if row != (receipt.binding.to_json(),): _fail(LedgerCode.NOT_ALLOWED)
+            # Charge time/day are never updated by finalize/recover.
+            return self._set(receipt.nonce,status,'CONSUMED')
 
 
 def _observed_matches(observed, binding):
