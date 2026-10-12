@@ -2556,7 +2556,7 @@ S1b A validates the existing preparation TaskContract/S1a ledger and bounded
 read-only local Git/worktree/import facts. **Real Claude is BLOCKED**: B's trusted
 Host Session Attestation, independently approved contract pairing, Production
 Grant Issuer/durable one-use protection and provider/data-route approval are not
-implemented here. `REVIEW_PRODUCTION_HOST_REQUIRED` lists those missing gates;
+implemented here. `REVIEW_AUTHORITY_UNAVAILABLE` lists those missing gates;
 not-ready, stale or drifted inputs fail earlier. No CLI/JSON/environment fake,
 grant or provider switch exists. This command loads no provider configuration,
 launches no agent/provider, writes no artifact/journal and changes no Git refs.

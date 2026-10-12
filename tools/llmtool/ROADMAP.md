@@ -1014,6 +1014,7 @@ real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
 | --- | --- |
 | **S1a — DONE/MERGED via PR #128** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`. Independent expectation input pins identity/source/epoch; bounded explicit files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
 | **S1b — contract merged; Product A fake-only candidate** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
+| **S1b-B — Production Enablement contract merged via PR #130; implementation NOT STARTED** | Docs-only [B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft): host-owned reviewer launch + registered author worktree + actual Git observations; static Host Registration/Route Policy; `ProductionReviewIssuer`; durable one-use replay protection reusing `ReceiptLedger` with a separate provider-ledger file whose explicit provider-only layout records a write-once consume UTC day for the daily cap (D1 schema v1 unchanged); frozen A injection points. Shared authorization code changes need a separate scope amendment. Real Claude route stays NOT_AUTHORIZED/BLOCKED until A+B acceptance, native Mac evidence and an explicit canary approval. |
 | **S2 — future separate authority/execution contract** | Permission-controlled repair/execution; retain A11b approval, sandbox, recovery/audit, budgets and F2 gates. No automatic merge authority. |
 
 S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
@@ -1059,6 +1060,15 @@ separately pinned product task are required before authoring product code.
 | Packet and independent verdict | Exact-SHA original contracts/source/complete diff and actual test/CI provenance, canonical digests and explicit data/source/size allowlists; <=256 KiB packet, no private raw logs/secrets. Strict <=64 KiB versioned verdict binds task/run/contracts/SHA/epoch/sequence/packet/reviewer and separate Security/Functional decisions. Invalid/CHANGES_REQUIRED/BLOCKED cannot authorize repair or merge. |
 | Permission and provider lifecycle | Authentic separately reviewed host grant and approved data route precede any real call; D1 fake-effect receipts/G7/S1a/model approval confer none. Existing isolated Claude text/no-tools lifecycle only, one attempt, <=120s call/<=180s run, no retry/fallback. Unknown token/cost stays null; a required unenforceable hard spend cap blocks the call. |
 | Acceptance and limits | Fake-provider full journey plus wrong Session/SHA/TTL/identity/route/privacy/verdict and during-review drift cases; relevant regression/full checks, exact-head 3.9/3.14 CI and independent review. Native collector evidence is separate; real Claude Mac smoke remains NOT_AUTHORIZED/NOT_TESTED until explicit permission/source gates. S2/F2, Git writes, repair, PR merge, daemon/scheduler/second approval/logging remain excluded. |
+
+**S1b Production Enablement (B), contract proposal only:** the merged
+[A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
+schedules B in parallel with Product A. Its normative draft is the
+[B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft). An automatic
+no-tools review starts as shadow/pre-review only and never replaces independent
+Security/Functional APPROVE; promotion needs 0 false-APPROVE on seeded defects.
+Unknown usage stays UNKNOWN; no savings claim. This grants no code scope,
+ledger/host-file creation, data route or provider call.
 
 Concrete future command, paired-contract semantics, collector provenance/limits,
 packet/verdict fields, result/exit/error behavior and proposed product allowlist

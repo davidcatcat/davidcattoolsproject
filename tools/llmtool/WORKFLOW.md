@@ -731,6 +731,269 @@ is partial, not the total. Development-time paired Token Savings Benchmark evide
 may quantify dogfood ROI when its measurement contract is satisfied; it still does
 not implement budget enforcement or an automatic cost router.
 
+### S1b Production Enablement (B) contract (DRAFT)
+
+**STATUS: B documentation contract ACCEPTED/MERGED via [PR #130](https://github.com/davidcatcat/davidcattoolsproject/pull/130)
+at `cfa6c73e26cf6a16bc3d8a2303a45a4a21904559`, independent R1 Security/Functional
+APPROVE. B implementation NOT STARTED; real Claude provider route
+NOT_AUTHORIZED/BLOCKED; production auto-handoff NOT DELIVERED.** This
+concretizes work item **B** of the merged
+[A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
+and the [Claude v0 proposal](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6128195426)
+under the Coordinator decisions recorded in Issue #120. It refines the
+[S1b invocation authority](#invocation-authority-lifecycle-and-failure) section
+and changes none of the S1b N1–N3, packet, verdict or limit rules above. Only
+ROADMAP.md/WORKFLOW.md change here; merging it grants no code scope, ledger
+creation, data route, provider call or smoke permission.
+
+#### B1. Trust model and non-goals
+
+Cooperative same-UID G7 trust applies. B does **not** claim an OS-level,
+unforgeable Session identity, hostile-peer protection or power-loss durability.
+Trust comes from three host-observable facts, never from caller JSON, `--expect`,
+events, env UUID, PID, TTY, helper ancestry or model text:
+
+| Question | Production evidence | Insufficient alone |
+| --- | --- | --- |
+| Who reviews, and is the reviewer independent? | **Host-owned reviewer launch**: the trusted host itself starts one fresh `claude-cli` text/no-tools child per admitted call through the existing provider and `CLIProcessLifecycle`; it records a random launch nonce, start time, owned-child kernel identity and the fixed logical reviewer role `llmtool-review/claude-cli`. Non-authorship holds by construction: no author Session, transcript or tool context is attached | Provider brand/model text; a reviewer Session ID supplied by the caller |
+| Who authored the reviewed source? | **Registered author worktree** (Host Registration, B2) plus **actual Git observations**: which registered locked root currently has the owned branch checked out at the exact SHA, with clean tracked state and the registered baseline preserved | Commit author, events, PR author field |
+| Did the reviewed source stay fixed? | Trusted host observations immediately before submission (no older than 5 s) and after the response: HEAD/index/clean tracked state, Git locks, writers, registration and packet digest | Developer CLI liveness/heartbeat (not required; heartbeat loss stays unknown, per N2) |
+
+The reviewer agent ID and launch identity must differ from **every** registered
+author. A pinned author whose registered root cannot be observed, an ambiguous
+checkout (the branch in two roots), or any drift is BLOCKED. Same-UID code can
+still edit host files; that limit is disclosed, not mitigated.
+
+#### B2. Host Registration and Route Policy (static host file)
+
+One Integrator-created JSON file, mode 0600, owner = current euid, regular,
+single-link, no-follow, in a 0700 directory **outside every repository root,
+worktree and common-dir** (proposed `~/.local/share/llmtool-host/`; final path
+is a Coordinator pin). Version 1, strict keys, duplicate-key/depth/size limits
+as S1b inputs, <=64 KiB. It holds only static policy; counters and state live
+only in the ledger (B4). It is **not** a second approval store.
+
+| Field group | Required content |
+| --- | --- |
+| `agents` | Each registered author: logical agent ID (`codex-dev`, `claude-dev`), physical root realpath + dev/inode, common-dir, origin URL, owned branch prefix, venv prefix |
+| `reviewer` | Logical role `llmtool-review/claude-cli`; approved `claude` executable realpath; approved auth-home provenance (`LLMTOOL_CLAUDE_CLI_HOME` value or HOME) |
+| `route_policies[]` | `ProviderRoutePolicy` (B3) entries, each with `revoked` boolean |
+| `ledger` | Provider-ledger path, dev/inode and creation nonce (B4) |
+| `issuer` | `capability_id` of the production issuer and the authorizing #120 comment URL |
+
+The host file's SHA256 and each route-policy digest are published in Issue #120
+when created or changed. A file that is missing, unsafe, unparsable, mismatched
+with the published digest, or that names a root/ledger whose dev/inode differs is
+BLOCKED with a fixed code; no auto-create, repair or re-pin. Creation, rotation
+and revocation are explicit Integrator actions, never part of `task review`.
+
+#### B3. Production Grant Issuer and Route Policy
+
+`ProviderRoutePolicy` (immutable, domain-separated digest
+`llmtool.provider-route-policy`): policy ID/version; provider `claude-cli`,
+profile and exact model; allowed data classes; maximum packet bytes (<=256 KiB);
+call timeout <=120 s and run <=180 s; one attempt, zero retry/fallback;
+per-call and per-UTC-day call caps; `unknown_cost_accepted` (must be true for
+the text route, else BLOCKED); validity window (`not_before`/`not_after` UTC);
+authorizer reference.
+
+**v1 data classes (Coordinator decision 4):** only approved source blobs and
+the complete exact-SHA diff of this repository, plus the S1b packet's own
+metadata (bindings, digests, check/CI references). **Denied:** company LLM logs
+or outputs, company endpoints/profiles, secrets/auth files, private raw logs,
+home paths, Session IDs and any Issue #66 excerpt not separately authorized.
+A packet containing any other class is BLOCKED before admission.
+
+`ProductionReviewIssuer` is the first production `HostIssuer` subclass, with a
+**new** `IssuerClass.PRODUCTION_REVIEW` value. `vouches_for(digest)` is true
+only when the host file loaded in this process lists that route-policy digest,
+it is not revoked, and current trusted UTC is within its validity window. It is
+constructed only by host code from the host file, never from model, JSON, env
+or CLI input; no flag selects a fake issuer.
+
+A **production review grant** is the ISSUED ledger receipt (B4) created from a
+`decide_provider_review()` ALLOW. Its binding names: task ID, both paired
+TaskBindings (preparation and final) with contract digests and criterion map;
+run ID and epoch/sequence; source SHA; packet digest; pre-call observation
+digest; author agent set; reviewer role and launch nonce; route-policy ID/
+version/digest; provider/profile/model; export-scope digest (data classes +
+path list digest); issuer class/capability ID; redeem run ID; UTC deadline.
+`NEW_COST` and `NEW_DATA_EGRESS` are allowed **only** in this function and only
+when covered by the vouched route policy; D1 `decide()` is unchanged and keeps
+denying them. D1 fake ALLOW, G7 rights, S1a preview, a docs merge, a packet
+digest, `--expect`/events or a model APPROVE are never production grants.
+
+#### B4. Durable one-use replay protection and crash recovery
+
+Reuse `authorization_ledger.ReceiptLedger` (Coordinator decision 3): **same
+class, a separate provider-ledger file**, created once by the Integrator with
+`ReceiptLedger.create()`. The D1 ledger file and D1 behavior are unchanged.
+State machine and durability are the existing ones: `ISSUED -> CONSUMED ->
+EFFECT_DONE | EFFECT_UNKNOWN` (or `DENIED`/`EXPIRED`); conditional UPDATE in
+`BEGIN IMMEDIATE`; `synchronous=FULL`, `fullfsync` requested; durable clock
+high-water; 0600/no-follow/dev-inode checks before and after the lock.
+
+Required additional semantics (each needs the scope amendment in B6):
+
+1. **Consume before effect:** CONSUMED is committed before the provider child
+   is started; the provider call is the sink. No call without a committed
+   CONSUMED row.
+2. **One call per reviewed object:** at most one receipt ever per
+   `(route-policy digest, source SHA, paired contract digests, packet digest)`,
+   independent of run ID, so a new run cannot buy a second call on the same
+   packet. A changed source/contract/packet is a new object needing a new
+   decision.
+3. **Redeem-time recheck:** inside the redeem transaction, re-verify that the
+   route policy is still vouched (not revoked, within validity) and the UTC
+   deadline has not passed; otherwise DENIED/EXPIRED with zero calls. This
+   closes D1's documented "redeem does not recheck revocation" limit for the
+   provider kind only.
+4. **Daily cap by durable consume day:** the provider ledger stores, per
+   receipt, a write-once `consumed_at` (trusted host UTC epoch seconds read
+   under the write lock after the existing high-water check) and
+   `consumed_day = floor(consumed_at / 86400)` (UTC day). Both are set in the
+   **same** conditional UPDATE that moves ISSUED -> CONSUMED, in the same
+   `BEGIN IMMEDIATE` transaction that first counts that route's rows with
+   `consumed_day` equal to the current UTC day and status in
+   {CONSUMED, EFFECT_DONE, EFFECT_UNKNOWN}; count >= cap -> NOT_ALLOWED,
+   row stays ISSUED, zero calls. The day is never derived from `issued_at`,
+   `expires_at`, the global clock high-water or a later status-update time.
+   Finalize (`EFFECT_DONE`/`EFFECT_UNKNOWN`) and `recover()` change only the
+   status, never `consumed_at`/`consumed_day`, so restart, recovery or late
+   finalization after midnight keeps the charge on the consume day. A
+   consumed-status row without both values, or with a day that disagrees
+   with `consumed_at`, is LEDGER_CORRUPT (fail closed). Because the clock
+   high-water is monotonic, consume days never move backward; host clock
+   rollback below it is CLOCK_INVALID before any count or consume. Admission
+   may pre-check the cap, but only the consume-time count is authoritative.
+5. **Recovery:** `recover()` runs only at host start-up under the host's
+   exclusive lock; every CONSUMED row becomes EFFECT_UNKNOWN. EFFECT_UNKNOWN
+   and any uncertain provider outcome (timeout, kill, crash after spawn) count
+   as **consumed**: no automatic retry, no "exactly-once" claim. A further
+   attempt needs a new run ID and an explicit Coordinator decision.
+6. **Ledger integrity:** a missing, replaced (dev/inode or creation nonce
+   mismatch vs. B2), locked, corrupt or clock-rolled-back ledger is BLOCKED;
+   re-creation is an explicit Integrator action re-published in #120.
+
+Result labels for the provider kind are distinct from D1 (`FAKE_POLICY_ALLOWED`
+and `FAKE_EFFECT_DONE` are never reused for a real call).
+
+#### B5. Interface with Product A (freeze before B code)
+
+Product A owns the foreground flow and its fake fixtures; B supplies only
+production implementations behind four injection points. A defines these
+protocols and the `ReviewCallBinding` pure data class in its own allowlisted
+files and freezes them in its Draft PR; B maps them and does not edit A's flow.
+
+```python
+class ReviewAuthority(Protocol):
+    def admit(self, binding: ReviewCallBinding) -> Admission: ...   # ISSUED grant or BLOCKED(code)
+    def consume(self, admission: Admission) -> ConsumeToken: ...    # CONSUMED committed before call
+    def finalize(self, token: ConsumeToken, outcome: CallOutcome) -> None: ...  # EFFECT_DONE / EFFECT_UNKNOWN
+class ReviewerLauncher(Protocol):
+    def launch(self, packet: bytes, token: ConsumeToken) -> LaunchResult: ...  # launch record + bounded raw text
+class AuthorshipObserver(Protocol):
+    def observe(self) -> Observation: ...   # A collector facts + B registration match
+class Clock(Protocol):
+    def utc(self) -> int: ...
+    def monotonic(self) -> float: ...
+```
+
+| Rule | Requirement |
+| --- | --- |
+| Production default | A's factory returns `UnavailableReviewAuthority` -> `REVIEW_AUTHORITY_UNAVAILABLE`, zero provider calls, until B is accepted |
+| Fakes | Fake authority/launcher/observer/clock exist only under `tools/llmtool/tests/`; no CLI flag, env or JSON selects them or upgrades fake to production |
+| Ownership | A owns `task_review*.py`/`cli.py` flow and tests; B owns new `review_authority*.py` and the scope-amended shared modules; the only B edit inside A's files is the single factory binding, made after A merges |
+| Change control | An interface mismatch is raised as an *interface decision request* in Issue #120; neither developer edits the other's branch or worktree |
+| Docs overlap | A and B both may touch ROADMAP/WORKFLOW; B keeps its text in this subsection plus one ROADMAP row so a later rebase is mechanical |
+
+#### B6. Proposed scope amendment for shared authorization code (not granted)
+
+B implementation needs a separately reviewed amendment before authoring.
+Proposed allowlist:
+
+- **New:** `tools/llmtool/llmtool/review_authority.py` (host file loader,
+  `ProviderRoutePolicy`, `ProductionReviewIssuer`, ledger adapter, launcher,
+  observer match), `review_authority_cli.py` (read-only
+  `llmtool review-authority check --json`; creates/changes nothing),
+  `tests/test_review_authority.py`, `tests/test_review_authority_native.py`
+  (Darwin-only; skipped elsewhere and never counted as PASS).
+- **Amend `authorization_policy.py` (additive only):** `EffectKind.PROVIDER_REVIEW_CALL`,
+  `IssuerClass.PRODUCTION_REVIEW`, `ProviderReviewBinding`, `ProviderObservedState`,
+  `decide_provider_review()`. `decide()`, `ReceiptBinding` and existing labels unchanged.
+- **Amend `authorization_ledger.py`:** accept a binding union (D1 `ReceiptBinding`
+  or `ProviderReviewBinding`) with per-kind sink/observation match; B4 items 2–4
+  apply to the provider kind only; D1 `FAKE_FILE_CREATE` path byte-for-byte
+  equivalent in behavior.
+- **Provider-only storage/schema amendment (explicit, R1):** the provider
+  ledger file uses a **distinct provider layout**, not a reinterpretation of
+  D1 schema v1. It keeps the D1 `clock` table and receipt status machine and
+  adds `consumed_at INTEGER NULL`, `consumed_day INTEGER NULL`, the
+  route-policy digest and the B4.2 reviewed-object key (UNIQUE), with CHECK
+  constraints that consumed-status rows carry both consume values. The file
+  records its layout identity as an explicit stored kind tag
+  (`PROVIDER_REVIEW`) in addition to its version number; a numeric version
+  alone never identifies the layout. Opening a D1 file as a provider ledger,
+  or a provider file as a D1 ledger, is LEDGER_CORRUPT, fail closed. The D1
+  schema v1, its existing files, `create()`/`open()` results for D1 and all
+  D1 semantics stay unchanged; there is no D1 migration and no in-place
+  conversion. Still one `ReceiptLedger` engine and no new approval store.
+- **Tests:** add cases to `test_authorization_policy.py`/`test_authorization_ledger.py`;
+  existing cases unchanged and must pass.
+- **One line** in A's `task_review_cli.py` factory, and `cli.py` subcommand
+  registration, after A merges.
+- **Optional, separately approved:** `providers/claude_cli.py` JSON-usage mode
+  (`--output-format json`) to report actual usage; without it usage/cost stay
+  UNKNOWN.
+- **Excluded:** diagnostics schema, TaskContract schema, Git hardening, F1/F2,
+  ai-loop controller, any daemon/scheduler/second approval store.
+
+#### B7. Threat model and required negative controls
+
+| Threat | Control | Residual / disclosed |
+| --- | --- | --- |
+| Forged identity (`--expect`/events/env/PID claims) | Author from registration + actual Git observation; reviewer launched by host | Same-UID can edit host file |
+| Self-review | Reviewer is a fresh host-launched child; agent ID differs from all authors | None beyond same-UID |
+| Replay (same grant/packet, retry after timeout) | One receipt per reviewed object; ISSUED-only consume; EFFECT_UNKNOWN counts as consumed | None |
+| Two-process race | `BEGIN IMMEDIATE` + conditional UPDATE; exactly one rowcount 1 | Requires native Mac proof |
+| Crash windows | CONSUMED committed before spawn; `recover()` -> EFFECT_UNKNOWN; no retry | Possible paid call with lost result (accepted) |
+| Clock rollback | Ledger high-water; monotonic used only within one process | Power-loss durability NOT_VERIFIED |
+| Day-boundary undercount (R1) | Write-once `consumed_at`/`consumed_day` set atomically with CONSUMED; cap counted by consume day inside the consume transaction | Requires T0/T1 proof |
+| Ledger deleted/replaced | Host-file dev/inode + creation nonce | Same-UID can change both |
+| Revocation race | Redeem-time recheck in the consume transaction | None |
+| Data egress | v1 data classes, existing privacy screen of packet and rendered prompt | Screen may miss content; class restriction limits blast radius |
+| Credential leak | Existing minimal child env; no API key; registered auth-home provenance | None |
+| Cost runaway | Per-call/day caps, `admit_next`, 120 s, no fallback | Text mode cannot cap spend; route must accept UNKNOWN cost |
+| Prompt injection | A's F2 fixed host instructions + escaped packet DATA; APPROVE is evidence only | No universal LLM resistance (shadow mode, B8) |
+| Executable swap | Approved `claude` realpath rechecked before/after launch | Same-UID TOCTOU disclosed |
+
+#### B8. Acceptance stages, shadow review and cost/quality evaluation
+
+| Stage | Content | Authority needed |
+| --- | --- | --- |
+| **T0 fake** (B PR, CI) | Fake provider + real ledger/host-file/issuer code: every B7 control, revocation between admit and consume, cap boundary, R1 consume-day cases (issue 23:59:30 then consume 23:59:40 vs. 00:00:20 charges the respective UTC day; cap N-1 at 23:59:59 plus consume at 00:00:00 admits on the new day; finalize or `recover()` after midnight keeps the consume day; missing/inconsistent consume values and D1/provider layout cross-open -> LEDGER_CORRUPT), binding/route/data-class mismatch, missing/unsafe host file, FAKE label isolation, D1 regression unchanged | Accepted scope amendment; exact-head 3.9/3.14 CI; non-author review |
+| **T1 native Mac (fake provider)** | Real APFS ledger: two-process barrier race (one call, one REPLAY), two-process race at cap-1 across distinct receipts (exactly one CONSUMED, the other NOT_ALLOWED with zero calls), SIGKILL then restart/`recover()` keeps EFFECT_UNKNOWN counted on its consume day, clock rollback across midnight -> CLOCK_INVALID with no count or consume, SIGKILL after consume/before spawn and after response/before finalize -> EFFECT_UNKNOWN with no retry, ledger replace/delete/lock, clock rollback, owned-child cleanup | Independently reviewed bounded command on exact source; Linux CI cannot substitute |
+| **T2 canary** | One real call: small public repo diff, no sensitive data; verify one consume, verdict parse, cleanup, second run REPLAY with zero calls | Coordinator single-use route approval after A+B exact-head gates |
+| **T3 shadow** | >=5 real PRs reviewed by both the automatic no-tools review and the existing independent human-led review, plus seeded-defect fixtures (N1-style false SUCCESS, permission hole, prompt injection) | Coordinator enables per run |
+
+**Shadow rule (Coordinator decision 6):** the automatic verdict is a
+pre-review/triage signal only and never replaces the independent
+Security/Functional APPROVE. Promotion is considered only with **0
+false-APPROVE on seeded defects** and agreement with independent reviewers on
+release blockers.
+
+**Metrics (decision 7):** per PR, manual prompt-relay count and
+request-to-verdict latency (primary benefit); provider calls, measured
+input/output/cached tokens where reported, wall time, cap hits and
+UNKNOWN-usage count. Missing usage is UNKNOWN, never 0; no token or cost saving
+is claimed without paired, quality-equivalent measured evidence.
+
+Production enablement is a later combined Coordinator decision requiring A
+exact-head acceptance (fake-only), B contract and implementation acceptance,
+T1 native evidence and an explicitly authorized T2. Until then S1b real-provider
+route stays **NOT_AUTHORIZED/BLOCKED**. No F2/S2, Git mutation, automatic merge,
+daemon, scheduler or second ai-loop.
+
 ## Quality-gate model
 
 Engineering evidence is split by purpose. Do not use one green result as a substitute
@@ -946,3 +1209,51 @@ no B absence may be hidden behind fake success. No S2/F2/automatic repair/Git
 write/merge, provider fallback, daemon/scheduler/second approval/logging stack,
 company benchmark or G5/G6 repeat. Intermediate historical evidence keeps its
 original scope/status and cannot renew current live readiness.
+
+
+#### Product A frozen interface mapping — I-1–I-5
+
+The [Coordinator interface disposition](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6128597185)
+is implemented in A's allowed modules. `task_review.py` owns `ReviewCallBinding`,
+`Admission`, `ConsumeToken`, `CallOutcome`, `LaunchResult`, `ReviewAuthority`,
+`ReviewerLauncher`, `AuthorshipObserver` and `Clock`; `task_review_collector.py`
+owns immutable `Observation`. The only shipped factory returns
+UnavailableReviewAuthority; public ready input yields REVIEW_AUTHORITY_UNAVAILABLE
+with zero calls, not a production grant. B later changes only the dedicated
+factory import binding in task_review_cli.py under its separately pinned scope.
+
+ReviewCallBinding includes all B3 fields: both original TaskBindings/digests,
+criterion map, task/run/epoch/sequence, exact source/packet/pre-observation,
+registered-author agent set, fixed reviewer role and preallocated nonce,
+route ID/version/digest/provider/profile/model, export-scope digest over approved
+data classes + path-list digest, issuer class/capability, redeem run and UTC
+deadline. The nonce is host-allocated before admit without spawning; only the
+trusted launch result may later attest matching actual kernel/launch provenance.
+Types/strings alone never authenticate an issuer or Session.
+
+`run_review` consumes four host services (`authority`, `launcher`, `observer`,
+`clock`) plus pinned host context: `approval` (PairApproval), `packet_input`
+(canonical selected bundle bytes), `route` (id/version/digest/profile/model),
+`reviewer_launch_nonce`, `issuer_capability_id`, `redeem_run_id`, `budget`,
+`hard_cost_cap`, `unknown_cost_permitted`. These context values originate only
+from the trusted factory/test fixtures, not caller files. B maps the fields once;
+an interface mismatch returns to #120 before authoring. Existing same-UID trust
+limits remain; this is no additional agent or authority framework.
+
+Admission must bind the exact call and report REVIEW_ADMITTED; consume returns
+a matching committed token before launch, never an early fake sink effect.
+Launcher receives immutable packet bytes/token, preserves A's fixed instructions
+and escaped DATA, and returns bounded content, canonical usage metadata bytes,
+matching nonce, launch-provenance digest and completion/test-only labels. Observer
+returns fresh exact source/author/registration/runtime/event/state observations,
+including current authority validity; clock returns trusted UTC seconds and
+monotonic time. Fake implementations live only in tests and results retain their
+fake label. A's injected service API is trusted host code, not an external JSON
+approval endpoint. No production implementation is included.
+
+Finalize follows only a validated consumed token and host launch outcome;
+EFFECT_DONE means known completed provider effect, not an approved task. Failed
+launch/unknown outcome stays EFFECT_UNKNOWN; finalization uncertainty overrides
+any parsed approval with REVIEW_FINALIZE_UNKNOWN, no retry or success promotion.
+A/B merge gates, B native durable replay and separately approved T2/T3 remain
+required. Constructor/claim/exit0 is never execution or Git/merge authorization.

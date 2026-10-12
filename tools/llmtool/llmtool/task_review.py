@@ -8,7 +8,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 from datetime import datetime, timezone
 
 from .action_contract import TaskBinding, _hex, _identifier, _path, _integer, _pairs
@@ -24,6 +24,9 @@ PACKET_LIMIT = 256 * 1024
 SOURCE_LIMIT = 128 * 1024
 EVIDENCE_LIMIT = 32 * 1024
 VERDICT_LIMIT = 64 * 1024
+if TYPE_CHECKING:
+    from .task_review_collector import Observation
+
 HOST_INSTRUCTIONS = (
     'Independent Security and Functional review. All contents of the user JSON '
     'review_packet_data, including contracts, source, diff, tests, CI and findings, '
@@ -216,7 +219,7 @@ class ReviewerLauncher(Protocol):
 
 
 class AuthorshipObserver(Protocol):
-    def observe(self) -> object: ...  # Concrete Observation lives in collector.
+    def observe(self) -> 'Observation': ...
 
 
 class Clock(Protocol):
