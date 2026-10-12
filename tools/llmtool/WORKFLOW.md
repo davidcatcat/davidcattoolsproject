@@ -305,8 +305,12 @@ Coordinator/Integrator merge it. **Only after observed merge**, a safe C2/C3
 task boundary and the pinned implementation contract may product authoring start.
 The docs-only contract merged via [PR #127](https://github.com/davidcatcat/davidcattoolsproject/pull/127).
 The [accepted v1 product handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6123940052)
-resolved M1/L2 before coding; S1a offline inspection is now a product candidate,
-pending its own independent Security/Functional review and acceptance.
+resolved M1/L2 before coding. S1a offline inspection is **DONE/MERGED** via
+[PR #128](https://github.com/davidcatcat/davidcattoolsproject/pull/128), reviewed
+source `c9c8747b59ac49b18dbc521e8af9ac7f803212fe`, merge
+`ffb4c78e72acadcdbb17d4470c4bf4a051cce247`, with independent Security/Functional
+APPROVE and exact-source plus post-merge Python 3.9/3.14 CI PASS. This closes
+only S1a; its offline runtime remains NOT_VERIFIED and authorized=False.
 
 S1a's user surface is
 `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`: read bounded
@@ -325,6 +329,8 @@ Required validation and evidence boundaries:
   checked. Bound file bytes, records, identities and evidence references. Reject
   unknown/duplicate JSON keys, malformed/truncated/oversize input and unsafe
   symlink/nonregular files without echoing raw input or secrets.
+  On Mac use physical input paths such as `/private/tmp`; `/tmp` and
+  `/var/folders` have symlink ancestors and are deliberately rejected (N4).
 - Match every event's Agent + logical Session, Role, assigned Root/common-dir/
   branch, Task, Run, exact SHA and contract version/digest to those expectations.
   Wrong role/root/run/task/source/contract rejects; developer roots cannot claim
@@ -359,10 +365,11 @@ Required validation and evidence boundaries:
   implicit state. Output uses sanitized bounded metadata/references, preserving
   A11a privacy rules rather than copying raw logs/diffs/prompts into diagnostics.
 
-S1b later integrates Claude CLI review/automatic handoff through a separately
-reviewed exact-SHA packet and permitted data route; this is not an S1a provider
-path. S2 later adds permission-controlled repair/execution under A11b's separately
-accepted approval/sandbox/recovery/audit/budget gates. **F2 remains NOT AUTHORIZED**;
+S1b's proposed [foreground review contract](#s1b-foreground-review-contract-draft)
+defines the separate exact-SHA packet and permitted data route; it is not an
+S1a provider path or an execution grant. S2 later adds permission-controlled
+repair/execution under A11b's separately accepted approval/sandbox/recovery/audit/
+budget gates. **F2 remains NOT AUTHORIZED**;
 S1a does not imply A11b DONE, full A11c acceptance or ai-loop parity/cutover.
 No daemon/scheduler, new temporary ai-loop controller or duplicate approval/logging
 system. Company-LLM Round 1–3 evidence and existing measurement/privacy policy
@@ -378,6 +385,281 @@ Publish a separate Draft product PR for independent Claude Security + Functional
 review. Offline tests do not satisfy later live collector, concurrent ledger or
 real-agent/repair acceptance. Keep required missing gates blocking, retain interim
 ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositions.
+
+### S1b foreground review contract (DRAFT)
+
+**STATUS: contract proposal / independent Claude Security + Functional review
+PENDING; product implementation and real provider invocation NOT STARTED.**
+This is the docs-only response to the accepted
+[S1b handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
+and [N1–N5 review](https://github.com/davidcatcat/davidcattoolsproject/pull/128#issuecomment-6125617914).
+Only ROADMAP.md/WORKFLOW.md change in this PR. Independent non-author contract
+review, applicable exact-head CI and authorized merge precede any product work;
+then pin a product handoff, pass fresh G7 C2/C3/C4 and independent exact-branch
+baseline acceptance. Neither this text nor its merge authorizes provider egress.
+
+#### Public outcome, scope and stage predicates (N1)
+
+The proposed product command is one foreground
+`llmtool task review --contract <ready-file> --acceptance-contract <final-file> --expect <file> --events <file> --json`.
+It validates preparation, collects actual read-only evidence, submits one permitted
+packet to the existing independent Claude CLI text/no-tools provider, and returns
+a bounded verdict/developer handoff on stdout. No background work, ledger append,
+automatic artifact persistence, repair, test execution, Git/PR mutation or merge.
+The collector supplies trusted current UTC plus monotonic time; caller timestamps
+are claims, not the admission clock. The existing `task inspect` surface/schema,
+TTL and runtime NOT_VERIFIED/authorized=False semantics remain unchanged.
+
+Use **two separately pinned, immutable existing TaskContracts**, selected together
+by the authorized Coordinator before readiness events exist: a preparation task
+with only required pre-review checks/artifacts, and a distinct final acceptance
+task with those checks **plus required Security and Functional REVIEW criteria**.
+The packet pins both TaskBindings/task IDs, run IDs, versions/digests and the
+explicit criterion mapping; both bind the same exact source SHA and author set.
+The preparation goal explicitly excludes product completion. Do not derive it by
+stripping criteria from a submitted final contract, silently edit a contract,
+reuse final-task events under the preparation binding or manufacture prior review.
+Missing/unapproved pairing is BLOCKED. This reuses TaskContract without changing
+its schema or making required review optional; outstanding final review criteria
+are always visible in the review result.
+
+| Decision | Required conjunction |
+| --- | --- |
+| Admit review | Preparation inspection `structural_validation == SUCCESS` **and** `reported_state == WAITING_REVIEW` **and** valid latest pinned HandoffRecord; all mapped pre-review criteria supported by actual accepted evidence; no rejected supplementary evidence; fresh collector, independent reviewer, policy/route/budget gates all pass |
+| Accept final completion claim | Final-task inspection SUCCESS **and** reported_state COMPLETED **and** both exact-bound reviewer verdicts APPROVE, authenticated invocation provenance and all final required actual evidence accepted under the contract |
+| Any other state/result | No call or completion promotion; FAILED/BLOCKED/RUNNING/STALE/INCOMPLETE/unknown never becomes eligible from exit0 or valid JSON |
+
+The preparation handoff's outstanding criteria must equal its own inspection
+result (empty on SUCCESS); the packet/result separately lists the final REVIEW
+criteria still outstanding. This prevents an impossible trigger requiring a
+previous review. Rejected/failed/partial supplementary evidence still caps the
+aggregate; model claims never substitute for checks. A successful review does
+not append COMPLETED to either ledger, certify semantic correctness, grant
+execution rights or declare DONE; a later authorized consumer must independently
+verify final evidence and delivery gates. Existing S1a runtime is never upgraded.
+The final check evidence must be independently validated under its final binding
+against the same original execution artifacts; remapping readiness criterion IDs
+does not rewrite or authenticate a caller EvidenceRecord.
+
+#### Historical evidence and live identity (N2/N3)
+
+Historical COMPLETED/FAILED records may supply **historical context** only after
+sequence/epoch, exact source/contract/run, original execution/verdict provenance
+and immutable artifact digests are verified. Report their original timestamp and
+validation scope separately from present liveness. The archival structural
+check may use the recorded terminal time, explicitly labeled historical rather
+than current inspection SUCCESS; it cannot renew eligibility or bypass S1a TTL.
+Missing original proof is NOT_VERIFIED, including structurally valid terminal
+records. Changed source/contract invalidates reuse for the new task. No review
+call is admitted from archived terminal records, even if historically valid.
+
+Live eligibility uses the existing 1..86400-second pinned heartbeat TTL, current
+trusted UTC and monotonic observations. Reject future/rollback/expired events,
+stale collector samples, inconsistent clocks, unknown Session or partial state.
+Immediately before submission and after response, take a new trusted observation
+(no older than 5 seconds at decision time) and recheck source, contract pair,
+task/run, epoch/last sequence/handoff, writer ownership, Session and remaining TTL.
+Expiry or drift during review invalidates the verdict for acceptance. Heartbeat
+loss is unknown liveness, not proof of death; no auto-resume/renew/kill/cleanup.
+
+A small host adapter around `git_intel`, task_lifecycle and existing runtime
+evidence performs the collector. Its trust source is the pre-existing reviewed
+G7 root/owner/task registration and trusted CLI host Session records, selected
+outside `--expect`/events/model content. Record provenance references/digests and
+compare independent expectations to observations; expectations constrain values
+but cannot authenticate them. Env UUID, PID, TTY, helper ancestry, a matching
+caller JSON or an archive alone is insufficient logical Session proof. If the
+host cannot attest a logical Session and its current ownership, BLOCKED before
+the provider call; do not add a self-attestation fallback. Cooperative same-UID
+trust remains the G7 assumption, not OS isolation or hostile-peer protection.
+
+Required actual observations: physical assigned root/dev/inode/UID/mode/no-follow
+ancestors; registered locked worktree/common-dir/repository/remote; unique owned
+branch and exact HEAD/index/clean tracked state; registered untracked/ignored
+baseline preservation; current writers/tests/locks; developer/reviewer logical
+Agent/Session/Role and authorship; approved executable/prefix/import/pyvenv home
+provenance. Each developer branch has one owner; reject duplicate claims,
+peer/main/automation takeover, symlinks, unsafe config/env/filter/hooks, wrong-root
+imports, unknown writer or drift. Do not execute a caller-selected interpreter
+or import peer code to establish provenance: attest the collector's own runtime
+in-process and require trusted host launch evidence for the reviewer runtime.
+
+Local Git reads use a pinned trusted executable, fixed allowlisted argv, literal
+validated refs/paths, no shell, disabled hooks/fsmonitor/filters/textconv/ext-diff,
+no pager/prompts/lazy-fetch/replacement objects and bounded output/time. Reuse A5
+hardened reads; any required new read primitive is individually reviewed/tested,
+not arbitrary caller argv. Per-read deadline <=10 seconds, whole collection
+<=30 seconds, <=32 reads, metadata <=1 MiB/read and <=2 MiB total before packet
+minimization. No fetch/ref update/install/switch/clean/signaling. Remote PR/CI
+reads use an explicitly permitted fixed GitHub route, repo/PR/head binding,
+<=8 requests, <=10 seconds/request within that same 30-second collection bound;
+no redirects to arbitrary hosts, URL fetching from events or credential export.
+Missing remote permission/facts means BLOCKED, never an empty successful result.
+
+#### Exact-SHA packet and privacy boundary
+
+The immutable packet version 1 pins: both original contracts/bindings and
+criterion map; author and independent reviewer bindings; base/subject exact SHA,
+selected source blobs and complete changed-path diff; epoch/sequence/handoff/check
+digest; pre-submission collector observation digest; selected actual command/exit/
+environment/artifact evidence; exact-head CI repo/run/job/conclusion references;
+approved provider/profile/model route and host permission reference. Every part
+has its source identifier, byte length and SHA256. Canonical UTF-8 JSON (sorted
+keys, compact separators, `ensure_ascii=False`, no duplicate keys/nonfinite
+numbers) has SHA256 of UTF-8 `llmtool.review-packet.v1` + NUL + canonical packet
+bytes, excluding its digest field. Preserve original TaskContract digest rules;
+packet serialization does not redefine them. Source/diff SHA and original artifact digests are independently
+verified, not simply copied from caller assertions. A packet hash proves byte
+identity, not authorization or that tests ran.
+
+Limits: total exported packet <=256 KiB; each unchanged TaskContract <=64 KiB
+and its existing limits; diff plus selected source <=128 KiB; selected test/CI
+metadata <=32 KiB; <=32 source paths and <=128 evidence references. The total
+limit always wins. Inputs retain S1a safe stable no-follow regular-file/inode
+checks, UTF-8/duplicate-key/record limits, plus S1b JSON depth <=16 before object
+construction. No binary/submodule/external path
+export; reject oversize, incomplete/truncated diff or absent relevant source
+rather than silently summarizing away a changed path. Selected context must
+include enough original code for each reviewed change; otherwise BLOCKED.
+
+Only an explicitly allowlisted source/evidence export scope may leave the host.
+Before any call, deterministically screen paths/content/metadata using existing
+privacy components and deny secrets/auth files/credentials/private raw logs,
+prompts, home paths/Session IDs and sensitive findings. Export stable opaque
+identity/provenance references; local trusted collector retains the comparison
+to actual private identity. Screen the entire rendered prompt and returned
+verdict too; refusal outputs fixed codes, never rejected content. Approval of a
+hash or redaction does not grant data routing. Issue #66's excerpt route is a
+separate prerequisite if excerpts are selected, not blanket diff/log permission.
+Unresolved privacy or provenance is BLOCKED. No raw packet/provider text in
+diagnostics/journal; originals remain at their authorized source for inspection.
+
+#### Invocation authority, lifecycle and failure
+
+Use existing action/policy/approval interfaces and `run_budget`, not a new approval
+ledger. D1 receipts/synthetic HostIssuer, G7 development rights, a S1a preview and
+model approval are **not production authority**. Before a real call, a separately
+reviewed host grant must name authentic issuer/delegated scope, task/paired
+contracts/run/SHA/epoch, reviewer Session/route/profile/model, exact packet digest,
+data scope, deadline and one-call allowance; recheck revocation/expiry and actual
+state just before submission. Missing accepted production host/issuer wiring
+blocks real invocation; contract merge and fake-provider tests do not create it.
+The trusted host must enforce one-use admission across invocations/restarts;
+reusing the same grant, including after timeout/unknown outcome, is rejected.
+Its production authority/replay mechanism needs separate accepted evidence;
+do not repurpose D1's synthetic sink or add a second approval store here.
+This round grants no such wiring or smoke permission. No explicit verdict file
+write is in v1; adding one requires its own scope/permission review.
+
+Invoke only approved `claude-cli` via its existing provider and CLIProcessLifecycle:
+`--print --output-format text --no-session-persistence --safe-mode --tools ""`,
+stdin packet, argv/no shell, isolated non-repository runtime cwd, existing minimal
+child environment and approved auth-home provenance. Never start an interactive
+peer session or enable tools/MCP/repo access. Attest the independently assigned
+reviewer role/logical invocation Session through the trusted host and owned-child
+launch record; provider brand/model text does not establish non-authorship.
+Both reviewer agent ID and Session ID differ from **every** pinned author.
+Ephemeral provider cwd/owned-child lifecycle is the existing isolation path,
+not another project checkout or daemon; stop only this call's owned children.
+
+S1b ceiling: one provider attempt, zero retries/fallback/repairs, configured call
+timeout <=120 seconds, whole foreground run <=180 seconds, packet byte limits
+above, parsed response <=64 KiB. Existing provider transport stdout/stderr ceiling
+remains 1 MiB each; oversize verdict is rejected, not truncated or echoed.
+Reuse prospective budget admission and record actual elapsed/calls/usage;
+unknown tokens/cost stay null, never zero. Claude text mode cannot attest/enforce
+a hard monetary/token cap: if the approved route requires such a cap, BLOCKED
+before calling, not a fabricated guarantee. Route must expressly accept the
+one-call/time/byte bounds and unknown-cost limitation.
+
+Unavailable/auth/timeout/cancel/nonzero exit/partial or invalid output, missing
+authority, stale/drifted observations or unknown cleanup returns a sanitized
+BLOCKED/INCOMPLETE reason with invocation status and evidence references. Never
+fallback to company/Codex/premium, retry, infer PASS from exit0 or claim successful
+cleanup without lifecycle evidence. Preserve existing provider error codes and
+A11a diagnostics schema. No implicit journal or packet persistence; stdout is
+the explicit result channel. A provider failure cannot renew a grant or task.
+
+#### Verdict/result schema and bounded developer handoff
+
+Version 1 verdict is one strict JSON object (no fences/prose/unknown or duplicate
+keys), <=64 KiB, bounded depth <=16. Required fields: `schema_version`, `review_id`,
+both `ready_task` and `acceptance_task` TaskBindings, `source_sha`, `epoch`,
+`sequence`, `packet_digest`, `observation_digest`, opaque `reviewer_binding_digest`,
+`security`, `functional`, `findings`, `criterion_evidence`. Each decision is exactly
+APPROVE/CHANGES_REQUIRED/BLOCKED. <=32 findings have unique ID, Security/Functional
+category, #92 severity/priority, explicit release_blocker boolean, bounded
+control-free summary/reproducer and allowlisted path/criterion/evidence refs.
+<=32 criterion-evidence entries reference existing final criterion IDs and packet
+evidence/digests; no model-supplied command, URL or path becomes executable input.
+Text fields <=1024 UTF-8 bytes; IDs/digests follow existing validators. Missing
+criteria, contradictory blocker+APPROVE, binding mismatch, self-review, absent
+provenance or malformed verdict is INCOMPLETE, never accepted review evidence.
+Severity/priority/blocker consistency follows #92's user-impact rules; an
+explicit false blocker flag cannot waive a required security/functional gate.
+
+The host envelope records `structural_validation`, `reported_state`, separate
+`collector_status`, `invocation_status`, `verdict_validation`, independent
+Security/Functional decisions and outstanding final criteria, plus task/source/
+packet/evidence references and the host's post-response observation digest
+(which cannot exist in the pre-call packet). The verdict echoes the pre-call
+observation digest; the host compares the post-call observation before accepting
+it. `authorized=False` is retained: this result grants
+no subsequent effect. Collector validation authenticates only its stated
+observations; actual invocation evidence proves a call ran, not test execution
+or semantic correctness. The S1a runtime field remains NOT_VERIFIED; don't
+overwrite it with collector/invocation success. Result exit0 requires both
+validated APPROVE verdicts and accepted provenance, but still means review result,
+not COMPLETED/DONE/merge. Valid CHANGES_REQUIRED/BLOCKED or incomplete prerequisites
+exit1; invalid local input/schema exit2 via existing sanitized error handling.
+
+CHANGES_REQUIRED returns a bounded handoff referencing exact source/contract,
+findings, required criteria and originals to the registered developer; it starts
+no developer or repair. Changed source/run/epoch/contract requires new evidence
+and separately permitted review, not reuse of this verdict/grant. BLOCKED returns
+the specific missing gate for Coordinator disposition and preserves state.
+Nonblocking Low is one #120 backlog using Issue #92 ACCEPT/DEFER/FIX; no infinite
+review loop. N4/N5 status/physical-path wording is maintained here/ROADMAP; README
+maintenance waits for an authorized ordinary product touch, not this two-file PR.
+
+#### Product allowlist and acceptance plan (no execution grant)
+
+After contract acceptance, a separately pinned product task may change only
+`tools/llmtool/llmtool/{task_review.py,task_review_cli.py,task_review_collector.py,cli.py}`,
+`tools/llmtool/tests/{test_task_review.py,test_task_review_cli.py,test_task_review_collector.py}`,
+and `tools/llmtool/{README.md,ROADMAP.md,WORKFLOW.md}`. These are thin adapters/tests
+reusing TaskContract/TaskBinding/task_lifecycle, A5 hardened reads, existing
+provider/lifecycle/privacy/error/diagnostics/authorization/budget components.
+This is a proposed future allowlist, not permission to edit those files now.
+Changes to existing shared schemas/providers/authorization/Git hardening need
+explicit accepted scope amendment before authoring; do not copy or weaken them
+to avoid that gate. No daemon/scheduler/second framework/logging/approval store,
+temporary ai-loop controller, F2/S2 mutation, Git write, automatic repair or PR
+merge. Interim ai-loop and company Round 1–3 evidence/policies remain unchanged;
+no company call, rerun or new savings claim.
+
+| Required future test | Expected behavior |
+| --- | --- |
+| Fake provider full journey | Paired pinned contracts, current verified collector, all actual pre-review criteria, valid WAITING_REVIEW handoff and explicit fake host grant -> one packet/call, exact-bound Security+Functional verdict, outstanding final gates visible |
+| N1 combinations | SUCCESS with RUNNING/BLOCKED/FAILED/COMPLETED, WAITING_REVIEW without valid handoff, incomplete aggregate/supplementary evidence, unapproved pairing or forged review -> zero calls; final false completion rejected |
+| N2 clocks/history | Historical terminal context vs fresh live TTL, exact expiry boundary, future/rollback/missing heartbeat and expiry during call -> no renewal/resume or false liveness |
+| N3 identity/source | Wrong/unknown Session/author/role/root/common-dir/remote/branch/import, duplicate branch ownership, unexpected writer/test/lock/config, forged expect/events -> fail closed before call |
+| Packet/route safety | Wrong SHA/digest/criterion/CI head, unsafe/aliased/changing file, oversize/deep/duplicate/binary input, secret/private path/log, arbitrary evidence URL, no issuer/route/budget -> zero calls and no sensitive echo |
+| Provider/verdict | Unavailable/auth/timeout/cancel/nonzero/oversize/partial output, invalid enum/schema/identity/evidence, plain APPROVE or self-review -> non-PASS, zero retries/fallbacks, owned-child cleanup evidence |
+| Drift and effects | HEAD/index/source/contract/run/epoch/sequence/Session/permission change before submission or during review invalidates eligibility/verdict; no Git writes/test/repair/extra file/journal persistence or unapproved subprocess/network calls |
+
+Focused new tests first, then relevant S1a/TaskContract/provider/privacy/budget/
+authorization regressions, required full checks and exact-head Python 3.9/3.14 CI.
+Native read-only Mac collector/file/provenance cases require independently reviewed
+bounded commands and exact tested source; fake provider first. Real Claude Mac
+smoke is NOT_AUTHORIZED/NOT_TESTED until explicit authentic host and data-route
+approval, accepted source gates and non-author Security/Functional review; a
+required missing native/production gate blocks corresponding product acceptance.
+Do not label fake tests live PASS or relax permissions to satisfy a gate. Deliver
+one separate Draft product PR with exact evidence and independent review; author
+never approves or merges it. This docs PR needs link/anchor/scope/contradiction
+validation, applicable exact-head CI and independent Claude contract review only;
+no application build/provider smoke or G5/G6/benchmark rerun.
 
 Before work, pin a **Task Contract** with task ID, version/digest, goal, authorized
 scope, forbidden scope, acceptance criteria and required evidence. Keep the exact
@@ -471,8 +753,9 @@ and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
 A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
-AUTHORIZED. A11c.1 S1a is an offline product candidate with independent review/
-acceptance PENDING; full production integration is NOT STARTED; A12 future optional. Historical
+AUTHORIZED. A11c.1 S1a is DONE/MERGED via PR #128; S1b is a docs-only contract
+proposal with independent review PENDING, no implementation/provider invocation;
+full production integration is NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
 durable-audit and state-recheck controls.
