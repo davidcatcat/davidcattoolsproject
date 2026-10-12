@@ -419,6 +419,13 @@ class FrozenInterfaceTests(unittest.TestCase):
             'reviewer_role','reviewer_launch_nonce','route_id','route_version','route_digest',
             'provider','profile','model','export_scope_digest','issuer_class','issuer_capability_id',
             'redeem_run_id','deadline'})
+    def test_fresh_submit_sample_cannot_renew_stale_packet_observation(self):
+        original=self.host.bundle
+        def delayed_packet():
+            self.host.utc='2026-10-13T00:00:16Z';self.host.mono=16.0
+            return original()
+        self.host.bundle=delayed_packet
+        self.zero(self.run_review(),'REVIEW_OBSERVATION_STALE')
     def test_default_factory_unavailable_and_never_creates_a_ledger(self):
         with patch('builtins.open',side_effect=AssertionError()),patch('subprocess.Popen',side_effect=AssertionError()):
             authority=r.review_authority_factory()

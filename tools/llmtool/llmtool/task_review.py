@@ -539,6 +539,9 @@ def run_review(ready, final, expect, events, fixture):
         submit_mono = fixture.clock.monotonic()
         submit = fixture.observer.observe()
         submit.validate(expect, events, submit_now, submit_mono)
+        # The exact observation pinned into the packet/binding must remain fresh
+        # too; a new equivalent sample cannot renew an old observation digest.
+        before.validate(expect, events, submit_now, submit_mono)
         _clocks_agree(before, submit)
         if submit.state_digest != before.state_digest:
             reject('REVIEW_SOURCE_DRIFT')
