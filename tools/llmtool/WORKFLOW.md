@@ -388,12 +388,14 @@ ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositio
 
 ### S1b foreground review contract (DRAFT)
 
-**STATUS: contract proposal / independent Claude Security + Functional review
-PENDING; product implementation and real provider invocation NOT STARTED.**
+**STATUS: contract accepted/merged via [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129)
+at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is a fake-only
+candidate, independent product review PENDING. Real Claude remains BLOCKED;
+actual automatic handoff NOT DELIVERED, pending B.**
 This is the docs-only response to the accepted
 [S1b handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
 and [N1–N5 review](https://github.com/davidcatcat/davidcattoolsproject/pull/128#issuecomment-6125617914).
-Only ROADMAP.md/WORKFLOW.md change in this PR. Independent non-author contract
+The original contract PR changed only ROADMAP.md/WORKFLOW.md. Independent non-author contract
 review, applicable exact-head CI and authorized merge precede any product work;
 then pin a product handoff, pass fresh G7 C2/C3/C4 and independent exact-branch
 baseline acceptance. Neither this text nor its merge authorizes provider egress.
@@ -490,7 +492,9 @@ no pager/prompts/lazy-fetch/replacement objects and bounded output/time. Reuse A
 hardened reads; any required new read primitive is individually reviewed/tested,
 not arbitrary caller argv. Per-read deadline <=10 seconds, whole collection
 <=30 seconds, <=32 reads, metadata <=1 MiB/read and <=2 MiB total before packet
-minimization. No fetch/ref update/install/switch/clean/signaling. Remote PR/CI
+minimization. No fetch/ref update/install/switch/clean or peer/historical-process signaling.
+Bounded read timeout cleanup stops only its own Git child under the existing
+A5 lifecycle principle. Remote PR/CI
 reads use an explicitly permitted fixed GitHub route, repo/PR/head binding,
 <=8 requests, <=10 seconds/request within that same 30-second collection bound;
 no redirects to arbitrary hosts, URL fetching from events or credential export.
@@ -620,7 +624,7 @@ and separately permitted review, not reuse of this verdict/grant. BLOCKED return
 the specific missing gate for Coordinator disposition and preserves state.
 Nonblocking Low is one #120 backlog using Issue #92 ACCEPT/DEFER/FIX; no infinite
 review loop. N4/N5 status/physical-path wording is maintained here/ROADMAP; README
-maintenance waits for an authorized ordinary product touch, not this two-file PR.
+maintenance is included in Product A's authorized ordinary README touch.
 
 #### Product allowlist and acceptance plan (no execution grant)
 
@@ -657,7 +661,7 @@ approval, accepted source gates and non-author Security/Functional review; a
 required missing native/production gate blocks corresponding product acceptance.
 Do not label fake tests live PASS or relax permissions to satisfy a gate. Deliver
 one separate Draft product PR with exact evidence and independent review; author
-never approves or merges it. This docs PR needs link/anchor/scope/contradiction
+never approves or merges it. The original docs PR required link/anchor/scope/contradiction
 validation, applicable exact-head CI and independent Claude contract review only;
 no application build/provider smoke or G5/G6/benchmark rerun.
 
@@ -753,8 +757,9 @@ and no execution/mutation; A11b.2.1 read-only Git preflight and
 A11b.2.2.1 synthetic containment are DONE/merged via PR #43 and PR #49;
 A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
-AUTHORIZED. A11c.1 S1a is DONE/MERGED via PR #128; S1b is a docs-only contract
-proposal with independent review PENDING, no implementation/provider invocation;
+AUTHORIZED. A11c.1 S1a is DONE/MERGED via PR #128; S1b contract is
+accepted via PR #129. Product A is a fake-only candidate, independent product
+review PENDING, real provider BLOCKED pending B;
 full production integration is NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
@@ -903,3 +908,41 @@ passed independent Security/Functional QA and was merged via
 [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84).
 F2 real-repository mutation remains NOT AUTHORIZED; [Issue #70](https://github.com/davidcatcat/davidcattoolsproject/issues/70)
 retains the historical integration design and deferred controls.
+
+
+### S1b Product A implementation boundary — B still required
+
+[Accepted A/B ordered handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
+adds F2 untrusted packet DATA isolation, F3 independently host-pinned pair
+approval and F4 stable size errors to the merged contract. A's public review
+command has no production host/issuer/provider wiring or fake flag; valid ready
+inputs collect LOCAL_FACTS_ONLY then BLOCKED with B's missing gates. Actual
+Session/registered inventory/writer/CI execution authentication stays unverified
+without B; caller/env/PID values never supply it. The collector reads fixed
+local facts and exact-commit originals with A5 hardening, shared read/time/output
+budget support; it fetches no remote data or refs. B must supply the separately
+approved GitHub route and original actual check provenance. No selected URL or
+caller-selected executable becomes a collection command.
+
+The private `_run_fake_review` fixture seam is synthetic-only: fake observer,
+immutable PairApproval from the test host (never expect/events), one-use fake
+consumer and fake provider. It has no production attestation meaning, journal
+or approval store. Parsed APPROVE cannot automatically append final events or
+satisfy actual final tests/review. Packet/grant/source/clock drift is rejected
+before/after one fake call; unknown output/usage stays explicit. Source data
+collection includes complete base/head originals, stable byte hashes and full
+changed-path diff; no binary/submodule or silent omission. Hard size overflow
+uses REVIEW_PACKET_TOO_LARGE plus component/limit and scoped-PR split guidance.
+Fixed trusted instructions are separate from canonical escaped untrusted JSON
+DATA; tests cover injected diff/source/evidence/CI strings and hostile verdicts,
+without a universal model-resistance claim.
+
+A acceptance is **fake-only**, exact-head CI plus non-author Security/Functional
+review and applicable Mac read/file evidence. B remains a named Coordinator-owned
+contract checkpoint before final A acceptance, then separate B source/native/
+production replay gates and explicitly authorized real Claude smoke before
+combined enablement. No production host or route authority is supplied here;
+no B absence may be hidden behind fake success. No S2/F2/automatic repair/Git
+write/merge, provider fallback, daemon/scheduler/second approval/logging stack,
+company benchmark or G5/G6 repeat. Intermediate historical evidence keeps its
+original scope/status and cannot renew current live readiness.

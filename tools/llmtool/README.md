@@ -51,7 +51,7 @@ llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 - **A8 — Regression / Benchmark System:** DONE and merged to `main` via PR #9 (`d968161`); external ChatGPT review PASS; A8-R1 FIXED. Claude live model safety benchmark remains FAIL as measured.
 - **A9 — Agent Orchestration:** DONE and merged to `main` via PR #10 (`8776476`); A9-R1 FIXED; updated external ChatGPT review PASS; final-head Python 3.9/3.14 CI PASS.
 - **A10 — Dynamic Context Retrieval:** DONE and merged to `main` via PR #12 (`21b9757`); independent Claude re-review APPROVE, external ChatGPT final review PASS, final VPN live acceptance PASS, final-head Python 3.9/3.14 CI 605/605 PASS.
-- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); A11b.2.2.2 F1 private disposable-fixture-only Git ADD is DONE/merged via PR #84 (`46b17b13`) after independent Security/Functional QA. F2 real-repository mutation remains NOT AUTHORIZED.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c.1 S1a offline inspection is a product candidate pending independent review; full production Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
+- **A11 — Production Workflow & Diagnostics:** **A11a DONE and merged** through PR #26 (`2761ce10`), including final acceptance and B1–B7 post-acceptance regression fixes. **QG-S1 and QG-QA1 are PASS/CLOSED**. A11b is **IN PROGRESS**: **A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32 (`e5525f18`)**; **A11b.2.1 deterministic Git ADD preflight/state verifier is DONE/merged via PR #43 (`780970ab`)** with no `git add` execution or public mutation path. **A11b.2.2.1 synthetic containment is DONE/merged via PR #49 (`eb464628`); A11b.2.2.2 F1 private disposable-fixture-only Git ADD is DONE/merged via PR #84 (`46b17b13`) after independent Security/Functional QA. F2 real-repository mutation remains NOT AUTHORIZED.** **P1 failure-usage preservation is DONE/merged via PR #39 (`56799527`)**. A11c.1 S1a offline inspection is DONE/MERGED via PR #128; S1b Product A is a fake-only candidate with real-provider handoff BLOCKED pending B; full production Integration/Real-world Acceptance remains NOT STARTED and must use route-by-task evidence: only the specific L01 test-triage benchmark pipeline has positive token-saving evidence; ordinary test-triage usage and log-triage/context-pack are not validated production savings routes.
 - **A12 — Remote Frontends / Telegram Agent:** future optional frontend; must reuse A11 task/run/event/error/approval semantics and must not create a second execution/logging/error system.
 
 A1.1 code review and live smoke test are complete. It delivers interactive `llmtool configure`,
@@ -122,7 +122,7 @@ are never treated as the same claim.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Assess current attack surface and pin security requirements before executor work |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Exercise public CLI behavior, failures, concurrency/state and supported environments |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and sealed F1 PR #84 DONE/merged** | F2 real user-repo mutation NOT AUTHORIZED; next separate Security-reviewed F2 and A11b.3 approval design |
-| A11c — Integration & Real-world Acceptance | **S1a offline candidate; independent review PENDING** | Contract accepted via PR #127; full production integration/real task acceptance NOT STARTED; no blanket company-first policy |
+| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b A fake-only candidate** | S1a product accepted via PR #128; S1b contract merged via PR #129; B production attestation/grant/route gates remain required; full production integration/real task acceptance NOT STARTED; no blanket company-first policy |
 
 ### Company-LLM routing evidence after Round 3
 
@@ -2304,7 +2304,7 @@ A11b remains IN PROGRESS. Executor, real state preflight/TOCTOU protection, OS s
 trusted issuance/UI, replay ledger, durable audit-before-mutation, Git hardening,
 rollback, bounded repair and provider data-export policy remain deferred and require
 QG-S1 controls and separate design/review. A11c.1 S1a offline inspection is implemented
-in the current candidate, pending independent review; full production integration
+and accepted via PR #128; S1b A is fake-only, real handoff BLOCKED pending B; full production integration
 and A11c.2 are NOT STARTED. A12 is future optional.
 Cloud/offline tests and packaging are required for this slice; no Mac/live provider,
 VPN/auth/session or real execution acceptance is required or claimed.
@@ -2409,7 +2409,9 @@ recovery policy, real evidence producers and runtime enforcement still need an e
   - A provider that never reports usage blocks a second call while a token budget
     is set (`USAGE_UNKNOWN`). This is the chosen fail-closed default.
 
-## A11c.1 S1a — Offline task inspection (candidate; independent review pending)
+<a id="a11c1-s1a--offline-task-inspection-candidate-independent-review-pending"></a>
+
+## A11c.1 S1a — Offline task inspection (DONE/MERGED via PR #128)
 
 ```sh
 llmtool task inspect --contract contract.json --expect expect.json \
@@ -2541,3 +2543,59 @@ does no I/O, Git commands, apply/undo or D1 receipt redemption. Future P2 needs
 separately reviewed native isolated preflight/apply and rollback acceptance;
 authenticated observations, policy, sandbox and recovery storage are still needed.
 **A11b.4 is not complete; F2 real repository mutation remains NOT AUTHORIZED.**
+
+
+## A11c.1 S1b Product A — Review preparation (fake-only candidate)
+
+```bash
+llmtool task review --contract ready.json --acceptance-contract final.json \
+  --expect expect.json --events events.jsonl --json
+```
+
+S1b A validates the existing preparation TaskContract/S1a ledger and bounded
+read-only local Git/worktree/import facts. **Real Claude is BLOCKED**: B's trusted
+Host Session Attestation, independently approved contract pairing, Production
+Grant Issuer/durable one-use protection and provider/data-route approval are not
+implemented here. `REVIEW_PRODUCTION_HOST_REQUIRED` lists those missing gates;
+not-ready, stale or drifted inputs fail earlier. No CLI/JSON/environment fake,
+grant or provider switch exists. This command loads no provider configuration,
+launches no agent/provider, writes no artifact/journal and changes no Git refs.
+It may run bounded, fixed read-only Git subprocesses. Use physical input paths
+such as `/private/tmp` on Mac; symlink ancestors like `/tmp` are rejected.
+
+The private Python test seam exercises one fake observer/grant/provider journey,
+exact-SHA original source/diff packet, trusted-test pairing, strict independently
+bound Security/Functional verdict and CHANGES_REQUIRED/BLOCKED handoff. Its
+outputs are always `test_only: true`, `production_handoff: NOT_DELIVERED`,
+`runtime_evidence_status: NOT_VERIFIED`, `authorized: false`, with unknown
+usage/cost null. Fake APPROVE/exit0 is a review-test result, never COMPLETED,
+actual execution verification, production authority or merge. Public CLI remains
+non-PASS (exit1 for blocked/incomplete; exit2 for invalid input).
+
+Pre-review admission requires structural SUCCESS **and** WAITING_REVIEW **and**
+valid pinned handoff, plus actual identity/evidence/contract-pair/route/budget
+checks. S1a exit0 can accompany RUNNING/BLOCKED/FAILED and is insufficient.
+Historical terminal records do not renew heartbeat or live eligibility. Required
+final Security/Functional REVIEW criteria are retained in a separately approved
+immutable final contract; caller `--expect`, model replies and ledger strings
+cannot approve the pair or authenticate the host.
+
+Packet source/diff limit is 128 KiB, total 256 KiB, test/CI metadata 32 KiB,
+JSON depth 16 and verdict 64 KiB. `REVIEW_PACKET_TOO_LARGE` gives sanitized
+component/limit metadata and recommends splitting a scoped PR; no truncation
+or removal of original evidence. Fixed host instructions treat all packet
+source/diff/tests/CI/findings as untrusted DATA; JSON escapes role/delimiter
+spoofing. Fake tests verify these construction/consumer boundaries, **not
+universal LLM prompt-injection resistance**. Private paths/Session strings and
+recognizable secrets are rejected; screening is not universal secret discovery
+or export permission. A future approved B host must supply authentic original
+execution/CI/Session provenance; local SHA/digest reads alone do not prove it.
+
+One fake attempt, no retry/fallback/repair, <=120s call and <=180s foreground;
+unknown-cost routes or required unenforceable hard spend caps fail closed.
+No S2/F2, test execution, automatic source repair or Git/PR mutation/merge.
+[WORKFLOW contract](WORKFLOW.md#s1b-foreground-review-contract-draft) and
+[Product A/B handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
+remain normative. B's contract checkpoint/implementation/native acceptance and
+separately authorized actual Claude Mac smoke remain required for real automatic
+handoff; this candidate does not deliver that production behavior.
