@@ -131,8 +131,14 @@ This Cloud exception does not authorize new project checkouts. Separately, the
 owner approved **only two fixed linked developer worktrees** (Codex/Claude)
 subject to independent policy review and Mac activation gates in
 [safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-The exception is NOT ACTIVATED by policy documentation; all other worktrees,
-archive project copies, independent/milestone clones and alternate local Mac
+Independent G5 and G6 native evidence passed, and the G7 independent review
+[Issue #115 #6118588175](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6118588175)
+supports activation subject to C1-C6. Exactly two fixed worktrees become
+**ACTIVE for ordinary development only upon merge** of the separately
+reviewed activation-status PR, not merely by this proposal. The
+[safe-git task-turnover and failure constraints](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
+remain binding; canonical F1 acceptance is separate. All other worktrees,
+archive project copies, independent/milestone clones and alternate Mac
 checkouts remain forbidden.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
