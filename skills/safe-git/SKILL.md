@@ -162,8 +162,10 @@ independent native gate verdict before any ACTIVE-status PR.
   untracked and ignored data preserved** and no conflicting writer, Git lock or
   partial work. Establish task ownership and run the pinned read-only
   `--baseline` preflight against its *already approved* old-branch baseline.
-  Perform only a verified, bounded no-prune/no-tags fetch of `origin/main`
-  into its own remote-tracking ref; verify remote HEAD, then create a fresh,
+  Perform only a verified, bounded no-prune/no-tags `git fetch origin`
+  using the approved default refspec, which updates the **shared**
+  `refs/remotes/origin/main` in the common Git directory; verify remote HEAD
+  and stop on a ref-lock or fetch failure. Then create a fresh,
   unique, agent-owned branch without force, for example
   `git switch --no-track -c <agent-unique-task-branch> origin/main`.
   **Never** use `git switch -B`, `-f`, `reset --hard`, `stash` or check out

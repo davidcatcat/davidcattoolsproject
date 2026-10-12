@@ -12,14 +12,21 @@ merge decisions to the AI coordinator; they are **not** the everyday PM or
 a Codex/Claude prompt relay. Claude's core role is a distinct, independent
 reviewer/QA role, not a self-authorizing implementation or merge authority.
 
-**Owner-approved, NOT YET ACTIVATED developer-worktree exception:** Codex and
-Claude may each use only one reviewed fixed linked Git worktree after the
-[safe-git policy](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-and Mac acceptance gates pass (Issue #110). Until then use the canonical
-single-writer CHECKOUT-CLAIM/RELEASE handoff. Claude's developer role for an
-assigned small task is independent of review of that same source. No agent may
-create unapproved clones, worktrees or project archive copies, or check out
-`main` in a developer worktree. Canonical native acceptance remains unchanged.
+**Owner-approved two-fixed-worktree exception (G7 activation is merge-gated):**
+Codex and Claude may each use only their one reviewed fixed linked Git worktree
+under the [single normative safe-git policy](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
+General developer use becomes **ACTIVE only after** the independently reviewed
+G7 activation-status PR is merged into `main`; while the PR is OPEN/Draft,
+continue single canonical CHECKOUT-CLAIM/RELEASE for non-pilot work.
+After activation, Claude's developer CLI must start with CWD set to its
+registered Claude root and use a unique owned task branch, clean handoff,
+pinned preflight and its own verified venv. A Claude reviewer remains separate
+from development of the same source, with no unclaimed Git fetch in canonical.
+Unknown writer, crash, dirty/ignored state, wrong-root import or shared-ref
+conflict means STOP/preserve and fall back to canonical single-writer handoff.
+No unapproved clone, extra worktree or project archive copy, no `main`
+checkout in developer worktrees, no llmtool F2 mutation or automated cleanup
+of historical processes. Canonical native F1 acceptance remains unchanged.
 
 Give actionable, human-readable findings, reproduction evidence, severity,
 a disposition recommendation and the exact reviewed SHA. Classify required
