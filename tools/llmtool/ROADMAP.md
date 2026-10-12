@@ -108,7 +108,7 @@ current roadmap.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
-| A11c — Integration & Real-world Acceptance | **NOT STARTED** | A11b DONE + validation/review gates + route-by-task delegation evidence; no blanket company-first policy |
+| A11c — Integration & Real-world Acceptance | **S1a contract preparation; product implementation NOT STARTED** | Independently reviewed/merged S1a contract permits only offline preparation while A11b remains incomplete; full production integration/cutover retains A11b DONE + validation/review/route gates |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
@@ -598,8 +598,8 @@ post-merge main CI `37193806074` Python 3.9/3.14 各 824 tests SUCCESS。
 A11a.6 offline doctor/failure matrix and narrow M1/M3 persistence hardening merged via [PR #24](https://github.com/davidcatcat/davidcattoolsproject/pull/24) as `6b7809ace69cdcbe6030e94cd9ee816b6d22710e`; post-merge [CI 37213447952](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/37213447952) passed Python 3.9/3.14. A11a.7 final acceptance merged via PR #25 as `e3869828`; post-acceptance B1–B7 diagnostics fixes merged via PR #26 as `2761ce10`, with post-merge CI `37228032137` passing Python 3.9/3.14. Overall **A11a DONE**.
 A11b is IN PROGRESS; A11b.1 Typed Action & Approval Contract is DONE/merged via PR #32
 (`e5525f18`) as a data-only slice. A11b.2.1 is DONE/merged via PR #43 (`780970ab`);
-A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git ADD** is DONE/merged via PR #84. A11c remains
-NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
+A11b.2.2.1 is DONE/merged via PR #49; A11b.2.2.2 **F1 private-fixture-only Git ADD** is DONE/merged via PR #84. A11c.1 S1a is in
+contract preparation; product implementation and full production integration remain NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.3 Anthropic HTTP API 仍未實作，不能被「A0–A10 完成」
 的主線摘要解讀為已交付。
 
 | Milestone | 交付邊界 | 開始／完成 gate |
@@ -608,7 +608,7 @@ NOT STARTED. General user-repository execution (F2) is still NOT AUTHORIZED. A2.
 | QG-S1 — PASS/CLOSED | Security baseline + threat model；不修改 production behavior | A11a DONE → security report/review accepted |
 | QG-QA1 — PASS/CLOSED | Public-interface formal QA；與 bug hunt/security review 分離 | QG-S1 accepted → QA report; confirmed regressions fixed/retested |
 | A11b — IN PROGRESS; A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49 and private F1 A11b.2.2.2 PR #84 DONE/merged | Data-only contract, preflight, synthetic containment and **disposable-fixture-only F1** delivered; F2 general mutation and recovery remain future work | Separate F2 Security-reviewed contract and A11b.3–6 gates required; F2 NOT AUTHORIZED |
-| A11c — NOT STARTED | route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | A11b DONE；route evidence + validation report + external review |
+| A11c — S1a contract preparation; product NOT STARTED | S1a offline event inspection；後續 route-by-task integration、獨立驗證、bounded repair 與真實任務驗收 | S1a requires its independent contract review/merge; full production integration retains A11b DONE、route evidence + validation report + external review |
 
 A11 全部完成需三個子 milestone 各自通過 gate；roadmap merge 不等於 A11 implementation
 完成，也不授權開始下一個 milestone。
@@ -860,7 +860,8 @@ must finish cleanly before A11b implementation starts.
 A11a's implementation, independent review, final acceptance, post-acceptance bug hunt,
 B1–B7 regression fixes, and exact-head/post-merge CI gates are complete. This does
 **not** mean A11 as a whole is complete: QG-S1/QG-QA1 are closed pre-A11b gates, and
-A11b is IN PROGRESS with a data-only first slice; A11c is NOT STARTED.
+A11b is IN PROGRESS; A11c.1 S1a is in contract preparation, with product
+implementation and full production integration NOT STARTED.
 
 ## A11b — Execution, Approval & Recovery
 
@@ -1001,6 +1002,44 @@ STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 ## A11c — Integration & Real-world Acceptance
 
 ### A11c.1 — Production Workflow Integration
+
+#### Issue #120 staged preparation — S1a, then S1b, then S2
+
+The Coordinator-adopted [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)
+split permits **S1a offline preparation while A11b is still IN PROGRESS**, only
+after this separate docs contract is independently reviewed and merged and the
+developer's safe-git C2/C3 gates pass. It does not mark A11b DONE, authorize F2
+real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
+
+| Slice | Boundary / next gate |
+| --- | --- |
+| **S1a — planned, no product implementation yet** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --events <file> --json`. Bounded explicit input files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
+| **S1b — future separate contract** | Integrate existing Claude CLI independent review and automatic handoff with exact-SHA review packets and explicit route/data scope. No authority is inherited from S1a; live collectors/storage/provider integration need their own review and applicable acceptance. |
+| **S2 — future separate authority/execution contract** | Permission-controlled repair/execution; retain A11b approval, sandbox, recovery/audit, budgets and F2 gates. No automatic merge authority. |
+
+S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
+run/error/evidence conventions without changing the diagnostics schema/store.
+Validate Agent, Role, logical Session, assigned Root/common-dir/branch, Task,
+Run, exact SHA, contract version/digest, epoch/sequence and expected prior state.
+Reject duplicates, stale/replayed events, identity/workspace mismatches, illegal
+transitions and developer self-review. Input bindings are claims until a later
+trusted collector establishes actual identity/workspace and execution provenance.
+The event ledger never grants Git, provider, command or PR permissions.
+
+Separate reported state, structural validation and actual execution verification;
+S1a runtime evidence remains **NOT_VERIFIED** and `authorized=False`, even when
+a COMPLETED event or evidence manifest is structurally valid. Model replies,
+hashes and ledger states cannot replace actual source/environment-bound test or
+independent review evidence. Missing/stale evidence cannot become PASS/VERIFIED/DONE.
+See the [S1a validation and delivery contract](WORKFLOW.md#s1a-offline-task-event-inspection-contract).
+
+Company-LLM Round 1–3 evidence and route-specific privacy/accounting rules are
+retained unchanged; no benchmark rerun or new savings claim. S1a calls **no
+provider**, including company LLM and Claude CLI. Company integration is deferred
+and does not block S1a/S1b preparation; future routes retain their own gates.
+No daemon, scheduler, new temporary ai-loop controller or second approval/logging
+system is part of these slices. The production integration below remains future
+work under its existing prerequisites.
 
 A11c 不採 blanket `company-first`。正式 integration 使用 **route-by-task evidence**：
 每個 task class 都要有自己的 reliability/quality/usage evidence，不能因同一 provider 在另一個
