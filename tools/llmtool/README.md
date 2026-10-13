@@ -2734,3 +2734,60 @@ smoke):
 - Same-UID code can tamper with the store and key; the HMACs show which records
   survived, but not that the store is complete.
 - A post-hoc inventory cannot prevent transient changes.
+
+### Track 3 native command-hook adapter candidate (not installed)
+
+`llmtool.codex_approval_hook_adapter` reuses the collector and its static rules.
+It installs no hooks, changes no configuration or trust, and executes no tools
+or providers. Native activation is a separate, independently reviewed gate.
+
+A reviewed task-specific command-hook definition must use the fixed absolute
+own-worktree venv interpreter with `-I -B -m llmtool.codex_approval_hook_adapter`
+and these trusted arguments (never populated from the incoming event):
+
+```text
+--event PreToolUse --session EXPECTED_SESSION --store PRIVATE_STORE
+--policy PRIVATE_POLICY_JSON --policy-sha256 REVIEWED_POLICY_SHA256
+```
+
+Use separate definitions for `PostToolUse` and supported `Stop`, `SessionEnd`,
+`Interrupt` events, with the corresponding fixed `--event`. The policy is the
+existing `AuditPolicy` JSON shape: `codex_root`, `home`, `protected_roots`,
+`allowed_paths`, `pinned_paths`, `deny_verified`, `coverage_verified`. Keep proof
+flags false until independently accepted native evidence exists; the adapter
+never changes them. Policy bytes must match the reviewed SHA256, with a private
+0700 parent and regular nonsymlink single-link owner-only file. Store creation
+uses the existing collector `init` only under a later activation grant, outside
+the task root, protected roots and Git common-dir. No event may select a policy,
+session, executable or store. The task definition must forbid all protected roots.
+
+The adapter checks input event/session binding, records to the private store,
+and returns a fixed official `PreToolUse` deny object only for the existing
+`UNAUTHORIZED` class. It returns no `allow` decision: a routine or unknown
+classification grants nothing. MCP/unknown tools remain unknown in summaries.
+Native `apply_patch` input uses `command`; legacy `input`/`patch` fixtures remain
+supported. Late Post events spanning an end marker are correlation gaps.
+
+For a known PreToolUse definition, malformed input, policy or store errors emit
+a fixed deny response with exit 0 and a fixed sanitized error message. Post/end
+errors return nonzero without a decision; they cannot undo an action. Invalid
+input/binding errors also append an empty malformed private failure marker when
+the pinned policy and store remain usable. It is not a native event. Policy
+loading or broken-store failures cannot safely record this marker and require
+independent native error/coverage evidence; stderr alone is not a complete store.
+Invalid
+adapter arguments, process termination or native hook timeout may still fail
+open. Input EOF has a five-second deadline and 1 MiB cap; the existing store
+lock has a five-second cap. Filesystem operations/shutdown are not a hard OS
+execution bound: configure a separately reviewed native hook timeout and verify
+actual failure behavior. Missing events/errors/overflow are never audit PASS.
+
+Do not install this candidate or bypass hook trust during source review. Later
+activation must establish exact-definition persisted trust and project trust,
+pin binary/config/hooks/trust/adapter/collector, collect real pre/post/end events,
+test denial without executing the synthetic denied effect, and independently
+check the sanitized summary for leaks. `exec_command` may match `Bash`, and a
+later `write_stdin` completion may deliver its Post event. Hosted web tools and
+opted-out paths are coverage gaps; nested tool naming requires native proof.
+Offline fixtures do not set `deny_verified` or `coverage_verified`, establish
+complete coverage, or change Owner's verified Full Access permission choice.
