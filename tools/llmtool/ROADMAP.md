@@ -1126,6 +1126,12 @@ repair proposal 與 Git action 各自回到 policy/required approval，通過才
 A9 text orchestration、A10 retrieval、A6 validator、A5 Git intelligence 的既有 boundary
 不得被 integration 偷偷放寬。
 
+### A11c.1a — Local Reviewer subagent and work-package pilot (2026-10-14)
+
+Per [Owner's accepted process change](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235), minimize human prompt relays without weakening formal independent or safe-git gates. In **each existing Codex Developer and Claude Developer session**, show one distinctly identified read-only in-session Reviewer child inside the existing fixed root, a real small finding or harmless seeded fixture, Developer repair and targeted regression check, and a single consolidated report with **zero human microstep relays**. Record exact tool/root/permission evidence and PASS or a reproducible BLOCKED limitation. A child is not an extra worktree or separately authenticated Claude/Codex independent reviewer.
+
+Separate A11c integration acceptance must **actually** demonstrate Codex-to-Claude independent review routing, task events, bounded repairs/tests and audited Draft PR-or-STOP with no owner prompt courier. Until verified, report CROSS_CLI_AUTO_HANDOFF_NOT_VERIFIED and use the previously reviewed temporary ai-loop only in its proven scope. Preserve required C3 baselines/CLAIM-RELEASE, Mac native QA, exact-head CI, privacy and independent Security/Functional approval; do not install a new daemon or shortcut trust boundaries. Before any actual company LLM call remind the owner to connect VPN; corporate VPN can block public documentation ([VPN rule](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155066742)).
+
 ### A11c.2 — Real-world Agent Acceptance Test
 
 最後 gate 使用真實 repository/task，至少覆蓋：

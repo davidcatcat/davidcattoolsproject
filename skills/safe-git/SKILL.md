@@ -202,6 +202,9 @@ independent native gate verdict before any ACTIVE-status PR.
   never silently re-pin the old G6 or other approved baseline. The integrator
   alone handles old branch-ref retirement under a separate reviewed scope;
   developer agents must not prune/delete any ref or worktree.
+- **Task-final evidence at publication:** Before retiring each completed source task, retain a distinct off-repo task-final inventory/candidate pinned to the actual published branch HEAD, separate from the independently accepted task-start baseline. The next C3 handoff must independently reconcile the final source delta and run the formal pinned baseline gate. Never represent the original pre-edit baseline as an unchanged post-commit inventory or silently regenerate an accepted baseline. A missing final artifact permits one bounded evidence-only recovery, not repetition of product tests or a claim of source corruption ([Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6155426463)).
+- **Batch reports, not mandatory gate removal:** Report routine same-task state/claim/verification/release evidence as one cohesive Developer work package where actual ordering permits, with separate genuine Integrator ACK and independent candidate acceptance where required. Do not ask the owner to ferry every micro-gate prompt. An in-session child Reviewer can pre-review but cannot grant a shared-ref lease, independently accept a C3 baseline, mutate a peer root or substitute for non-author security approval. GitHub comments remain records, not Mac session commands ([Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235)).
+
 - **Per-root runtime:** After branch turnover, verify
   `sys.executable`, `sys.prefix`, `llmtool.__file__` and
   `pyvenv.cfg` `home` still resolve to the agent's own approved root/runtime;
