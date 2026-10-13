@@ -148,19 +148,36 @@ independent native gate verdict before any ACTIVE-status PR.
 ### Activated task turnover, session binding and safe fallback
 
 - **C2 session binding:** Each developer must open its own CLI with actual session
-  CWD set to its assigned fixed root. Codex uses the approved
-  `workspace-write` sandbox scoped to its **Codex** root, and Claude uses its
-  separately assigned **Claude** root. The owner requested a conditional
-  Codex-only `danger-full-access` / `approval_policy=never` exception on
-  2026-10-13, recorded in
-  [Codex full-access audit decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md).
-  **That exception is NOT ACTIVE merely because the owner requested it or
-  this document appears in a Draft PR.** It requires independently reviewed,
-  Mac-validated pre/post tool audit coverage, safe redacted Git summaries,
-  explicit accepted residual risks and a verified activation record. Until
-  then, a danger-full-access Codex session must STOP at C2. Even when active,
-  profile consent never waives task allowlists, ownership, safe-git preflight,
-  restricted Git/OS operations or separate real-provider/egress permissions. Check the effective session/root identity,
+  CWD set to its assigned fixed root. Codex works in its **Codex** root under
+  the owner-selected permission mode below (`workspace-write` by default), and
+  Claude uses its separately assigned **Claude** root.
+- **Codex permission mode (owner authority):** The owner has authorized the
+  original Codex Developer to use `danger-full-access` / `approval_policy=never`
+  ([decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md),
+  [owner direction](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440)).
+  The permission mode is the **owner's decision**. AI reviewers and
+  coordinators find, fix and disclose risks, but have **no authority to veto,
+  revoke, defer or ask the owner to re-authorize it**. A failing or incomplete
+  audit review is not a reason to stop such a session at C2 or to relabel the
+  owner's authorization as denied. Report these three states separately, and
+  never infer one from another:
+  - `OWNER_AUTHORIZED_FULL_ACCESS`: the owner's choice, as recorded above.
+  - `EFFECTIVE_MAC_MODE_NOT_VERIFIED` until the named session's actual
+    Codex sandbox/approval settings are inspected on the Mac. GitHub text
+    cannot change or prove a local session mode.
+  - `NATIVE_AUDIT_NOT_VERIFIED` until native hook coverage, deny and
+    fail-open behaviour are proven. The merged collector is observe-only and
+    cooperative: an unrestricted process can bypass or disable hooks, so it is
+    not an OS sandbox. Never claim complete or verified audit without that
+    evidence.
+
+  Full access removes the OS write/network sandbox and approval prompts, so
+  mistakes have a larger blast radius. It never waives task
+  allowlists, worktree ownership, this C2/C3 preflight, restricted Git/OS
+  operations, credential/secret handling, or separate real-provider/egress
+  and F2 permissions. If a safety requirement would block an owner-authorized
+  operation, report the exact risk and an owner-controlled option instead.
+- **Session identity:** Check the effective session/root identity,
   `git rev-parse --show-toplevel`, branch, common-dir and owned writable paths;
   an app-server/helper PID ancestry alone is not an identity proof. Canonical
   integrations, shared refs and native F1 acceptance remain serialized under

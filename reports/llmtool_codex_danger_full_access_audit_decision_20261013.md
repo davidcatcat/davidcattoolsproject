@@ -2,12 +2,17 @@
 
 Decision recorded: **2026-10-13**. Owner request: allow the **existing named Codex Developer CLI** to use `danger-full-access` because repeated approvals are disruptive, while retaining a Git-searchable record of actions that previously would have needed owner approval.
 
-**Status: PROPOSED POLICY / NOT ACTIVATED.** This document and its Draft PR record the owner's authorization in principle. They are not evidence of a configured/audited runtime. Existing [safe-git C2](../skills/safe-git/SKILL.md) remains the effective execution guard until the separate native hook/test and independent security activation gates below pass. No one may treat these words as license to ignore a current C2 STOP.
+**Status (corrected 2026-10-14 per [owner direction](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440)):**
+- `OWNER_AUTHORIZED_FULL_ACCESS`. The permission mode is the owner's decision. AI review and coordination may find, fix and disclose risks, but may not veto, revoke, defer or ask for re-authorization of that choice.
+- `EFFECTIVE_MAC_MODE_NOT_VERIFIED`. This document does not configure or prove any local session's actual mode.
+- `NATIVE_AUDIT_NOT_VERIFIED`. The observe-only collector from PR #136 is merged, but native hook coverage, deny and fail-open behaviour are unproven. Hooks are cooperative and are not an OS sandbox.
+
+[safe-git C2](../skills/safe-git/SKILL.md) keeps every non-permission guard: identity, root, task scope, ownership, preflight, Git, secret and egress limits. The full-access mode alone is not a C2 STOP reason.
 
 ## Exact scope and limits
 
 - Applies only to the **original Codex Developer** assigned to `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex`, including its verified existing session identity, task branch and independently accepted safe-git G7 C2-C4 preflight. It does **not** change the canonical integrator, Claude root, other assistants, Codex Cloud, ai-loop controller or any shell outside that task session.
-- Requested Codex settings after activation: `sandbox_mode = "danger-full-access"`, `approval_policy = "never"`; these are **permission-profile choices, not a task authorization**. They remove an OS write/network sandbox and approval prompts, not merely their UI. This enlarges the blast radius if the agent makes a mistake or follows untrusted instructions.
+- Owner-authorized Codex settings: `sandbox_mode = "danger-full-access"`, `approval_policy = "never"`; these are **permission-profile choices, not a task authorization**. They remove an OS write/network sandbox and approval prompts, not merely their UI. This enlarges the blast radius if the agent makes a mistake or follows untrusted instructions.
 - Still prohibited without their **own separate explicit scope and gate**: changes outside task file/path allowlist; force/reset/clean/rebase/stash/prune or unowned Git refs; canonical/peer/other worktree edits; credentials/SSH/keychain/secret stores; unreviewed package installs and arbitrary network/provider data egress; spending; production Host/ledger/F2 real-repository executor effects; root/`sudo`, system settings and system-wide services; background agents, new clones/worktrees and destructive OS operations. A blanket owner approval to reduce routine prompts does not waive these restrictions.
 - Especially, **no** retrospective approval of T1 Helper execution, Issue #120 HOLD, Issue #66 content egress, product F2 mutation, unreviewed Mac program modifications or provider spending. Unexpected actions must STOP and be flagged, even if the operating system would allow them.
 - Never publish private command arguments, prompts, environment variables, stdout/stderr, tokens, passwords, secret-bearing file paths or raw transcripts to GitHub.
@@ -48,18 +53,36 @@ Example **invented format only, NOT execution evidence**:
 | `Bash: network operation [destination redacted]` | WOULD_PROMPT_UNDER_OLD_PROFILE / REVIEW | example: NOT EXECUTED |
 | `Bash: sudo [arguments redacted]` | SEPARATE_APPROVAL_REQUIRED | example: BLOCKED |
 
-## Activation / test acceptance
+## Verification and hardening (evidence, not an AI permission gate)
 
-**No live full-access switch from this document alone.** Before anyone restarts the Codex Developer task in danger-full-access:
+These steps establish what is actually true and make the owner-authorized mode as safe as practicable. Their results are reported as evidence. They do not grant, withhold or revoke the owner's permission choice. An incomplete step stays labelled `NOT_VERIFIED` or `AUDIT_INCOMPLETE`; it is never reported as verified.
 
-1. Confirm current Codex CLI supports the proposed hooks/events on this Mac version; install/configure hooks only within a separately reviewed narrowly scoped change, not untrusted global auto-start or new daemon. Inspect Codex configuration precedence and report actual effective permission mode. If coverage is incomplete, enumerate alternatives or keep `workspace-write`.
-2. Independently Security-review hook source, event redaction, local-file access controls, deny/STOP behavior and available counterexamples. **A hook failure/timeout may fail open; do not claim hooks enforce sandbox isolation.** Activation must explicitly accept this residual risk or use a separately reviewed external process/OS-level enforcement layer.
-3. Mac-local **synthetic-only** tests: routine read, previously prompted candidate (no risky side effects), denied privilege/destructive action, apply_patch, supported MCP, failed/timeout/interrupt, missing pre/post, redaction of canary token and source/hash/branch mismatch. Prove Git summaries have no secret-like output and are traceable to the correct task, or STOP.
-4. Exact source SHA, independent Security+Functional review and verified task-bound activation record in this document's PR/Issue. Mark effective profile, audit version/hash, limits, explicit remaining gaps and rollback. If this is not accepted, `workspace-write` is still required and Issue #66 C2 STOP remains correct.
-5. Only after activation, open/resume the **same verified Developer session in its assigned root** with the explicitly accepted profile. Require audited STOP if the task cannot prove its root, own branch/baseline, pre/post command records or non-conflicting writer. Do not attempt to adjust a running session by simply changing text in Git.
+1. **Effective mode:** inspect the named session's actual Codex flags and configuration precedence on the Mac. Report `EFFECTIVE_MAC_MODE` truthfully. Changing another agent's session configuration requires that session's own explicit direction.
+2. **Hooks:** confirm that the installed Codex CLI supports the hooks/events. Install or configure hooks only through a separately reviewed, narrowly scoped change: no untrusted global auto-start and no new daemon. Report coverage gaps and options to the owner.
+3. **Security review:** independently review hook source, event redaction, local-file access controls, deny/STOP behaviour and available counterexamples. **A hook failure/timeout may fail open; do not claim hooks enforce sandbox isolation.** Disclose this residual risk to the owner.
+4. **Mac-local synthetic-only tests:**
+   - routine read;
+   - previously prompted candidate (no risky side effects);
+   - denied privilege/destructive action;
+   - apply_patch;
+   - supported MCP;
+   - failed/timeout/interrupt;
+   - missing pre/post;
+   - redaction of a canary token;
+   - source/hash/branch mismatch.
+
+   Git summaries must contain no secret-like output and be traceable to the correct task; otherwise publish only a safe STOP summary for that audit.
+5. **Record:** the exact source SHA, independent Security+Functional review of audit code, effective profile, audit version/hash, limits, remaining gaps and rollback options, all in this document's PR/Issue.
+6. **Session:** use only the **same verified Developer session in its assigned root**. Safe-git C2/C3 identity, root, own branch/baseline and non-conflicting-writer checks still apply; failing them is a STOP for that task, independent of the permission mode. Changing text in Git does not adjust a running session.
 
 ### Rollback
 
-Revert the session to `workspace-write` (and the prescribed approval mode) if audit hooks are unavailable, pre/post events are incomplete, secret redaction fails, any action crosses the task/permission boundary or the security reviewer rejects the exception. Do not delete recorded evidence. This permission-profile exception is revocable and must not become a universal default for other projects.
+Reverting the session to `workspace-write` (and the prescribed approval mode) is the owner's decision. Reviewers should promptly recommend rollback, with evidence, if:
+- audit hooks are unavailable;
+- pre/post events are incomplete;
+- secret redaction fails;
+- an action crosses the task/permission boundary.
+
+A task-level STOP for a concrete boundary violation still applies immediately. Do not delete recorded evidence. This permission-profile exception is revocable by the owner and must not become a universal default for other projects.
 
 Related: [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120), [safe-git](../skills/safe-git/SKILL.md), [Codex Hooks docs](https://developers.openai.com/codex/hooks), [Codex configuration docs](https://developers.openai.com/codex/config-basic).
