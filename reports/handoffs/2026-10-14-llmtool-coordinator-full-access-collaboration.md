@@ -100,3 +100,8 @@ Codex/Claude **現有 GitHub Issue 留言不會自動喚醒 Mac CLI**；没有�
 - 這是 **GitHub API 寫入的文件交接**；不是 Mac 上產生的測試產物，也不應納入或洩漏 command argv、密碼、tokens、環境變數、真實 providers 的敏感 endpoint 或私人 log。
 - 快照可靠性：GitHub 已合併 PR #136／#138 的 remote status 可查；Mac effective mode 與 Hooks 為未驗證。PR #132 是歷史，不宜據以覆蓋最新 Issue #120 處置。
 - 本文不改 Roadmap、不授予新的 Git/Mac/provider 執行權，也不解除真正 task-level STOP。需要的新實作必須有明確 owner/task 授權、獨立 review 和真實對應測試。
+
+## 8. 後續 GitHub 工作台清理（本次對話追加）
+
+- 舊的 [PR #132](https://github.com/davidcatcat/davidcattoolsproject/pull/132) 已由 Coordinator 留存 superseded 記錄，並於本次對話中 **CLOSED / UNMERGED**；完整歷史及其舊 HEAD 原樣保留，**不是已合併到 main**。
+- 新的 **PR #139** 是此 2026-10-14 交接檔的 GitHub Draft；報告存於該 PR 的具名分支，完成獨立文件審查前不得假稱已在 main。新對話若查到新的 merge，應以 live GitHub 資料為準。
