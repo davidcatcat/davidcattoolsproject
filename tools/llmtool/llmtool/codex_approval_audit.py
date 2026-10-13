@@ -703,7 +703,7 @@ def _scan_tokens(text):
 
 
 def _patch_paths(tool_input):
-    text = tool_input.get('input', tool_input.get('patch')) if isinstance(tool_input, dict) else tool_input
+    text = tool_input.get('command', tool_input.get('input', tool_input.get('patch'))) if isinstance(tool_input, dict) else tool_input
     if not isinstance(text, str):
         return None
     return re.findall(r'^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$', text, re.M)
@@ -761,7 +761,7 @@ def correlate(records):
         if rec.get('kind') != 'hook':
             continue
         if rec['event'] in END_EVENTS:
-            ended.setdefault(rec['session_id'], rec['seq'])
+            ended.setdefault(rec['session_id'], []).append(rec['seq'])
             continue
         if rec['event'] not in TOOL_EVENTS:
             continue
@@ -781,10 +781,12 @@ def correlate(records):
         if not pre:
             problems.append('MISSING_PRE')
         if not post:
-            end = ended.get(key[0])
-            problems.append('INTERRUPTED_NO_POST' if end and end > pre[0]['seq'] else 'MISSING_POST')
+            ends = ended.get(key[0], [])
+            problems.append('INTERRUPTED_NO_POST' if any(e > pre[0]['seq'] for e in ends) else 'MISSING_POST')
         if pre and post and post[0]['seq'] < pre[0]['seq']:
             problems.append('POST_BEFORE_PRE')
+        if pre and post and any(pre[0]['seq'] < e < post[0]['seq'] for e in ended.get(key[0], [])):
+            problems.append('POST_AFTER_END')
         if pre and post and (pre[0]['tool_name'] != post[0]['tool_name'] or
                              _canonical(pre[0]['tool_input']) != _canonical(post[0]['tool_input']) or
                              pre[0]['cwd'] != post[0]['cwd']):
@@ -850,7 +852,7 @@ _EXPORT_WORDS = frozenset(
     {'NOT_REQUIRED', 'DETECTED_AFTER_EXECUTION', 'BLOCKED', 'NO_POST_EVENT', 'POST_OBSERVED_STATUS_UNKNOWN',
      'EXIT_ZERO', 'EXIT_NONZERO', 'ALLOWLIST_SYNOPSIS_ONLY', 'PENDING_INDEPENDENT_REVIEW', 'AUDIT_INCOMPLETE',
      'OBSERVED_EVENTS_CONSISTENT', 'INTERRUPTED_NO_POST', 'MISSING_POST', 'MISSING_PRE', 'DUPLICATE_PRE',
-     'DUPLICATE_POST', 'POST_BEFORE_PRE', 'PRE_POST_MISMATCH', 'TORN_RECORD', 'UNREADABLE_RECORD',
+     'DUPLICATE_POST', 'POST_BEFORE_PRE', 'POST_AFTER_END', 'PRE_POST_MISMATCH', 'TORN_RECORD', 'UNREADABLE_RECORD',
      'INTEGRITY_MISMATCH', 'SEQUENCE_ANOMALY', 'MALFORMED_EVENT', 'STORE_OVERFLOW', 'SEQ_STATE_INVALID',
      'TAIL_TRUNCATED', 'SEQ_FRONTIER_BEHIND', 'git <OTHER>', '<COMPOUND_SHELL>', '<OTHER_PROGRAM>',
      '<UNKNOWN_TOOL>', '<UNPARSEABLE>', '<EMPTY>', '<INVALID_CWD>', '<INVALID_PATH>', '<CODEX_ROOT>',
@@ -1280,6 +1282,11 @@ def _policy(path):
         data = json.loads(_read_limited(fd, MAX_POLICY_BYTES).decode('utf-8'))
     finally:
         os.close(fd)
+    return _policy_data(data)
+
+
+def _policy_data(data):
+    """Shared policy decoding for the summary and pinned native adapter."""
     if not isinstance(data, dict):
         raise AuditError('audit policy is malformed')
     lists = [data.get(name, []) for name in ('protected_roots', 'allowed_paths', 'pinned_paths')]
