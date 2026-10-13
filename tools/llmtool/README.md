@@ -2633,3 +2633,104 @@ Unexpected post-consume exceptions retain one attempted call and UNKNOWN.
 Independent product Security/Functional review and T1/T2/T3 release/route gates
 remain required; no F2/S2, auto repair/merge or production enablement is delivered.
 See [B1 contract](WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
+
+
+## Issue #135 — Codex tool-event audit collector (not an activation)
+
+`llmtool/codex_approval_audit.py` is a cooperative, observe-only collector for Codex
+`PreToolUse`/`PostToolUse` command-hook events. It **does not** install hooks, change
+Codex configuration or enable `danger-full-access`. Activation stays a separate,
+independently reviewed gate (Issue #135 A1–A5).
+
+**CLI**
+- `python -I -B -m llmtool.codex_approval_audit init --store DIR` creates a private
+  0700 store with 0600 files, a random HMAC key and a keyed sequence frontier.
+  - Use a new directory outside every repository and the Git common-dir.
+  - `--forbid ROOT` enforces this.
+- `record --store DIR` reads one hook event (at most 1 MiB) from stdin and prints
+  nothing, so it never returns a hook decision.
+  - The record is appended under a bounded `flock` (5 s) with a per-record HMAC.
+  - `tool_response` is kept only up to 64 KiB; the exit code is always kept.
+  - Malformed or oversized input is stored by size and reason only.
+  - Store limits: 64 MiB and 50,000 records. Past them, a small `STORE_OVERFLOW`
+    marker keeps the loss visible, then appends fail closed.
+- `summarize` reads a coherent locked snapshot. It reports `TAIL_TRUNCATED`,
+  `SEQ_STATE_INVALID`, `SEQ_FRONTIER_BEHIND`, torn, tampered, out-of-sequence and
+  overflow records as gaps.
+
+**Summary contents**
+
+Every exported value must be one of:
+- a fixed reviewed word, such as a rule, status, synopsis (program plus safe git
+  subcommand), pin label, inventory category or role placeholder like `<CODEX_ROOT>`;
+- a keyed HMAC reference (session, turn, tool-use and event refs);
+- a timestamp;
+- the validated `issue-N`/`pr-N` task id and 40-hex source SHA.
+
+Raw argv, environment, paths, identifiers, labels and stdout are never exported. A
+fail-closed self-check rejects anything else, as well as any raw fragment of 8 or more
+characters, with no exemption for identifiers.
+
+**Classification** uses a reviewed static mapping of the old `workspace-write` +
+`on-request` profile:
+- `ROUTINE_NO_PROMPT_INFERRED` and `WOULD_PROMPT_UNDER_OLD_PROFILE` are
+  **inferences**, not owner approvals.
+- `UNAUTHORIZED` covers hard no-go actions, including git `-c`/`--config-env`,
+  `--git-dir`/`--work-tree`-style overrides and `GIT_*` environment assignments.
+- Other environment assignments, pagers, unknown git global options and read
+  subcommands with `--output`, external-diff, textconv or filter options are `UNKNOWN`.
+- `SEPARATE_APPROVAL_REQUIRED` covers pinned config/collector paths.
+- MCP and unknown tools are `UNKNOWN`.
+
+Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
+enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or `UNKNOWN`.
+
+**Status** is `OBSERVED_EVENTS_CONSISTENT` only when all of these hold:
+- `coverage_verified` and `deny_verified` are real booleans set to true (`"false"` is
+  rejected);
+- complete, successful A2 pins exist for `codex.binary`, `codex.config`, `codex.hooks`
+  and `collector.module`. `MISSING`, unreadable or too-large values are
+  `PINS_NOT_VERIFIED`, never "unchanged";
+- a complete A1 inventory has `pre` and `post` snapshots, each with:
+  - `head`/`branch`/`index`/`status` for the `canonical` and `claude` peer roots, and
+    for any other root it lists;
+  - `common.config`, `common.hooks`, `shared.refs=OK` and at least one ref.
+
+  Every value must have its field's success format (a 64-hex digest, a Git object id,
+  `OK`, or `ABSENT` for a worktree lock). `GIT_EXIT_*`, failure words or arbitrary
+  strings are `INVENTORY_NOT_VERIFIED`. There must be no drift;
+- the expected session ids are supplied from task provenance, and **each** one has its
+  own tool events and a later session end. Another session's events cannot cover an
+  idle one (`SESSION_WITHOUT_TOOL_EVENTS`);
+- there are no unexpected sessions, no store or correlation gaps, and no action needing
+  review.
+
+Otherwise it is `AUDIT_INCOMPLETE`, with the blockers listed.
+
+**A1 git queries** (`run_git`) are read-only, with output capped at 32 MiB and a 10 s
+deadline. On overflow, timeout, read error or cancellation, one cleanup path stops
+only the child that call started: `terminate`, then `kill`, each followed by a 2 s
+wait. Cancellation is re-raised.
+- If the exit cannot be confirmed, the result is `GIT_EXIT_UNKNOWN`.
+- Any failure makes that inventory field unverified.
+
+**Measured** from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
+smoke):
+- `hooks` is stable and enabled.
+- Hook inputs carry `session_id`/`turn_id`/`tool_use_id`, and PreToolUse can return
+  `permissionDecision`.
+- Hooks require persisted trust.
+
+**NOT_VERIFIED**
+- real tool names;
+- deny enforcement;
+- fail-open behaviour;
+- tools that bypass hooks;
+- the A1 content of files that were already dirty or ignored. Status/index hashes do
+  not reveal edits to them.
+
+**Residual risks**
+- Hooks are cooperative, so a full-access process can bypass them.
+- Same-UID code can tamper with the store and key; the HMACs show which records
+  survived, but not that the store is complete.
+- A post-hoc inventory cannot prevent transient changes.
