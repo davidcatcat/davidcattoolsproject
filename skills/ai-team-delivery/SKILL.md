@@ -203,6 +203,16 @@ recovery. Do not make the owner shuttle prompts. The legacy/frozen
 runner maintenance until native llmtool reaches parity.
 
 
+### Work-package delivery and in-session Reviewer subagents (owner decision 2026-10-14)
+
+The delivery unit is **one complete authorized work package**, not many owner-mediated claim, baseline, review, repair and release microsteps. Follow the [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235). Genuine mandatory technical gates still apply.
+
+- Each Codex Developer or Claude Developer may use a **distinct read-only Reviewer subagent** in its existing registered worktree when that CLI actually supports it. The child reviews the current diff, tests, scope and severity, and returns findings directly to its Developer; the Developer remains the sole writer. Check the actual child identity, root and restricted tool permissions. Merely prompting "read-only" is not OS-level isolation. Such a child is neither a new registered Mac CLI nor an independent cross-provider reviewer.
+- The Developer completes scope, implementation, targeted tests, local child pre-review, at most two failed repairs per confirmed root cause, and **one consolidated PR/evidence report**. Small linear changes may use deterministic checks plus final local review instead of spawning gratuitous children. Full/native/exact-head checks still run when mandated at release, not after every tiny edit.
+- Preserve formal **non-author Security/Functional/QA** review, C3 old-final/new-start independent baselines and shared-ref handoff, safe-git STOP rules, native Hooks coverage evidence, provider permissions and owner P0 escalation. Batch the formal review **once per completed candidate**, with a bounded affected-area rereview if the reviewed head changes. Same-provider local review is not formal independent acceptance.
+- Routine technical STOP and repair dispositions belong to the authorized AIs, not repeated owner prompt relays. GitHub comments are an evidence ledger, **not** a Mac CLI dispatcher. Do not claim cross-CLI auto-handoff or invisible background execution until measured. If Mac access is genuinely unavailable, request at most one meaningful physical step for a whole work package rather than each CHECKOUT-CLAIM, baseline or RELEASE.
+- A11c must demonstrate in **both** existing Developer CLIs one supported read-only child review, a small real or harmless seeded finding, Developer fix, targeted verification and zero owner prompt relays between microsteps. Report PASS or a reproducible capability gap. True Codex-to-Claude automatic formal review is a **separate unverified A11c acceptance**. Prefer the existing reviewed temporary ai-loop in its proved scope until native llmtool has parity; do not invent a second controller.
+
 ## Delivery loop, within available access
 
 1. Read the owner's goal and repo/skill guidance; pin task ID, allowed files,
