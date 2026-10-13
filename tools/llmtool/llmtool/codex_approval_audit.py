@@ -553,8 +553,8 @@ def _verdict(results):
 def _path_rules(paths, writes, policy):
     results = []
     for path in paths:
-        if any(_under(path, p) for p in policy.pinned_paths):
-            results.append((SEPARATE, 'R29'))
+        if any(_under(path, p) or (writes and _under(p, path)) for p in policy.pinned_paths):
+            results.append((UNAUTHORIZED if writes else SEPARATE, 'R29'))
         elif any(_under(path, r) for r in policy.protected_roots):
             results.append((UNAUTHORIZED, 'R26'))
         elif writes and not _under(path, policy.codex_root):
@@ -621,6 +621,8 @@ def _classify_command(argv, cwd, policy):
     flags = []
     candidates = args + [a.split('=', 1)[1] for a in args if '=' in a]
     paths = [_norm(a, cwd) for a in candidates if a.startswith(('/', '.')) or ('/' in a and '=' not in a)]
+    if program in READ_PROGRAMS | WRITE_PROGRAMS | {'git'}:
+        paths += [_norm(a, cwd) for a in args if a and not a.startswith('-') and '=' not in a]
     paths = [p for p in paths if p is not None]
     if any(a.startswith('~') for a in args):
         paths.append(policy.home)
@@ -649,6 +651,17 @@ def _classify_command(argv, cwd, policy):
         base = (UNKNOWN, 'R31') if writes and program == 'find' else (ROUTINE, 'R02' if writes else 'R01')
         return _verdict([base] + _path_rules(paths, writes, policy)), program, flags
     if program in WRITE_PROGRAMS or program in BUILD_PROGRAMS:
+        if program == 'cp':
+            # Only the simple two-operand form has statically known roles.
+            # Reading a pinned source does not write that source. Options and
+            # multiple operands need semantics this small classifier lacks.
+            if len(args) != 2 or any(a.startswith('-') for a in args):
+                return _verdict([(UNKNOWN, 'R31')] + _path_rules(paths, False, policy)), program, flags
+            source, target = (_norm(a, cwd) for a in args)
+            if source is None or target is None:
+                return (UNKNOWN, 'R51'), program, flags
+            return _verdict([(ROUTINE, 'R02')] + _path_rules([source], False, policy) +
+                            _path_rules([target], True, policy)), program, flags
         base = (ROUTINE, 'R02')
         if program == 'rm' and any(re.fullmatch(r'-[A-Za-z]*[rR][A-Za-z]*|--recursive', a) for a in args):
             base = (UNKNOWN, 'R28')
