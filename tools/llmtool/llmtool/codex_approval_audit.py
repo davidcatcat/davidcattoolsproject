@@ -4,9 +4,10 @@ The collector is cooperative and observe-only. A Codex ``PreToolUse`` /
 ``PostToolUse`` command hook pipes each event to ``record`` and the collector
 appends it to a private local store: a 0700 directory with 0600 files, kept
 outside every repository and the Git common-dir. ``summarize`` then builds a
-deterministic, allowlisted per-task summary that is safe to commit. It never
-contains raw argv, environment, paths, tokens or stdout. Each action is cited
-by a keyed HMAC reference that only a holder of the local key can recompute.
+deterministic per-task summary for Git. Every exported string must come from
+a fixed reviewed vocabulary, a keyed HMAC reference, a timestamp or the
+validated task/source provenance. Raw argv, environment, paths, identifiers,
+labels, tokens and stdout are never exported.
 
 Truthfulness rules:
 - ``WOULD_PROMPT_UNDER_OLD_PROFILE`` is an inference from a reviewed static
@@ -16,11 +17,14 @@ Truthfulness rules:
   enforcement (``AuditPolicy.deny_verified``) and no PostToolUse. Anything
   else observed after the fact is ``DETECTED_AFTER_EXECUTION``, or
   ``UNKNOWN`` when there is no post event.
+- ``OBSERVED_EVENTS_CONSISTENT`` requires boolean coverage/deny verification,
+  complete successful pins, a complete successful inventory without drift,
+  the expected sessions with tool events and session ends, a complete store
+  and no action needing review. Failure or absence is never "unchanged".
 - Hook coverage, trust and fail-open behaviour of the installed Codex are
-  NOT_VERIFIED until a reviewed native smoke. Until
-  ``AuditPolicy.coverage_verified`` is set, the summary status is
-  ``AUDIT_INCOMPLETE``. A full-access Codex process can bypass hooks entirely,
-  and same-UID code can tamper with the store. Neither is prevented here.
+  NOT_VERIFIED until a reviewed native smoke. A full-access Codex process can
+  bypass hooks entirely, and same-UID code can tamper with the store and key.
+  Neither is prevented here.
 
 Importing this module does nothing. ``python -I -B -m llmtool.codex_approval_audit``
 exposes ``init``, ``record`` and ``summarize``; it installs no hooks and
@@ -34,21 +38,36 @@ import json
 import os
 import posixpath
 import re
+import select
 import shlex
 import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .errors import LLMToolError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_EVENT_BYTES = 1024 * 1024
 RESPONSE_CAP_BYTES = 64 * 1024
+MAX_RECORD_BYTES = 4 * 1024 * 1024
+MAX_STORE_BYTES = 64 * 1024 * 1024
+MAX_EVENT_RECORDS = 50000
+OVERFLOW_RESERVE = 64 * 1024
+OVERFLOW_RECORDS = 256
+MAX_SEQ_BYTES = 128
+MAX_POLICY_BYTES = 64 * 1024
+MAX_PIN_BYTES = 512 * 1024 * 1024
+MAX_GIT_OUTPUT = 32 * 1024 * 1024
+MAX_LISTING = 256
+MAX_INVENTORY_ENTRIES = 100000
+MAX_EXPECTED_SESSIONS = 64
+LOCK_TIMEOUT_SECONDS = 5.0
 GIT_TIMEOUT_SECONDS = 10
 KEY_BYTES = 32
 REF_HEX = 32
+PUBLIC_REF_HEX = 16
 EVENTS, KEY, LOCK, SEQ = 'events.jsonl', 'key', 'lock', 'seq'
 TOOL_EVENTS = ('PreToolUse', 'PostToolUse')
 END_EVENTS = ('Stop', 'SessionEnd', 'Interrupt')
@@ -60,8 +79,12 @@ REQUIRED = {
                     'tool_name', 'tool_response', 'tool_use_id', 'transcript_path', 'turn_id'),
 }
 _ID = re.compile(r'[A-Za-z0-9._:-]{1,80}')
-_TASK = re.compile(r'[a-z0-9][a-z0-9._-]{0,79}')
+_TASK = re.compile(r'(issue|pr)-[0-9]{1,6}')
 _SHA = re.compile(r'[0-9a-f]{40}')
+_DIGEST = re.compile(r'[0-9a-f]{64}')
+_HEX_REF = re.compile(r'[0-9a-f]{16,64}')
+_TIME = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z')
+_SEQ_TEXT = re.compile(rb'(0|[1-9][0-9]{0,9}) ([0-9a-f]{64})')
 
 # Tool names are UNVERIFIED until a native smoke; anything else is UNKNOWN.
 SHELL_TOOLS = frozenset({'Bash', 'shell', 'local_shell', 'exec_command', 'unified_exec'})
@@ -91,10 +114,21 @@ GIT_NOGO = frozenset({'checkout', 'clean', 'filter-branch', 'gc', 'merge', 'prun
 KNOWN_PROGRAMS = (READ_PROGRAMS | WRITE_PROGRAMS | BUILD_PROGRAMS | NETWORK_PROGRAMS | SYSTEM_PROGRAMS |
                   INSTALL_PROGRAMS | SECRET_PROGRAMS | PROVIDER_PROGRAMS | SHELLS | {'gh', 'git'})
 KNOWN_GIT = GIT_READ | GIT_WRITE | GIT_NETWORK | GIT_NOGO | {'branch', 'remote'}
+# Git global options. Value options consume the next argument unless written as --opt=value.
+GIT_VALUE_GLOBALS = frozenset({'-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path',
+                               '--config-env', '--super-prefix'})
+GIT_SAFE_GLOBALS = frozenset({'-C', '--no-pager', '-P', '--no-optional-locks', '--literal-pathspecs',
+                              '--no-replace-objects'})
+GIT_CONFIG_GLOBALS = frozenset({'-c', '--config-env'})
+GIT_REPO_GLOBALS = frozenset({'--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix'})
+# Options that make a read-only subcommand write a file, run an external program or a pager.
+GIT_READ_RISKY = ('--output', '--ext-diff', '--textconv', '--open-files-in-pager', '--filters', '--exec',
+                  '--upload-pack', '--receive-pack', '--paginate')
+BENIGN_ENV = frozenset({'COLUMNS', 'LANG', 'LC_ALL', 'LC_CTYPE', 'NO_COLOR', 'TERM', 'TZ'})
+_ASSIGN = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=(.*)', re.S)
 _SHELL_META = re.compile(r'[;&|<>`$(){}\n]')
 _SECRET_HINT = re.compile(r'(?i)(auth\.json|(^|/)\.ssh(/|$)|\.netrc|(^|/)\.aws(/|$)|keychain|'
                           r'(token|secret|passw(or)?d|api[_-]?key|credential)[A-Za-z_]*=)')
-_GIT_VALUE_OPTIONS = ('-C', '-c', '--git-dir', '--work-tree', '--namespace')
 
 RULES = {
     'R00': 'tool name not in the reviewed mapping',
@@ -104,7 +138,7 @@ RULES = {
     'R10': 'git write to the shared common-dir outside the old writable root',
     'R11': 'git/gh network operation (old profile had no network)',
     'R12': 'write to a path outside the task root but not a protected root',
-    'R20': 'destructive or unknown git operation',
+    'R20': 'destructive, repository/config-overriding or unknown git operation',
     'R21': 'sudo/system modification',
     'R22': 'network tool (egress)',
     'R23': 'package installation',
@@ -117,6 +151,8 @@ RULES = {
     'R30': 'compound shell or substitution cannot be statically classified',
     'R31': 'inline interpreter code cannot be statically classified',
     'R32': 'unrecognised program',
+    'R33': 'environment assignment, pager or unrecognised global option alters the command',
+    'R34': 'git read subcommand with an output-file, external-program or pager option',
     'R40': 'patch inside the task path allowlist',
     'R41': 'patch outside the task path allowlist',
     'R50': 'MCP tool: old-profile approval behaviour unknown',
@@ -128,6 +164,16 @@ UNAUTHORIZED = 'UNAUTHORIZED'
 SEPARATE = 'SEPARATE_APPROVAL_REQUIRED'
 UNKNOWN = 'UNKNOWN'
 _RANK = {ROUTINE: 0, WOULD_PROMPT: 1, UNKNOWN: 2, SEPARATE: 3, UNAUTHORIZED: 4}
+
+# A2 pin labels and A1 inventory labels are a fixed reviewed vocabulary.
+REQUIRED_PINS = ('codex.binary', 'codex.config', 'codex.hooks', 'collector.module')
+PIN_LABELS = frozenset(REQUIRED_PINS + ('codex.project_config', 'codex.trust_state', 'collector.hook_adapter'))
+ROOT_LABELS = frozenset({'canonical', 'claude', 'codex', 'task'})
+ROOT_ITEMS = ('head', 'branch', 'index', 'status')
+REQUIRED_INVENTORY = ('common.config', 'common.hooks', 'shared.refs')
+FAILURE_WORDS = frozenset({'MISSING', 'UNREADABLE_OR_SYMLINK', 'NOT_REGULAR', 'TOO_LARGE', 'TOO_MANY'})
+MALFORMED_REASONS = frozenset({'OVERSIZE', 'NOT_UTF8_JSON', 'NOT_HOOK_EVENT', 'MISSING_FIELD', 'INVALID_ID',
+                               'INVALID_FIELD', 'RECORD_TOO_LARGE'})
 
 
 class AuditError(LLMToolError):
@@ -143,6 +189,20 @@ class AuditPolicy:
     pinned_paths: tuple = ()
     deny_verified: bool = False
     coverage_verified: bool = False
+
+
+def _check_policy(policy):
+    if not isinstance(policy, AuditPolicy):
+        raise AuditError('audit policy is malformed')
+    paths = (policy.codex_root, policy.home)
+    if (type(policy.deny_verified) is not bool
+            or type(policy.coverage_verified) is not bool
+            or not all(isinstance(group, (tuple, list)) for group in
+                       (policy.protected_roots, policy.allowed_paths, policy.pinned_paths))
+            or not all(isinstance(p, str) and p.startswith('/') for p in
+                       paths + tuple(policy.protected_roots) + tuple(policy.pinned_paths))
+            or not all(isinstance(p, str) for p in policy.allowed_paths)):
+        raise AuditError('audit policy is malformed')
 
 
 # ------------------------------------------------------------------- store
@@ -177,7 +237,10 @@ def _open_store(store, forbidden=(), create=False):
 
 def _open_file(dir_fd, name, flags, create=False):
     flags |= os.O_NOFOLLOW | (os.O_CREAT | os.O_EXCL if create else 0)
-    fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    try:
+        fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
+    except FileNotFoundError:
+        raise AuditError('audit store file is missing') from None
     try:
         _check_private(os.fstat(fd), False)
     except Exception:
@@ -186,26 +249,82 @@ def _open_file(dir_fd, name, flags, create=False):
     return fd
 
 
-def _read_all(fd):
-    chunks = []
+def _read_limited(fd, limit):
+    """Read at most ``limit`` bytes; a longer file is a fixed-text failure."""
+    chunks, total = [], 0
     while True:
-        chunk = os.read(fd, 1 << 20)
+        chunk = os.read(fd, min(1 << 16, limit + 1 - total))
         if not chunk:
             return b''.join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise AuditError('audit file exceeds its size limit')
         chunks.append(chunk)
+
+
+def _lock(fd, mode):
+    """Bounded flock acquisition; never blocks past LOCK_TIMEOUT_SECONDS."""
+    deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, mode | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            pass
+        if time.monotonic() >= deadline:
+            raise AuditError('audit store lock timed out')
+        time.sleep(0.005)
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
+
+
+def _mac(key, label, data):
+    return hmac.new(key, label + b'\0' + data, hashlib.sha256).hexdigest()
+
+
+def public_ref(key, kind, value):
+    """Keyed pseudonymous reference for an identifier exported to Git."""
+    return _mac(key, b'public-' + kind.encode(), value.encode('utf-8', 'surrogatepass'))[:PUBLIC_REF_HEX]
+
+
+def _seq_text(key, number):
+    digits = str(number).encode()
+    return digits + b' ' + _mac(key, b'seq', digits).encode()
+
+
+def _parse_seq(key, raw):
+    match = _SEQ_TEXT.fullmatch(raw) if raw is not None else None
+    if not match or not hmac.compare_digest(match.group(2).decode(), _mac(key, b'seq', match.group(1))):
+        return None
+    return int(match.group(1))
+
+
+def _write_seq(fd, key, number):
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.ftruncate(fd, 0)
+    os.write(fd, _seq_text(key, number))
+    os.fsync(fd)
 
 
 def init_store(store, forbidden=()):
     """Create a new private store with a fresh random HMAC key (exclusive)."""
     dir_fd = _open_store(store, forbidden, create=True)
     try:
+        key = os.urandom(KEY_BYTES)
         fd = _open_file(dir_fd, KEY, os.O_WRONLY, create=True)
         try:
-            os.write(fd, os.urandom(KEY_BYTES))
+            os.write(fd, key)
             os.fsync(fd)
         finally:
             os.close(fd)
-        for name in (LOCK, SEQ, EVENTS):
+        fd = _open_file(dir_fd, SEQ, os.O_WRONLY, create=True)
+        try:
+            _write_seq(fd, key, 0)
+        finally:
+            os.close(fd)
+        for name in (LOCK, EVENTS):
             os.close(_open_file(dir_fd, name, os.O_WRONLY, create=True))
         os.fsync(dir_fd)
     finally:
@@ -215,7 +334,7 @@ def init_store(store, forbidden=()):
 def _key(dir_fd):
     fd = _open_file(dir_fd, KEY, os.O_RDONLY)
     try:
-        key = _read_all(fd)
+        key = _read_limited(fd, KEY_BYTES)
     finally:
         os.close(fd)
     if len(key) != KEY_BYTES:
@@ -223,12 +342,8 @@ def _key(dir_fd):
     return key
 
 
-def _canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()
-
-
-def _mac(key, label, data):
-    return hmac.new(key, label + b'\0' + data, hashlib.sha256).hexdigest()
+def _sealed(key, body):
+    return _canonical(dict(body, mac=_mac(key, b'record', _canonical(body)))) + b'\n'
 
 
 def _cap_response(response):
@@ -250,7 +365,7 @@ def _parse_event(raw):
         return None, 'OVERSIZE'
     try:
         event = json.loads(raw.decode('utf-8'))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         return None, 'NOT_UTF8_JSON'
     if not isinstance(event, dict) or not isinstance(event.get('hook_event_name'), str):
         return None, 'NOT_HOOK_EVENT'
@@ -291,7 +406,7 @@ def record_event(store, raw, decision=None, forbidden=(), now_ns=None):
         key = _key(dir_fd)
         lock_fd = _open_file(dir_fd, LOCK, os.O_RDWR)
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            _lock(lock_fd, fcntl.LOCK_EX)
             seq_fd = _open_file(dir_fd, SEQ, os.O_RDWR)
             try:
                 events_fd = _open_file(dir_fd, EVENTS, os.O_WRONLY | os.O_APPEND)
@@ -299,17 +414,26 @@ def record_event(store, raw, decision=None, forbidden=(), now_ns=None):
                 os.close(seq_fd)
                 raise
             try:
-                text = _read_all(seq_fd).strip()
-                body['seq'] = (int(text) if text else 0) + 1
-                line = dict(body, mac=_mac(key, b'record', _canonical(body)))
-                data = _canonical(line) + b'\n'
+                current = _parse_seq(key, _read_limited(seq_fd, MAX_SEQ_BYTES))
+                if current is None:
+                    raise AuditError('audit sequence state is invalid')
+                seq = current + 1
+                data = _sealed(key, dict(body, seq=seq))
+                if len(data) > MAX_RECORD_BYTES:
+                    data = _sealed(key, {'v': SCHEMA_VERSION, 'kind': 'malformed', 'reason': 'RECORD_TOO_LARGE',
+                                         'size': len(raw), 'received_ns': received, 'seq': seq})
+                size = os.fstat(events_fd).st_size
+                if seq > MAX_EVENT_RECORDS or size + len(data) > MAX_STORE_BYTES:
+                    # A small marker keeps the loss visible; past the reserve the append fails closed.
+                    data = _sealed(key, {'v': SCHEMA_VERSION, 'kind': 'overflow', 'received_ns': received,
+                                         'seq': seq})
+                    if (seq > MAX_EVENT_RECORDS + OVERFLOW_RECORDS
+                            or size + len(data) > MAX_STORE_BYTES + OVERFLOW_RESERVE):
+                        raise AuditError('audit store is full')
                 if os.write(events_fd, data) != len(data):
                     raise AuditError('audit append was short')
                 os.fsync(events_fd)
-                os.lseek(seq_fd, 0, os.SEEK_SET)
-                os.ftruncate(seq_fd, 0)
-                os.write(seq_fd, str(body['seq']).encode())
-                os.fsync(seq_fd)
+                _write_seq(seq_fd, key, seq)
             finally:
                 os.close(events_fd)
                 os.close(seq_fd)
@@ -317,44 +441,85 @@ def record_event(store, raw, decision=None, forbidden=(), now_ns=None):
             os.close(lock_fd)  # Closing releases the flock.
     finally:
         os.close(dir_fd)
-    return body['seq']
+    return seq
 
 
-def read_store(store, forbidden=()):
-    """Return (key, records, gaps, store_mac). Integrity problems become gaps, never silent."""
-    dir_fd = _open_store(store, forbidden)
+def _snapshot(dir_fd):
+    """Coherent (seq, events) bytes read under a shared lock; seq is None when missing or oversize."""
+    lock_fd = _open_file(dir_fd, LOCK, os.O_RDWR)
     try:
-        key = _key(dir_fd)
+        _lock(lock_fd, fcntl.LOCK_SH)
+        try:
+            seq_fd = _open_file(dir_fd, SEQ, os.O_RDONLY)
+        except AuditError:
+            seq_raw = None
+        else:
+            try:
+                seq_raw = _read_limited(seq_fd, MAX_SEQ_BYTES)
+            except AuditError:
+                seq_raw = None
+            finally:
+                os.close(seq_fd)
         fd = _open_file(dir_fd, EVENTS, os.O_RDONLY)
         try:
-            raw = _read_all(fd)
+            raw = _read_limited(fd, MAX_STORE_BYTES + OVERFLOW_RESERVE)
         finally:
             os.close(fd)
     finally:
+        os.close(lock_fd)
+    return seq_raw, raw
+
+
+def read_store(store, forbidden=()):
+    """Return (key, records, gaps, store_mac). Integrity and completeness problems become gaps."""
+    dir_fd = _open_store(store, forbidden)
+    try:
+        key = _key(dir_fd)
+        seq_raw, raw = _snapshot(dir_fd)
+    finally:
         os.close(dir_fd)
-    records, gaps = [], []
     lines = raw.split(b'\n')
-    if lines and lines[-1]:
+    if len(lines) > MAX_EVENT_RECORDS + OVERFLOW_RECORDS + 1:
+        raise AuditError('audit store has too many records')
+    records, gaps = [], []
+    if lines[-1]:
         gaps.append({'gap': 'TORN_RECORD'})
-    expected = 1
+    expected, last = 1, 0
     for data in lines[:-1]:
+        if len(data) > MAX_RECORD_BYTES:
+            gaps.append({'gap': 'RECORD_TOO_LARGE'})
+            continue
         try:
             line = json.loads(data.decode('utf-8'))
             mac = line.pop('mac')
-        except (UnicodeDecodeError, ValueError, KeyError, AttributeError, TypeError):
+        except (UnicodeDecodeError, ValueError, KeyError, AttributeError, TypeError, RecursionError):
             gaps.append({'gap': 'UNREADABLE_RECORD'})
             continue
         if not hmac.compare_digest(str(mac), _mac(key, b'record', _canonical(line))):
             gaps.append({'gap': 'INTEGRITY_MISMATCH'})
             continue
-        if line.get('seq') != expected:
-            gaps.append({'gap': 'SEQUENCE_ANOMALY', 'seq': line.get('seq')})
-        expected = (line.get('seq') if isinstance(line.get('seq'), int) else expected) + 1
+        seq = line.get('seq')
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            gaps.append({'gap': 'SEQUENCE_ANOMALY', 'seq': None})
+            continue
+        if seq != expected:
+            gaps.append({'gap': 'SEQUENCE_ANOMALY', 'seq': seq})
+        expected, last = seq + 1, max(last, seq)
         line['ref'] = _mac(key, b'ref', data)[:REF_HEX]
         records.append(line)
         if line.get('kind') == 'malformed':
-            gaps.append({'gap': 'MALFORMED_EVENT', 'reason': line.get('reason'), 'seq': line.get('seq')})
-    return key, records, gaps, _mac(key, b'store', raw)
+            reason = line.get('reason') if line.get('reason') in MALFORMED_REASONS else 'UNREADABLE_RECORD'
+            gaps.append({'gap': 'MALFORMED_EVENT', 'reason': reason, 'seq': seq})
+        elif line.get('kind') == 'overflow':
+            gaps.append({'gap': 'STORE_OVERFLOW', 'seq': seq})
+    frontier = _parse_seq(key, seq_raw)
+    if frontier is None:
+        gaps.append({'gap': 'SEQ_STATE_INVALID'})
+    elif last < frontier:
+        gaps.append({'gap': 'TAIL_TRUNCATED'})
+    elif last > frontier:
+        gaps.append({'gap': 'SEQ_FRONTIER_BEHIND'})
+    return key, records, gaps, _mac(key, b'store', (seq_raw or b'') + b'\0' + raw)
 
 
 # ---------------------------------------------------------- classification
@@ -404,13 +569,49 @@ def _argv(tool_input):
     return None, None
 
 
-def _classify_argv(argv, cwd, policy):
-    while argv and (posixpath.basename(argv[0]) in WRAPPERS or re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', argv[0])):
-        argv = argv[1:]
-        if argv and argv[0].startswith('-'):
-            argv = argv[1:]
-    if not argv:
-        return (UNKNOWN, 'R51'), '<EMPTY>', []
+def _classify_git(args, flags):
+    globals_, i = [], 0
+    while i < len(args) and args[i].startswith('-'):
+        globals_.append(args[i].split('=', 1)[0])
+        i += 2 if args[i] in GIT_VALUE_GLOBALS else 1
+    sub = args[i] if i < len(args) else ''
+    rest = args[i:]
+    if '-C' in globals_:
+        flags.append('cwd-override')
+    if GIT_CONFIG_GLOBALS.intersection(globals_):
+        flags.append('config-override')
+    if GIT_REPO_GLOBALS.intersection(globals_):
+        flags.append('git-dir-override')
+    unknown_global = [g for g in globals_ if g not in GIT_VALUE_GLOBALS and g not in GIT_SAFE_GLOBALS]
+    if unknown_global:
+        flags.append('unknown-option')
+    force = any(a in ('-f', '--force', '--force-with-lease', '-D', '--hard', '--delete') or a.startswith('+')
+                for a in rest)
+    if force:
+        flags.append('force')
+    reads = sub in GIT_READ or (sub == 'branch' and all(a in ('branch', '--show-current', '-a', '-r', '--list',
+                                                               '-v') for a in rest)) or rest == ['remote', '-v']
+    risky = [a for a in rest[1:] if a.startswith(GIT_READ_RISKY) or (sub == 'grep' and a.startswith('-O'))]
+    if ('config-override' in flags or 'git-dir-override' in flags or sub in GIT_NOGO or sub not in KNOWN_GIT
+            or (sub == 'switch' and 'main' in rest)):
+        result = (UNAUTHORIZED, 'R20')
+    elif unknown_global:
+        result = (UNKNOWN, 'R33')
+    elif reads and risky:
+        flags.append('output-or-exec-option')
+        result = (UNKNOWN, 'R34')
+    elif reads:
+        result = (ROUTINE, 'R03')
+    elif force:
+        result = (UNAUTHORIZED, 'R20')
+    elif sub in GIT_NETWORK:
+        result = (WOULD_PROMPT, 'R11')
+    else:
+        result = (WOULD_PROMPT, 'R10')
+    return result, 'git ' + (sub if sub in KNOWN_GIT else '<OTHER>')
+
+
+def _classify_command(argv, cwd, policy):
     program = posixpath.basename(argv[0])
     args = argv[1:]
     flags = []
@@ -422,36 +623,7 @@ def _classify_argv(argv, cwd, policy):
     if any(_SECRET_HINT.search(a) for a in args):
         return (UNAUTHORIZED, 'R24'), program if program in KNOWN_PROGRAMS else '<OTHER_PROGRAM>', ['secret-hint']
     if program == 'git':
-        sub, skip = '', False
-        for a in args:
-            if skip:
-                skip = False
-            elif a in _GIT_VALUE_OPTIONS:
-                skip = True
-            elif not a.startswith('-'):
-                sub = a
-                break
-        if any(a in ('-C', '--git-dir', '--work-tree') or a.startswith(('--git-dir=', '--work-tree='))
-               for a in args):
-            flags.append('git-dir-override')
-        if '-c' in args[:args.index(sub)] if sub else '-c' in args:
-            flags.append('config-override')
-        synopsis = 'git ' + (sub if sub in KNOWN_GIT else '<OTHER>')
-        force = any(a in ('-f', '--force', '--force-with-lease', '-D', '--hard', '--delete') or a.startswith('+')
-                    for a in args)
-        if force:
-            flags.append('force')
-        rest = args[args.index(sub):] if sub else []
-        if sub in GIT_READ or (sub == 'branch' and all(a in ('branch', '--show-current', '-a', '-r', '--list', '-v')
-                                                      for a in rest)) or (sub == 'remote' and rest == ['remote', '-v']):
-            result = (ROUTINE, 'R03')
-        elif (force or sub in GIT_NOGO or sub not in KNOWN_GIT or 'config-override' in flags
-              or (sub == 'switch' and 'main' in rest)):
-            result = (UNAUTHORIZED, 'R20')
-        elif sub in GIT_NETWORK:
-            result = (WOULD_PROMPT, 'R11')
-        else:
-            result = (WOULD_PROMPT, 'R10')
+        result, synopsis = _classify_git(args, flags)
         return _verdict([result] + _path_rules(paths, result[0] != ROUTINE, policy)), synopsis, flags
     if program in SYSTEM_PROGRAMS:
         return (UNAUTHORIZED, 'R21'), program, flags
@@ -479,6 +651,37 @@ def _classify_argv(argv, cwd, policy):
             flags.append('recursive')
         return _verdict([base] + _path_rules(paths, program in WRITE_PROGRAMS, policy)), program, flags
     return (UNKNOWN, 'R32'), '<OTHER_PROGRAM>', flags
+
+
+def _classify_argv(argv, cwd, policy):
+    assignments = []
+    while argv and (posixpath.basename(argv[0]) in WRAPPERS or _ASSIGN.fullmatch(argv[0])):
+        is_assignment = _ASSIGN.fullmatch(argv[0]) is not None
+        if is_assignment:
+            assignments.append(argv[0])
+        argv = argv[1:]
+        if not is_assignment and argv and argv[0].startswith('-'):
+            argv = argv[1:]
+    if not argv:
+        return (UNKNOWN, 'R51'), '<EMPTY>', []
+    result, synopsis, flags = _classify_command(argv, cwd, policy)
+    if assignments:
+        # Environment assignments are never discarded: GIT_* redirects git, others may alter any program.
+        names = [_ASSIGN.fullmatch(a).group(1) for a in assignments]
+        extra = []
+        if any(_SECRET_HINT.search(a) for a in assignments):
+            extra.append((UNAUTHORIZED, 'R24'))
+            flags = flags + ['secret-hint']
+        if any(n.startswith('GIT_') for n in names):
+            extra.append((UNAUTHORIZED, 'R20'))
+        elif any(n not in BENIGN_ENV for n in names):
+            extra.append((UNKNOWN, 'R33'))
+        if any(n not in BENIGN_ENV for n in names):
+            flags = flags + ['env-override']
+        values = [_norm(a.split('=', 1)[1], cwd) for a in assignments if a.split('=', 1)[1].startswith(('/', '.'))]
+        extra += _path_rules([v for v in values if v], False, policy)
+        result = _verdict(extra + [result])
+    return result, synopsis, flags
 
 
 def _scan_tokens(text):
@@ -592,7 +795,7 @@ def _enforcement(classification, pre, post, policy):
         return 'NOT_REQUIRED'
     if post:
         return 'DETECTED_AFTER_EXECUTION'
-    if pre and pre[0].get('decision') == 'deny' and policy.deny_verified:
+    if pre and pre[0].get('decision') == 'deny' and policy.deny_verified is True:
         return 'BLOCKED'
     return UNKNOWN
 
@@ -611,56 +814,184 @@ def _iso(ns):
 
 
 # ---------------------------------------------------------------- summary
-def _strings(value, out):
+def _strings(value, out, keys=True):
     if isinstance(value, str):
         out.append(value)
     elif isinstance(value, dict):
         for k, v in value.items():
-            _strings(k, out)
-            _strings(v, out)
+            if keys:
+                _strings(k, out, keys)
+            _strings(v, out, keys)
     elif isinstance(value, list):
         for v in value:
-            _strings(v, out)
+            _strings(v, out, keys)
 
 
 RESIDUAL_RISKS = ('hooks are cooperative: a full-access process can bypass or disable them',
                   'same-UID code can tamper with the local store and key',
                   'post-hoc inventory cannot prevent or catch transient changes')
-_CONSTANT_TEXT = ' '.join(list(RULES.values()) + list(RESIDUAL_RISKS) + list(_RANK) + [
-    'NOT_REQUIRED DETECTED_AFTER_EXECUTION BLOCKED NO_POST_EVENT POST_OBSERVED_STATUS_UNKNOWN EXIT_ZERO',
-    'EXIT_NONZERO ALLOWLIST_SYNOPSIS_ONLY PENDING_INDEPENDENT_REVIEW AUDIT_INCOMPLETE OBSERVED_EVENTS_CONSISTENT',
-    'INTERRUPTED_NO_POST MISSING_POST MISSING_PRE DUPLICATE_PRE DUPLICATE_POST POST_BEFORE_PRE PRE_POST_MISMATCH',
-    'TORN_RECORD UNREADABLE_RECORD INTEGRITY_MISMATCH SEQUENCE_ANOMALY MALFORMED_EVENT OVERSIZE NOT_UTF8_JSON',
-    'NOT_HOOK_EVENT MISSING_FIELD INVALID_ID INVALID_FIELD HOOK_COVERAGE_NOT_VERIFIED PINS_NOT_PROVIDED',
-    'PRE_EXECUTION_DENY_NOT_VERIFIED PIN_CHANGE_SEPARATE_APPROVAL_REQUIRED INVENTORY_DRIFT_OR_MISSING',
-    'INVENTORY_NOT_PROVIDED EVENT_GAPS ACTIONS_REQUIRE_REVIEW COMPOUND_SHELL OTHER_PROGRAM UNKNOWN_TOOL',
-    'UNPARSEABLE INVALID_CWD INVALID_PATH CODEX_ROOT PROTECTED_ROOT git-dir-override inline-code secret-hint',
-    'llmtool.codex_approval_audit'])
+NOT_VERIFIED = ('real Codex tool names and hook coverage', 'pre-execution deny enforcement',
+                'hook failure (fail-open) behaviour',
+                'A1 content of already-dirty or ignored files is not inventoried')
+BLOCKERS = ('HOOK_COVERAGE_NOT_VERIFIED', 'PRE_EXECUTION_DENY_NOT_VERIFIED', 'PINS_NOT_PROVIDED',
+            'PINS_INCOMPLETE', 'PINS_NOT_VERIFIED', 'PIN_CHANGE_SEPARATE_APPROVAL_REQUIRED',
+            'INVENTORY_NOT_PROVIDED', 'INVENTORY_NOT_VERIFIED', 'INVENTORY_DRIFT', 'EXPECTED_SESSIONS_NOT_PROVIDED',
+            'UNEXPECTED_SESSION', 'EXPECTED_SESSION_NOT_OBSERVED', 'SESSION_END_NOT_OBSERVED',
+            'NO_TOOL_EVENTS_OBSERVED', 'EVENT_GAPS', 'ACTIONS_REQUIRE_REVIEW')
+_EXPORT_WORDS = frozenset(
+    set(RULES) | set(RULES.values()) | set(RESIDUAL_RISKS) | set(NOT_VERIFIED) | set(BLOCKERS) | set(_RANK) |
+    PIN_LABELS | MALFORMED_REASONS | FAILURE_WORDS | KNOWN_PROGRAMS | {'git ' + s for s in KNOWN_GIT} |
+    {'%s.%s' % (r, i) for r in ROOT_LABELS for i in ROOT_ITEMS} |
+    {'common.config', 'common.hooks', 'shared.refs', 'worktree.metadata', 'other.metadata'} |
+    {'NOT_REQUIRED', 'DETECTED_AFTER_EXECUTION', 'BLOCKED', 'NO_POST_EVENT', 'POST_OBSERVED_STATUS_UNKNOWN',
+     'EXIT_ZERO', 'EXIT_NONZERO', 'ALLOWLIST_SYNOPSIS_ONLY', 'PENDING_INDEPENDENT_REVIEW', 'AUDIT_INCOMPLETE',
+     'OBSERVED_EVENTS_CONSISTENT', 'INTERRUPTED_NO_POST', 'MISSING_POST', 'MISSING_PRE', 'DUPLICATE_PRE',
+     'DUPLICATE_POST', 'POST_BEFORE_PRE', 'PRE_POST_MISMATCH', 'TORN_RECORD', 'UNREADABLE_RECORD',
+     'INTEGRITY_MISMATCH', 'SEQUENCE_ANOMALY', 'MALFORMED_EVENT', 'STORE_OVERFLOW', 'SEQ_STATE_INVALID',
+     'TAIL_TRUNCATED', 'SEQ_FRONTIER_BEHIND', 'git <OTHER>', '<COMPOUND_SHELL>', '<OTHER_PROGRAM>',
+     '<UNKNOWN_TOOL>', '<UNPARSEABLE>', '<EMPTY>', '<INVALID_CWD>', '<INVALID_PATH>', '<CODEX_ROOT>',
+     '<CODEX_ROOT>/...', '<PROTECTED_ROOT>', '<HOME>/...', '<OUTSIDE>', 'apply_patch', 'mcp', 'shell', 'patch',
+     'unknown', 'compound', 'cwd-override', 'config-override', 'git-dir-override', 'unknown-option',
+     'output-or-exec-option', 'env-override', 'force', 'recursive', 'inline-code', 'secret-hint',
+     'llmtool.codex_approval_audit v%d' % SCHEMA_VERSION})
+# Leak-check vocabulary: whole export words plus their sub-tokens, so a raw piece equal to a fixed word is fine.
+_VOCAB = frozenset(_EXPORT_WORDS | {t for w in _EXPORT_WORDS for t in re.split(r'[^A-Za-z0-9]+', w) if t} |
+                   {t for w in _EXPORT_WORDS for t in re.findall(r'[A-Za-z0-9_.<>-]+', w)})
 
 
-def leak_check(text, records, policy, allowed=()):
-    """Fail-closed self-check: no raw string piece (>=8 chars) from any event may appear."""
-    vocab = (set(KNOWN_PROGRAMS) | KNOWN_GIT | SHELL_TOOLS | PATCH_TOOLS | set(RULES) |
-             set(re.findall(r'[A-Za-z0-9_.<>-]+', _CONSTANT_TEXT)) | set(allowed))
+def leak_check(text, records, policy, extra=()):
+    """Fail-closed self-check: no raw string piece (>=8 chars) from any event, ID or input may appear.
+
+    ``text`` is a string or a list of exported strings. Identifiers get no exemption.
+    """
+    texts = [text] if isinstance(text, str) else list(text)
     raw = []
     for rec in records:
-        for name in ('tool_input', 'tool_response', 'cwd', 'tool_name'):
+        for name in ('tool_input', 'tool_response', 'cwd', 'tool_name', 'session_id', 'turn_id', 'tool_use_id'):
             _strings(rec.get(name), raw)
     raw.extend((policy.codex_root, policy.home) + tuple(policy.protected_roots) + tuple(policy.pinned_paths))
+    raw.extend(extra)
     pieces = set()
     for item in raw:
         pieces.add(item)
         pieces.update(re.split(r'[\s=:,;"\'/]+', item))
-    ids = {rec.get(k) for rec in records for k in ('session_id', 'turn_id', 'tool_use_id')}
     return sorted({hashlib.sha256(p.encode('utf-8', 'surrogatepass')).hexdigest()[:12]
-                   for p in pieces if len(p) >= 8 and p not in vocab and p not in ids and p in text})
+                   for p in pieces if len(p) >= 8 and p not in _VOCAB and any(p in t for t in texts)})
 
 
-def summarize(store, task_id, source_sha, policy, pins=None, inventory_drift=None, forbidden=()):
-    """Deterministic, allowlisted per-task summary. Raises if the self-check finds a leak."""
+def _pin_evidence(pins):
+    if pins is None:
+        return ['PINS_NOT_PROVIDED'], [], []
+    if not isinstance(pins, dict) or not all(isinstance(pins.get(side), dict) for side in ('start', 'end')):
+        raise AuditError('pin evidence is malformed')
+    start, end = pins['start'], pins['end']
+    for side in (start, end):
+        if not all(label in PIN_LABELS and isinstance(value, str) for label, value in side.items()):
+            raise AuditError('pin evidence is malformed')
+    result = compare_pins(start, end)
+    blockers = []
+    if not set(REQUIRED_PINS) <= set(start) or not set(REQUIRED_PINS) <= set(end):
+        blockers.append('PINS_INCOMPLETE')
+    if result['unverified']:
+        blockers.append('PINS_NOT_VERIFIED')
+    if result['changed']:
+        blockers.append('PIN_CHANGE_SEPARATE_APPROVAL_REQUIRED')
+    return blockers, result['changed'], result['unverified']
+
+
+def _category(label):
+    """Fixed public category for an internal inventory label; never the raw label."""
+    if label.startswith('ref:') or label == 'shared.refs':
+        return 'shared.refs'
+    if label.startswith('worktree:'):
+        return 'worktree.metadata'
+    if label in ('common.config', 'common.hooks'):
+        return label
+    root, _, item = label.partition('.')
+    return label if root in ROOT_LABELS and item in ROOT_ITEMS else 'other.metadata'
+
+
+def _inventory_evidence(inventory):
+    if inventory is None:
+        return ['INVENTORY_NOT_PROVIDED'], [], []
+    if not isinstance(inventory, dict):
+        raise AuditError('inventory evidence is malformed')
+    pre, post, allowed = inventory.get('pre'), inventory.get('post'), inventory.get('allowed_refs', [])
+    for snap in (pre, post):
+        if (not isinstance(snap, dict) or len(snap) > MAX_INVENTORY_ENTRIES
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in snap.items())):
+            raise AuditError('inventory evidence is malformed')
+    if not isinstance(allowed, list) or not all(isinstance(r, str) and r.startswith('refs/heads/') for r in allowed):
+        raise AuditError('inventory evidence is malformed')
+    result = compare_inventory(pre, post, tuple(allowed))
+    blockers = []
+    complete = all(set(REQUIRED_INVENTORY) <= set(snap) and
+                   any(_category(label) != 'other.metadata' and label.endswith('.head') for label in snap)
+                   for snap in (pre, post))
+    if not complete or result['unverified']:
+        blockers.append('INVENTORY_NOT_VERIFIED')
+    if result['drift']:
+        blockers.append('INVENTORY_DRIFT')
+    return (blockers, sorted({_category(label) for label in result['drift']}),
+            sorted({_category(label) for label in result['unverified']}))
+
+
+def _expected_sessions(sessions):
+    if sessions is None:
+        return None
+    if (not isinstance(sessions, (list, tuple)) or not 1 <= len(sessions) <= MAX_EXPECTED_SESSIONS
+            or not all(isinstance(s, str) and _ID.fullmatch(s) for s in sessions)):
+        raise AuditError('expected sessions are malformed')
+    return frozenset(sessions)
+
+
+def _session_blockers(records, expected, rows):
+    blockers = []
+    hooks = [r for r in records if r.get('kind') == 'hook']
+    if expected is None:
+        blockers.append('EXPECTED_SESSIONS_NOT_PROVIDED')
+    else:
+        seen = {r['session_id'] for r in hooks}
+        if seen - expected:
+            blockers.append('UNEXPECTED_SESSION')
+        if expected - seen:
+            blockers.append('EXPECTED_SESSION_NOT_OBSERVED')
+        for session in sorted(expected):
+            tool = [r['seq'] for r in hooks if r['session_id'] == session and r['event'] in TOOL_EVENTS]
+            ends = [r['seq'] for r in hooks if r['session_id'] == session and r['event'] in END_EVENTS]
+            if not ends or (tool and max(ends) < max(tool)):
+                blockers.append('SESSION_END_NOT_OBSERVED')
+                break
+    if not rows:
+        blockers.append('NO_TOOL_EVENTS_OBSERVED')
+    return blockers
+
+
+def _check_export(summary, records, policy):
+    """Every exported value must be fixed vocabulary, a keyed ref, a time or validated provenance."""
+    values = []
+    _strings({k: v for k, v in summary.items() if k not in ('task_id', 'source_sha')}, values, keys=False)
+    if any(not (v in _EXPORT_WORDS or _HEX_REF.fullmatch(v) or _TIME.fullmatch(v)) for v in values):
+        raise AuditError('summary contains a value outside the export vocabulary')
+    if leak_check(values, records, policy):
+        raise AuditError('summary self-check found raw event content')
+
+
+def summarize(store, task_id, source_sha, policy, pins=None, inventory=None, expected_sessions=None,
+              forbidden=()):
+    """Deterministic, allowlisted per-task summary. Raises on malformed evidence or a self-check failure.
+
+    pins: ``{'start': {label: digest}, 'end': {...}}`` with labels from PIN_LABELS (see pin_files).
+    inventory: ``{'pre': snapshot, 'post': snapshot, 'allowed_refs': [...]}`` (see inventory).
+    expected_sessions: the Codex session ids that belong to this task, from trusted task provenance.
+    """
     if not (isinstance(task_id, str) and _TASK.fullmatch(task_id)) or not (
             isinstance(source_sha, str) and _SHA.fullmatch(source_sha)):
         raise AuditError('invalid task id or source sha')
+    _check_policy(policy)
+    pin_blockers, pin_changes, pins_unverified = _pin_evidence(pins)
+    inventory_blockers, drift, inventory_unverified = _inventory_evidence(inventory)
+    expected = _expected_sessions(expected_sessions)
     key, records, gaps, store_mac = read_store(store, forbidden)
     actions, action_gaps = correlate(records)
     gaps = gaps + action_gaps
@@ -674,8 +1005,10 @@ def summarize(store, task_id, source_sha, policy, pins=None, inventory_drift=Non
         if action['problems'] and classification == ROUTINE:
             classification = UNKNOWN
         rows.append({
-            'action': index, 'time_utc': _iso(first['received_ns']), 'session_id': first['session_id'],
-            'turn_id': first['turn_id'], 'tool_use_id': first['tool_use_id'], 'tool_kind': kind,
+            'action': index, 'time_utc': _iso(first['received_ns']),
+            'session_ref': public_ref(key, 'session', first['session_id']),
+            'turn_ref': public_ref(key, 'turn', first['turn_id']),
+            'use_ref': public_ref(key, 'tool_use', first['tool_use_id']), 'tool_kind': kind,
             'synopsis': synopsis, 'flags': flags, 'cwd_class': _place(_norm(first['cwd'], '/'), policy),
             'pre': len(action['pre']) == 1, 'post': len(action['post']) == 1, 'outcome': _outcome(action['post']),
             'classification': classification, 'inferred': classification in (ROUTINE, WOULD_PROMPT),
@@ -685,16 +1018,11 @@ def summarize(store, task_id, source_sha, policy, pins=None, inventory_drift=Non
             'event_refs': [r['ref'] for r in action['pre'] + action['post']],
             'redaction': 'ALLOWLIST_SYNOPSIS_ONLY'})
     blockers = []
-    if not policy.coverage_verified:
+    if policy.coverage_verified is not True:
         blockers.append('HOOK_COVERAGE_NOT_VERIFIED')
-    if not policy.deny_verified:
+    if policy.deny_verified is not True:
         blockers.append('PRE_EXECUTION_DENY_NOT_VERIFIED')
-    pin_changes = sorted(pins['changed']) if pins else ['PINS_NOT_PROVIDED']
-    if pin_changes:
-        blockers.append('PIN_CHANGE_SEPARATE_APPROVAL_REQUIRED' if pins else 'PINS_NOT_PROVIDED')
-    drift = sorted(inventory_drift) if inventory_drift is not None else ['INVENTORY_NOT_PROVIDED']
-    if drift:
-        blockers.append('INVENTORY_DRIFT_OR_MISSING')
+    blockers += pin_blockers + inventory_blockers + _session_blockers(records, expected, rows)
     if gaps:
         blockers.append('EVENT_GAPS')
     if any(r['classification'] in (UNAUTHORIZED, SEPARATE, UNKNOWN) for r in rows):
@@ -702,23 +1030,21 @@ def summarize(store, task_id, source_sha, policy, pins=None, inventory_drift=Non
     summary = {
         'schema_version': SCHEMA_VERSION, 'task_id': task_id, 'source_sha': source_sha,
         'status': 'AUDIT_INCOMPLETE' if blockers else 'OBSERVED_EVENTS_CONSISTENT',
-        'blockers': blockers, 'actions': rows, 'gaps': gaps, 'pin_changes': pin_changes,
-        'inventory_drift': drift, 'store_mac': store_mac,
+        'blockers': blockers, 'actions': rows, 'gaps': gaps, 'event_count': len(records),
+        'pin_changes': pin_changes, 'pins_unverified': pins_unverified,
+        'inventory_drift': drift, 'inventory_unverified': inventory_unverified, 'store_mac': store_mac,
         'collector': 'llmtool.codex_approval_audit v%d' % SCHEMA_VERSION,
         'collector_sha256': file_digest(os.path.abspath(__file__)),
         'rules': {k: RULES[k] for k in sorted({r['rule_id'] for r in rows})},
-        'residual_risks': list(RESIDUAL_RISKS),
+        'residual_risks': list(RESIDUAL_RISKS), 'not_verified': list(NOT_VERIFIED),
         'reviewer_verdict': 'PENDING_INDEPENDENT_REVIEW'}
-    text = json.dumps(summary, sort_keys=True, indent=1, ensure_ascii=True) + '\n'
-    synopses = tuple(r['synopsis'] for r in rows)  # Built only from allowlisted words.
-    if leak_check(text, records, policy, allowed=(task_id, source_sha) + synopses):
-        raise AuditError('summary self-check found raw event content')
-    return text
+    _check_export(summary, records, policy)
+    return json.dumps(summary, sort_keys=True, indent=1, ensure_ascii=True) + '\n'
 
 
 # ------------------------------------------------------- A2 pins, A1 inventory
 def file_digest(path):
-    """sha256 of a regular file opened without following symlinks; else a status word."""
+    """Streamed sha256 of a regular file opened without following symlinks; else a status word."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -728,42 +1054,101 @@ def file_digest(path):
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return 'NOT_REGULAR'
-        return hashlib.sha256(_read_all(fd)).hexdigest()
+        digest, total = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                return digest.hexdigest()
+            total += len(chunk)
+            if total > MAX_PIN_BYTES:
+                return 'TOO_LARGE'
+            digest.update(chunk)
+    except OSError:
+        return 'UNREADABLE_OR_SYMLINK'
     finally:
         os.close(fd)
 
 
 def pin_files(labelled):
-    """{label: digest} for Codex config, hooks, collector and binary paths."""
+    """{label: digest} for Codex config, hooks, collector and binary paths (labels from PIN_LABELS)."""
     return {label: file_digest(path) for label, path in sorted(labelled.items())}
 
 
 def compare_pins(start, end):
-    changed = sorted(label for label in set(start) | set(end)
-                     if start.get(label) != end.get(label) or start.get(label) in
-                     ('UNREADABLE_OR_SYMLINK', 'NOT_REGULAR'))
-    return {'start': start, 'end': end, 'changed': changed}
+    """Changed labels, and labels whose digest failed or is absent on either side (never 'unchanged')."""
+    labels = set(start) | set(end)
+    changed = sorted(label for label in labels if start.get(label) != end.get(label))
+    unverified = sorted(label for label in labels
+                        if not all(isinstance(s.get(label), str) and _DIGEST.fullmatch(s.get(label))
+                                   for s in (start, end)))
+    return {'start': start, 'end': end, 'changed': changed, 'unverified': unverified}
+
+
+def _read_pipe(fd, limit, deadline):
+    """Read a pipe to EOF within ``limit`` bytes and ``deadline``; None on overflow or timeout."""
+    chunks, total = [], 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            return None
+        chunk = os.read(fd, 1 << 16)
+        if not chunk:
+            return b''.join(chunks)
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
 
 
 def run_git(args, cwd):
-    """Read-only git query with optional locks disabled and no prompts."""
+    """Read-only git query: optional locks disabled, no prompts, bounded output and time."""
     env = {'PATH': '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', 'LC_ALL': 'C', 'GIT_OPTIONAL_LOCKS': '0',
            'GIT_TERMINAL_PROMPT': '0', 'HOME': os.environ.get('HOME', '/nonexistent')}
-    done = subprocess.run(['git', '-C', cwd] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL, env=env, timeout=GIT_TIMEOUT_SECONDS, check=False)
-    return done.returncode, done.stdout
+    deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
+    proc = subprocess.Popen(['git', '-C', cwd] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, env=env)
+    try:
+        out = _read_pipe(proc.stdout.fileno(), MAX_GIT_OUTPUT, deadline)
+        if out is None:
+            proc.kill()
+            proc.wait()
+            return -1, b''
+        return proc.wait(timeout=max(0.0, deadline - time.monotonic())), out
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return -1, b''
+    finally:
+        proc.stdout.close()
 
 
 def _sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def _listing(path):
+    """Sorted directory names, [] when absent, None past MAX_LISTING entries."""
+    if not os.path.isdir(path) or os.path.islink(path):
+        return []
+    names = []
+    with os.scandir(path) as entries:
+        for entry in entries:
+            names.append(entry.name)
+            if len(names) > MAX_LISTING:
+                return None
+    return sorted(names)
+
+
 def inventory(roots, common_dir, git=run_git, own_worktree=None):
     """Read-only snapshot of peer/canonical roots and shared Git metadata.
 
-    roots: {label: path}; never writes. Per root: HEAD, branch, index entries
-    and status (incl. ignored). Shared: refs, config, hooks, worktree metadata.
+    roots: {label: path} with labels from ROOT_LABELS; never writes. Per root: HEAD,
+    branch, index entries and status (incl. ignored). Shared: refs, config, hooks and
+    worktree metadata. Status/index hashes do not reveal content edits to files that
+    were already dirty or ignored; that A1 criterion remains NOT_VERIFIED.
     """
+    if not all(label in ROOT_LABELS for label in roots):
+        raise AuditError('inventory root label is not in the reviewed vocabulary')
     snap = {}
     for label, path in sorted(roots.items()):
         for name, args in (('head', ['rev-parse', 'HEAD']), ('branch', ['symbolic-ref', '-q', 'HEAD']),
@@ -773,36 +1158,62 @@ def inventory(roots, common_dir, git=run_git, own_worktree=None):
             code, out = git(args, path)
             snap['%s.%s' % (label, name)] = _sha(out) if code == 0 else 'GIT_EXIT_%d' % code
     code, out = git(['for-each-ref', '--format=%(refname) %(objectname)'], common_dir)
-    refs = dict(line.split(' ', 1) for line in out.decode('utf-8', 'replace').splitlines() if ' ' in line) \
-        if code == 0 else {'GIT_EXIT': str(code)}
-    for ref, obj in sorted(refs.items()):
-        snap['ref:' + ref] = obj
+    lines = out.decode('utf-8', 'replace').splitlines() if code == 0 else []
+    snap['shared.refs'] = ('GIT_EXIT_%d' % code if code != 0 else
+                           'TOO_MANY' if len(lines) > MAX_INVENTORY_ENTRIES else 'OK')
+    if snap['shared.refs'] == 'OK':
+        for line in lines:
+            if ' ' in line:
+                ref, obj = line.split(' ', 1)
+                snap['ref:' + ref] = obj
     snap['common.config'] = file_digest(os.path.join(common_dir, 'config'))
     hooks = os.path.join(common_dir, 'hooks')
-    names = sorted(os.listdir(hooks)) if os.path.isdir(hooks) and not os.path.islink(hooks) else []
-    snap['common.hooks'] = _sha(_canonical({n: file_digest(os.path.join(hooks, n)) for n in names}))
+    names = _listing(hooks)
+    snap['common.hooks'] = 'TOO_MANY' if names is None else _sha(
+        _canonical({n: file_digest(os.path.join(hooks, n)) for n in names}))
     trees = os.path.join(common_dir, 'worktrees')
-    for name in sorted(os.listdir(trees)) if os.path.isdir(trees) and not os.path.islink(trees) else []:
+    names = _listing(trees)
+    if names is None:
+        snap['worktree:'] = 'TOO_MANY'
+    for name in names or []:
         files = ('gitdir', 'locked', 'commondir') if name == own_worktree else (
             'gitdir', 'locked', 'commondir', 'HEAD', 'index')
         for item in files:
-            snap['worktree:%s/%s' % (name, item)] = file_digest(os.path.join(trees, name, item))
+            digest = file_digest(os.path.join(trees, name, item))
+            # An unlocked worktree has no 'locked' file; that absence is a valid state.
+            snap['worktree:%s/%s' % (name, item)] = 'ABSENT' if item == 'locked' and digest == 'MISSING' else digest
     return snap
 
 
+def _failed(value):
+    return not isinstance(value, str) or value in FAILURE_WORDS or value.startswith('GIT_EXIT')
+
+
 def compare_inventory(pre, post, allowed_refs=()):
-    """Drift labels (never values). Allowed refs are the task's own branch refs."""
-    return sorted(label for label in set(pre) | set(post) if pre.get(label) != post.get(label)
-                  and not (label.startswith('ref:') and label[4:] in allowed_refs))
+    """Internal drift and unverified labels. Allowed refs are the task's own branch refs."""
+    labels = set(pre) | set(post)
+    drift = sorted(label for label in labels if pre.get(label) != post.get(label)
+                   and not (label.startswith('ref:') and label[4:] in allowed_refs))
+    unverified = sorted(label for label in labels if any(_failed(s[label]) for s in (pre, post) if label in s))
+    return {'drift': drift, 'unverified': unverified}
 
 
 # --------------------------------------------------------------------- CLI
 def _policy(path):
-    with open(path, 'rb') as handle:
-        data = json.loads(handle.read(MAX_EVENT_BYTES).decode('utf-8'))
-    return AuditPolicy(data['codex_root'], data['home'], tuple(data['protected_roots']),
-                       tuple(data.get('allowed_paths', ())), tuple(data.get('pinned_paths', ())),
-                       bool(data.get('deny_verified', False)), bool(data.get('coverage_verified', False)))
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = json.loads(_read_limited(fd, MAX_POLICY_BYTES).decode('utf-8'))
+    finally:
+        os.close(fd)
+    if not isinstance(data, dict):
+        raise AuditError('audit policy is malformed')
+    lists = [data.get(name, []) for name in ('protected_roots', 'allowed_paths', 'pinned_paths')]
+    if not all(isinstance(value, list) for value in lists):
+        raise AuditError('audit policy is malformed')
+    policy = AuditPolicy(data.get('codex_root'), data.get('home'), tuple(lists[0]), tuple(lists[1]),
+                         tuple(lists[2]), data.get('deny_verified', False), data.get('coverage_verified', False))
+    _check_policy(policy)
+    return policy
 
 
 def main(argv=None):

@@ -2639,54 +2639,84 @@ See [B1 contract](WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
 
 `llmtool/codex_approval_audit.py` is a cooperative, observe-only collector for Codex
 `PreToolUse`/`PostToolUse` command-hook events. It **does not** install hooks, change
-Codex configuration or enable `danger-full-access`; activation stays a separate,
+Codex configuration or enable `danger-full-access`. Activation stays a separate,
 independently reviewed gate (Issue #135 A1–A5).
 
+**CLI**
 - `python -I -B -m llmtool.codex_approval_audit init --store DIR` creates a private
-  0700 store with 0600 files, plus a random HMAC key. Use a new directory outside every
-  repository and the Git common-dir (`--forbid ROOT` enforces this).
-- `record --store DIR` reads one hook event on stdin. It appends a keyed-HMAC record
-  under `flock`, keeps `tool_response` only up to 64 KiB (the exit code is always kept)
-  and prints nothing, so it never returns a hook decision. Malformed input is stored by
-  size and reason only.
-- `summarize --store DIR --task ID --source-sha SHA --policy FILE` writes deterministic
-  JSON that is safe to commit. Each action carries:
-  - time, session, turn and `tool_use_id`, tool kind;
-  - an allowlisted synopsis (program plus safe git subcommand) and a placeholder
-    cwd class (`<CODEX_ROOT>`, `<HOME>/...`, `<PROTECTED_ROOT>`);
-  - pre/post/outcome, classification, rule ID and enforcement;
-  - keyed event references.
+  0700 store with 0600 files, a random HMAC key and a keyed sequence frontier.
+  - Use a new directory outside every repository and the Git common-dir.
+  - `--forbid ROOT` enforces this.
+- `record --store DIR` reads one hook event (at most 1 MiB) from stdin and prints
+  nothing, so it never returns a hook decision.
+  - The record is appended under a bounded `flock` (5 s) with a per-record HMAC.
+  - `tool_response` is kept only up to 64 KiB; the exit code is always kept.
+  - Malformed or oversized input is stored by size and reason only.
+  - Store limits: 64 MiB and 50,000 records. Past them, a small `STORE_OVERFLOW`
+    marker keeps the loss visible, then appends fail closed.
+- `summarize` reads a coherent locked snapshot. It reports `TAIL_TRUNCATED`,
+  `SEQ_STATE_INVALID`, `SEQ_FRONTIER_BEHIND`, torn, tampered, out-of-sequence and
+  overflow records as gaps.
 
-  It never includes raw argv, environment, paths, URLs or stdout. A fail-closed
-  self-check rejects the summary if any raw piece of 8 or more characters appears.
-- Classifications come from a reviewed static mapping of the old `workspace-write` +
-  `on-request` profile:
-  - `ROUTINE_NO_PROMPT_INFERRED` and `WOULD_PROMPT_UNDER_OLD_PROFILE` are
-    **inferences**, not owner approvals.
-  - `UNAUTHORIZED` covers hard no-go actions.
-  - `SEPARATE_APPROVAL_REQUIRED` covers pinned config/collector paths.
-  - `UNKNOWN` covers everything unproven, including MCP and unknown tools.
-- Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
-  enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or
-  `UNKNOWN`.
-- The status stays `AUDIT_INCOMPLETE` while any of these hold:
-  - hook coverage or deny enforcement is unverified;
-  - the A2 pins (`pin_files`/`compare_pins`) changed or are missing;
-  - the A1 read-only peer/canonical/shared-ref inventory (`inventory`/`compare_inventory`)
-    drifted or is missing;
-  - there are event gaps (missing, duplicate, out-of-order or interrupted events,
-    tampered records, sequence gaps, torn records);
-  - any action needs review.
+**Summary contents**
 
-Measured from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
+Every exported value must be one of:
+- a fixed reviewed word, such as a rule, status, synopsis (program plus safe git
+  subcommand), pin label, inventory category or role placeholder like `<CODEX_ROOT>`;
+- a keyed HMAC reference (session, turn, tool-use and event refs);
+- a timestamp;
+- the validated `issue-N`/`pr-N` task id and 40-hex source SHA.
+
+Raw argv, environment, paths, identifiers, labels and stdout are never exported. A
+fail-closed self-check rejects anything else, as well as any raw fragment of 8 or more
+characters, with no exemption for identifiers.
+
+**Classification** uses a reviewed static mapping of the old `workspace-write` +
+`on-request` profile:
+- `ROUTINE_NO_PROMPT_INFERRED` and `WOULD_PROMPT_UNDER_OLD_PROFILE` are
+  **inferences**, not owner approvals.
+- `UNAUTHORIZED` covers hard no-go actions, including git `-c`/`--config-env`,
+  `--git-dir`/`--work-tree`-style overrides and `GIT_*` environment assignments.
+- Other environment assignments, pagers, unknown git global options and read
+  subcommands with `--output`, external-diff, textconv or filter options are `UNKNOWN`.
+- `SEPARATE_APPROVAL_REQUIRED` covers pinned config/collector paths.
+- MCP and unknown tools are `UNKNOWN`.
+
+Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
+enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or `UNKNOWN`.
+
+**Status** is `OBSERVED_EVENTS_CONSISTENT` only when all of these hold:
+- `coverage_verified` and `deny_verified` are real booleans set to true (`"false"` is
+  rejected);
+- complete, successful A2 pins exist for `codex.binary`, `codex.config`, `codex.hooks`
+  and `collector.module`. `MISSING`, unreadable or too-large values are
+  `PINS_NOT_VERIFIED`, never "unchanged";
+- a complete A1 inventory has `pre` and `post` snapshots, with no `GIT_EXIT_*` or
+  failed entries and no drift;
+- the expected session ids are supplied from task provenance, and each one has tool
+  events and a later session end;
+- there are no unexpected sessions, no store or correlation gaps, and no action needing
+  review.
+
+Otherwise it is `AUDIT_INCOMPLETE`, with the blockers listed.
+
+**Measured** from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
 smoke):
 - `hooks` is stable and enabled.
 - Hook inputs carry `session_id`/`turn_id`/`tool_use_id`, and PreToolUse can return
   `permissionDecision`.
 - Hooks require persisted trust.
-- **NOT_VERIFIED:** real tool names, deny enforcement, fail-open behaviour, and tools
-  that bypass hooks.
 
-Residual risks: hooks are cooperative, so a full-access process can bypass them;
-same-UID code can tamper with the store; post-hoc inventory cannot prevent transient
-changes.
+**NOT_VERIFIED**
+- real tool names;
+- deny enforcement;
+- fail-open behaviour;
+- tools that bypass hooks;
+- the A1 content of files that were already dirty or ignored. Status/index hashes do
+  not reveal edits to them.
+
+**Residual risks**
+- Hooks are cooperative, so a full-access process can bypass them.
+- Same-UID code can tamper with the store and key; the HMACs show which records
+  survived, but not that the store is complete.
+- A post-hoc inventory cannot prevent transient changes.
