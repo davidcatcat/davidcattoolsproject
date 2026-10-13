@@ -2691,14 +2691,28 @@ enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or `UN
 - complete, successful A2 pins exist for `codex.binary`, `codex.config`, `codex.hooks`
   and `collector.module`. `MISSING`, unreadable or too-large values are
   `PINS_NOT_VERIFIED`, never "unchanged";
-- a complete A1 inventory has `pre` and `post` snapshots, with no `GIT_EXIT_*` or
-  failed entries and no drift;
-- the expected session ids are supplied from task provenance, and each one has tool
-  events and a later session end;
+- a complete A1 inventory has `pre` and `post` snapshots, each with:
+  - `head`/`branch`/`index`/`status` for the `canonical` and `claude` peer roots, and
+    for any other root it lists;
+  - `common.config`, `common.hooks`, `shared.refs=OK` and at least one ref.
+
+  Every value must have its field's success format (a 64-hex digest, a Git object id,
+  `OK`, or `ABSENT` for a worktree lock). `GIT_EXIT_*`, failure words or arbitrary
+  strings are `INVENTORY_NOT_VERIFIED`. There must be no drift;
+- the expected session ids are supplied from task provenance, and **each** one has its
+  own tool events and a later session end. Another session's events cannot cover an
+  idle one (`SESSION_WITHOUT_TOOL_EVENTS`);
 - there are no unexpected sessions, no store or correlation gaps, and no action needing
   review.
 
 Otherwise it is `AUDIT_INCOMPLETE`, with the blockers listed.
+
+**A1 git queries** (`run_git`) are read-only, with output capped at 32 MiB and a 10 s
+deadline. On overflow, timeout, read error or cancellation, one cleanup path stops
+only the child that call started: `terminate`, then `kill`, each followed by a 2 s
+wait. Cancellation is re-raised.
+- If the exit cannot be confirmed, the result is `GIT_EXIT_UNKNOWN`.
+- Any failure makes that inventory field unverified.
 
 **Measured** from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
 smoke):

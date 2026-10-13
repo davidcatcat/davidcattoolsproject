@@ -42,9 +42,50 @@ def good_pins():
 
 
 def good_inventory():
-    snap = {'canonical.head': 'b' * 64, 'common.config': 'c' * 64, 'common.hooks': 'd' * 64,
-            'shared.refs': 'OK', 'ref:refs/heads/main': '2' * 40}
+    snap = {'%s.%s' % (root, item): 'b' * 64 for root in ('canonical', 'claude')
+            for item in ('head', 'branch', 'index', 'status')}
+    snap.update({'common.config': 'c' * 64, 'common.hooks': 'd' * 64, 'shared.refs': 'OK',
+                 'ref:refs/heads/main': '2' * 40, 'worktree:claude/locked': 'ABSENT'})
     return {'pre': snap, 'post': dict(snap), 'allowed_refs': []}
+
+
+class FakeProc:
+    """Fake Popen for run_git cleanup tests; exits only at the configured step."""
+
+    def __init__(self, exits_on='wait', code=0):
+        self.exits_on, self.code, self.returncode = exits_on, code, None
+        self.calls, self.waits = [], []
+        self.stdout = self
+
+    def fileno(self):
+        return -1
+
+    def close(self):
+        self.calls.append('close')
+
+    def poll(self):
+        return self.returncode
+
+    def _signal(self, name):
+        self.calls.append(name)
+        if self.returncode is None and self.exits_on == name:
+            self.returncode = -15 if name == 'terminate' else -9
+
+    def terminate(self):
+        self._signal('terminate')
+
+    def kill(self):
+        self._signal('kill')
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if timeout is None:
+            raise AssertionError('unbounded wait')
+        if self.returncode is None and self.exits_on == 'wait':
+            self.returncode = self.code
+        if self.returncode is None:
+            raise a.subprocess.TimeoutExpired('git', timeout)
+        return self.returncode
 
 
 def event(name, use='use-1', tool='Bash', command='ls', cwd=ROOT, session='sess-1', turn='turn-1', **extra):
@@ -440,8 +481,8 @@ class ReviewRegressionTests(StoreCase):
     def test_f2_empty_or_unexpected_sessions_are_never_consistent(self):
         empty = self.summary(self.verified())
         self.assertEqual(empty['status'], 'AUDIT_INCOMPLETE')
-        self.assertEqual(empty['blockers'], ['EXPECTED_SESSION_NOT_OBSERVED', 'SESSION_END_NOT_OBSERVED',
-                                             'NO_TOOL_EVENTS_OBSERVED'])
+        self.assertEqual(empty['blockers'], ['EXPECTED_SESSION_NOT_OBSERVED', 'SESSION_WITHOUT_TOOL_EVENTS',
+                                             'SESSION_END_NOT_OBSERVED', 'NO_TOOL_EVENTS_OBSERVED'])
         self.pair('ok', command='git status')
         self.assertIn('SESSION_END_NOT_OBSERVED', self.summary(self.verified())['blockers'])
         self.end()
@@ -451,6 +492,54 @@ class ReviewRegressionTests(StoreCase):
         for bad in ((), 'sess-1', ('bad id/x',), [1]):
             with self.assertRaises(a.AuditError):
                 self.summary(self.verified(), expected=bad)
+
+    def test_r1_invalid_or_partial_inventory_is_never_consistent(self):
+        """Delta review R1: field-specific values and every required root observation."""
+        self.pair('ok', command='git status')
+        self.end()
+        self.assertEqual(self.summary(self.verified())['status'], 'OBSERVED_EVENTS_CONSISTENT')
+        garbage = good_inventory()
+        for side in ('pre', 'post'):
+            garbage[side] = dict(garbage[side], **{label: 'garbage' for label in
+                                                   ('canonical.head', 'common.config', 'common.hooks',
+                                                    'shared.refs')})
+        summary = self.summary(self.verified(), inventory=garbage)
+        self.assertEqual((summary['status'], summary['blockers']), ('AUDIT_INCOMPLETE', ['INVENTORY_NOT_VERIFIED']))
+        self.assertEqual(summary['inventory_unverified'], ['canonical.head', 'common.config', 'common.hooks',
+                                                           'shared.refs'])
+        for label, value in (('ref:refs/heads/main', 'garbage'), ('worktree:claude/locked', 'garbage'),
+                             ('claude.status', 'A' * 64), ('canonical.branch', 'OK')):
+            bad = good_inventory()
+            bad['pre'] = dict(bad['pre'], **{label: value})
+            bad['post'] = dict(bad['post'], **{label: value})
+            self.assertEqual(self.summary(self.verified(), inventory=bad)['blockers'], ['INVENTORY_NOT_VERIFIED'],
+                             label)
+        thin_snap = {'canonical.head': 'b' * 64, 'common.config': 'c' * 64, 'common.hooks': 'd' * 64,
+                     'shared.refs': 'OK', 'ref:refs/heads/main': '2' * 40}
+        thin = {'pre': thin_snap, 'post': dict(thin_snap)}
+        self.assertEqual(self.summary(self.verified(), inventory=thin)['blockers'], ['INVENTORY_NOT_VERIFIED'])
+        for missing in ('claude.index', 'canonical.status', 'ref:refs/heads/main'):
+            partial = good_inventory()
+            for side in ('pre', 'post'):
+                partial[side] = {k: v for k, v in partial[side].items() if k != missing}
+            self.assertEqual(self.summary(self.verified(), inventory=partial)['blockers'],
+                             ['INVENTORY_NOT_VERIFIED'], missing)
+        extra_root = good_inventory()
+        for side in ('pre', 'post'):
+            extra_root[side] = dict(extra_root[side], **{'codex.head': 'b' * 64})
+        self.assertEqual(self.summary(self.verified(), inventory=extra_root)['blockers'], ['INVENTORY_NOT_VERIFIED'])
+
+    def test_r1_each_expected_session_needs_tool_events(self):
+        self.pair('ok', command='git status')
+        self.end()
+        a.record_event(self.store, event('SessionEnd', session='sess-no-tools'))
+        summary = self.summary(self.verified(), expected=('sess-1', 'sess-no-tools'))
+        self.assertEqual((summary['status'], summary['blockers']),
+                         ('AUDIT_INCOMPLETE', ['SESSION_WITHOUT_TOOL_EVENTS']))
+        self.pair('second', command='git status', session='sess-no-tools')
+        a.record_event(self.store, event('SessionEnd', session='sess-no-tools'))
+        self.assertEqual(self.summary(self.verified(), expected=('sess-1', 'sess-no-tools'))['status'],
+                         'OBSERVED_EVENTS_CONSISTENT')
 
     def test_f3_suffix_and_whole_log_deletion_are_gaps(self):
         self.pair('u1', command='git status')
@@ -603,6 +692,60 @@ class ReviewRegressionTests(StoreCase):
         finally:
             os.close(fd)
         a.record_event(self.store, event('PreToolUse'))
+
+    def run_fake(self, proc, read=b'out', read_error=None):
+        def fake_read(fd, limit, deadline):
+            if read_error is not None:
+                raise read_error
+            return read
+        with patch.object(a.subprocess, 'Popen', lambda *args, **kw: proc), \
+                patch.object(a, '_read_pipe', fake_read):
+            return a.run_git(['status'], '/synthetic/canonical')
+
+    def assert_bounded(self, proc):
+        self.assertTrue(proc.waits)
+        for timeout in proc.waits:
+            self.assertIsNotNone(timeout)
+            self.assertLessEqual(timeout, a.GIT_TIMEOUT_SECONDS)
+        self.assertIn('close', proc.calls)
+
+    def test_r2_run_git_cleanup_is_bounded_on_every_path(self):
+        """Delta review R2: fake Popen only; no real or stuck child is created."""
+        proc = FakeProc('wait', code=0)
+        self.assertEqual(self.run_fake(proc), (0, b'out'))
+        self.assert_bounded(proc)
+        self.assertNotIn('terminate', proc.calls)
+        proc = FakeProc('terminate')
+        self.assertEqual(self.run_fake(proc, read=None), (a.GIT_FAILED, b''))
+        self.assert_bounded(proc)
+        self.assertEqual(proc.calls.count('terminate'), 1)
+        self.assertNotIn('kill', proc.calls)
+        proc = FakeProc('kill')
+        self.assertEqual(self.run_fake(proc), (a.GIT_FAILED, b''))
+        self.assert_bounded(proc)
+        self.assertEqual([c for c in proc.calls if c != 'close'], ['terminate', 'kill'])
+        proc = FakeProc('terminate')
+        self.assertEqual(self.run_fake(proc, read_error=OSError('read failed')), (a.GIT_FAILED, b''))
+        self.assert_bounded(proc)
+        self.assertIn('terminate', proc.calls)
+        proc = FakeProc('never')
+        self.assertEqual(self.run_fake(proc, read=None), (a.GIT_EXIT_UNKNOWN, b''))
+        self.assert_bounded(proc)
+        self.assertEqual(proc.calls.count('terminate') + proc.calls.count('kill'), 2)
+        proc = FakeProc('terminate')
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_fake(proc, read_error=KeyboardInterrupt())
+        self.assert_bounded(proc)
+        self.assertIn('terminate', proc.calls)
+        proc = FakeProc('none')
+        proc.returncode = 3
+        self.assertEqual(self.run_fake(proc, read=None), (a.GIT_FAILED, b''))
+        self.assertNotIn('terminate', proc.calls)
+        self.assertNotIn('kill', proc.calls)
+        with patch.object(a.subprocess, 'Popen', side_effect=OSError('no git')):
+            self.assertEqual(a.run_git(['status'], '/synthetic/canonical'), (a.GIT_FAILED, b''))
+        snap = a.inventory({'canonical': CANON}, self.base, lambda args, cwd: (a.GIT_EXIT_UNKNOWN, b''))
+        self.assertEqual(snap['canonical.head'], 'GIT_EXIT_UNKNOWN')
 
 
 class PinAndInventoryTests(unittest.TestCase):

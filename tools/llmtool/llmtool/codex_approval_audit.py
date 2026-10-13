@@ -170,8 +170,12 @@ REQUIRED_PINS = ('codex.binary', 'codex.config', 'codex.hooks', 'collector.modul
 PIN_LABELS = frozenset(REQUIRED_PINS + ('codex.project_config', 'codex.trust_state', 'collector.hook_adapter'))
 ROOT_LABELS = frozenset({'canonical', 'claude', 'codex', 'task'})
 ROOT_ITEMS = ('head', 'branch', 'index', 'status')
+REQUIRED_ROOTS = ('canonical', 'claude')  # The Codex task's protected peers; every item is required.
 REQUIRED_INVENTORY = ('common.config', 'common.hooks', 'shared.refs')
 FAILURE_WORDS = frozenset({'MISSING', 'UNREADABLE_OR_SYMLINK', 'NOT_REGULAR', 'TOO_LARGE', 'TOO_MANY'})
+_OBJECT_ID = re.compile(r'[0-9a-f]{40}|[0-9a-f]{64}')
+GIT_FAILED, GIT_EXIT_UNKNOWN = -1, -2  # run_git: child stopped and reaped / exit could not be confirmed.
+REAP_TIMEOUT_SECONDS = 2.0
 MALFORMED_REASONS = frozenset({'OVERSIZE', 'NOT_UTF8_JSON', 'NOT_HOOK_EVENT', 'MISSING_FIELD', 'INVALID_ID',
                                'INVALID_FIELD', 'RECORD_TOO_LARGE'})
 
@@ -836,8 +840,8 @@ NOT_VERIFIED = ('real Codex tool names and hook coverage', 'pre-execution deny e
 BLOCKERS = ('HOOK_COVERAGE_NOT_VERIFIED', 'PRE_EXECUTION_DENY_NOT_VERIFIED', 'PINS_NOT_PROVIDED',
             'PINS_INCOMPLETE', 'PINS_NOT_VERIFIED', 'PIN_CHANGE_SEPARATE_APPROVAL_REQUIRED',
             'INVENTORY_NOT_PROVIDED', 'INVENTORY_NOT_VERIFIED', 'INVENTORY_DRIFT', 'EXPECTED_SESSIONS_NOT_PROVIDED',
-            'UNEXPECTED_SESSION', 'EXPECTED_SESSION_NOT_OBSERVED', 'SESSION_END_NOT_OBSERVED',
-            'NO_TOOL_EVENTS_OBSERVED', 'EVENT_GAPS', 'ACTIONS_REQUIRE_REVIEW')
+            'UNEXPECTED_SESSION', 'EXPECTED_SESSION_NOT_OBSERVED', 'SESSION_WITHOUT_TOOL_EVENTS',
+            'SESSION_END_NOT_OBSERVED', 'NO_TOOL_EVENTS_OBSERVED', 'EVENT_GAPS', 'ACTIONS_REQUIRE_REVIEW')
 _EXPORT_WORDS = frozenset(
     set(RULES) | set(RULES.values()) | set(RESIDUAL_RISKS) | set(NOT_VERIFIED) | set(BLOCKERS) | set(_RANK) |
     PIN_LABELS | MALFORMED_REASONS | FAILURE_WORDS | KNOWN_PROGRAMS | {'git ' + s for s in KNOWN_GIT} |
@@ -911,6 +915,14 @@ def _category(label):
     return label if root in ROOT_LABELS and item in ROOT_ITEMS else 'other.metadata'
 
 
+def _inventory_complete(snap):
+    """Every required peer root has all four items, any other root is complete, shared metadata and refs exist."""
+    roots = set(REQUIRED_ROOTS) | {label.partition('.')[0] for label in snap
+                                   if label.partition('.')[0] in ROOT_LABELS}
+    return (all('%s.%s' % (root, item) in snap for root in roots for item in ROOT_ITEMS)
+            and set(REQUIRED_INVENTORY) <= set(snap) and any(label.startswith('ref:') for label in snap))
+
+
 def _inventory_evidence(inventory):
     if inventory is None:
         return ['INVENTORY_NOT_PROVIDED'], [], []
@@ -925,10 +937,7 @@ def _inventory_evidence(inventory):
         raise AuditError('inventory evidence is malformed')
     result = compare_inventory(pre, post, tuple(allowed))
     blockers = []
-    complete = all(set(REQUIRED_INVENTORY) <= set(snap) and
-                   any(_category(label) != 'other.metadata' and label.endswith('.head') for label in snap)
-                   for snap in (pre, post))
-    if not complete or result['unverified']:
+    if not all(_inventory_complete(snap) for snap in (pre, post)) or result['unverified']:
         blockers.append('INVENTORY_NOT_VERIFIED')
     if result['drift']:
         blockers.append('INVENTORY_DRIFT')
@@ -956,12 +965,17 @@ def _session_blockers(records, expected, rows):
             blockers.append('UNEXPECTED_SESSION')
         if expected - seen:
             blockers.append('EXPECTED_SESSION_NOT_OBSERVED')
+        idle = unended = False
         for session in sorted(expected):
             tool = [r['seq'] for r in hooks if r['session_id'] == session and r['event'] in TOOL_EVENTS]
             ends = [r['seq'] for r in hooks if r['session_id'] == session and r['event'] in END_EVENTS]
-            if not ends or (tool and max(ends) < max(tool)):
-                blockers.append('SESSION_END_NOT_OBSERVED')
-                break
+            # Each expected session needs its own tool events; other sessions' rows cannot cover it.
+            idle = idle or not tool
+            unended = unended or not ends or (bool(tool) and max(ends) < max(tool))
+        if idle:
+            blockers.append('SESSION_WITHOUT_TOOL_EVENTS')
+        if unended:
+            blockers.append('SESSION_END_NOT_OBSERVED')
     if not rows:
         blockers.append('NO_TOOL_EVENTS_OBSERVED')
     return blockers
@@ -1105,25 +1119,57 @@ def run_git(args, cwd):
     env = {'PATH': '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin', 'LC_ALL': 'C', 'GIT_OPTIONAL_LOCKS': '0',
            'GIT_TERMINAL_PROMPT': '0', 'HOME': os.environ.get('HOME', '/nonexistent')}
     deadline = time.monotonic() + GIT_TIMEOUT_SECONDS
-    proc = subprocess.Popen(['git', '-C', cwd] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, env=env)
     try:
-        out = _read_pipe(proc.stdout.fileno(), MAX_GIT_OUTPUT, deadline)
-        if out is None:
-            proc.kill()
-            proc.wait()
-            return -1, b''
-        return proc.wait(timeout=max(0.0, deadline - time.monotonic())), out
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        return -1, b''
+        proc = subprocess.Popen(['git', '-C', cwd] + list(args), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, env=env)
+    except OSError:
+        return GIT_FAILED, b''
+    out = code = None
+    try:
+        try:
+            out = _read_pipe(proc.stdout.fileno(), MAX_GIT_OUTPUT, deadline)
+        except OSError:
+            out = None
+        if out is not None:
+            try:
+                code = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                out = None
+    except BaseException:
+        # Cancellation or an unexpected error: stop our own child, then re-raise unchanged.
+        _reap(proc)
+        raise
     finally:
         proc.stdout.close()
+    if out is None or code is None:
+        return (GIT_FAILED if _reap(proc) is not None else GIT_EXIT_UNKNOWN), b''
+    return code, out
+
+
+def _reap(proc):
+    """Finite terminate, then kill, of the child this call started; its exit code, or None if unconfirmed.
+
+    Popen.terminate/kill do nothing once the child has been reaped, so a recycled pid is never signalled.
+    """
+    for stop in (proc.terminate, proc.kill):
+        if proc.poll() is not None:
+            return proc.returncode
+        try:
+            stop()
+            return proc.wait(timeout=REAP_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            break
+    return proc.poll()
 
 
 def _sha(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def _git_failure(code):
+    return 'GIT_EXIT_UNKNOWN' if code == GIT_EXIT_UNKNOWN else 'GIT_EXIT_%d' % code
 
 
 def _listing(path):
@@ -1156,10 +1202,10 @@ def inventory(roots, common_dir, git=run_git, own_worktree=None):
                            ('status', ['status', '--porcelain=v1', '-z', '--untracked-files=all',
                                        '--ignored=matching'])):
             code, out = git(args, path)
-            snap['%s.%s' % (label, name)] = _sha(out) if code == 0 else 'GIT_EXIT_%d' % code
+            snap['%s.%s' % (label, name)] = _sha(out) if code == 0 else _git_failure(code)
     code, out = git(['for-each-ref', '--format=%(refname) %(objectname)'], common_dir)
     lines = out.decode('utf-8', 'replace').splitlines() if code == 0 else []
-    snap['shared.refs'] = ('GIT_EXIT_%d' % code if code != 0 else
+    snap['shared.refs'] = (_git_failure(code) if code != 0 else
                            'TOO_MANY' if len(lines) > MAX_INVENTORY_ENTRIES else 'OK')
     if snap['shared.refs'] == 'OK':
         for line in lines:
@@ -1185,8 +1231,20 @@ def inventory(roots, common_dir, git=run_git, own_worktree=None):
     return snap
 
 
-def _failed(value):
-    return not isinstance(value, str) or value in FAILURE_WORDS or value.startswith('GIT_EXIT')
+def _valid_observation(label, value):
+    """Field-specific success format: a digest, a Git object id, 'OK' or 'ABSENT'; anything else is invalid."""
+    if not isinstance(value, str):
+        return False
+    if label.startswith('ref:'):
+        return _OBJECT_ID.fullmatch(value) is not None
+    if label == 'shared.refs':
+        return value == 'OK'
+    if label.startswith('worktree:') and label.endswith('/locked') and value == 'ABSENT':
+        return True
+    root, _, item = label.partition('.')
+    known = (label in ('common.config', 'common.hooks') or label.startswith('worktree:')
+             or (root in ROOT_LABELS and item in ROOT_ITEMS))
+    return known and _DIGEST.fullmatch(value) is not None
 
 
 def compare_inventory(pre, post, allowed_refs=()):
@@ -1194,7 +1252,8 @@ def compare_inventory(pre, post, allowed_refs=()):
     labels = set(pre) | set(post)
     drift = sorted(label for label in labels if pre.get(label) != post.get(label)
                    and not (label.startswith('ref:') and label[4:] in allowed_refs))
-    unverified = sorted(label for label in labels if any(_failed(s[label]) for s in (pre, post) if label in s))
+    unverified = sorted(label for label in labels
+                        if not all(_valid_observation(label, s[label]) for s in (pre, post) if label in s))
     return {'drift': drift, 'unverified': unverified}
 
 
