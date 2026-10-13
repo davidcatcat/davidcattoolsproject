@@ -2,7 +2,7 @@
 
 Decision recorded: **2026-10-13**. Owner request: allow the **existing named Codex Developer CLI** to use `danger-full-access` because repeated approvals are disruptive, while retaining a Git-searchable record of actions that previously would have needed owner approval.
 
-**Status: PROPOSED POLICY / NOT ACTIVATED.** This document and its Draft PR record the owner's authorization in principle. They are not evidence of a configured/audited runtime. Existing [safe-git C2](../../skills/safe-git/SKILL.md) remains the effective execution guard until the separate native hook/test and independent security activation gates below pass. No one may treat these words as license to ignore a current C2 STOP.
+**Status: PROPOSED POLICY / NOT ACTIVATED.** This document and its Draft PR record the owner's authorization in principle. They are not evidence of a configured/audited runtime. Existing [safe-git C2](../skills/safe-git/SKILL.md) remains the effective execution guard until the separate native hook/test and independent security activation gates below pass. No one may treat these words as license to ignore a current C2 STOP.
 
 ## Exact scope and limits
 
@@ -62,4 +62,4 @@ Example **invented format only, NOT execution evidence**:
 
 Revert the session to `workspace-write` (and the prescribed approval mode) if audit hooks are unavailable, pre/post events are incomplete, secret redaction fails, any action crosses the task/permission boundary or the security reviewer rejects the exception. Do not delete recorded evidence. This permission-profile exception is revocable and must not become a universal default for other projects.
 
-Related: [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120), [safe-git](../../skills/safe-git/SKILL.md), [Codex Hooks docs](https://developers.openai.com/codex/hooks), [Codex configuration docs](https://developers.openai.com/codex/config-basic).
+Related: [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66), [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120), [safe-git](../skills/safe-git/SKILL.md), [Codex Hooks docs](https://developers.openai.com/codex/hooks), [Codex configuration docs](https://developers.openai.com/codex/config-basic).
