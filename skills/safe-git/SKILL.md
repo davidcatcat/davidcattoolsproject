@@ -150,7 +150,17 @@ independent native gate verdict before any ACTIVE-status PR.
 - **C2 session binding:** Each developer must open its own CLI with actual session
   CWD set to its assigned fixed root. Codex uses the approved
   `workspace-write` sandbox scoped to its **Codex** root, and Claude uses its
-  separately assigned **Claude** root. Check the effective session/root identity,
+  separately assigned **Claude** root. The owner requested a conditional
+  Codex-only `danger-full-access` / `approval_policy=never` exception on
+  2026-10-13, recorded in
+  [Codex full-access audit decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md).
+  **That exception is NOT ACTIVE merely because the owner requested it or
+  this document appears in a Draft PR.** It requires independently reviewed,
+  Mac-validated pre/post tool audit coverage, safe redacted Git summaries,
+  explicit accepted residual risks and a verified activation record. Until
+  then, a danger-full-access Codex session must STOP at C2. Even when active,
+  profile consent never waives task allowlists, ownership, safe-git preflight,
+  restricted Git/OS operations or separate real-provider/egress permissions. Check the effective session/root identity,
   `git rev-parse --show-toplevel`, branch, common-dir and owned writable paths;
   an app-server/helper PID ancestry alone is not an identity proof. Canonical
   integrations, shared refs and native F1 acceptance remain serialized under
