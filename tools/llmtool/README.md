@@ -2633,3 +2633,60 @@ Unexpected post-consume exceptions retain one attempted call and UNKNOWN.
 Independent product Security/Functional review and T1/T2/T3 release/route gates
 remain required; no F2/S2, auto repair/merge or production enablement is delivered.
 See [B1 contract](WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
+
+
+## Issue #135 — Codex tool-event audit collector (not an activation)
+
+`llmtool/codex_approval_audit.py` is a cooperative, observe-only collector for Codex
+`PreToolUse`/`PostToolUse` command-hook events. It **does not** install hooks, change
+Codex configuration or enable `danger-full-access`; activation stays a separate,
+independently reviewed gate (Issue #135 A1–A5).
+
+- `python -I -B -m llmtool.codex_approval_audit init --store DIR` creates a private
+  0700 store with 0600 files, plus a random HMAC key. Use a new directory outside every
+  repository and the Git common-dir (`--forbid ROOT` enforces this).
+- `record --store DIR` reads one hook event on stdin. It appends a keyed-HMAC record
+  under `flock`, keeps `tool_response` only up to 64 KiB (the exit code is always kept)
+  and prints nothing, so it never returns a hook decision. Malformed input is stored by
+  size and reason only.
+- `summarize --store DIR --task ID --source-sha SHA --policy FILE` writes deterministic
+  JSON that is safe to commit. Each action carries:
+  - time, session, turn and `tool_use_id`, tool kind;
+  - an allowlisted synopsis (program plus safe git subcommand) and a placeholder
+    cwd class (`<CODEX_ROOT>`, `<HOME>/...`, `<PROTECTED_ROOT>`);
+  - pre/post/outcome, classification, rule ID and enforcement;
+  - keyed event references.
+
+  It never includes raw argv, environment, paths, URLs or stdout. A fail-closed
+  self-check rejects the summary if any raw piece of 8 or more characters appears.
+- Classifications come from a reviewed static mapping of the old `workspace-write` +
+  `on-request` profile:
+  - `ROUTINE_NO_PROMPT_INFERRED` and `WOULD_PROMPT_UNDER_OLD_PROFILE` are
+    **inferences**, not owner approvals.
+  - `UNAUTHORIZED` covers hard no-go actions.
+  - `SEPARATE_APPROVAL_REQUIRED` covers pinned config/collector paths.
+  - `UNKNOWN` covers everything unproven, including MCP and unknown tools.
+- Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
+  enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or
+  `UNKNOWN`.
+- The status stays `AUDIT_INCOMPLETE` while any of these hold:
+  - hook coverage or deny enforcement is unverified;
+  - the A2 pins (`pin_files`/`compare_pins`) changed or are missing;
+  - the A1 read-only peer/canonical/shared-ref inventory (`inventory`/`compare_inventory`)
+    drifted or is missing;
+  - there are event gaps (missing, duplicate, out-of-order or interrupted events,
+    tampered records, sequence gaps, torn records);
+  - any action needs review.
+
+Measured from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
+smoke):
+- `hooks` is stable and enabled.
+- Hook inputs carry `session_id`/`turn_id`/`tool_use_id`, and PreToolUse can return
+  `permissionDecision`.
+- Hooks require persisted trust.
+- **NOT_VERIFIED:** real tool names, deny enforcement, fail-open behaviour, and tools
+  that bypass hooks.
+
+Residual risks: hooks are cooperative, so a full-access process can bypass them;
+same-UID code can tamper with the store; post-hoc inventory cannot prevent transient
+changes.
