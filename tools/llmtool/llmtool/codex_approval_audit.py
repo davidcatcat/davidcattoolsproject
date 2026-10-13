@@ -1127,23 +1127,39 @@ def run_git(args, cwd):
     out = code = None
     try:
         try:
-            out = _read_pipe(proc.stdout.fileno(), MAX_GIT_OUTPUT, deadline)
-        except OSError:
-            out = None
-        if out is not None:
             try:
-                code = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
+                out = _read_pipe(proc.stdout.fileno(), MAX_GIT_OUTPUT, deadline)
+            except OSError:
                 out = None
+            if out is not None:
+                try:
+                    code = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    out = None
+        finally:
+            _close_quietly(proc.stdout)  # A close failure must never skip the reap below.
     except BaseException:
-        # Cancellation or an unexpected error: stop our own child, then re-raise unchanged.
-        _reap(proc)
+        # Cancellation or an unexpected error: stop our own child, then re-raise the original unchanged.
+        _reap_quietly(proc)
         raise
-    finally:
-        proc.stdout.close()
     if out is None or code is None:
-        return (GIT_FAILED if _reap(proc) is not None else GIT_EXIT_UNKNOWN), b''
+        return (GIT_FAILED if _reap_quietly(proc) is not None else GIT_EXIT_UNKNOWN), b''
     return code, out
+
+
+def _close_quietly(stream):
+    try:
+        stream.close()
+    except OSError:
+        pass
+
+
+def _reap_quietly(proc):
+    """_reap that never raises: a cleanup failure is an unconfirmed exit (None), not a new exception."""
+    try:
+        return _reap(proc)
+    except Exception:
+        return None
 
 
 def _reap(proc):

@@ -52,8 +52,8 @@ def good_inventory():
 class FakeProc:
     """Fake Popen for run_git cleanup tests; exits only at the configured step."""
 
-    def __init__(self, exits_on='wait', code=0):
-        self.exits_on, self.code, self.returncode = exits_on, code, None
+    def __init__(self, exits_on='wait', code=0, close_error=None):
+        self.exits_on, self.code, self.returncode, self.close_error = exits_on, code, None, close_error
         self.calls, self.waits = [], []
         self.stdout = self
 
@@ -62,6 +62,8 @@ class FakeProc:
 
     def close(self):
         self.calls.append('close')
+        if self.close_error is not None:
+            raise self.close_error
 
     def poll(self):
         return self.returncode
@@ -746,6 +748,39 @@ class ReviewRegressionTests(StoreCase):
             self.assertEqual(a.run_git(['status'], '/synthetic/canonical'), (a.GIT_FAILED, b''))
         snap = a.inventory({'canonical': CANON}, self.base, lambda args, cwd: (a.GIT_EXIT_UNKNOWN, b''))
         self.assertEqual(snap['canonical.head'], 'GIT_EXIT_UNKNOWN')
+
+    def test_r2_close_failure_never_skips_child_cleanup(self):
+        """Final review R2 #1: a stdout.close() OSError must not bypass the bounded reap."""
+        proc = FakeProc('terminate', close_error=OSError('close failed'))
+        self.assertEqual(self.run_fake(proc, read=None), (a.GIT_FAILED, b''))
+        self.assert_bounded(proc)
+        self.assertEqual(proc.calls.count('terminate'), 1)
+        proc = FakeProc('terminate', close_error=OSError('close failed'))
+        self.assertEqual(self.run_fake(proc, read_error=OSError('read failed')), (a.GIT_FAILED, b''))
+        self.assert_bounded(proc)
+        self.assertIn('terminate', proc.calls)
+        proc = FakeProc('wait', code=0, close_error=OSError('close failed'))
+        self.assertEqual(self.run_fake(proc), (0, b'out'))
+        self.assertNotIn('terminate', proc.calls)
+
+    def test_r2_cleanup_failure_preserves_cancellation(self):
+        """Final review R2 #2: a cleanup OSError must not replace the original KeyboardInterrupt."""
+        original = KeyboardInterrupt('original cancellation')
+        proc = FakeProc('terminate')
+        with patch.object(a, '_reap', side_effect=OSError('cleanup failed')):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.run_fake(proc, read_error=original)
+        self.assertIs(caught.exception, original)
+        self.assertIn('close', proc.calls)
+        proc = FakeProc('terminate', close_error=OSError('close failed'))
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            self.run_fake(proc, read_error=original)
+        self.assertIs(caught.exception, original)
+        self.assert_bounded(proc)
+        self.assertIn('terminate', proc.calls)
+        proc = FakeProc('terminate')
+        with patch.object(a, '_reap', side_effect=OSError('cleanup failed')):
+            self.assertEqual(self.run_fake(proc, read=None), (a.GIT_EXIT_UNKNOWN, b''))
 
 
 class PinAndInventoryTests(unittest.TestCase):
