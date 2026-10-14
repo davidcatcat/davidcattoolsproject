@@ -139,6 +139,64 @@ class AdapterTests(StoreCase):
         self.assertEqual(out.getvalue(), '')
         self.assertEqual(err.getvalue(), 'codex-approval-hook: incomplete\n')
 
+    def test_l1_bad_trusted_pre_arguments_deny_without_input_or_secret_echo(self):
+        for argv in (['--event', 'PreToolUse', '--unknown', CANARY],
+                     ['--event=PreToolUse', '--session'],
+                     ['--event', 'PreToolUse', '--event', 'PostToolUse'],
+                     ['--event', 'PreToolUse', '--eve', 'PostToolUse'],
+                     ['--event', 'PreToolUse', '--help'], ['--event=PreToolUse', '-h']):
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(h, 'read_input') as reader, \
+                    contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(h.main(argv), 0)
+                reader.assert_not_called()
+            self.assertEqual(json.loads(out.getvalue()), h.DENY)
+            self.assertEqual(err.getvalue(), 'codex-approval-hook: incomplete\n')
+            self.assertNotIn(CANARY, out.getvalue() + err.getvalue())
+
+    def test_l2_pinned_writes_deny_but_reads_are_only_observed(self):
+        pinned = '/synthetic/codex/tools/llmtool/audit.py'
+        raw = json.dumps(dataclasses.asdict(policy(pinned_paths=(pinned,)))).encode()
+        with open(self.policy_path, 'wb') as f:
+            f.write(raw)
+        self.pin = hashlib.sha256(raw).hexdigest()
+        for i, command in enumerate(('touch ' + pinned, 'touch ./tools/llmtool/audit.py',
+                                     'touch tools/llmtool/../llmtool/audit.py',
+                                     'rm -rf /synthetic/codex/tools/llmtool')):
+            code, out, err = self.invoke(event('PreToolUse', use='write-' + str(i), command=command))
+            self.assertEqual((code, err), (0, ''))
+            self.assertEqual(json.loads(out), h.DENY)
+        for i, command in enumerate(('cat ' + pinned, 'head ' + pinned, 'ls ' + pinned)):
+            self.assertEqual(self.invoke(event('PreToolUse', use='read-' + str(i), command=command)),
+                             (0, '', ''))
+        self.assertFalse(policy().deny_verified)
+
+    def test_l2_bare_pinned_name_and_native_patch_cannot_evade(self):
+        pinned = '/synthetic/codex/audit.py'
+        raw = json.dumps(dataclasses.asdict(policy(pinned_paths=(pinned,), allowed_paths=('audit.py',)))).encode()
+        with open(self.policy_path, 'wb') as f:
+            f.write(raw)
+        self.pin = hashlib.sha256(raw).hexdigest()
+        for tool, command in (('Bash', 'touch audit.py'), ('apply_patch',
+                              '*** Begin Patch\n*** Update File: audit.py\n+x\n*** End Patch')):
+            self.assertEqual(json.loads(self.invoke(event('PreToolUse', tool=tool, command=command))[1]), h.DENY)
+        self.assertEqual(self.invoke(event('PreToolUse', command='cat audit.py')), (0, '', ''))
+
+    def test_l2_copy_source_read_and_target_write_have_distinct_roles(self):
+        pinned = '/synthetic/codex/audit.py'
+        raw = json.dumps(dataclasses.asdict(policy(pinned_paths=(pinned,)))).encode()
+        with open(self.policy_path, 'wb') as f:
+            f.write(raw)
+        self.pin = hashlib.sha256(raw).hexdigest()
+        self.assertEqual(self.invoke(event('PreToolUse', command='cp audit.py backup.py')), (0, '', ''))
+        self.assertEqual(json.loads(self.invoke(event('PreToolUse', command='cp backup.py audit.py'))[1]), h.DENY)
+        self.assertEqual(self.invoke(event('PreToolUse', command='cp -f audit.py backup.py')), (0, '', ''))
+        classification = a.classify('Bash', {'command': 'cp -f audit.py backup.py'},
+                                    '/synthetic/codex', policy(pinned_paths=(pinned,)))[1]
+        self.assertNotEqual(classification, a.ROUTINE)
+        for command in ('cp bad\0source audit.py', 'cp audit.py bad\0target'):
+            self.assertEqual(a.classify('Bash', {'command': command}, '/synthetic/codex', policy())[1], a.UNKNOWN)
+
     def test_policy_traversal_and_oversize_are_refused(self):
         for raw in (json.dumps(dataclasses.asdict(policy(allowed_paths=('../escape',)))).encode(),
                     b'x' * (a.MAX_POLICY_BYTES + 1)):

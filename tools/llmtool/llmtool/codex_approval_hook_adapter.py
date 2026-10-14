@@ -74,15 +74,22 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv=None):
-    parser = _Parser(description=__doc__)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    declared_pre = any(a == '--event=PreToolUse' or
+                       (a == '--event' and argv[i + 1:i + 2] == ['PreToolUse'])
+                       for i, a in enumerate(argv))
+    parser = _Parser(description=__doc__, allow_abbrev=False, add_help=not declared_pre)
     parser.add_argument('--event', required=True, choices=EVENTS)
     parser.add_argument('--session', required=True)
     parser.add_argument('--store', required=True)
     parser.add_argument('--policy', required=True)
     parser.add_argument('--policy-sha256', required=True)
-    event = policy = None
+    event = 'PreToolUse' if declared_pre else None
+    policy = None
     try:
         args = parser.parse_args(argv)
+        if declared_pre and args.event != 'PreToolUse':
+            raise audit.AuditError('hook event arguments conflict')
         event = args.event
         policy = _policy(args.policy, args.policy_sha256)
         response = handle(read_input(), event=event, session=args.session,

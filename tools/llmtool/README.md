@@ -2679,7 +2679,10 @@ characters, with no exemption for identifiers.
   `--git-dir`/`--work-tree`-style overrides and `GIT_*` environment assignments.
 - Other environment assignments, pagers, unknown git global options and read
   subcommands with `--output`, external-diff, textconv or filter options are `UNKNOWN`.
-- `SEPARATE_APPROVAL_REQUIRED` covers pinned config/collector paths.
+- Statically recognized writes to pinned config/collector paths (including
+  ancestor targets) are `UNAUTHORIZED`; reads retain the observation-only
+  `SEPARATE_APPROVAL_REQUIRED` inference. This is not blanket rejection of that
+  classification and never grants approval.
 - MCP and unknown tools are `UNKNOWN`.
 
 Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
@@ -2761,12 +2764,23 @@ uses the existing collector `init` only under a later activation grant, outside
 the task root, protected roots and Git common-dir. No event may select a policy,
 session, executable or store. The task definition must forbid all protected roots.
 
+Malformed trusted Pre definitions with an exact `--event PreToolUse` or
+`--event=PreToolUse` declaration return the same fixed deny before reading input,
+including unknown/missing/conflicting arguments and Pre help flags. Abbreviated
+options are not accepted. Undeclared/non-Pre argument errors retain sanitized
+failure behavior; ordinary module help outside Pre remains informational.
+
 The adapter checks input event/session binding, records to the private store,
 and returns a fixed official `PreToolUse` deny object only for the existing
 `UNAUTHORIZED` class. It returns no `allow` decision: a routine or unknown
 classification grants nothing. MCP/unknown tools remain unknown in summaries.
 Native `apply_patch` input uses `command`; legacy `input`/`patch` fixtures remain
 supported. Late Post events spanning an end marker are correlation gaps.
+Pinned bare/relative paths and normalized parent traversal are recognized for
+known commands. Simple two-operand `cp` distinguishes reading its source from
+writing its destination. Copy options/multiple operands, compound shell,
+inline interpreters and unknown/MCP paths remain uncertain; they are not a
+complete protection boundary and cannot establish audit PASS.
 
 For a known PreToolUse definition, malformed input, policy or store errors emit
 a fixed deny response with exit 0 and a fixed sanitized error message. Post/end
@@ -2775,8 +2789,7 @@ input/binding errors also append an empty malformed private failure marker when
 the pinned policy and store remain usable. It is not a native event. Policy
 loading or broken-store failures cannot safely record this marker and require
 independent native error/coverage evidence; stderr alone is not a complete store.
-Invalid
-adapter arguments, process termination or native hook timeout may still fail
+Undeclared adapter arguments, process termination or native hook timeout may still fail
 open. Input EOF has a five-second deadline and 1 MiB cap; the existing store
 lock has a five-second cap. Filesystem operations/shutdown are not a hard OS
 execution bound: configure a separately reviewed native hook timeout and verify
@@ -2791,3 +2804,13 @@ later `write_stdin` completion may deliver its Post event. Hosted web tools and
 opted-out paths are coverage gaps; nested tool naming requires native proof.
 Offline fixtures do not set `deny_verified` or `coverage_verified`, establish
 complete coverage, or change Owner's verified Full Access permission choice.
+
+Activation still requires L3-L6 checks: end hooks have a native three-second
+maximum (the current input/store budgets can exceed it); Pre must be synchronous
+with no overlapping rewrite hooks; Stop-per-turn/later `write_stdin` Post gaps
+remain visible; hosted/opted-out/unknown tools remain uncovered. No hooks or
+definition trust are installed by these source changes.
+
+This local-only development needs no company VPN. Before any separately
+authorized real company LLM call, remind the Owner to connect the corporate
+VPN; it may block public documentation, so do not request it for local checks.
