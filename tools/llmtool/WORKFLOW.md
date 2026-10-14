@@ -399,8 +399,8 @@ ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositio
 ### S1b foreground review contract (DRAFT)
 
 **STATUS: contract accepted/merged via [PR #129](https://github.com/davidcatcat/davidcattoolsproject/pull/129)
-at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is an accepted/merged fake-only slice via PR #131; B1 is a
-candidate, independent product review PENDING. Real Claude remains BLOCKED;
+at `8468164d5503953f941b24c1f2318d5decda42b5`; S1b Product A is an accepted/merged fake-only slice via PR #131; B1 fake-first source is MERGED via PR #133 with independent product review.
+T1 native release is HOLD_REPRIORITIZE. Real Claude remains BLOCKED;
 actual automatic handoff NOT DELIVERED, pending B.**
 This is the docs-only response to the accepted
 [S1b handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
@@ -741,12 +741,167 @@ is partial, not the total. Development-time paired Token Savings Benchmark evide
 may quantify dogfood ROI when its measurement contract is satisfied; it still does
 not implement budget enforcement or an automatic cost router.
 
+### A11c.1 Cross-CLI handoff adapter proposal (Issue #120)
+
+**DESIGN ONLY / IMPLEMENTATION NOT AUTHORIZED by this document.** This is the
+next read-only S1b preparation boundary within S1a -> S1b -> S2, not a new
+milestone, dispatcher, approval system or replacement ai-loop. Public
+`task review` remains unavailable for production. Existing B1 source merged
+via PR #133; T1 additional native measurement is HOLD_REPRIORITIZE, and
+production Host/ledger installation, real-provider T2/T3 and S2/F2 remain gated.
+No held T1 helper or trial is resumed by this proposal.
+
+#### Evidence and delivery order
+
+| Evidence | Established scope | Still unverified |
+| --- | --- | --- |
+| PR #141 and PR #143 | GitHub records merged workflow docs and exact-source independent Security/Functional approval plus CI for C1b.0 | A docs/source merge is not automatic CLI dispatch or privacy-egress permission |
+| Claude Developer background Bash / 60-second GitHub polling / task-notification | Developer report describes review-triggered recovery and worker exit | Independent native process/notification/exit evidence; no assertion that Codex has the same notification mechanism |
+| Codex 0.162.1 probe in [#6163519573](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6163519573) | Real yielded command, bounded GitHub read, duplicate-HEAD skip and one fixed-UUID queue accepted by an already running daemon | No general listener or idle polling service installed |
+| Subsequent same-session synthetic marker | Local original-session record: marker user message at 2026-10-14T07:46:58.582Z and acknowledgement at 07:47:04.279Z; initial report predates delivery | Complete event-to-review without human intervention, closed-TUI recovery and cross-CLI repair loop; queue acceptance alone never proves these |
+
+Implement in this order after a separately pinned source task is authorized:
+(1) deterministic admission/mapping and fake transport/clock tests;
+(2) independently reviewed Codex transport/host-observation extension of S1b;
+(3) separately authorized native synthetic read-only handoff with real owned
+notification/exit evidence; (4) production handoff only after applicable
+Host/route/privacy/native gates. Programmatic repair/execution stays S2 after
+A11b approval, containment, recovery/audit and separate F2 authority. Existing
+human-authorized Developer fixes are engineering work under their own scoped
+task grant and safe-git, not adapter permission to mutate.
+
+The B contract currently launches a fresh isolated Claude text/no-tools child.
+Queueing an existing Codex Reviewer is a different host/session/tool boundary:
+its approved launch/attachment provenance, actual restrictive tools, route,
+packet-export policy and independence must be separately reviewed before a
+real transport is wired. Do not select it via caller JSON or silently replace
+the B reviewer role. Deterministic/fake work can precede that extension; a CLI
+feature is not a provider grant. This docs task performs no model launch.
+
+#### Minimal adapter: existing events and one finite worker
+
+Keep TaskContract, TaskBinding, TaskEvent, HandoffRecord, replay and S1b
+PairApproval/ReviewCallBinding/collector/packet/verdict semantics. Do not add
+new core states, change their schema or create a second event/approval store.
+READY_FOR_REVIEW is a transport cue for an already validated readiness
+snapshot: structural SUCCESS **and** reported_state WAITING_REVIEW, latest
+valid independent-reviewer handoff and actual required pre-review evidence.
+It is not a new TaskState or a substitute for those conjunctions.
+Use externally approved paired contracts and expected bindings; never derive
+expected identity, scope, SHA or authority from the notification itself.
+
+One task-scoped foreground owner may retain a finite deterministic child that
+checks the approved GitHub/event reference every 60 seconds. It calls no model
+while waiting; zero model invocations is the measurable oracle, with token
+usage UNKNOWN unless actually reported. It does not keep an agent reasoning
+turn/Goal alive, start a daemon, install a LaunchAgent or poll all tasks.
+A proposed default waiting budget is 10 minutes, including reads/notification;
+the separately approved host/task grant and existing budget/clock seams must
+pin it and bounded per-read time/output limits; TaskContract schema is unchanged.
+Expiry, transport error or ambiguous effect means STOP with preserved
+evidence, not automatic retry/fallback or another worker.
+
+Before notification **and** before consumption, verify this complete tuple:
+repository, paired task IDs and contract digests/version, run/epoch/sequence,
+exact source HEAD/base/tree and packet digest, separately registered author
+agent/Session/root/common-dir/branch/venv, distinct non-author Reviewer
+agent/Session/root/role, current host grant/data route, TTL and preflight.
+Trusted host observations supply actual process/session/root/tool identity;
+PID, env UUID, GitHub login, caller --expect and events alone cannot do so.
+Both Developer and Reviewer must remain in their existing registered roots,
+with one owner per root and serialized shared-ref windows.
+
+GitHub carries bounded untrusted DATA/reference only. An independently pinned
+task grant specifies authorized event source/actor, exact decision/reference
+and actions; a same-account login is not independent authorship proof.
+Arbitrary comments, prompt injection and a model APPROVE do not dispatch,
+grant a route, renew TTL or authorize merge. Do not interpolate body text into
+shell/argv or agent instructions. Keep fixed trusted review instructions
+separate from the complete allowlisted exact-SHA packet and its original
+evidence; retain S1b packet/verdict size and privacy limits.
+
+For Codex prefer one `codex queue --thread <fixed-UUID> --message <fixed-reference>`
+through the **verified existing** shared server/explicit local endpoint,
+without profile/sandbox overrides. Do not use --last, fork, new worktree,
+daemon auto-start, TUI keystroke injection or concurrent exec-resume.
+CLI help also exposes `codex exec resume <Session-ID>`; it is only a separately
+reviewed inactive-client fallback candidate, not a verified original-TUI wake.
+Missing/unobservable Session or unsupported queue is BLOCKED.
+
+Queue acceptance is not reviewer execution. Correlate accepted message ID,
+original-session delivery, actual turn/start/result, exact-source observation
+and owned worker/child exit. Parse the existing versioned verdict: transport
+PASS means both Security and Functional APPROVE with valid bound evidence;
+transport CHANGES_REQUESTED maps to existing CHANGES_REQUIRED. BLOCKED,
+timeout, exit0-only, invalid/partial result or missing post-observation never
+becomes PASS or COMPLETED. Publication uses only the separately authorized
+GitHub reporter; notification does not grant publication or merge rights.
+
+The return notification to the original Claude Developer uses its evidenced
+native task-notification when an owned finite watcher actually ends. Require
+the actual same-session receipt and result binding, not an invented
+`claude queue` command or a copied claim. If that interface is unavailable,
+record BLOCKED without automatically creating a controller. Wake carries
+findings as data; source repair still requires the separate Developer grant.
+
+Reuse existing task sequence/state replay and one-use ReceiptLedger semantics
+under reviewed host composition. For real notification effects, the source
+contract must define a durable one-use key over task/run/epoch, contract pair,
+source SHA, reviewer/scope, transport and event ID; atomically claim before
+dispatch. No production ledger is installed here. Duplicate reviewed objects
+skip regardless of repeated comments or new run IDs. A queue-success/ack-loss
+crash is EFFECT_UNKNOWN: preserve the claimed key, reconcile trusted delivery
+IDs, never blindly resend or bypass caps. Fake fixtures test this boundary.
+
+A changed candidate invalidates the old final review evidence, gets a new
+pinned binding/packet and focused affected-area review; old review is historical.
+At most two unsuccessful repairs per confirmed root cause under Issue #92,
+with pinned per-task total attempt/time budgets. No blanket repeated full
+suite: focused tests during authorized repair and required exact-head/native
+release checks at final candidate. Exhaustion returns STOP/NEEDS_DECISION.
+PASS does not merge or declare DONE without final-task actual evidence.
+On result, expiry or completion, the finite worker exits; cleanup touches only
+verified owned handles. Unreaped/unknown child, failed cleanup or residual
+worker makes the native trial fail and preserves evidence; no PID guessing,
+peer-session kill or historical-process cleanup.
+
+#### Acceptance matrix and dependencies
+
+All rows below are **future tests / NOT_VERIFIED**, not results of this docs PR.
+Use synthetic events/hosts/fake transports first; do not re-review PR #143 or
+re-run company Round 1-3, G5/G6 or held T1/full legacy suites.
+
+| Case | Required oracle |
+| --- | --- |
+| No event / complete waiting budget | Zero model/queue invocations; finite exit and no owned worker remains |
+| Valid READY_FOR_REVIEW | Existing S1a readiness conjunction, actual identity and route admission; one exact-bound notification |
+| Arbitrary comment / injected body / unapproved grant | No dispatch, tool effect or data export |
+| Duplicate / replay / already-reviewed HEAD | SKIP with one-use evidence; no second model turn even after worker restart |
+| Wrong task/run/epoch/sequence/Session/role/root/venv | BLOCKED before notification and before review |
+| HEAD/base/packet drift or expired/revoked grant | STOP; old verdict cannot be reused or polling renew TTL |
+| Queue accepted but missing delivery / crash after effect | UNKNOWN, no blind resend or false PASS |
+| Native Codex pickup | Original registered Reviewer receives event, starts and completes one read-only exact-SHA review without owner prompt relay |
+| Reviewer PASS / changes / malformed/partial/exit0-only | Strict bound Security+Functional verdict and actual evidence; false/missing success fails closed |
+| Claude result wake | Original author Session receives exact verdict; recorded native notification, no copied-text-only proof |
+| Repair with no mutation grant | Findings only; no source/test/Git write, no S2/F2 activation |
+| Separately authorized bounded repair | Same author root/allowlist; changed SHA invalidates review; attempts/time exhaustion STOP |
+| Completion/timeout/interruption/cleanup error | Worker exits with owned-child inventory/actual exit proof; unknown cleanup never PASS |
+| Privacy and reviewer independence | Unauthorized source/log/secret/endpoint/Session export blocked; author/self-review rejected |
+
+Real native pickup requires the reviewed Codex host/transport and current
+data/call permission; closed-CLI recovery remains a separate NOT_VERIFIED
+case. Real programmatic mutation requires S2/A11b/F2 gates. T1 remains
+HOLD_REPRIORITIZE and applicable T1-dependent enablement remains blocked.
+Existing queue/Claude wait probes do not waive these. Public production
+factory stays unavailable until separately accepted enablement.
+
 ### S1b Production Enablement (B) contract (DRAFT)
 
 **STATUS: B documentation contract ACCEPTED/MERGED via [PR #130](https://github.com/davidcatcat/davidcattoolsproject/pull/130)
 at `cfa6c73e26cf6a16bc3d8a2303a45a4a21904559`, independent R1 Security/Functional
-APPROVE. B1 authority adapters/fake-first implementation is a product candidate,
-independent Security/Functional review PENDING; real Claude provider route
+APPROVE. B1 authority adapters/fake-first source is MERGED via PR #133 with independent
+Security/Functional approval; T1 additional native measurement is HOLD_REPRIORITIZE.
+The real Claude provider route
 NOT_AUTHORIZED/BLOCKED; production auto-handoff NOT DELIVERED.** This
 concretizes work item **B** of the merged
 [A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
@@ -1038,8 +1193,8 @@ A11b.2.2.2 **F1 private disposable-fixture-only Git ADD** is DONE/merged
 via PR #84 (`46b17b13`). F2 real-repository Git mutation remains NOT
 AUTHORIZED. A11c.1 S1a is DONE/MERGED via PR #128; S1b contract is
 accepted via PR #129. Product A fake-only is accepted/merged via PR #131;
-B1 authority adapters/fake-first is a candidate pending independent product
-review; real provider BLOCKED pending B enablement;
+B1 authority adapters/fake-first source is MERGED via PR #133 with independent
+product approval; T1 is HOLD_REPRIORITIZE and real provider BLOCKED pending B enablement;
 full production integration is NOT STARTED; A12 future optional. Historical
 reports retain their original checkpoint status.
 Any later executor requires the separate QG-S1 sandbox, authority, replay,
