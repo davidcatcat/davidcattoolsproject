@@ -2850,3 +2850,29 @@ PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest disco
 See [D1–D4 and native gates](WORKFLOW.md#fake-only-source-preparation-d1d4-acceptance).
 True cross-CLI auto-handoff, T1/native measurement and S2/F2 remain unverified or
 unauthorized under their existing contracts; this fixture does not enable them.
+
+
+### Codex Pickup B1: disabled native boundary
+
+`llmtool.codex_handoff_transport.run_pickup` always returns
+`NATIVE_PICKUP_NOT_AUTHORIZED` without calling supplied Host/transport components.
+The private fixture seam composes externally pinned notification decisions,
+Session/Unix-socket/route identities, existing S1b packets/verdicts and a separate
+NOTIFICATION-kind file in the existing ReceiptLedger. It does not ship a live
+RPC/queue client or native issuer, install a Host/ledger, or alter CLI settings.
+
+Fixture tests distinguish queue acceptance, original-session delivery, actual
+turn, strict review completion and exact author receipt. They exercise idle plus
+empty admission, exact-message withdrawal, exact-turn cancellation, UNKNOWN and
+pending on missing proof, and fresh-grant-only re-arm. BLOCKED and SKIP never mean
+review PASS. The fixture cannot prove native restrictive tools, cancellation,
+real zero model calls, cost caps or cross-CLI pickup. Runtime stays NOT_VERIFIED,
+authorized=false and token usage UNKNOWN. Native Pickup Grant remains absent.
+
+H1–H5, M1 and L1/L3 acceptance and unchanged T1/F2/S2 boundaries are documented in
+[the B1 workflow boundary](WORKFLOW.md#codex-pickup-b1-source-boundary-default-blocked).
+Targeted fixture checks use the own-root venv with bytecode writes disabled:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_codex_handoff_transport.py -v
+```

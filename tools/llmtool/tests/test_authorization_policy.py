@@ -419,6 +419,9 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 'HostIssuer', 'IssuerClass', 'Decision', 'ProviderReviewBinding',
                 'ProviderObservedState', 'decide_provider_review'})),
             ('review_authority.py', 'authorization_ledger', frozenset({'ReceiptLedger', 'LedgerError'})),
+            ('codex_handoff_transport.py','authorization_policy',frozenset({
+                'NotificationBinding','NotificationObserved','NotificationDecision','Decision','decide_notification'})),
+            ('codex_handoff_transport.py','authorization_ledger',frozenset({'ReceiptLedger'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
         self.assertEqual(d1_imports, {
@@ -433,9 +436,11 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 'MAX_APPROVAL_SECONDS','MAX_EPOCH','ContractValue','_hex','_typed'})),
             ('authorization_ledger.py', 1, 'authorization_policy', frozenset({
                 'Decision','EffectKind','ObservedState','PolicyDecision','ReceiptBinding',
-                'ProviderReviewBinding','ProviderPolicyDecision','decide_provider_review'})),
+                'ProviderReviewBinding','ProviderPolicyDecision','decide_provider_review',
+                'NotificationBinding','NotificationDecision','decide_notification'})),
             ('authorization_ledger.py', 1, 'errors', frozenset({'LLMToolError'})),
             ('authorization_ledger.py', 1, 'task_lifecycle', frozenset({'utc_time'})),
+            ('authorization_ledger.py', 1, 'authorization_policy', frozenset({'notification_id'})),
         })
         for name in ('authorization_policy.py', 'authorization_ledger.py'):
             source = (PACKAGE / name).read_text(encoding='utf-8')
@@ -485,3 +490,43 @@ class ProviderPolicyBoundaryTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NotificationPolicyTests(unittest.TestCase):
+    def setUp(self):
+        from test_codex_handoff_transport import Trial
+        self.t=Trial();self.addCleanup(self.t.close)
+    def observed(self,**changes):
+        return p.NotificationObserved(self.t.binding.digest,self.t.binding.host_pin,**dict(
+            attested=True,idle=True,queue_empty=True,exclusive=True,no_tools=True,
+            withdrawal_supported=True,turn_cancel_supported=True,**changes))
+    def test_notification_decision_is_isolated_and_host_vouched(self):
+        obs=self.observed()
+        decision=p.decide_notification(self.t.binding,issuer=self.t.issuer,observed=obs)
+        self.assertIs(decision.decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        for issuer in (None,{'trusted':True},FakeHostIssuer(make_policy()),
+                       FakeHostIssuer(make_policy(),issuer_class=p.IssuerClass.PRODUCTION_REVIEW)):
+            denied=p.decide_notification(self.t.binding,issuer=issuer,observed=obs)
+            self.assertIs(denied.decision,p.Decision.DENY)
+        forged=dataclasses.replace(self.t.binding,source_sha='0'*40)
+        forged_obs=dataclasses.replace(obs,binding_digest=forged.digest)
+        self.assertIs(p.decide_notification(forged,issuer=self.t.issuer,observed=forged_obs).decision,p.Decision.DENY)
+        self.t.issuer.revoked=True
+        self.assertIs(p.decide_notification(self.t.binding,issuer=self.t.issuer,observed=obs).decision,p.Decision.DENY)
+    def test_each_m1_host_guard_required_and_dict_cannot_grant(self):
+        obs=self.observed()
+        for field in ('attested','idle','queue_empty','exclusive','no_tools','withdrawal_supported','turn_cancel_supported'):
+            with self.subTest(field=field):
+                denied=p.decide_notification(self.t.binding,issuer=self.t.issuer,observed=dataclasses.replace(obs,**{field:False}))
+                self.assertIs(denied.decision,p.Decision.DENY)
+        self.assertIs(p.decide_notification(self.t.binding.to_dict(),issuer=self.t.issuer,observed=obs).decision,p.Decision.DENY)
+    def test_notification_issuer_cannot_authorize_d1_or_provider(self):
+        self.assertIs(allow(issuer=self.t.issuer).decision,p.Decision.DENY)
+        self.assertIs(p.decide_provider_review(self.t.binding,issuer=self.t.issuer,observed=self.observed()).decision,p.Decision.DENY)
+    def test_scope_and_replay_keys_immutable_distinct_from_attempt(self):
+        b=self.t.binding
+        again=dataclasses.replace(b,event_id='event-other',attempt_id='c'*32,task=dataclasses.replace(b.task,run_id='f'*32))
+        self.assertEqual(b.object_key,again.object_key);self.assertNotEqual(b.digest,again.digest)
+        with self.assertRaises(dataclasses.FrozenInstanceError):b.reviewer_session='spoofed'
+        for changes in ({'sequence':True},{'author_session':b.reviewer_session},{'expires_at':b.not_before+601}):
+            with self.assertRaises(LLMToolError):dataclasses.replace(b,**changes)

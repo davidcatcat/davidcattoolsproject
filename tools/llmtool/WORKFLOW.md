@@ -890,6 +890,45 @@ callbacks. The adapter consumes at most128 bounded cues, with existing packet,
 verdict, source, depth and privacy limits. Real notification, durable production
 claim composition, native identity/tools and owned-process exit remain gated.
 
+#### Codex Pickup B1 source boundary (default BLOCKED)
+
+[Accepted B1 pins](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6166418985)
+add typed Session/socket/route/Host pins and a private fixture transport. The
+public `run_pickup` always returns NATIVE_PICKUP_NOT_AUTHORIZED without invoking
+caller callbacks. No native queue/RPC client, issuer or Host installation is
+shipped; a fixture marker, dataclass or `test_only` flag is not authentication.
+Original reviewer physical checkout and immutable reviewed source remain distinct.
+
+The same ReceiptLedger has a separate NOTIFICATION file layout, kind CHECK,
+layout version and creation nonce. It never migrates D1/provider files or charges
+provider days/caps. Cross-kind and cross-file nonce replay reject. The host must
+pin a private path; there is no default path or production auto-create.
+
+| Pin | Source/fixture acceptance |
+| --- | --- |
+| M1 | A single fresh observation proves exclusive reviewer idle AND empty queue before dispatch. An accepted undelivered message must have exact-ID withdrawal evidence after expiry; an acknowledgement alone leaves durable UNKNOWN/pending, prohibiting another trial |
+| M1 cancellation race | Only this message's authoritative turn ID can be cancelled; completed turns are not cancelled. Missing or contradictory withdrawal/turn evidence preserves pending, never controller-exit-as-success |
+| H1 | Denied composition/admission receives zero Host/transport/finally callbacks |
+| H2 | Consumed but dispatch intent not begun can finish ZERO_EFFECT. Once dispatch intent commits, ambiguity stays UNKNOWN. Re-arm needs the exact prior terminal receipt and a different externally vouched grant; no automatic retry |
+| H3 | Notification completion is separate from review verdict. BLOCKED is not reviewed; SKIP exposes a historical verdict and never becomes PASS. New blocked-review attempts require a fresh external grant |
+| H4 | Generation re-arm must repin the whole host and grant; changing rearm fields alone cannot authenticate a new Session |
+| H5 | Primary failure plus up to8 fixed failure codes retain finalize/cleanup/counter failures without raw exceptions |
+| L1 | Delivery/turn/tool/author-receipt events come from externally pinned host event/rollout provenance, correlated to original message/turn/packet/result IDs. Reviewer prose is never evidence |
+| L3 | NOTIFICATION metadata/nonce/layout isolation and unchanged D1/provider day/cap/recovery regressions |
+
+QUEUE_ACCEPTED, SESSION_DELIVERED, TURN_STARTED, REVIEW_COMPLETED and
+AUTHOR_RECEIPTED remain separate evidence dimensions. Only two strict APPROVE
+verdicts produce fixture PASS, always runtime NOT_VERIFIED/authorized=false.
+Fixed queue instructions carry the effective expires_at and an EXPIRED/no-packet
+cooperative fallback; they do not prove prevention of late inference.
+
+Private fake-child collection checks bounded output, simulated time and owned
+exit without launching processes. This is not an OS timeout or native lifecycle
+proof. Real dequeue/cancel/tool restriction/usage/context permission (L2/L4) remain
+unverified; NATIVE_PICKUP_GRANT is NOT_AUTHORIZED. T1 HOLD, F2/S2 restrictions and
+ai-loop fallback remain unchanged. Unresolved pending records need separately
+trusted reconciliation, never deletion, auto-retry or an invented supervisor.
+
 #### Acceptance matrix and dependencies
 
 All rows below are **future tests / NOT_VERIFIED**, not results of this docs PR.

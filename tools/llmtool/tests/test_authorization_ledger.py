@@ -792,3 +792,79 @@ class ProviderLedgerTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NotificationLedgerTests(unittest.TestCase):
+    def setUp(self):
+        from test_codex_handoff_transport import Trial
+        self.t=Trial();self.addCleanup(self.t.close)
+    def observed(self):
+        return p.NotificationObserved(self.t.binding.digest,self.t.binding.host_pin,True,True,True,True,True,True,True)
+    def issue(self):
+        return self.t.ledger.issue_notification(p.decide_notification(self.t.binding,issuer=self.t.issuer,
+            observed=self.observed()),ttl_seconds=240)
+    def consume(self, receipt):
+        return self.t.ledger.consume_notification(receipt,issuer=self.t.issuer,observed=self.observed())
+    def test_l3_independent_meta_version_nonce_cross_kind_and_no_provider_counts(self):
+        notification=self.t.ledger
+        self.assertEqual(notification._db.execute('PRAGMA user_version').fetchone()[0],l.SCHEMA_VERSION)
+        self.assertEqual(notification._db.execute('SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall(),
+                         [('NOTIFICATION',l.NOTIFICATION_SCHEMA_VERSION,notification.creation_nonce)])
+        for wrong in ('D1','PROVIDER_REVIEW'):
+            with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(self.t.path,clock=self.t.j.clock.utc,
+                kind=wrong,creation_nonce=notification.creation_nonce)
+        for kind in ('D1','PROVIDER_REVIEW'):
+            path=str(Path(self.t.tmp.name)/('other-'+kind))
+            with l.ReceiptLedger.create(path,clock=self.t.j.clock.utc,kind=kind) as other:
+                before=other._db.execute('SELECT sql FROM sqlite_master ORDER BY name').fetchall()
+                with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(path,clock=self.t.j.clock.utc,
+                    kind='NOTIFICATION',creation_nonce=notification.creation_nonce)
+                self.assertEqual(other._db.execute('SELECT sql FROM sqlite_master ORDER BY name').fetchall(),before)
+                self.assertEqual(other._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+        columns=[x[1] for x in notification._db.execute('PRAGMA table_info(receipts)')]
+        self.assertNotIn('consumed_day',columns);self.assertNotIn('route_digest',columns)
+    def test_atomic_consume_replay_pending_and_restart_recovery(self):
+        receipt=self.issue();self.assertTrue(self.consume(receipt));self.assertFalse(self.consume(receipt))
+        self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+        self.t.ledger.close()
+        self.t.ledger=l.ReceiptLedger.open(self.t.path,clock=self.t.j.clock.utc,kind='NOTIFICATION',
+                                        creation_nonce=self.t.binding.ledger_nonce)
+        self.assertEqual(self.t.ledger.recover(),1)
+        self.assertEqual(self.t.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+        self.assertFalse(self.consume(receipt));self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+    def test_known_zero_rearm_needs_fresh_external_grant_and_original_receipt(self):
+        receipt=self.issue();self.assertTrue(self.consume(receipt))
+        self.assertTrue(self.t.ledger.finalize_notification(receipt,'ZERO_EFFECT'))
+        with self.assertRaises(l.LedgerError):self.issue()
+        self.t.binding=replace(self.t.binding,rearm_from=receipt.nonce,grant_digest='c'*64,attempt_id='b'*32)
+        self.t.issuer.binding=self.t.binding
+        fresh=self.issue();self.assertTrue(self.consume(fresh))
+        self.assertTrue(self.t.ledger.begin_notification(fresh))
+        with self.assertRaises(l.LedgerError):self.t.ledger.finalize_notification(fresh,'ZERO_EFFECT')
+        self.t.ledger.finalize_notification(fresh,'EFFECT_UNKNOWN')
+        self.t.binding=replace(self.t.binding,rearm_from=fresh.nonce,grant_digest='d'*64,attempt_id='c'*32)
+        self.t.issuer.binding=self.t.binding
+        with self.assertRaises(l.LedgerError):self.issue()
+    def test_cross_file_nonce_and_provider_d1_methods_reject_notification(self):
+        receipt=self.issue()
+        with l.ReceiptLedger.create(str(Path(self.t.tmp.name)/'another-notification'),clock=self.t.j.clock.utc,
+                                    kind='NOTIFICATION') as other:
+            with self.assertRaises(l.LedgerError):other.consume_notification(receipt,issuer=self.t.issuer,observed=self.observed())
+        with self.assertRaises(l.LedgerError):self.t.ledger.issue(p.decide_notification(self.t.binding,
+            issuer=self.t.issuer,observed=self.observed()),ttl_seconds=10)
+        with self.assertRaises(l.LedgerError):self.t.ledger.issue_provider(p.decide_notification(self.t.binding,
+            issuer=self.t.issuer,observed=self.observed()),ttl_seconds=10)
+    def test_notification_expiry_revocation_ids_and_blocked_result(self):
+        receipt=self.issue();self.t.issuer.revoked=True;self.assertFalse(self.consume(receipt))
+        self.assertEqual(self.t.ledger.status(receipt.nonce),'DENIED')
+        # A different object permits a separately vouched test grant.
+        self.t.issuer.revoked=False;self.t.binding=replace(self.t.binding,source_sha='9'*40,attempt_id='e'*32)
+        self.t.issuer.binding=self.t.binding
+        receipt=self.issue();self.assertTrue(self.consume(receipt));self.assertTrue(self.t.ledger.begin_notification(receipt))
+        self.t.ledger.record_notification_ids(receipt,'m','t')
+        with self.assertRaises(l.LedgerError):self.t.ledger.record_notification_ids(receipt,'other','t')
+        self.t.ledger.finalize_notification(receipt,'EFFECT_DONE',review_status='BLOCKED',verdict_digest='b'*64)
+        self.assertEqual(self.t.ledger.notification_record(self.t.binding.object_key)['review_status'],'BLOCKED')
+        self.t.binding=replace(self.t.binding,rearm_from=receipt.nonce,grant_digest='e'*64,attempt_id='f'*32)
+        self.t.issuer.binding=self.t.binding
+        self.assertIsNotNone(self.issue())
