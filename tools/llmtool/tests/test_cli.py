@@ -183,6 +183,25 @@ class CLITests(unittest.TestCase):
             self.assertNotIn(b'PRIVATE_', result.stderr)
         self.assertEqual(self.server.requests, [])
 
+    def test_test_excerpts_truncated_sensitive_excerpt_fails_closed_without_leak(self):
+        from test_test_output_excerpts import (
+            EMITTED_SENSITIVE_ERROR, FAIL_BODY, FAIL_ID, SYNTHETIC_AWS_KEY, unittest_capture)
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + 'MORE')])
+        bound = raw.index(SYNTHETIC_AWS_KEY.encode()) + len(SYNTHETIC_AWS_KEY) - raw.index(b'FAIL: ')
+        escaped = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + '測試')])
+        for capture, extra in ((raw, ('--max-excerpt-bytes', str(bound))), (escaped, ())):
+            with self.subTest(extra=extra):
+                path.write_bytes(capture)
+                result = self.run_cli('test-excerpts', '--file', str(path), '--exit-code', '1',
+                                      '--json', *extra)
+                self.assert_failure(result)
+                self.assertEqual(result.stderr, b'llmtool: ' + EMITTED_SENSITIVE_ERROR.encode() + b'\n')
+                for marker in (SYNTHETIC_AWS_KEY.encode(), b'AKIA', b'PRIVATE_CAPTURE_PATH', b'evidence'):
+                    self.assertNotIn(marker, result.stdout + result.stderr)
+                self.assertEqual(path.read_bytes(), capture)
+        self.assertEqual(self.server.requests, [])
+
     def test_test_excerpts_arguments_help_and_bounded_output(self):
         from test_test_output_excerpts import UNIT_FAILURE
         path = (self.cwd / 'capture.log').resolve()

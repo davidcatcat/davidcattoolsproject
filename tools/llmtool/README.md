@@ -765,8 +765,14 @@ stderr uses fixed categories without input paths, content or exception details.
 
 Recognizable credential assignments, authorization values, key/token patterns
 and credential-bearing URLs anywhere in the capture cause rejection before
-any excerpt is printed. This conservative indicator check can reject benign
-fixtures and does not discover every secret. Excerpts may contain sensitive
+any excerpt is printed. The same check runs again on every emitted failure ID
+and final excerpt text, after byte, UTF-8 and aggregate truncation, both as
+is and with non-ASCII characters backslash-escaped as in the ASCII JSON
+output, because a cut or escape can create a match the full source lacked.
+Any match rejects the whole result with a fixed, content-free error instead
+of partial output. JSON's `\t`/`\n`/`\r` spellings are not modelled. This
+conservative indicator check can reject benign fixtures and does not discover
+every secret. Excerpts may contain sensitive
 test data or traceback paths and remain **local evidence**. C1 authorizes no
 transfer to company or external models: a separately reviewed permission and
 redaction gate is required before any future handoff. No automatic routing,

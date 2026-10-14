@@ -87,6 +87,17 @@ def _sensitive_url(text):
     return False
 
 
+def _sensitive(text):
+    return bool(_SENSITIVE.search(text) or _sensitive_jwt(text) or _sensitive_url(text))
+
+
+def _emitted_sensitive(text):
+    # The CLI prints ensure_ascii JSON. Its backslash escape of a non-ASCII word
+    # character can add a word boundary that the Unicode-aware string lacks.
+    # Escape only non-ASCII here: escaping LF/TAB would merge separate tokens.
+    return _sensitive(text) or _sensitive(text.encode('ascii', 'backslashreplace').decode('ascii'))
+
+
 def _error(category):
     # All callers supply fixed categories; never interpolate untrusted data.
     return LLMToolError('test-excerpts: ' + category + '; details omitted')
@@ -200,7 +211,7 @@ def _lines(raw):
            or (c == '\r' and (i + 1 == len(text) or text[i + 1] != '\n'))
            for i, c in enumerate(text)):
         raise _error('source contains binary or unsafe controls')
-    if _SENSITIVE.search(text) or _sensitive_jwt(text) or _sensitive_url(text):
+    if _sensitive(text):
         raise _error('source contains sensitive-content indicators')
     if raw.count(b'\n') > MAX_SOURCE_LINES:
         raise _error('source line count exceeds bound')
@@ -425,6 +436,12 @@ def select_test_excerpts(filename, test_exit_code, *, max_excerpt_bytes=MAX_EXCE
                              text=text, truncated=partial))
         used += end - start
         truncated += int(partial)
+    # Byte, UTF-8 and aggregate cuts can add a word boundary the full source
+    # lacked (e.g. AKIA + 16 characters cut out of a longer word). Re-check the
+    # exact emitted strings and fail closed instead of dropping or redacting them.
+    if any(_emitted_sensitive(value) for value in
+           selected_ids + [item['text'] for item in excerpts]):
+        raise _error('emitted excerpt contains sensitive-content indicators')
     incomplete = bool(reasons)
     test_status = ('FAILED' if test_exit_code or failures or expected and sum(expected.values())
                    else 'UNKNOWN' if incomplete else 'NO_FAILURES_REPORTED')
