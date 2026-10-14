@@ -73,6 +73,16 @@ security, QA or Mac/runtime gates remain blocking regardless of the
 owner's general merge delegation. This document describes workflow,
 not an installed autonomous Mac executor or background service.
 
+### Complete-work-package execution and local reviewer handoff (2026-10-14)
+
+Apply the [normative work-package policy](../../skills/ai-team-delivery/SKILL.md#work-package-delivery-and-in-session-reviewer-subagents-owner-decision-2026-10-14) and [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235). One already-authorized Developer CLI owns a complete deliverable: plan and safe-git preflight, scoped implementation, targeted tests, a **read-only in-session Reviewer child** if supported, bounded repair/recheck and one consolidated Draft PR/evidence packet. Avoid separately asking the owner to advance each microstep.
+
+Codex Developer uses a distinct local Codex Reviewer child; Claude Developer uses a distinct local Claude Reviewer child. Verify child identity, actual root and *effective* restrictive tools; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
+
+Batch deterministic worktree/branch/baseline state checks where permitted, but do not skip real independently accepted C3 old-final/new-start baselines, Git shared-ref serialization, matching release, TaskContract allowlists or meaningful STOP. Preserve the task-final candidate at published HEAD so the next handoff does not mistakenly compare post-commit source to task-start baseline. No current proof exists that GitHub messages awaken Mac CLIs or that a cross-provider listener is installed. If a physical operator action is unavoidable, give one action for a work package; report an A11c capability gap rather than claim impossible unattended progress. Use the reviewed ai-loop only within its actual accepted scope until llmtool provides the full native Codex/Claude/test/repair route.
+
+**VPN transition:** Before a real company LLM call remind the owner: 「接下來要使用公司 LLM，請先連上公司 VPN。」 Corporate VPN may block external Codex Hooks documentation or GitHub; batch permitted public-doc checks outside VPN-only phases where practical and never equate a blocked request with an absent API. VPN connectivity is not provider-egress authorization; the [Issue #66 privacy gate](https://github.com/davidcatcat/davidcattoolsproject/issues/66) remains in force. [VPN record](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155066742).
+
 ### Bug report → user-impact triage → bounded release
 
 Apply the [canonical ai-team-delivery defect policy](../../skills/ai-team-delivery/SKILL.md#user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92),
