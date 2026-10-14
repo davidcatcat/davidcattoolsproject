@@ -405,6 +405,8 @@ class AdvisoryDeltaRegressions(unittest.TestCase):
             result=original(*args);self.t.events[-1]=replace(self.t.events[-1],terminal_status='Failed');return result
         self.t.rpc.verdict=drift
         result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+        self.assertNotEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
         self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
     def test_cleanup_provider_domain_change_is_not_zero(self):
         def clean():
@@ -429,6 +431,11 @@ class CleanupCoverageRegression(unittest.TestCase):
         t.rpc.clean=clean
         result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
         self.assertIn('PICKUP_TOOL_EFFECT',result['failure_codes'])
+        self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'FAIL')
+        self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'FAIL')
+        self.assertEqual(result['dimensions']['QUEUE_ACCEPTED'],'PASS')
+        self.assertEqual(result['dimensions']['SESSION_DELIVERED'],'PASS')
+        self.assertEqual(result['dimensions']['TURN_STARTED'],'PASS')
         self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
 
 
@@ -445,4 +452,22 @@ class TerminalCleanupRegression(unittest.TestCase):
                     result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
                     self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
                     self.assertEqual(t.ledger.notification_record(t.binding.object_key)['status'],'EFFECT_UNKNOWN')
+                    self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+                    self.assertNotEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+                finally:t.close()
+
+
+class DurableDimensionsRegression(unittest.TestCase):
+    def test_failed_completion_or_receipt_write_never_reports_pass(self):
+        for method in ('finish_notification_turn','record_author_receipt'):
+            with self.subTest(method=method):
+                t=DeltaTrial()
+                try:
+                    with patch.object(t.ledger,method,return_value=False):
+                        result=t.run()
+                    self.assertEqual(result['status'],'BLOCKED',result)
+                    self.assertIn('PICKUP_FINALIZE_UNKNOWN',result['failure_codes'])
+                    self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+                    self.assertNotEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+                    self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
                 finally:t.close()

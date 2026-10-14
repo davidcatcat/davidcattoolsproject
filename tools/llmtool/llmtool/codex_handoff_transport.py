@@ -164,6 +164,7 @@ def _run_fixture_pickup(ready, final, expect, services):
     turn_deadline = None
     review_finished = False
     terminal_saved = False
+    completion_invalidated = False
     domains_before = None
     terminal_pin = None
     try:
@@ -383,7 +384,6 @@ def _run_fixture_pickup(ready, final, expect, services):
                     observe()
                     verdict = parse_verdict(verdict_text,packet)
                     status = verdict_status(verdict)
-                    if status != 'BLOCKED': phases['REVIEW_COMPLETED'] = 'PASS'
                     # Durable review completion is distinct from author receipt.
                     label = 'APPROVE' if status=='PASS' else status
                     if delta:
@@ -394,6 +394,7 @@ def _run_fixture_pickup(ready, final, expect, services):
                                 review_status=label,verdict_digest=digest(verdict)):reject('PICKUP_FINALIZE_UNKNOWN')
                         review_finished=True
                         terminal_saved=True
+                        if status != 'BLOCKED': phases['REVIEW_COMPLETED']='PASS'
                     bounded(lambda:s.transport.author_receipt(message,digest(verdict)))
                     receipt_deadline=min(normal_deadline,s.clock.monotonic()+g.receipt_seconds)
                     found=False
@@ -412,12 +413,13 @@ def _run_fixture_pickup(ready, final, expect, services):
                         completed=True
                         outcome=_output('PICKUP_AUTHOR_RECEIPT_UNVERIFIED','PARTIAL')
                         break
-                    phases['AUTHOR_RECEIPTED']='PASS'
                     if delta:
                         if not s.ledger.record_author_receipt(receipt,verdict_digest=digest(verdict),
                                 receipt_digest=digest(receipts[0].__dict__)):reject('PICKUP_FINALIZE_UNKNOWN')
                     elif not s.ledger.finalize_notification(receipt,'EFFECT_DONE',review_status=label,verdict_digest=digest(verdict)):
                         reject('PICKUP_FINALIZE_UNKNOWN')
+                    if not delta and status != 'BLOCKED': phases['REVIEW_COMPLETED']='PASS'
+                    phases['AUTHOR_RECEIPTED']='PASS'
                     completed=True
                     outcome=_output('PICKUP_FIXTURE_RESULT',status)
                     break
@@ -435,6 +437,7 @@ def _run_fixture_pickup(ready, final, expect, services):
                 completed=True
                 outcome=_output(code,'PARTIAL')
             else:
+                completion_invalidated=True
                 try: s.ledger.invalidate_notification_completion(receipt)
                 except Exception: outcome=failure(outcome,"PICKUP_FINALIZE_UNKNOWN")
     finally:
@@ -510,8 +513,15 @@ def _run_fixture_pickup(ready, final, expect, services):
                     if final_code not in _FAILURE_CODES:final_code='PICKUP_COUNTER_DOMAIN'
                     outcome=failure(outcome,final_code)
                     if terminal_saved:
+                        completion_invalidated=True
                         try:s.ledger.invalidate_notification_completion(receipt)
                         except Exception:outcome=failure(outcome,'PICKUP_FINALIZE_UNKNOWN')
+    # Historical delivery/start evidence survives, but a blocked completion
+    # cannot retain PASS after invalidation or a final cleanup contradiction.
+    if outcome['status']=='BLOCKED' and (completion_invalidated or review_finished or
+            phases['REVIEW_COMPLETED']=='PASS'):
+        phases['REVIEW_COMPLETED']='FAIL'
+        phases['AUTHOR_RECEIPTED']='FAIL'
     outcome['dimensions']=phases
     if outcome['status']=='BLOCKED' and not outcome['failure_codes']: outcome['failure_codes']=[outcome['code']]
     return outcome
