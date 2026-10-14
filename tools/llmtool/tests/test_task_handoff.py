@@ -284,3 +284,22 @@ class HandoffTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+
+class HandoffB1Regressions(unittest.TestCase):
+    def test_h1_rejected_components_receive_zero_callbacks(self):
+        j=Journey();j.host.test_only=False
+        with patch.object(j.host,'invocations',side_effect=AssertionError('rejected host called')) as inv,\
+             patch.object(j.transport,'clean',side_effect=AssertionError('rejected cleanup called')) as clean:
+            result=j.run()
+        self.assertEqual(result['status'],'BLOCKED');inv.assert_not_called();clean.assert_not_called()
+        self.assertFalse(j.transport.notifications)
+    def test_h5_keeps_finalize_cleanup_and_counter_failures(self):
+        j=Journey();j.claims.fail_finish=True;j.transport.cleanup=False
+        j.transport.on_receipt=lambda:setattr(j.host,'invoked',1)
+        result=j.run()
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertIn('HANDOFF_CLAIM_FINALIZE_UNKNOWN',result['failure_codes'])
+        self.assertIn('HANDOFF_CLEANUP_UNKNOWN',result['failure_codes'])
+        self.assertIn('HANDOFF_INVOCATION_UNVERIFIED',result['failure_codes'])
+        self.assertLessEqual(len(result['failure_codes']),8)

@@ -52,7 +52,8 @@ from enum import Enum
 
 from .action_contract import MAX_APPROVAL_SECONDS, MAX_EPOCH, ContractValue, _hex, _typed
 from .authorization_policy import (Decision, EffectKind, ObservedState, PolicyDecision, ReceiptBinding,
-                                   ProviderReviewBinding,ProviderPolicyDecision,decide_provider_review)
+                                   ProviderReviewBinding,ProviderPolicyDecision,decide_provider_review,
+                                   NotificationBinding,NotificationDecision,decide_notification)
 from .errors import LLMToolError
 
 SCHEMA_VERSION = 1
@@ -77,6 +78,21 @@ _PROVIDER_SCHEMA = (
     "typeof(consumed_at) = 'integer' AND consumed_at >= 0 AND "
     "typeof(consumed_day) = 'integer' AND consumed_day = consumed_at / 86400) OR "
     "(status IN ('ISSUED','DENIED','EXPIRED') AND consumed_at IS NULL AND consumed_day IS NULL)))",
+)
+
+
+NOTIFICATION_SCHEMA_VERSION = 1
+_NOTIFICATION_SCHEMA = (
+    _SCHEMA[0],
+    "CREATE TABLE ledger_meta (kind TEXT NOT NULL CHECK (kind = 'NOTIFICATION'), "
+    "layout_version INTEGER NOT NULL CHECK (layout_version = 1), creation_nonce TEXT NOT NULL)",
+    'CREATE TABLE receipts (nonce TEXT PRIMARY KEY, binding TEXT NOT NULL UNIQUE, '
+    'issued_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK '
+    "(status IN ('ISSUED','CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN','ZERO_EFFECT','WITHDRAWN','CANCELLED','DENIED','EXPIRED')), "
+    'redeem_run_id TEXT, object_key TEXT NOT NULL, session_key TEXT NOT NULL, grant_digest TEXT NOT NULL, '
+    'dispatch_started INTEGER NOT NULL CHECK (dispatch_started IN (0,1)), '
+    'message_id TEXT, turn_id TEXT, pending INTEGER NOT NULL CHECK (pending IN (0,1)), '
+    "review_status TEXT CHECK (review_status IN ('APPROVE','CHANGES_REQUIRED','BLOCKED')), verdict_digest TEXT)",
 )
 
 
@@ -119,7 +135,7 @@ class Receipt(ContractValue):
     nonce: str
 
     def __post_init__(self):
-        if type(self.binding) not in (ReceiptBinding,ProviderReviewBinding):
+        if type(self.binding) not in (ReceiptBinding,ProviderReviewBinding,NotificationBinding):
             raise LLMToolError('receipt invalid; details omitted')
         _hex(self.nonce)
         for name in ('issued_at', 'expires_at'):
@@ -191,8 +207,8 @@ class ReceiptLedger:
 
     @classmethod
     def create(cls, path, *, clock, kind='D1'):
-        if kind not in ('D1','PROVIDER_REVIEW'): _fail(LedgerCode.NOT_ALLOWED)
-        creation_nonce = secrets.token_hex(32) if kind == 'PROVIDER_REVIEW' else None
+        if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
+        creation_nonce = secrets.token_hex(32) if kind != 'D1' else None
         path = os.path.abspath(path)
         _secure_directory(os.path.dirname(path))
         try:
@@ -206,10 +222,13 @@ class ReceiptLedger:
             try:
                 cls._configure(db)
                 db.execute('BEGIN IMMEDIATE')
-                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA):
+                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA if kind == 'PROVIDER_REVIEW' else _NOTIFICATION_SCHEMA):
                     db.execute(statement)
                 if creation_nonce is not None:
-                    db.execute('INSERT INTO ledger_meta VALUES (?, ?)',(kind,creation_nonce))
+                    if kind == 'NOTIFICATION':
+                        db.execute('INSERT INTO ledger_meta VALUES (?, ?, ?)',(kind,NOTIFICATION_SCHEMA_VERSION,creation_nonce))
+                    else:
+                        db.execute('INSERT INTO ledger_meta VALUES (?, ?)',(kind,creation_nonce))
                 db.execute('INSERT INTO clock VALUES (1, 0)')
                 db.execute('PRAGMA user_version = %d' % SCHEMA_VERSION)
                 db.execute('COMMIT')
@@ -233,8 +252,8 @@ class ReceiptLedger:
         """clock is the host's time source; callers never pass request times."""
         if not callable(clock):
             _fail(LedgerCode.CLOCK_INVALID)
-        if kind not in ('D1','PROVIDER_REVIEW'): _fail(LedgerCode.NOT_ALLOWED)
-        if kind == 'PROVIDER_REVIEW':
+        if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
+        if kind != 'D1':
             try: _hex(creation_nonce)
             except LLMToolError: _fail(LedgerCode.LEDGER_CORRUPT)
         return cls(os.path.abspath(path),clock,kind,creation_nonce)
@@ -294,11 +313,14 @@ class ReceiptLedger:
                 "OR (type = 'index' AND sql IS NOT NULL)").fetchone()[0]
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
             # A schema-less (e.g. half-created) store is corrupt, not unavailable.
-            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA
+            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA if self.kind == 'PROVIDER_REVIEW' else _NOTIFICATION_SCHEMA
             if tables != [(s,) for s in schema] or others or version != SCHEMA_VERSION:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             if self.kind == 'PROVIDER_REVIEW' and self._db.execute(
                     'SELECT kind,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.creation_nonce)]:
+                _fail(LedgerCode.LEDGER_CORRUPT)
+            if self.kind == 'NOTIFICATION' and self._db.execute(
+                    'SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,NOTIFICATION_SCHEMA_VERSION,self.creation_nonce)]:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             rows = self._db.execute('SELECT id FROM clock').fetchall()
         except sqlite3.Error as error:
@@ -359,7 +381,7 @@ class ReceiptLedger:
             # Inside the try so an interrupt right after BEGIN still rolls back.
             self._db.execute('BEGIN IMMEDIATE')
             self._check_identity()
-            if self.kind == 'PROVIDER_REVIEW':
+            if self.kind != 'D1':
                 self._verify_schema()
             now = self._now()
             high_water = self._db.execute('SELECT high_water FROM clock WHERE id = 1').fetchone()
@@ -541,6 +563,120 @@ class ReceiptLedger:
             if row != (receipt.binding.to_json(),): _fail(LedgerCode.NOT_ALLOWED)
             # Charge time/day are never updated by finalize/recover.
             return self._set(receipt.nonce,status,'CONSUMED')
+
+
+    def _notification_row(self, receipt):
+        if (self.kind != 'NOTIFICATION' or type(receipt) is not Receipt or
+                type(receipt.binding) is not NotificationBinding or
+                receipt.binding.ledger_nonce != self.creation_nonce):
+            _fail(LedgerCode.NOT_ALLOWED)
+        row = self._db.execute('SELECT binding,issued_at,expires_at,status,dispatch_started,message_id,turn_id '
+                               'FROM receipts WHERE nonce=?',(receipt.nonce,)).fetchone()
+        if row is None or row[:3] != (receipt.binding.to_json(),receipt.issued_at,receipt.expires_at):
+            _fail(LedgerCode.NOT_ALLOWED)
+        return row
+
+    def notification_record(self, object_key):
+        if self.kind != 'NOTIFICATION': _fail(LedgerCode.NOT_ALLOWED)
+        _hex(object_key)
+        with self._transaction():
+            row = self._db.execute('SELECT nonce,status,review_status,verdict_digest,pending,grant_digest '
+                'FROM receipts WHERE object_key=? ORDER BY rowid DESC LIMIT 1',(object_key,)).fetchone()
+            return None if row is None else dict(zip(
+                ('nonce','status','review_status','verdict_digest','pending','grant_digest'),row))
+
+    def notification_pending(self, session):
+        if self.kind != 'NOTIFICATION': _fail(LedgerCode.NOT_ALLOWED)
+        with self._transaction():
+            return self._db.execute('SELECT count(*) FROM receipts WHERE session_key=? AND pending=1',
+                                    (session,)).fetchone()[0] != 0
+
+    def issue_notification(self, decision, *, ttl_seconds):
+        if (self.kind != 'NOTIFICATION' or type(decision) is not NotificationDecision or
+                decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT or
+                type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 600):
+            _fail(LedgerCode.NOT_ALLOWED)
+        b = decision.binding
+        if type(b) is not NotificationBinding or b.ledger_nonce != self.creation_nonce:
+            _fail(LedgerCode.NOT_ALLOWED)
+        nonce = secrets.token_hex(32)
+        with self._transaction() as now:
+            if not b.not_before <= now < b.expires_at: _fail(LedgerCode.NOT_ALLOWED)
+            if self._db.execute('SELECT count(*) FROM receipts WHERE session_key=? AND pending=1',
+                                (b.reviewer_session,)).fetchone()[0]: _fail(LedgerCode.NOT_ALLOWED)
+            previous = self._db.execute('SELECT nonce,status,review_status,grant_digest FROM receipts '
+                'WHERE object_key=? ORDER BY rowid DESC LIMIT 1',(b.object_key,)).fetchone()
+            if previous is None:
+                if b.rearm_from: _fail(LedgerCode.NOT_ALLOWED)
+            elif (b.rearm_from != previous[0] or b.grant_digest == previous[3] or
+                  not (previous[1] in ('ZERO_EFFECT','WITHDRAWN','CANCELLED') or
+                       (previous[1] == 'EFFECT_DONE' and previous[2] == 'BLOCKED'))):
+                _fail(LedgerCode.NOT_ALLOWED)
+            expires = min(now+ttl_seconds,b.expires_at)
+            self._db.execute('INSERT INTO receipts VALUES (?,?,?,?,?,NULL,?,?,?,0,NULL,NULL,0,NULL,NULL)',
+                (nonce,b.to_json(),now,expires,'ISSUED',b.object_key,b.reviewer_session,b.grant_digest))
+        return Receipt(b,now,expires,nonce)
+
+    def consume_notification(self, receipt, *, issuer, observed):
+        with self._transaction() as now:
+            row = self._notification_row(receipt)
+            if row[3] != 'ISSUED': return False
+            if not receipt.issued_at <= now < receipt.expires_at:
+                self._set(receipt.nonce,'EXPIRED','ISSUED'); return False
+            decision = decide_notification(receipt.binding,issuer=issuer,observed=observed)
+            if decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT:
+                self._set(receipt.nonce,'DENIED','ISSUED'); return False
+            if self._db.execute('SELECT count(*) FROM receipts WHERE session_key=? AND pending=1',
+                                (receipt.binding.reviewer_session,)).fetchone()[0]: return False
+            return self._db.execute("UPDATE receipts SET status='CONSUMED',pending=1,redeem_run_id=? "
+                "WHERE nonce=? AND status='ISSUED'",(receipt.binding.task.run_id,receipt.nonce)).rowcount == 1
+
+    def begin_notification(self, receipt):
+        # Commit ambiguous dispatch intent BEFORE entering the external callback.
+        with self._transaction() as now:
+            row = self._notification_row(receipt)
+            if row[3] != 'CONSUMED' or row[4] or now >= receipt.expires_at: return False
+            return self._db.execute('UPDATE receipts SET dispatch_started=1 WHERE nonce=? AND dispatch_started=0',
+                                    (receipt.nonce,)).rowcount == 1
+
+    def record_notification_ids(self, receipt, message_id, turn_id=None):
+        from .authorization_policy import notification_id
+        notification_id(message_id)
+        if turn_id is not None: notification_id(turn_id)
+        with self._transaction():
+            row = self._notification_row(receipt)
+            if row[3] != 'CONSUMED' or row[4] != 1 or row[5] not in (None,message_id) or row[6] not in (None,turn_id):
+                _fail(LedgerCode.NOT_ALLOWED)
+            self._db.execute('UPDATE receipts SET message_id=?,turn_id=? WHERE nonce=?',
+                             (message_id,turn_id,receipt.nonce))
+
+    def finalize_notification(self, receipt, status, *, message_id=None, turn_id=None, no_turn=False,
+                              review_status=None, verdict_digest=None):
+        # Trusted host-only completion API. Constructor data is not attestation;
+        # the transport composition must first correlate original host events.
+        with self._transaction():
+            row = self._notification_row(receipt)
+            if row[3] != 'CONSUMED': return False
+            if status == 'ZERO_EFFECT':
+                if row[4] or row[5] is not None: _fail(LedgerCode.NOT_ALLOWED)
+                pending = 0
+            elif status == 'WITHDRAWN':
+                if (row[5] is None or row[5] != message_id or row[6] is not None or no_turn is not True):
+                    _fail(LedgerCode.NOT_ALLOWED)
+                pending = 0
+            elif status == 'CANCELLED':
+                if row[5] != message_id or row[6] is None or row[6] != turn_id: _fail(LedgerCode.NOT_ALLOWED)
+                pending = 0
+            elif status == 'EFFECT_DONE':
+                if row[5] is None or row[6] is None or review_status not in ('APPROVE','CHANGES_REQUIRED','BLOCKED'):
+                    _fail(LedgerCode.NOT_ALLOWED)
+                _hex(verdict_digest); pending = 0
+            elif status == 'EFFECT_UNKNOWN':
+                pending = 1
+            else: _fail(LedgerCode.NOT_ALLOWED)
+            self._db.execute('UPDATE receipts SET status=?,pending=?,review_status=?,verdict_digest=? WHERE nonce=?',
+                             (status,pending,review_status,verdict_digest,receipt.nonce))
+            return True
 
 
 def _observed_matches(observed, binding):

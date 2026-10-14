@@ -52,6 +52,7 @@ class IssuerClass(str, Enum):
     POLICY_CONTRACT = 'POLICY_CONTRACT'
     OWNER_P0 = 'OWNER_P0'
     PRODUCTION_REVIEW = 'PRODUCTION_REVIEW'
+    NOTIFICATION = 'NOTIFICATION'
 
 
 class Requirement(str, Enum):
@@ -73,6 +74,7 @@ SEPARATE_AUTHORITY = frozenset((Requirement.NEW_COST, Requirement.NEW_DATA_EGRES
 class EffectKind(str, Enum):
     FAKE_FILE_CREATE = 'FAKE_FILE_CREATE'
     PROVIDER_REVIEW_CALL = 'PROVIDER_REVIEW_CALL'
+    REVIEW_NOTIFICATION = 'REVIEW_NOTIFICATION'
 
 
 def _kinds(value):
@@ -400,3 +402,119 @@ def decide_provider_review(binding, *, issuer, observed,
     except Exception:
         return result(Decision.DENY,DecisionCode.INVALID_REQUEST)
     return result(Decision.ALLOW_WITH_TRUSTED_RECEIPT,DecisionCode.POLICY_ALLOWED,binding)
+
+
+@dataclass(frozen=True)
+class NotificationBinding(ContractValue):
+    """Host-only notification scope; never a provider/D1 permission."""
+    task: TaskBinding
+    acceptance_task: TaskBinding
+    source_sha: str
+    base_sha: str
+    tree_sha: str
+    packet_digest: str
+    host_pin: str
+    route_digest: str
+    scope_digest: str
+    authors_digest: str
+    reviewer_digest: str
+    author_session: str
+    reviewer_session: str
+    epoch: int
+    sequence: int
+    event_id: str
+    source_ref: str
+    actor_ref: str
+    grant_digest: str
+    capability_id: str
+    attempt_id: str
+    ledger_nonce: str
+    not_before: int
+    expires_at: int
+    rearm_from: str = ''
+
+    def __post_init__(self):
+        _typed(self.task, TaskBinding); _typed(self.acceptance_task, TaskBinding)
+        for name in ('source_sha','base_sha','tree_sha'): _hex(getattr(self,name),(40,64))
+        for name in ('packet_digest','host_pin','route_digest','scope_digest','authors_digest',
+                     'reviewer_digest','grant_digest','ledger_nonce'): _hex(getattr(self,name))
+        for name in ('author_session','reviewer_session','event_id','source_ref','actor_ref','capability_id'):
+            _identifier(getattr(self,name))
+        _hex(self.attempt_id,(32,))
+        if self.rearm_from: _hex(self.rearm_from)
+        _integer(self.epoch,minimum=1); _integer(self.sequence,minimum=1,maximum=128)
+        _integer(self.not_before); _integer(self.expires_at)
+        if (self.author_session == self.reviewer_session or self.task.task_id == self.acceptance_task.task_id or
+                not 0 < self.expires_at-self.not_before <= 600):
+            raise LLMToolError('notification binding invalid; details omitted')
+
+    @property
+    def digest(self): return _digest('llmtool.notification-binding.v1',self)
+
+    @property
+    def object_key(self):
+        # Exclude run, comment/event, attempt and generation. Fresh grants cannot
+        # accidentally repeat an already completed review of this object.
+        from .task_review import digest
+        return digest({
+            'ready':(self.task.task_id,self.task.contract_digest),
+            'final':(self.acceptance_task.task_id,self.acceptance_task.contract_digest),
+            'source':self.source_sha,'scope':self.scope_digest,'reviewer':self.reviewer_digest},'llmtool.notification-object.v1')
+
+
+@dataclass(frozen=True)
+class NotificationObserved(ContractValue):
+    binding_digest: str
+    host_pin: str
+    attested: bool
+    idle: bool
+    queue_empty: bool
+    exclusive: bool
+    no_tools: bool
+    withdrawal_supported: bool
+    turn_cancel_supported: bool
+
+    def __post_init__(self):
+        _hex(self.binding_digest); _hex(self.host_pin)
+        for name in ('attested','idle','queue_empty','exclusive','no_tools',
+                     'withdrawal_supported','turn_cancel_supported'): _typed(getattr(self,name),bool)
+
+
+@dataclass(frozen=True)
+class NotificationDecision:
+    decision: Decision
+    code: DecisionCode
+    binding: Optional[NotificationBinding]
+    _origin: object = field(default=None,repr=False,compare=False)
+
+    def __post_init__(self):
+        if (self._origin is not _DECIDED or type(self.decision) is not Decision or
+                type(self.code) is not DecisionCode or
+                (self.binding is not None) != (self.decision is Decision.ALLOW_WITH_TRUSTED_RECEIPT)):
+            raise LLMToolError('notification decision invalid; details omitted')
+        if self.binding is not None: _typed(self.binding,NotificationBinding)
+        object.__setattr__(self,'_origin',None)
+
+
+def decide_notification(binding, *, issuer, observed):
+    """Offline host decision only. No native issuer, parser or public route."""
+    def result(decision,code,b=None): return NotificationDecision(decision,code,b,_DECIDED)
+    try:
+        _typed(binding,NotificationBinding); _typed(observed,NotificationObserved)
+        if not isinstance(issuer,HostIssuer) or issuer.issuer_class is not IssuerClass.NOTIFICATION:
+            return result(Decision.DENY,DecisionCode.UNTRUSTED_ISSUER)
+        if (issuer.capability_id != binding.capability_id or
+                issuer.vouches_for(binding.digest) is not True):
+            return result(Decision.DENY,DecisionCode.UNTRUSTED_POLICY)
+        if (observed.binding_digest != binding.digest or observed.host_pin != binding.host_pin or
+                any(getattr(observed,n) is not True for n in ('attested','idle','queue_empty','exclusive',
+                    'no_tools','withdrawal_supported','turn_cancel_supported'))):
+            return result(Decision.DENY,DecisionCode.STATE_MISMATCH)
+    except Exception:
+        return result(Decision.DENY,DecisionCode.INVALID_REQUEST)
+    return result(Decision.ALLOW_WITH_TRUSTED_RECEIPT,DecisionCode.POLICY_ALLOWED,binding)
+
+
+def notification_id(value):
+    """Bound original host IDs before persisting or correlating them."""
+    _identifier(value)

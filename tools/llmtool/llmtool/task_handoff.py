@@ -61,6 +61,8 @@ class FakeGrant:
     not_before: str
     expires_at: str
     armed_generations: tuple
+    # Re-arm also requires a NEW externally pinned host digest/grant. This
+    # field alone neither authenticates a changed Session nor renews authority.
     rearm_generations: tuple = ()
     wait_seconds: int = 600
     poll_seconds: int = 60
@@ -128,6 +130,29 @@ def _result(code, status='BLOCKED', zero='NOT_VERIFIED', **extra):
                 zero_model_calls=zero, token_usage='UNKNOWN', **extra)
 
 
+
+def ready_snapshot(ready, expect, events, now):
+    """Pure shared readiness conjunction, no host or transport callbacks."""
+    snapshot = inspect_task(ready, expect, events, now)
+    if (snapshot.structural_validation != 'SUCCESS' or
+            snapshot.reported_state is not State.WAITING_REVIEW or snapshot.handoff_preview is None):
+        reject('HANDOFF_NOT_READY')
+    return snapshot
+
+
+def verdict_status(verdict):
+    if verdict['security'] == verdict['functional'] == 'APPROVE': return 'PASS'
+    return 'BLOCKED' if 'BLOCKED' in (verdict['security'],verdict['functional']) else 'CHANGES_REQUIRED'
+
+
+def failure(outcome, code):
+    """Retain causal failure plus bounded fixed cleanup evidence (H5)."""
+    codes = list(outcome.get('failure_codes', ()))
+    if outcome.get('status') == 'BLOCKED' and not codes: codes.append(outcome['code'])
+    if code not in codes and len(codes) < 8: codes.append(code)
+    return {**outcome, 'status':'BLOCKED', 'code':codes[0], 'failure_codes':codes}
+
+
 def _run_fake_handoff(ready, final, expect, services):
     """Finite fixture-only journey; DATA cannot select host, grant or effect.
 
@@ -136,6 +161,7 @@ def _run_fake_handoff(ready, final, expect, services):
     production store. Every consumed ambiguous effect remains EFFECT_UNKNOWN.
     """
     key = None
+    admitted = False
     done = False
     first_counter = None
     last_utc = last_mono = None
@@ -155,6 +181,8 @@ def _run_fake_handoff(ready, final, expect, services):
             reject('HANDOFF_INPUT_INVALID')
         for value in (g.host_pin, g.packet_digest):
             _hex(value)
+
+        admitted = True  # Only admitted fixture components may receive cleanup callbacks.
 
         def clocks():
             nonlocal last_utc, last_mono
@@ -247,7 +275,7 @@ def _run_fake_handoff(ready, final, expect, services):
             screen(text)
             h, reviewer = observe()
             events = h.observation.events
-            snapshot = inspect_task(ready, expect, events, now)
+            snapshot = ready_snapshot(ready, expect, events, now)
             if (snapshot.structural_validation != 'SUCCESS' or
                     snapshot.reported_state is not State.WAITING_REVIEW or
                     snapshot.handoff_preview is None or
@@ -303,8 +331,7 @@ def _run_fake_handoff(ready, final, expect, services):
                     reply.packet_digest != packet.digest):
                 reject('HANDOFF_RESULT_UNVERIFIED')
             verdict = parse_verdict(reply.verdict, packet)
-            status = ('PASS' if verdict['security'] == verdict['functional'] == 'APPROVE' else
-                      'CHANGES_REQUIRED' if 'BLOCKED' not in (verdict['security'], verdict['functional']) else 'BLOCKED')
+            status = verdict_status(verdict)
             observe()
             receipt = s.transport.receipt(delivery, digest(verdict))
             observe()
@@ -323,21 +350,23 @@ def _run_fake_handoff(ready, final, expect, services):
         code = getattr(exc, 'review_code', 'HANDOFF_INPUT_INVALID')
         outcome = _result(code if isinstance(exc, LLMToolError) else 'HANDOFF_INPUT_INVALID')
     finally:
-        if key is not None and not done:
+        if admitted and key is not None and not done:
             try:
                 services.claims.finish(key, 'EFFECT_UNKNOWN')
             except Exception:
-                outcome = _result('HANDOFF_CLAIM_FINALIZE_UNKNOWN')
-        if type(services) is FakeServices:
+                outcome = failure(outcome,'HANDOFF_CLAIM_FINALIZE_UNKNOWN')
+        if admitted:
             try:
                 if services.transport.clean() is not True:
-                    outcome = _result('HANDOFF_CLEANUP_UNKNOWN')
+                    outcome = failure(outcome,'HANDOFF_CLEANUP_UNKNOWN')
                 sample = services.host.invocations()
                 if (first_counter is None or type(sample) is not InvocationSample or sample != first_counter):
-                    outcome = _result('HANDOFF_INVOCATION_UNVERIFIED')
+                    outcome = failure(outcome,'HANDOFF_INVOCATION_UNVERIFIED')
                 else:
                     zero = 'FAKE_HOST_VERIFIED'
             except Exception:
-                outcome = _result('HANDOFF_INVOCATION_UNVERIFIED')
+                outcome = failure(outcome,'HANDOFF_INVOCATION_UNVERIFIED')
+    if outcome['status'] == 'BLOCKED' and not outcome.get('failure_codes'):
+        outcome['failure_codes'] = [outcome['code']]
     outcome['zero_model_calls'] = zero
     return outcome
