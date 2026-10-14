@@ -554,3 +554,22 @@ class NativeDeltaPolicyTests(unittest.TestCase):
         issuer=n._fixture_issuer(grant)
         self.assertTrue(issuer.vouches_for(t.binding.digest));self.assertFalse(issuer.vouches_for(t.binding.grant_digest))
         self.assertIs(allow(make_create(),make_policy(),issuer=issuer).decision,p.Decision.DENY)
+
+
+class CompositionPolicyTests(unittest.TestCase):
+    def test_zero_child_topology_requires_complete_binding_and_observed_pins(self):
+        from test_codex_handoff_transport import DeltaTrial
+        t=DeltaTrial();self.addCleanup(t.close)
+        for changes in ({'topology':'IN_PROCESS_ZERO_CHILD'},{'composition_digest':'f'*64},{'topology':'OWNED_CHILD'}):
+            with self.assertRaises(Exception):dataclasses.replace(t.binding,**changes)
+        b=dataclasses.replace(t.binding,topology='IN_PROCESS_ZERO_CHILD',composition_digest='f'*64)
+        t.issuer.binding=b
+        obs=p.NotificationObserved(b.digest,b.host_pin,True,True,True,True,False,True,True,True,b.risk_acceptance_digest)
+        self.assertIs(p.decide_notification(b,issuer=t.issuer,observed=obs).decision,p.Decision.DENY)
+        obs=dataclasses.replace(obs,topology=b.topology,composition_digest=b.composition_digest)
+        self.assertIs(p.decide_notification(b,issuer=t.issuer,observed=obs).decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        for changes in ({'composition_digest':'e'*64},{'topology':'LEGACY_FIXTURE'}):
+            self.assertIs(p.decide_notification(b,issuer=t.issuer,observed=dataclasses.replace(obs,**changes)).decision,p.Decision.DENY)
+        old_digest=b.digest;t.issuer.binding=dataclasses.replace(b,composition_digest='e'*64)
+        self.assertFalse(t.issuer.vouches_for(old_digest))
+        self.assertIs(allow(make_create(),make_policy(),issuer=t.issuer).decision,p.Decision.DENY)

@@ -230,3 +230,341 @@ class ProtocolJourneyTests(unittest.TestCase):
         x.feed(sequence=3,source_digest='b'*64,thread_id='reviewer',turn_id='turn-1',kind='terminal',status='Completed')
         with self.assertRaises(Exception):x.seal(drained=True,child_exited=True,source_digest='b'*64)
         with self.assertRaises(Exception):n.feed_notification(x,c,raw({'method':'item/completed','params':{'threadId':'reviewer','turnId':'turn-1','item':{'type':'agentMessage','id':'other-item','text':'DATA'}}}),sequence=4,source_digest='b'*64)
+
+
+class CompositionSourceRedTests(unittest.TestCase):
+    def test_queue_snapshot_can_restart_without_replay_reset_of_effects(self):
+        c=CodecTests().codec()
+        row={'id':'s','input':[],'clientUserMessageId':'c'}
+        c.list_page(raw({'data':[row],'nextCursor':None}))
+        c.new_snapshot()
+        self.assertFalse(c.list_page(raw({'data':[row],'nextCursor':None})))
+        with self.assertRaises(Exception):c.accept(raw({'queuedSubmission':{'id':'other','input':c.input,'clientUserMessageId':'client-1'}}))
+
+
+class CompositionTrial:
+    """Owned socketpair server setup occurs outside the composition window."""
+    def __init__(self, *, mode='complete', stream_fault=None):
+        from test_codex_handoff_transport import DeltaTrial
+        from llmtool import codex_handoff_transport as c,task_review as r,authorization_policy as p
+        self.t=DeltaTrial();t=self.t
+        old_utc=t.j.clock.utc;t.j.clock.utc=lambda:int(old_utc())
+        self.inferences=0;self.author_calls=0;self.errors=[];self.requests=[]
+        self.channel,self.server=n.SocketPairChannel.fixture_pair();self.server.settimeout(3)
+        original_domains=t.host.domains
+        def domains():
+            samples=original_domains()
+            return samples[0],replace(samples[1],counter=self.inferences),replace(samples[2],counter=self.author_calls)
+        t.host.domains=domains
+        d=domains();pins=tuple(n.DomainPin(x.domain,x.source,x.owner,x.run_id,x.generation,x.covered_entrypoints) for x in d)
+        waiter=n.ReceiptWaiterPin(t.binding.author_session,t.binding.task.task_id,t.binding.task.run_id,
+            t.binding.source_sha,t.binding.event_id,'owned-author-tool','author-gen',str(Path(t.tmp.name)/'ack.json'),t.binding.expires_at)
+        self.pins=n.CompositionPins(t.session.digest,t.binding.host_pin,t.binding.packet_digest,t.binding.route_digest,
+            '1'*64,'2'*64,'3'*64,t.binding.risk_acceptance_digest,t.binding.coverage_digest,t.session.event_source_digest,
+            t.binding.reviewer_session,waiter,pins,True)
+        t.binding=replace(t.binding,topology='IN_PROCESS_ZERO_CHILD',composition_digest=self.pins.digest)
+        t.grant=replace(t.grant,binding=t.binding,poll_seconds=1);t.issuer.binding=t.binding
+        t.host.attest=lambda:n.CompositionAttestation(self.pins.digest,t.session.digest,t.binding.host_pin,
+            waiter.digest,t.binding.route_digest,t.binding.not_before,t.binding.expires_at)
+        self.ack=None;self.notify_count=0;self.poll_count=0;self.waiter_change=lambda x:x;self.receipt_missing=False
+        trial=self
+        class Waiter:
+            def notify(self,pin,message,turn,result):
+                trial.notify_count+=1;trial.author_calls=1
+                trial.ack=n.AuthorAck(pin.digest,pin.session,pin.task_id,pin.run_id,pin.source_sha,pin.notification_id,
+                    pin.owner_tool_id,pin.child_generation,message,turn,result,t.j.clock.utc())
+            def poll(self):
+                trial.poll_count+=1
+                return None if trial.receipt_missing else trial.waiter_change(trial.ack)
+        t.rpc.mode='blocked' if mode=='blocked' else 'complete'
+        if mode=='changes':t.rpc.verdict_mutate=lambda v:{**v,'functional':'CHANGES_REQUIRED'}
+        verdict=t.rpc.verdict('turn-1')
+        self.comp=n.ComposedPickup(self.pins,t.host,Waiter(),self.channel,t.j.clock,t.rpc.read())
+        def serve():
+            try:
+                data=bytearray()
+                while True:
+                    while b'\n' not in data:
+                        chunk=self.server.recv(8192)
+                        if not chunk:return
+                        data.extend(chunk)
+                    line,_,rest=data.partition(b'\n');data=bytearray(rest);x=json.loads(line)
+                    method=x['method'];self.requests.append(method)
+                    if method=='initialized':continue
+                    reply={'jsonrpc':'2.0','id':x['id'],'result':{}}
+                    if method=='thread/queue/list':reply['result']={'data':[],'nextCursor':None}
+                    if method=='thread/queue/add':
+                        self.inferences=1
+                        params=x['params'];reply['result']={'queuedSubmission':{'id':'submission-1','input':params['input'],'clientUserMessageId':params['clientUserMessageId']}}
+                        if stream_fault=='wrong-id':reply['id']+=1
+                        if stream_fault=='malformed':self.server.sendall(b'{broken}\n');return
+                        if stream_fault=='partial':self.server.sendall(b'{"id":');return
+                        if stream_fault=='disconnect':return
+                    self.server.sendall(raw(reply)+b'\n')
+                    if method=='thread/queue/add':
+                        thread=self.pins.thread_id
+                        item={'type':'userMessage','id':'user-item','clientId':params['clientUserMessageId'],'content':params['input']}
+                        agent={'type':'agentMessage','id':'verdict-item','text':verdict}
+                        terminal='failed' if mode=='failed' else 'interrupted' if mode=='interrupted' else 'completed'
+                        values=[('turn/started',{'threadId':thread,'turn':{'id':'turn-1','status':'inProgress'}}),
+                                ('item/started',{'threadId':thread,'turnId':'turn-1','item':item}),
+                                ('item/completed',{'threadId':thread,'turnId':'turn-1','item':item}),
+                                ('item/started',{'threadId':thread,'turnId':'turn-1','item':agent}),
+                                ('item/completed',{'threadId':thread,'turnId':'turn-1','item':agent}),
+                                ('turn/completed',{'threadId':thread,'turn':{'id':'turn-1','status':terminal}})]
+                        if stream_fault=='tool':values[3][1]['item']={'type':'commandExecution','id':'bad-tool'}
+                        if stream_fault=='flood':values=values[:1]*129
+                        if stream_fault=='duplicate-response':self.server.sendall(raw(reply)+b'\n')
+                        if stream_fault=='missing-terminal':values=values[:-1]
+                        if stream_fault=='other-thread':values[1][1]['threadId']='child-thread'
+                        for method,params in values:
+                            packet=raw({'jsonrpc':'2.0','method':method,'params':params})+b'\n'
+                            # Fragmented byte delivery exercises the actual owned stream.
+                            self.server.sendall(packet[:13]);self.server.sendall(packet[13:])
+                        return
+            except (OSError,ValueError) as exc:self.errors.append(type(exc).__name__)
+            finally:self.server.close()
+        self.thread=threading.Thread(target=serve);self.thread.start()
+    def run(self):
+        from llmtool import codex_handoff_transport as c,authorization_policy as p,task_review as r
+        t=self.t;b=t.binding
+        obs=p.NotificationObserved(b.digest,b.host_pin,True,True,True,True,False,True,True,True,b.risk_acceptance_digest,b.topology,b.composition_digest)
+        services=c._fixture_services(t.grant,self.comp,self.comp,t.issuer,t.ledger,t.j.clock,
+            r.canonical(t.j.review_fixture.data),admission=p.decide_notification(b,issuer=t.issuer,observed=obs),composition=self.comp)
+        return c._run_fixture_composition(t.j.ready,t.j.final,t.j.expect,services)
+    def close(self):
+        self.channel.close();self.server.close();self.thread.join(timeout=4)
+        assert not self.thread.is_alive()
+        self.t.close()
+
+
+class CompositionAcceptanceTests(unittest.TestCase):
+    def trial(self,**kwargs):
+        t=CompositionTrial(**kwargs);self.addCleanup(t.close);return t
+    def test_full_zero_child_stream_coverage_ledger_and_receipt(self):
+        t=self.trial()
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn forbidden')) as spawn:
+            result=t.run()
+        self.assertEqual(result['status'],'PASS',result)
+        self.assertEqual(set(result['dimensions'].values()),{'PASS'})
+        self.assertEqual(t.requests.count('initialize'),1);self.assertEqual(t.requests.count('initialized'),1)
+        self.assertGreater(t.requests.count('thread/queue/list'),1)
+        self.assertEqual(t.requests.count('thread/queue/add'),1);self.assertEqual(t.notify_count,1)
+        self.assertEqual(spawn.call_count,0)
+        proof=result['composition_evidence'];self.assertEqual(proof['spawn_count'],0)
+        self.assertTrue(proof['stream_drained']);self.assertTrue(proof['stream_closed'])
+        self.assertEqual(proof['terminal_coverage_digest'],t.comp.coverage.seal(drained=True,child_exited=True,source_digest=t.pins.event_source_digest))
+        self.assertFalse(result['authorized']);self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
+        self.assertFalse(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+    def test_all_strict_verdicts_and_terminal_states(self):
+        for mode in ('blocked','changes','failed','interrupted'):
+            with self.subTest(mode=mode):
+                t=self.trial(mode=mode);result=t.run()
+                self.assertEqual(result['status'],'CHANGES_REQUIRED' if mode=='changes' else 'BLOCKED',result)
+                if mode=='blocked':
+                    self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'NOT_VERIFIED')
+                    self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+                if mode in ('failed','interrupted'):self.assertEqual(t.notify_count,0)
+                self.assertFalse(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+    def test_k3_each_transport_fault_remains_sticky(self):
+        for fault in ('wrong-id','malformed','partial','disconnect','flood','duplicate-response','missing-terminal','tool','other-thread'):
+            with self.subTest(fault=fault):
+                t=self.trial(stream_fault=fault);result=t.run()
+                self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertTrue(t.comp.coverage.failed)
+                self.assertTrue(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+                with self.assertRaises(Exception):t.comp.coverage.seal(drained=True,child_exited=True,source_digest=t.pins.event_source_digest)
+                with self.assertRaises(Exception):t.comp.coverage.feed(sequence=t.comp.coverage.last+1,source_digest=t.pins.event_source_digest,
+                    thread_id=t.pins.thread_id,turn_id='turn-1',kind='terminal',status='Completed')
+    def test_missing_or_wrong_author_receipt_is_partial_not_closed_loop(self):
+        for wrong in (False,True):
+            t=self.trial();t.t.grant=replace(t.t.grant,receipt_seconds=2)
+            if wrong:t.waiter_change=lambda ack:replace(ack,session='wrong-author')
+            else:t.receipt_missing=True
+            result=t.run();self.assertEqual(result['status'],'PARTIAL',result)
+            self.assertNotEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+            self.assertEqual(t.notify_count,1)
+    def test_external_counter_pins_and_attestation_cannot_be_self_report(self):
+        for change in ('source','coverage','owner','revoked','topology'):
+            with self.subTest(change=change):
+                t=self.trial();old=t.t.host.domains
+                if change in ('source','coverage','owner'):
+                    field='covered_entrypoints' if change=='coverage' else change
+                    def altered():
+                        samples=list(old());samples[1]=replace(samples[1],**{field:('uncovered',) if change=='coverage' else 'fake-source'});return tuple(samples)
+                    t.t.host.domains=altered
+                else:
+                    old_a=t.t.host.attest;t.t.host.attest=lambda:replace(old_a(),**({'revoked':True} if change=='revoked' else {'topology':'OWNED_CHILD'}))
+                result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertNotIn('thread/queue/add',t.requests)
+    def test_attempted_spawn_poison_even_if_callback_swallows_exception(self):
+        t=self.trial();old=t.t.host.attest
+        def spawn():
+            try:os.fork()
+            except Exception:pass
+            return old()
+        t.t.host.attest=spawn;result=t.run()
+        self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(t.comp.coverage.failed)
+        self.assertEqual(result['composition_evidence']['spawn_count'],0)
+        self.assertGreater(result['composition_evidence']['spawn_attempts'],0)
+        self.assertNotIn('thread/queue/add',t.requests)
+    def test_close_failure_never_persists_completion(self):
+        t=self.trial();t.channel.close=lambda:False
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+        self.assertTrue(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+        # Restore ownership cleanup for the test only.
+        t.channel.close=lambda:(t.channel.socket.close() or True)
+
+
+class CompositionBoundaryTests(unittest.TestCase):
+    def test_transport_timeout_is_fixed_and_sticky(self):
+        channel,server=n.SocketPairChannel.fixture_pair();self.addCleanup(channel.close);self.addCleanup(server.close)
+        coverage=n.EventCoverage('thread','a'*64);stream=n.PersistentRPC(channel,coverage,time.monotonic,time.monotonic()+10)
+        with patch.object(channel,'read',side_effect=TimeoutError):
+            with self.assertRaises(Exception) as caught:stream.initialize()
+        self.assertEqual(caught.exception.review_code,'PICKUP_READ_TIMEOUT')
+        self.assertTrue(coverage.failed)
+        with self.assertRaises(Exception):stream.initialize()
+        with self.assertRaises(Exception):coverage.feed(sequence=1,source_digest='a'*64,thread_id='thread',turn_id='turn',kind='started')
+    def test_zero_child_guard_catches_each_api_and_restores_originals(self):
+        APIs=[(os,'fork'),(os,'posix_spawn'),(os,'posix_spawnp')]
+        import subprocess
+        APIs.append((subprocess,'Popen'))
+        for module,name in APIs:
+            if not hasattr(module,name):continue
+            original=getattr(module,name);coverage=n.EventCoverage('thread','a'*64)
+            with n.ZeroChildWindow(coverage) as window:
+                with self.assertRaises(Exception):getattr(module,name)('forbidden')
+                self.assertEqual(window.spawn_count,0);self.assertEqual(window.attempts,1)
+                self.assertTrue(coverage.failed)
+            self.assertIs(getattr(module,name),original)
+    def test_attested_spawn_and_topology_poison_permanently(self):
+        t=CompositionTrial();self.addCleanup(t.close);old=t.t.host.attest
+        t.t.host.attest=lambda:replace(old(),spawn_count=1)
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(t.comp.coverage.failed)
+        t.t.host.attest=old
+        with self.assertRaises(Exception):t.comp.check()
+    def test_untrusted_issuer_or_grant_digest_never_initializes(self):
+        for change in ('issuer','binding'):
+            t=CompositionTrial();self.addCleanup(t.close)
+            if change=='issuer':t.t.issuer.revoked=True
+            else:t.t.grant=replace(t.t.grant,binding=replace(t.t.binding,composition_digest='f'*64))
+            result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertNotIn('initialize',t.requests)
+    def test_missing_close_or_coverage_cannot_call_durable_finish(self):
+        for fault in ('missing-terminal','tool'):
+            t=CompositionTrial(stream_fault=fault);self.addCleanup(t.close)
+            with patch.object(t.t.ledger,'finish_notification_turn',wraps=t.t.ledger.finish_notification_turn) as finish:
+                result=t.run()
+            self.assertEqual(result['status'],'BLOCKED',result);self.assertEqual(finish.call_count,0)
+    def test_head_or_session_drift_and_late_callback_fail_before_dispatch(self):
+        for change in ('session','head','late'):
+            t=CompositionTrial();self.addCleanup(t.close)
+            if change=='late':
+                old=t.t.host.attest
+                def late():t.t.j.clock.wait(6);return old()
+                t.t.host.attest=late
+            else:
+                old=t.t.host.observe
+                t.t.host.observe=lambda:replace(old(),session=replace(t.t.session,**({'session_id':'other'} if change=='session' else {'checkout_sha':'f'*40})))
+            result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertNotIn('thread/queue/add',t.requests)
+
+
+class AdvisoryCompositionRegressions(unittest.TestCase):
+    def trial(self):
+        t=CompositionTrial();self.addCleanup(t.close);return t
+    def test_other_thread_cannot_be_vouched_as_original_session(self):
+        t=self.trial();t.comp.pins=replace(t.pins,thread_id='wrong-thread')
+        t.t.binding=replace(t.t.binding,composition_digest=t.comp.pins.digest)
+        t.t.grant=replace(t.t.grant,binding=t.t.binding);t.t.issuer.binding=t.t.binding
+        old=t.t.host.attest
+        t.t.host.attest=lambda:replace(old(),pins_digest=t.comp.pins.digest)
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertNotIn('initialize',t.requests)
+    def test_queue_uses_only_validated_packet_and_expiry(self):
+        from llmtool import task_review as r
+        for field in ('review_packet','expires_at','instructions'):
+            t=self.trial();old=t.comp.queue
+            def injected(request):
+                request=dict(request)
+                request[field]=(r.ReviewPacket(r.canonical({'wrong':'packet'})) if field=='review_packet' else
+                                t.t.binding.expires_at+1 if field=='expires_at' else 'unapproved instructions')
+                return old(request)
+            t.comp.queue=injected
+            result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertNotIn('thread/queue/add',t.requests)
+    def test_rejected_admission_never_calls_host_or_issuer(self):
+        from llmtool import codex_handoff_transport as c,task_review as r
+        t=self.trial()
+        services=c._fixture_services(t.t.grant,t.comp,t.comp,t.t.issuer,t.t.ledger,t.t.j.clock,
+            r.canonical(t.t.j.review_fixture.data),admission=None,composition=t.comp)
+        with patch.object(t.t.host,'attest',side_effect=AssertionError('rejected callback')) as attest:
+            result=c._run_fixture_composition(t.t.j.ready,t.t.j.final,t.t.j.expect,services)
+        self.assertEqual(result['status'],'BLOCKED');self.assertEqual(attest.call_count,0)
+        self.assertNotIn('initialize',t.requests)
+    def test_rejected_component_never_calls_evidence_or_escapes(self):
+        from llmtool import codex_handoff_transport as c,task_review as r
+        t=self.trial()
+        class Invalid:
+            def evidence(self):raise AssertionError('rejected callback')
+        services=c._fixture_services(t.t.grant,t.comp,t.comp,t.t.issuer,t.t.ledger,t.t.j.clock,
+            r.canonical(t.t.j.review_fixture.data),composition=Invalid())
+        result=c._run_fixture_pickup(t.t.j.ready,t.t.j.final,t.t.j.expect,services)
+        self.assertEqual(result['status'],'BLOCKED')
+    def test_original_start_timestamp_is_not_renewed_by_late_delivery(self):
+        t=self.trial();comp=t.comp;comp.grant=t.t.grant
+        c=comp.codec;c.add('DATA');c.accept(raw({'queuedSubmission':{'id':'s','input':c.input,'clientUserMessageId':c.client}}))
+        def feed(method,params):
+            comp.stream.notifications=[raw({'method':method,'params':params})];comp.stream.notification_times=[t.t.j.clock.utc()];comp._notifications()
+        feed('turn/started',{'threadId':t.pins.thread_id,'turn':{'id':'turn-1','status':'inProgress'}})
+        original=t.t.j.clock.utc();t.t.j.clock.wait(100)
+        feed('item/started',{'threadId':t.pins.thread_id,'turnId':'turn-1','item':{'type':'userMessage','id':'u','clientId':c.client,'content':c.input}})
+        starts=[e for e in comp.events if e.kind=='TURN_STARTED']
+        self.assertEqual(starts[0].timestamp,original)
+    def test_cleanup_transition_does_not_reuse_normal_deadline(self):
+        t=self.trial();result=t.run();self.assertEqual(result['status'],'PASS',result)
+        comp=t.comp;t.t.j.clock.wait(int(comp.normal_deadline-t.t.j.clock.monotonic())+1)
+        comp.begin_cleanup();comp.stream.check()
+        self.assertEqual(comp.stream.deadline,comp.overall_deadline)
+
+
+class AggregateDeadlineRegressions(unittest.TestCase):
+    def test_snapshot_pages_share_single_five_second_operation(self):
+        t=CompositionTrial();self.addCleanup(t.close)
+        comp=t.comp;comp.grant=t.t.grant;comp.window=n.ZeroChildWindow(comp.coverage)
+        comp.issuer=t.t.issuer;comp.normal_deadline=t.t.j.clock.monotonic()+100;comp.overall_deadline=comp.normal_deadline+20;comp.stream.deadline=comp.normal_deadline
+        pages=iter([{'data':[],'nextCursor':'next'},{'data':[],'nextCursor':None}])
+        def slow(method,params,**kwargs):
+            t.t.j.clock.wait(4);return next(pages)
+        comp.stream.request=slow
+        with self.assertRaises(Exception):comp._snapshot()
+        self.assertTrue(comp.coverage.failed)
+    def test_delayed_demux_does_not_refresh_original_start_receipt(self):
+        t=CompositionTrial();self.addCleanup(t.close);comp=t.comp;comp.grant=t.t.grant
+        c=comp.codec;c.add('DATA');c.accept(raw({'queuedSubmission':{'id':'s','input':c.input,'clientUserMessageId':c.client}}))
+        original=t.t.j.clock.utc()
+        comp.stream._notification({'jsonrpc':'2.0','method':'turn/started','params':{'threadId':t.pins.thread_id,'turn':{'id':'turn-1','status':'inProgress'}}})
+        t.t.j.clock.wait(4);comp._notifications()
+        self.assertEqual(comp.original_start,original)
+
+
+class LogicalReadDeadlineTests(unittest.TestCase):
+    def test_observe_aggregates_host_and_snapshot_time(self):
+        t=CompositionTrial();self.addCleanup(t.close);old=t.t.host.observe
+        def slow_host():t.t.j.clock.wait(4);return old()
+        def slow_snapshot(operation=None):t.t.j.clock.wait(4);return True
+        t.t.host.observe=slow_host;t.comp._snapshot=slow_snapshot
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertNotIn('thread/queue/add',t.requests)
+    def test_close_return_time_cannot_renew_seal_deadline(self):
+        t=CompositionTrial();self.addCleanup(t.close);old=t.channel.close
+        def late_close():t.t.j.clock.wait(6);return old()
+        t.channel.close=late_close
+        with patch.object(t.t.ledger,'finish_notification_turn',wraps=t.t.ledger.finish_notification_turn) as finish:
+            result=t.run()
+        self.assertEqual(result['status'],'BLOCKED',result);self.assertEqual(finish.call_count,0)
+        self.assertTrue(t.comp.coverage.failed)
