@@ -2907,3 +2907,38 @@ PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest disco
 ```
 
 See [Delta A1 acceptance](WORKFLOW.md#native-delta-a1-source-acceptance).
+
+### Native Composition A1 — source/fake only
+
+The private composition reuses the task replay, packet/verdict and NOTIFICATION
+v2 runner. One initialized synthetic socketpair stream correlates RPC IDs,
+queue snapshots and original item/turn events. An externally pinned fake Host
+issuer authenticates the whole binding, including topology, routes, context,
+author waiter and all three domain source/owner/run/generation/entrypoint pins.
+These interface tests do not install a production authority or original Session
+waiter. The public native factory/entry remain unavailable/BLOCKED.
+
+`IN_PROCESS_ZERO_CHILD` is the sole composition topology: no spawned child,
+actual stream drain and returned close precede the real coverage seal and ledger
+completion. Python spawn attempts poison coverage; this cooperative guard is
+not OS isolation. EOF alone is insufficient. Worker-provider delta is zero;
+Reviewer/author inference domains are separate and usage/cost remain UNKNOWN.
+Author receipt is a separate bounded seam: missing/rejected receipt is PARTIAL,
+never closed-loop PASS. Contradictions preserve UNKNOWN/pending and prohibit
+resend. Ordinary operations stop before the final 20-second cleanup reserve.
+
+K2 source investigation of Codex 0.162.1 confirms APP_SERVER_EVENTS without
+start/resume subscription is not feasible; there is no `thread/subscribe`.
+`thread/resume` is not read-only and is prohibited. HOST_ROLLOUT lacks sufficient
+started/completed/error/approval coverage for the accepted observer. Native
+remains BLOCKED, even when fake composition passes. CR-K2-B is a separate future
+contract; this source does not read rollouts, add a rollout codec, connect a live
+endpoint, call a provider or authorize a Native Trial. Full Access stays unchanged;
+AUDIT_ONLY_TRIAL does not enforce no-tools. T1/F2/S2 remain held/ungranted and
+ai-loop remains fallback.
+
+Focused source/fake acceptance, in the assigned venv without writing bytecode:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p 'test_codex_pickup_native.py'
+```

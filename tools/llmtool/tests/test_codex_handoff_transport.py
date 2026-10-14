@@ -471,3 +471,21 @@ class DurableDimensionsRegression(unittest.TestCase):
                     self.assertNotEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
                     self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
                 finally:t.close()
+
+
+class CompositionRegressionTests(unittest.TestCase):
+    def test_r1a_legal_blocked_verdict_retains_author_receipt(self):
+        t=DeltaTrial();self.addCleanup(t.close);t.rpc.mode='blocked'
+        result=t.run()
+        self.assertEqual(result['code'],'PICKUP_FIXTURE_RESULT')
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'NOT_VERIFIED')
+        self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+    def test_normal_callback_cannot_use_cleanup_reserve(self):
+        t=DeltaTrial();self.addCleanup(t.close)
+        old=t.rpc.read
+        def delayed():
+            t.j.clock.wait(3);return old()
+        t.rpc.read=delayed;t.grant=replace(t.grant,wait_seconds=22)
+        result=t.run();self.assertEqual(result['status'],'BLOCKED')
+        self.assertNotIn('queue',t.rpc.calls)
