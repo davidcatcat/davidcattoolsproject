@@ -83,3 +83,24 @@ A11c.1: B1 fake-only 已由 PR #146 合併；Native Delta A1 已完成受控 C3�
 
 ---
 此報告由 Coordinator 透過 GitHub 獨立 docs branch 發布；交接並不代替正式 CLI Git/Source/Native grants。
+
+## 8. 固定新增：距離 llmtool 自我開發正式上線還剩多少（Owner 決策 2026-10-15）
+
+**強制 Coordinator 回報規則：每次使用者說 `review repo`，報告最末尾都必須附上「距離 llmtool 上線、自動開發自己還有多少進度沒做」。** 不得只回報 PR/CI 或再次口頭承諾；這是持續使用的格式要求。所有完成狀態必須先依 live GitHub ROADMAP、Issue、PR、CI、獨立 reviewer 與 Native evidence 重新核對，不可沿用舊百分比或將 fake-only 當 Native PASS。
+
+每次末尾固定列出以下八個里程與 DONE / IN_PROGRESS / BLOCKED / NOT_STARTED、證據及下一個 Gate：
+
+| 里程 | 名稱 | 截至 2026-10-15 的參考狀態（每次必重新查） |
+| --- | --- | --- |
+| A | llmtool 基礎架構及 Provider 能力 | 基礎已具備；production routing 尚未完整驗收 |
+| B | Codex/Claude 角色分工、Worktree 隔離 | 有實際平行作業證據；原生無人工接力尚未證明 |
+| C | Native Delta A1 source/fake | PR #147 MERGED；非 Native PASS |
+| D | Native Composition A1 | Issue #120 契約 v1 已獲非作者 Security/Functional ACCEPT（#6175025949），待 K1 final pins、新 C3、八檔實作/CI/獨立 source review |
+| E | 真實跨 CLI Native Pickup | 未授權、未驗證；需要獨立 Gate B、可信 Host/queue/coverage/author receipt |
+| F | 自動 task handoff、bounded repair、review、PR-or-STOP | 尚無原 Session 無人工轉貼的完整端到端 acceptance |
+| G | 公司 LLM 自動低成本路由與品質/實際 usage 驗收 | Provider 可用能力不得冒稱 production routing；使用時先提醒 Owner 連 VPN，並確保 egress/敏感資料授權 |
+| H | llmtool 以自身協作開發 llmtool（dogfooding） | 尚未正式驗收；須以實際自動開發/測試/獨立審查/修復/PR 證據證成 |
+
+報告應同時給出：本輪完成/新增的 Gate、**尚未完成的主要階段數與關鍵 blocker**、可否開始部分 dogfooding、唯一 NEXT_AI + 原 Session + Worktree + 一份完整提示。不要把 8 格平均當可信百分比；只有存在可追溯權重/驗收證據才可報數值完成率。區分兩道目標：(1) llmtool+Codex+Claude 真實自動閉環 MVP；(2) 公司 LLM 參與、品質相當且確實降低 Token/成本的完整 self-development production 目標。不得以 fake-only、GitHub 留言或未驗證的上下文推斷 CLI 自動喚醒。
+
+本規則只改 Coordinator 回報與交接記錄，不改 source、ROADMAP milestone 狀態、Native grant 或 Owner `danger-full-access`/`approval_policy=never`。
