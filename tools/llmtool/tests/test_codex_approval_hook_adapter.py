@@ -197,6 +197,26 @@ class AdapterTests(StoreCase):
         for command in ('cp bad\0source audit.py', 'cp audit.py bad\0target'):
             self.assertEqual(a.classify('Bash', {'command': command}, '/synthetic/codex', policy())[1], a.UNKNOWN)
 
+    def test_r29_filter_output_writes_deny_but_filter_reads_are_only_observed(self):
+        pinned = '/synthetic/codex/tools/llmtool/audit.py'
+        raw = json.dumps(dataclasses.asdict(policy(pinned_paths=(pinned,)))).encode()
+        with open(self.policy_path, 'wb') as f:
+            f.write(raw)
+        self.pin = hashlib.sha256(raw).hexdigest()
+        for i, command in enumerate(('sort -o ' + pinned + ' in.txt', 'sort --output=tools/llmtool/audit.py in.txt',
+                                     'uniq in.txt ./tools/llmtool/audit.py',
+                                     "sed -n 'w " + pinned + "' in.txt",
+                                     "sed 's/a/b/w tools/llmtool/audit.py' in.txt")):
+            code, out, err = self.invoke(event('PreToolUse', use='write-' + str(i), command=command))
+            self.assertEqual((code, err), (0, ''))
+            self.assertEqual(json.loads(out), h.DENY)
+            self.assertNotIn('audit.py', out)
+        for i, command in enumerate(('sort ' + pinned, 'uniq -c ' + pinned, "sed -n '1,5p' " + pinned,
+                                     'sort -o out.txt in.txt')):
+            self.assertEqual(self.invoke(event('PreToolUse', use='read-' + str(i), command=command)),
+                             (0, '', ''))
+        self.assertFalse(policy().deny_verified)
+
     def test_policy_traversal_and_oversize_are_refused(self):
         for raw in (json.dumps(dataclasses.asdict(policy(allowed_paths=('../escape',)))).encode(),
                     b'x' * (a.MAX_POLICY_BYTES + 1)):
