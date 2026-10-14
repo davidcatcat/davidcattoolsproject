@@ -344,6 +344,19 @@ class ClassificationTests(unittest.TestCase):
         for command in ("sed -i '1e touch x' f.txt", "sed '1,w out.txt' f.txt", 'sort --c=x in.txt'):
             self.check('Bash', command, a.UNKNOWN, 'R31')
 
+    def test_r29_ambiguous_detached_in_place_is_never_routine(self):
+        # Review R1: GNU reads `sed -i A B` as script A, BSD as suffix A + script B.
+        # Unless both readings parse, the form is unsupported (scope reduction).
+        X, U = a.UNKNOWN, a.UNAUTHORIZED
+        for command in ('sed -i p G in.txt', "sed -i p '1e touch tools/llmtool/x' in.txt",
+                        "sed -i 's/a/b/' tools/x.txt", ['sed', '-i', 'p', 'y/a/b/;w out.txt', 'in.txt']):
+            self.check('Bash', command, X, 'R31')
+        self.check('Bash', ['sed', '-i', 'p', 'y/a/b/;w ' + CONFIG, 'in.txt'], U, 'R29')
+        pinned = ROOT + '/audit.py'
+        for command in (['sed', '-i', 'p', 'y/a/b/;w audit.py', 'in.txt'], 'sed -i p G audit.py'):
+            verdict = a.classify('Bash', {'command': command}, ROOT, policy(pinned_paths=(pinned,)))[1:3]
+            self.assertEqual(verdict, (U, 'R29'), command)
+
     def test_r29_filter_reads_and_ordinary_forms_are_not_blanket_denied(self):
         R, W, S = a.ROUTINE, a.WOULD_PROMPT, a.SEPARATE
         for command, expected, rule in (
@@ -356,7 +369,7 @@ class ClassificationTests(unittest.TestCase):
                 ("sed -E -n -e '/x/!d' -e 's,a,b,p' in.txt", R, 'R01'), ('sed 2q in.txt', R, 'R01'),
                 ("sed -n 'w /dev/stdout' in.txt", R, 'R01'),
                 ('sort -o out.txt in.txt', R, 'R02'), ("sed 'w out.txt' in.txt", R, 'R02'),
-                ("sed -i 's/a/b/' tools/x.txt", R, 'R02'),
+                ("sed -i.bak 's/a/b/' tools/x.txt", R, 'R02'), ("sed --in-place 's/a/b/' tools/x.txt", R, 'R02'),
                 ('sort -o /synthetic/tmp/out in.txt', W, 'R12'), ('uniq in.txt /synthetic/tmp/out', W, 'R12'),
                 ("sed 'w /synthetic/tmp/out' in.txt", W, 'R12')):
             self.check('Bash', command, expected, rule)

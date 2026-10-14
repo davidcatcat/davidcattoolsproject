@@ -625,7 +625,9 @@ def _filter_options(program, args):
         for j, letter in enumerate(arg[1:], 2):
             if letter in values:
                 value = arg[j:]
-                if not value and letter != 'i':  # sed -i takes only an attached suffix.
+                if letter == 'i':  # GNU: attached suffix only; BSD may read the next argument.
+                    value = value or None
+                elif not value:
                     if i == len(args):
                         return roles, operands, False
                     value, i = args[i], i + 1
@@ -745,10 +747,13 @@ def _filter_writes(program, args):
             if found is None:
                 return [], False, False
             targets += found
-        if in_place and not kinds & {'script'} and ('in-place', '') in roles:
-            # BSD reads a detached -i suffix, so the next operand may be the script.
-            found = _sed_writes(operands[1]) if len(operands) > 1 else None
-            targets += found or []
+        if ('in-place', None) in roles and not kinds & {'script'} and len(operands) > 1:
+            # GNU reads `-i A B` as script A, BSD as suffix A and script B. Support
+            # the form only when both readings parse; otherwise it is unsupported.
+            found = _sed_writes(operands[1])
+            if found is None:
+                return [], False, False
+            targets += found
     return targets, in_place, True
 
 
@@ -757,7 +762,8 @@ def _classify_filter(program, args, paths, cwd, policy, flags):
     if not supported:
         # Unknown spellings may write: any visible path fragment is a write candidate.
         flags.append('write-form-unsupported')
-        fragments = [_norm(m, cwd) for a in args for m in re.findall(r'[./][^\s;]*', a)]
+        fragments = [_norm(m, cwd) for a in args
+                     for m in re.findall(r'[./][^\s;]*', a) + re.findall(r'[^\s;]+', a)]
         return _verdict([(UNKNOWN, 'R31')] + _path_rules(paths + [f for f in fragments if f], True, policy))
     written = [_norm(target, cwd) for target in targets]
     if None in written:

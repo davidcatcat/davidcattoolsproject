@@ -215,6 +215,17 @@ class AdapterTests(StoreCase):
                                      'sort -o out.txt in.txt')):
             self.assertEqual(self.invoke(event('PreToolUse', use='read-' + str(i), command=command)),
                              (0, '', ''))
+        # Review R1: an ambiguous BSD/GNU -i form is UNKNOWN (observed, not denied, never
+        # ROUTINE) unless a pinned target is visible, which is denied.
+        for i, command in enumerate(('sed -i p G in.txt', "sed -i p '1e touch x' in.txt")):
+            self.assertEqual(self.invoke(event('PreToolUse', use='ambiguous-' + str(i), command=command)),
+                             (0, '', ''))
+            self.assertEqual(a.classify('Bash', {'command': command}, '/synthetic/codex',
+                                        policy(pinned_paths=(pinned,)))[1], a.UNKNOWN)
+        code, out, err = self.invoke(event('PreToolUse', use='ambiguous-w', command=[
+            'sed', '-i', 'p', 'y/a/b/;w tools/llmtool/audit.py', 'in.txt']))
+        self.assertEqual((code, err, json.loads(out)), (0, '', h.DENY))
+        self.assertNotIn('audit.py', out)
         self.assertFalse(policy().deny_verified)
 
     def test_policy_traversal_and_oversize_are_refused(self):
