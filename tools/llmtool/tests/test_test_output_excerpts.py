@@ -50,6 +50,10 @@ ERROR_ID = 'test_error (sample.Case.test_error)'
 FAIL_BODY = 'Traceback (most recent call last):\n  File "tests/test_sample.py", line 8, in test_failure\n    self.fail("evidence")\nAssertionError: evidence'
 ERROR_BODY = 'Traceback (most recent call last):\n  File "tests/test_sample.py", line 12, in test_error\n    raise ValueError("evidence")\nValueError: evidence'
 UNIT_FAILURE = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY)])
+# Synthetic, deterministic AWS-like shape (Issue #66 seed); never a real credential.
+SYNTHETIC_AWS_KEY = 'AKIA' + 'SYNTHETIC0TEST16'
+EMITTED_SENSITIVE_ERROR = ('test-excerpts: emitted excerpt contains sensitive-content '
+                           'indicators; details omitted')
 
 
 class TestOutputExcerptsTests(unittest.TestCase):
@@ -390,6 +394,79 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertNotIn('FIXTURE_VALUE', str(caught.exception))
                 self.assertNotIn(indicator, str(caught.exception))
                 self.assertNotIn(str(self.path), str(caught.exception))
+
+    def assert_emitted_excerpt_rejected(self, raw, **bounds):
+        self.path.write_bytes(raw)
+        with self.assertRaises(LLMToolError) as caught:
+            select_test_excerpts(self.path, 1, **bounds)
+        self.assertEqual(str(caught.exception), EMITTED_SENSITIVE_ERROR)
+        self.assertNotIn(str(self.path), str(caught.exception))
+        self.assertEqual(self.path.read_bytes(), raw)
+
+    def excerpt_bound(self, raw, value, extra=0):
+        # Bytes from the failure header through the end of value, plus extra.
+        return raw.index(value.encode()) + len(value.encode()) - raw.rindex(b'FAIL: ') + extra
+
+    def test_byte_cut_word_boundary_cannot_emit_aws_like_indicator(self):
+        # The source has no \b after the 16 key characters; a cut there adds one.
+        raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + 'MORE')])
+        self.assertEqual(self.select(raw)['status'], 'COMPLETE')  # Full-source scan unchanged.
+        self.assert_emitted_excerpt_rejected(
+            raw, max_excerpt_bytes=self.excerpt_bound(raw, SYNTHETIC_AWS_KEY))
+
+    def test_utf8_cut_cannot_emit_aws_like_or_jwt_indicator(self):
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        for value in (SYNTHETIC_AWS_KEY, jwt):
+            with self.subTest(value=value[:3]):
+                # A Unicode word character continues the word until a cut inside it is dropped.
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
+                self.assert_emitted_excerpt_rejected(
+                    raw, max_excerpt_bytes=self.excerpt_bound(raw, value, extra=1))
+
+    def test_ascii_escaped_json_cannot_emit_aws_like_or_jwt_indicator(self):
+        # The source scan passes (no source-level error), but CLI JSON's \uXXXX
+        # escape after the value adds a boundary, so uncut output is rejected too.
+        jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
+        for value in (SYNTHETIC_AWS_KEY, jwt):
+            with self.subTest(value=value[:3]):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
+                self.assert_emitted_excerpt_rejected(raw)
+
+    def test_ascii_escaped_failure_id_without_excerpt_is_rejected(self):
+        hidden = 'test_k (sample.' + SYNTHETIC_AWS_KEY + '測.test_k)'
+        raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('FAIL', hidden, FAIL_BODY)])
+        self.assert_emitted_excerpt_rejected(raw, max_excerpts=1)
+
+    def test_near_miss_indicator_shapes_are_still_emitted(self):
+        for value, extra in (('AKIA' + 'SYNTHETIC0TEST1', 0), ('AKIB' + 'SYNTHETIC0TEST16', 0),
+                             ('AKIA' + 'SYNTHETIC0TEST1', 1)):
+            with self.subTest(value=value, extra=extra):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + value + '測試')])
+                result = self.select(raw, max_excerpt_bytes=self.excerpt_bound(raw, value, extra))
+                self.assertEqual(result['status'], 'COMPLETE')
+                self.assertTrue(result['excerpts'][0]['text'].endswith(value))
+
+    def test_aggregate_cut_cannot_emit_aws_like_indicator(self):
+        per_excerpt = 2000
+        fillers = [('FAIL', 'test_' + str(i) + ' (sample.Case.test_' + str(i) + ')',
+                    FAIL_BODY + '\n' + 'evidence' * 300) for i in range(8)]
+        remaining = MAX_TOTAL_EXCERPT_BYTES - 8 * per_excerpt
+        head = ('FAIL: ' + FAIL_ID + '\n' + '-' * 70 + '\n' + FAIL_BODY + '\n').encode()
+        padding = 'p' * (remaining - len(head) - len(SYNTHETIC_AWS_KEY) - 1)
+        raw = unittest_capture(fillers + [('FAIL', FAIL_ID, FAIL_BODY + '\n' + padding + ' '
+                                           + SYNTHETIC_AWS_KEY + 'MORE')])
+        self.assertEqual(self.excerpt_bound(raw, SYNTHETIC_AWS_KEY), remaining)
+        self.assertLess(remaining, per_excerpt)  # The aggregate cap, not the excerpt cap, cuts.
+        self.assertEqual(self.select(raw)['status'], 'COMPLETE')
+        self.assert_emitted_excerpt_rejected(raw, max_excerpt_bytes=per_excerpt)
+
+    def test_truncated_innocuous_word_is_still_emitted(self):
+        control = 'SYNTHETICCONTROL' + 'X' * 4
+        raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + control + 'MORE')])
+        result = self.select(raw, max_excerpt_bytes=self.excerpt_bound(raw, control))
+        self.assertEqual(result['status'], 'COMPLETE')
+        self.assertTrue(result['excerpts'][0]['truncated'])
+        self.assertTrue(result['excerpts'][0]['text'].endswith(control))
 
     def test_jwt_shapes_preserve_case_segments_and_word_boundaries(self):
         jwt = 'eyJ' + 'a' * 8 + '.' + 'b' * 8 + '.' + 'c' * 8
