@@ -280,3 +280,169 @@ class PickupTests(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+class DeltaHost(Host):
+    def observe(self):
+        self.calls+=1;t=self.trial
+        frame=c.PickupObservation(t.j.host.observe(),t.session,not t.rpc.queued,not t.rpc.queued,
+            True,False,True,True,tuple(t.events),True,t.binding.coverage_digest,
+            r.digest([e.__dict__ for e in t.events if e.kind != "AUTHOR_RECEIPT"]),t.rpc.child_exit)
+        return self.change(frame,self.calls)
+    def domains(self):
+        from llmtool.codex_pickup_native import DomainSample,DOMAINS
+        t=self.trial
+        sample=(DomainSample(DOMAINS[0],t.session.counter_source,'owned-worker',t.binding.task.run_id,t.session.counter_generation,0,('dispatcher',)),
+                DomainSample(DOMAINS[1],'reviewer-host',t.binding.reviewer_session,t.binding.task.run_id,'turn-generation',int('queue' in t.rpc.calls),('original-turn',)),
+                DomainSample(DOMAINS[2],'author-host',t.binding.author_session,t.binding.task.run_id,'author-generation',int(any(e.kind=='AUTHOR_RECEIPT' for e in t.events)),('receipt-turn',)))
+        return self.domain_change(sample)
+    def __init__(self, trial):super().__init__(trial);self.domain_change=lambda x:x
+
+
+class DeltaTrial(Trial):
+    def __init__(self):
+        super().__init__();self.ledger.close()
+        self.path=str(Path(self.tmp.name)/'delta-v2.sqlite')
+        self.ledger=l.ReceiptLedger.create(self.path,clock=self.j.clock.utc,kind='NOTIFICATION',notification_layout=2)
+        self.binding=replace(self.binding,ledger_nonce=self.ledger.creation_nonce,tool_mode='AUDIT_ONLY_TRIAL',
+            risk_acceptance_digest='d'*64,coverage_digest='e'*64)
+        self.issuer.binding=self.binding;self.grant=replace(self.grant,binding=self.binding,ledger_path=self.path)
+        self.host=DeltaHost(self)
+    def run(self):
+        obs=p.NotificationObserved(self.binding.digest,self.binding.host_pin,True,True,True,True,False,True,True,True,self.binding.risk_acceptance_digest)
+        services=c._fixture_services(self.grant,self.host,self.rpc,self.issuer,self.ledger,self.j.clock,
+            r.canonical(self.j.review_fixture.data),admission=p.decide_notification(self.binding,issuer=self.issuer,observed=obs))
+        return c._run_fixture_pickup(self.j.ready,self.j.final,self.j.expect,services)
+
+
+class NativeDeltaJourneyTests(unittest.TestCase):
+    def setUp(self):self.t=DeltaTrial()
+    def tearDown(self):self.t.close()
+    def test_complete_audit_only_fake_journey_not_native_authority(self):
+        result=self.t.run();self.assertEqual(result['status'],'PASS',result)
+        self.assertFalse(result['authorized']);self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
+        row=self.t.ledger._db.execute('SELECT terminal_status,author_receipt_status FROM receipts').fetchone()
+        self.assertEqual(row,('Completed','VERIFIED'))
+        self.assertEqual(self.t.run()['status'],'SKIP');self.assertEqual(self.t.rpc.calls.count('queue'),1)
+    def test_async_author_receipt_waits_without_repeating_notification(self):
+        self.t.rpc.author_ok=False
+        old=self.t.rpc.author_receipt
+        notified=False
+        def observe(frame,count):
+            nonlocal notified
+            if 'author_receipt' in self.t.rpc.calls and count>10 and not notified:
+                notified=True
+                verdict=r.parse_verdict(self.t.rpc.verdict('turn-1'),self.t.j.packet)
+                self.t.event('AUTHOR_RECEIPT','turn-1',result=r.digest(verdict))
+                return replace(frame,events=tuple(self.t.events))
+            return frame
+        self.t.host.change=observe
+        result=self.t.run();self.assertEqual(result['status'],'PASS',result)
+        self.assertEqual(self.t.rpc.calls.count('author_receipt'),1);self.assertEqual(self.t.rpc.calls.count('queue'),1)
+    def test_missing_receipt_is_durable_partial_not_reviewer_unknown(self):
+        self.t.rpc.author_ok=False;self.t.grant=replace(self.t.grant,receipt_seconds=10)
+        result=self.t.run();self.assertEqual(result['status'],'PARTIAL',result)
+        self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+        self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'NOT_VERIFIED')
+        self.assertFalse(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+        self.assertEqual(self.t.ledger.notification_record(self.t.binding.object_key)['status'],'EFFECT_DONE')
+        self.assertEqual(self.t.run()['status'],'SKIP');self.assertEqual(self.t.rpc.calls.count('queue'),1)
+    def test_p1_turn_only_tool_before_mapping_and_after_verdict(self):
+        for stage in ('queue','verdict','author_receipt'):
+            with self.subTest(stage=stage):
+                if self.t.rpc.calls:self.t.close();self.t=DeltaTrial()
+                original=getattr(self.t.rpc,stage)
+                def tool(*args):
+                    value=original(*args);self.t.event('TOOL','turn-1');self.t.events[-1]=replace(self.t.events[-1],message_id='')
+                    return value
+                setattr(self.t.rpc,stage,tool)
+                result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertIn('PICKUP_TOOL_EFFECT',result['failure_codes'])
+    def test_coverage_or_child_exit_missing_blocks_before_queue(self):
+        for field in ('coverage_complete','child_exited'):
+            self.t.host.change=lambda f,n:replace(f,**{field:False})
+            result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertNotIn('queue',self.t.rpc.calls)
+    def test_n3_failed_and_interrupted_terminal_not_review(self):
+        for status in ('Failed','Interrupted'):
+            if self.t.rpc.calls:self.t.close();self.t=DeltaTrial()
+            self.t.rpc.after_queue=lambda:self.t.events.__setitem__(-1,replace(self.t.events[-1],terminal_status=status))
+            result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'NOT_VERIFIED')
+            self.assertNotIn('verdict',self.t.rpc.calls)
+            self.assertFalse(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+    def test_n3_in_progress_is_not_terminal(self):
+        self.t.rpc.after_queue=lambda:self.t.events.__setitem__(-1,replace(self.t.events[-1],terminal_status='InProgress'))
+        self.t.rpc.cancel_ok=False
+        result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+    def test_worker_counter_increment_is_not_reviewer_inference(self):
+        self.t.host.domain_change=lambda samples:(replace(samples[0],counter=int('queue' in self.t.rpc.calls)),*samples[1:])
+        result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertIn('PICKUP_COUNTER_DOMAIN',result['failure_codes'])
+    def test_late_author_receipt_is_partial_with_original_review_preserved(self):
+        old=self.t.rpc.author_receipt
+        def late(*args):
+            old(*args);self.t.j.clock.wait(230)
+        self.t.rpc.author_receipt=late
+        result=self.t.run();self.assertEqual(result['status'],'PARTIAL',result)
+        self.assertFalse(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+
+
+class AdvisoryDeltaRegressions(unittest.TestCase):
+    def setUp(self):self.t=DeltaTrial()
+    def tearDown(self):self.t.close()
+    def test_author_only_timeout_preserves_proven_review_as_partial(self):
+        old=self.t.rpc.author_receipt
+        def delay(*args):old(*args);self.t.j.clock.wait(6)
+        self.t.rpc.author_receipt=delay
+        result=self.t.run();self.assertEqual(result['status'],'PARTIAL',result)
+        self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'NOT_VERIFIED')
+        self.assertFalse(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+    def test_terminal_contradiction_after_verdict_never_passes(self):
+        original=self.t.rpc.verdict
+        def drift(*args):
+            result=original(*args);self.t.events[-1]=replace(self.t.events[-1],terminal_status='Failed');return result
+        self.t.rpc.verdict=drift
+        result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
+    def test_cleanup_provider_domain_change_is_not_zero(self):
+        def clean():
+            self.t.host.domain_change=lambda samples:(replace(samples[0],counter=1),*samples[1:]);return True
+        self.t.rpc.clean=clean
+        result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertIn('PICKUP_COUNTER_DOMAIN',result['failure_codes'])
+    def test_domain_callback_return_time_is_checked(self):
+        old=self.t.host.domains
+        def delayed():
+            result=old();self.t.j.clock.wait(230);return result
+        self.t.host.domains=delayed
+        result=self.t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertNotIn('queue',self.t.rpc.calls)
+
+
+class CleanupCoverageRegression(unittest.TestCase):
+    def test_cleanup_late_turn_only_tool_is_not_hidden(self):
+        t=DeltaTrial();self.addCleanup(t.close)
+        def clean():
+            t.event('TOOL','turn-1');t.events[-1]=replace(t.events[-1],message_id='');return True
+        t.rpc.clean=clean
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertIn('PICKUP_TOOL_EFFECT',result['failure_codes'])
+        self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
+
+
+class TerminalCleanupRegression(unittest.TestCase):
+    def test_failed_and_interrupted_late_tool_restore_unknown_pending(self):
+        for status in ('Failed','Interrupted'):
+            with self.subTest(status=status):
+                t=DeltaTrial()
+                try:
+                    t.rpc.after_queue=lambda:t.events.__setitem__(-1,replace(t.events[-1],terminal_status=status))
+                    def clean():
+                        t.event('TOOL','turn-1');t.events[-1]=replace(t.events[-1],message_id='');return True
+                    t.rpc.clean=clean
+                    result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+                    self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
+                    self.assertEqual(t.ledger.notification_record(t.binding.object_key)['status'],'EFFECT_UNKNOWN')
+                finally:t.close()

@@ -432,6 +432,10 @@ class NotificationBinding(ContractValue):
     not_before: int
     expires_at: int
     rearm_from: str = ''
+    tool_mode: str = 'ENFORCED_NO_TOOLS'
+    risk_acceptance_digest: str = '0'*64
+    coverage_digest: str = '0'*64
+    counter_domains: tuple = ('LLMTOOL_PROVIDER_CALLS','REVIEWER_TURN_INFERENCE','CLAUDE_AUTHOR_INFERENCE')
 
     def __post_init__(self):
         _typed(self.task, TaskBinding); _typed(self.acceptance_task, TaskBinding)
@@ -442,6 +446,11 @@ class NotificationBinding(ContractValue):
             _identifier(getattr(self,name))
         _hex(self.attempt_id,(32,))
         if self.rearm_from: _hex(self.rearm_from)
+        _hex(self.risk_acceptance_digest); _hex(self.coverage_digest)
+        if self.tool_mode not in ("ENFORCED_NO_TOOLS","AUDIT_ONLY_TRIAL") or self.counter_domains != ("LLMTOOL_PROVIDER_CALLS","REVIEWER_TURN_INFERENCE","CLAUDE_AUTHOR_INFERENCE"):
+            raise LLMToolError("notification capability invalid; details omitted")
+        if self.tool_mode == "AUDIT_ONLY_TRIAL" and (self.risk_acceptance_digest == "0"*64 or self.coverage_digest == "0"*64):
+            raise LLMToolError("notification audit acceptance missing; details omitted")
         _integer(self.epoch,minimum=1); _integer(self.sequence,minimum=1,maximum=128)
         _integer(self.not_before); _integer(self.expires_at)
         if (self.author_session == self.reviewer_session or self.task.task_id == self.acceptance_task.task_id or
@@ -473,9 +482,12 @@ class NotificationObserved(ContractValue):
     no_tools: bool
     withdrawal_supported: bool
     turn_cancel_supported: bool
+    audit_coverage: bool = False
+    risk_acceptance_digest: str = "0"*64
 
     def __post_init__(self):
         _hex(self.binding_digest); _hex(self.host_pin)
+        _typed(self.audit_coverage,bool); _hex(self.risk_acceptance_digest)
         for name in ('attested','idle','queue_empty','exclusive','no_tools',
                      'withdrawal_supported','turn_cancel_supported'): _typed(getattr(self,name),bool)
 
@@ -508,7 +520,10 @@ def decide_notification(binding, *, issuer, observed):
             return result(Decision.DENY,DecisionCode.UNTRUSTED_POLICY)
         if (observed.binding_digest != binding.digest or observed.host_pin != binding.host_pin or
                 any(getattr(observed,n) is not True for n in ('attested','idle','queue_empty','exclusive',
-                    'no_tools','withdrawal_supported','turn_cancel_supported'))):
+                    'withdrawal_supported','turn_cancel_supported')) or
+                (binding.tool_mode == 'ENFORCED_NO_TOOLS' and observed.no_tools is not True) or
+                (binding.tool_mode == 'AUDIT_ONLY_TRIAL' and (observed.audit_coverage is not True or
+                 observed.risk_acceptance_digest != binding.risk_acceptance_digest))):
             return result(Decision.DENY,DecisionCode.STATE_MISMATCH)
     except Exception:
         return result(Decision.DENY,DecisionCode.INVALID_REQUEST)

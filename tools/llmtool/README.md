@@ -2876,3 +2876,34 @@ Targeted fixture checks use the own-root venv with bytecode writes disabled:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_codex_handoff_transport.py -v
 ```
+
+
+### Native Delta A1: source readiness, no Native Grant
+
+The public `codex_pickup_native.run_native_pickup` remains BLOCKED with zero
+callbacks. Release-pinned 0.162.1 codecs and private fixtures exercise four
+independent queue/client/item/turn IDs, bounded ASCII JSON echoes, complete
+observed tool classification, scoped counters and asynchronous author receipts.
+Only UserMessage, AgentMessage, Reasoning and Plan are non-tool items; all other
+release/unknown items, subagents and other Thread activity fail closed.
+
+Explicit NOTIFICATION layout 2 uses a new private file. Layout 1 and D1/provider
+files are retained, never migrated. Verified terminal/coverage/client exit can
+record the completed review independently of author receipt: missing receipt
+returns PARTIAL, never review resend. Ambiguous effects stay UNKNOWN/pending.
+Failed/Interrupted are terminal without review completion; InProgress is not
+terminal. Layout 2 allows no rearm/reconciliation/retry, even after known zero
+effect. The fixture origin is not native grant authentication.
+
+AUDIT_ONLY_TRIAL needs external risk/coverage pins and never fabricates no-tools
+capability. Full Access settings stay unchanged. File metadata/receipt records
+are local DATA, not proof of original Session ownership or actual notification.
+Production Host/transport registration, complete original event coverage, author
+waiter ownership, inference/context routing and cost acceptance remain gated.
+Native queue/RPC/inference/T1/F2/S2 are not exercised by these tests.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_codex_pickup_native.py
+```
+
+See [Delta A1 acceptance](WORKFLOW.md#native-delta-a1-source-acceptance).

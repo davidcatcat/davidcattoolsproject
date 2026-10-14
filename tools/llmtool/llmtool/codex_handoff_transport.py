@@ -19,7 +19,7 @@ from .task_lifecycle import utc_time
 
 DIMENSIONS = ('QUEUE_ACCEPTED','SESSION_DELIVERED','TURN_STARTED','REVIEW_COMPLETED','AUTHOR_RECEIPTED')
 _FIXTURE = object()
-_FAILURE_CODES = frozenset(('HANDOFF_NOT_READY', 'PICKUP_AUTHOR_RECEIPT_UNVERIFIED', 'PICKUP_CHILD_EXIT_UNKNOWN', 'PICKUP_CHILD_FAILED', 'PICKUP_CHILD_OUTPUT_LIMIT', 'PICKUP_CHILD_PROTOCOL_INVALID', 'PICKUP_CHILD_TIMEOUT', 'PICKUP_CLOCK_INVALID', 'PICKUP_COMPOSITION_UNAVAILABLE', 'PICKUP_CONSUME_DENIED', 'PICKUP_CUE_BINDING_INVALID', 'PICKUP_CUE_INVALID', 'PICKUP_ENDPOINT_INVALID', 'PICKUP_EVENT_LIMIT', 'PICKUP_EVENT_REPLAY', 'PICKUP_EVENT_SOURCE_INVALID', 'PICKUP_EVENT_UNVERIFIED', 'PICKUP_EXPIRED', 'PICKUP_FINALIZE_UNKNOWN', 'PICKUP_GRANT_INVALID', 'PICKUP_HOST_NOT_ADMITTED', 'PICKUP_IDENTITY_DRIFT', 'PICKUP_INPUT_INVALID', 'PICKUP_INTERRUPTED', 'PICKUP_INVOCATION_UNVERIFIED', 'PICKUP_LATE_VERDICT', 'PICKUP_NOT_AUTHORIZED', 'PICKUP_PACKET_DRIFT', 'PICKUP_QUEUE_UNKNOWN', 'PICKUP_READ_TIMEOUT', 'PICKUP_REARM_REQUIRED', 'PICKUP_REVIEWER_INVALID', 'PICKUP_RUNTIME_INVALID', 'PICKUP_SESSION_CHANGED', 'PICKUP_SESSION_PENDING', 'PICKUP_TOOL_EFFECT', 'PICKUP_TURN_UNCORRELATED', 'PICKUP_WITHDRAWAL_RACE', 'REVIEW_PACKET_TOO_LARGE', 'REVIEW_PAIR_NOT_APPROVED', 'REVIEW_PRIVACY_BLOCKED', 'REVIEW_VERDICT_INVALID'))
+_FAILURE_CODES = frozenset(('HANDOFF_NOT_READY', 'PICKUP_AUTHOR_RECEIPT_UNVERIFIED', 'PICKUP_CHILD_EXIT_UNKNOWN', 'PICKUP_CHILD_FAILED', 'PICKUP_CHILD_OUTPUT_LIMIT', 'PICKUP_CHILD_PROTOCOL_INVALID', 'PICKUP_CHILD_TIMEOUT', 'PICKUP_CLOCK_INVALID', 'PICKUP_COMPOSITION_UNAVAILABLE', 'PICKUP_CONSUME_DENIED', 'PICKUP_CUE_BINDING_INVALID', 'PICKUP_CUE_INVALID', 'PICKUP_ENDPOINT_INVALID', 'PICKUP_EVENT_LIMIT', 'PICKUP_EVENT_REPLAY', 'PICKUP_EVENT_SOURCE_INVALID', 'PICKUP_EVENT_UNVERIFIED', 'PICKUP_EXPIRED', 'PICKUP_FINALIZE_UNKNOWN', 'PICKUP_GRANT_INVALID', 'PICKUP_HOST_NOT_ADMITTED', 'PICKUP_IDENTITY_DRIFT', 'PICKUP_INPUT_INVALID', 'PICKUP_INTERRUPTED', 'PICKUP_INVOCATION_UNVERIFIED', 'PICKUP_LATE_VERDICT', 'PICKUP_NOT_AUTHORIZED', 'PICKUP_PACKET_DRIFT', 'PICKUP_QUEUE_UNKNOWN', 'PICKUP_READ_TIMEOUT', 'PICKUP_REARM_REQUIRED', 'PICKUP_REVIEWER_INVALID', 'PICKUP_RUNTIME_INVALID', 'PICKUP_SESSION_CHANGED', 'PICKUP_SESSION_PENDING', 'PICKUP_TOOL_EFFECT', 'PICKUP_TURN_UNCORRELATED', 'PICKUP_WITHDRAWAL_RACE', 'REVIEW_PACKET_TOO_LARGE', 'REVIEW_PAIR_NOT_APPROVED', 'REVIEW_PRIVACY_BLOCKED', 'REVIEW_VERDICT_INVALID','PICKUP_WIRE_LIMIT','PICKUP_COUNTER_DOMAIN','PICKUP_COVERAGE_UNVERIFIED','PICKUP_TURN_FAILED'))
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,7 @@ class HostEvent:
     packet_digest: str
     timestamp: int
     result_digest: str = ''
+    terminal_status: str = 'Completed'
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,10 @@ class PickupObservation:
     withdrawal_supported: bool
     cancel_supported: bool
     events: tuple = ()
+    coverage_complete: bool = False
+    coverage_digest: str = ""
+    terminal_coverage_digest: str = ""
+    child_exited: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,7 @@ class PickupGrant:
     turn_seconds: int = 120
     hard_cost_cap: bool = False
     unknown_usage_accepted: bool = True
+    receipt_seconds: int = 120
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,10 @@ def _run_fixture_pickup(ready, final, expect, services):
     first_counter = None
     last_utc = last_mono = None
     turn_deadline = None
+    review_finished = False
+    terminal_saved = False
+    domains_before = None
+    terminal_pin = None
     try:
         if type(services) is not _FixtureServices or services.marker is not _FIXTURE:
             reject('PICKUP_COMPOSITION_UNAVAILABLE')
@@ -163,6 +173,7 @@ def _run_fixture_pickup(ready, final, expect, services):
         if type(g) is not PickupGrant or type(g.binding) is not NotificationBinding or type(g.session) is not SessionPin:
             reject('PICKUP_COMPOSITION_UNAVAILABLE')
         b = g.binding
+        delta = s.ledger.notification_layout == 2 if type(s.ledger) is ReceiptLedger else False
         if (type(s.admission) is not NotificationDecision or
                 s.admission.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT or s.admission.binding != b):
             reject('PICKUP_NOT_AUTHORIZED')
@@ -172,7 +183,7 @@ def _run_fixture_pickup(ready, final, expect, services):
                 len(s.packet_input) > 1024*1024 or g.hard_cost_cap is not False or
                 g.unknown_usage_accepted is not True):
             reject('PICKUP_GRANT_INVALID')
-        for value, maximum in ((g.wait_seconds,600),(g.read_seconds,5),(g.poll_seconds,60),(g.turn_seconds,120)):
+        for value, maximum in ((g.wait_seconds,600),(g.read_seconds,5),(g.poll_seconds,60),(g.turn_seconds,120),(g.receipt_seconds,120)):
             _integer(value,minimum=1,maximum=maximum)
         if g.session.session_id != b.reviewer_session:
             reject('PICKUP_SESSION_CHANGED')
@@ -191,12 +202,26 @@ def _run_fixture_pickup(ready, final, expect, services):
         now,start = clocks()
         expires = min(b.expires_at,int(utc_time(g.approval.expires_at).timestamp()),now+g.wait_seconds)
         deadline = start+min(g.wait_seconds,expires-now)
-        if not b.not_before <= now < expires:
+        normal_deadline = deadline-(20 if delta else 0)
+        if not b.not_before <= now < expires or start >= normal_deadline:
             reject('PICKUP_EXPIRED')
         g.approval.validate(ready,final,expect,clock_utc(s.clock))
         # Rejected grants receive no Host/transport callbacks, including finally.
         admitted = True
         first_counter = s.host.invocations()
+        if delta:
+            from .codex_pickup_native import validate_domains
+            def domain_snapshot():
+                _,begin=clocks()
+                values=s.host.domains()
+                _,end=clocks()
+                if end-begin>g.read_seconds:reject("PICKUP_READ_TIMEOUT")
+                return values
+            domains_before = domain_snapshot()
+            validate_domains(domains_before,domains_before)
+            if (domains_before[0].source != g.session.counter_source or domains_before[0].generation != g.session.counter_generation or
+                    domains_before[0].run_id != b.task.run_id or domains_before[1].owner != b.reviewer_session or domains_before[2].owner != b.author_session):
+                reject("PICKUP_COUNTER_DOMAIN")
         def check_counter():
             c = s.host.invocations()
             if (type(c) is not InvocationSample or c.source != g.session.counter_source or
@@ -209,9 +234,9 @@ def _run_fixture_pickup(ready, final, expect, services):
             frame = s.host.observe()
             check_counter()
             now,mono = clocks()  # Always AFTER callbacks.
-            if not cleanup and (not b.not_before <= now < expires or mono >= deadline):
+            if not cleanup and (not b.not_before <= now < expires or mono >= normal_deadline):
                 reject('PICKUP_EXPIRED')
-            if not cleanup and turn_deadline is not None and mono >= turn_deadline:
+            if not cleanup and not review_finished and turn_deadline is not None and mono >= turn_deadline:
                 reject('PICKUP_LATE_VERDICT')
             if type(frame) is not PickupObservation or type(frame.sample) is not HostSample or frame.session != g.session:
                 reject('PICKUP_IDENTITY_DRIFT')
@@ -220,7 +245,8 @@ def _run_fixture_pickup(ready, final, expect, services):
             if (digest((frame.sample.pin,g.session.digest)) != b.host_pin or
                     frame.sample.base_sha != b.base_sha or frame.sample.tree_sha != b.tree_sha or
                     frame.sample.route_digest != b.route_digest or frame.sample.active is not True or
-                    any(getattr(frame,n) is not True for n in ('exclusive','no_tools','withdrawal_supported','cancel_supported')) or
+                    any(getattr(frame,n) is not True for n in ('exclusive','withdrawal_supported','cancel_supported')) or
+                    (b.tool_mode == 'ENFORCED_NO_TOOLS' and frame.no_tools is not True) or
                     (idle and (frame.idle is not True or frame.queue_empty is not True))):
                 reject('PICKUP_HOST_NOT_ADMITTED')
             reviewers = [a for a in expect.agents if a.session_id == b.reviewer_session]
@@ -238,15 +264,30 @@ def _run_fixture_pickup(ready, final, expect, services):
                         not b.not_before <= e.timestamp <= now or e.kind not in
                         ('DELIVERY','TURN_STARTED','TURN_COMPLETED','AUTHOR_RECEIPT','WITHDRAWN','TURN_CANCELLED','TOOL')):
                     reject('PICKUP_EVENT_UNVERIFIED')
-                _identifier(e.message_id)
+                if e.message_id: _identifier(e.message_id)
+                elif e.kind != "TOOL" or not e.turn_id: reject("PICKUP_EVENT_UNVERIFIED")
                 if e.turn_id: _identifier(e.turn_id)
-                if not cleanup and message is not None and e.message_id == message and e.kind == 'TOOL':
+                if not cleanup and message is not None and (e.message_id == message or (turn is not None and e.turn_id == turn)) and e.kind == 'TOOL':
                     reject('PICKUP_TOOL_EFFECT')
+            if delta:
+                if (frame.coverage_complete is not True or frame.coverage_digest != b.coverage_digest or frame.child_exited is not True):
+                    reject("PICKUP_COVERAGE_UNVERIFIED")
+                validate_domains(domains_before,domain_snapshot())
+                now,mono=clocks()
+                if not cleanup and (now>=expires or mono>=normal_deadline):reject("PICKUP_EXPIRED")
+                if not cleanup and not review_finished and turn_deadline is not None and mono>=turn_deadline:reject("PICKUP_LATE_VERDICT")
+                obs.validate(expect,obs.events,clock_utc(s.clock),mono)
+                if terminal_pin is not None:
+                    terminals=[e for e in frame.events if e.kind=="TURN_COMPLETED" and e.message_id==message and e.turn_id==turn]
+                    if len(terminals)!=1 or (terminals[0].terminal_status,terminals[0].timestamp,frame.terminal_coverage_digest)!=terminal_pin:
+                        reject("PICKUP_COVERAGE_UNVERIFIED")
             return frame
 
         def bounded(callback):
-            _,begin = clocks(); result = callback(); _,end = clocks()
-            if end-begin > g.read_seconds: reject('PICKUP_READ_TIMEOUT')
+            _,begin = clocks()
+            if delta and begin >= deadline: reject("PICKUP_EXPIRED")
+            result = callback(); _,end = clocks()
+            if (delta and end >= deadline) or end-begin > g.read_seconds: reject('PICKUP_READ_TIMEOUT')
             return result
 
         # Idle and empty are observed together, not inferred from session age.
@@ -279,7 +320,8 @@ def _run_fixture_pickup(ready, final, expect, services):
             packet.messages()
             frame = observe(idle=True)
             attestation = NotificationObserved(b.digest,b.host_pin,True,frame.idle,frame.queue_empty,
-                frame.exclusive,frame.no_tools,frame.withdrawal_supported,frame.cancel_supported)
+                frame.exclusive,frame.no_tools,frame.withdrawal_supported,frame.cancel_supported,
+                delta and frame.coverage_complete,b.risk_acceptance_digest)
             decision = decide_notification(b,issuer=s.issuer,observed=attestation)
             if decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT: reject('PICKUP_NOT_AUTHORIZED')
             observe(idle=True)  # Issuer callback time/revocation cannot renew the pin.
@@ -300,7 +342,7 @@ def _run_fixture_pickup(ready, final, expect, services):
             s.ledger.record_notification_ids(receipt,message)
             phases['QUEUE_ACCEPTED'] = 'PASS'
             if ack.child_exited is not True: reject('PICKUP_CHILD_EXIT_UNKNOWN')
-            turn_deadline = deadline
+            turn_deadline = normal_deadline
             for _ in range(128):
                 frame = observe()
                 events = [e for e in frame.events if e.message_id == message]
@@ -310,18 +352,31 @@ def _run_fixture_pickup(ready, final, expect, services):
                 if len(delivered)>1 or len(starts)>1: reject('PICKUP_EVENT_REPLAY')
                 if delivered: phases['SESSION_DELIVERED'] = 'PASS'
                 if starts:
-                    if not delivered or not starts[0].turn_id or starts[0].timestamp < delivered[0].timestamp:
+                    if not delivered or not starts[0].turn_id or (not delta and starts[0].timestamp < delivered[0].timestamp):
                         reject('PICKUP_TURN_UNCORRELATED')
                     if turn is not None and turn != starts[0].turn_id: reject('PICKUP_TURN_UNCORRELATED')
                     turn = starts[0].turn_id
                     s.ledger.record_notification_ids(receipt,message,turn)
                     phases['TURN_STARTED'] = 'PASS'
+                    if any(e.kind == 'TOOL' and (e.message_id == message or e.turn_id == turn) for e in frame.events):
+                        reject('PICKUP_TOOL_EFFECT')
                     now,mono = clocks()
                     turn_deadline = min(turn_deadline,mono+g.turn_seconds-(now-starts[0].timestamp))
                 ends = [e for e in events if e.kind == 'TURN_COMPLETED']
                 if ends:
                     if len(ends)!=1 or turn is None or ends[0].turn_id != turn or ends[0].timestamp < starts[0].timestamp:
                         reject('PICKUP_TURN_UNCORRELATED')
+                    if delta:
+                        terminal_pin=(ends[0].terminal_status,ends[0].timestamp,frame.terminal_coverage_digest)
+                    if delta and ends[0].terminal_status != 'Completed':
+                        if ends[0].terminal_status not in ('Interrupted','Failed'): reject('PICKUP_COVERAGE_UNVERIFIED')
+                        _hex(frame.terminal_coverage_digest)
+                        if not s.ledger.finish_notification_turn(receipt,terminal_status=ends[0].terminal_status,
+                                coverage_digest=frame.terminal_coverage_digest,child_exited=frame.child_exited):reject('PICKUP_FINALIZE_UNKNOWN')
+                        terminal_saved=True
+                        completed=True
+                        outcome=_output('PICKUP_TURN_FAILED')
+                        break
                     verdict_text = bounded(lambda:s.transport.verdict(turn))
                     now,mono = clocks()
                     if now >= expires or mono >= turn_deadline: reject('PICKUP_LATE_VERDICT')
@@ -329,17 +384,42 @@ def _run_fixture_pickup(ready, final, expect, services):
                     verdict = parse_verdict(verdict_text,packet)
                     status = verdict_status(verdict)
                     if status != 'BLOCKED': phases['REVIEW_COMPLETED'] = 'PASS'
-                    # BLOCKED can be delivered as findings, never marked reviewed.
-                    bounded(lambda:s.transport.author_receipt(message,digest(verdict)))
-                    frame = observe()
-                    receipts = [e for e in frame.events if e.kind=='AUTHOR_RECEIPT' and e.message_id==message and e.turn_id==turn and e.result_digest==digest(verdict)]
-                    if len(receipts)!=1: reject('PICKUP_AUTHOR_RECEIPT_UNVERIFIED')
-                    phases['AUTHOR_RECEIPTED'] = 'PASS'
+                    # Durable review completion is distinct from author receipt.
                     label = 'APPROVE' if status=='PASS' else status
-                    if not s.ledger.finalize_notification(receipt,'EFFECT_DONE',review_status=label,verdict_digest=digest(verdict)):
+                    if delta:
+                        frame=observe()
+                        _hex(frame.terminal_coverage_digest)
+                        if not s.ledger.finish_notification_turn(receipt,terminal_status='Completed',
+                                coverage_digest=frame.terminal_coverage_digest,child_exited=frame.child_exited,
+                                review_status=label,verdict_digest=digest(verdict)):reject('PICKUP_FINALIZE_UNKNOWN')
+                        review_finished=True
+                        terminal_saved=True
+                    bounded(lambda:s.transport.author_receipt(message,digest(verdict)))
+                    receipt_deadline=min(normal_deadline,s.clock.monotonic()+g.receipt_seconds)
+                    found=False
+                    for _ in range(128 if delta else 1):
+                        if delta and s.clock.monotonic() >= receipt_deadline: break
+                        frame=observe()
+                        receipts=[e for e in frame.events if e.kind=='AUTHOR_RECEIPT' and e.message_id==message and e.turn_id==turn and e.result_digest==digest(verdict)]
+                        if len(receipts)>1:reject('PICKUP_EVENT_REPLAY')
+                        if receipts:
+                            found=True;break
+                        left=receipt_deadline-s.clock.monotonic()
+                        if left<=0:break
+                        if delta:s.clock.wait(min(5,left))
+                    if not found:
+                        if not delta:reject('PICKUP_AUTHOR_RECEIPT_UNVERIFIED')
+                        completed=True
+                        outcome=_output('PICKUP_AUTHOR_RECEIPT_UNVERIFIED','PARTIAL')
+                        break
+                    phases['AUTHOR_RECEIPTED']='PASS'
+                    if delta:
+                        if not s.ledger.record_author_receipt(receipt,verdict_digest=digest(verdict),
+                                receipt_digest=digest(receipts[0].__dict__)):reject('PICKUP_FINALIZE_UNKNOWN')
+                    elif not s.ledger.finalize_notification(receipt,'EFFECT_DONE',review_status=label,verdict_digest=digest(verdict)):
                         reject('PICKUP_FINALIZE_UNKNOWN')
-                    completed = True
-                    outcome = _output('PICKUP_FIXTURE_RESULT',status)
+                    completed=True
+                    outcome=_output('PICKUP_FIXTURE_RESULT',status)
                     break
                 _,mono = clocks()
                 if mono >= turn_deadline: reject('PICKUP_EXPIRED')
@@ -350,8 +430,15 @@ def _run_fixture_pickup(ready, final, expect, services):
         # Only internal fixed code namespaces; no exception text is returned.
         if type(code) is not str or code not in _FAILURE_CODES: code='PICKUP_INPUT_INVALID'
         outcome = _output(code)
+        if review_finished:
+            if code in ('PICKUP_AUTHOR_RECEIPT_UNVERIFIED','PICKUP_READ_TIMEOUT','PICKUP_EXPIRED','PICKUP_LATE_VERDICT'):
+                completed=True
+                outcome=_output(code,'PARTIAL')
+            else:
+                try: s.ledger.invalidate_notification_completion(receipt)
+                except Exception: outcome=failure(outcome,"PICKUP_FINALIZE_UNKNOWN")
     finally:
-        if admitted and consumed and not completed:
+        if admitted and consumed and not completed and not review_finished:
             resolved = False
             try:
                 if not started:
@@ -362,7 +449,7 @@ def _run_fixture_pickup(ready, final, expect, services):
                     frame = observe(cleanup=True)
                     ids = [e for e in frame.events if e.message_id==message and e.kind=='TURN_STARTED']
                     if len(ids)==1 and ids[0].turn_id: turn=ids[0].turn_id
-                    ended = any(e.message_id==message and e.kind=='TURN_COMPLETED' and e.turn_id==turn
+                    ended = any(e.message_id==message and e.kind=='TURN_COMPLETED' and (not delta or e.terminal_status in ('Completed','Interrupted','Failed')) and e.turn_id==turn
                                 for e in frame.events)
                     if turn and not ended:
                         bounded(lambda:services.transport.cancel(message,turn))
@@ -395,6 +482,36 @@ def _run_fixture_pickup(ready, final, expect, services):
                 if type(last) is not InvocationSample or first_counter is None or last!=first_counter:
                     outcome=failure(outcome,'PICKUP_INVOCATION_UNVERIFIED')
             except Exception: outcome=failure(outcome,'PICKUP_INVOCATION_UNVERIFIED')
+            if delta and domains_before is not None:
+                try:
+                    # Final cleanup can reveal a buffered original tool/terminal
+                    # contradiction. Historical READY freshness is not renewed.
+                    _,begin=clocks()
+                    final_frame=services.host.observe()
+                    _,end=clocks()
+                    if end-begin>g.read_seconds:reject('PICKUP_READ_TIMEOUT')
+                    if (type(final_frame) is not PickupObservation or final_frame.session != g.session or
+                            final_frame.coverage_complete is not True or final_frame.coverage_digest != b.coverage_digest or
+                            final_frame.child_exited is not True or type(final_frame.events) is not tuple or len(final_frame.events)>128 or
+                            digest((final_frame.sample.pin,g.session.digest)) != b.host_pin):
+                        reject('PICKUP_COVERAGE_UNVERIFIED')
+                    for e in final_frame.events:
+                        if (type(e) is not HostEvent or e.source != g.session.event_source or e.source_digest != g.session.event_source_digest or
+                                e.session_id != (b.author_session if e.kind=='AUTHOR_RECEIPT' else b.reviewer_session) or e.packet_digest != b.packet_digest):
+                            reject('PICKUP_COVERAGE_UNVERIFIED')
+                        if e.kind=='TOOL':reject('PICKUP_TOOL_EFFECT')
+                    if terminal_pin is not None:
+                        ends=[e for e in final_frame.events if e.kind=='TURN_COMPLETED' and e.message_id==message and e.turn_id==turn]
+                        if len(ends)!=1 or (ends[0].terminal_status,ends[0].timestamp,final_frame.terminal_coverage_digest)!=terminal_pin:
+                            reject('PICKUP_COVERAGE_UNVERIFIED')
+                    validate_domains(domains_before,domain_snapshot())
+                except Exception as final_error:
+                    final_code=getattr(final_error,'review_code','PICKUP_COUNTER_DOMAIN')
+                    if final_code not in _FAILURE_CODES:final_code='PICKUP_COUNTER_DOMAIN'
+                    outcome=failure(outcome,final_code)
+                    if terminal_saved:
+                        try:s.ledger.invalidate_notification_completion(receipt)
+                        except Exception:outcome=failure(outcome,'PICKUP_FINALIZE_UNKNOWN')
     outcome['dimensions']=phases
     if outcome['status']=='BLOCKED' and not outcome['failure_codes']: outcome['failure_codes']=[outcome['code']]
     return outcome

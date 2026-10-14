@@ -929,6 +929,43 @@ unverified; NATIVE_PICKUP_GRANT is NOT_AUTHORIZED. T1 HOLD, F2/S2 restrictions a
 ai-loop fallback remain unchanged. Unresolved pending records need separately
 trusted reconciliation, never deletion, auto-retry or an invented supervisor.
 
+#### Native Delta A1 source acceptance
+
+[Accepted source pins](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6172165502)
+fix Codex 0.162.1 protocol commit `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`.
+Source/fake PASS does not grant Native execution. Public factories remain
+unavailable; neither JSON, dataclass construction nor a private fixture issuer
+constitutes production Host authentication.
+
+| Pin | Required deterministic source behavior |
+| --- | --- |
+| P1 / Q1 | Match message OR bound turn; retain mapping-before-tool checks. Only UserMessage, AgentMessage, Reasoning and Plan are known non-tool. All other 12 release items, unknown items, subagents/other Threads and incomplete coverage fail closed |
+| N2 | Complete add/list/UserMessage echoes, including JSON envelope/ASCII/non-BMP expansion, remain at most64KiB. Before-add conservative sizing rejects oversized input without dispatch. Packet256KiB is a maximum, not a guarantee of fitting an echoed response |
+| N3 | Completed requires strict verdict, original terminal, full coverage and actual child exit; Failed/Interrupted are terminal without review completion. InProgress/unknown terminal/partial coverage or missing exit never clear pending |
+| P3 | One notification followed by bounded async original-author receipt observation. Durable review and receipt are independent. Confirmed completed review without receipt is PARTIAL, never closed-loop PASS; no repeat review/notification. Late contradictory tools invalidate completion to UNKNOWN/pending |
+| P5 | Fixed Host-owned worker-provider / Reviewer-turn / Claude-author domains retain identity/run/generation/entrypoint coverage. Worker delta0; legal Reviewer/author inference is separate. UNKNOWN usage is never zero or a hard cost cap |
+| Layout | New explicitly selected NOTIFICATION v2 file only; preserve v1, D1 and provider schemas/UTC day/cap/recovery. No migration, default path or second store |
+| P2/P4 | First fresh object/receipt/dispatch only. All retries/rearm/reconciliation remain STOP/PRESERVE, including expired/unconsumed/UNKNOWN attempts |
+
+Overall600s, review120s, receipt120s and read/client5s caps can only shrink.
+Delta fixtures reserve final20s inside overall expiry for cleanup; callbacks and
+pages do not renew deadlines. Synthetic owned client tests use real nonblocking
+pipes/EOF/actual wait and deadline-aware owned group termination, never the old
+unbounded terminate.wait. A missing actual exit remains NOT_VERIFIED/UNKNOWN.
+Private synthetic sockets are distinct from original Codex/Claude endpoints.
+The existing collector's developer-root/main checks are unchanged; explicit
+HostRecordPin observes static exact pinned metadata and returns digests only,
+never claims fresh CLI ownership from a file, UUID, PID or caller declaration.
+
+ENFORCED_NO_TOOLS remains an unproven native capability. AUDIT_ONLY_TRIAL is a
+separate explicitly accepted risk mode, not prevention or OS isolation. Before
+any Native Grant, N1 packet persistence in the Full Access Session/context, N4
+experimental opt-in/client-local behavior, dual inference/context/data routes,
+UNKNOWN cost and original Claude owned waiter/notification/ack evidence require
+independent acceptance. No Session cloning, transcript/TTY injection, Host
+installation, daemon, supervisor, T1/F2/S2 or automatic merge is authorized.
+Full Access stays unchanged; ai-loop remains fallback.
+
 #### Acceptance matrix and dependencies
 
 All rows below are **future tests / NOT_VERIFIED**, not results of this docs PR.

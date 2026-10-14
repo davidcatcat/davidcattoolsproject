@@ -868,3 +868,40 @@ class NotificationLedgerTests(unittest.TestCase):
         self.t.binding=replace(self.t.binding,rearm_from=receipt.nonce,grant_digest='e'*64,attempt_id='f'*32)
         self.t.issuer.binding=self.t.binding
         self.assertIsNotNone(self.issue())
+
+
+class NativeDeltaLedgerTests(unittest.TestCase):
+    def setUp(self):
+        from test_codex_handoff_transport import DeltaTrial
+        self.t=DeltaTrial()
+    def tearDown(self):self.t.close()
+    def consumed(self):
+        t=self.t;o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
+        receipt=t.ledger.issue_notification(p.decide_notification(t.binding,issuer=t.issuer,observed=o),ttl_seconds=200)
+        self.assertTrue(t.ledger.consume_notification(receipt,issuer=t.issuer,observed=o));self.assertTrue(t.ledger.begin_notification(receipt));t.ledger.record_notification_ids(receipt,'m','t');return receipt
+    def test_layout_v2_never_migrates_v1_and_cross_kind_rejects(self):
+        t=self.t;before=Path(t.path).read_bytes()
+        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(t.path,clock=t.j.clock.utc,kind='NOTIFICATION',creation_nonce=t.binding.ledger_nonce)
+        self.assertEqual(Path(t.path).read_bytes(),before)
+        self.assertEqual(t.ledger._db.execute('SELECT layout_version FROM ledger_meta').fetchone()[0],2)
+        self.assertEqual(t.ledger._db.execute('PRAGMA user_version').fetchone()[0],l.SCHEMA_VERSION)
+    def test_review_completion_receipt_and_late_unknown_are_forward_only(self):
+        receipt=self.consumed();t=self.t
+        self.assertTrue(t.ledger.finish_notification_turn(receipt,terminal_status='Completed',coverage_digest='c'*64,child_exited=True,review_status='APPROVE',verdict_digest='d'*64))
+        state=t.ledger.notification_completion(receipt);self.assertEqual(state['author_receipt_status'],'NOT_VERIFIED');self.assertFalse(state['pending'])
+        self.assertTrue(t.ledger.record_author_receipt(receipt,verdict_digest='d'*64,receipt_digest='e'*64))
+        self.assertFalse(t.ledger.record_author_receipt(receipt,verdict_digest='d'*64,receipt_digest='e'*64))
+        self.assertTrue(t.ledger.invalidate_notification_completion(receipt));self.assertTrue(t.ledger.notification_completion(receipt)['pending'])
+        self.assertFalse(t.ledger.finish_notification_turn(receipt,terminal_status='Completed',coverage_digest='c'*64,child_exited=True,review_status='APPROVE',verdict_digest='d'*64))
+    def test_n3_terminal_and_no_false_completion_or_exit(self):
+        receipt=self.consumed();t=self.t
+        for status,exit in (('InProgress',True),('Failed',False),('Completed',True)):
+            with self.assertRaises(l.LedgerError):t.ledger.finish_notification_turn(receipt,terminal_status=status,coverage_digest='c'*64,child_exited=exit)
+        self.assertTrue(t.ledger.notification_pending(t.binding.reviewer_session))
+        self.assertTrue(t.ledger.finish_notification_turn(receipt,terminal_status='Failed',coverage_digest='c'*64,child_exited=True))
+        state=t.ledger.notification_completion(receipt);self.assertEqual(state['terminal_status'],'Failed');self.assertIsNone(state['review_status']);self.assertFalse(state['pending'])
+    def test_p2_p4_never_consumed_or_unknown_no_rearm(self):
+        receipt=self.consumed();t=self.t;t.ledger.finalize_notification(receipt,'EFFECT_UNKNOWN')
+        t.binding=replace(t.binding,rearm_from=receipt.nonce,grant_digest='e'*64,attempt_id='e'*32);t.issuer.binding=t.binding
+        o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
+        with self.assertRaises(l.LedgerError):t.ledger.issue_notification(p.decide_notification(t.binding,issuer=t.issuer,observed=o),ttl_seconds=100)
