@@ -284,6 +284,36 @@ class ProviderTests(unittest.TestCase):
         reply = self.answer(obj)
         self.assertEqual(set(reply.metadata), {"elapsed_seconds"})
 
+    def test_success_usage_is_a_complete_triplet_or_absent(self):
+        """C1B: success usage uses the P1 validator; partial/inconsistent is unknown, never partial."""
+        from llmtool.diagnostics_runtime import RunContext
+        fields = {'prompt_tokens', 'completion_tokens', 'total_tokens'}
+        for usage, expected in (
+                ({'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25},
+                 {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25}),
+                ({'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
+                 {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
+                ({'prompt_tokens': 20}, None),
+                ({'prompt_tokens': 20, 'completion_tokens': 5}, None),
+                ({'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 99}, None),
+                ({'prompt_tokens': 20.0, 'completion_tokens': 5, 'total_tokens': 25}, None),
+                ({'prompt_tokens': -1, 'completion_tokens': 1, 'total_tokens': 0}, None),
+                ({'prompt_tokens': 10 ** 13, 'completion_tokens': 0, 'total_tokens': 10 ** 13}, None),
+                ({'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25, 'raw': 'X'},
+                 {'prompt_tokens': 20, 'completion_tokens': 5, 'total_tokens': 25})):
+            with self.subTest(usage=usage):
+                body = success()
+                body['usage'] = usage
+                reply = self.answer(body)
+                self.assertEqual(reply.content, 'final answer')  # never turned into a failure
+                got = {k: v for k, v in reply.metadata.items() if k in fields}
+                self.assertEqual(got, expected or {})
+                run = RunContext(d.DiagnosticMode.VERBOSE)
+                run.response(reply.metadata)
+                event = next(e for e in run.events if e.type == d.EventType.PROVIDER_RESPONSE)
+                self.assertEqual(event.data['token_usage_available'], expected is not None)
+        self.assertEqual(self.open.call_count, 9)  # one request per answer, never a retry
+
     def test_metadata_masks_api_key(self):
         self.client.key = "test-secret"
         obj = success()

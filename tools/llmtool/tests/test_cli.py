@@ -202,6 +202,56 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), capture)
         self.assertEqual(self.server.requests, [])
 
+    def write_worker_config(self):
+        config = self.home / '.config/llmtool/config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('active_provider: decoy\nproviders:\n  decoy:\n    base_url: ' + self.base_url +
+                          '\n    model: decoy-model\n  company-test:\n    base_url: ' + self.base_url +
+                          '\n    model: PRIVATE_MODEL_NAME\n    timeout_seconds: 60\n')
+        return config
+
+    def test_test_triage_worker_public_live_route_is_blocked_with_zero_requests(self):
+        from test_test_output_excerpts import UNIT_FAILURE
+        config = self.write_worker_config()
+        before = config.read_bytes()
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        self.env['LLMTOOL_PROVIDER'] = 'decoy'
+        result = self.run_cli('test-triage-worker', '--file', str(path), '--exit-code', '1',
+                              '--profile', 'company-test', '--json')
+        self.assert_failure(result)
+        self.assertEqual(result.stderr, b'llmtool: test-triage-worker: live company route is not '
+                                        b'authorized; details omitted\n')
+        for marker in (b'PRIVATE_', self.base_url.encode(), b'company-test', b'Traceback'):
+            self.assertNotIn(marker, result.stdout + result.stderr)
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(path.read_bytes(), UNIT_FAILURE)
+
+    def test_test_triage_worker_local_rejections_are_fixed_and_leak_free(self):
+        from test_test_output_excerpts import UNIT_FAILURE
+        self.write_worker_config()
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        cases = ((UNIT_FAILURE, 'PRIVATE_MISSING_PROFILE', b'explicit profile unavailable'),
+                 (b'api_key=PRIVATE_SECRET_VALUE\n' + UNIT_FAILURE, 'company-test',
+                  b'source contains sensitive-content indicators'),
+                 (b'opaque output\n', 'company-test', b'selection incomplete'))
+        for raw, profile, category in cases:
+            with self.subTest(category=category):
+                path.write_bytes(raw)
+                result = self.run_cli('test-triage-worker', '--file', str(path), '--exit-code', '1',
+                                      '--profile', profile, '--json')
+                self.assert_failure(result)
+                self.assertIn(category, result.stderr)
+                self.assertNotIn(b'PRIVATE_', result.stdout + result.stderr)
+        for extra in ((), ('--profile', 'company-test'), ('--json',)):
+            result = self.run_cli('test-triage-worker', '--file', str(path), '--exit-code', '1', *extra)
+            self.assert_failure(result)
+        help_result = self.run_cli('test-triage-worker', '--help')
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn(b'--profile', help_result.stdout)
+        self.assertEqual(self.server.requests, [])
+
     def test_test_excerpts_arguments_help_and_bounded_output(self):
         from test_test_output_excerpts import UNIT_FAILURE
         path = (self.cwd / 'capture.log').resolve()

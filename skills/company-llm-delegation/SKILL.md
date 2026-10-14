@@ -97,6 +97,27 @@ Until a deterministic real-format selector and Company-only Phase 0 are implemen
 ordinary `test-triage` remains useful for bounded triage but is **UNVALIDATED for
 token-saving claims**.
 
+## C1B test-triage Worker (source/fake only)
+
+`llmtool test-triage-worker --file … --exit-code … --profile … --json` (C1B, Issue #120)
+is a bounded advisory Worker over production `test-excerpts`. Status: **source and fake
+tests only; the public live route is BLOCKED** until a separately accepted Company-only
+Phase 0 grant. It does not reuse the frozen L01 selector or its savings claims.
+
+- **Deterministic first.** The selector must be COMPLETE and every failure ID must have
+  a selected excerpt. Otherwise there are zero requests.
+- **Counts come from the selector.** Records, occurrences and unique IDs are computed
+  there; the model only classifies each ID with refs bound to that ID, and any model
+  totals or summaries are rejected.
+- **One call.** Explicit `openai-compatible` profile only (no active/default fallback),
+  one request, no retry or fallback.
+- **Usage.** It is a complete gateway-reported triplet or `UNKNOWN`, never 0.
+- **Advisory.** Output is `ADVISORY_WORKER_OUTPUT`: not review, QA, Security, merge,
+  egress or budget authority. It never turns a failed capture into a pass.
+- **Not measured.** Quality, fidelity and savings stay UNKNOWN until Phase 0.
+- **Exit status.** While the live route is blocked the command exits 1 after local
+  checks, never 0, so a failed capture is never hidden.
+
 ## Runtime skill selection
 
 Use the smallest applicable llmtool runtime skill:

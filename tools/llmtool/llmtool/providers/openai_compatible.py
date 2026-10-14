@@ -224,10 +224,8 @@ class OpenAICompatibleClient:
         model = obj.get("model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_./:-]{1,128}", model):
             metadata["model"] = "[redacted]" if self.key and self.key in model else model
-        usage = obj.get("usage")
-        if isinstance(usage, dict):
-            for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
-                value = usage.get(field)
-                if type(value) is int and 0 <= value <= 10**12:
-                    metadata[field] = value
+        # Success usage is the same complete, validated triplet as P1 failure
+        # usage; partial or inconsistent usage stays unknown, never partial or 0.
+        if provider_usage is not None:
+            metadata.update(provider_usage)
         return Reply(content, metadata)
