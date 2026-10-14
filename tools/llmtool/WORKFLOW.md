@@ -865,6 +865,31 @@ verified owned handles. Unreaped/unknown child, failed cleanup or residual
 worker makes the native trial fail and preserves evidence; no PID guessing,
 peer-session kill or historical-process cleanup.
 
+#### Fake-only source preparation: D1–D4 acceptance
+
+The accepted [FAKE-A1 source contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6164823204)
+permits only a private synchronous adapter and fixture-owned host/transport/claim
+seams. It installs no worker, queue or notification ledger. `ReceiptLedger`
+D1/provider layouts are unchanged; production handoff composition is unavailable.
+Fake claims exercise CONSUMED -> EFFECT_DONE/EFFECT_UNKNOWN and retain reviewed
+objects across adapter instances, including new comment/run IDs. A fake success
+always retains runtime NOT_VERIFIED and authorized=false.
+
+| Additional acceptance | Required fake oracle / native limitation |
+| --- | --- |
+| D1: CLI update or restart, same Session | Explicit externally pinned generation re-arm, fresh host observation and replay suppression; no automatic worker resurrection |
+| D1: Session ID changed | BLOCKED under the old external binding; new registration cannot erase historical authorship or permit self-review |
+| D2: reviewer turn and late result | Separate wait/reviewer/grant deadlines; earliest expiry wins. Late result is historical/UNKNOWN, without receipt, PASS or renewed TTL |
+| D3: evidence grading | Fake fixtures and both CLI authors' own observations are not independently accepted native process/delivery evidence |
+| D4: zero model calls | Independently composed fake host lifecycle counter/source/generation sampled before and after; missing, tampered or changed counter fails closed. Worker self-report is insufficient; token usage stays UNKNOWN |
+
+The fake host/task grant can only shorten wait600s, poll60s, read5s and reviewer120s
+limits. Callback elapsed times and UTC/monotonic agreement are checked; this is
+cooperative simulated time, not an OS timeout or containment of arbitrary Python
+callbacks. The adapter consumes at most128 bounded cues, with existing packet,
+verdict, source, depth and privacy limits. Real notification, durable production
+claim composition, native identity/tools and owned-process exit remain gated.
+
 #### Acceptance matrix and dependencies
 
 All rows below are **future tests / NOT_VERIFIED**, not results of this docs PR.

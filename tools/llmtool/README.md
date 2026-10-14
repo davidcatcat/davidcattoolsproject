@@ -2820,3 +2820,33 @@ definition trust are installed by these source changes.
 This local-only development needs no company VPN. Before any separately
 authorized real company LLM call, remind the Owner to connect the corporate
 VPN; it may block public documentation, so do not request it for local checks.
+
+
+### S1b fake-only handoff preparation (Issue #120)
+
+`llmtool.task_handoff._run_fake_handoff` is a private synchronous fixture seam,
+not a CLI command or production queue. It reuses TaskContract event replay,
+S1b paired packet construction and strict Security/Functional verdict parsing.
+Externally pinned fake host observations precede notification and consumption;
+fixture claims precede effects, retain replay state and never resend an unknown
+notification. Only both APPROVE verdicts yield fake PASS. Session generation
+changes require explicit re-arm; changed Session IDs remain BLOCKED. Expired
+review results remain historical/UNKNOWN and cannot notify the author.
+
+Zero model calls require the fixture host's lifecycle counter evidence, not the
+worker's claim. Fake PASS still means runtime NOT_VERIFIED, authorized=false,
+and token usage UNKNOWN. The shipped handoff factory is unavailable. No daemon,
+process, sleep, Git mutation, real queue, provider, Host installation or network
+poller is implemented. Fake callback deadlines are checked after return and do
+not enforce OS isolation. Fixture claim storage is not a production ledger.
+
+Run the deterministic journey and negative tests from the registered root with
+its own venv, preserving bytecode inventories:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_task_handoff.py -v
+```
+
+See [D1–D4 and native gates](WORKFLOW.md#fake-only-source-preparation-d1d4-acceptance).
+True cross-CLI auto-handoff, T1/native measurement and S2/F2 remain unverified or
+unauthorized under their existing contracts; this fixture does not enable them.
