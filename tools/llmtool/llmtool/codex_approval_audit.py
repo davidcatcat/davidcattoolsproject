@@ -562,6 +562,221 @@ def _path_rules(paths, writes, policy):
     return results
 
 
+# sort/uniq/sed only read unless a documented option or sed command names an
+# output file. Parse GNU getopt-style options (short clusters, attached or next
+# values, unique long prefixes) for these forms only; any other spelling of a
+# write, exec or script-file option is unsupported, never ROUTINE.
+_FILTER_SHORT = {  # program: (flag letters, {value letter: role or None})
+    'sort': ('bcCdfghiMmnRrsuVz', {'k': None, 'o': 'write', 't': None, 'S': None, 'T': 'write'}),
+    'uniq': ('cdDiuz', {'f': None, 's': None, 'w': None}),
+    'sed': ('nErsuz', {'e': 'script', 'f': 'script-file', 'i': 'in-place', 'l': None}),
+}
+_FILTER_LONG = {  # program: {name: (requires a value, role or None)}
+    'sort': dict({n: (False, None) for n in (
+        'ignore-leading-blanks', 'dictionary-order', 'ignore-case', 'general-numeric-sort',
+        'ignore-nonprinting', 'month-sort', 'human-numeric-sort', 'numeric-sort', 'random-sort',
+        'reverse', 'version-sort', 'check', 'debug', 'merge', 'stable', 'unique', 'zero-terminated')},
+        **{n: (True, None) for n in ('random-source', 'sort', 'batch-size', 'files0-from', 'key',
+                                     'buffer-size', 'field-separator', 'parallel')},
+        output=(True, 'write'), **{'temporary-directory': (True, 'write'),
+                                   'compress-program': (True, 'exec')}),
+    'uniq': dict({n: (False, None) for n in ('count', 'repeated', 'all-repeated', 'ignore-case',
+                                             'unique', 'zero-terminated', 'group')},
+                 **{n: (True, None) for n in ('skip-fields', 'skip-chars', 'check-chars')}),
+    'sed': dict({n: (False, None) for n in (
+        'null-data', 'zero-terminated', 'quiet', 'silent', 'regexp-extended', 'separate',
+        'unbuffered', 'debug', 'posix', 'sandbox', 'follow-symlinks')},
+        expression=(True, 'script'), file=(True, 'script-file'), **{'in-place': (False, 'in-place'),
+                                                                     'line-length': (True, None)}),
+}
+_SED_LINE = re.compile(r'[0-9]+|\$')
+_SED_STD = ('/dev/stdout', '/dev/stderr')
+
+
+def _filter_options(program, args):
+    """Return ([(role, value)], operands, supported) for one sort/uniq/sed argv."""
+    letters, values = _FILTER_SHORT[program]
+    longs = _FILTER_LONG[program]
+    roles, operands, i = [], [], 0
+    while i < len(args):
+        arg = args[i]
+        i += 1
+        if arg == '--':
+            operands += args[i:]
+            break
+        if not arg.startswith('-') or arg == '-':
+            operands.append(arg)
+            continue
+        if operands and program == 'uniq':
+            return roles, operands, False  # GNU permutes; BSD treats it as an operand.
+        if arg.startswith('--'):
+            name, eq, value = arg[2:].partition('=')
+            names = [n for n in longs if n == name] or [n for n in longs if name and n.startswith(name)]
+            if len(names) != 1:
+                return roles, operands, False
+            required, role = longs[names[0]]
+            if required and not eq:
+                if i == len(args):
+                    return roles, operands, False
+                value, i = args[i], i + 1
+            if role:
+                roles.append((role, value))
+            continue
+        for j, letter in enumerate(arg[1:], 2):
+            if letter in values:
+                value = arg[j:]
+                if letter == 'i':  # GNU: attached suffix only; BSD may read the next argument.
+                    value = value or None
+                elif not value:
+                    if i == len(args):
+                        return roles, operands, False
+                    value, i = args[i], i + 1
+                if values[letter]:
+                    roles.append((values[letter], value))
+                break
+            if letter not in letters:
+                return roles, operands, False
+    return roles, operands, True
+
+
+def _sed_end(script, i, delim):
+    """Next unescaped delimiter; None at a newline or bracket expression."""
+    while i < len(script):
+        if script[i] == '\\':
+            i += 2
+            continue
+        if script[i] == delim:
+            return i
+        if script[i] in '\n[':
+            return None
+        i += 1
+    return None
+
+
+def _sed_address(script, i):
+    if script.startswith('/', i):
+        end = _sed_end(script, i + 1, '/')
+        return None if end is None else end + 1
+    match = _SED_LINE.match(script, i)
+    return match.end() if match else i
+
+
+def _sed_blank(script, i):
+    while i < len(script) and script[i] in ' \t':
+        i += 1
+    return i
+
+
+def _sed_writes(script):
+    """`w`/`W FILE` and `s///w FILE` targets; None outside the supported subset.
+
+    Supported: optional `N`, `$` or `/regex/` address (or a range of two),
+    optional `!`, then `p`, `d`, `=`, `q[N]`, `s` (flags g, p, i, I, m, M, digits,
+    w) or `w`/`W`, separated by `;` or newlines. A file name runs to end of line.
+    """
+    targets, i, n = [], 0, len(script)
+    while True:
+        while i < n and script[i] in ' \t;\n':
+            i += 1
+        if i == n:
+            return targets
+        end = _sed_address(script, i)
+        if end is not None and end > i and script.startswith(',', end):
+            second = _sed_address(script, end + 1)
+            end = None if second == end + 1 else second
+        if end is None:
+            return None
+        i = _sed_blank(script, end)
+        if script.startswith('!', i):
+            i = _sed_blank(script, i + 1)
+        command, i = script[i:i + 1], i + 1
+        if command == 's':
+            delim = script[i:i + 1]
+            middle = None if delim in ('', '\\', '\n') else _sed_end(script, i + 1, delim)
+            end = None if middle is None else _sed_end(script, middle + 1, delim)
+            if end is None:
+                return None
+            i = end + 1
+            while i < n and script[i] in 'gpiImM0123456789':
+                i += 1
+            command = 'w' if script.startswith('w', i) else ''
+            i += len(command)
+        elif command == 'q':
+            while i < n and script[i].isdigit():
+                i += 1
+            command = ''
+        elif command in ('p', 'd', '='):
+            command = ''
+        elif command not in ('w', 'W'):
+            return None
+        if command:
+            line_end = script.find('\n', i)
+            line_end = n if line_end == -1 else line_end
+            name = script[i:line_end].lstrip(' \t')
+            if not name:
+                return None
+            if name not in _SED_STD:
+                targets.append(name)
+            i = line_end
+            continue
+        i = _sed_blank(script, i)
+        if i < n and script[i] not in ';\n':
+            return None
+
+
+def _filter_writes(program, args):
+    """Return (written operands, in_place, supported) for sort, uniq or sed."""
+    roles, operands, supported = _filter_options(program, args)
+    kinds = {role for role, _ in roles}
+    if not supported or kinds & {'exec', 'script-file'}:
+        return [], False, False
+    in_place = 'in-place' in kinds
+    targets = [value for role, value in roles if role == 'write']
+    if program == 'uniq':
+        if len(operands) > 2:
+            return [], False, False
+        targets += [op for op in operands[1:] if op != '-']
+    if program == 'sed':
+        scripts = [value for role, value in roles if role == 'script'] or operands[:1]
+        if in_place and scripts == [''] and not kinds & {'script'}:
+            scripts = operands[1:2]  # BSD `-i ''`: the empty suffix is a separate argument.
+        if not scripts:
+            return [], False, False
+        for script in scripts:
+            found = _sed_writes(script)
+            if found is None:
+                return [], False, False
+            targets += found
+        if ('in-place', None) in roles and not kinds & {'script'} and len(operands) > 1:
+            # GNU reads `-i A B` as script A, BSD as suffix A and script B. Support
+            # the form only when both readings parse; otherwise it is unsupported.
+            found = _sed_writes(operands[1])
+            if found is None:
+                return [], False, False
+            targets += found
+    return targets, in_place, True
+
+
+def _classify_filter(program, args, paths, cwd, policy, flags):
+    targets, in_place, supported = _filter_writes(program, args)
+    if not supported:
+        # Unknown spellings may write: any visible path fragment is a write candidate.
+        flags.append('write-form-unsupported')
+        fragments = [_norm(m, cwd) for a in args
+                     for m in re.findall(r'[./][^\s;]*', a) + re.findall(r'[^\s;]+', a)]
+        return _verdict([(UNKNOWN, 'R31')] + _path_rules(paths + [f for f in fragments if f], True, policy))
+    written = [_norm(target, cwd) for target in targets]
+    if None in written:
+        return UNKNOWN, 'R51'
+    if written:
+        flags.append('output-file')
+    if in_place:
+        return _verdict([(ROUTINE, 'R02')] + _path_rules(paths + written, True, policy))
+    if not written:
+        return _verdict([(ROUTINE, 'R01')] + _path_rules(paths, False, policy))
+    return _verdict([(ROUTINE, 'R02')] + _path_rules(written, True, policy) + _path_rules(paths, False, policy))
+
+
 def _argv(tool_input):
     command = tool_input.get('command') if isinstance(tool_input, dict) else tool_input
     if isinstance(command, list) and command and all(isinstance(a, str) for a in command):
@@ -645,10 +860,11 @@ def _classify_command(argv, cwd, policy):
         return _verdict([(WOULD_PROMPT, 'R11')] + _path_rules(paths, False, policy)), 'gh', flags
     if program in SHELLS or (program in ('python', 'python3') and any(a in ('-c', '-e') for a in args)):
         return (UNKNOWN, 'R31'), program, ['inline-code']
+    if program in _FILTER_SHORT:
+        return _classify_filter(program, args, paths, cwd, policy, flags), program, flags
     if program in READ_PROGRAMS:
-        writes = program == 'sed' and any(a.startswith('-i') for a in args) or \
-            program == 'find' and any(a in ('-delete', '-exec', '-execdir') for a in args)
-        base = (UNKNOWN, 'R31') if writes and program == 'find' else (ROUTINE, 'R02' if writes else 'R01')
+        writes = program == 'find' and any(a in ('-delete', '-exec', '-execdir') for a in args)
+        base = (UNKNOWN, 'R31') if writes else (ROUTINE, 'R01')
         return _verdict([base] + _path_rules(paths, writes, policy)), program, flags
     if program in WRITE_PROGRAMS or program in BUILD_PROGRAMS:
         if program == 'cp':

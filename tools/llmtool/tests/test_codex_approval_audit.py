@@ -318,6 +318,75 @@ class ClassificationTests(unittest.TestCase):
         self.check('Bash', ['env', 'GIT_DIR=/synthetic/common', 'git', 'status'], U)
         self.check('Bash', 'GIT_DIR=' + CANON + '/.git git status', U, 'R20')
 
+    def test_r29_sort_uniq_sed_output_forms_write_pinned_paths(self):
+        """Issue #148: supported output forms of read programs are writes."""
+        U = a.UNAUTHORIZED
+        for command in ('sort -o ' + CONFIG + ' in.txt', 'sort --output=' + CONFIG + ' in.txt',
+                        'sort --output ' + CONFIG + ' in.txt', 'sort -o' + CONFIG + ' in.txt',
+                        'sort -nro ' + CONFIG + ' in.txt', 'sort --out=' + CONFIG + ' in.txt',
+                        'sort -k 2 -t , -o ' + CONFIG + ' in.txt', 'sort -T ' + HOME + '/.codex in.txt',
+                        'uniq in.txt ' + CONFIG, 'uniq -c in.txt ' + CONFIG, 'uniq -f 1 in.txt ' + CONFIG,
+                        'uniq --skip-chars 2 - ' + CONFIG,
+                        "sed -n -e 'w " + CONFIG + "' in.txt", "sed 'w " + CONFIG + "' in.txt",
+                        "sed --expression='1,3w " + CONFIG + "' in.txt", "sed -n '/x/W " + CONFIG + "' in.txt",
+                        "sed 's/a/b/gw " + CONFIG + "' in.txt", "sed -ni 's/a/b/' " + CONFIG,
+                        "sed --in-place 's/a/b/' " + CONFIG, "sed -i.bak 's/a/b/' " + CONFIG):
+            self.check('Bash', command, U, 'R29')
+        self.check('Bash', ['sed', '-n', '5p\nw ' + CONFIG, 'in.txt'], U, 'R29')
+
+    def test_r29_in_place_sed_still_checks_script_write_targets(self):
+        # Pre-review F1: -i must not skip `w`/`s///w` targets inside the script.
+        for command in ("sed -i 's/a/b/w " + CONFIG + "' f.txt", "sed -i -e 'w " + CONFIG + "' f.txt",
+                        "sed --in-place 'w " + CONFIG + "' f.txt", 'sort in.txt -o ' + CONFIG):
+            self.check('Bash', command, a.UNAUTHORIZED, 'R29')
+        self.check('Bash', ['sed', '-i', '', 'w ' + CONFIG, 'f.txt'], a.UNAUTHORIZED, 'R29')
+        self.check('Bash', "sed -i p 's/a/b/w " + CONFIG + "' f.txt", a.UNAUTHORIZED, 'R29')
+        for command in ("sed -i '1e touch x' f.txt", "sed '1,w out.txt' f.txt", 'sort --c=x in.txt'):
+            self.check('Bash', command, a.UNKNOWN, 'R31')
+
+    def test_r29_ambiguous_detached_in_place_is_never_routine(self):
+        # Review R1: GNU reads `sed -i A B` as script A, BSD as suffix A + script B.
+        # Unless both readings parse, the form is unsupported (scope reduction).
+        X, U = a.UNKNOWN, a.UNAUTHORIZED
+        for command in ('sed -i p G in.txt', "sed -i p '1e touch tools/llmtool/x' in.txt",
+                        "sed -i 's/a/b/' tools/x.txt", ['sed', '-i', 'p', 'y/a/b/;w out.txt', 'in.txt']):
+            self.check('Bash', command, X, 'R31')
+        self.check('Bash', ['sed', '-i', 'p', 'y/a/b/;w ' + CONFIG, 'in.txt'], U, 'R29')
+        pinned = ROOT + '/audit.py'
+        for command in (['sed', '-i', 'p', 'y/a/b/;w audit.py', 'in.txt'], 'sed -i p G audit.py'):
+            verdict = a.classify('Bash', {'command': command}, ROOT, policy(pinned_paths=(pinned,)))[1:3]
+            self.assertEqual(verdict, (U, 'R29'), command)
+
+    def test_r29_filter_reads_and_ordinary_forms_are_not_blanket_denied(self):
+        R, W, S = a.ROUTINE, a.WOULD_PROMPT, a.SEPARATE
+        for command, expected, rule in (
+                ('sort ' + CONFIG, S, 'R29'), ('uniq -c ' + CONFIG, S, 'R29'),
+                ("sed -n '1,5p' " + CONFIG, S, 'R29'), ('sort -o out.txt ' + CONFIG, S, 'R29'),
+                ('uniq ' + CONFIG + ' out.txt', S, 'R29'),
+                ('sort in.txt', R, 'R01'), ('sort -nr -k 2 in.txt', R, 'R01'), ('uniq -c in.txt', R, 'R01'),
+                ('uniq in.txt -', R, 'R01'), ("sed -n '1,20p' in.txt", R, 'R01'),
+                ("sed -n '/def x/,/def y/p' in.txt", R, 'R01'), ("sed 's/a/b/g' in.txt", R, 'R01'),
+                ("sed -E -n -e '/x/!d' -e 's,a,b,p' in.txt", R, 'R01'), ('sed 2q in.txt', R, 'R01'),
+                ("sed -n 'w /dev/stdout' in.txt", R, 'R01'),
+                ('sort -o out.txt in.txt', R, 'R02'), ("sed 'w out.txt' in.txt", R, 'R02'),
+                ("sed -i.bak 's/a/b/' tools/x.txt", R, 'R02'), ("sed --in-place 's/a/b/' tools/x.txt", R, 'R02'),
+                ('sort -o /synthetic/tmp/out in.txt', W, 'R12'), ('uniq in.txt /synthetic/tmp/out', W, 'R12'),
+                ("sed 'w /synthetic/tmp/out' in.txt", W, 'R12')):
+            self.check('Bash', command, expected, rule)
+
+    def test_r29_unsupported_filter_forms_are_never_routine(self):
+        X, U = a.UNKNOWN, a.UNAUTHORIZED
+        for command in ('sort --compress-program=gzip in.txt', 'sort -X in.txt', 'sort -o',
+                        'sort --check=quiet --frob in.txt', 'uniq a b c', 'uniq in.txt -c', 'uniq -Q in.txt',
+                        'sed -f script.sed in.txt', "sed 'y/a/b/' in.txt", "sed 's/a/b/e' in.txt",
+                        "sed -n '1~2p' in.txt", "sed '/[/]/p' in.txt", "sed 'r other.txt' in.txt",
+                        "sed 'w' in.txt", 'sed', "sed --frob 'p' in.txt"):
+            self.check('Bash', command, X, 'R31')
+        # Unsupported forms keep any visible pinned path as a possible write target.
+        self.check('Bash', 'sort --compress-program=gzip -o ' + CONFIG + ' in.txt', U, 'R29')
+        self.check('Bash', ['sed', '1y/a/b/;w ' + CONFIG, 'in.txt'], U, 'R29')
+        self.check('Bash', ['sort', '-Xo' + CONFIG, 'in.txt'], U, 'R29')
+
 
 class CorrelationAndSummaryTests(StoreCase):
     def test_canaries_never_reach_summary_errors_or_stderr(self):
