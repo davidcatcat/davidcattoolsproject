@@ -163,13 +163,15 @@ def _depth(value, level=1):
 
 
 def _safe_text(text, limit):
-    if type(text) is not str or not text or len(text.encode('utf-8')) > limit:
+    if type(text) is not str or not text:
         return False
+    # Reject surrogates/controls before encoding: an ASCII-escaped lone surrogate
+    # decodes to a str that cannot be UTF-8 encoded.
     for char in text:
         if (unicodedata.category(char) in ('Cc', 'Cf', 'Cs', 'Co', 'Cn')
                 or ord(char) > 0xFFFF):
             return False
-    return not _emitted_sensitive(text)
+    return len(text.encode('utf-8')) <= limit and not _emitted_sensitive(text)
 
 
 def parse_reply(content, expected_ids, refs):

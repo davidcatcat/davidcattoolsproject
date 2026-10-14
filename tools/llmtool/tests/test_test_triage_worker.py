@@ -277,6 +277,28 @@ class WorkerTests(unittest.TestCase):
                     self.assertEqual(str(caught.exception), 'test-triage-worker: ' + code + '; details omitted')
                     self.assertEqual(self.opener.open.call_count, 1)
 
+    def test_escaped_lone_surrogates_fail_at_fixed_schema_boundary(self):
+        # Review R1: an ASCII-escaped lone surrogate decodes to an unencodable str.
+        raw = self.two_failures()
+        _, by_id = self.refs(raw)
+        a = {'id': FAIL_ID, 'category': 'unknown', 'rationale': 'x', 'excerpt_refs': by_id[FAIL_ID]}
+        b = {'id': ERROR_ID, 'category': 'unknown', 'rationale': 'y', 'excerpt_refs': by_id[ERROR_ID]}
+        for rationale in ('\ud800', 'lead \udfff tail', '\udc00'):
+            with self.subTest(rationale=ascii(rationale)):
+                self.opener.open.reset_mock()
+                content = json.dumps({'classifications': [dict(a, rationale=rationale), b]})
+                self.assertIn('\\ud', content)  # the wire form is a plain ASCII escape
+                with self.assertRaises(LLMToolError) as caught:
+                    self.run_worker(raw, reply_body([dict(a, rationale=rationale), b]))
+                self.assertEqual(str(caught.exception),
+                                 'test-triage-worker: COMPANY_TRIAGE_SCHEMA_INVALID; details omitted')
+                self.assertEqual(self.opener.open.call_count, 1)
+                self.assertNotIn('ud8', repr(caught.exception))
+        self.opener.open.reset_mock()
+        result = self.run_worker(raw, reply_body([dict(a, rationale='測試 BMP 中文'), b]))
+        self.assertEqual(result['classifications'][0]['rationale'], '測試 BMP 中文')
+        self.assertEqual(self.opener.open.call_count, 1)
+
     def test_malformed_json_replies_fail_closed_without_echo(self):
         raw = self.two_failures()
         deep = '{"classifications":' + '[' * 9 + ']' * 9 + '}'
