@@ -966,6 +966,41 @@ independent acceptance. No Session cloning, transcript/TTY injection, Host
 installation, daemon, supervisor, T1/F2/S2 or automatic merge is authorized.
 Full Access stays unchanged; ai-loop remains fallback.
 
+#### Native Composition A1 source/fake acceptance
+
+[Accepted composition contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6174941122),
+[final K1/K3 pins](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6175153094)
+and [independent C3 acceptance](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6175585948)
+authorize only the eight-file source/fake package. They do not grant live queue,
+RPC, inference, Host installation or Native Trial. Existing public native paths
+stay BLOCKED. No ledger migration, new controller/store or background worker.
+
+| Invariant | Source/fake oracle |
+| --- | --- |
+| K1 | Only externally bound IN_PROCESS_ZERO_CHILD; spawn count0, attempts reject permanently; persistent stream actual drain and returned close plus original terminal coverage precede ledger child_exited=True. No invented PID or dummy child |
+| K3 / L6 | One initialize/initialized connection, monotonic nonreused request ID and at most one in-flight request. Fragmented/interleaved responses/notifications remain bounded. Transport disconnect/error/timeout/flood/partial JSON poisons EventCoverage; no reconnect/reset/snapshot can restore it |
+| L1 / L2 | Whole binding authenticates all external Host/Session/route/context/waiter/domain pins. Domain source, owner, run, generation and complete entrypoints match before/after. Original Codec IDs feed HostEvent and EventCoverage.seal; copied hex and caller prose are not coverage/authentication |
+| R1 / R1a / P3 | Legitimate BLOCKED verdict may reach the author: REVIEW_COMPLETED NOT_VERIFIED, AUTHOR_RECEIPTED PASS. Invalidation demotes completion/receipt, preserving original queue/delivery/start evidence. Missing/rejected receipt is bounded PARTIAL; notify once, no resend/rearm/UNKNOWN recovery |
+| L5 | Overall600s/review120s/receipt120s/RPC5s only shrink. All normal operations use overall minus20s; cleanup/final observation uses the original overall deadline. Callback return time cannot renew TTL |
+
+The original Claude author's owned waiter is an interface with independently
+pinned registration, task/run/SHA/notification/tool/generation/channel/TTL and
+exact message/turn/verdict ACK. This package exercises a fake waiter, not a
+production original-Session registration. Three Host-owned inference counters
+remain separate; zero worker calls is not zero Reviewer/author inference or a
+hard token cost cap. Audit-only is cooperative observation, not enforced
+no-tools or OS isolation; Owner Full Access/never is unchanged.
+
+[K2 release-pinned source evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6175548413)
+confirms APP_SERVER_EVENTS without resume cannot provide full item/turn events.
+No independent thread/subscribe exists, and resume is prohibited. HOST_ROLLOUT
+is insufficient for current started/completed/error/approval coverage. Therefore
+Native remains BLOCKED/NOT_VERIFIED. CR-K2-B rollout mode and any structure-only
+live inspection require a separate future contract/grant; neither is implemented
+or authorized here. P2/P4 remain one-shot STOP/PRESERVE; L3 possible-tool types
+stay fail-closed. N1 context retention, N4 opt-in and dual inference/data routes
+remain Native Grant conditions. T1 HOLD, F2/S2 ungranted, ai-loop fallback retained.
+
 #### Acceptance matrix and dependencies
 
 All rows below are **future tests / NOT_VERIFIED**, not results of this docs PR.

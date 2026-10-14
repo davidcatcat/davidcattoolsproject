@@ -436,6 +436,8 @@ class NotificationBinding(ContractValue):
     risk_acceptance_digest: str = '0'*64
     coverage_digest: str = '0'*64
     counter_domains: tuple = ('LLMTOOL_PROVIDER_CALLS','REVIEWER_TURN_INFERENCE','CLAUDE_AUTHOR_INFERENCE')
+    topology: str = 'LEGACY_FIXTURE'
+    composition_digest: str = '0'*64
 
     def __post_init__(self):
         _typed(self.task, TaskBinding); _typed(self.acceptance_task, TaskBinding)
@@ -447,6 +449,10 @@ class NotificationBinding(ContractValue):
         _hex(self.attempt_id,(32,))
         if self.rearm_from: _hex(self.rearm_from)
         _hex(self.risk_acceptance_digest); _hex(self.coverage_digest)
+        _hex(self.composition_digest)
+        if (self.topology not in ('LEGACY_FIXTURE','IN_PROCESS_ZERO_CHILD') or
+                (self.topology == 'IN_PROCESS_ZERO_CHILD') != (self.composition_digest != '0'*64)):
+            raise LLMToolError('notification topology invalid; details omitted')
         if self.tool_mode not in ("ENFORCED_NO_TOOLS","AUDIT_ONLY_TRIAL") or self.counter_domains != ("LLMTOOL_PROVIDER_CALLS","REVIEWER_TURN_INFERENCE","CLAUDE_AUTHOR_INFERENCE"):
             raise LLMToolError("notification capability invalid; details omitted")
         if self.tool_mode == "AUDIT_ONLY_TRIAL" and (self.risk_acceptance_digest == "0"*64 or self.coverage_digest == "0"*64):
@@ -484,10 +490,12 @@ class NotificationObserved(ContractValue):
     turn_cancel_supported: bool
     audit_coverage: bool = False
     risk_acceptance_digest: str = "0"*64
+    topology: str = "LEGACY_FIXTURE"
+    composition_digest: str = "0"*64
 
     def __post_init__(self):
         _hex(self.binding_digest); _hex(self.host_pin)
-        _typed(self.audit_coverage,bool); _hex(self.risk_acceptance_digest)
+        _typed(self.audit_coverage,bool); _hex(self.risk_acceptance_digest); _hex(self.composition_digest)
         for name in ('attested','idle','queue_empty','exclusive','no_tools',
                      'withdrawal_supported','turn_cancel_supported'): _typed(getattr(self,name),bool)
 
@@ -519,6 +527,7 @@ def decide_notification(binding, *, issuer, observed):
                 issuer.vouches_for(binding.digest) is not True):
             return result(Decision.DENY,DecisionCode.UNTRUSTED_POLICY)
         if (observed.binding_digest != binding.digest or observed.host_pin != binding.host_pin or
+                observed.topology != binding.topology or observed.composition_digest != binding.composition_digest or
                 any(getattr(observed,n) is not True for n in ('attested','idle','queue_empty','exclusive',
                     'withdrawal_supported','turn_cancel_supported')) or
                 (binding.tool_mode == 'ENFORCED_NO_TOOLS' and observed.no_tools is not True) or
