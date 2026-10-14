@@ -413,7 +413,8 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 self.assertEqual([ast.dump(n) for n in body],
                                  [ast.dump(ast.parse('return UnavailableReviewAuthority()').body[0])])
         # R-A/R-B: exact reviewed additions, no filename-wide exemption.
-        self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer')})
+        self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer'),
+            ('codex_pickup_native.py','NativePickupIssuer','HostIssuer')})
         self.assertEqual(imports, {
             ('review_authority.py', 'authorization_policy', frozenset({
                 'HostIssuer', 'IssuerClass', 'Decision', 'ProviderReviewBinding',
@@ -422,6 +423,7 @@ class NoProductionAuthorityTests(unittest.TestCase):
             ('codex_handoff_transport.py','authorization_policy',frozenset({
                 'NotificationBinding','NotificationObserved','NotificationDecision','Decision','decide_notification'})),
             ('codex_handoff_transport.py','authorization_ledger',frozenset({'ReceiptLedger'})),
+            ('codex_pickup_native.py','authorization_policy',frozenset({'HostIssuer','IssuerClass','NotificationBinding'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
         self.assertEqual(d1_imports, {
@@ -530,3 +532,25 @@ class NotificationPolicyTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):b.reviewer_session='spoofed'
         for changes in ({'sequence':True},{'author_session':b.reviewer_session},{'expires_at':b.not_before+601}):
             with self.assertRaises(LLMToolError):dataclasses.replace(b,**changes)
+
+
+class NativeDeltaPolicyTests(unittest.TestCase):
+    def test_audit_only_is_separate_and_requires_whole_binding_acceptance(self):
+        from test_codex_handoff_transport import DeltaTrial
+        t=DeltaTrial();self.addCleanup(t.close)
+        o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
+        self.assertIs(p.decide_notification(t.binding,issuer=t.issuer,observed=o).decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        for changes in ({'audit_coverage':False},{'risk_acceptance_digest':'f'*64}):
+            self.assertIs(p.decide_notification(t.binding,issuer=t.issuer,observed=dataclasses.replace(o,**changes)).decision,p.Decision.DENY)
+        with self.assertRaises(Exception):dataclasses.replace(t.binding,risk_acceptance_digest='0'*64)
+        enforced=dataclasses.replace(t.binding,tool_mode='ENFORCED_NO_TOOLS');t.issuer.binding=enforced
+        self.assertIs(p.decide_notification(enforced,issuer=t.issuer,observed=dataclasses.replace(o,binding_digest=enforced.digest)).decision,p.Decision.DENY)
+    def test_native_issuer_requires_sealed_acceptance_and_cannot_authorize_d1(self):
+        from test_codex_handoff_transport import DeltaTrial
+        from llmtool import codex_pickup_native as n
+        t=DeltaTrial();self.addCleanup(t.close)
+        grant=n.NativeGrant(t.binding,'f'*64,n.PROTOCOL_SHA,n.CLI_VERSION,'reviewer-route','author-route','a'*64,'b'*64,True,'STOP_PRESERVE_CONTEXT',True,'c'*64)
+        with self.assertRaises(Exception):n.NativePickupIssuer(grant,{'accepted':True})
+        issuer=n._fixture_issuer(grant)
+        self.assertTrue(issuer.vouches_for(t.binding.digest));self.assertFalse(issuer.vouches_for(t.binding.grant_digest))
+        self.assertIs(allow(make_create(),make_policy(),issuer=issuer).decision,p.Decision.DENY)

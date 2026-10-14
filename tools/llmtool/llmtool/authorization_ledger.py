@@ -96,6 +96,16 @@ _NOTIFICATION_SCHEMA = (
 )
 
 
+# Explicit separate new-file layout. Legacy v1 is never migrated.
+_NOTIFICATION_SCHEMA_V2 = (
+    _SCHEMA[0],
+    _NOTIFICATION_SCHEMA[1].replace('layout_version = 1','layout_version = 2'),
+    _NOTIFICATION_SCHEMA[2][:-1] + ", author_receipt_status TEXT NOT NULL DEFAULT 'NOT_VERIFIED' "
+    "CHECK (author_receipt_status IN ('NOT_VERIFIED','VERIFIED')), author_receipt_digest TEXT, "
+    "terminal_status TEXT CHECK (terminal_status IN ('Completed','Interrupted','Failed')), coverage_digest TEXT)",
+)
+
+
 class LedgerCode(str, Enum):
     LEDGER_UNAVAILABLE = 'LEDGER_UNAVAILABLE'
     LEDGER_INSECURE = 'LEDGER_INSECURE'
@@ -206,8 +216,9 @@ class ReceiptLedger:
     """Use create() once, then open(); there is no default path."""
 
     @classmethod
-    def create(cls, path, *, clock, kind='D1'):
+    def create(cls, path, *, clock, kind='D1', notification_layout=1):
         if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
+        if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != 'NOTIFICATION' and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
         creation_nonce = secrets.token_hex(32) if kind != 'D1' else None
         path = os.path.abspath(path)
         _secure_directory(os.path.dirname(path))
@@ -222,11 +233,11 @@ class ReceiptLedger:
             try:
                 cls._configure(db)
                 db.execute('BEGIN IMMEDIATE')
-                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA if kind == 'PROVIDER_REVIEW' else _NOTIFICATION_SCHEMA):
+                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA if kind == 'PROVIDER_REVIEW' else (_NOTIFICATION_SCHEMA if notification_layout == 1 else _NOTIFICATION_SCHEMA_V2)):
                     db.execute(statement)
                 if creation_nonce is not None:
                     if kind == 'NOTIFICATION':
-                        db.execute('INSERT INTO ledger_meta VALUES (?, ?, ?)',(kind,NOTIFICATION_SCHEMA_VERSION,creation_nonce))
+                        db.execute('INSERT INTO ledger_meta VALUES (?, ?, ?)',(kind,notification_layout,creation_nonce))
                     else:
                         db.execute('INSERT INTO ledger_meta VALUES (?, ?)',(kind,creation_nonce))
                 db.execute('INSERT INTO clock VALUES (1, 0)')
@@ -245,10 +256,10 @@ class ReceiptLedger:
             _fail(LedgerCode.LEDGER_UNAVAILABLE)
         finally:
             os.close(fd)
-        return cls.open(path,clock=clock,kind=kind,creation_nonce=creation_nonce)
+        return cls.open(path,clock=clock,kind=kind,creation_nonce=creation_nonce,notification_layout=notification_layout)
 
     @classmethod
-    def open(cls, path, *, clock, kind='D1', creation_nonce=None):
+    def open(cls, path, *, clock, kind='D1', creation_nonce=None, notification_layout=1):
         """clock is the host's time source; callers never pass request times."""
         if not callable(clock):
             _fail(LedgerCode.CLOCK_INVALID)
@@ -256,10 +267,12 @@ class ReceiptLedger:
         if kind != 'D1':
             try: _hex(creation_nonce)
             except LLMToolError: _fail(LedgerCode.LEDGER_CORRUPT)
-        return cls(os.path.abspath(path),clock,kind,creation_nonce)
+        if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != "NOTIFICATION" and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
+        return cls(os.path.abspath(path),clock,kind,creation_nonce,notification_layout)
 
-    def __init__(self, path, clock, kind='D1', creation_nonce=None):
+    def __init__(self, path, clock, kind='D1', creation_nonce=None, notification_layout=1):
         self.kind,self.creation_nonce = kind,creation_nonce
+        self.notification_layout = notification_layout
         self._path, self._clock, self._db, self._fd = path, clock, None, None
         self._directory = _secure_directory(os.path.dirname(path))
         try:
@@ -313,14 +326,14 @@ class ReceiptLedger:
                 "OR (type = 'index' AND sql IS NOT NULL)").fetchone()[0]
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
             # A schema-less (e.g. half-created) store is corrupt, not unavailable.
-            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA if self.kind == 'PROVIDER_REVIEW' else _NOTIFICATION_SCHEMA
+            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA if self.kind == 'PROVIDER_REVIEW' else (_NOTIFICATION_SCHEMA if self.notification_layout == 1 else _NOTIFICATION_SCHEMA_V2)
             if tables != [(s,) for s in schema] or others or version != SCHEMA_VERSION:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             if self.kind == 'PROVIDER_REVIEW' and self._db.execute(
                     'SELECT kind,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.creation_nonce)]:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             if self.kind == 'NOTIFICATION' and self._db.execute(
-                    'SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,NOTIFICATION_SCHEMA_VERSION,self.creation_nonce)]:
+                    'SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.notification_layout,self.creation_nonce)]:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             rows = self._db.execute('SELECT id FROM clock').fetchall()
         except sqlite3.Error as error:
@@ -606,6 +619,7 @@ class ReceiptLedger:
                                 (b.reviewer_session,)).fetchone()[0]: _fail(LedgerCode.NOT_ALLOWED)
             previous = self._db.execute('SELECT nonce,status,review_status,grant_digest FROM receipts '
                 'WHERE object_key=? ORDER BY rowid DESC LIMIT 1',(b.object_key,)).fetchone()
+            if self.notification_layout == 2 and previous is not None: _fail(LedgerCode.NOT_ALLOWED)
             if previous is None:
                 if b.rearm_from: _fail(LedgerCode.NOT_ALLOWED)
             elif (b.rearm_from != previous[0] or b.grant_digest == previous[3] or
@@ -613,7 +627,7 @@ class ReceiptLedger:
                        (previous[1] == 'EFFECT_DONE' and previous[2] == 'BLOCKED'))):
                 _fail(LedgerCode.NOT_ALLOWED)
             expires = min(now+ttl_seconds,b.expires_at)
-            self._db.execute('INSERT INTO receipts VALUES (?,?,?,?,?,NULL,?,?,?,0,NULL,NULL,0,NULL,NULL)',
+            self._db.execute('INSERT INTO receipts (nonce,binding,issued_at,expires_at,status,redeem_run_id,object_key,session_key,grant_digest,dispatch_started,message_id,turn_id,pending,review_status,verdict_digest) VALUES (?,?,?,?,?,NULL,?,?,?,0,NULL,NULL,0,NULL,NULL)',
                 (nonce,b.to_json(),now,expires,'ISSUED',b.object_key,b.reviewer_session,b.grant_digest))
         return Receipt(b,now,expires,nonce)
 
@@ -677,6 +691,50 @@ class ReceiptLedger:
             self._db.execute('UPDATE receipts SET status=?,pending=?,review_status=?,verdict_digest=? WHERE nonce=?',
                              (status,pending,review_status,verdict_digest,receipt.nonce))
             return True
+
+
+    def finish_notification_turn(self, receipt, *, terminal_status, coverage_digest, child_exited,
+                                 review_status=None, verdict_digest=None):
+        """Host-only forward completion; author receipt is separately verified.
+
+        The adapter must establish original terminal/coverage/owned exit first.
+        Constructor fields do not authenticate those facts. No UNKNOWN recovery.
+        """
+        if self.kind != 'NOTIFICATION' or self.notification_layout != 2: _fail(LedgerCode.NOT_ALLOWED)
+        _hex(coverage_digest)
+        if terminal_status not in ('Completed','Interrupted','Failed') or child_exited is not True: _fail(LedgerCode.NOT_ALLOWED)
+        if terminal_status == 'Completed':
+            if review_status not in ('APPROVE','CHANGES_REQUIRED','BLOCKED'): _fail(LedgerCode.NOT_ALLOWED)
+            _hex(verdict_digest)
+        elif review_status is not None or verdict_digest is not None: _fail(LedgerCode.NOT_ALLOWED)
+        with self._transaction():
+            row=self._notification_row(receipt)
+            if row[3] != 'CONSUMED' or row[4] != 1 or row[5] is None or row[6] is None: return False
+            self._db.execute("UPDATE receipts SET status='EFFECT_DONE',pending=0,review_status=?,verdict_digest=?,terminal_status=?,coverage_digest=? WHERE nonce=?",
+                             (review_status,verdict_digest,terminal_status,coverage_digest,receipt.nonce))
+            return True
+
+    def record_author_receipt(self, receipt, *, verdict_digest, receipt_digest):
+        if self.kind != 'NOTIFICATION' or self.notification_layout != 2: _fail(LedgerCode.NOT_ALLOWED)
+        _hex(verdict_digest); _hex(receipt_digest)
+        with self._transaction():
+            self._notification_row(receipt)
+            return self._db.execute("UPDATE receipts SET author_receipt_status='VERIFIED',author_receipt_digest=? WHERE nonce=? AND status='EFFECT_DONE' AND terminal_status='Completed' AND verdict_digest=? AND author_receipt_status='NOT_VERIFIED'",
+                                    (receipt_digest,receipt.nonce,verdict_digest)).rowcount == 1
+
+    def notification_completion(self, receipt):
+        if self.kind != 'NOTIFICATION' or self.notification_layout != 2: _fail(LedgerCode.NOT_ALLOWED)
+        with self._transaction():
+            self._notification_row(receipt)
+            row=self._db.execute('SELECT status,pending,review_status,verdict_digest,terminal_status,coverage_digest,author_receipt_status,author_receipt_digest FROM receipts WHERE nonce=?',(receipt.nonce,)).fetchone()
+            return dict(zip(('status','pending','review_status','verdict_digest','terminal_status','coverage_digest','author_receipt_status','author_receipt_digest'),row))
+
+    def invalidate_notification_completion(self, receipt):
+        """Same-attempt late contradiction only; never reconciles UNKNOWN."""
+        if self.kind != 'NOTIFICATION' or self.notification_layout != 2: _fail(LedgerCode.NOT_ALLOWED)
+        with self._transaction():
+            self._notification_row(receipt)
+            return self._db.execute("UPDATE receipts SET status='EFFECT_UNKNOWN',pending=1 WHERE nonce=? AND status='EFFECT_DONE'",(receipt.nonce,)).rowcount == 1
 
 
 def _observed_matches(observed, binding):
