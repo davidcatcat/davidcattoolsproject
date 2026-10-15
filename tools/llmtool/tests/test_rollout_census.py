@@ -489,3 +489,17 @@ with patch.object(socket,'socket',side_effect=AssertionError('network')), patch.
 '''
         result=subprocess.run([sys.executable,'-B','-I','-c',script],capture_output=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr);self.assertEqual(result.stdout,b'')
+
+    def test_python39_parents_without_slice_support(self):
+        # pathlib parents gained slicing in3.10; preserve3.9 runtime semantics.
+        from unittest.mock import patch
+        original=Path.parents
+        class Parents39:
+            def __init__(self,value):self.value=value
+            def __iter__(self):return iter(self.value)
+            def __getitem__(self,key):
+                if isinstance(key,slice):raise TypeError('parents slicing unavailable on3.9')
+                return self.value[key]
+        with patch.object(Path,'parents',property(lambda value:Parents39(original.fget(value)))):
+            r=self.run_census()
+        self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED')

@@ -167,7 +167,7 @@ class InputPin:
                                     + re.escape(self.thread_id) + r'\.jsonl', parts[4])):
             _stop('PATH_UNSAFE')
         _physical(self.codex_home, budget)
-        for parent in (home,) + tuple(path.parents[:4]):
+        for parent in (home,) + tuple(path.parents)[:4]:
             st = budget.op(os.lstat, str(parent))
             if st.st_uid != self.uid or stat.S_IMODE(st.st_mode) & 0o077:
                 _stop('PATH_UNSAFE')
