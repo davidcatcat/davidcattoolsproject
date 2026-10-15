@@ -32,24 +32,42 @@ HISTORY = ('forked_from_id', 'history_base', 'parent_thread_id',
            'forked_from_ordinal_exclusive', 'subagent_history_start_ordinal')
 INCOMPLETE = frozenset(('TAIL_ALIGNMENT_UNAVAILABLE', 'BOUNDED_TAIL_SAMPLE',
     'BYTE_LIMIT', 'RECORD_LIMIT', 'READ_LIMIT', 'LINE_OVER_LIMIT',
-    'PARTIAL_LAST_LINE', 'SOURCE_GREW'))
+    'PARTIAL_LAST_LINE', 'SOURCE_GREW', 'NO_RECORDS'))
 UNSUPPORTED = frozenset(('LEGACY_HISTORY', 'FORK_OR_HISTORY_PRESENT',
-                        'UNKNOWN_TYPE', 'UNSUPPORTED_SHAPE'))
+                        'UNKNOWN_TYPE', 'UNSUPPORTED_SHAPE', 'PICKUP_REJECTED_RECORD'))
 CODES = frozenset(('PIN_INVALID', 'RUNTIME_MISMATCH', 'INPUT_IDENTITY_MISMATCH',
     'PATH_UNSAFE', 'META_OVER_LIMIT', 'META_INVALID', 'IDENTITY_MISMATCH',
     'SOURCE_CHANGED', 'INVALID_RECORD', 'ORDINAL_INVALID', 'ORDINAL_GAP',
     'DEADLINE', 'CLOSE_FAILED', 'INTERRUPTED', 'OUTPUT_FAILED')) | INCOMPLETE | UNSUPPORTED
 EXITS = {'FORMAT_OBSERVED_SUPPORTED': 0, 'INCOMPLETE': 2, 'UNSUPPORTED': 3, 'BLOCKED': 1}
-TYPES = ('event_msg', 'response_item', 'session_meta', 'UNKNOWN')
-EVENTS = ('task_started', 'task_complete', 'turn_aborted', 'item_completed', 'UNKNOWN')
-ITEMS = ('UserMessage', 'AgentMessage', 'Reasoning', 'UNKNOWN')
-PHASES = ('commentary', 'final_answer', 'UNKNOWN')
+# Closed enums pinned to092d3acd protocol/src/{items,models}.rs and the
+# merged feed_rollout_record acceptance set; no dynamic payload keys escape.
+TOP_REJECTED = ('session_meta', 'compacted', 'thread_settings_applied',
+                'thread_goal_updated', 'token_usage_record', 'world_state')
+RESPONSE_REJECTED = frozenset(('additional_tools', 'agent_message', 'local_shell_call',
+    'function_call', 'tool_search_call', 'function_call_output', 'custom_tool_call',
+    'custom_tool_call_output', 'tool_search_output', 'web_search_call',
+    'image_generation_call', 'compaction', 'configuration_update',
+    'compaction_trigger', 'context_compaction'))
+ITEM_REJECTED = frozenset(('FunctionCallOutput', 'HookPrompt', 'CommandExecution',
+    'DynamicToolCall', 'CollabAgentToolCall', 'SubAgentActivity', 'WebSearch',
+    'ImageView', 'Extension', 'ImageGeneration', 'EnteredReviewMode',
+    'ExitedReviewMode', 'FileChange', 'McpToolCall', 'ContextCompaction'))
+TYPES = ('event_msg', 'response_item', 'turn_context') + TOP_REJECTED + ('UNKNOWN',)
+EVENTS = ('task_started', 'task_complete', 'turn_aborted', 'item_completed', 'token_count',
+          'PICKUP_REJECTED', 'UNKNOWN')
+ITEMS = ('UserMessage', 'AgentMessage', 'Reasoning', 'Plan', 'PICKUP_REJECTED', 'UNKNOWN')
+RESPONSES = ('message', 'reasoning', 'PICKUP_REJECTED', 'UNKNOWN')
+ROLES = ('user', 'assistant', 'developer', 'system', 'UNKNOWN')
+PHASES = ('commentary', 'final_answer', 'ABSENT', 'partial_answer', 'UNKNOWN')
 ERRORS = ('ABSENT', 'OBJECT', 'NULL', 'OTHER')
+TERMINALS = ('Completed', 'Failed', 'Interrupted')
 CANONICAL = '/Users/davidsun/git/davidcataiporject/davidcattoolsproject'
 CODEX = '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex'
 SOURCE_FILES = {'driver': 'tools/llmtool/scripts/native_step0_census.py',
                 'module': 'tools/llmtool/llmtool/rollout_census.py',
-                'decoder': 'tools/llmtool/llmtool/codex_pickup_native.py'}
+                'decoder': 'tools/llmtool/llmtool/codex_pickup_native.py',
+                'task_review': 'tools/llmtool/llmtool/task_review.py'}
 
 
 class Stop(Exception):
@@ -185,8 +203,9 @@ def result():
         sample_bounds=dict(prefix_skipped=False, partial_first=False, partial_last=False),
         ordinal_summary=dict(origin='NOT_OBSERVED', contiguous=None, meta_plus_one=None),
         fixed_histograms={name: dict.fromkeys(keys, 0) for name, keys in (
-            ('type', TYPES), ('event', EVENTS), ('item', ITEMS), ('phase', PHASES), ('error', ERRORS))},
-        shape_counts=dict(user_text=0, agent_text=0, unsupported=0, unknown=0),
+            ('type', TYPES), ('event', EVENTS), ('item', ITEMS), ('phase', PHASES),
+            ('error', ERRORS), ('response_item', RESPONSES), ('role', ROLES), ('terminal', TERMINALS))},
+        shape_counts=dict(user_text=0, agent_text=0, unsupported=0, unknown=0, pickup_rejected=0),
         identity_checks=dict(before=False, after=False),
         resource_counts=dict(bytes=0, reads=0, records=0), elapsed_ms=0,
         closed=False, snapshot_drained=False, code_pin={})
@@ -200,12 +219,16 @@ def _reason(out, code):
 
 
 def _finish(out, budget):
+    if (out['resource_counts']['records'] == 0
+            and out['metadata_summary']['history_presence'][HISTORY[0]] is not None):
+        _reason(out, 'NO_RECORDS')
     codes = set(out['reasons'])
     out['status'] = ('BLOCKED' if codes - INCOMPLETE - UNSUPPORTED else
                      'UNSUPPORTED' if codes & UNSUPPORTED else
                      'INCOMPLETE' if codes else 'FORMAT_OBSERVED_SUPPORTED')
     out['sample_clean'] = (not codes or codes == {'BOUNDED_TAIL_SAMPLE'}) and (
-        out['shape_counts']['unsupported'] == out['shape_counts']['unknown'] == 0
+        out['shape_counts']['unsupported'] == out['shape_counts']['unknown']
+        == out['shape_counts']['pickup_rejected'] == 0
         and out['identity_checks']['after'] and out['closed']
         and out['ordinal_summary']['contiguous'] is True)
     out['resource_counts'].update(bytes=budget.bytes, reads=budget.reads)
@@ -227,7 +250,11 @@ def _ordinal(value):
 
 
 def _project(x, out):
-    """No content/id values copied to output; histogram keys are all static."""
+    """Structure recognition only, no task correlation or execution success.
+
+    Failed terminal is supported FORMAT, never review/model success. Known
+    Pickup-rejected records and unknown future types have distinct buckets.
+    """
     hist = out['fixed_histograms']
     kind = x.get('type')
     key = kind if type(kind) is str and kind in TYPES[:-1] else 'UNKNOWN'
@@ -241,11 +268,43 @@ def _project(x, out):
     def unsupported():
         out['shape_counts']['unsupported'] += 1
         _reason(out, 'UNSUPPORTED_SHAPE')
+    def rejected():
+        out['shape_counts']['pickup_rejected'] += 1
+        _reason(out, 'PICKUP_REJECTED_RECORD')
+    if key in TOP_REJECTED:
+        rejected()
+        return
+    if key == 'turn_context':
+        return  # Same shape as pickup: dict, no private fields projected.
+    if key == 'response_item':
+        response = payload.get('type')
+        if type(response) is str and response in RESPONSE_REJECTED:
+            hist['response_item']['PICKUP_REJECTED'] += 1
+            rejected()
+        elif response == 'reasoning':
+            hist['response_item']['reasoning'] += 1
+        elif response == 'message':
+            hist['response_item']['message'] += 1
+            role = payload.get('role')
+            role = role if type(role) is str and role in ROLES[:-1] else 'UNKNOWN'
+            hist['role'][role] += 1
+            if role in ('developer', 'system'):
+                rejected()
+            elif role == 'UNKNOWN':
+                unsupported()
+        else:
+            hist['response_item']['UNKNOWN'] += 1
+            unknown()
+        return
     if key != 'event_msg':
         unknown()
         return
     event = payload.get('type')
-    event = event if type(event) is str and event in EVENTS[:-1] else 'UNKNOWN'
+    if type(event) is str and event in TOP_REJECTED:
+        hist['event']['PICKUP_REJECTED'] += 1
+        rejected()
+        return
+    event = event if type(event) is str and event in EVENTS[:-2] else 'UNKNOWN'
     hist['event'][event] += 1
     if event == 'UNKNOWN':
         unknown()
@@ -253,7 +312,14 @@ def _project(x, out):
         error = ('ABSENT' if 'error' not in payload else 'NULL' if payload['error'] is None
                  else 'OBJECT' if type(payload['error']) is dict else 'OTHER')
         hist['error'][error] += 1
-        if error != 'ABSENT':
+        if error in ('ABSENT', 'OBJECT'):
+            hist['terminal']['Completed' if error == 'ABSENT' else 'Failed'] += 1
+        else:
+            unsupported()
+    elif event == 'turn_aborted':
+        if payload.get('reason') == 'interrupted':
+            hist['terminal']['Interrupted'] += 1
+        else:
             unsupported()
     elif event == 'item_completed':
         item = payload.get('item')
@@ -261,12 +327,16 @@ def _project(x, out):
             unsupported()
             return
         item_type = item.get('type')
-        item_type = item_type if type(item_type) is str and item_type in ITEMS[:-1] else 'UNKNOWN'
+        if type(item_type) is str and item_type in ITEM_REJECTED:
+            hist['item']['PICKUP_REJECTED'] += 1
+            rejected()
+            return
+        item_type = item_type if type(item_type) is str and item_type in ITEMS[:-2] else 'UNKNOWN'
         hist['item'][item_type] += 1
         if item_type == 'UNKNOWN':
             unknown()
-        elif item_type == 'Reasoning':
-            pass  # No reasoning content is inspected or retained.
+        elif item_type in ('Reasoning', 'Plan'):
+            pass  # Match pickup: no content inspection/retention for these.
         else:
             content = item.get('content')
             if item_type == 'UserMessage':
@@ -277,10 +347,12 @@ def _project(x, out):
                 valid = (type(content) is list and len(content) == 1
                          and type(content[0]) is dict and set(content[0]) == {'type', 'text'}
                          and content[0]['type'] == 'Text' and type(content[0]['text']) is str)
-                phase = item.get('phase')
-                phase = phase if type(phase) is str and phase in PHASES[:-1] else 'UNKNOWN'
+                raw_phase = item.get('phase')
+                phase = ('ABSENT' if 'phase' not in item else raw_phase
+                         if type(raw_phase) is str and raw_phase in ('commentary', 'final_answer', 'partial_answer')
+                         else 'UNKNOWN')
                 hist['phase'][phase] += 1
-                if phase == 'UNKNOWN':
+                if phase not in ('commentary', 'final_answer'):
                     unsupported()
             if valid:
                 out['shape_counts']['user_text' if item_type == 'UserMessage' else 'agent_text'] += 1
@@ -520,6 +592,15 @@ def _validate_runtime(pin, root, budget, _runtime=None):
     expected_python, expected_prefix = (_runtime if _runtime is not None else
         (str(root/'tools/llmtool/.venv/bin/python'), str(root/'tools/llmtool/.venv')))
     runtime = pin['runtime']
+    main_file = getattr(sys.modules.get('__main__'), '__file__', None)
+    decoder = sys.modules.get(_rollout_json.__module__)
+    parser = sys.modules.get('llmtool.task_review')
+    if (sys.flags.isolated != 1 or sys.flags.dont_write_bytecode != 1
+            or type(main_file) is not str
+            or Path(main_file).resolve() != root/SOURCE_FILES['driver']
+            or parser is None or Path(parser.__file__).absolute() != root/SOURCE_FILES['task_review']
+            or getattr(decoder, 'load_json', None) is not getattr(parser, 'load_json', None)):
+        _stop('RUNTIME_MISMATCH')
     if (set(runtime) != {'executable', 'prefix', 'version', 'interpreter_sha256'}
             or runtime['executable'] != sys.executable or sys.executable != expected_python
             or runtime['prefix'] != sys.prefix or sys.prefix != expected_prefix

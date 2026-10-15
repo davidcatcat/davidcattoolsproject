@@ -61,7 +61,7 @@ class CensusTests(unittest.TestCase):
         self.write(body, meta)
         r = self.run_census()
         self.assertEqual(r['status'], 'FORMAT_OBSERVED_SUPPORTED')
-        self.assertEqual(r['shape_counts'], dict(user_text=1,agent_text=2,unknown=0,unsupported=0))
+        self.assertEqual(r['shape_counts'], dict(user_text=1,agent_text=2,unknown=0,unsupported=0,pickup_rejected=0))
         self.assertEqual(r['fixed_histograms']['error']['ABSENT'], 1)
         self.assertNotIn('CANARY', json.dumps(r))
         self.assertNotIn(str(self.path), json.dumps(r))
@@ -134,7 +134,7 @@ class CensusTests(unittest.TestCase):
             self.assertNotIn('CANARY',json.dumps(r))
         for error,label in ((None,'NULL'),({},'OBJECT'),('CANARY_ERROR','OTHER')):
             self.write(self.event(13,'task_complete',error=error));r=self.run_census()
-            self.assertEqual(r['fixed_histograms']['error'][label],1);self.assertEqual(r['status'],'UNSUPPORTED')
+            self.assertEqual(r['fixed_histograms']['error'][label],1);self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED' if label=='OBJECT' else 'UNSUPPORTED')
 
     def test_record_bound_exact_and_plus_one_preserves_counts(self):
         for count in (127,128,129):
@@ -271,11 +271,14 @@ class CensusTests(unittest.TestCase):
         file=self.home/'pin.json';data=json.dumps(pin).encode();file.write_bytes(data);file.chmod(0o600)
         return ['--pin-file',str(file),'--pin-sha256',hashlib.sha256(data).hexdigest(),'--json']
 
-    def entry(self,argv,output=None):
+    def entry(self,argv,output=None,main_file="DRIVER"):
+        import sys
+        from unittest.mock import patch
         import io
         root=Path(c.__file__).absolute().parents[3]
         output=output if output is not None else io.StringIO()
-        code=c._entry(argv,_root=root,_stdout=output, _runtime=self._runtime())
+        with patch.object(sys.modules["__main__"],"__file__",str(root/c.SOURCE_FILES["driver"]) if main_file=="DRIVER" else main_file,create=True):
+            code=c._entry(argv,_root=root,_stdout=output, _runtime=self._runtime())
         return code,output
 
     def _runtime(self):
@@ -362,7 +365,7 @@ class CensusTests(unittest.TestCase):
         root=Path(c.__file__).absolute().parents[3]
         argv=self.argv(self.pin_document())
         # Private seam only in a test-owned -c wrapper, never a production flag.
-        script='from llmtool import rollout_census as c;import sys;raise SystemExit(c._entry(sys.argv[1:],_root='+repr(str(root))+',_runtime=(sys.executable,sys.prefix)))'
+        script='from llmtool import rollout_census as c;import sys;sys.modules[\"__main__\"].__file__='+repr(str(root/c.SOURCE_FILES['driver']))+';raise SystemExit(c._entry(sys.argv[1:],_root='+repr(str(root))+',_runtime=(sys.executable,sys.prefix)))'
         proc=subprocess.run([sys.executable,'-B','-I','-c',script]+argv,capture_output=True,timeout=10)
         self.assertEqual(proc.returncode,0,proc.stderr)
         self.assertEqual(proc.stderr,b'');self.assertEqual(json.loads(proc.stdout)['status'],'FORMAT_OBSERVED_SUPPORTED')
@@ -503,3 +506,147 @@ with patch.object(socket,'socket',side_effect=AssertionError('network')), patch.
         with patch.object(Path,'parents',property(lambda value:Parents39(original.fget(value)))):
             r=self.run_census()
         self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED')
+
+    def test_repair_n1_paginated_supported_writer_golden(self):
+        # Pinned092d3acd: protocol/src/{items,models}.rs + rollout/src/policy.rs.
+        # Historical IDs below are DATA; census never correlates/publishes them.
+        body=self.event(13,turn_id='turn')
+        body+=row(14,'response_item',dict(type='message',role='user',id='raw-user',content=[dict(type='input_text',text='CANARY')]))
+        body+=row(15,'response_item',dict(type='message',role='assistant',content=[dict(type='output_text',text='CANARY')]))
+        body+=row(16,'response_item',dict(type='reasoning',summary=[dict(type='summary_text',text='CANARY')]))
+        body+=row(17,'turn_context',dict(turn_id='turn',base_instructions='CANARY'))
+        body+=self.event(18,'token_count',info=dict(total_token_usage=dict(total_tokens=4)))
+        body+=self.event(19,'item_completed',thread_id='reviewer',turn_id='turn',item=dict(type='Plan',id='plan',text='CANARY'))
+        body+=self.event(20,'task_complete',turn_id='turn',error=dict(message='CANARY_FAILURE'))
+        self.write(body);r=self.run_census()
+        self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED')
+        self.assertEqual(r['shape_counts']['pickup_rejected'],0)
+        self.assertEqual(r['fixed_histograms']['response_item']['message'],2)
+        self.assertEqual(r['fixed_histograms']['event']['token_count'],1)
+        self.assertEqual(r['fixed_histograms']['item']['Plan'],1)
+        self.assertEqual(r['fixed_histograms']['terminal']['Failed'],1)
+        self.assertNotIn('CANARY',json.dumps(r))
+
+    def test_repair_n1_known_pickup_rejected_separate_from_unknown(self):
+        top=('compacted','thread_settings_applied','thread_goal_updated','token_usage_record','world_state')
+        responses=('additional_tools','agent_message','local_shell_call','function_call','tool_search_call','function_call_output',
+            'custom_tool_call','custom_tool_call_output','tool_search_output','web_search_call','image_generation_call',
+            'compaction','configuration_update','compaction_trigger','context_compaction')
+        items=('FunctionCallOutput','HookPrompt','CommandExecution','DynamicToolCall','CollabAgentToolCall',
+            'SubAgentActivity','WebSearch','ImageView','Extension','ImageGeneration','EnteredReviewMode',
+            'ExitedReviewMode','FileChange','McpToolCall','ContextCompaction')
+        values=[row(13,k,{}) for k in top]
+        values += [row(13,'response_item',dict(type=k)) for k in responses]
+        values += [self.event(13,'item_completed',item=dict(type=k)) for k in items]
+        values += [row(13,'response_item',dict(type='message',role=k)) for k in ('developer','system')]
+        for value in values:
+            with self.subTest(value=value[:90]):
+                self.write(value);r=self.run_census()
+                self.assertEqual(r['status'],'UNSUPPORTED')
+                self.assertIn('PICKUP_REJECTED_RECORD',r['reasons'])
+                self.assertNotIn('UNKNOWN_TYPE',r['reasons'])
+                self.assertEqual(r['shape_counts']['pickup_rejected'],1)
+        for value in (row(13,'CANARY',{}),row(13,'response_item',dict(type='CANARY')),
+                      self.event(13,'item_completed',item=dict(type='CANARY'))):
+            self.write(value);r=self.run_census();self.assertIn('UNKNOWN_TYPE',r['reasons'])
+            self.assertNotIn('CANARY',json.dumps(r))
+
+    def test_repair_n1_phase_missing_partial_unknown_distinct(self):
+        for value,label in (('ABSENT','ABSENT'),('partial_answer','partial_answer'),(None,'UNKNOWN'),('CANARY','UNKNOWN')):
+            item=dict(type='AgentMessage',id='agent',content=[dict(type='Text',text='CANARY')])
+            if value!='ABSENT':item['phase']=value
+            self.write(self.event(13,'item_completed',item=item));r=self.run_census()
+            self.assertEqual(r['status'],'UNSUPPORTED')
+            self.assertEqual(r['fixed_histograms']['phase'][label],1)
+            self.assertFalse(r['sample_clean']);self.assertNotIn('CANARY',json.dumps(r))
+
+    def test_repair_n1_failed_and_interrupted_terminal_shapes(self):
+        for fields,supported in ((dict(error={}),True),({},True),(dict(error=None),False),
+                                  (dict(error='CANARY'),False)):
+            self.write(self.event(13,'task_complete',**fields));r=self.run_census()
+            self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED' if supported else 'UNSUPPORTED')
+        for reason in ('interrupted','CANARY',None):
+            self.write(self.event(13,'turn_aborted',turn_id='turn',reason=reason));r=self.run_census()
+            self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED' if reason=='interrupted' else 'UNSUPPORTED')
+
+    def test_repair_n2_no_complete_sample_cannot_be_supported(self):
+        for body in (b'',b'{"partial":"\xe4',b'not-terminated'):
+            self.write(body);r=self.run_census()
+            self.assertEqual(r['status'],'INCOMPLETE');self.assertIn('NO_RECORDS',r['reasons'])
+            self.assertFalse(r['sample_clean']);self.assertIsNone(r['ordinal_summary']['meta_plus_one'])
+        self.path.write_bytes(b'');r=self.run_census()
+        self.assertEqual(r['status'],'BLOCKED');self.assertIn('META_INVALID',r['reasons'])
+        meta=row(12,'session_meta',dict(id='reviewer',session_id='session',history_mode='legacy'))
+        self.write(b'',meta);r=self.run_census();self.assertEqual(r['status'],'UNSUPPORTED')
+
+    def test_repair_n3_task_review_hash_required_and_loaded_path_bound(self):
+        from unittest.mock import patch
+        from llmtool import task_review
+        pin=self.pin_document();pin['code_hashes'].pop('task_review',None)
+        with patch.object(c,'census') as read:
+            code,out=self.entry(self.argv(pin));self.assertEqual(code,1);read.assert_not_called()
+        pin=self.pin_document()
+        with patch.object(task_review,'__file__','/CANARY/task_review.py'),patch.object(c,'census') as read:
+            code,out=self.entry(self.argv(pin));self.assertEqual(code,1);read.assert_not_called()
+            self.assertIn('RUNTIME_MISMATCH',out.getvalue());self.assertNotIn('CANARY',out.getvalue())
+        pin=self.pin_document();pin['code_hashes']['task_review']='0'*64
+        with patch.object(c,'census') as read:
+            code,out=self.entry(self.argv(pin));self.assertEqual(code,1);read.assert_not_called()
+
+    def test_repair_n3_isolated_flags_and_main_binding_before_read(self):
+        import sys
+        from unittest.mock import patch
+        flags=sys.flags
+        for key in ('isolated','dont_write_bytecode'):
+            class Flags:
+                def __getattr__(self,attr):return 0 if attr==key else getattr(flags,attr)
+            with patch.object(sys,'flags',Flags()),patch.object(c,'census') as read:
+                code,out=self.entry(self.argv(self.pin_document()))
+                self.assertEqual(code,1);self.assertIn('RUNTIME_MISMATCH',out.getvalue());read.assert_not_called()
+        for main_file in (None,'/CANARY/wrong.py'):
+            with patch.object(c,'census') as read:
+                code,out=self.entry(self.argv(self.pin_document()),main_file=main_file)
+                self.assertEqual(code,1);self.assertIn('RUNTIME_MISMATCH',out.getvalue());read.assert_not_called()
+                self.assertNotIn('CANARY',out.getvalue())
+
+    def test_repair_n3_driver_import_error_fixed_json_no_traceback(self):
+        import subprocess
+        import sys
+        root=Path(c.__file__).absolute().parents[3]
+        script='''import builtins,runpy,sys
+original=builtins.__import__
+def blocked(name,*a,**kw):
+    if name=='llmtool.rollout_census':raise ImportError('CANARY_PRIVATE_PATH')
+    return original(name,*a,**kw)
+builtins.__import__=blocked
+runpy.run_path(sys.argv[1],run_name='__main__')
+'''
+        r=subprocess.run([sys.executable,'-B','-I','-c',script,str(root/c.SOURCE_FILES['driver'])],capture_output=True,timeout=10)
+        self.assertEqual(r.returncode,1);self.assertEqual(r.stderr,b'')
+        result=json.loads(r.stdout);self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['reasons'],['RUNTIME_MISMATCH'])
+        self.assertNotIn(b'CANARY',r.stdout+r.stderr);self.assertNotIn(str(root).encode(),r.stdout+r.stderr)
+
+    def test_repair_n3_driver_rejects_flags_before_dependency_import(self):
+        import subprocess
+        import sys
+        root=Path(c.__file__).absolute().parents[3]
+        for flag in ('isolated','dont_write_bytecode'):
+            script='''import builtins,runpy,sys
+realflags=sys.flags
+class Flags:
+    def __getattr__(self,key):return 0 if key==sys.argv[2] else getattr(realflags,key)
+sys.flags=Flags()
+original=builtins.__import__
+def blocked(name,*a,**kw):
+    if name=='llmtool.rollout_census':
+        print('UNEXPECTED_IMPORT_CANARY',file=sys.stderr)
+        raise AssertionError('dependency import before flags')
+    return original(name,*a,**kw)
+builtins.__import__=blocked
+runpy.run_path(sys.argv[1],run_name='__main__')
+'''
+            r=subprocess.run([sys.executable,'-B','-I','-c',script,str(root/c.SOURCE_FILES['driver']),flag],
+                capture_output=True,timeout=10)
+            self.assertEqual(r.returncode,1);self.assertEqual(r.stderr,b'')
+            self.assertEqual(json.loads(r.stdout)['reasons'],['RUNTIME_MISMATCH'])
