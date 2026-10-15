@@ -317,7 +317,11 @@ def _project(x, out):
         else:
             unsupported()
     elif event == 'turn_aborted':
-        if payload.get('reason') == 'interrupted':
+        turn_id = payload.get('turn_id')
+        # Full action_contract._identifier vocabulary, not just the later
+        # Pickup non-null branch shown in the limited M1a advisory excerpt.
+        if (payload.get('reason') == 'interrupted' and type(turn_id) is str
+                and re.fullmatch('[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}', turn_id) is not None):
             hist['terminal']['Interrupted'] += 1
         else:
             unsupported()
