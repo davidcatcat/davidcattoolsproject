@@ -83,6 +83,56 @@ Batch deterministic worktree/branch/baseline state checks where permitted, but d
 
 **VPN transition:** Before a real company LLM call remind the owner: 「接下來要使用公司 LLM，請先連上公司 VPN。」 Corporate VPN may block external Codex Hooks documentation or GitHub; batch permitted public-doc checks outside VPN-only phases where practical and never equate a blocked request with an absent API. VPN connectivity is not provider-egress authorization; the [Issue #66 privacy gate](https://github.com/davidcatcat/davidcattoolsproject/issues/66) remains in force. [VPN record](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155066742).
 
+### Supervised self-hosting dogfood (M1)
+
+M1a/M1b/M2 map to [A11c.1 delivery stages](ROADMAP.md#supervised-self-hosting-delivery-within-a11c1-m1).
+They do not replace S1a/S1b/S2, waive F2/Host/provider gates, or retire ai-loop.
+Follow the existing [team policy](../../skills/ai-team-delivery/SKILL.md) and
+[safe-git](../../skills/safe-git/SKILL.md); Owner decisions in Issue #120 remain
+traceable evidence rather than model-generated authority.
+
+1. Choose one real task and its exact source/evidence scope. Prefer deterministic
+   local facts first, then one permitted foreground advisory request. Reuse
+   existing `ask`, `review-diff`, `test-excerpts` or A9 capabilities; do not label
+   direct Codex development as an llmtool invocation. A partial source packet is
+   explicitly a limited-context advisory, not a complete independent review.
+2. Pin the actual execution root, runtime revision/import, provider profile/CLI
+   and current data/cost permission. An older trusted runtime may be reported
+   honestly when it already provides the needed functionality; do not claim it
+   is current main. Any required synchronization follows CLAIM/RELEASE. Do not
+   alter global settings, create a project copy or borrow a peer's venv.
+3. Use a bounded, screened public-source or synthetic packet within the granted
+   route. `review-diff` input validation is not a secret/export scanner; neither
+   a public repository nor `test-excerpts` authorizes every data export. Keep raw
+   private logs, credentials, company data and existing session context out.
+4. For the initial pilot, make at most one admitted provider request, with a
+   fixed timeout, actual owned-child exit and no automatic retry/fallback.
+   Preserve pre-dispatch configuration failures separately; a correction with
+   proven zero requests is not an unknown-effect request resend. Record every
+   CLI invocation and actual effect rather than hiding failed attempts.
+5. Verify the reply against complete relevant source and deterministic evidence
+   before adoption. Limited context can omit earlier validation. Record valid,
+   invalid and unconfirmed claims, including recommendations you modify or reject.
+   Keep advisory authority NONE; do not execute generated commands automatically.
+6. M1a requires a useful real-task artifact and its adoption/disposition record.
+   M1b additionally requires the assigned Developer's real source/test change,
+   before/after test evidence, commit/PR and independent review. The original
+   worktree/task gates still apply; no source writes before a required new C3.
+7. Record command/provider, runtime/task SHA, input/output digests, exit, elapsed,
+   cleanup, actual model calls, privacy/preservation and artifact use. CLI usage
+   unavailable means UNKNOWN, not zero or a savings percentage. Let AI record
+   observed Owner relays, initial authorization and physical operations separately;
+   do not ask the Owner to add bookkeeping markers or reconstruct old relays.
+
+An active Developer's foreground request does not require idle-session wake.
+This may reduce a courier step but is not proof of M2: the full independently
+reviewed development/test/repair/Draft-PR cycle must meet its own applicable
+permissions, budget, deduplication and Native acceptance. Model output and
+GitHub markers never confer execution authority. Do not enable #153 polling,
+a new bridge/daemon, Company Live, real Step-0 or Gate B through this workflow.
+Historical CLI/company smoke and L01 benchmark evidence keep their original
+scope; they do not establish a current real-task result or token saving.
+
 ### Bug report → user-impact triage → bounded release
 
 Apply the [canonical ai-team-delivery defect policy](../../skills/ai-team-delivery/SKILL.md#user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92),
