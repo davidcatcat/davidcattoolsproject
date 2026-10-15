@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import selectors
 import select
 import signal
@@ -224,16 +225,20 @@ class QueueCodec:
 
 class EventCoverage:
     """Pinned observer window. Provenance is supplied by trusted Host, not prose."""
-    def __init__(self, thread, source_digest):
+    def __init__(self, thread, source_digest, *, mode='APP_SERVER_EVENTS'):
         _identifier(thread);_hex(source_digest)
+        if mode not in ('APP_SERVER_EVENTS','HOST_ROLLOUT'):reject('PICKUP_EVENT_SOURCE_INVALID')
+        self.mode=mode
         self.thread,self.source=thread,source_digest;self.last=0;self.started=False;self.terminal=None
         self.failed=False;self.tool=False;self.turn=None;self.events=[];self.item_ids={}
+        self.rollout_next=None;self.record_digests=[];self.delivery_matched=False
     def feed(self, *, sequence, source_digest, thread_id, turn_id, kind, item_type=None, status=None, item_id=None, item_phase="started"):
         if self.failed:reject('PICKUP_COVERAGE_UNVERIFIED')
         try:
             if source_digest!=self.source or sequence!=self.last+1 or thread_id!=self.thread:
                 reject('PICKUP_COVERAGE_UNVERIFIED')
             if type(sequence) is not int or len(self.events)>=128:reject('PICKUP_EVENT_LIMIT')
+            if self.terminal is not None:reject('PICKUP_EVENT_REPLAY')
             _identifier(turn_id)
             if self.turn is not None and turn_id!=self.turn:reject('PICKUP_TOOL_EFFECT')
             if kind=='started':
@@ -243,7 +248,11 @@ class EventCoverage:
                 if not self.started or item_type not in NON_TOOL: self.tool=True;reject('PICKUP_TOOL_EFFECT')
                 _identifier(item_id)
                 prior=self.item_ids.get(item_id)
-                if item_phase=='started':
+                if item_phase=='completed_only' and self.mode=='HOST_ROLLOUT':
+                    if prior is not None:reject('PICKUP_EVENT_REPLAY')
+                    self.item_ids[item_id]=(item_type,turn_id,'completed')
+                elif self.mode=='HOST_ROLLOUT':reject('PICKUP_COVERAGE_UNVERIFIED')
+                elif item_phase=='started':
                     if prior is not None:reject('PICKUP_EVENT_REPLAY')
                     self.item_ids[item_id]=(item_type,turn_id,'started')
                 elif item_phase=='completed':
@@ -254,14 +263,249 @@ class EventCoverage:
                 if not self.started or self.terminal is not None or status not in ('Completed','Interrupted','Failed'):
                     reject('PICKUP_COVERAGE_UNVERIFIED')
                 self.terminal=status
+            elif kind=='observed' and self.mode=='HOST_ROLLOUT':pass
             else:reject('PICKUP_COVERAGE_UNVERIFIED')
             self.last=sequence;self.events.append((sequence,thread_id,turn_id,kind,item_type,status,item_id,item_phase))
         except Exception:
             self.failed=True;raise
     def seal(self, *, drained, child_exited, source_digest):
-        if self.failed or not self.started or self.terminal is None or any(x[2] != "completed" for x in self.item_ids.values()) or drained is not True or child_exited is not True or source_digest!=self.source:
+        if self.failed or not self.started or self.terminal is None or (self.mode=='HOST_ROLLOUT' and not self.delivery_matched) or any(x[2] != "completed" for x in self.item_ids.values()) or drained is not True or child_exited is not True or source_digest!=self.source:
+            self.failed=True
             reject('PICKUP_COVERAGE_UNVERIFIED')
-        return digest((self.source,self.events),'llmtool.pickup-coverage.v1')
+        domain='llmtool.pickup-coverage.rollout.v1' if self.mode=='HOST_ROLLOUT' else 'llmtool.pickup-coverage.v1'
+        return digest((self.source,self.events,self.record_digests) if self.mode=='HOST_ROLLOUT' else (self.source,self.events),domain)
+
+
+@dataclass(frozen=True)
+class RolloutPin:
+    """External admission DATA, never a Host or execution grant."""
+    codex_home: str
+    rollout_path: str
+    uid: int
+    device: int
+    inode: int
+    session_id: str
+    thread_id: str
+    start_offset: int
+    next_ordinal: int
+    history_mode: str = 'paginated'
+    protocol_sha: str = PROTOCOL_SHA
+    max_line_bytes: int = LIMIT
+    max_window_bytes: int = 512*1024
+    max_records: int = 128
+    max_polls: int = 128
+
+    def __post_init__(self):
+        for x in (self.session_id,self.thread_id):_identifier(x)
+        for x in (self.uid,self.device,self.inode,self.start_offset,self.next_ordinal):
+            _integer(x,maximum=2**63-1)
+        for x,limit in ((self.max_line_bytes,LIMIT),(self.max_window_bytes,512*1024),
+                        (self.max_records,128),(self.max_polls,128)):_integer(x,minimum=1,maximum=limit)
+        if (self.history_mode!='paginated' or self.protocol_sha!=PROTOCOL_SHA or
+                type(self.codex_home) is not str or type(self.rollout_path) is not str):
+            reject('PICKUP_EVENT_SOURCE_INVALID')
+        home,path=Path(self.codex_home),Path(self.rollout_path)
+        try:parts=path.relative_to(home).parts
+        except ValueError:reject('PICKUP_EVENT_SOURCE_INVALID')
+        if (not home.is_absolute() or str(home)!=os.path.abspath(home) or
+                str(path)!=os.path.abspath(path) or len(parts)!=5 or parts[0]!='sessions' or
+                not re.fullmatch(r'\d{4}',parts[1]) or not all(re.fullmatch(r'\d{2}',x) for x in parts[2:4]) or
+                not re.fullmatch(r'rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-'+re.escape(self.thread_id)+r'\.jsonl',parts[4])):
+            reject('PICKUP_EVENT_SOURCE_INVALID')
+
+    @property
+    def digest(self):return digest(asdict(self),'llmtool.pickup-rollout-pin.v1')
+
+
+def _rollout_json(raw,limit):
+    """Strict JSON and Unicode without exposing raw payload/paths in errors."""
+    try:
+        value=load_json(raw.decode('utf-8'),limit)
+        # ensure_ascii=False rejects unpaired escaped surrogates too.
+        json.dumps(value,ensure_ascii=False,allow_nan=False).encode('utf-8')
+        if type(value) is not dict:reject('PICKUP_COVERAGE_UNVERIFIED')
+        return value
+    except Exception:reject('PICKUP_COVERAGE_UNVERIFIED')
+
+
+class RolloutWindow:
+    """Bounded read-only LF cursor. Only explicitly admitted synthetic files.
+
+    The source is cooperative same-UID DATA. EOF proves one snapshot boundary,
+    not the absence of future writes. No retry, history scan or re-resolution.
+    """
+    def __init__(self,pin,coverage,clock,deadline,check=lambda:None):
+        if type(pin) is not RolloutPin or type(coverage) is not EventCoverage:
+            reject('PICKUP_EVENT_SOURCE_INVALID')
+        self.pin,self.coverage,self.clock,self.deadline,self.check=pin,coverage,clock,deadline,check
+        self.offset=pin.start_offset;self.next_ordinal=pin.next_ordinal
+        self.bytes=self.records=self.polls=0;self.size=None;self.file_mode=None;self.admitted=False
+        self.partial=False;self.closed=False;self.drained=False
+        coverage.rollout_next=pin.next_ordinal
+        coverage.rollout_session=pin.session_id
+        if coverage.mode!='HOST_ROLLOUT' or coverage.source!=pin.digest or coverage.thread!=pin.thread_id:
+            self.fail('PICKUP_EVENT_SOURCE_INVALID')
+
+    def fail(self,code):self.coverage.failed=True;reject(code)
+
+    def _time(self,end):
+        self.check()
+        if self.clock()>=min(end[0],self.deadline) or time.monotonic()>=end[1]:
+            self.fail('PICKUP_READ_TIMEOUT')
+
+    def _identity(self,info):
+        p=self.pin
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or
+                (info.st_uid,info.st_dev,info.st_ino)!=(p.uid,p.device,p.inode) or
+                info.st_mode&0o022 or info.st_size<self.offset or
+                (self.file_mode is not None and info.st_mode!=self.file_mode) or
+                (self.size is not None and info.st_size<self.size)):
+            self.fail('PICKUP_EVENT_SOURCE_INVALID')
+
+    def _read(self,fd,count):
+        left=self.pin.max_window_bytes-self.bytes
+        # Read a bounded sentinel when exhausted, so exact-limit EOF can pass.
+        data=os.read(fd,min(count,max(1,left+1)))
+        self.bytes+=len(data)
+        if self.bytes>self.pin.max_window_bytes:self.fail('PICKUP_EVENT_LIMIT')
+        return data
+
+    def _admit(self,fd):
+        p=self.pin;os.lseek(fd,0,os.SEEK_SET)
+        # Metadata is bounded even if instructions alone exceed the limit.
+        raw=self._read(fd,p.max_line_bytes+1);line,sep,_=raw.partition(b'\n')
+        if not sep or len(line)+1>p.max_line_bytes:self.fail('PICKUP_EVENT_LIMIT')
+        x=_rollout_json(line,p.max_line_bytes)
+        meta=x.get('payload')
+        if (set(x)!={'timestamp','ordinal','type','payload'} or x['type']!='session_meta' or
+                type(x['ordinal']) is not int or not 0<=x['ordinal']<p.next_ordinal or
+                type(x['timestamp']) is not str or type(meta) is not dict or
+                meta.get('id')!=p.thread_id or meta.get('session_id')!=p.session_id or
+                meta.get('history_mode')!=p.history_mode or 'forked_from_id' in meta or p.start_offset<len(line)+1):
+            self.fail('PICKUP_EVENT_SOURCE_INVALID')
+        os.lseek(fd,p.start_offset-1,os.SEEK_SET)
+        if self._read(fd,1)!=b'\n':self.fail('PICKUP_EVENT_SOURCE_INVALID')
+        self.records+=1
+        if self.records>p.max_records:self.fail('PICKUP_EVENT_LIMIT')
+        self.admitted=True
+
+    def poll(self, *, operation=None, final=False):
+        if self.coverage.failed:self.fail('PICKUP_COVERAGE_UNVERIFIED')
+        end=(self.clock()+5,time.monotonic()+5)
+        if operation is not None:end=(min(end[0],operation[0]),min(end[1],operation[1]))
+        fd=None;self.closed=False;self.drained=False
+        try:
+            self._time(end);self.polls+=1
+            if self.polls>self.pin.max_polls:self.fail('PICKUP_EVENT_LIMIT')
+            path=Path(self.pin.rollout_path);physical_directory(path.parent)
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            st=os.fstat(fd);self._identity(st);self._identity(path.lstat())
+            self.file_mode=st.st_mode
+            if not self.admitted:self._admit(fd)
+            os.lseek(fd,self.offset,os.SEEK_SET)
+            out=[];pending=bytearray()
+            while True:
+                self._time(end)
+                data=self._read(fd,min(8192,self.pin.max_line_bytes+1-len(pending)))
+                if not data:break
+                pending.extend(data)
+                while b'\n' in pending:
+                    line,_,rest=pending.partition(b'\n');pending=bytearray(rest)
+                    if len(line)+1>self.pin.max_line_bytes:self.fail('PICKUP_EVENT_LIMIT')
+                    self.records+=1
+                    if self.records>self.pin.max_records:self.fail('PICKUP_EVENT_LIMIT')
+                    value=_rollout_json(bytes(line),self.pin.max_line_bytes)
+                    ordinal=value.get('ordinal')
+                    if type(ordinal) is not int or ordinal!=self.next_ordinal or not 0<=ordinal<=2**63-1:
+                        self.fail('PICKUP_COVERAGE_UNVERIFIED')
+                    self.next_ordinal+=1;self.offset+=len(line)+1;out.append(value)
+                if len(pending)>=self.pin.max_line_bytes:self.fail('PICKUP_EVENT_LIMIT')
+            self.partial=bool(pending)
+            after=os.fstat(fd);self._identity(after);self._identity(path.lstat());physical_directory(path.parent)
+            self.size=after.st_size
+            if final:
+                if out or self.partial or self.coverage.terminal is None:self.fail('PICKUP_COVERAGE_UNVERIFIED')
+                self.drained=True
+            self._time(end)
+            return out
+        except BaseException as exc:
+            self.coverage.failed=True
+            if getattr(exc,'review_code',None) not in ('PICKUP_EVENT_SOURCE_INVALID',
+                    'PICKUP_EVENT_LIMIT','PICKUP_COVERAGE_UNVERIFIED','PICKUP_READ_TIMEOUT'):
+                reject('PICKUP_EVENT_SOURCE_INVALID')
+            raise
+        finally:
+            if fd is not None:
+                try:os.close(fd);self.closed=True;self._time(end)
+                except BaseException:self.coverage.failed=True;self.drained=False;raise
+
+
+def feed_rollout_record(coverage,codec,value, *, source_digest):
+    """Map actual writer tags; return ephemeral verdict text only in memory."""
+    try:
+        if (coverage.failed or coverage.mode!='HOST_ROLLOUT' or source_digest!=coverage.source or
+                type(value) is not dict or set(value)!={'timestamp','ordinal','type','payload'} or
+                type(value['timestamp']) is not str or type(value['payload']) is not dict):
+            reject('PICKUP_COVERAGE_UNVERIFIED')
+        p=value['payload'];kind=value['type'];event=p.get('type')
+        for key,expected in (('thread_id',coverage.thread),('session_id',getattr(coverage,'rollout_session',None))):
+            if key in p and p[key]!=expected:reject('PICKUP_COVERAGE_UNVERIFIED')
+        if (type(value['ordinal']) is not int or value['ordinal']!=coverage.rollout_next or
+                not 0<=value['ordinal']<=2**63-1):reject('PICKUP_COVERAGE_UNVERIFIED')
+        turn=p.get('turn_id',coverage.turn);item_type=item_id=status=text=None
+        action='observed'
+        if kind=='event_msg':
+            if event in ('task_started','item_completed','task_complete','turn_aborted'):
+                _identifier(p.get('turn_id'))
+            if event=='task_started':action='started'
+            elif event=='item_completed':
+                if p.get('thread_id')!=coverage.thread:reject('PICKUP_TOOL_EFFECT')
+                item=p.get('item')
+                if type(item) is not dict or item.get('type') not in NON_TOOL:reject('PICKUP_TOOL_EFFECT')
+                item_type=item['type'];item_id=item.get('id');action='item'
+                if item_type=='UserMessage':
+                    codec.delivery(encoded({'threadId':p['thread_id'],'turnId':turn,'item':{
+                        'type':'userMessage','id':item_id,'clientId':item.get('client_id'),'content':item.get('content')}}))
+                elif item_type=='AgentMessage':
+                    if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
+                    phase=item.get('phase')
+                    if phase not in ('commentary','final_answer'):reject('REVIEW_VERDICT_INVALID')
+                    content=item.get('content')
+                    if (type(content) is not list or len(content)!=1 or type(content[0]) is not dict or
+                            set(content[0])!={'type','text'} or content[0]['type']!='Text' or
+                            type(content[0]['text']) is not str or len(content[0]['text'].encode('utf-8'))>LIMIT):
+                        reject('REVIEW_VERDICT_INVALID')
+                    if phase=='final_answer':
+                        if getattr(coverage,'final_seen',False):reject('REVIEW_VERDICT_INVALID')
+                        text=content[0]['text']
+                        screen(text);coverage.final_seen=True
+            elif event=='task_complete':
+                if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
+                action='terminal'
+                if 'error' not in p:status='Completed'
+                elif type(p['error']) is dict:status='Failed'
+                else:reject('PICKUP_COVERAGE_UNVERIFIED')
+                if status=='Completed' and not getattr(coverage,'final_seen',False):reject('REVIEW_VERDICT_INVALID')
+            elif event=='turn_aborted':
+                if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
+                if p.get('reason')!='interrupted' or p.get('turn_id') is None:reject('PICKUP_COVERAGE_UNVERIFIED')
+                action='terminal';status='Interrupted'
+            elif event!='token_count':reject('PICKUP_COVERAGE_UNVERIFIED')
+        elif kind=='response_item':
+            # Wire ResponseItem is snake_case, distinct from PascalCase TurnItem.
+            if p.get('type') not in ('message','reasoning'):reject('PICKUP_TOOL_EFFECT')
+            if p['type']=='message' and p.get('role') not in ('user','assistant'):reject('PICKUP_COVERAGE_UNVERIFIED')
+        elif kind!='turn_context':reject('PICKUP_COVERAGE_UNVERIFIED')
+        # Even benign records must belong to an actually started bound turn.
+        if action=='observed' and not coverage.started:reject('PICKUP_COVERAGE_UNVERIFIED')
+        coverage.feed(sequence=coverage.last+1,source_digest=source_digest,thread_id=coverage.thread,
+            turn_id=turn,kind=action,item_type=item_type,item_id=item_id,status=status,item_phase='completed_only')
+        if item_type=='UserMessage':coverage.delivery_matched=True
+        coverage.rollout_next+=1
+        coverage.record_digests.append(digest(value,'llmtool.pickup-rollout-record.v1'))
+        return action,item_type,text
+    except BaseException:
+        coverage.failed=True;raise
 
 
 @dataclass(frozen=True)
@@ -524,12 +768,16 @@ class CompositionPins:
     topology: str = 'IN_PROCESS_ZERO_CHILD'
     protocol_sha: str = PROTOCOL_SHA
     cli_version: str = CLI_VERSION
+    rollout: object = None
     def __post_init__(self):
         for key in ('session_digest','host_pin','packet_digest','route_digest','reviewer_context_digest',
                     'author_context_digest','author_route_digest','risk_digest','coverage_digest','event_source_digest'):
             _hex(getattr(self,key))
             if getattr(self,key)=='0'*64:reject('PICKUP_GRANT_INVALID')
         _identifier(self.thread_id)
+        if self.rollout is not None and (type(self.rollout) is not RolloutPin or
+                self.rollout.thread_id!=self.thread_id or self.rollout.digest!=self.event_source_digest):
+            reject('PICKUP_EVENT_SOURCE_INVALID')
         if (type(self.waiter) is not ReceiptWaiterPin or type(self.domains) is not tuple or len(self.domains)!=3 or
                 any(type(x) is not DomainPin for x in self.domains) or tuple(x.domain for x in self.domains)!=DOMAINS or
                 type(self.author_inference_allowed) is not bool or self.topology!='IN_PROCESS_ZERO_CHILD' or
@@ -706,6 +954,21 @@ class PersistentRPC:
             self.closed=True
         except BaseException:self.coverage.failed=True;raise
 
+    def available_drain_close(self, *, operation=None):
+        """Rollout mode: local available snapshot, never wait for server EOF."""
+        if self.closed:return self.drained and not self.coverage.failed
+        end=self._operation(operation)
+        try:
+            if self.coverage.failed or self.inflight is not None:self._fail('PICKUP_COVERAGE_UNVERIFIED')
+            self._remaining(end)
+            # RPC lifecycle data cannot substitute for rollout coverage.
+            if self.notifications or self.buffer or self.channel.readable():
+                self._fail('PICKUP_COVERAGE_UNVERIFIED')
+            self.drained=True
+            if self.channel.close() is not True:self._fail('PICKUP_CLEANUP_UNKNOWN')
+            self.closed=True;self._remaining(end);return True
+        except BaseException:self.coverage.failed=True;raise
+
 
 class ComposedPickup:
     """Private fake composition. Existing runner owns replay/approval/ledger.
@@ -717,7 +980,9 @@ class ComposedPickup:
         if type(pins) is not CompositionPins:reject('PICKUP_GRANT_INVALID')
         self.pins,self.host,self.waiter,self.clock=pins,host,waiter,clock
         self.codec=QueueCodec(pins.thread_id,'client-'+pins.waiter.notification_id,pins.packet_digest)
-        self.coverage=EventCoverage(pins.thread_id,pins.event_source_digest)
+        self.coverage=EventCoverage(pins.thread_id,pins.event_source_digest,
+            mode='HOST_ROLLOUT' if pins.rollout else 'APP_SERVER_EVENTS')
+        self.rollout=None
         self.stream=PersistentRPC(channel,self.coverage,clock.monotonic,clock.monotonic())
         self.stream.utc_now=clock.utc
         self.cue=cue;self.original_start=None
@@ -730,6 +995,7 @@ class ComposedPickup:
                 b.host_pin!=p.host_pin or b.packet_digest!=p.packet_digest or b.route_digest!=p.route_digest or
                 b.risk_acceptance_digest!=p.risk_digest or b.coverage_digest!=p.coverage_digest or
                 grant.session.digest!=p.session_digest or grant.session.event_source_digest!=p.event_source_digest or b.author_session!=p.waiter.session or
+                grant.session.event_source!=self.coverage.mode or
                 (b.task.task_id,b.task.run_id,b.source_sha,b.event_id)!=(p.waiter.task_id,p.waiter.run_id,p.waiter.source_sha,p.waiter.notification_id) or
                 p.waiter.expires_at<b.expires_at or any(x.run_id!=b.task.run_id for x in p.domains) or
                 p.domains[1].owner!=b.reviewer_session or p.domains[2].owner!=b.author_session or
@@ -742,6 +1008,10 @@ class ComposedPickup:
         self.normal_deadline=self.clock.monotonic()+expires-self.clock.utc()-20
         self.overall_deadline=self.normal_deadline+20;self.stream.deadline=self.normal_deadline
         self.stream.check=self.check
+        if p.rollout:
+            if p.rollout.session_id!=grant.session.session_id:reject('PICKUP_EVENT_SOURCE_INVALID')
+            self.rollout=RolloutWindow(p.rollout,self.coverage,self.clock.monotonic,self.normal_deadline,self.check)
+            self.coverage.rollout_session=p.rollout.session_id
         self.check()
         self.before_domains=self.domains()
     def check(self,cleanup=False):
@@ -787,6 +1057,7 @@ class ComposedPickup:
     def _feed_pending_notifications(self):
         values=self.stream.notifications;times=self.stream.notification_times
         self.stream.notifications=[];self.stream.notification_times=[]
+        if self.rollout is not None and values:reject('PICKUP_COVERAGE_UNVERIFIED')
         if len(values)!=len(times):reject('PICKUP_COVERAGE_UNVERIFIED')
         for raw,received_at in zip(values,times):
             if type(received_at) is not int:reject('PICKUP_CLOCK_INVALID')
@@ -803,6 +1074,17 @@ class ComposedPickup:
                 if type(text) is not str or len(text.encode())>LIMIT:reject('REVIEW_VERDICT_INVALID')
                 screen(text);self.verdict_text=text
             elif method=='turn/completed':self._event('TURN_COMPLETED',params['turn']['id'],status=self.coverage.terminal,timestamp=received_at)
+    def _rollout_events(self,operation):
+        try:
+            for value in self.rollout.poll(operation=operation):
+                action,item,text=feed_rollout_record(self.coverage,self.codec,value,source_digest=self.pins.event_source_digest)
+                if action=='started':self.original_start=self.clock.utc()
+                elif item=='UserMessage':
+                    self._event('DELIVERY',self.codec.turn)
+                    self._event('TURN_STARTED',self.coverage.turn,timestamp=self.original_start)
+                elif text is not None:self.verdict_text=text
+                elif action=='terminal':self._event('TURN_COMPLETED',self.coverage.turn,status=self.coverage.terminal)
+        except BaseException:self.coverage.failed=True;raise
     def _snapshot(self,operation=None):
         operation=self.stream._operation(operation)
         try:return self._read_snapshot(operation)
@@ -816,8 +1098,22 @@ class ComposedPickup:
             if self.codec.cursor is None:return empty
         reject('PICKUP_EVENT_LIMIT')
     def _seal(self,operation=None):
+        try:
+            if self.coverage.failed:reject('PICKUP_COVERAGE_UNVERIFIED')
+            return self._seal_window(operation)
+        except BaseException:
+            self.coverage.failed=True;self.terminal_digest=''
+            raise
+    def _seal_window(self,operation):
         if self.coverage.terminal is None:return
-        self.stream.drain_close(operation=operation);self._notifications()
+        if self.rollout is not None:
+            if self.terminal_digest:
+                self.rollout.poll(operation=operation,final=True)
+                return
+            self.rollout.poll(operation=operation,final=True)
+            self.stream.available_drain_close(operation=operation);self._notifications()
+            if not self.rollout.drained or not self.rollout.closed:reject('PICKUP_CLEANUP_UNKNOWN')
+        else:self.stream.drain_close(operation=operation);self._notifications()
         if self.window.attempts or self.window.spawn_count or not self.stream.closed or not self.stream.drained:
             reject('PICKUP_CHILD_EXIT_UNKNOWN')
         self.terminal_digest=self.coverage.seal(drained=self.stream.drained,child_exited=self.stream.closed,
@@ -829,13 +1125,19 @@ class ComposedPickup:
         frame=self.host.observe()
         if not self.queued:
             self.stream.initialize(operation=operation);empty=self._snapshot(operation)
+            if self.rollout is not None:
+                if self.rollout.poll(operation=operation) or self.rollout.partial:
+                    self.coverage.failed=True;reject('PICKUP_COVERAGE_UNVERIFIED')
         else:
             empty=False
-            for _ in range(128):
-                self._notifications()
-                if self.coverage.terminal is not None or self.stream.closed:break
-                self.stream.poll_available(operation=operation)
-                if not self.stream.notifications:break
+            if self.rollout is not None:
+                if not self.terminal_digest:self._rollout_events(operation)
+            else:
+                for _ in range(128):
+                    self._notifications()
+                    if self.coverage.terminal is not None or self.stream.closed:break
+                    self.stream.poll_available(operation=operation)
+                    if not self.stream.notifications:break
         self._notifications();self._seal(operation)
         if self.notified and not self.acknowledged and not self.receipt_rejected:
             ack=self.waiter.poll()
@@ -869,7 +1171,9 @@ class ComposedPickup:
             reject('PICKUP_PACKET_DRIFT')
         text=HOST_INSTRUCTIONS+'\n'+instructions+'\nExpires_at_UTC='+str(self.expires_utc)+'\nUNTRUSTED_DATA_JSON\n'+packet.messages()[1]['content']
         method,params=self.codec.add(text)
-        value=self.stream.request(method,params,operation=operation);self.codec.accept(encoded(value));self.queued=True
+        try:
+            value=self.stream.request(method,params,operation=operation);self.codec.accept(encoded(value));self.queued=True
+        except BaseException:self.coverage.failed=True;raise
         # Original queued/client/item/turn mapping is processed after the exact ack.
         self._notifications();self.stream._remaining(operation)
         g=self.grant
