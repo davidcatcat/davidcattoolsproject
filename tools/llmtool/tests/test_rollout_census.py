@@ -675,3 +675,42 @@ runpy.run_path(sys.argv[1],run_name='__main__')
             # A unit fixture models the isolated Host; it is not production.
             code,output=self.entry(argv)
             self.assertEqual(code,0,output.getvalue())
+
+    def test_m1b_adopted_missing_and_null_abort_id_fail_closed(self):
+        # M1a diagnosed D1; full Pickup validates _identifier before its later
+        # non-null guard. Do not adopt the model's non-null-only/int-positive.
+        for fields in ({},dict(turn_id=None)):
+            self.write(self.event(13,'turn_aborted',reason='interrupted',**fields))
+            r=self.run_census()
+            self.assertEqual(r['status'],'UNSUPPORTED')
+            self.assertEqual(r['fixed_histograms']['terminal']['Interrupted'],0)
+            self.assertEqual(r['shape_counts']['unsupported'],1)
+            self.assertFalse(r['sample_clean'])
+
+    def test_m1b_full_identifier_semantics_without_pickup_correlation(self):
+        from llmtool.action_contract import _identifier
+        from llmtool.errors import LLMToolError
+        values=('A','0','CANARY_TURN.a-1_2','A'*64,
+            None,7,0,1.0,True,False,'','_turn','.turn','-turn','a b','a/b',
+            'a\n','\u4e2d','A\u200b','A\x00','A'*65,[],{},['CANARY'],dict(id='CANARY'))
+        for value in values:
+            with self.subTest(value=value):
+                try:_identifier(value);supported=True
+                except LLMToolError:supported=False
+                self.write(self.event(13,'turn_aborted',reason='interrupted',turn_id=value))
+                r=self.run_census()
+                self.assertEqual(r['status'],'FORMAT_OBSERVED_SUPPORTED' if supported else 'UNSUPPORTED')
+                self.assertEqual(r['fixed_histograms']['terminal']['Interrupted'],int(supported))
+                self.assertEqual(r['shape_counts']['unsupported'],int(not supported))
+                self.assertEqual(r['fixed_histograms']['error'],dict.fromkeys(c.ERRORS,0))
+                self.assertNotIn('CANARY',json.dumps(r))
+                self.assertLessEqual(r['resource_counts']['bytes'],c.TOTAL)
+
+    def test_m1b_wrong_reason_and_private_abort_id_not_echoed(self):
+        for fields in ({},dict(reason=None),dict(reason='cancelled'),dict(reason='CANARY_REASON')):
+            self.write(self.event(13,'turn_aborted',turn_id='CANARY_TURN_ID',**fields))
+            r=self.run_census()
+            self.assertEqual(r['status'],'UNSUPPORTED')
+            self.assertEqual(r['reasons'],['UNSUPPORTED_SHAPE'])
+            self.assertEqual(r['fixed_histograms']['terminal']['Interrupted'],0)
+            self.assertNotIn('CANARY',json.dumps(r))
