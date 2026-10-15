@@ -96,6 +96,12 @@ def parser_for_cli():
     excerpts.add_argument("--json", action="store_true", required=True, help="output version-1 evidence JSON")
     excerpts.add_argument("--max-excerpt-bytes", type=int, default=2048, help="128 through 2048 original bytes per excerpt")
     excerpts.add_argument("--max-excerpts", type=int, default=32, help="1 through 32 excerpts; total capped at 16 KiB")
+    worker = sub.add_parser("test-triage-worker",
+                            help="Advisory company test-triage over test-excerpts; live route BLOCKED")
+    worker.add_argument("--file", required=True, help="one explicit captured UTF-8 regular file")
+    worker.add_argument("--exit-code", required=True, type=int, help="captured test exit (-127 through 255)")
+    worker.add_argument("--profile", required=True, help="explicit openai-compatible profile; no fallback")
+    worker.add_argument("--json", action="store_true", required=True, help="output advisory JSON")
     add_feedback_parser(sub)
     add_benchmark_parser(sub, add_options)
     add_orchestration_parser(sub)
@@ -299,6 +305,14 @@ def _run_test_excerpts(args):
     return result
 
 
+def _run_test_triage_worker(args):
+    from .test_triage_worker import run_test_triage_worker
+    # Profile, selector and packet checks run locally; the public composition
+    # stops before any client exists until a separate live grant is accepted.
+    run_test_triage_worker(args.file, args.exit_code, profile=args.profile)
+    raise LLMToolError('test-triage-worker: live company route is not authorized; details omitted')
+
+
 def main(argv=None):
     try:
         args = parser_for_cli().parse_args(argv)
@@ -308,6 +322,8 @@ def main(argv=None):
             return run_task_review(args) if args.action == 'review' else run_task_inspect(args)
         if args.command == 'test-excerpts':
             return _run_test_excerpts(args)
+        if args.command == 'test-triage-worker':
+            return _run_test_triage_worker(args)
         if args.command in ('action', 'approval'):
             return run_action_contract(args)
         if args.command == 'ask':
