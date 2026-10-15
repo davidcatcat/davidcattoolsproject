@@ -1126,6 +1126,36 @@ repair proposal 與 Git action 各自回到 policy/required approval，通過才
 A9 text orchestration、A10 retrieval、A6 validator、A5 Git intelligence 的既有 boundary
 不得被 integration 偷偷放寬。
 
+### Supervised self-hosting delivery within A11c.1 (M1)
+
+Apply the [Owner direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6194008916),
+[Claude challenge](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6194171132)
+and [Codex counter-review](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6195340371)
+through the Coordinator decision/evidence recorded in Issue #120. M1a/M1b/M2 are
+acceptance stages mapped to the existing S1a/S1b/S2 roadmap, not new parallel
+milestones, executors or permission grants.
+
+| Stage | Smallest useful delivery | Boundary |
+| --- | --- | --- |
+| M1a supervised advisory | Existing llmtool CLI/provider processes permitted evidence from a real llmtool task; a source-checked artifact is adopted or dispositioned with invocation provenance | No F2 dependency for read-only/text assistance; no formal review or merge authority |
+| M1b assisted development | The assigned Developer adopts a useful llmtool proposal into a real scoped source/test change, with tests, Git evidence and independent review | Developer performs the authorized writes; this is not llmtool-executed mutation or S2 enablement |
+| M2 bounded autonomous cycle | Real development, independent review, bounded repair and tests reach an eligible Draft PR or STOP without Owner prompt relays | Per-action S2/A11b/F2 and provider/Host gates remain applicable; an idle wake or advisory response alone is insufficient |
+
+Prefer existing foreground text providers/A9 for the first useful task. An active
+Developer can wait for a fresh advisory child without an original-session wake;
+formal production review still requires its own accepted route and evidence.
+Pause new Native Pickup expansion until real M1 observations justify it; finish
+already-scoped fixes under their existing gates. Do not create a second bridge,
+scheduler or controller. Issue #153 remains CLOSED/HOLD; ai-loop fallback remains.
+
+Record exact runtime and task revisions, permitted input digest/scope, actual
+provider, exit/elapsed, output provenance and concrete adoption/rejection. Count
+observed Owner relays separately from initial task authorization; missing usage
+or intervention evidence stays UNKNOWN. Documents, fake tests and historical
+smoke results do not satisfy a new real-task acceptance. Company Live, real
+Step-0 and Native Gate B still require their separate explicit authorizations.
+See [the foreground workflow](WORKFLOW.md#supervised-self-hosting-dogfood-m1).
+
 ### A11c.1a — Local Reviewer subagent and work-package pilot (2026-10-14)
 
 Per [Owner's accepted process change](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235), minimize human prompt relays without weakening formal independent or safe-git gates. In **each existing Codex Developer and Claude Developer session**, show one distinctly identified read-only in-session Reviewer child inside the existing fixed root, a real small finding or harmless seeded fixture, Developer repair and targeted regression check, and a single consolidated report with **zero human microstep relays**. Record exact tool/root/permission evidence and PASS or a reproducible BLOCKED limitation. A child is not an extra worktree or separately authenticated Claude/Codex independent reviewer.
