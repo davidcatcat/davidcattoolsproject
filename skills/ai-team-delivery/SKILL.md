@@ -213,6 +213,35 @@ The delivery unit is **one complete authorized work package**, not many owner-me
 - Routine technical STOP and repair dispositions belong to the authorized AIs, not repeated owner prompt relays. GitHub comments are an evidence ledger, **not** a Mac CLI dispatcher. Do not claim cross-CLI auto-handoff or invisible background execution until measured. If Mac access is genuinely unavailable, request at most one meaningful physical step for a whole work package rather than each CHECKOUT-CLAIM, baseline or RELEASE.
 - A11c must demonstrate in **both** existing Developer CLIs one supported read-only child review, a small real or harmless seeded finding, Developer fix, targeted verification and zero owner prompt relays between microsteps. Report PASS or a reproducible capability gap. True Codex-to-Claude automatic formal review is a **separate unverified A11c acceptance**. Prefer the existing reviewed temporary ai-loop in its proved scope until native llmtool has parity; do not invent a second controller.
 
+### No self-handoff and complete authorized work (owner decision 2026-10-15)
+
+`NEXT_AI` must never name the current session. Continue all work that this CLI
+can actually perform within its existing authority in the same turn; publishing
+a prompt, plan or status comment does not replace execution. Hand off only when
+a different CLI's actual environment, independent role or formal review is
+needed. If the work is complete, report completion instead of inventing another
+executor. If a required condition is missing, preserve state and name the real
+blocker, the evidence and the different session or owner decision that can
+resolve it.
+
+Developers own ordinary bugs, necessary tests and bounded repairs. They may use
+subagents for development, test design and advisory review within the authorized
+scope and worktree, with coordinated writes and no independent shared-ref
+mutation. Do not shuttle minor issues repeatedly between Developer and Reviewer;
+track nonblocking Low/LATER items together under the existing convergence rules.
+Use the designated independent Claude Reviewer when a formal non-author
+Security/Functional gate is required; advisory children do not satisfy it.
+
+Every actual handoff must state what was completed, the remaining genuine
+blocker and the next **different** session. Never claim cross-CLI execution,
+C3 acceptance, GitHub publication or automatic wake-up without observed evidence.
+Every Coordinator review must end with the concrete gaps still separating the
+current source/fake delivery from real llmtool deployment and acceptance.
+
+This rule does not waive safe-git, source scope, worktree ownership, independent
+review, provider/egress or Native grants. Record the owner decision and executed
+evidence in [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6190074894).
+
 ## Delivery loop, within available access
 
 1. Read the owner's goal and repo/skill guidance; pin task ID, allowed files,
