@@ -19,13 +19,14 @@ def raw(x):return json.dumps(x,ensure_ascii=True,separators=(',',':')).encode()
 
 class CodecTests(unittest.TestCase):
     def test_rollout_mode_requires_real_completed_only_and_distinct_seal(self):
-        c=n.EventCoverage('reviewer','a'*64,mode='HOST_ROLLOUT')
-        c.feed(sequence=1,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='started')
-        c.feed(sequence=2,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='item',
-               item_type='AgentMessage',item_id='final',item_phase='completed_only')
-        c.feed(sequence=3,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='terminal',status='Completed')
-        self.assertNotEqual(c.seal(drained=True,child_exited=True,source_digest='a'*64),
-                            n.digest((c.source,c.events),'llmtool.pickup-coverage.v1'))
+        f=RolloutFixture();self.addCleanup(f.close);c=f.codec();f.append(f.journey(c.input));r=f.reader()
+        for value in r.poll():n.feed_rollout_record(r.coverage,c,value,source_digest=r.pin.digest)
+        r.poll(final=True);coverage=r.coverage
+        payload=(coverage.source,coverage.events,coverage.record_digests)
+        self.assertEqual(coverage.seal(drained=True,child_exited=True,source_digest=r.pin.digest),
+                         n.digest(payload,'llmtool.pickup-coverage.rollout.v1'))
+        self.assertNotEqual(n.digest(payload,'llmtool.pickup-coverage.rollout.v1'),
+                            n.digest(payload,'llmtool.pickup-coverage.v1'))
     def codec(self):
         c=n.QueueCodec('reviewer','client-1','a'*64);c.add('synthetic packet DATA')
         c.accept(raw({'queuedSubmission':{'id':'submission-1','input':c.input,'clientUserMessageId':'client-1'}}));return c
@@ -602,7 +603,7 @@ class RolloutFixture:
         self.home=Path(self.tmp.name);os.chmod(self.home,0o700)
         self.path=self.home/'sessions/2026/10/15'/('rollout-2026-10-15T01-02-03-'+thread+'.jsonl')
         self.path.parent.mkdir(parents=True,mode=0o700)
-        self.meta=self.record(0,'session_meta',{'id':thread,'session_id':session,'history_mode':'paginated','forked_from_id':None})
+        self.meta=self.record(0,'session_meta',{'id':thread,'session_id':session,'history_mode':'paginated'})
         self.path.write_bytes(raw(self.meta)+b'\n');self.path.chmod(0o600);st=self.path.stat()
         self.pin=n.RolloutPin(str(self.home),str(self.path),st.st_uid,st.st_dev,st.st_ino,session,thread,self.path.stat().st_size,next_ordinal)
         self.clock_value=0
@@ -614,9 +615,9 @@ class RolloutFixture:
             {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
                 'type':'UserMessage','id':'user-item','client_id':client,'content':content}},
             {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
-                'type':'AgentMessage','id':'comment','phase':'commentary','text':'CANARY_PRIVATE_COMMENTARY'}},
+                'type':'AgentMessage','id':'comment','phase':'commentary','content':[{'type':'Text','text':'CANARY_PRIVATE_COMMENTARY'}]}},
             {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
-                'type':'AgentMessage','id':'verdict-item','phase':'final_answer','text':verdict}},
+                'type':'AgentMessage','id':'verdict-item','phase':'final_answer','content':[{'type':'Text','text':verdict}]}},
             {'type':'task_complete','turn_id':'turn-1'}]
         if mode=='failed':payloads[-1]['error']={'message':'CANARY_PRIVATE_FAILURE'}
         if mode=='interrupted':payloads[-1]={'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}
@@ -871,3 +872,127 @@ class RolloutCompositionTests(unittest.TestCase):
         self.assertEqual(result['status'],'BLOCKED',result)
         self.assertTrue(t.comp.coverage.failed)
         self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+
+
+# Golden writer JSONL, Codex0.162.1 / 092d3acd6bec3e3a14bdc7e7a2810ab628ab759d:
+# codex-rs/protocol/src/protocol.rs:3152-3163,3212 (SessionMeta, omitted None);
+# codex-rs/protocol/src/items.rs:81,125-127,151-160 (User/AgentMessage/Text);
+# codex-rs/protocol/src/user_input.rs:15-26 (text input).
+# Lifecycle writer tags/absent terminal error follow accepted R1 final pins
+# Issue120 #6184679109 (protocol.rs:1964,2173,2203).
+ROLLOUT_WRITER_GOLDEN = b'''{"timestamp":"2026-10-15T01:02:03Z","ordinal":0,"type":"session_meta","payload":{"id":"reviewer","session_id":"reviewer","history_mode":"paginated"}}
+{"timestamp":"2026-10-15T01:02:03Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"timestamp":"2026-10-15T01:02:03Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"reviewer","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-item","client_id":"client-1","content":[{"type":"text","text":"CANARY_PRIVATE_INPUT","text_elements":[]}]}}}
+{"timestamp":"2026-10-15T01:02:03Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"reviewer","turn_id":"turn-1","item":{"type":"AgentMessage","id":"comment","phase":"commentary","content":[{"type":"Text","text":"CANARY_PRIVATE_COMMENTARY"}]}}}
+{"timestamp":"2026-10-15T01:02:03Z","ordinal":4,"type":"event_msg","payload":{"type":"item_completed","thread_id":"reviewer","turn_id":"turn-1","item":{"type":"AgentMessage","id":"verdict-item","phase":"final_answer","content":[{"type":"Text","text":"{}"}]}}}
+{"timestamp":"2026-10-15T01:02:03Z","ordinal":5,"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}
+'''
+
+
+class R1BoundedRepairTests(unittest.TestCase):
+    def fixture(self):
+        f=RolloutFixture();self.addCleanup(f.close);return f
+    def real_records(self,f,c):
+        return f.journey(c.input)
+    def feed(self,r,c):
+        return [n.feed_rollout_record(r.coverage,c,x,source_digest=r.pin.digest) for x in r.poll()]
+    def sticky(self,r,call,code):
+        with self.assertRaises(Exception) as e:call()
+        self.assertEqual(e.exception.review_code,code);self.assertTrue(r.coverage.failed)
+        with self.assertRaises(Exception):r.coverage.seal(drained=True,child_exited=True,source_digest=r.pin.digest)
+        with self.assertRaises(Exception):r.poll()
+    def test_n1_literal_upstream_golden_admission_content_and_seal(self):
+        f=self.fixture();f.path.write_bytes(ROLLOUT_WRITER_GOLDEN)
+        f.pin=replace(f.pin,start_offset=ROLLOUT_WRITER_GOLDEN.index(b'\n')+1,next_ordinal=1)
+        c=f.codec();r=f.reader();result=self.feed(r,c);r.poll(final=True)
+        self.assertEqual([v[2] for v in result if v[2] is not None],['{}'])
+        self.assertTrue(r.coverage.delivery_matched)
+        self.assertEqual(r.coverage.terminal,'Completed')
+        self.assertEqual(len(r.coverage.seal(drained=True,child_exited=True,source_digest=r.pin.digest)),64)
+        self.assertNotIn('CANARY',repr(r.coverage.events)+repr(r.coverage.record_digests))
+    def test_n1_agent_content_shapes_fail_closed_for_commentary_and_final(self):
+        invalid=[None,{},'text',[],[{'type':'Text','text':'a'},{'type':'Text','text':'b'}],
+                 [{'type':'text','text':'a'}],[{'type':'Image','text':'a'}],
+                 [{'type':'Text','text':False}],[{'type':'Text'}],[{'type':'Text','text':'a','extra':1}],['a']]
+        for index in (2,3):
+            for content in invalid+['TOP_LEVEL_ONLY']:
+                with self.subTest(index=index,content=content):
+                    f=self.fixture();c=f.codec();values=self.real_records(f,c)
+                    item=values[index]['payload']['item']
+                    if content=='TOP_LEVEL_ONLY':item.pop('content');item['text']='CANARY_FALSE_VERDICT'
+                    else:item['content']=content
+                    f.append(values);r=f.reader();self.sticky(r,lambda:self.feed(r,c),'REVIEW_VERDICT_INVALID')
+    def test_n1_fork_key_must_be_absent_including_null_and_wrong_types(self):
+        for fork in [None,'parent',False,0,{},[]]:
+            f=self.fixture();meta=json.loads(json.dumps(f.meta));meta['payload']['forked_from_id']=fork
+            f.path.write_bytes(raw(meta)+b'\n');r=f.reader()
+            self.sticky(r,r.poll,'PICKUP_EVENT_SOURCE_INVALID')
+    def test_n2_unmatched_input_rejects_agent_or_any_terminal(self):
+        for selected in ((0,3,4),(0,2),(0,4)):
+            f=self.fixture();c=f.codec();values=self.real_records(f,c);values=[values[i] for i in selected]
+            for i,value in enumerate(values):value['ordinal']=7+i
+            f.append(values);r=f.reader();self.sticky(r,lambda:self.feed(r,c),'PICKUP_TURN_UNCORRELATED')
+        for payload in [{'type':'task_complete','turn_id':'turn-1','error':{}},
+                        {'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}]:
+            f=self.fixture();c=f.codec();f.append([f.journey(c.input)[0],f.record(8,'event_msg',payload)])
+            r=f.reader();self.sticky(r,lambda:self.feed(r,c),'PICKUP_TURN_UNCORRELATED')
+    def test_n2_final_before_input_rejects_without_retaining_text(self):
+        f=self.fixture();c=f.codec();values=self.real_records(f,c);values[1],values[3]=values[3],values[1]
+        for i,value in enumerate(values):value['ordinal']=7+i
+        f.append(values);r=f.reader();self.sticky(r,lambda:self.feed(r,c),'PICKUP_TURN_UNCORRELATED')
+        self.assertFalse(getattr(r.coverage,'final_seen',False))
+    def test_n2_seal_independently_requires_matched_delivery(self):
+        c=n.EventCoverage('reviewer','a'*64,mode='HOST_ROLLOUT')
+        c.started=True;c.terminal='Completed'
+        with self.assertRaises(Exception) as e:c.seal(drained=True,child_exited=True,source_digest='a'*64)
+        self.assertEqual(e.exception.review_code,'PICKUP_COVERAGE_UNVERIFIED');self.assertTrue(c.failed)
+    def test_n2_entire_composition_seal_failure_sticky_and_original_exception(self):
+        from types import SimpleNamespace
+        for failure in ('cleanup','child','coverage','interrupt'):
+            with self.subTest(failure=failure):
+                t=CompositionTrial(rollout=True);self.addCleanup(t.close);comp=t.comp
+                comp.coverage.started=True;comp.coverage.terminal='Completed';comp.coverage.delivery_matched=True
+                comp.window=SimpleNamespace(attempts=0,spawn_count=0)
+                comp.rollout=SimpleNamespace(poll=lambda **kw:[],drained=failure!='cleanup',closed=True)
+                comp.stream.available_drain_close=lambda **kw:True
+                comp.stream.closed=True;comp.stream.drained=failure!='child'
+                error=KeyboardInterrupt() if failure=='interrupt' else RuntimeError('seal-sentinel')
+                real_seal=comp.coverage.seal
+                if failure in ('coverage','interrupt'):
+                    comp.coverage.seal=lambda **kw:(_ for _ in ()).throw(error)
+                try:
+                    with self.assertRaises(BaseException) as e:comp._seal()
+                    if failure in ('coverage','interrupt'):self.assertIs(e.exception,error)
+                    else:self.assertEqual(e.exception.review_code,'PICKUP_CLEANUP_UNKNOWN' if failure=='cleanup' else 'PICKUP_CHILD_EXIT_UNKNOWN')
+                    self.assertTrue(comp.coverage.failed);self.assertEqual(comp.terminal_digest,'')
+                finally:comp.coverage.seal=real_seal
+                # Restoring resources or callbacks cannot resurrect this coverage.
+                comp.rollout.drained=True;comp.stream.drained=True
+                with self.assertRaises(Exception):comp._seal()
+                self.assertEqual(comp.terminal_digest,'')
+                r=t.rollout_fixture.reader();r.coverage=comp.coverage
+                with self.assertRaises(Exception):r.poll()
+
+    def test_n2_real_runner_cannot_retry_a_failed_seal_during_final_observe(self):
+        t=CompositionTrial(rollout=True);self.addCleanup(t.close);comp=t.comp
+        original=comp.coverage.seal;calls=[]
+        def fail_once(**kwargs):
+            calls.append(1)
+            if len(calls)==1:n.reject('PICKUP_COVERAGE_UNVERIFIED')
+            return original(**kwargs)
+        comp.coverage.seal=fail_once
+        result=t.run()
+        self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertEqual(result['code'],'PICKUP_COVERAGE_UNVERIFIED')
+        self.assertTrue(comp.coverage.failed);self.assertEqual(comp.terminal_digest,'')
+        self.assertEqual(len(calls),1)
+        self.assertTrue(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+        self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')
+        comp.coverage.seal=original
+        comp.begin_cleanup()
+        for callback in (comp.observe,comp._seal,comp.rollout.poll):
+            with self.assertRaises(Exception):callback()
+        with self.assertRaises(Exception):
+            comp.coverage.feed(sequence=comp.coverage.last+1,source_digest=comp.coverage.source,
+                thread_id=comp.pins.thread_id,turn_id=comp.codec.turn,kind='terminal',status='Completed')
+        self.assertEqual(comp.terminal_digest,'')

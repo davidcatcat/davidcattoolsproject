@@ -231,7 +231,7 @@ class EventCoverage:
         self.mode=mode
         self.thread,self.source=thread,source_digest;self.last=0;self.started=False;self.terminal=None
         self.failed=False;self.tool=False;self.turn=None;self.events=[];self.item_ids={}
-        self.rollout_next=None;self.record_digests=[]
+        self.rollout_next=None;self.record_digests=[];self.delivery_matched=False
     def feed(self, *, sequence, source_digest, thread_id, turn_id, kind, item_type=None, status=None, item_id=None, item_phase="started"):
         if self.failed:reject('PICKUP_COVERAGE_UNVERIFIED')
         try:
@@ -269,7 +269,8 @@ class EventCoverage:
         except Exception:
             self.failed=True;raise
     def seal(self, *, drained, child_exited, source_digest):
-        if self.failed or not self.started or self.terminal is None or any(x[2] != "completed" for x in self.item_ids.values()) or drained is not True or child_exited is not True or source_digest!=self.source:
+        if self.failed or not self.started or self.terminal is None or (self.mode=='HOST_ROLLOUT' and not self.delivery_matched) or any(x[2] != "completed" for x in self.item_ids.values()) or drained is not True or child_exited is not True or source_digest!=self.source:
+            self.failed=True
             reject('PICKUP_COVERAGE_UNVERIFIED')
         domain='llmtool.pickup-coverage.rollout.v1' if self.mode=='HOST_ROLLOUT' else 'llmtool.pickup-coverage.v1'
         return digest((self.source,self.events,self.record_digests) if self.mode=='HOST_ROLLOUT' else (self.source,self.events),domain)
@@ -380,8 +381,7 @@ class RolloutWindow:
                 type(x['ordinal']) is not int or not 0<=x['ordinal']<p.next_ordinal or
                 type(x['timestamp']) is not str or type(meta) is not dict or
                 meta.get('id')!=p.thread_id or meta.get('session_id')!=p.session_id or
-                meta.get('history_mode')!=p.history_mode or 'forked_from_id' not in meta or
-                meta['forked_from_id'] is not None or p.start_offset<len(line)+1):
+                meta.get('history_mode')!=p.history_mode or 'forked_from_id' in meta or p.start_offset<len(line)+1):
             self.fail('PICKUP_EVENT_SOURCE_INVALID')
         os.lseek(fd,p.start_offset-1,os.SEEK_SET)
         if self._read(fd,1)!=b'\n':self.fail('PICKUP_EVENT_SOURCE_INVALID')
@@ -467,20 +467,27 @@ def feed_rollout_record(coverage,codec,value, *, source_digest):
                     codec.delivery(encoded({'threadId':p['thread_id'],'turnId':turn,'item':{
                         'type':'userMessage','id':item_id,'clientId':item.get('client_id'),'content':item.get('content')}}))
                 elif item_type=='AgentMessage':
+                    if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
                     phase=item.get('phase')
                     if phase not in ('commentary','final_answer'):reject('REVIEW_VERDICT_INVALID')
+                    content=item.get('content')
+                    if (type(content) is not list or len(content)!=1 or type(content[0]) is not dict or
+                            set(content[0])!={'type','text'} or content[0]['type']!='Text' or
+                            type(content[0]['text']) is not str or len(content[0]['text'].encode('utf-8'))>LIMIT):
+                        reject('REVIEW_VERDICT_INVALID')
                     if phase=='final_answer':
                         if getattr(coverage,'final_seen',False):reject('REVIEW_VERDICT_INVALID')
-                        text=item.get('text')
-                        if type(text) is not str or len(text.encode('utf-8'))>LIMIT:reject('REVIEW_VERDICT_INVALID')
+                        text=content[0]['text']
                         screen(text);coverage.final_seen=True
             elif event=='task_complete':
+                if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
                 action='terminal'
                 if 'error' not in p:status='Completed'
                 elif type(p['error']) is dict:status='Failed'
                 else:reject('PICKUP_COVERAGE_UNVERIFIED')
                 if status=='Completed' and not getattr(coverage,'final_seen',False):reject('REVIEW_VERDICT_INVALID')
             elif event=='turn_aborted':
+                if codec.item is None or not coverage.delivery_matched:reject('PICKUP_TURN_UNCORRELATED')
                 if p.get('reason')!='interrupted' or p.get('turn_id') is None:reject('PICKUP_COVERAGE_UNVERIFIED')
                 action='terminal';status='Interrupted'
             elif event!='token_count':reject('PICKUP_COVERAGE_UNVERIFIED')
@@ -493,6 +500,7 @@ def feed_rollout_record(coverage,codec,value, *, source_digest):
         if action=='observed' and not coverage.started:reject('PICKUP_COVERAGE_UNVERIFIED')
         coverage.feed(sequence=coverage.last+1,source_digest=source_digest,thread_id=coverage.thread,
             turn_id=turn,kind=action,item_type=item_type,item_id=item_id,status=status,item_phase='completed_only')
+        if item_type=='UserMessage':coverage.delivery_matched=True
         coverage.rollout_next+=1
         coverage.record_digests.append(digest(value,'llmtool.pickup-rollout-record.v1'))
         return action,item_type,text
@@ -1090,6 +1098,13 @@ class ComposedPickup:
             if self.codec.cursor is None:return empty
         reject('PICKUP_EVENT_LIMIT')
     def _seal(self,operation=None):
+        try:
+            if self.coverage.failed:reject('PICKUP_COVERAGE_UNVERIFIED')
+            return self._seal_window(operation)
+        except BaseException:
+            self.coverage.failed=True;self.terminal_digest=''
+            raise
+    def _seal_window(self,operation):
         if self.coverage.terminal is None:return
         if self.rollout is not None:
             if self.terminal_digest:
