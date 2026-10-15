@@ -329,6 +329,9 @@ def main(argv=None):
         if args.command == 'review-authority':
             return run_review_authority_check(args)
         if args.command == 'task':
+            if args.action == 'review-bundle':
+                from .review_bundle import run_review_bundle
+                return run_review_bundle(args)
             return run_task_review(args) if args.action == 'review' else run_task_inspect(args)
         if args.command == 'test-excerpts':
             return _run_test_excerpts(args)
