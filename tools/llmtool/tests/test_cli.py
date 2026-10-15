@@ -96,6 +96,25 @@ class CLITests(unittest.TestCase):
                 self.assertIn(b"llmtool", result.stdout)
         self.assertEqual(self.server.requests, [])
 
+    def test_review_bundle_is_local_early_dispatch_and_sanitized_json(self):
+        result = self.run_cli('task','review-bundle','--help')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn(b'--evidence',result.stdout)
+        self.assertIn(b'--output',result.stdout)
+        result = self.run_cli('task','review-bundle','--contract','/private/missing-contract',
+            '--expect','/private/missing-expect','--events','/private/missing-events',
+            '--base','1'*40,'--evidence','/private/missing-index',
+            '--output','/private/missing-output','--json')
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(result.stderr,b'')
+        data = json.loads(result.stdout)
+        self.assertEqual(data['status'],'BLOCKED')
+        self.assertFalse(data['authorized'])
+        self.assertEqual(data['runtime_evidence_status'],'NOT_VERIFIED')
+        self.assertNotIn(b'/private/',result.stdout)
+        self.assertNotIn(b'Traceback',result.stdout)
+        self.assertEqual(self.server.requests,[])
+
     def test_test_excerpts_public_command_retains_failed_exit_and_provenance(self):
         from test_test_output_excerpts import UNIT_FAILURE, FAIL_ID
         import hashlib

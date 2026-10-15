@@ -60,9 +60,19 @@ class _LocalGit:
                  hex_ref(args[5]) and hex_ref(args[6]) and args[7] == '--')
         blob = (len(args) == 3 and args[:2] == ('cat-file','blob') and hex_ref(args[2]))
         tree = (len(args) == 5 and args[:2] == ('ls-tree','-z') and hex_ref(args[2]) and args[3] == '--')
+        # Bundle metadata only: complete, non-renaming path sets and immutable
+        # trees. Never accept caller argv or broaden the raw-source export path.
+        bundle_names = (len(args) == 9 and args[:6] ==
+            ('diff','--name-only','-z','--no-ext-diff','--no-textconv','--no-renames') and
+            hex_ref(args[6]) and hex_ref(args[7]) and args[8] == '--')
+        bundle_tree = (len(args) == 5 and args[:4] ==
+                       ('ls-tree','-r','--full-tree','-z') and hex_ref(args[4]))
+        ancestor = (len(args) == 4 and args[:2] == ('merge-base','--is-ancestor') and
+                    hex_ref(args[2]) and hex_ref(args[3]))
         if tree:
             scope_path(args[4], (args[4],))
-        if (args not in FIXED_READS and not (diff or names or blob or tree)) or self.reads >= 32:
+        if (args not in FIXED_READS and not (diff or names or blob or tree or
+                bundle_names or bundle_tree or ancestor)) or self.reads >= 32:
             reject('REVIEW_GIT_READ_DENIED')
         self.reads += 1
         remaining = 30 - (time.monotonic()-self.started)
@@ -115,6 +125,8 @@ class _LocalGit:
             if left <= 0:
                 reject('REVIEW_COLLECTOR_TIMEOUT')
             code = proc.wait(timeout=left)
+            if ancestor and code == 1 and not errors:
+                reject('BUNDLE_BASE_NOT_ANCESTOR')
             no_match = args[0] == 'config' and '--get-regexp' in args and code == 1
             if errors or (code and not no_match):
                 reject('REVIEW_GIT_READ_FAILED')
@@ -263,6 +275,75 @@ def collect_source_data(root, base_sha, source_sha, scope, *, reader=None):
         reject('REVIEW_SOURCE_DRIFT')
     return {'content':diff,'sha256':hashlib.sha256(diff.encode()).hexdigest(),
             'changed_paths':list(paths),'complete':True},sources
+
+
+def collect_bundle_manifest(root, base_sha, source_sha, scope, forbidden=(), *, reader=None):
+    """Complete local blob references only; no raw source/diff or export waiver.
+
+    Two bounded tree reads avoid a per-path read budget expansion. The original
+    privacy-screened collect_source_data route remains unchanged.
+    """
+    physical_directory(root)
+    reader = _LocalGit(root) if reader is None else reader
+    if Path(reader.root) != Path(root):
+        reject('REVIEW_ROOT_INVALID')
+    for ref in (base_sha, source_sha):
+        if type(ref) is not str or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', ref):
+            reject('BUNDLE_BASE_INVALID')
+    if reader.read(git_intel.HEAD).decode().strip() != source_sha:
+        reject('REVIEW_SOURCE_DRIFT')
+    reader.read(('merge-base','--is-ancestor',base_sha,source_sha))
+    raw = reader.read(('diff','--name-only','-z','--no-ext-diff','--no-textconv',
+                       '--no-renames',base_sha,source_sha,'--'))
+    paths = [p.decode('utf-8') for p in raw.split(b'\0') if p]
+    if not 1 <= len(paths) <= 32 or len(set(paths)) != len(paths):
+        reject('BUNDLE_SCOPE_INVALID')
+    for path in paths:
+        scope_path(path, scope)
+        if any(path == f or path.startswith(f+'/') for f in forbidden):
+            reject('BUNDLE_SCOPE_INVALID')
+    trees = []
+    for commit in (base_sha, source_sha):
+        entries = {}
+        for entry in reader.read(('ls-tree','-r','--full-tree','-z',commit)).split(b'\0'):
+            if not entry:
+                continue
+            meta, name = entry.split(b'\t',1)
+            path = name.decode('utf-8')
+            if path in entries:
+                reject('BUNDLE_SCOPE_INVALID')
+            mode, kind, blob = meta.decode('ascii').split()
+            entries[path] = (mode, kind, blob)
+        tree = {}
+        for path in paths:
+            if path not in entries:
+                tree[path] = None
+            else:
+                mode, kind, blob = entries[path]
+                if (mode not in ('100644','100755') or kind != 'blob' or
+                        not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',blob)):
+                    reject('BUNDLE_SCOPE_INVALID')
+                tree[path] = {'mode':mode, 'blob':blob}
+        trees.append(tree)
+    if reader.read(git_intel.HEAD).decode().strip() != source_sha:
+        reject('REVIEW_SOURCE_DRIFT')
+    return [{'path':p,'base':trees[0][p],'source':trees[1][p]} for p in sorted(paths)]
+
+
+def verify_bundle_facts(facts, reader):
+    """Recheck local observations with the SAME 32-read/30s budget."""
+    text = lambda args: reader.read(args).decode('utf-8').rstrip('\n')
+    index = reader.read(('ls-files','--stage','-z'))
+    untracked = reader.read(('ls-files','--others','--exclude-standard','-z'))
+    ignored = reader.read(('ls-files','--others','--ignored','--exclude-standard','-z'))
+    registration = reader.read(('worktree','list','--porcelain'))
+    status = git_intel.parse_status(reader.read(git_intel.STATUS))
+    if (text(git_intel.HEAD) != facts.source_sha or text(git_intel.BRANCH) != facts.branch or
+            hashlib.sha256(index).hexdigest() != facts.index_digest or
+            hashlib.sha256(untracked+b'\0'+ignored).hexdigest() != facts.inventory_digest or
+            hashlib.sha256(registration).hexdigest() != facts.registration_digest or
+            status.staged or status.unstaged or status.conflicted):
+        reject('REVIEW_SOURCE_DRIFT')
 
 
 @dataclass(frozen=True)

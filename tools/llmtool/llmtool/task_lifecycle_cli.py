@@ -21,6 +21,11 @@ def add_task_parser(sub):
         inspect.add_argument('--' + option, required=True)
     inspect.add_argument('--json', action='store_true', required=True,
                          help='Structural result only; runtime is always NOT_VERIFIED')
+    bundle = actions.add_parser('review-bundle', help='Prepare private local evidence; no review execution')
+    for option in ('contract','expect','events','base','evidence','output'):
+        bundle.add_argument('--'+option, required=True)
+    bundle.add_argument('--json', action='store_true', required=True,
+                        help='PREPARED means data only; runtime is NOT_VERIFIED')
 
 
 def read_task_file(filename):

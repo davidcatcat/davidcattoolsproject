@@ -2984,3 +2984,70 @@ final phase or oversized metadata can block a future Native run. Actual layout,
 phase availability, original Host/waiter and routing still require separate
 census/Native grants and review. AUDIT_ONLY is not OS-enforced no-tools; T1 HOLD,
 F2/S2 ungranted, #153 CLOSED/HOLD and ai-loop fallback are unchanged.
+
+### Local Review Bundle (M2 evidence handoff slice)
+
+```sh
+llmtool task review-bundle --contract /absolute/private/contract.json \
+  --expect /absolute/private/expect.json --events /absolute/private/events.jsonl \
+  --base FULL_BASE_SHA --evidence /absolute/private/evidence-index.json \
+  --output /absolute/private/new-bundle.json --json
+```
+
+This foreground command prepares review DATA in the current developer worktree.
+It reuses TaskContract, independent Expectations, event replay and the hardened
+read-only Git collector. It requires current UTC freshness, structural SUCCESS,
+WAITING_REVIEW and a valid non-author handoff. The observed own-root import/venv,
+registered locked branch, common directory, clean tracked state and exact HEAD
+must match the expected developer. A present CODEX_THREAD_ID must match too;
+environment and caller identities still are not Host attestation.
+
+The full base must be an ancestor of the expected committed HEAD. Every changed
+path is checked against authorized/forbidden scope, including added and deleted
+files. The complete manifest contains base/source blob OIDs and file modes, not
+raw source or diffs; it is **not dependency closure**. A reviewer independently
+reads the immutable referenced commits/blobs and adjacent dependencies as needed.
+This does not relax the separate privacy-screened raw-source export route.
+
+All four input files and referenced artifacts must be explicit physical owner
+0600 regular single-link files in owner0700 directories outside protected project
+roots/workspace parents. Symlinks, special files, credential/config locations,
+aliases and changed files are refused. On macOS use the physical `/private/tmp`
+spelling rather than its `/tmp` symlink. No directory is created implicitly.
+The output parent must already exist privately; output is a **new** O_EXCL,
+no-follow 0600 file. Existing files are never overwritten. On a late error a
+partial/full private artifact can remain for diagnosis; it is not a success
+receipt and the command never automatically cleans or retries it.
+
+Evidence index version1 has exactly `schema_version`, `source_sha`, `artifacts`.
+Each artifact (maximum16) has exactly `artifact_id`, `kind`, `source_sha`, `path`,
+`sha256`, `metadata`. `kind` is TEST, COMMAND, CAPTURE or CI. The first three use
+metadata `{ "exit_code": 0, "argv_sha256": "FULL_SHA256" }`; CI uses
+`{ "url": "https://github.com/davidcatcat/davidcattoolsproject/actions/runs/123",
+"head_sha": "FULL_SOURCE_SHA", "conclusion": "SUCCESS" }`, with conclusion
+SUCCESS, FAILURE, CANCELLED, PENDING or UNKNOWN. Digests must match actual original
+UTF-8 bytes and the declared source must match independent expectations. Commands
+and URLs are never executed/fetched. Artifact bodies/logs/model replies are not
+copied into the bundle. Hash matching authenticates neither their origin nor their
+reported exit/CI result: these stay **CALLER_REPORTED**, execution unverified.
+
+Inputs/artifacts are individually limited to 1MiB; artifact reads together to 4MiB
+(both stable-reader passes count), private bundle to 1MiB and public JSON to 16KiB.
+JSON rejects duplicate keys, excessive depth, invalid UTF-8 and nonfinite numbers.
+Git operations share the existing 32-read/30s/2MiB collector budget; overall
+preparation uses a 60s deadline with checks between bounded local operations.
+It spawns only owned fixed read-only Git children, never providers, tests, shell,
+network requests or Agents. No new approval store, controller or daemon exists.
+
+Exit0 and `status=PREPARED` mean **only that the bundle was prepared**. Public JSON
+contains its SHA256, task/base/source and counts, without private root/Session/
+artifact paths. `authorized=false`, `runtime_evidence_status=NOT_VERIFIED` always;
+Git observations are LOCAL_GIT_FACTS. The private bundle includes input references,
+complete manifest, artifacts and a bounded Security/Functional review-request
+template. It is local/private, not an export grant or automatic GitHub post.
+Errors return fixed BLOCKED codes/nonzero without private details. Losing stdout
+cannot yield exit0. Independently verify the actual bundle and evidence before
+review; a prepared bundle never means tests PASS or Review APPROVE.
+
+This is one local evidence handoff slice, not the complete M2 autonomous cycle,
+Agent wake-up, production review authority, Native/Company Live or F2/S2 execution.
