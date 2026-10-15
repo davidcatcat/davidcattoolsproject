@@ -271,13 +271,22 @@ class CensusTests(unittest.TestCase):
         file=self.home/'pin.json';data=json.dumps(pin).encode();file.write_bytes(data);file.chmod(0o600)
         return ['--pin-file',str(file),'--pin-sha256',hashlib.sha256(data).hexdigest(),'--json']
 
-    def entry(self,argv,output=None,main_file="DRIVER"):
+    def entry(self,argv,output=None,main_file="DRIVER",*,flag_overrides=None):
         import sys
         from unittest.mock import patch
         import io
         root=Path(c.__file__).absolute().parents[3]
         output=output if output is not None else io.StringIO()
-        with patch.object(sys.modules["__main__"],"__file__",str(root/c.SOURCE_FILES["driver"]) if main_file=="DRIVER" else main_file,create=True):
+        # CI's ordinary unittest runner is not an isolated Host. This private
+        # fixture models the required flags; actual CLI subprocesses use real
+        # -B -I and production has no flags override or bypass.
+        actual_flags=sys.flags
+        expected_flags=dict(isolated=1,dont_write_bytecode=1)
+        expected_flags.update(flag_overrides or {})
+        class FixtureFlags:
+            def __getattr__(self,key):
+                return expected_flags[key] if key in expected_flags else getattr(actual_flags,key)
+        with patch.object(sys,'flags',FixtureFlags()), patch.object(sys.modules["__main__"],"__file__",str(root/c.SOURCE_FILES["driver"]) if main_file=="DRIVER" else main_file,create=True):
             code=c._entry(argv,_root=root,_stdout=output, _runtime=self._runtime())
         return code,output
 
@@ -596,12 +605,9 @@ with patch.object(socket,'socket',side_effect=AssertionError('network')), patch.
     def test_repair_n3_isolated_flags_and_main_binding_before_read(self):
         import sys
         from unittest.mock import patch
-        flags=sys.flags
         for key in ('isolated','dont_write_bytecode'):
-            class Flags:
-                def __getattr__(self,attr):return 0 if attr==key else getattr(flags,attr)
-            with patch.object(sys,'flags',Flags()),patch.object(c,'census') as read:
-                code,out=self.entry(self.argv(self.pin_document()))
+            with patch.object(c,'census') as read:
+                code,out=self.entry(self.argv(self.pin_document()),flag_overrides={key:0})
                 self.assertEqual(code,1);self.assertIn('RUNTIME_MISMATCH',out.getvalue());read.assert_not_called()
         for main_file in (None,'/CANARY/wrong.py'):
             with patch.object(c,'census') as read:
@@ -650,3 +656,22 @@ runpy.run_path(sys.argv[1],run_name='__main__')
                 capture_output=True,timeout=10)
             self.assertEqual(r.returncode,1);self.assertEqual(r.stderr,b'')
             self.assertEqual(json.loads(r.stdout)['reasons'],['RUNTIME_MISMATCH'])
+
+    def test_repair_fixture_runner_flags_do_not_bypass_production(self):
+        import io
+        import sys
+        from unittest.mock import patch
+        actual=sys.flags
+        class NonisolatedRunner:
+            def __getattr__(self,key):return 0 if key=='isolated' else getattr(actual,key)
+        root=Path(c.__file__).absolute().parents[3]
+        argv=self.argv(self.pin_document())
+        with patch.object(sys,'flags',NonisolatedRunner()):
+            output=io.StringIO()
+            with patch.object(sys.modules['__main__'],'__file__',str(root/c.SOURCE_FILES['driver']),create=True), \
+                 patch.object(c,'census') as read:
+                code=c._entry(argv,_root=root,_stdout=output,_runtime=self._runtime())
+                self.assertEqual(code,1);self.assertIn('RUNTIME_MISMATCH',output.getvalue());read.assert_not_called()
+            # A unit fixture models the isolated Host; it is not production.
+            code,output=self.entry(argv)
+            self.assertEqual(code,0,output.getvalue())
