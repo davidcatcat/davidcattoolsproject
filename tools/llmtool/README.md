@@ -2929,11 +2929,11 @@ resend. Ordinary operations stop before the final 20-second cleanup reserve.
 
 K2 source investigation of Codex 0.162.1 confirms APP_SERVER_EVENTS without
 start/resume subscription is not feasible; there is no `thread/subscribe`.
-`thread/resume` is not read-only and is prohibited. HOST_ROLLOUT lacks sufficient
-started/completed/error/approval coverage for the accepted observer. Native
-remains BLOCKED, even when fake composition passes. CR-K2-B is a separate future
-contract; this source does not read rollouts, add a rollout codec, connect a live
-endpoint, call a provider or authorize a Native Trial. Full Access stays unchanged;
+`thread/resume` is not read-only and is prohibited. CR-K2-B adds a separate,
+synthetic-only HOST_ROLLOUT mode described below; it does not restore invisible
+item starts, approval waits or transient errors. Native remains BLOCKED even
+when synthetic composition passes. No live endpoint, rollout census, provider
+call or Native Trial is authorized. Full Access stays unchanged;
 AUDIT_ONLY_TRIAL does not enforce no-tools. T1/F2/S2 remain held/ungranted and
 ai-loop remains fallback.
 
@@ -2942,3 +2942,45 @@ Focused source/fake acceptance, in the assigned venv without writing bytecode:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p 'test_codex_pickup_native.py'
 ```
+
+### CR-K2-B HOST_ROLLOUT — Source/Fake only
+
+The private `ComposedPickup` selects APP_SERVER_EVENTS or HOST_ROLLOUT from
+externally bound pins; RPC notifications cannot substitute for rollout coverage.
+A frozen `RolloutPin` binds the physical plain JSONL path, UID/device/inode,
+Session/thread, Paginated metadata, admitted newline offset/next ordinal and
+limits. It is DATA, not a Host attestation or an execution grant. Only explicitly
+created synthetic files are exercised here; the public factory stays unavailable.
+
+The reader opens read-only/no-follow/nonblocking, checks physical parents and
+file identity before/after reads, and rejects shrink, replacement, hardlinks,
+unsafe permissions, compression, reverted suffixes and forks. Partial lines
+are re-read without advancing the cursor; that I/O counts against the same
+window budget. Admission metadata is also bounded. Upper bounds are 64 KiB per
+LF line, 512 KiB cumulative I/O, 128 records (including metadata), 128 polls;
+operations share the existing five-second/normal deadline, including close.
+
+Codex 0.162.1 writer tags are `task_started`, `task_complete`, `turn_aborted`;
+read aliases are rejected. Successful completion omits `error`; `error:null`
+is rejected. Item tags are PascalCase `UserMessage`/`AgentMessage`; exact
+client/content/item/turn binding preserves the separate RPC submission ID.
+Only one `final_answer` supplies a verdict; commentary is coverage only.
+Missing/partial/duplicate final, image input, wrong identities, ordinal gaps,
+unknown/tool records and post-terminal records poison coverage permanently.
+All records, including allowed benign records, are ordinal checked and digested;
+no item-start evidence is fabricated. Rollout seals use a separate digest domain.
+
+A terminal requires an additional bounded file EOF snapshot with no partial or
+new record, actual descriptor close, and available-data RPC drain/local close
+without waiting for server EOF. Spawn remains zero. EOF proves that snapshot
+boundary only, not absence of future appends; later observed contradictions
+remain fail-closed. Same-UID DATA is not tamper-proof. Evidence retains bounded
+IDs/types/status/digests, not raw rollout, instructions, messages or reasoning.
+
+Failed/Interrupted terminal states are not review PASS. Existing verdict,
+receipt, ledger, pending/UNKNOWN and three-domain counter gates remain required.
+R2–R6 conservative exclusions remain LATER: unlisted release records, missing
+final phase or oversized metadata can block a future Native run. Actual layout,
+phase availability, original Host/waiter and routing still require separate
+census/Native grants and review. AUDIT_ONLY is not OS-enforced no-tools; T1 HOLD,
+F2/S2 ungranted, #153 CLOSED/HOLD and ai-loop fallback are unchanged.

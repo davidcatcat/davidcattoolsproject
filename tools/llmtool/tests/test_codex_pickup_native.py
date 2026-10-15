@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -17,6 +18,14 @@ def raw(x):return json.dumps(x,ensure_ascii=True,separators=(',',':')).encode()
 
 
 class CodecTests(unittest.TestCase):
+    def test_rollout_mode_requires_real_completed_only_and_distinct_seal(self):
+        c=n.EventCoverage('reviewer','a'*64,mode='HOST_ROLLOUT')
+        c.feed(sequence=1,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='started')
+        c.feed(sequence=2,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='item',
+               item_type='AgentMessage',item_id='final',item_phase='completed_only')
+        c.feed(sequence=3,source_digest='a'*64,thread_id='reviewer',turn_id='turn',kind='terminal',status='Completed')
+        self.assertNotEqual(c.seal(drained=True,child_exited=True,source_digest='a'*64),
+                            n.digest((c.source,c.events),'llmtool.pickup-coverage.v1'))
     def codec(self):
         c=n.QueueCodec('reviewer','client-1','a'*64);c.add('synthetic packet DATA')
         c.accept(raw({'queuedSubmission':{'id':'submission-1','input':c.input,'clientUserMessageId':'client-1'}}));return c
@@ -244,13 +253,23 @@ class CompositionSourceRedTests(unittest.TestCase):
 
 class CompositionTrial:
     """Owned socketpair server setup occurs outside the composition window."""
-    def __init__(self, *, mode='complete', stream_fault=None):
+    def __init__(self, *, mode='complete', stream_fault=None, rollout=False):
         from test_codex_handoff_transport import DeltaTrial
         from llmtool import codex_handoff_transport as c,task_review as r,authorization_policy as p
         self.t=DeltaTrial();t=self.t
         old_utc=t.j.clock.utc;t.j.clock.utc=lambda:int(old_utc())
         self.inferences=0;self.author_calls=0;self.errors=[];self.requests=[]
         self.channel,self.server=n.SocketPairChannel.fixture_pair();self.server.settimeout(3)
+        self.rollout_fixture=None
+        if rollout:
+            self.rollout_fixture=RolloutFixture(thread=t.binding.reviewer_session,session=t.session.session_id)
+            t.session=replace(t.session,event_source='HOST_ROLLOUT',event_source_digest=self.rollout_fixture.pin.digest)
+            t.grant=replace(t.grant,session=t.session)
+        else:
+            # This fixture emits app-server notifications, not rollout JSONL.
+            t.session=replace(t.session,event_source='APP_SERVER_EVENTS')
+            t.grant=replace(t.grant,session=t.session)
+        t.binding=replace(t.binding,host_pin=r.digest((t.j.host.observe().pin,t.session.digest)))
         original_domains=t.host.domains
         def domains():
             samples=original_domains()
@@ -262,6 +281,7 @@ class CompositionTrial:
         self.pins=n.CompositionPins(t.session.digest,t.binding.host_pin,t.binding.packet_digest,t.binding.route_digest,
             '1'*64,'2'*64,'3'*64,t.binding.risk_acceptance_digest,t.binding.coverage_digest,t.session.event_source_digest,
             t.binding.reviewer_session,waiter,pins,True)
+        if rollout:self.pins=replace(self.pins,rollout=self.rollout_fixture.pin)
         t.binding=replace(t.binding,topology='IN_PROCESS_ZERO_CHILD',composition_digest=self.pins.digest)
         t.grant=replace(t.grant,binding=t.binding,poll_seconds=1);t.issuer.binding=t.binding
         t.host.attest=lambda:n.CompositionAttestation(self.pins.digest,t.session.digest,t.binding.host_pin,
@@ -300,8 +320,12 @@ class CompositionTrial:
                         if stream_fault=='malformed':self.server.sendall(b'{broken}\n');return
                         if stream_fault=='partial':self.server.sendall(b'{"id":');return
                         if stream_fault=='disconnect':return
+                        if rollout:
+                            f=self.rollout_fixture
+                            f.append(f.journey(params['input'],params['clientUserMessageId'],verdict,mode))
                     self.server.sendall(raw(reply)+b'\n')
                     if method=='thread/queue/add':
+                        if rollout:continue  # Server stays alive; local drain must not await EOF.
                         thread=self.pins.thread_id
                         item={'type':'userMessage','id':'user-item','clientId':params['clientUserMessageId'],'content':params['input']}
                         agent={'type':'agentMessage','id':'verdict-item','text':verdict}
@@ -336,6 +360,7 @@ class CompositionTrial:
         self.channel.close();self.server.close();self.thread.join(timeout=4)
         assert not self.thread.is_alive()
         self.t.close()
+        if self.rollout_fixture:self.rollout_fixture.close()
 
 
 class CompositionAcceptanceTests(unittest.TestCase):
@@ -568,3 +593,281 @@ class LogicalReadDeadlineTests(unittest.TestCase):
             result=t.run()
         self.assertEqual(result['status'],'BLOCKED',result);self.assertEqual(finish.call_count,0)
         self.assertTrue(t.comp.coverage.failed)
+
+
+class RolloutFixture:
+    """Only synthetic JSONL, never a real Codex HOME/session file."""
+    def __init__(self, *, thread='reviewer',session='reviewer',next_ordinal=7):
+        self.tmp=tempfile.TemporaryDirectory(prefix='llmtool-rollout-fixture-',dir='/private/tmp' if sys.platform=='darwin' else None)
+        self.home=Path(self.tmp.name);os.chmod(self.home,0o700)
+        self.path=self.home/'sessions/2026/10/15'/('rollout-2026-10-15T01-02-03-'+thread+'.jsonl')
+        self.path.parent.mkdir(parents=True,mode=0o700)
+        self.meta=self.record(0,'session_meta',{'id':thread,'session_id':session,'history_mode':'paginated','forked_from_id':None})
+        self.path.write_bytes(raw(self.meta)+b'\n');self.path.chmod(0o600);st=self.path.stat()
+        self.pin=n.RolloutPin(str(self.home),str(self.path),st.st_uid,st.st_dev,st.st_ino,session,thread,self.path.stat().st_size,next_ordinal)
+        self.clock_value=0
+    @staticmethod
+    def record(ordinal,kind,payload):return dict(timestamp='2026-10-15T01:02:03Z',ordinal=ordinal,type=kind,payload=payload)
+    def journey(self,content=None,client='client-1',verdict='{}',mode='complete'):
+        thread=self.pin.thread_id
+        payloads=[{'type':'task_started','turn_id':'turn-1'},
+            {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
+                'type':'UserMessage','id':'user-item','client_id':client,'content':content}},
+            {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
+                'type':'AgentMessage','id':'comment','phase':'commentary','text':'CANARY_PRIVATE_COMMENTARY'}},
+            {'type':'item_completed','thread_id':thread,'turn_id':'turn-1','item':{
+                'type':'AgentMessage','id':'verdict-item','phase':'final_answer','text':verdict}},
+            {'type':'task_complete','turn_id':'turn-1'}]
+        if mode=='failed':payloads[-1]['error']={'message':'CANARY_PRIVATE_FAILURE'}
+        if mode=='interrupted':payloads[-1]={'type':'turn_aborted','turn_id':'turn-1','reason':'interrupted'}
+        return [self.record(self.pin.next_ordinal+i,'event_msg',p) for i,p in enumerate(payloads)]
+    def append(self,records):
+        with self.path.open('ab') as f:
+            for x in records:f.write(raw(x)+b'\n')
+    def reader(self,**limits):
+        pin=replace(self.pin,**limits);coverage=n.EventCoverage(pin.thread_id,pin.digest,mode='HOST_ROLLOUT')
+        return n.RolloutWindow(pin,coverage,lambda:self.clock_value,100)
+    def codec(self):
+        c=n.QueueCodec(self.pin.thread_id,'client-1','a'*64);c.add('CANARY_PRIVATE_INPUT')
+        c.accept(raw({'queuedSubmission':{'id':'submission-1','input':c.input,'clientUserMessageId':c.client}}));return c
+    def close(self):self.tmp.cleanup()
+
+
+class RolloutAcceptanceTests(unittest.TestCase):
+    def fixture(self,**kwargs):
+        f=RolloutFixture(**kwargs);self.addCleanup(f.close);return f
+    def poison(self,r,call,code=None):
+        with self.assertRaises(Exception) as caught:call()
+        if code:self.assertEqual(getattr(caught.exception,'review_code',None),code)
+        self.assertTrue(r.coverage.failed)
+        with self.assertRaises(Exception):r.coverage.seal(drained=True,child_exited=True,source_digest=r.pin.digest)
+        with self.assertRaises(Exception):r.poll()
+        self.assertNotIn('CANARY',str(caught.exception));self.assertNotIn(str(r.pin.rollout_path),str(caught.exception))
+    def feed(self,r,c):
+        texts=[]
+        for value in r.poll():texts.append(n.feed_rollout_record(r.coverage,c,value,source_digest=r.pin.digest)[2])
+        return texts
+    def test_full_writer_journey_nonzero_ordinal_real_drain_close_and_privacy(self):
+        f=self.fixture();c=f.codec();f.append(f.journey(c.input));r=f.reader()
+        original=f.path.read_bytes()
+        with patch('subprocess.Popen',side_effect=AssertionError('no spawn')) as spawn:
+            texts=self.feed(r,c);r.poll(final=True)
+        self.assertEqual(spawn.call_count,0);self.assertEqual(f.path.read_bytes(),original)
+        self.assertEqual([x for x in texts if x is not None],['{}'])
+        self.assertEqual(r.next_ordinal,12);self.assertTrue(r.closed and r.drained)
+        self.assertEqual((c.submission,c.client,c.item,c.turn),('submission-1','client-1','user-item','turn-1'))
+        self.assertEqual(r.coverage.terminal,'Completed')
+        self.assertNotIn('started',[x[-1] for x in r.coverage.events if x[3]=='item'])
+        self.assertNotIn('CANARY',repr(r.coverage.events)+repr(r.coverage.record_digests))
+        self.assertEqual(len(r.coverage.seal(drained=True,child_exited=True,source_digest=r.pin.digest)),64)
+    def test_partial_suffix_reread_counts_io_consumed_once(self):
+        f=self.fixture();c=f.codec();values=f.journey(c.input);r=f.reader()
+        line=raw(values[0])+b'\n'
+        with f.path.open('ab') as out:out.write(line[:25])
+        self.assertEqual(r.poll(),[]);self.assertTrue(r.partial);self.assertEqual(r.next_ordinal,7)
+        before=r.bytes
+        with f.path.open('ab') as out:out.write(line[25:])
+        self.assertEqual(len(r.poll()),1);self.assertGreater(r.bytes,before+len(line)-25)
+        self.assertFalse(r.partial);self.assertEqual(r.next_ordinal,8)
+    def test_failed_and_interrupted_are_not_completed_success(self):
+        for mode,terminal in [('failed','Failed'),('interrupted','Interrupted')]:
+            f=self.fixture();c=f.codec();f.append(f.journey(c.input,mode=mode));r=f.reader();self.feed(r,c);r.poll(final=True)
+            self.assertEqual(r.coverage.terminal,terminal)
+    def test_metadata_legacy_fork_identity_missing_ordinal_and_oversize(self):
+        for field,value in [('id','other'),('session_id','other'),('history_mode','legacy'),('forked_from_id','parent'),('instructions','x'*n.LIMIT)]:
+            f=self.fixture();meta=json.loads(json.dumps(f.meta));meta['payload'][field]=value
+            f.path.write_bytes(raw(meta)+b'\n');r=f.reader();self.poison(r,r.poll)
+        for ordinal in [None,True,-1,2**63]:
+            f=self.fixture();meta=dict(f.meta,ordinal=ordinal);f.path.write_bytes(raw(meta)+b'\n');r=f.reader();self.poison(r,r.poll)
+    def test_cursor_not_record_boundary_and_file_permission_or_identity_drift(self):
+        for mode in ('cursor','truncate','replace','hardlink','permission','symlink','parent'):
+            f=self.fixture();r=f.reader()
+            if mode=='cursor':r=f.reader(start_offset=f.pin.start_offset-1)
+            elif mode=='truncate':f.path.write_bytes(b'')
+            elif mode=='replace':f.path.rename(f.path.with_suffix('.old'));f.path.write_bytes(raw(f.meta)+b'\n');f.path.chmod(0o600)
+            elif mode=='hardlink':os.link(f.path,f.path.with_suffix('.link'))
+            elif mode=='permission':f.path.chmod(0o622)
+            elif mode=='symlink':f.path.rename(f.path.with_suffix('.old'));f.path.symlink_to(f.path.with_suffix('.old'))
+            elif mode=='parent':f.path.parent.chmod(0o777)
+            self.poison(r,r.poll,'PICKUP_EVENT_SOURCE_INVALID')
+            if mode=='parent':f.path.parent.chmod(0o700)
+    def test_shrink_after_poll_and_wrong_uid_inode(self):
+        f=self.fixture();r=f.reader();r.poll();f.path.write_bytes(b'x');self.poison(r,r.poll)
+        for field in ('uid','inode','device'):
+            f=self.fixture();r=f.reader(**{field:getattr(f.pin,field)+1});self.poison(r,r.poll)
+    def test_path_compressed_reverted_and_traversal_are_not_admitted(self):
+        f=self.fixture()
+        for path in [str(f.path)+'.zst',str(f.path).replace('.jsonl','_reverted.jsonl'),str(f.home/'sessions/../bad.jsonl')]:
+            with self.assertRaises(Exception):replace(f.pin,rollout_path=path)
+        with self.assertRaises(Exception):replace(f.pin,history_mode='Legacy')
+    def test_true_line_boundary_and_partial_limit(self):
+        for suffix in (b'\n',b''):
+            f=self.fixture();r=f.reader();r.poll()
+            f.append([f.record(7,'event_msg',{'type':'task_started','turn_id':'turn-1'})])
+            r.poll()
+            # Exactly 64KiB LF record succeeds at reader level, then +1 rejects.
+            prefix=b'{"timestamp":"t","ordinal":8,"type":"turn_context","payload":{"pad":"';tail=b'"}}\n'
+            line=prefix+b'x'*(n.LIMIT-len(prefix)-len(tail))+tail
+            with f.path.open('ab') as out:out.write(line if suffix else b'x'*(n.LIMIT-1))
+            self.assertEqual(len(r.poll()),1 if suffix else 0)
+            with f.path.open('ab') as out:out.write(b'x'*(n.LIMIT+1) if suffix else b'x')
+            self.poison(r,r.poll,'PICKUP_EVENT_LIMIT')
+    def test_window_record_poll_limits_reached_without_early_replay(self):
+        f=self.fixture();r=f.reader();r.poll()
+        # Distinct contiguous benign records fill the actual default record cap.
+        f.append([f.record(7+i,'turn_context',{}) for i in range(127)])
+        self.assertEqual(len(r.poll()),127)
+        f.append([f.record(134,'turn_context',{})]);self.poison(r,r.poll,'PICKUP_EVENT_LIMIT')
+        f=self.fixture();r=f.reader()
+        for _ in range(128):r.poll()
+        self.poison(r,r.poll,'PICKUP_EVENT_LIMIT')
+        f=self.fixture();r=f.reader();r.poll()
+        # Repeated partial reads consume the actual 512KiB I/O budget.
+        with f.path.open('ab') as out:out.write(b'x'*60000)
+        while r.bytes+60000<=512*1024:r.poll()
+        self.poison(r,r.poll,'PICKUP_EVENT_LIMIT')
+    def test_invalid_utf8_json_unicode_depth_duplicate_keys_and_nan(self):
+        for bad in [b'\xff',b'{bad}',b'{"a":1,"a":2}',b'{"a":NaN}',b'{"a":"\\ud800"}',b'{"a":'+b'['*17+b'0'+b']'*17+b'}']:
+            f=self.fixture();r=f.reader()
+            with f.path.open('ab') as out:out.write(bad+b'\n')
+            self.poison(r,r.poll,'PICKUP_COVERAGE_UNVERIFIED')
+    def test_gap_duplicate_decrease_bool_missing_and_overflow_ordinals(self):
+        for ordinal in [8,6,True,None,2**63]:
+            f=self.fixture();r=f.reader();f.append([f.record(ordinal,'turn_context',{})]);self.poison(r,r.poll)
+        f=self.fixture();r=f.reader();f.append([f.record(7,'turn_context',{}),f.record(7,'turn_context',{})]);self.poison(r,r.poll)
+    def test_deadline_partial_and_late_close_are_sticky(self):
+        f=self.fixture();r=f.reader();r.poll();f.clock_value=100;self.poison(r,r.poll,'PICKUP_READ_TIMEOUT')
+        f=self.fixture();r=f.reader();close=os.close
+        def late(fd):close(fd);f.clock_value=6
+        with patch.object(n.os,'close',side_effect=late):self.poison(r,r.poll,'PICKUP_READ_TIMEOUT')
+    def test_all_wire_rejections_poison_and_cannot_seal(self):
+        cases=[]
+        for tag in ('turn_started','turn_complete','compacted','unknown','thread_rolled_back','token_usage_record',
+                    'thread_settings_applied','thread_goal_updated','retained_context','security_risk_score','configuration_update','additional_tools'):
+            cases.append(('event_msg',{'type':tag,'turn_id':'turn-1'}))
+        cases += [('session_meta',{}),('world_state',{}),('compacted',{}),('response_item',{'type':'agent_message'})]
+        for typ in ('function_call','local_shell_call','custom_tool_call','tool_search_call','web_search_call','image_generation_call','function_call_output','unknown'):
+            cases.append(('response_item',{'type':typ}))
+        for item in n.RELEASE_ITEMS-n.NON_TOOL|{'unknown'}:
+            cases.append(('event_msg',{'type':'item_completed','thread_id':'reviewer','turn_id':'turn-1','item':{'type':item,'id':'bad'}}))
+        for reason in ('replaced','review_ended','budget_limited',None):
+            cases.append(('event_msg',{'type':'turn_aborted','turn_id':'turn-1','reason':reason}))
+        for kind,payload in cases:
+            with self.subTest(kind=kind,payload=payload):
+                f=self.fixture();c=f.codec();r=f.reader();f.append([f.journey(c.input)[0],f.record(8,kind,payload)])
+                self.poison(r,lambda:self.feed(r,c))
+    def test_phase_error_null_client_image_cross_turn_and_postterminal_rejections(self):
+        for fault in ('null','scalar-error','partial','missing-phase','duplicate-final','image','client','thread','turn','item-replay','second-start','postterminal','abort-null','no-final','pascal-alias'):
+            with self.subTest(fault=fault):
+                f=self.fixture();c=f.codec();values=f.journey(c.input)
+                if fault=='null':values[-1]['payload']['error']=None
+                elif fault=='scalar-error':values[-1]['payload']['error']='bad'
+                elif fault=='partial':values[3]['payload']['item']['phase']='partial_answer'
+                elif fault=='missing-phase':del values[3]['payload']['item']['phase']
+                elif fault=='duplicate-final':values.insert(4,json.loads(json.dumps(values[3])))
+                elif fault=='image':values[1]['payload']['item']['content']=[{'type':'image','image_url':'private'}]
+                elif fault=='client':values[1]['payload']['item']['client_id']='wrong'
+                elif fault=='thread':values[1]['payload']['thread_id']='wrong'
+                elif fault=='turn':values[1]['payload']['turn_id']='other'
+                elif fault=='item-replay':values[3]['payload']['item']['id']='comment'
+                elif fault=='second-start':values.insert(2,json.loads(json.dumps(values[0])))
+                elif fault=='postterminal':values.append(f.record(12,'turn_context',{}))
+                elif fault=='abort-null':values[-1]['payload']={'type':'turn_aborted','turn_id':None,'reason':'interrupted'}
+                elif fault=='no-final':values.pop(3)
+                elif fault=='pascal-alias':values[1]['payload']['item']['type']='userMessage'
+                for i,x in enumerate(values):x['ordinal']=7+i
+                f.append(values);r=f.reader();self.poison(r,lambda:self.feed(r,c))
+    def test_benign_records_are_counted_and_bound_with_digest(self):
+        f=self.fixture();c=f.codec();values=f.journey(c.input)
+        values[1:1]=[f.record(0,'turn_context',{'turn_id':'turn-1'}),f.record(0,'response_item',{'type':'reasoning'}),
+                     f.record(0,'response_item',{'type':'message','role':'assistant'}),f.record(0,'event_msg',{'type':'token_count'})]
+        for i,x in enumerate(values):x['ordinal']=7+i
+        f.append(values);r=f.reader();self.feed(r,c);r.poll(final=True)
+        self.assertEqual(len(r.coverage.record_digests),9)
+    def test_source_mode_mismatch_and_bounds_bool_reject(self):
+        f=self.fixture()
+        for field in ('max_line_bytes','max_window_bytes','max_records','max_polls','next_ordinal'):
+            with self.assertRaises(Exception):replace(f.pin,**{field:True})
+        c=n.EventCoverage(f.pin.thread_id,'a'*64)
+        with self.assertRaises(Exception):n.RolloutWindow(f.pin,c,lambda:0,10)
+        self.assertTrue(c.failed)
+    def test_benign_wrong_thread_session_turn_and_overflow_are_sticky(self):
+        for key,value in [('thread_id','child-thread'),('session_id','other-session'),('turn_id','other-turn')]:
+            f=self.fixture();c=f.codec();r=f.reader()
+            f.append([f.journey(c.input)[0],f.record(8,'turn_context',{key:value})])
+            self.poison(r,lambda:self.feed(r,c))
+        f=self.fixture(next_ordinal=2**63-1);c=f.codec();r=f.reader()
+        f.append([f.record(2**63-1,'event_msg',{'type':'task_started','turn_id':'turn-1'})]);self.feed(r,c)
+        f.append([f.record(2**63,'turn_context',{})]);self.poison(r,r.poll)
+    def test_final_snapshot_partial_or_late_append_and_mode_drift_reject(self):
+        for suffix in [b'partial',raw(RolloutFixture.record(12,'turn_context',{}))+b'\n']:
+            f=self.fixture();c=f.codec();r=f.reader();f.append(f.journey(c.input));self.feed(r,c)
+            with f.path.open('ab') as out:out.write(suffix)
+            self.poison(r,lambda:r.poll(final=True))
+        f=self.fixture();r=f.reader();r.poll();f.path.chmod(0o400);self.poison(r,r.poll)
+    def test_missing_explicit_lifecycle_turn_never_inherits_prior_turn(self):
+        for index in (0,1,3,4):
+            f=self.fixture();c=f.codec();r=f.reader();values=f.journey(c.input)
+            del values[index]['payload']['turn_id'];f.append(values)
+            self.poison(r,lambda:self.feed(r,c))
+    def test_malformed_schema_lowered_true_budget_and_parent_symlink(self):
+        for bad in [[],{'ordinal':7},dict(RolloutFixture.record(7,'event_msg',{}),timestamp=1)]:
+            f=self.fixture();c=f.codec();r=f.reader();f.append([bad]);self.poison(r,lambda:self.feed(r,c))
+        f=self.fixture();c=f.codec();r=f.reader(max_window_bytes=16);self.poison(r,r.poll,'PICKUP_EVENT_LIMIT')
+        f=self.fixture();r=f.reader();parent=f.path.parent;parent.rename(parent.with_name('moved'));parent.symlink_to(parent.with_name('moved'))
+        self.poison(r,r.poll,'PICKUP_EVENT_SOURCE_INVALID')
+        parent.unlink();parent.with_name('moved').rename(parent)
+
+
+class RolloutCompositionTests(unittest.TestCase):
+    def trial(self,**kwargs):
+        t=CompositionTrial(rollout=True,**kwargs);self.addCleanup(t.close);return t
+    def test_full_existing_runner_ledger_receipt_and_no_server_eof(self):
+        t=self.trial();result=t.run()
+        self.assertEqual(result['status'],'PASS',result)
+        self.assertEqual(set(result['dimensions'].values()),{'PASS'})
+        self.assertTrue(t.comp.rollout.drained and t.comp.rollout.closed)
+        self.assertTrue(t.comp.stream.drained and t.comp.stream.closed)
+        self.assertEqual(t.comp.window.spawn_count,0);self.assertEqual(t.comp.window.attempts,0)
+        self.assertEqual(t.requests.count('thread/queue/add'),1);self.assertEqual(t.notify_count,1)
+        self.assertFalse(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+        self.assertFalse(result['authorized']);self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
+        self.assertNotIn('CANARY',json.dumps(result))
+    def test_failed_interrupted_blocked_and_changes(self):
+        for mode in ('failed','interrupted','blocked','changes'):
+            t=self.trial(mode=mode);result=t.run()
+            self.assertEqual(result['status'],'CHANGES_REQUIRED' if mode=='changes' else 'BLOCKED',result)
+            if mode in ('failed','interrupted'):self.assertEqual(t.notify_count,0)
+            if mode=='blocked':self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'PASS')
+    def test_rpc_fault_queue_ack_and_late_tool_keep_unknown_pending(self):
+        for fault in ('wrong-id','malformed','partial','disconnect','ack'):
+            t=self.trial(stream_fault=None if fault=='ack' else fault)
+            if fault=='ack':t.comp.codec.accept=lambda x:(_ for _ in ()).throw(ValueError('CANARY'))
+            result=t.run();self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertTrue(t.comp.coverage.failed);self.assertEqual(t.notify_count,0)
+            self.assertTrue(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+            self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'NOT_VERIFIED')
+    def test_cleanup_late_tool_source_mismatch_and_prequeue_data_fail_closed(self):
+        t=self.trial();old=t.comp.clean
+        def late():
+            f=t.rollout_fixture
+            f.append([f.record(12,'response_item',{'type':'function_call','call_id':'late-tool'})])
+            return old()
+        t.comp.clean=late;result=t.run()
+        self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(t.comp.coverage.failed)
+        self.assertTrue(t.t.ledger.notification_pending(t.t.binding.reviewer_session))
+        self.assertEqual(result['dimensions']['REVIEW_COMPLETED'],'FAIL')
+        self.assertEqual(result['dimensions']['AUTHOR_RECEIPTED'],'FAIL')
+        t=self.trial();t.rollout_fixture.append([t.rollout_fixture.journey()[0]])
+        result=t.run();self.assertEqual(result['status'],'BLOCKED',result);self.assertEqual(t.requests.count('thread/queue/add'),0)
+    def test_missing_receipt_is_partial_and_close_timeout_never_finishes(self):
+        t=self.trial();t.receipt_missing=True;result=t.run()
+        self.assertEqual(result['status'],'PARTIAL',result);self.assertEqual(t.notify_count,1)
+        t=self.trial();close=t.channel.close
+        def late():
+            result=close();t.t.j.clock.wait(6);return result
+        t.channel.close=late;result=t.run()
+        self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertTrue(t.comp.coverage.failed)
+        self.assertNotEqual(result['dimensions']['REVIEW_COMPLETED'],'PASS')

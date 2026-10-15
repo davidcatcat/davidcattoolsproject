@@ -994,12 +994,46 @@ no-tools or OS isolation; Owner Full Access/never is unchanged.
 [K2 release-pinned source evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6175548413)
 confirms APP_SERVER_EVENTS without resume cannot provide full item/turn events.
 No independent thread/subscribe exists, and resume is prohibited. HOST_ROLLOUT
-is insufficient for current started/completed/error/approval coverage. Therefore
-Native remains BLOCKED/NOT_VERIFIED. CR-K2-B rollout mode and any structure-only
-live inspection require a separate future contract/grant; neither is implemented
-or authorized here. P2/P4 remain one-shot STOP/PRESERVE; L3 possible-tool types
+cannot supply item-start/approval/transient-error evidence. The separately bound
+CR-K2-B source/fake mode below accepts completed-only rollout coverage with
+explicit limitations. Native remains BLOCKED/NOT_VERIFIED; live structure-only
+inspection and Native execution still require separate grants. P2/P4 remain one-shot STOP/PRESERVE; L3 possible-tool types
 stay fail-closed. N1 context retention, N4 opt-in and dual inference/data routes
 remain Native Grant conditions. T1 HOLD, F2/S2 ungranted, ai-loop fallback retained.
+
+#### CR-K2-B HOST_ROLLOUT source/fake acceptance
+
+[Four-file contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6184402548),
+[R1 final pins](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6184679109)
+and [independent new C3 PASS](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6185208724)
+authorize only native module/test plus README/WORKFLOW Source/Fake changes.
+No transport/policy/ledger/provider/CLI/schema/CI changes or #153 automation.
+
+| Required invariant | Synthetic acceptance |
+| --- | --- |
+| Admission | Physical sessions/YYYY/MM/DD plain JSONL, exact filename/thread/Session/Paginated/no-fork metadata, externally admitted LF cursor and nonzero next ordinal; pin digest bound through Session and composition/grant |
+| Limits | Actual 64KiB LF line, 512KiB cumulative I/O (including partial re-reads/metadata), 128 records/128 polls; strict Unicode/JSON/depth/duplicate-key rejection; shared five-second normal deadline, close included |
+| Writer codec | task_started/task_complete/turn_aborted; absent error succeeds, null rejects; PascalCase completed-only items; exact text input/client/item/turn, final_answer only, commentary never verdict; aliases/images/unknown/tool/fork/compaction fail sticky |
+| Coverage | Contiguous ordinals from external pin for every record; separate rollout seal domain and record digests; no fabricated ItemStarted; Failed/Interrupted never review PASS |
+| Ownership/cleanup | Identity checked before/after read, shrink/rename/replacement/hardlink/UID/unsafe physical parents reject; actual extra EOF snapshot/no partial and local close; available RPC drain/close without server EOF, zero spawn |
+| Composition | Existing runner/NOTIFICATION ledger/verdict/author waiter/counter domains; invalid ack or swallowed callback failure poisons coverage; unresolved effects remain UNKNOWN/pending/no resend; public route stays BLOCKED |
+| Privacy | Synthetic canaries absent from errors/evidence; no raw rollout/message/reasoning persistence or true Codex HOME reads |
+
+Delivery order: Source/Fake tests and advisory review → one exact-HEAD Draft PR /
+Python3.9+3.14 CI → original non-author Claude Security+Functional Source Review.
+Only after accepted source may a separately authorized structure-only census
+check actual Paginated/ordinal/layout/size/type/phase feasibility; it does not
+start a turn and is not Gate B. Any allowlist widening needs new evidence and
+independent acceptance. A separate Native grant is still required for queue/RPC,
+model/context/data routing, unknown token cost, original Host/receipt/counters.
+
+STOP/PRESERVE on identity/cursor/source/domain drift, missing coverage, unsafe
+path, partial/missing terminal at deadline, or cleanup uncertainty. No auto
+re-resolution, resume, retry/recovery framework or second store. A finite EOF
+snapshot cannot prove future silence; invisible approval/transient errors/item
+starts remain NOT_VERIFIED. R2–R6 LOW/LATER remain grouped rather than opening
+new repair loops. Owner Full Access/never stays unchanged; AUDIT_ONLY is not
+ENFORCED_NO_TOOLS. T1/F2/S2/#153 remain held/ungranted; ai-loop stays fallback.
 
 #### Acceptance matrix and dependencies
 
