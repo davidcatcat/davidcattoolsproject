@@ -46,6 +46,38 @@ class ProviderTests(unittest.TestCase):
         self.open.return_value = FakeResponse(raw)
         return self.client.complete(messages_for("ask", "test evidence"))
 
+    def test_exact_wire_unicode_surrogates_and_same_bytes_send(self):
+        messages = [{'role': 'user', 'content': '中文😀\ud800\udfff"\\\n'}]
+        body = {'model': self.client.provider['model'], 'temperature': self.client.generation['temperature'],
+                'max_tokens': self.client.generation['max_tokens'], 'messages': messages,
+                'chat_template_kwargs': {'enable_thinking': False}}
+        expected = json.dumps(body, ensure_ascii=True, allow_nan=False).encode('utf-8')
+        encoded = self.client.encode_request(messages)
+        self.assertEqual(encoded, expected)
+        self.open.return_value = FakeResponse(json.dumps(success()).encode())
+        self.client.send(encoded)
+        self.assertIs(self.open.call_args.args[0].data, encoded)
+        self.open.return_value = FakeResponse(json.dumps(success()).encode())
+        self.client.complete(messages)
+        self.assertEqual(self.open.call_args.args[0].data, expected)
+
+    def test_legacy_error_order_before_unserializable_messages(self):
+        self.client.key = object()
+        with self.assertRaises(TypeError) as caught:
+            self.client.complete([object()])
+        self.assertIn('concatenate', str(caught.exception))
+        self.open.assert_not_called()
+        self.client.key = None
+        self.client.provider['provider_options'] = {'enable_thinking': 'bad'}
+        with self.assertRaises(LLMToolError):self.client.complete([object()])
+        self.open.assert_not_called()
+
+    def test_surrogate_response_keeps_primary_failure_and_p1_usage(self):
+        for content in ('\ud800', '\udfff'):
+            with self.assertRaises(LLMToolError) as caught:self.answer(success(content))
+            self.assertEqual(caught.exception.diagnostic.code, d.ErrorCode.MODEL_RESPONSE_INVALID)
+            self.assertEqual(caught.exception.provider_metadata['total_tokens'], 25)
+
     def test_success_only_final_content_and_safe_metadata(self):
         reply = self.answer(success())
         self.assertEqual(reply.content, "final answer")
@@ -313,6 +345,29 @@ class ProviderTests(unittest.TestCase):
                 event = next(e for e in run.events if e.type == d.EventType.PROVIDER_RESPONSE)
                 self.assertEqual(event.data['token_usage_available'], expected is not None)
         self.assertEqual(self.open.call_count, 9)  # one request per answer, never a retry
+
+    def test_request_body_bytes_are_the_exact_bytes_sent(self):
+        """P0-LIVE-SEAM: one serialization for digest, cap and send; ask path unchanged."""
+        messages = messages_for("ask", "test evidence")
+        encoded = self.client.encode_request(messages)
+        self.assertIsInstance(encoded, bytes)
+        expected = json.dumps({"model": "test-model", "temperature": 0, "max_tokens": 2000,
+                               "messages": messages,
+                               "chat_template_kwargs": {"enable_thinking": False}},
+                              ensure_ascii=True, allow_nan=False).encode("utf-8")
+        self.assertEqual(encoded, expected)
+        self.answer(success())  # existing complete() path
+        self.assertEqual(self.open.call_args[0][0].data, expected)
+        self.open.reset_mock()
+        self.open.return_value = FakeResponse(json.dumps(success()).encode())
+        reply = self.client.send(encoded)
+        self.assertEqual(reply.content, "final answer")
+        self.assertEqual(self.open.call_args[0][0].data, encoded)
+        self.open.assert_called_once()
+        for bad in ("text", bytearray(b"x"), None):
+            with self.assertRaises(LLMToolError):
+                self.client.send(bad)
+        self.open.assert_called_once()
 
     def test_metadata_masks_api_key(self):
         self.client.key = "test-secret"

@@ -48,7 +48,8 @@ def reply_body(classifications, *, usage=None, finish='stop', extra=None):
     return json.dumps(body).encode()
 
 
-class WorkerTests(unittest.TestCase):
+class _WorkerFixture:
+    # Shared setup/helpers only; test classes below add the TestCase base.
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -108,6 +109,8 @@ class WorkerTests(unittest.TestCase):
         return reply_body([{'id': i, 'category': 'product_bug', 'rationale': 'assertion mismatch',
                             'excerpt_refs': refs} for i, refs in by_id.items()])
 
+
+class WorkerTests(_WorkerFixture, unittest.TestCase):
     # --- valid journey -------------------------------------------------------
     def test_valid_journey_is_one_request_with_selected_bytes_only(self):
         raw = ('preamble ' + CANARY + '\n').encode() + self.two_failures()
@@ -383,6 +386,295 @@ class WorkerTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertEqual(w.exit_status({'facts': {'test_exit_code': code, 'test_status': status}}),
                                  expected)
+
+
+GRANT_REF = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1'
+
+
+class Phase0GrantTests(_WorkerFixture, unittest.TestCase):
+    """P0-LIVE-SEAM: explicit pinned grant; provider's own opener; exact wire bytes."""
+
+    def setUp(self):
+        super().setUp()
+        self.grant_dir = self.root / 'grant'
+        self.grant_dir.mkdir(mode=0o700)
+        self.grant_path = self.grant_dir / 'phase0-grant.json'
+        self.now = w.datetime.datetime(2026, 10, 15, 12, 0, tzinfo=w.datetime.timezone.utc)
+
+    def grant_fields(self, raw, **overrides):
+        values = {'schema_version': 1, 'kind': 'llmtool.company-phase0-grant', 'policy_id': 'phase0-c0c6',
+                  'version': 1, 'profile': PROFILE, 'origin': 'http://127.0.0.1:9', 'model': 'gw',
+                  'capture_sha256': [w.hashlib.sha256(raw).hexdigest()], 'max_calls': 7,
+                  'not_before': '2026-10-15T00:00:00Z', 'not_after': '2026-10-16T00:00:00Z',
+                  'authorizer_ref': GRANT_REF}
+        values.update(overrides)
+        return values
+
+    def write_grant(self, value, mode=0o600):
+        data = value if isinstance(value, bytes) else json.dumps(value).encode()
+        if self.grant_path.exists() or self.grant_path.is_symlink():
+            self.grant_path.unlink()
+        self.grant_path.write_bytes(data)
+        os.chmod(self.grant_path, mode)
+        return w.hashlib.sha256(data).hexdigest()
+
+    def live(self, raw, body=None, *, pin=None, grant=None, now=None, fake=None, **kwargs):
+        self.path.write_bytes(raw)
+        pin = pin if pin is not None else self.write_grant(grant if grant is not None else self.grant_fields(raw))
+        fake = fake or Mock()
+        if body is not None:
+            fake.open.return_value = FakeResponse(body)
+        with patch('llmtool.providers.openai_compatible.request.build_opener', return_value=fake) as built:
+            try:
+                return w.run_test_triage_worker(self.path, 1, profile=PROFILE, home=self.home,
+                                                phase0_grant=self.grant_path, phase0_grant_sha256=pin,
+                                                _now=lambda: now or self.now, **kwargs), fake
+            finally:
+                self.last_fake, self.last_built = fake, built
+
+    def assert_live_blocked(self, raw, category, **kwargs):
+        with self.assertRaises(LLMToolError) as caught:
+            self.live(raw, self.valid_reply(raw), **kwargs)
+        self.assertEqual(str(caught.exception), 'test-triage-worker: ' + category + '; details omitted')
+        self.assertEqual(self.last_fake.open.call_count, 0)
+        if category != 'request body limit exceeded':  # only the wire cap runs after the client exists
+            self.assertEqual(self.last_built.call_count, 0)
+        for marker in (str(self.grant_path), str(self.path), GRANT_REF, '127.0.0.1', CANARY):
+            self.assertNotIn(marker, str(caught.exception))
+
+    def test_valid_grant_sends_exactly_one_request_through_provider_opener(self):
+        raw = self.two_failures()
+        result, fake = self.live(raw, self.valid_reply(raw))
+        self.assertEqual(fake.open.call_count, 1)
+        request_obj = fake.open.call_args[0][0]
+        self.assertEqual(request_obj.full_url, 'http://127.0.0.1:9/v1/chat/completions')
+        self.assertEqual(fake.open.call_args[1]['timeout'], 60)
+        self.assertEqual(result['route'], 'PHASE0_GRANT')
+        self.assertEqual(result['kind'], 'ADVISORY_WORKER_OUTPUT')
+        self.assertEqual(result['grant']['policy_id'], 'phase0-c0c6')
+        # Digest, cap and the bytes actually sent are one serialization.
+        sent = request_obj.data
+        self.assertEqual(result['digests']['request_body'], 'sha256:' + w.hashlib.sha256(sent).hexdigest())
+        self.assertEqual(result['request_body_bytes'], len(sent))
+        body = json.loads(sent)
+        self.assertEqual((body['model'], body['temperature'], body['max_tokens']), ('gw', 0, 4096))
+        self.assertEqual(body['chat_template_kwargs'], {'enable_thinking': False})
+        self.assertNotIn(CANARY, sent.decode())
+
+    def test_missing_or_partial_grant_arguments_stay_blocked(self):
+        raw = self.two_failures()
+        self.path.write_bytes(raw)
+        pin = self.write_grant(self.grant_fields(raw))
+        fake = Mock()
+        with patch('llmtool.providers.openai_compatible.request.build_opener', return_value=fake):
+            for kwargs in ({}, {'phase0_grant': self.grant_path}, {'phase0_grant_sha256': pin}):
+                with self.subTest(kwargs=sorted(kwargs)):
+                    with self.assertRaises(LLMToolError) as caught:
+                        w.run_test_triage_worker(self.path, 1, profile=PROFILE, home=self.home, **kwargs)
+                    self.assertIn('live company route is not authorized', str(caught.exception))
+        self.assertEqual(fake.open.call_count, 0)
+
+    def test_pin_mismatch_and_malformed_pins_block(self):
+        raw = self.two_failures()
+        good = self.write_grant(self.grant_fields(raw))
+        for pin in ('0' * 64, good.upper(), good[:-1], 'not-hex', ''):
+            with self.subTest(pin=pin[:8]):
+                self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+
+    def test_grant_file_safety(self):
+        raw = self.two_failures()
+        fields = self.grant_fields(raw)
+        pin = self.write_grant(fields, mode=0o644)
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        pin = self.write_grant(fields)
+        target = self.grant_dir / 'real.json'
+        self.grant_path.rename(target)
+        self.grant_path.symlink_to(target)
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        self.grant_path.unlink()
+        pin = self.write_grant(b'{' + b' ' * (w.MAX_GRANT_BYTES + 1) + b'}')
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        os.chmod(self.grant_dir, 0o755)
+        pin = self.write_grant(fields)
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        os.chmod(self.grant_dir, 0o750)
+        pin = self.write_grant(fields)
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        os.chmod(self.grant_dir, 0o700)
+        os.link(self.grant_path, self.grant_dir / 'second-link.json')
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+        (self.grant_dir / 'second-link.json').unlink()
+        self.grant_path.unlink()
+        self.assert_live_blocked(raw, 'phase0 grant invalid', pin=pin)
+
+    def test_grant_schema_is_strict(self):
+        raw = self.two_failures()
+        bad = [b'not json', b'{"schema_version": 1, "schema_version": 1}', b'[]',
+               json.dumps(dict(self.grant_fields(raw), extra=1)).encode()]
+        for key, value in (('schema_version', 2), ('kind', 'other'), ('version', 0), ('version', True),
+                           ('policy_id', 'bad id/with space'), ('max_calls', 0), ('max_calls', 8), ('max_calls', 9),
+                           ('capture_sha256', []), ('capture_sha256', ['%064x' % i for i in range(8)]), ('capture_sha256', ['A' * 64]),
+                           ('capture_sha256', ['a' * 64] * 2), ('capture_sha256', ['a' * 64] * 9),
+                           ('origin', 'http://127.0.0.1:9/path'), ('origin', 'ftp://x'),
+                           ('not_before', '2026-10-15 00:00:00'), ('not_after', '2026-10-14T00:00:00Z'),
+                           ('authorizer_ref', 'https://example.invalid/grant')):
+            bad.append(json.dumps(self.grant_fields(raw, **{key: value})).encode())
+        for data in bad:
+            with self.subTest(data=data[:40]):
+                self.assert_live_blocked(raw, 'phase0 grant invalid', grant=data)
+
+    def test_grant_binding_mismatches_block_before_any_request(self):
+        raw = self.two_failures()
+        for overrides, category in (({'profile': 'decoy'}, 'phase0 grant does not match profile'),
+                                    ({'origin': 'http://127.0.0.1:8'}, 'phase0 grant does not match profile'),
+                                    ({'model': 'other-model'}, 'phase0 grant does not match profile'),
+                                    ({'capture_sha256': ['b' * 64]}, 'phase0 grant does not cover capture')):
+            with self.subTest(overrides=overrides):
+                self.assert_live_blocked(raw, category, grant=self.grant_fields(raw, **overrides))
+
+    def test_grant_time_window_is_enforced(self):
+        raw = self.two_failures()
+        utc = w.datetime.timezone.utc
+        for now in (w.datetime.datetime(2026, 10, 14, 23, 59, 59, tzinfo=utc),
+                    w.datetime.datetime(2026, 10, 16, 0, 0, 0, tzinfo=utc)):
+            with self.subTest(now=now.isoformat()):
+                self.assert_live_blocked(raw, 'phase0 grant outside its time window', now=now)
+        for now in (w.datetime.datetime(2026, 10, 15, 0, 0, 0, tzinfo=utc),
+                    w.datetime.datetime(2026, 10, 15, 23, 59, 59, tzinfo=utc)):
+            result, fake = self.live(raw, self.valid_reply(raw), now=now)
+            self.assertEqual(fake.open.call_count, 1)
+        with self.assertRaises(LLMToolError):  # a naive clock is never trusted
+            self.live(raw, self.valid_reply(raw), now=w.datetime.datetime(2026, 10, 15, 12, 0))
+        self.assertEqual(self.last_fake.open.call_count, 0)
+
+    def test_request_body_cap_is_on_exact_wire_bytes(self):
+        raw = self.two_failures()
+        result, fake = self.live(raw, self.valid_reply(raw))
+        size = result['request_body_bytes']
+        with patch.object(w, 'MAX_REQUEST_BODY_BYTES', size - 1):
+            self.assert_live_blocked(raw, 'request body limit exceeded')
+        with patch.object(w, 'MAX_REQUEST_BODY_BYTES', size):
+            result, fake = self.live(raw, self.valid_reply(raw))
+            self.assertEqual(fake.open.call_count, 1)
+            self.assertEqual(len(fake.open.call_args[0][0].data), size)
+
+    def test_live_path_refuses_injected_openers_and_ignores_environment(self):
+        raw = self.two_failures()
+        for kwargs in ({'_opener': Mock()}, {'_token': w._FIXTURE}, {'_token': w._FIXTURE, '_opener': Mock()}):
+            with self.subTest(kwargs=sorted(kwargs)):
+                with self.assertRaises(LLMToolError):
+                    self.live(raw, self.valid_reply(raw), **kwargs)
+                self.assertEqual((self.last_fake.open.call_count, self.last_built.call_count), (0, 0))
+        with patch.dict(os.environ, {'LLMTOOL_PROVIDER': 'decoy', 'LLMTOOL_BASE_URL': 'http://127.0.0.1:7',
+                                     'LLMTOOL_MODEL': 'env-model'}):
+            result, fake = self.live(raw, self.valid_reply(raw))
+        self.assertEqual(fake.open.call_args[0][0].full_url, 'http://127.0.0.1:9/v1/chat/completions')
+        self.assertEqual(json.loads(fake.open.call_args[0][0].data)['model'], 'gw')
+
+    def test_live_failures_are_single_attempt_without_fallback(self):
+        raw = self.two_failures()
+        for effect in (HTTPError('u', 429, 'x', {}, io.BytesIO()), URLError('down'), socket.timeout()):
+            with self.subTest(effect=type(effect).__name__):
+                fake = Mock()
+                fake.open.side_effect = effect
+                with self.assertRaises(LLMToolError):
+                    self.live(raw, fake=fake)
+                self.assertEqual(fake.open.call_count, 1)
+
+
+    def test_g1_expiry_crossed_during_encode_has_zero_send(self):
+        raw = self.two_failures(); self.path.write_bytes(raw)
+        pin = self.write_grant(self.grant_fields(raw)); fake = Mock()
+        times = iter((self.now, w.datetime.datetime(2026, 10, 16, tzinfo=w.datetime.timezone.utc)))
+        with patch('llmtool.providers.openai_compatible.request.build_opener', return_value=fake):
+            with self.assertRaises(LLMToolError) as caught:
+                w.run_test_triage_worker(self.path, 1, profile=PROFILE, home=self.home,
+                    phase0_grant=self.grant_path, phase0_grant_sha256=pin, _now=lambda: next(times))
+        self.assertIn('phase0 grant outside its time window', str(caught.exception))
+        self.assertEqual(fake.open.call_count, 0)
+
+    def test_g2_worker_schema_v2_both_routes_and_actual_wire_digest(self):
+        raw = self.two_failures()
+        fixture = self.run_worker(raw, self.valid_reply(raw))
+        result, fake = self.live(raw, self.valid_reply(raw))
+        for value in (fixture, result):
+            self.assertEqual(value['schema_version'], 2)
+            self.assertEqual(set(value['digests']), {'request_body', 'reply'})
+        sent = fake.open.call_args[0][0].data
+        self.assertEqual(result['digests']['request_body'], 'sha256:' + w.hashlib.sha256(sent).hexdigest())
+
+    def test_g3_secret_policy_metadata_zero_client_and_no_echo(self):
+        raw = self.two_failures()
+        self.assert_live_blocked(raw, 'phase0 grant invalid',
+            grant=self.grant_fields(raw, policy_id=SYNTHETIC_AWS_KEY))
+
+    def test_la2_every_git_boundary_is_rejected_even_private_subdir(self):
+        raw = self.two_failures(); original = self.grant_path
+        for marker in ('directory', 'file'):
+            repo = self.root / ('other-repo-' + marker); repo.mkdir()
+            dotgit = repo / '.git'
+            if marker == 'directory': dotgit.mkdir()
+            else: dotgit.write_text('gitdir: /not-a-real-repository')
+            private = repo / 'nested' / 'private'; private.mkdir(parents=True, mode=0o700)
+            self.grant_path = private / 'grant.json'
+            self.assert_live_blocked(raw, 'phase0 grant invalid')
+        self.grant_path = original
+        self.assertEqual(self.live(raw, self.valid_reply(raw))[1].open.call_count, 1)
+
+
+    def test_grant_exact_modes_and_identity_change_block_before_client(self):
+        raw = self.two_failures(); fields = self.grant_fields(raw)
+        pin = self.write_grant(fields, mode=0o400)
+        self.assert_live_blocked(raw,'phase0 grant invalid',pin=pin)
+        pin = self.write_grant(fields); self.grant_dir.chmod(0o500)
+        try:self.assert_live_blocked(raw,'phase0 grant invalid',pin=pin)
+        finally:self.grant_dir.chmod(0o700)
+        original = os.read
+        def replace_during_read(fd, limit):
+            value = original(fd,limit)
+            self.grant_path.rename(self.grant_dir / 'previous.json')
+            self.grant_path.write_bytes(value); self.grant_path.chmod(0o600)
+            return value
+        with patch.object(w.os,'read',side_effect=replace_during_read):
+            self.assert_live_blocked(raw,'phase0 grant invalid',pin=pin)
+
+    def test_la2_known_roots_and_unknown_boundary_fail_closed(self):
+        roots=('/Users/davidsun/git/davidcataiporject/davidcattoolsproject',
+            '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex',
+            '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude')
+        for root in roots:
+            with patch.object(w.os,'open',side_effect=AssertionError('must reject before open')):
+                with self.assertRaises(LLMToolError):
+                    w.load_phase0_grant(root+'/private/grant.json','a'*64)
+        raw=self.two_failures(); original=os.lstat
+        def denied(path,*args,**kwargs):
+            if str(path).endswith('/.git'):raise PermissionError('synthetic')
+            return original(path,*args,**kwargs)
+        with patch.object(w.os,'lstat',side_effect=denied):
+            self.assert_live_blocked(raw,'phase0 grant invalid')
+
+    def test_full_wire_actual_64k_boundary_and_identical_bytes_object(self):
+        from llmtool.providers.openai_compatible import OpenAICompatibleClient
+        raw=self.two_failures(); original=OpenAICompatibleClient.encode_request
+        for size in (65535,65536,65537):
+            sent=[]
+            def encode(client,messages):
+                data=original(client,messages); data=data+b' '*(size-len(data)); sent.append(data);return data
+            with patch.object(OpenAICompatibleClient,'encode_request',encode):
+                if size>65536:self.assert_live_blocked(raw,'request body limit exceeded')
+                else:
+                    result,fake=self.live(raw,self.valid_reply(raw))
+                    self.assertIs(fake.open.call_args[0][0].data,sent[0])
+                    self.assertEqual(result['request_body_bytes'],size)
+                    self.assertEqual(result['digests']['request_body'],w._digest(sent[0]))
+
+    def test_g3_complete_escaped_output_scan_is_fixed_and_does_not_echo(self):
+        raw=self.two_failures()
+        with patch.object(w,'_budget',return_value={'status':SYNTHETIC_AWS_KEY}):
+            with self.assertRaises(LLMToolError) as caught:self.live(raw,self.valid_reply(raw))
+        self.assertEqual(str(caught.exception),'test-triage-worker: output contains sensitive-content indicators; details omitted')
+        self.assertNotIn(SYNTHETIC_AWS_KEY,str(caught.exception))
+        self.assertEqual(self.last_fake.open.call_count,1)
 
 
 if __name__ == '__main__':

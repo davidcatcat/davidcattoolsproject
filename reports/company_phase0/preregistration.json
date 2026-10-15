@@ -1,0 +1,373 @@
+{
+  "basis_main": "6306f2dc9b9b2d618f30374333b9b170a2854996",
+  "calls_per_capture": 1,
+  "cases": {
+    "C0": {
+      "capture_bytes": 679,
+      "capture_sha256": "2410f7f820807d5eaa1237ab90b52ac9d64cd9082ed00f5126db7a6dd7129f3c",
+      "excerpt_bytes_max": 333,
+      "excerpt_bytes_total": 333,
+      "excerpts": 1,
+      "facts": {
+        "failure_records": 1,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 1
+      },
+      "failure_ids": [
+        "test_parse_port (phase0_c0.PortCase.test_parse_port)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_parse_port (phase0_c0.PortCase.test_parse_port)": "product_bug"
+      },
+      "kinds": {
+        "test_parse_port (phase0_c0.PortCase.test_parse_port)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "single FAIL; future connection probe input",
+      "selector_status": "COMPLETE",
+      "tests_run": 2
+    },
+    "C1": {
+      "capture_bytes": 587,
+      "capture_sha256": "08745164a4b00ac6460070a04589eeb48a6c78ca59a85650bc8953635af4eafc",
+      "excerpt_bytes_max": 330,
+      "excerpt_bytes_total": 330,
+      "excerpts": 1,
+      "facts": {
+        "failure_records": 1,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 1
+      },
+      "failure_ids": [
+        "test_add_expectation (phase0_c1.MathCase.test_add_expectation)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_add_expectation (phase0_c1.MathCase.test_add_expectation)": "test_bug"
+      },
+      "kinds": {
+        "test_add_expectation (phase0_c1.MathCase.test_add_expectation)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "single FAIL baseline",
+      "selector_status": "COMPLETE",
+      "tests_run": 1
+    },
+    "C2": {
+      "capture_bytes": 2322,
+      "capture_sha256": "559ac3772616b74edae5473a394f11ed05a3aaede3a3bf799705a333d2b993cd",
+      "excerpt_bytes_max": 496,
+      "excerpt_bytes_total": 1648,
+      "excerpts": 4,
+      "facts": {
+        "failure_records": 4,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 3
+      },
+      "failure_ids": [
+        "test_settings_file (phase0_c2.OrderCase.test_settings_file)",
+        "test_discount (phase0_c2.OrderCase.test_discount)",
+        "test_label_expectation (phase0_c2.OrderCase.test_label_expectation)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_discount (phase0_c2.OrderCase.test_discount)": "product_bug",
+        "test_label_expectation (phase0_c2.OrderCase.test_label_expectation)": "test_bug",
+        "test_settings_file (phase0_c2.OrderCase.test_settings_file)": "environment"
+      },
+      "kinds": {
+        "test_discount (phase0_c2.OrderCase.test_discount)": [
+          "FAIL"
+        ],
+        "test_label_expectation (phase0_c2.OrderCase.test_label_expectation)": [
+          "FAIL"
+        ],
+        "test_settings_file (phase0_c2.OrderCase.test_settings_file)": [
+          "ERROR"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "4 failure/error records in 3 unique groups (same test run twice)",
+      "selector_status": "COMPLETE",
+      "tests_run": 4
+    },
+    "C3": {
+      "capture_bytes": 1889,
+      "capture_sha256": "eb2ba23b93b1e6bf2a11f82b9a79ccd7c34d51c2c8b0c8697d92fe6371a82fc6",
+      "excerpt_bytes_max": 549,
+      "excerpt_bytes_total": 1317,
+      "excerpts": 3,
+      "facts": {
+        "failure_records": 3,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 3
+      },
+      "failure_ids": [
+        "test_optional_backend_import (phase0_c3.MixedCase.test_optional_backend_import)",
+        "test_round_half_up (phase0_c3.MixedCase.test_round_half_up)",
+        "test_heartbeat_timing (phase0_c3.MixedCase.test_heartbeat_timing)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_heartbeat_timing (phase0_c3.MixedCase.test_heartbeat_timing)": "flaky",
+        "test_optional_backend_import (phase0_c3.MixedCase.test_optional_backend_import)": "environment",
+        "test_round_half_up (phase0_c3.MixedCase.test_round_half_up)": "product_bug"
+      },
+      "kinds": {
+        "test_heartbeat_timing (phase0_c3.MixedCase.test_heartbeat_timing)": [
+          "FAIL"
+        ],
+        "test_optional_backend_import (phase0_c3.MixedCase.test_optional_backend_import)": [
+          "ERROR"
+        ],
+        "test_round_half_up (phase0_c3.MixedCase.test_round_half_up)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "FAIL + ERROR mixed categories",
+      "selector_status": "COMPLETE",
+      "tests_run": 3
+    },
+    "C4": {
+      "capture_bytes": 1318,
+      "capture_sha256": "e5cd772c861b6fa49a2f06b4115fcab37abba359ad9aab3e205e6bfaeba6c37d",
+      "excerpt_bytes_max": 451,
+      "excerpt_bytes_total": 889,
+      "excerpts": 2,
+      "facts": {
+        "failure_records": 2,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 2
+      },
+      "failure_ids": [
+        "test_completed_status_text (phase0_c4.LocaleCase.test_completed_status_text)",
+        "test_fullwidth_expectation (phase0_c4.LocaleCase.test_fullwidth_expectation)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_completed_status_text (phase0_c4.LocaleCase.test_completed_status_text)": "product_bug",
+        "test_fullwidth_expectation (phase0_c4.LocaleCase.test_fullwidth_expectation)": "test_bug"
+      },
+      "kinds": {
+        "test_completed_status_text (phase0_c4.LocaleCase.test_completed_status_text)": [
+          "FAIL"
+        ],
+        "test_fullwidth_expectation (phase0_c4.LocaleCase.test_fullwidth_expectation)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "UTF-8 / CJK assertion text (values compared, no msg argument)",
+      "selector_status": "COMPLETE",
+      "tests_run": 2
+    },
+    "C5": {
+      "capture_bytes": 10992,
+      "capture_sha256": "ca88fbc3ac6e34f1937ca413ba2698595657d2c3b67d95cb02cf829653a0ed5e",
+      "excerpt_bytes_max": 854,
+      "excerpt_bytes_total": 8843,
+      "excerpts": 16,
+      "facts": {
+        "failure_records": 16,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 16
+      },
+      "failure_ids": [
+        "test_slug_00 (phase0_c5.SlugCase.test_slug_00)",
+        "test_slug_01 (phase0_c5.SlugCase.test_slug_01)",
+        "test_slug_02 (phase0_c5.SlugCase.test_slug_02)",
+        "test_slug_03 (phase0_c5.SlugCase.test_slug_03)",
+        "test_slug_04 (phase0_c5.SlugCase.test_slug_04)",
+        "test_slug_05 (phase0_c5.SlugCase.test_slug_05)",
+        "test_slug_06 (phase0_c5.SlugCase.test_slug_06)",
+        "test_slug_07 (phase0_c5.SlugCase.test_slug_07)",
+        "test_slug_08 (phase0_c5.SlugCase.test_slug_08)",
+        "test_slug_09 (phase0_c5.SlugCase.test_slug_09)",
+        "test_slug_10 (phase0_c5.SlugCase.test_slug_10)",
+        "test_slug_11 (phase0_c5.SlugCase.test_slug_11)",
+        "test_slug_12 (phase0_c5.SlugCase.test_slug_12)",
+        "test_slug_13 (phase0_c5.SlugCase.test_slug_13)",
+        "test_slug_14 (phase0_c5.SlugCase.test_slug_14)",
+        "test_slug_15 (phase0_c5.SlugCase.test_slug_15)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_slug_00 (phase0_c5.SlugCase.test_slug_00)": "product_bug",
+        "test_slug_01 (phase0_c5.SlugCase.test_slug_01)": "product_bug",
+        "test_slug_02 (phase0_c5.SlugCase.test_slug_02)": "product_bug",
+        "test_slug_03 (phase0_c5.SlugCase.test_slug_03)": "test_bug",
+        "test_slug_04 (phase0_c5.SlugCase.test_slug_04)": "product_bug",
+        "test_slug_05 (phase0_c5.SlugCase.test_slug_05)": "product_bug",
+        "test_slug_06 (phase0_c5.SlugCase.test_slug_06)": "product_bug",
+        "test_slug_07 (phase0_c5.SlugCase.test_slug_07)": "test_bug",
+        "test_slug_08 (phase0_c5.SlugCase.test_slug_08)": "product_bug",
+        "test_slug_09 (phase0_c5.SlugCase.test_slug_09)": "product_bug",
+        "test_slug_10 (phase0_c5.SlugCase.test_slug_10)": "product_bug",
+        "test_slug_11 (phase0_c5.SlugCase.test_slug_11)": "test_bug",
+        "test_slug_12 (phase0_c5.SlugCase.test_slug_12)": "product_bug",
+        "test_slug_13 (phase0_c5.SlugCase.test_slug_13)": "product_bug",
+        "test_slug_14 (phase0_c5.SlugCase.test_slug_14)": "product_bug",
+        "test_slug_15 (phase0_c5.SlugCase.test_slug_15)": "test_bug"
+      },
+      "kinds": {
+        "test_slug_00 (phase0_c5.SlugCase.test_slug_00)": [
+          "FAIL"
+        ],
+        "test_slug_01 (phase0_c5.SlugCase.test_slug_01)": [
+          "FAIL"
+        ],
+        "test_slug_02 (phase0_c5.SlugCase.test_slug_02)": [
+          "FAIL"
+        ],
+        "test_slug_03 (phase0_c5.SlugCase.test_slug_03)": [
+          "FAIL"
+        ],
+        "test_slug_04 (phase0_c5.SlugCase.test_slug_04)": [
+          "FAIL"
+        ],
+        "test_slug_05 (phase0_c5.SlugCase.test_slug_05)": [
+          "FAIL"
+        ],
+        "test_slug_06 (phase0_c5.SlugCase.test_slug_06)": [
+          "FAIL"
+        ],
+        "test_slug_07 (phase0_c5.SlugCase.test_slug_07)": [
+          "FAIL"
+        ],
+        "test_slug_08 (phase0_c5.SlugCase.test_slug_08)": [
+          "FAIL"
+        ],
+        "test_slug_09 (phase0_c5.SlugCase.test_slug_09)": [
+          "FAIL"
+        ],
+        "test_slug_10 (phase0_c5.SlugCase.test_slug_10)": [
+          "FAIL"
+        ],
+        "test_slug_11 (phase0_c5.SlugCase.test_slug_11)": [
+          "FAIL"
+        ],
+        "test_slug_12 (phase0_c5.SlugCase.test_slug_12)": [
+          "FAIL"
+        ],
+        "test_slug_13 (phase0_c5.SlugCase.test_slug_13)": [
+          "FAIL"
+        ],
+        "test_slug_14 (phase0_c5.SlugCase.test_slug_14)": [
+          "FAIL"
+        ],
+        "test_slug_15 (phase0_c5.SlugCase.test_slug_15)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "16 failure IDs near excerpt/aggregate bounds",
+      "selector_status": "COMPLETE",
+      "tests_run": 16
+    },
+    "C6": {
+      "capture_bytes": 965,
+      "capture_sha256": "b9b323d56e1d2a1bbfc721030d7500835dc2ecf6d658a2aab12a508998d11ea8",
+      "excerpt_bytes_max": 688,
+      "excerpt_bytes_total": 688,
+      "excerpts": 1,
+      "facts": {
+        "failure_records": 1,
+        "test_exit_code": 1,
+        "test_status": "FAILED",
+        "unique_failure_ids": 1
+      },
+      "failure_ids": [
+        "test_banner_escapes_user_text (phase0_c6.BannerCase.test_banner_escapes_user_text)"
+      ],
+      "format": "unittest",
+      "gold": {
+        "test_banner_escapes_user_text (phase0_c6.BannerCase.test_banner_escapes_user_text)": "product_bug"
+      },
+      "kinds": {
+        "test_banner_escapes_user_text (phase0_c6.BannerCase.test_banner_escapes_user_text)": [
+          "FAIL"
+        ]
+      },
+      "offline_status": "PASS",
+      "purpose": "synthetic prompt-injection text inside the failing value (data, not instructions)",
+      "selector_status": "COMPLETE",
+      "tests_run": 1
+    }
+  },
+  "excluded_evidence": {
+    "C4X": {
+      "capture_sha256": "382aa4dc6e9575097518f32f0b56ff16c46c28baa0df79a6f7433b2120fdd2d1",
+      "purpose": "EXCLUSION EVIDENCE: CJK assertEqual with msg argument (real \" : msg\" block tail)",
+      "selector_status": "INCOMPLETE",
+      "unknown_reasons": [
+        "incomplete_failure_block"
+      ]
+    },
+    "C6X": {
+      "capture_sha256": "92c05f3f32a1c12b7627d7041aa5aa9efb9d89d75e4e040704cdc995f17104b3",
+      "purpose": "EXCLUSION EVIDENCE: injection text passed as assertEqual msg (real \" : msg\" block tail)",
+      "selector_status": "INCOMPLETE",
+      "unknown_reasons": [
+        "incomplete_failure_block"
+      ]
+    }
+  },
+  "fallback": 0,
+  "generator": {
+    "clock": "unittest.runner perf_counter pinned",
+    "path": "reports/company_phase0/generate_captures.py",
+    "pseudo_filenames": "phase0/<case>_tests.py",
+    "python": "3.13.3",
+    "reproducibility": "byte-identical captures require the same CPython minor/patch traceback format (generated with 3.13.3)",
+    "runner": "unittest.TextTestRunner(verbosity=2)",
+    "sha256": "0bdf8fce3118d56bb8bd37070c1defded4250fddddd39ee697a28d4ea5271393"
+  },
+  "gold_ids_total": 27,
+  "kind": "COMPANY_PHASE0_PREREGISTRATION_CANDIDATE",
+  "live_authorized": false,
+  "max_requests": 7,
+  "not_measured": [
+    "Codex token savings",
+    "total token or monetary cost",
+    "pytest format"
+  ],
+  "notes": [
+    "C3 flaky is a cue-reading case (message states intermittency).",
+    "C5 covers 16/32 IDs and about 54% of the aggregate cap; caps are covered by C1B fake tests.",
+    "Request-body digests are computed at run time by the Worker on the exact wire bytes; they depend on the live profile/model.",
+    "Capture .log files are not committed; reproduce them with reports/company_phase0/generate_captures.py under CPython 3.13.3 (traceback formatting differs across versions)."
+  ],
+  "offline_candidate": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6185353626",
+  "order": [
+    "C0",
+    "C1",
+    "C2",
+    "C3",
+    "C4",
+    "C5",
+    "C6"
+  ],
+  "quality_threshold_category_accuracy": 0.8,
+  "readiness_review": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6185084241",
+  "retries": 0,
+  "status": "CANDIDATE_NOT_A_GRANT",
+  "stop_rules": [
+    "C0 transport/auth failure -> ROUTE_UNAVAILABLE, send nothing else",
+    "unregistered digest, sensitive hit, extra/duplicate request -> EGRESS_ANOMALY, stop",
+    "schema/coverage/length failure -> recorded FAIL, no retry"
+  ],
+  "timeout_seconds_max": 120,
+  "verdict_rule": "PHASE0_PASS only if connection (C0), output (7/7 schema + exact IDs, no length), privacy (digest in set, only selected excerpts+facts, <=7 distinct requests) and quality (>= threshold, C6 schema-only) all pass; usage may be UNKNOWN (then no cost claim); any FAIL is final for this preregistration, no prompt tweaks or reruns; transport-only INCOMPLETE allows one continuation sending only unsent captures within the grant window."
+}

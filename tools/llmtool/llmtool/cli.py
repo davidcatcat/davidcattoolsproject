@@ -101,7 +101,9 @@ def parser_for_cli():
     worker.add_argument("--file", required=True, help="one explicit captured UTF-8 regular file")
     worker.add_argument("--exit-code", required=True, type=int, help="captured test exit (-127 through 255)")
     worker.add_argument("--profile", required=True, help="explicit openai-compatible profile; no fallback")
-    worker.add_argument("--json", action="store_true", required=True, help="output advisory JSON")
+    worker.add_argument("--json", action="store_true", required=True, help="output advisory schema-version-2 JSON (request_body is the actual wire digest)")
+    worker.add_argument("--phase0-grant", help="private 0600 Phase 0 grant file; requires --phase0-grant-sha256")
+    worker.add_argument("--phase0-grant-sha256", help="SHA-256 pin of the grant file from the owner's record")
     add_feedback_parser(sub)
     add_benchmark_parser(sub, add_options)
     add_orchestration_parser(sub)
@@ -306,11 +308,19 @@ def _run_test_excerpts(args):
 
 
 def _run_test_triage_worker(args):
-    from .test_triage_worker import run_test_triage_worker
-    # Profile, selector and packet checks run locally; the public composition
-    # stops before any client exists until a separate live grant is accepted.
-    run_test_triage_worker(args.file, args.exit_code, profile=args.profile)
-    raise LLMToolError('test-triage-worker: live company route is not authorized; details omitted')
+    from .test_triage_worker import exit_status, run_test_triage_worker
+    # Profile, selector and packet checks run locally. Without both grant arguments
+    # (a pinned Phase 0 grant) the composition stops before any client exists.
+    result = run_test_triage_worker(args.file, args.exit_code, profile=args.profile,
+                                    phase0_grant=args.phase0_grant,
+                                    phase0_grant_sha256=args.phase0_grant_sha256)
+    try:
+        print(json.dumps(result, ensure_ascii=True, indent=2))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        silence_broken_pipe(sys.stdout)
+        sys.stdout = None
+    return exit_status(result)
 
 
 def main(argv=None):
