@@ -101,8 +101,33 @@ token-saving claims**.
 
 `llmtool test-triage-worker --file … --exit-code … --profile … --json` (C1B, Issue #120)
 is a bounded advisory Worker over production `test-excerpts`. Status: **source and fake
-tests only; the public live route is BLOCKED** until a separately accepted Company-only
-Phase 0 grant. It does not reuse the frozen L01 selector or its savings claims.
+tests only; the public live route is BLOCKED** unless `--phase0-grant FILE
+--phase0-grant-sha256 HEX` name a private 0600 grant whose pin, profile, origin, model,
+capture digest and UTC window all match. It does not reuse the frozen L01 selector or
+its savings claims.
+
+- **The grant is not authorization.** A same-UID process can write a grant file and
+  compute its pin. The seam only stops accidental or implicit live calls. A real Phase 0
+  run needs the owner's prior #120 grant record (field-for-field equal to the file), the
+  VPN step and a non-author check of the per-invocation evidence afterwards.
+- **Owner-only Live grants.** AI agents must not create, modify or fabricate any
+  grant file that could be used for real Live execution. Only the Owner supplies
+  real grants. Before each real Phase0 invocation a non-author must confirm that
+  authorizer_ref points to the Owner's actual #120 authorization comment, and
+  reconcile the exact grant hash, route/data/capture/time/call limits. URL-format
+  and SHA checks alone do not prove Owner authority. Isolated synthetic grants
+  are permitted only with fake openers/local synthetic servers, never real routes.
+- **Off-repo only.** Grant files inside any Git worktree are rejected, including
+  canonical/fixed roots and unrelated repositories, even in private0700 folders.
+  Bounded physical ancestor/.git checks are cooperative, not same-UID race isolation.
+- **Worker schema v2 (breaking).** Fixture and grant routes both return
+  schema_version2. digests.request_body hashes actual HTTP wire bytes; the old
+  compact-message digests.prompt key is removed. Grant DATA remains schema_version1.
+- **One serialization.** The provider's own request bytes are capped (64 KiB),
+  re-scanned, digested and sent once through its own opener (no proxy, no redirect).
+- **`max_calls` is informational.** There is no store, so it cannot be enforced across
+  runs. Capture and max_calls limits are1..7. The run report must list every invocation
+  with its request-body digest; no cross-process replay/call cap is claimed.
 
 - **Deterministic first.** The selector must be COMPLETE and every failure ID must have
   a selected excerpt. Otherwise there are zero requests.
@@ -111,12 +136,17 @@ Phase 0 grant. It does not reuse the frozen L01 selector or its savings claims.
   totals or summaries are rejected.
 - **One call.** Explicit `openai-compatible` profile only (no active/default fallback),
   one request, no retry or fallback.
-- **Usage.** It is a complete gateway-reported triplet or `UNKNOWN`, never 0.
+- **Usage.** It is a complete gateway-reported triplet or `UNKNOWN`. Unknown is never
+  replaced by 0; a reported, valid `(0,0,0)` is known.
 - **Advisory.** Output is `ADVISORY_WORKER_OUTPUT`: not review, QA, Security, merge,
   egress or budget authority. It never turns a failed capture into a pass.
 - **Not measured.** Quality, fidelity and savings stay UNKNOWN until Phase 0.
 - **Exit status.** While the live route is blocked the command exits 1 after local
-  checks, never 0, so a failed capture is never hidden.
+  checks. With a valid grant it keeps the test-excerpts rule. A failed capture is never
+  reported as a pass.
+- **Phase 0 data.** `reports/company_phase0/` holds the C0–C6 generator and the
+  preregistration candidate (digests, gold labels, verdict and stop rules). That
+  candidate is not a grant.
 
 ## Runtime skill selection
 

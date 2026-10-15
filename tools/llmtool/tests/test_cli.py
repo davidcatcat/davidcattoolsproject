@@ -252,6 +252,68 @@ class CLITests(unittest.TestCase):
         self.assertIn(b'--profile', help_result.stdout)
         self.assertEqual(self.server.requests, [])
 
+    def test_test_triage_worker_phase0_grant_arguments(self):
+        import hashlib
+        from test_test_output_excerpts import UNIT_FAILURE
+        self.write_worker_config()
+        path = (self.cwd / 'PRIVATE_CAPTURE_PATH.log').resolve()
+        path.write_bytes(UNIT_FAILURE)
+        grant_dir = (self.cwd / 'grant').resolve()
+        grant_dir.mkdir(mode=0o700)
+        grant = grant_dir / 'grant.json'
+        grant.write_text(json.dumps({'schema_version': 1, 'kind': 'llmtool.company-phase0-grant',
+                                     'policy_id': 'phase0-cli', 'version': 1, 'profile': 'company-test',
+                                     'origin': self.base_url, 'model': 'PRIVATE_MODEL_NAME',
+                                     'capture_sha256': ['0' * 64], 'max_calls': 1,
+                                     'not_before': '2000-01-01T00:00:00Z', 'not_after': '2100-01-01T00:00:00Z',
+                                     'authorizer_ref': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1'}))
+        os.chmod(grant, 0o600)
+        pin = hashlib.sha256(grant.read_bytes()).hexdigest()
+        base = ('test-triage-worker', '--file', str(path), '--exit-code', '1', '--profile', 'company-test', '--json')
+        for extra, category in ((('--phase0-grant', str(grant)), b'live company route is not authorized'),
+                                (('--phase0-grant-sha256', pin), b'live company route is not authorized'),
+                                (('--phase0-grant', str(grant), '--phase0-grant-sha256', '0' * 64),
+                                 b'phase0 grant invalid'),
+                                (('--phase0-grant', str(grant), '--phase0-grant-sha256', pin),
+                                 b'phase0 grant does not cover capture')):
+            with self.subTest(extra=extra[0]):
+                result = self.run_cli(*base, *extra)
+                self.assert_failure(result)
+                self.assertIn(category, result.stderr)
+                for marker in (b'PRIVATE_', self.base_url.encode(), str(grant).encode(), b'Traceback'):
+                    self.assertNotIn(marker, result.stdout + result.stderr)
+        self.assertEqual(self.server.requests, [])
+
+    def test_worker_v2_fake_local_http_preserves_failed_exit(self):
+        from llmtool import test_triage_worker as worker
+        from test_test_output_excerpts import UNIT_FAILURE
+        import hashlib
+        self.write_worker_config()
+        path = (self.cwd / 'synthetic-capture.log').resolve(); path.write_bytes(UNIT_FAILURE)
+        selection = worker.select_test_excerpts(path, 7)
+        _, _, refs = worker.build_packet(selection)
+        classifications = [dict(id=item, category='unknown', rationale='synthetic only',
+            excerpt_refs=[ref for ref, owner in refs.items() if owner == item])
+            for item in selection['failure_ids']]
+        self.server.reply = (200, success(json.dumps({'classifications': classifications})), 0, {})
+        private = (self.cwd / 'private-grant').resolve(); private.mkdir(mode=0o700)
+        grant = private / 'synthetic-only.json'
+        grant.write_text(json.dumps(dict(schema_version=1,kind='llmtool.company-phase0-grant',
+            policy_id='phase0-local-fixture',version=1,profile='company-test',origin=self.base_url,
+            model='PRIVATE_MODEL_NAME',capture_sha256=[hashlib.sha256(UNIT_FAILURE).hexdigest()],max_calls=1,
+            not_before='2000-01-01T00:00:00Z',not_after='2100-01-01T00:00:00Z',
+            authorizer_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1')))
+        grant.chmod(0o600); pin = hashlib.sha256(grant.read_bytes()).hexdigest()
+        result = self.run_cli('test-triage-worker','--file',str(path),'--exit-code','7',
+            '--profile','company-test','--json','--phase0-grant',str(grant),'--phase0-grant-sha256',pin)
+        self.assertEqual(result.returncode,7,result.stderr); self.assertEqual(result.stderr,b'')
+        value=json.loads(result.stdout); self.assertEqual(value['schema_version'],2)
+        self.assertEqual(set(value['digests']),{'request_body','reply'})
+        self.assertEqual(len(self.server.requests),1)
+        self.assertNotIn(b'PRIVATE_',result.stdout)
+        self.assertNotIn(self.base_url.encode(),result.stdout)
+        self.assertNotIn(str(grant).encode(),result.stdout)
+
     def test_test_excerpts_arguments_help_and_bounded_output(self):
         from test_test_output_excerpts import UNIT_FAILURE
         path = (self.cwd / 'capture.log').resolve()

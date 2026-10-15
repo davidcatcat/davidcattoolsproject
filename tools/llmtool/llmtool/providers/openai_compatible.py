@@ -61,7 +61,7 @@ class OpenAICompatibleClient:
         # Do not forward prompts/keys through ambient proxy settings.
         self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
 
-    def complete(self, messages):
+    def _request_body(self, messages):
         self.validate_ready(self.provider)
         options = self.provider.get("provider_options", {})
         self.validate_options(options)
@@ -73,13 +73,37 @@ class OpenAICompatibleClient:
         }
         if options.get("enable_thinking") is not None:
             body["chat_template_kwargs"] = {"enable_thinking": options["enable_thinking"]}
+        return body
+
+    def encode_request(self, messages):
+        """Exact wire bytes for callers with their own separately authorized route."""
+        return json.dumps(self._request_body(messages), ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+    def complete(self, messages):
+        body = self._request_body(messages)
+        url, headers = self._request_target()
+        # Preserve legacy order: readiness/options, headers/URL, serialization.
+        data = json.dumps(body, ensure_ascii=True, allow_nan=False).encode("utf-8")
+        return self._send(data, url, headers)
+
+    def send(self, data):
+        """POST already-encoded bytes once, so callers can digest/cap exactly what is sent."""
+        if type(data) is not bytes:
+            raise LLMToolError("request body must be encoded bytes")
+        self.validate_ready(self.provider)
+        url, headers = self._request_target()
+        return self._send(data, url, headers)
+
+    def _request_target(self):
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.key:
             headers["Authorization"] = "Bearer " + self.key
+        return self.provider["base_url"].rstrip("/") + "/v1/chat/completions", headers
+
+    def _send(self, data, url, headers):
         req = request.Request(
-            self.provider["base_url"].rstrip("/") + "/v1/chat/completions",
-            data=json.dumps(body, ensure_ascii=True, allow_nan=False).encode("utf-8"),
-            headers=headers, method="POST",
+            url,
+            data=data, headers=headers, method="POST",
         )
         start = time.monotonic()
         try:
