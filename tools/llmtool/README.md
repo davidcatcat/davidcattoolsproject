@@ -3054,6 +3054,36 @@ Agent wake-up, production review authority, Native/Company Live or F2/S2 executi
 
 ### Cooperative foreground review request / return (original Reviewer only)
 
+The separate trusted-host Worker entry is
+`llmtool.review_authority.run_foreground_review(issuer, ledger, budget=budget)`.
+It uses the issuer's existing pinned context and actual `compose_host_services`
+with the `llmtool-worker/claude-cli` role; legacy Reviewer routes are rejected
+before consumption/spawn. There is no new CLI flag, default Host path, grant
+file, ledger creation or enabled public factory. Only already authorized trusted
+host code with permitted Host/route/runtime/auth/ledger pins may call it.
+
+One atomic attempt per issuer includes composition failures and cancellation;
+reusing another issuer cannot bypass the existing ledger's replay checks. The
+ledger is borrowed and left open. The caller can inspect read-only
+`issuer.foreground_services` and `issuer.pending_job`; retained ownership remains
+reachable on UNKNOWN/SystemExit/BaseException, without retry or fallback. Keep
+the issuer alive and preserve unresolved child/evidence handles. The original
+<=180s absolute deadline includes composition, caps the actual Worker launcher,
+and gates final acceptance; delayed handoff does not reset it. Existing <=120s
+call, UTC windows and bounded cleanup still apply.
+
+The offline E2E uses only temporary synthetic executable/Host/ledger fixtures,
+including actual Production composition, dual decisions and owned cleanup.
+Production components' `test_only=false` is not proof of a live model call or
+Host readiness. Results remain `WORKER_DATA_ONLY`, `authorized=false`,
+`STOP_NO_EXECUTION_AUTHORITY`, runtime `NOT_VERIFIED` and handoff `NOT_DELIVERED`.
+They do not replace independent formal Source approval or authorize repairs/Git.
+Live still needs a separate one-call route/data/model/cost/window grant, permitted
+physical executable and dedicated Auth HOME, Host/ledger provisioning and the
+outstanding pre-Live reviews. No original Reviewer wake-up, reduced manual relay,
+useful live adoption or full M2 completion is claimed. See the
+[Worker Source/Fake contract](WORKFLOW.md#foreground-worker-sourcefake-contract-issue-120).
+
 ```sh
 llmtool task review-request --bundle ABS_PRIVATE_BUNDLE --bundle-sha256 FULL_SHA256 \
   --expect ABS_PRIVATE_EXPECT --output ABS_NEW_REQUEST --json

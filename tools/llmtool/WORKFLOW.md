@@ -128,6 +128,36 @@ these facts without changing the frozen ReviewCallBinding field set or ledger
 schema. A changed executable, revoked route, source, nonce or expired binding
 cannot reuse that grant. Public factories remain unavailable.
 
+Trusted host code can now call
+`run_foreground_review(issuer, ledger, budget=budget)` in `review_authority`.
+It composes the actual HostServices and calls the existing `run_review` using
+only `issuer.context`; it accepts no second contract or caller-supplied services.
+Only the Worker role is accepted, before receipt consumption or spawn. This
+host-only entry does not install Host registration/authentication or activate a
+CLI/public factory. The host must already hold independently permitted pins,
+context, route and a PROVIDER_REVIEW ledger; grant DATA is not permission.
+
+An issuer-local atomic fence admits one attempt, including failed composition,
+invalid budget and cancellation; it is never reset. A new issuer remains subject
+to the existing ledger's replay/cap checks. The borrowed ledger stays open.
+Read-only `issuer.foreground_services` and `issuer.pending_job` retain the real
+launcher before invocation, including UNKNOWN, SystemExit and BaseException.
+The host must preserve these handles and uncertain evidence; inspecting them
+does not authorize cleanup of other processes or another attempt. No automatic
+retry, fallback, resume or global cleanup is added.
+
+The entry captures its original absolute monotonic deadline (<=180s), charges
+composition time, and passes a reduced budget to the existing review flow. The
+retained Worker launcher also caps its deadline by that original absolute value,
+so a delayed handoff cannot renew time. Expiry is checked immediately before
+invocation and after result normalization/finalization. Existing call/window and
+cleanup limits remain inside the deadline. Late results fail closed while actual
+attempt/receipt accounting and pending ownership survive. Returned dual decisions
+remain WORKER_DATA_ONLY, authorized=false and STOP_NO_EXECUTION_AUTHORITY.
+Temporary synthetic executable/Host/ledger E2E tests exercise this production
+composition (test_only=false on its real components); that flag is not Live
+evidence. Runtime stays NOT_VERIFIED and production handoff NOT_DELIVERED.
+
 The opt-in provider invocation is foreground `--print --output-format json
 --no-session-persistence --safe-mode --tools "" --model <pinned model>`, with
 shell disabled, isolated empty cwd, sanitized environment and pinned auth HOME.
