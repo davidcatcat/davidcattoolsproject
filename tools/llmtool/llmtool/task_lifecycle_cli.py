@@ -26,6 +26,15 @@ def add_task_parser(sub):
         bundle.add_argument('--'+option, required=True)
     bundle.add_argument('--json', action='store_true', required=True,
                         help='PREPARED means data only; runtime is NOT_VERIFIED')
+    request = actions.add_parser('review-request', help='Prepare original-reviewer request DATA; never send')
+    for option in ('bundle','bundle-sha256','expect','output'):
+        request.add_argument('--'+option,required=True)
+    request.add_argument('--json',action='store_true',required=True)
+    wait = actions.add_parser('review-wait', help='Bounded foreground local receipt/result observation')
+    for option in ('request','request-sha256','receipt','verdict','output'):
+        wait.add_argument('--'+option,required=True)
+    wait.add_argument('--timeout',type=int,default=300,help='0..600 seconds; 0 is one immediate status pass')
+    wait.add_argument('--json',action='store_true',required=True)
 
 
 def read_task_file(filename):

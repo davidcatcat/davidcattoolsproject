@@ -115,6 +115,25 @@ class CLITests(unittest.TestCase):
         self.assertNotIn(b'Traceback',result.stdout)
         self.assertEqual(self.server.requests,[])
 
+    def test_review_exchange_commands_dispatch_locally_without_provider(self):
+        for command in ('review-request','review-wait'):
+            result = self.run_cli('task',command,'--help')
+            self.assertEqual(result.returncode,0,result.stderr)
+        request = self.run_cli('task','review-request','--bundle','/private/missing-bundle',
+            '--bundle-sha256','0'*64,'--expect','/private/missing-expect',
+            '--output','/private/missing-request','--json')
+        wait = self.run_cli('task','review-wait','--request','/private/missing-request',
+            '--request-sha256','0'*64,'--receipt','/private/missing-receipt',
+            '--verdict','/private/missing-verdict','--timeout','0',
+            '--output','/private/missing-result','--json')
+        for result in (request,wait):
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual(json.loads(result.stdout)['status'],'BLOCKED')
+            self.assertFalse(json.loads(result.stdout)['authorized'])
+            self.assertEqual(result.stderr,b'')
+            self.assertNotIn(b'/private/',result.stdout)
+        self.assertEqual(self.server.requests,[])
+
     def test_test_excerpts_public_command_retains_failed_exit_and_provenance(self):
         from test_test_output_excerpts import UNIT_FAILURE, FAIL_ID
         import hashlib
