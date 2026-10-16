@@ -30,6 +30,41 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 純文字 runtime request，不使用 CLI tools，不提供 shell、Git 或 code-edit capability。
 llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
+## Accepted collaboration and mobile Codex Cloud development lane
+
+[Architecture decisions Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172)
+and [Draft PR #173](https://github.com/davidcatcat/davidcattoolsproject/pull/173)
+record the owner's D-001, D-002a, D-003a/b/c, D-005a and D-007 decisions:
+**ChatGPT Coordinator** discusses product requirements; for complex work the
+**existing Codex Integrator** is PM + Integration Manager and decides how to
+split and assign agents; **llmtool** performs authorized deterministic
+Provider/Worker invocation, policy, state, evidence and events, **not**
+complex AI-driven task planning. The local one-time owner handoff -> Worker
+completion -> same Integrator wake is an unverified M2 product target.
+Company gw remains an API-only advisory Provider with quality- and
+egress-gated, task-specific net premium-Token measurements; unknown cost
+and usage remain UNKNOWN.
+
+**D-007 mobile parallel development:** while away from the Mac, the owner
+can start a separate Codex Cloud task from ChatGPT mobile after the
+Cloud environment was configured/published on web/desktop. Coordinator or
+Integrator/PM decides which independent, nonoverlapping work package suits
+Cloud. Cloud works in its own checkout, implements, tests, **self-pre-reviews**
+and, when GitHub permissions allow, publishes its own branch/Draft PR.
+**The owner manually hands the finished PR to the existing Integrator
+reviewer**, who verifies the change and obtains independent non-author
+Security/Functional/QA plus Mac-only checks as applicable. This single
+Cloud final handoff is intentional, not an llmtool Worker, an automated
+original-session callback, or evidence of M2/F2 Live acceptance. Self-review
+does not replace independent review. Do not auto-merge main.
+
+Cloud needs repository and push authorization; it does not automatically
+inherit Mac checkout, VPN/Keychain or unpushed files. GitHub refs remain
+shared between independent Cloud and Mac branches. See
+[Workflow](WORKFLOW.md#d-007-independent-mobile-codex-cloud-delivery),
+[Roadmap](ROADMAP.md#owner-accepted-collaboration-architecture-and-mobile-codex-cloud-lane-2026-10-17)
+and [official Codex Cloud guide](https://help.openai.com/en/articles/20001545-using-codex-cloud).
+
 ## Roadmap status
 
 - **A0 — Model Validation:** DONE
