@@ -20,7 +20,7 @@ from .authorization_policy import (HostIssuer,IssuerClass,Decision,ProviderRevie
 from .authorization_ledger import ReceiptLedger,LedgerError
 from .task_review import (HostServices,PairApproval,ReviewPacket,ReviewCallBinding,Admission,
     ConsumeToken,CallOutcome,LaunchResult,UnavailableReviewAuthority,load_json,canonical,
-    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen)
+    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen,REVIEWER_ROLES)
 from .task_lifecycle import utc_time,inspect_task,Role
 from .task_review_collector import physical_directory,collect_local_facts,Observation
 
@@ -56,8 +56,13 @@ class ProviderRoutePolicy(ContractValue):
     not_before: str
     not_after: str
     authorizer_ref: str
+    reviewer_role: str
+    worker_runtime_digest: str = None
 
     def __post_init__(self):
+        if self.reviewer_role not in REVIEWER_ROLES: reject('REVIEW_ROUTE_NOT_AUTHORIZED')
+        if self.reviewer_role == REVIEWER_ROLES[1]: _hex(self.worker_runtime_digest)
+        elif self.worker_runtime_digest is not None: reject('REVIEW_ROUTE_NOT_AUTHORIZED')
         safe_id(self.policy_id);_integer(self.version,minimum=1)
         safe_id(self.profile);safe_id(self.model)
         if (self.provider != 'claude-cli' or self.data_classes != ('DIFF','REVIEW_METADATA','SOURCE') or
@@ -133,6 +138,9 @@ class HostRegistration:
     capability_id: str
     authorizer_ref: str
 
+    reviewer_version: str = None
+    reviewer_executable_digest: str = None
+
     def route(self,route_digest):
         matches=[(p,r) for p,r in self.route_policies if p.digest == route_digest]
         if len(matches) != 1 or matches[0][1]: reject('REVIEW_ROUTE_NOT_AUTHORIZED')
@@ -149,17 +157,34 @@ def _decode_host(raw):
         _keys(a,RegisteredAgent.__dataclass_fields__);agents.append(RegisteredAgent(**a))
     if len({a.agent_id for a in agents}) != len(agents) or len({a.root for a in agents}) != len(agents):
         reject('REVIEW_REGISTRATION_INVALID')
-    reviewer=v['reviewer'];_keys(reviewer,('role','executable','auth_home'))
-    if reviewer['role'] != 'llmtool-review/claude-cli' or reviewer['role'] in {a.agent_id for a in agents}:
+    reviewer=v['reviewer']
+    keys=('role','executable','auth_home')
+    if type(reviewer) is dict and reviewer.get('role') == REVIEWER_ROLES[1]:
+        keys += ('version','executable_sha256')
+    _keys(reviewer,keys)
+    if reviewer['role'] not in REVIEWER_ROLES or reviewer['role'] in {a.agent_id for a in agents}:
         reject('REVIEW_REGISTRATION_INVALID')
     for key in ('executable','auth_home'): _path(reviewer[key],absolute=True)
+    if reviewer['role'] == REVIEWER_ROLES[1]:
+        if reviewer['version'] != '2.1.301': reject('REVIEW_RUNTIME_INVALID')
+        _hex(reviewer['executable_sha256'])
     entries=v['route_policies']
     if type(entries) is not list or not 1 <= len(entries) <= 32: reject('REVIEW_HOST_POLICY_INVALID')
     policies=[]
     for entry in entries:
-        _keys(entry,('policy','revoked'));_keys(entry['policy'],ProviderRoutePolicy.__dataclass_fields__)
+        _keys(entry,('policy','revoked'))
+        if type(entry['policy']) is not dict: reject('REVIEW_HOST_POLICY_INVALID')
+        # Backward compatibility exists ONLY at legacy Host-file decode. New
+        # policy construction must explicitly supply the bound principal role.
+        p=dict(entry['policy'])
+        if 'reviewer_role' not in p:
+            if reviewer['role'] != REVIEWER_ROLES[0]: reject('REVIEW_HOST_POLICY_INVALID')
+            p['reviewer_role']=REVIEWER_ROLES[0]
+        if 'worker_runtime_digest' not in p and reviewer['role'] == REVIEWER_ROLES[0]:
+            p['worker_runtime_digest']=None
+        _keys(p,ProviderRoutePolicy.__dataclass_fields__)
         if type(entry['revoked']) is not bool: reject('REVIEW_HOST_POLICY_INVALID')
-        p=dict(entry['policy']);p['data_classes']=tuple(p['data_classes'])
+        p['data_classes']=tuple(p['data_classes'])
         policies.append((ProviderRoutePolicy(**p),entry['revoked']))
     if len({p.policy_id for p,r in policies}) != len(policies): reject('REVIEW_HOST_POLICY_INVALID')
     ledger=v['ledger'];_keys(ledger,('path','device','inode','creation_nonce'))
@@ -169,7 +194,8 @@ def _decode_host(raw):
     safe_id(issuer['capability_id']);_reference(issuer['authorizer_ref'])
     return HostRegistration(tuple(agents),reviewer['role'],reviewer['executable'],reviewer['auth_home'],
         tuple(policies),ledger['path'],ledger['device'],ledger['inode'],ledger['creation_nonce'],
-        issuer['capability_id'],issuer['authorizer_ref'])
+        issuer['capability_id'],issuer['authorizer_ref'],
+        reviewer.get('version'),reviewer.get('executable_sha256'))
 
 
 def read_host_file(path):
@@ -287,6 +313,40 @@ class ReviewContext:
     packet_input: bytes
 
 
+def worker_runtime_pin(reg):
+    if reg.reviewer_role != REVIEWER_ROLES[1]:
+        return None
+    return digest(dict(role=reg.reviewer_role, executable=reg.reviewer_executable,
+        version=reg.reviewer_version, executable_sha256=reg.reviewer_executable_digest,
+        auth_home=reg.reviewer_auth_home), 'llmtool.worker-runtime-pin.v1')
+
+
+def verify_worker_executable(reg, deadline):
+    """Bounded read of independently pinned executable, no --version execution."""
+    fd=None
+    try:
+        fd=os.open(reg.reviewer_executable,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        before=os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 256*1024*1024):
+            reject('REVIEW_RUNTIME_INVALID')
+        sha=hashlib.sha256();remaining=before.st_size
+        while remaining:
+            if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
+            chunk=os.read(fd,min(65536,remaining))
+            if not chunk: reject('REVIEW_RUNTIME_INVALID')
+            sha.update(chunk);remaining-=len(chunk)
+        after=os.fstat(fd);named=os.lstat(reg.reviewer_executable)
+        fields=lambda st:(st.st_dev,st.st_ino,st.st_size,st.st_mode,st.st_mtime_ns,st.st_ctime_ns)
+        if (fields(before) != fields(after) or fields(before) != fields(named) or
+                sha.hexdigest() != reg.reviewer_executable_digest):
+            reject('REVIEW_RUNTIME_INVALID')
+    except OSError:
+        reject('REVIEW_RUNTIME_INVALID')
+    finally:
+        if fd is not None: os.close(fd)
+    if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
+
+
 class ProductionReviewIssuer(HostIssuer):
     def __init__(self,pin,clock,observer,context):
         if type(pin) is not HostPin or type(context) is not ReviewContext:
@@ -340,7 +400,9 @@ class ProductionReviewIssuer(HostIssuer):
             call.source_sha == c.expect.source_sha and call.epoch == c.expect.epoch and
             call.sequence == snapshot.last_sequence and call.packet_digest == packet.digest and
             call.author_agents == tuple(sorted(a.agent_id for a in c.expect.authored_by)) and
-            call.reviewer_role == 'llmtool-review/claude-cli' and call.reviewer_role not in call.author_agents and
+            call.reviewer_role == p.reviewer_role == load_host_registration(self.pin).reviewer_role and
+            call.reviewer_role not in call.author_agents and
+            p.worker_runtime_digest == worker_runtime_pin(load_host_registration(self.pin)) and
             call.reviewer_launch_nonce == self.reviewer_launch_nonce and call.redeem_run_id == self.redeem_run_id and
             (call.route_id,call.route_version,call.provider,call.profile,call.model) ==
                 (p.policy_id,p.version,p.provider,p.profile,p.model) and
@@ -415,10 +477,13 @@ class ProductionReviewerLauncher:
     test_only=False
     def __init__(self,authority):
         self.authority=authority
+        self.pending_job=None
+        self._job_deadlines={}
         self._attempted=set()
         self._attempt_lock=threading.Lock()
 
-    def launch(self,packet,token):
+    def launch(self,packet,token,*,deadline=None):
+        if self.pending_job is not None: reject('REVIEW_WORKER_CLEANUP_UNKNOWN')
         receipt=self.authority.receipt_for(token)
         c=receipt.binding.call
         p=self.authority.issuer.policy(c.route_digest)
@@ -429,6 +494,8 @@ class ProductionReviewerLauncher:
         with self._attempt_lock:
             if token.grant_ref in self._attempted: reject('REVIEW_GRANT_NOT_AUTHORIZED')
             self._attempted.add(token.grant_ref)
+        if c.reviewer_role == REVIEWER_ROLES[1]:
+            return self._worker_launch(packet,c,p,reg,deadline)
         # Use the existing provider argv, pipe limits and owned-child lifecycle.
         from .providers.claude_cli import ClaudeCLIProvider
         class TrackedProvider(ClaudeCLIProvider):
@@ -449,6 +516,53 @@ class ProductionReviewerLauncher:
         if provider.provenance is None: reject('REVIEW_LAUNCH_NOT_ATTESTED')
         return LaunchResult(content,canonical({'elapsed_seconds':elapsed}),c.reviewer_launch_nonce,
                             provider.provenance,True,self.test_only)
+
+
+    def _worker_launch(self,packet,c,p,reg,deadline):
+        from .providers.claude_cli import ClaudeCLIProvider
+        started=time.monotonic()
+        if type(deadline) not in (int,float): reject('REVIEW_BUDGET_BLOCKED')
+        deadline=min(deadline, started+p.call_timeout_seconds,
+            started+max(0,(utc_time(c.deadline).timestamp()-self.authority.issuer.clock.utc())),
+            started+max(0,(utc_time(p.not_after).timestamp()-self.authority.issuer.clock.utc())))
+        self._job_deadlines[c.reviewer_launch_nonce]=deadline
+        if (c.reviewer_role != p.reviewer_role or c.reviewer_role != reg.reviewer_role or
+                p.worker_runtime_digest != worker_runtime_pin(reg) or
+                not self.authority.issuer.matches(c,self.authority._observed(c))):
+            reject('REVIEW_GRANT_NOT_AUTHORIZED')
+        verify_worker_executable(reg,deadline)
+        provider=ClaudeCLIProvider({'model':p.model},None)
+        # Keep pending ownership reachable even when provider raises/BaseException.
+        self.pending_job=None
+        try:
+            forbidden=tuple(a.session_id for a in (*self.authority.issuer.context.expect.agents,
+                *self.authority.issuer.context.expect.authored_by)) + (
+                '081de22e-d514-4288-9d1f-48f488979271',)
+            result=provider._invoke_review_job(reg.reviewer_executable,
+                provider._prompt(ReviewPacket(packet).messages()),deadline=deadline,
+                auth_home=reg.reviewer_auth_home,launch_nonce=c.reviewer_launch_nonce,
+                runtime_pin=p.worker_runtime_digest,forbidden_sessions=forbidden)
+            evidence=provider.job_evidence
+            if (time.monotonic() >= deadline or
+                    not self.authority.issuer.matches(c,self.authority._observed(c))):
+                reject('REVIEW_SOURCE_DRIFT')
+            verify_worker_executable(reg,deadline)
+            content=result.pop('content')
+            return LaunchResult(content,canonical(result),c.reviewer_launch_nonce,
+                digest(evidence,'llmtool.review-owned-worker.v1'),True,self.test_only,canonical(evidence))
+        finally:
+            self.pending_job=getattr(provider,'pending_job',None)
+
+
+    def validate_completion(self,token):
+        """Final host/time/source/route check after verdict and ledger finalize."""
+        receipt=self.authority.receipt_for(token)
+        c=receipt.binding.call
+        deadline=self._job_deadlines.get(c.reviewer_launch_nonce)
+        if deadline is None or time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
+        if not self.authority.issuer.matches(c,self.authority._observed(c)):
+            reject('REVIEW_SOURCE_DRIFT')
+        if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
 
 
 def review_authority_factory():
@@ -472,4 +586,5 @@ def compose_host_services(issuer,ledger,*,budget):
     return HostServices(authority,ProductionReviewerLauncher(authority),issuer.observer,issuer.clock,
         c.approval,c.packet_input,dict(id=policy.policy_id,version=policy.version,digest=policy.digest,
         profile=policy.profile,model=policy.model),issuer.reviewer_launch_nonce,issuer.capability_id,
-        issuer.redeem_run_id,budget,False,policy.unknown_cost_accepted)
+        issuer.redeem_run_id,budget,False,policy.unknown_cost_accepted,
+        policy.reviewer_role,worker_runtime_pin(reg))

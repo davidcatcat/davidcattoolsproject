@@ -1002,6 +1002,27 @@ STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 
 ### A11c.1 — Production Workflow Integration
 
+#### Main AI decisions and llmtool execution boundary (Issue #120 Owner direction)
+
+The main responsible AI understands the parent task, decomposes work, explicitly
+selects a Worker/provider, verifies evidence and decides whether to adopt a result.
+llmtool performs the delegated call, policy/data-authorization checks, bounded
+execution/lifecycle, state/evidence collection and result handoff. It does not
+plan the task, score models or autonomously choose a route. A company LLM is an
+explicitly selected Worker; no new company invocation or export is authorized.
+
+The next M2 delivery candidate is one host-owned foreground Reviewer invocation
+per work package, reusing existing provider/lifecycle/HostServices components.
+It is a new Worker identity, never the original Claude Session implicitly resumed
+or copied. Original-session manual request/return remains supported with its
+existing pins. Changing ordinary Worker review into a formal release gate requires
+independent contract acceptance; original nonauthor Source Review stays required.
+No production factory, Host registration, live call or ledger is enabled by this
+text. Fake source acceptance and a separately granted one-call real trial are
+distinct. Full M2 still requires measured delivery and authorized bounded
+repair/tests/DraftPR-or-STOP without an Owner prompt courier. Existing A11b,
+F2/S2/Host/provider/egress gates and #153/#161 HOLD are unchanged.
+
 #### Issue #120 staged preparation — S1a, then S1b, then S2
 
 The Coordinator-adopted [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)

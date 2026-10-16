@@ -7,6 +7,9 @@ issuer/replay and route wiring; CLI input can never select this fixture seam.
 import hashlib
 import json
 import re
+import time
+import sys
+import math
 from dataclasses import dataclass
 from typing import Protocol, TYPE_CHECKING, Mapping
 from types import MappingProxyType
@@ -25,6 +28,7 @@ PACKET_LIMIT = 256 * 1024
 SOURCE_LIMIT = 128 * 1024
 EVIDENCE_LIMIT = 32 * 1024
 VERDICT_LIMIT = 64 * 1024
+REVIEWER_ROLES = ('llmtool-review/claude-cli', 'llmtool-worker/claude-cli')
 if TYPE_CHECKING:
     from .task_review_collector import Observation
 
@@ -171,7 +175,7 @@ class ReviewCallBinding:
             reject('REVIEW_BINDING_INVALID')
         if (self.task_id != self.ready_task.task_id or self.run_id != self.ready_task.run_id or
                 self.ready_task.task_id == self.acceptance_task.task_id or
-                self.provider != 'claude-cli' or self.reviewer_role != 'llmtool-review/claude-cli' or
+                self.provider != 'claude-cli' or self.reviewer_role not in REVIEWER_ROLES or
                 self.issuer_class not in ('FAKE_TEST_ONLY','PRODUCTION_REVIEW')):
             reject('REVIEW_BINDING_INVALID')
         for value in (self.task_id,self.route_id,self.issuer_capability_id): safe_id(value)
@@ -232,6 +236,7 @@ class LaunchResult:
     provenance_digest: str
     complete: bool
     test_only: bool
+    job_evidence_json: bytes = b'{}'
 
 
 class ReviewAuthority(Protocol):
@@ -269,9 +274,17 @@ class HostServices:
     budget: RunBudget
     hard_cost_cap: bool
     unknown_cost_permitted: bool
+    reviewer_role: str = REVIEWER_ROLES[0]
+    worker_runtime_digest: str = None
 
     def __post_init__(self):
         if type(self.packet_input) is not bytes or type(self.approval) is not PairApproval:
+            reject('REVIEW_HOST_SERVICES_INVALID')
+        if self.reviewer_role not in REVIEWER_ROLES:
+            reject('REVIEW_HOST_SERVICES_INVALID')
+        if self.reviewer_role == REVIEWER_ROLES[1]:
+            _hex(self.worker_runtime_digest)
+        elif self.worker_runtime_digest is not None:
             reject('REVIEW_HOST_SERVICES_INVALID')
         route = dict(self.route)
         if set(route) != {'id','version','digest','profile','model'}:
@@ -582,6 +595,8 @@ def run_review(ready, final, expect, events, fixture):
     consumed = False
     fake = getattr(fixture.authority,'test_only',False) is True
     try:
+        real_start = time.monotonic()
+        real_deadline = real_start + min(180, fixture.budget.wall_clock_ms / 1000)
         start = fixture.clock.monotonic()
         now = clock_utc(fixture.clock)
         snapshot = inspect_task(ready, expect, events, now)
@@ -625,7 +640,7 @@ def run_review(ready, final, expect, events, fixture):
             approval.criterion_map,approval.ready_task.run_id,expect.epoch,snapshot.last_sequence,
             expect.source_sha,packet.digest,before.digest,
             tuple(sorted({a.agent_id for a in expect.authored_by})),
-            'llmtool-review/claude-cli',fixture.reviewer_launch_nonce,
+            fixture.reviewer_role if type(fixture) is HostServices else REVIEWER_ROLES[0],fixture.reviewer_launch_nonce,
             route['id'],route['version'],route['digest'],'claude-cli',route['profile'],route['model'],
             digest({'data_classes':('SOURCE','DIFF','REVIEW_METADATA'),
                     'path_list_digest':digest([s['path'] for s in packet.to_dict()['sources']],
@@ -648,11 +663,21 @@ def run_review(ready, final, expect, events, fixture):
         calls = 1
         invocation = 'FAKE_ATTEMPTED' if fake else 'HOST_ATTEMPTED'
         call_start = fixture.clock.monotonic()
-        reply = fixture.launcher.launch(packet.data,token)
+        worker = binding.reviewer_role == REVIEWER_ROLES[1]
+        real_deadline = real_start + min(180, budget.wall_clock_ms / 1000)
+        reply = (fixture.launcher.launch(packet.data,token,deadline=real_deadline) if worker else
+                 fixture.launcher.launch(packet.data,token))
         if (type(reply) is not LaunchResult or reply.complete is not True or reply.test_only is not fake or
                 reply.reviewer_launch_nonce != binding.reviewer_launch_nonce):
             reject('REVIEW_LAUNCH_NOT_ATTESTED')
         _hex(reply.provenance_digest)
+        if worker:
+            job_clock = load_json(reply.job_evidence_json.decode(),4096)
+            effective = job_clock.get('deadline')
+            if type(effective) not in (int,float) or not math.isfinite(effective):
+                reject('REVIEW_LAUNCH_NOT_ATTESTED')
+            real_deadline = min(real_deadline,effective)
+            if time.monotonic() >= real_deadline: reject('REVIEW_TIMEOUT')
         call_complete=True
         end = fixture.clock.monotonic()
         if end < call_start or end-call_start > 120 or end-start > min(180,budget.wall_clock_ms/1000):
@@ -673,7 +698,24 @@ def run_review(ready, final, expect, events, fixture):
                for value in (a.session_id,a.root,a.common_dir)):
             reject('REVIEW_PRIVACY_BLOCKED')
         verdict = parse_verdict(reply.content,packet)
-        usage = usage_from_provider(CallPhase.REVIEW,load_json(reply.metadata_json.decode(),4096))
+        metadata = load_json(reply.metadata_json.decode(),4096)
+        if (binding.reviewer_role == REVIEWER_ROLES[1] and
+                type(metadata.get('input_tokens')) is int and type(metadata.get('output_tokens')) is int):
+            metadata = dict(prompt_tokens=metadata['input_tokens'],
+                            completion_tokens=metadata['output_tokens'],
+                            total_tokens=metadata['input_tokens'] + metadata['output_tokens'])
+        usage = usage_from_provider(CallPhase.REVIEW,metadata)
+        job_evidence = load_json(reply.job_evidence_json.decode(),4096)
+        if worker:
+            # Host-only launcher evidence is separate from the model's verdict.
+            # It cannot rename the original TaskContract/EXPECT reviewer.
+            if (job_evidence.get('launch_nonce') != binding.reviewer_launch_nonce or
+                    job_evidence.get('runtime_pin') != fixture.worker_runtime_digest or
+                    job_evidence.get('identity_source') != 'CLI_REPORTED_RUNTIME_ID' or
+                    any(job_evidence.get(k) is not True for k in
+                        ('reaped','pipes_drained','pipes_closed','runtime_closed')) or
+                    time.monotonic() >= real_deadline):
+                reject('REVIEW_LAUNCH_NOT_ATTESTED')
         approve = verdict['security'] == verdict['functional'] == 'APPROVE'
         return envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
             'CHANGES_REQUIRED' in (verdict['security'],verdict['functional']) else 'REVIEW_BLOCKED',
@@ -683,7 +725,10 @@ def run_review(ready, final, expect, events, fixture):
             post_observation_digest=after.digest,verdict=verdict,
             outstanding_final_criteria=[approval.security_criterion,approval.functional_criterion],
             handoff={'triggered':False,'source_sha':expect.source_sha,'findings':verdict['findings']},
-            input_tokens=usage.input_tokens,output_tokens=usage.output_tokens)
+            input_tokens=usage.input_tokens,output_tokens=usage.output_tokens,
+            execution_disposition='STOP_NO_EXECUTION_AUTHORITY',
+            reviewer_role=binding.reviewer_role,job_evidence=job_evidence,
+            review_authority='WORKER_DATA_ONLY' if worker else 'REVIEW_DATA_ONLY')
     except (LLMToolError,ValueError,TypeError,AttributeError,KeyError,UnicodeError,RecursionError,TimeoutError) as exc:
         return envelope(getattr(exc,'review_code','REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID'),
                         snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,
@@ -699,13 +744,22 @@ def run_review(ready, final, expect, events, fixture):
 
     finally:
         if consumed and binding is not None:
+            unwinding = sys.exc_info()[0] is not None
             try:
                 fixture.authority.finalize(token,CallOutcome(binding.digest,
                     'EFFECT_DONE' if call_complete else 'EFFECT_UNKNOWN',invocation))
             except Exception:
-                # Finalization uncertainty cannot be returned as successful review.
-                return envelope('REVIEW_FINALIZE_UNKNOWN',snapshot=snapshot,fake=fake,calls=calls,
-                                invocation_status=invocation)
+                # Preserve original SystemExit/BaseException on unwind.
+                if not unwinding:
+                    return envelope('REVIEW_FINALIZE_UNKNOWN',snapshot=snapshot,fake=fake,calls=calls,
+                                    invocation_status=invocation)
+            if not unwinding and binding.reviewer_role == REVIEWER_ROLES[1] and call_complete:
+                try:
+                    fixture.launcher.validate_completion(token)
+                    if time.monotonic() >= real_deadline: reject('REVIEW_TIMEOUT')
+                except Exception as exc:
+                    return envelope(getattr(exc,'review_code','REVIEW_FINALIZE_UNKNOWN'),
+                                    snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
 
 
 def _run_fake_review(ready,final,expect,events,fixture):

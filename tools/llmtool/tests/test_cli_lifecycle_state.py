@@ -212,3 +212,33 @@ class LifecycleStateTests(unittest.TestCase):
                     self.fail('installation failed')
         self.assertNotIn('DG1_SYNTHETIC_SECRET', str(caught.exception))
         self.assertEqual(self.handlers(), before)
+
+
+class BoundedWorkerLifecycleTests(unittest.TestCase):
+    def test_unowned_and_reaped_never_signal(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        process=Mock(returncode=None,pid=12345)
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
+            self.assertFalse(bounded_terminate(process,time.monotonic()+1))
+            kill.assert_not_called();process.wait.assert_not_called()
+        process.returncode=0
+        self.assertTrue(bounded_terminate(process,time.monotonic()+1))
+
+    def test_unknown_teardown_keeps_pending_ownership_no_unbounded_wait(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time,subprocess
+        process=Mock(returncode=None,pid=12345)
+        process._llmtool_owned_pgid=12345
+        process._llmtool_owner_pid=os.getpid()
+        process.wait.side_effect=subprocess.TimeoutExpired('fake',1)
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
+            self.assertFalse(bounded_terminate(process,time.monotonic()+0.01))
+            kill.assert_called_once_with(12345,signal.SIGKILL)
+        self.assertTrue(process._llmtool_cleanup_pending)
+        self.assertIsNone(process.returncode)
+        self.assertGreaterEqual(process.wait.call_args.kwargs['timeout'],0)
+
+
+if __name__ == "__main__":
+    unittest.main()

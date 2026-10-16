@@ -83,6 +83,103 @@ Batch deterministic worktree/branch/baseline state checks where permitted, but d
 
 **VPN transition:** Before a real company LLM call remind the owner: 「接下來要使用公司 LLM，請先連上公司 VPN。」 Corporate VPN may block external Codex Hooks documentation or GitHub; batch permitted public-doc checks outside VPN-only phases where practical and never equate a blocked request with an absent API. VPN connectivity is not provider-egress authorization; the [Issue #66 privacy gate](https://github.com/davidcatcat/davidcattoolsproject/issues/66) remains in force. [VPN record](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155066742).
 
+### Main AI delegation and per-work-package Reviewer lifecycle
+
+The main AI owns task understanding/decomposition, explicit Worker/provider
+selection, verification and adoption. llmtool owns only authorized invocation,
+policy/data checks, bounded lifecycle/state, evidence and handoff. It must not
+add an AI Planner, intelligent router or model-capability scoring framework.
+Company LLM selection is explicit and retains its route-specific permissions.
+
+Prefer one foreground, no-tools, isolated Reviewer invocation per work package
+to concurrent resume/background control of an existing CLI. A fresh invocation
+must bind its host-owned nonce/PID/process group, actual CLI runtime identity,
+exact task/source/packet, approved executable/model/profile and one-call grant.
+A CLI-reported new runtime Session ID is not original Session081de22e and is
+not inferred from inner model text or authenticated by that report. Never overwrite existing request/EXPECT identities.
+Keep PR163/164 manual protocols unchanged until a separately accepted extension.
+The main AI consumes structured findings; llmtool does not authorize their adoption
+or execute repairs. Formal Source approval, transport success and action grants
+remain distinct; reported review output is DATA and execution stays STOP.
+
+The initial implementation uses fake transport and temporary fixture authority;
+it must preserve unavailable public factories and existing receipt-store kinds.
+A real one-call trial additionally needs independently accepted route/data/cost,
+Host/executable/identity and replay/budget pins. No AI-created grant DATA alone
+supplies live permission. Test actual owned exit, timeout/cancel, bounded cleanup,
+blocked stdout, malformed/truncated output, wrong identity/SHA and UNKNOWN with
+no retry/fallback/resume. Stop only owned processes, preserve uncertain evidence,
+and never start a new scheduler, daemon or supervisor. Do not use --bare by
+assumption: it changes authentication; verify installed flags without upgrading.
+Record all actual model calls, unknown costs and human relays. No fake-only test
+or first-turn launch proves full M2 or native Host/OS isolation.
+
+#### Foreground Worker Source/Fake contract (Issue #120)
+
+The trusted `compose_host_services` seam can select the explicit
+`llmtool-worker/claude-cli` role. `ProviderRoutePolicy.reviewer_role` is mandatory
+for new construction; only old Host-file decoding fills the absent legacy
+`llmtool-review/claude-cli` value. Both role crossings deny before spawn. Worker
+Host registration additionally pins version `2.1.301` and executable SHA256;
+its physical executable/auth-home/version pins form `worker_runtime_digest` in
+that role's route policy. The existing call `route_digest`, issuer-held Host
+file digest, unpredictable pre-admission launch nonce and consumed receipt bind
+these facts without changing the frozen ReviewCallBinding field set or ledger
+schema. A changed executable, revoked route, source, nonce or expired binding
+cannot reuse that grant. Public factories remain unavailable.
+
+The opt-in provider invocation is foreground `--print --output-format json
+--no-session-persistence --safe-mode --tools "" --model <pinned model>`, with
+shell disabled, isolated empty cwd, sanitized environment and pinned auth HOME.
+The syntax basis is the previously inspected installed **2.1.301 help**, plus
+Anthropic's [CLI reference](https://code.claude.com/docs/en/cli-reference) and
+[SDKResultMessage reference](https://platform.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage).
+These references are schema/design input, **not installed live protocol proof**.
+The supported fixture codec accepts exactly one bounded `type=result`,
+`subtype=success`, `is_error=false`, canonical UUID `session_id`, JSON-string
+`result`. Optional keys are exactly `usage`, `duration_ms`, `duration_api_ms`,
+`num_turns`, `total_cost_usd`, `stop_reason`, `uuid`, empty
+`permission_denials`, and bounded/ignored `modelUsage`. Unknown fields, duplicate
+keys, malformed/error/nonterminal/multiple output, private/sensitive decoded
+strings and invalid Unicode fail closed. Outer UTF-8 is at most128KiB; the
+unchanged strict inner verdict is at most64KiB with both decisions separately
+validated. Optional unsupported/incomplete usage is UNKNOWN; accepted counts
+are CLI_REPORTED, never measured cost. No total cost, raw stderr or CLI envelope
+is reflected into public diagnostics.
+
+The UUID is **CLI_REPORTED_RUNTIME_ID under a pinned executable**, not
+cryptographic authentication, model self-attestation, or original Claude081.
+Host nonce, actual owned PID/PGID, runtime-pin digest, actual exit/reap,
+stream drain/close and isolated-directory close are recorded separately. Author,
+original081 and registered EXPECT Session UUID reuse is rejected. Existing
+manual Bundle/Request/Return identities stay intact. Valid Worker dual decisions
+remain DATA, `authorized=false`, `STOP_NO_EXECUTION_AUTHORITY`; they do not replace
+original independent Source Review or authorize repair/tests/Git/merge.
+
+One monotonic call deadline is capped by the remaining <=180s run, <=120s call
+and current grant/route windows. Work uses 80% of the remaining call window,
+with cleanup reserve at most20s **inside** that deadline. Worker collection uses
+nonblocking unbuffered pipes and bounded wait; all its exit paths use the new
+opt-in `bounded_terminate`, never generic unbounded terminate/wait. Only a
+lifecycle-owned, unreaped child group may be signalled; confirmed reaping prevents
+stale PGID signalling. Default generic CLI lifecycle/text behavior is unchanged.
+Unknown exit/drain/close leaves pending ownership/evidence and EFFECT_UNKNOWN,
+counts the attempt and forbids resend. Unexpected runtime-directory contents
+are preserved, not recursively cleaned; success requires an empty removed
+runtime directory. OS/filesystem stalls are not an OS-enforced hard-real-time
+isolation guarantee. At most one wrapper launch is observable; underlying
+model requests/internal retries/prefetch and missing billing remain UNKNOWN.
+
+Source/Fake acceptance does **not** authorize REVIEWER_JOB_TRIAL, real Host
+registration/ledger creation, authentication setup, credentials copying, live
+Claude/model/provider calls or original Session resume. A future explicit trial
+grant must pin a dedicated reviewer_auth_home distinct from Owner primary HOME,
+packet/data/context/route/model/executable digest/version, UTC window, cost
+uncertainty, one-use receipt, cleanup/cancel/no-resend evidence and useful main-AI
+adoption. Native availability, original Reviewer auto-wake, relay reduction and
+full M2 are NOT_VERIFIED. #153 polling and #161 UX remain HOLD; Company Live,
+Native, T1, F2/S2, A11b and Owner Full Access/never are unchanged.
+
 ### Supervised self-hosting dogfood (M1)
 
 M1a/M1b/M2 map to [A11c.1 delivery stages](ROADMAP.md#supervised-self-hosting-delivery-within-a11c1-m1).
