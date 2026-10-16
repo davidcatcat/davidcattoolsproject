@@ -1,0 +1,4 @@
+interface:
+  display_name: "Artifact Verification"
+  short_description: "Verify schemas, paths, constants, and evidence labels with real parsers"
+  default_prompt: "Use $artifact-verification to check report or handoff JSON schemas, role constants, path constraints, and external IDs against the real repository parsers, and separate TEMPLATE_ONLY examples from SYNTHETIC_PARSER_VERIFIED and LIVE_NOT_VERIFIED states."
