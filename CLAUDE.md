@@ -78,6 +78,25 @@ any permitted model data transfer, but full company cost benchmarks
 do not block offline A11b design. Report evidence and risks, not
 new permanent ai-loop automation.
 
+## 2026-10-17 PM responsibility and Cloud review handoff
+
+Per [architecture Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172),
+the existing canonical **Codex Integrator** acts as PM + Integration
+Manager for complex tasks and chooses agents/reviews; **llmtool**
+executes permitted calls and tracks state/evidence, not semantic routing.
+The same Integrator Session automatic wake/resume is NOT_LIVE_VERIFIED.
+
+**D-007 Codex Cloud** independently handles mobile-initiated tasks
+in its configured remote checkout, with tests and self-pre-review,
+then an own feature branch/Draft PR where GitHub permits. The owner
+deliberately hands the completed result to the **existing Integrator
+reviewer**. Cloud self-review or Integrator bookkeeping cannot replace
+formal distinct non-author Security/Functional/QA or required Mac-native
+gates. Cloud publication does not prove local llmtool F2 mutation,
+M2 parity or permission to auto-merge main. Respect
+[ai-team-delivery](skills/ai-team-delivery/SKILL.md) and
+[safe-git](skills/safe-git/SKILL.md).
+
 ## Skill design
 
 - Keep each skill small, composable, and focused on one recurring workflow.
