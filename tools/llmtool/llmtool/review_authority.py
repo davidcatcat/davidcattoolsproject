@@ -356,6 +356,19 @@ class ProductionReviewIssuer(HostIssuer):
         # Allocated by host code before admission; no caller launch identity.
         self.reviewer_launch_nonce=secrets.token_hex(16)
         self.redeem_run_id=secrets.token_hex(16)
+        self._foreground_lock=threading.Lock()
+        self._foreground_attempted=False
+        self._foreground_services=None
+
+    @property
+    def foreground_services(self):
+        """Trusted host inspection only; retained before invocation/unwind."""
+        return self._foreground_services
+
+    @property
+    def pending_job(self):
+        services=self._foreground_services
+        return services.launcher.pending_job if services is not None else None
 
     @property
     def issuer_class(self): return IssuerClass.PRODUCTION_REVIEW
@@ -481,6 +494,7 @@ class ProductionReviewerLauncher:
         self._job_deadlines={}
         self._attempted=set()
         self._attempt_lock=threading.Lock()
+        self._foreground_deadline=None
 
     def launch(self,packet,token,*,deadline=None):
         if self.pending_job is not None: reject('REVIEW_WORKER_CLEANUP_UNKNOWN')
@@ -522,10 +536,13 @@ class ProductionReviewerLauncher:
         from .providers.claude_cli import ClaudeCLIProvider
         started=time.monotonic()
         if type(deadline) not in (int,float): reject('REVIEW_BUDGET_BLOCKED')
+        if self._foreground_deadline is not None:
+            deadline=min(deadline,self._foreground_deadline)
         deadline=min(deadline, started+p.call_timeout_seconds,
             started+max(0,(utc_time(c.deadline).timestamp()-self.authority.issuer.clock.utc())),
             started+max(0,(utc_time(p.not_after).timestamp()-self.authority.issuer.clock.utc())))
         self._job_deadlines[c.reviewer_launch_nonce]=deadline
+        if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
         if (c.reviewer_role != p.reviewer_role or c.reviewer_role != reg.reviewer_role or
                 p.worker_runtime_digest != worker_runtime_pin(reg) or
                 not self.authority.issuer.matches(c,self.authority._observed(c))):
@@ -538,8 +555,10 @@ class ProductionReviewerLauncher:
             forbidden=tuple(a.session_id for a in (*self.authority.issuer.context.expect.agents,
                 *self.authority.issuer.context.expect.authored_by)) + (
                 '081de22e-d514-4288-9d1f-48f488979271',)
+            prompt=provider._prompt(ReviewPacket(packet).messages())
+            if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
             result=provider._invoke_review_job(reg.reviewer_executable,
-                provider._prompt(ReviewPacket(packet).messages()),deadline=deadline,
+                prompt,deadline=deadline,
                 auth_home=reg.reviewer_auth_home,launch_nonce=c.reviewer_launch_nonce,
                 runtime_pin=p.worker_runtime_digest,forbidden_sessions=forbidden)
             evidence=provider.job_evidence
@@ -588,3 +607,42 @@ def compose_host_services(issuer,ledger,*,budget):
         profile=policy.profile,model=policy.model),issuer.reviewer_launch_nonce,issuer.capability_id,
         issuer.redeem_run_id,budget,False,policy.unknown_cost_accepted,
         policy.reviewer_role,worker_runtime_pin(reg))
+
+
+def run_foreground_review(issuer,ledger,*,budget):
+    """One trusted-host Worker attempt, using only the issuer's pinned context.
+
+    Borrows the ledger. The issuer retains services/pending ownership even on
+    BaseException; callers must preserve UNKNOWN and never resend this attempt.
+    This does not activate the public factory or authorize a real model call.
+    """
+    started=time.monotonic()
+    from .run_budget import RunBudget
+    from .task_review import run_review,envelope
+    if type(issuer) is not ProductionReviewIssuer:
+        reject('REVIEW_HOST_SERVICES_INVALID')
+    with issuer._foreground_lock:
+        if issuer._foreground_attempted: reject('REVIEW_GRANT_NOT_AUTHORIZED')
+        issuer._foreground_attempted=True
+    if type(budget) is not RunBudget or not 0 < budget.wall_clock_ms <= 180000:
+        reject('REVIEW_BUDGET_BLOCKED')
+    deadline=started+budget.wall_clock_ms/1000
+    services=compose_host_services(issuer,ledger,budget=budget)
+    issuer._foreground_services=services
+    if services.reviewer_role != REVIEWER_ROLES[1]:
+        reject('REVIEW_ROUTE_NOT_AUTHORIZED')
+    services.launcher._foreground_deadline=deadline
+    remaining=int((deadline-time.monotonic())*1000)
+    if remaining <= 0: reject('REVIEW_TIMEOUT')
+    # Deduct prologue time without letting run_review's own clock reanchor
+    # extend the effect: the retained launcher's absolute ceiling is separate.
+    services=replace(services,budget=replace(budget,wall_clock_ms=remaining))
+    issuer._foreground_services=services
+    c=issuer.context
+    result=run_review(c.ready,c.final,c.expect,c.events,services)
+    if time.monotonic() >= deadline:
+        return envelope('REVIEW_TIMEOUT',calls=result['provider_calls'],
+            invocation_status=result['invocation_status'],
+            review_authority='WORKER_DATA_ONLY',
+            execution_disposition='STOP_NO_EXECUTION_AUTHORITY')
+    return result

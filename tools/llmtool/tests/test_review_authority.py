@@ -277,6 +277,8 @@ class WorkerHarness(Harness):
         self.argv_file=self.hostdir/'argv.json'
         script=FAKE_SCRIPT.replace('print(json.dumps(out))', """
 mode=MODE
+if mode == 'changes': out['functional']='CHANGES_REQUIRED'
+if mode == 'blocked': out['functional']='BLOCKED'
 if mode == 'invalid-inner': out['source_sha']='9'*40
 if mode == 'private': out['private']='Bearer SECRET_FAKE_VALUE_12345678'
 if mode == 'timeout':
@@ -515,6 +517,242 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         with patch('time.monotonic',side_effect=(0,2)):
             with self.assertRaises(Exception) as caught:a.verify_worker_executable(reg,1)
         self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
+
+
+class ForegroundEntryTests(unittest.TestCase):
+    """Actual composition + temporary synthetic Host/ledger/executable, no Live.
+
+    Production components intentionally have test_only=False. These controlled
+    fixture invocations are FAKE_TEST_VERIFIED, never runtime/Live authority.
+    """
+    def harness(self,**changes):
+        h=WorkerHarness(**changes);self.addCleanup(h.close);return h
+
+    def invoke(self,h,budget=None):
+        return a.run_foreground_review(h.issuer,h.ledger,budget=budget or h.fake.budget)
+
+    def test_actual_composition_and_issuer_context_complete_fake_journey(self):
+        h=self.harness()
+        with patch.object(h,'services',side_effect=AssertionError('fixture bypass')), \
+                patch.object(a,'compose_host_services',wraps=a.compose_host_services) as compose:
+            result=self.invoke(h)
+        compose.assert_called_once()
+        services=h.issuer.foreground_services
+        self.assertIs(type(services.authority),a.ProductionReviewAuthority)
+        self.assertIs(type(services.launcher),a.ProductionReviewerLauncher)
+        self.assertIs(services.authority.ledger,h.ledger)
+        self.assertIs(services.authority.issuer,h.issuer)
+        self.assertIs(services.observer,h.observer)
+        self.assertEqual(result['code'],'REVIEW_APPROVED',result)
+        self.assertEqual(result['review_authority'],'WORKER_DATA_ONLY')
+        self.assertFalse(result['test_only']) # production composition, SYNTHETIC fixtures
+        self.assertFalse(result['authorized'])
+        self.assertEqual(result['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+        self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
+        self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
+        self.assertEqual(result['provider_calls'],1)
+        self.assertEqual(result['job_evidence']['wrapper_launches'],1)
+        self.assertEqual(result['job_evidence']['launch_nonce'],h.issuer.reviewer_launch_nonce)
+        self.assertTrue(all(result['job_evidence'][k] for k in
+                            ('reaped','pipes_drained','pipes_closed','runtime_closed')))
+        self.assertIsNone(h.issuer.pending_job)
+        receipt=next(iter(services.authority.receipts.values()))
+        self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_DONE')
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],1)
+        with self.assertRaises(AttributeError):h.issuer.foreground_services=None
+
+    def test_repeat_and_failed_attempt_cannot_replace_services_or_launch(self):
+        h=self.harness();self.invoke(h);retained=h.issuer.foreground_services
+        with patch('subprocess.Popen',side_effect=AssertionError('resend')),self.assertRaises(Exception):
+            self.invoke(h)
+        self.assertIs(h.issuer.foreground_services,retained)
+        h=self.harness()
+        with patch.object(a,'compose_host_services',side_effect=ValueError('fixture failure')):
+            with self.assertRaises(ValueError):self.invoke(h)
+        with patch.object(a,'compose_host_services',side_effect=AssertionError('retry')):
+            with self.assertRaises(Exception):self.invoke(h)
+        self.assertIsNone(h.issuer.foreground_services)
+
+    def test_legacy_route_and_invalid_budget_denied_before_effect(self):
+        h=Harness();self.addCleanup(h.close)
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+            with self.assertRaises(Exception):self.invoke(h)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+        h=self.harness()
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+            with self.assertRaises(Exception):a.run_foreground_review(h.issuer,h.ledger,budget=object())
+        with self.assertRaises(Exception):self.invoke(h) # invalid attempt is not reset
+
+    def test_original_deadline_survives_delayed_run_review_handoff(self):
+        import time
+        h=self.harness();original=r.run_review;real=time.monotonic;late=[False]
+        budget=replace(h.fake.budget,wall_clock_ms=1000)
+        def delayed(*args):
+            late[0]=True
+            return original(*args)
+        with patch.object(r,'run_review',side_effect=delayed), \
+                patch('time.monotonic',side_effect=lambda:real()+(2 if late[0] else 0)), \
+                patch('subprocess.Popen',side_effect=AssertionError('late spawn')) as spawn:
+            result=self.invoke(h,budget)
+            spawn.assert_not_called()
+        self.assertEqual(result['code'],'REVIEW_TIMEOUT',result)
+        self.assertFalse(h.argv_file.exists())
+        self.assertEqual(result['provider_calls'],1) # consume already committed, never reset
+        services=h.issuer.foreground_services
+        receipt=next(iter(services.authority.receipts.values()))
+        self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+
+    def test_new_issuer_replay_stays_in_existing_ledger(self):
+        h=self.harness();self.invoke(h)
+        other=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
+        with patch('subprocess.Popen',side_effect=AssertionError('replay')) as spawn:
+            result=a.run_foreground_review(other,h.ledger,budget=h.fake.budget)
+            spawn.assert_not_called()
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['provider_calls'],0)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],1)
+
+    def test_finalize_failure_and_unknown_owned_child_stay_inspectable(self):
+        import subprocess
+        h=self.harness()
+        with patch.object(a.ProductionReviewAuthority,'finalize',side_effect=RuntimeError('private')):
+            result=self.invoke(h)
+        self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN')
+        self.assertEqual(result['provider_calls'],1)
+        self.assertIsNotNone(h.issuer.foreground_services)
+        h=self.harness()
+        with patch.object(subprocess.Popen,'wait',side_effect=subprocess.TimeoutExpired('fake',1)):
+            result=self.invoke(h)
+        pending=h.issuer.pending_job
+        self.assertIsNotNone(pending)
+        try:
+            self.assertFalse(pending.cleanup_confirmed)
+            self.assertEqual(result['status'],'BLOCKED')
+            with patch('subprocess.Popen',side_effect=AssertionError('resend')):
+                with self.assertRaises(Exception):self.invoke(h)
+            self.assertIs(h.issuer.pending_job,pending)
+        finally:
+            pending.process.wait(timeout=2) # bounded test-owned cleanup only
+
+    def test_concurrent_claim_rejects_without_waiting_or_replacing_holder(self):
+        import threading
+        h=self.harness();entered=threading.Event();release=threading.Event();errors=[]
+        def delayed(*args,**kwargs):
+            entered.set()
+            if not release.wait(timeout=2):raise AssertionError('fixture wait')
+            raise ValueError('synthetic compose failure')
+        def first():
+            try:self.invoke(h)
+            except BaseException as exc:errors.append(exc)
+        with patch.object(a,'compose_host_services',side_effect=delayed) as compose:
+            worker=threading.Thread(target=first);worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=1))
+                with self.assertRaises(Exception):self.invoke(h)
+            finally:release.set();worker.join(timeout=2)
+            self.assertFalse(worker.is_alive());compose.assert_called_once()
+        self.assertEqual(len(errors),1)
+        self.assertIsNone(h.issuer.foreground_services)
+
+    def test_dual_verdicts_remain_data_and_ledger_is_borrowed(self):
+        for mode,code,decision in (('success','REVIEW_APPROVED','APPROVE'),
+                ('changes','REVIEW_CHANGES_REQUIRED','CHANGES_REQUIRED'),
+                ('blocked','REVIEW_BLOCKED','BLOCKED')):
+            with self.subTest(mode=mode):
+                h=self.harness(mode=mode);result=self.invoke(h)
+                self.assertEqual(result['code'],code,result)
+                self.assertEqual((result['security'],result['functional']),('APPROVE',decision))
+                self.assertFalse(result['authorized'])
+                self.assertEqual(result['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+                self.assertFalse(result['handoff']['triggered'])
+                self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],1)
+
+    def test_invalid_source_runtime_window_and_budget_cannot_spawn(self):
+        for case in ('source','runtime','window','host','calls','repairs','overlong'):
+            with self.subTest(case=case):
+                h=self.harness();budget=h.fake.budget
+                if case=='source':h.observer.baseline_check=None
+                if case=='runtime':h.exe.write_text(h.exe.read_text()+'\n# drift')
+                if case=='window':h.fake.utc='2026-10-14T00:10:00Z'
+                if case=='host':h.hostpath.write_bytes(b'{}')
+                if case=='calls':budget=replace(budget,max_provider_calls=2)
+                if case=='repairs':budget=replace(budget,max_repair_attempts=1)
+                if case=='overlong':budget=replace(budget,wall_clock_ms=180001)
+                with patch('subprocess.Popen',side_effect=AssertionError('spawn')) as spawn:
+                    try:result=self.invoke(h,budget)
+                    except Exception as exc:self.assertIsNotNone(getattr(exc,'review_code',None))
+                    else:self.assertEqual(result['status'],'BLOCKED',result)
+                    spawn.assert_not_called()
+                self.assertFalse(h.argv_file.exists())
+
+    def test_exhausted_prologue_and_final_acceptance_use_original_deadline(self):
+        import time
+        for stage in ('compose','return'):
+            with self.subTest(stage=stage):
+                h=self.harness();late=[False];real=time.monotonic
+                compose=a.compose_host_services;run=r.run_review
+                def late_compose(*args,**kwargs):
+                    services=compose(*args,**kwargs)
+                    if stage=='compose':late[0]=True
+                    return services
+                def late_return(*args):
+                    result=run(*args);late[0]=True;return result
+                with patch.object(a,'compose_host_services',side_effect=late_compose), \
+                        patch.object(r,'run_review',side_effect=late_return), \
+                        patch('time.monotonic',side_effect=lambda:real()+(181 if late[0] else 0)):
+                    if stage=='compose':
+                        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+                            with self.assertRaises(Exception) as caught:self.invoke(h)
+                        self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
+                    else:
+                        result=self.invoke(h)
+                        self.assertEqual(result['code'],'REVIEW_TIMEOUT',result)
+                        self.assertEqual(result['provider_calls'],1)
+                        self.assertNotIn('verdict',result)
+                self.assertIsNotNone(h.issuer.foreground_services)
+
+    def test_real_fake_timeout_pipe_and_invalid_reply_fail_closed(self):
+        import time
+        for mode in ('timeout','descendant','stderr','invalid-inner','private','spoof','exit'):
+            with self.subTest(mode=mode):
+                h=self.harness(mode=mode,timeout=1);started=time.monotonic()
+                result=self.invoke(h)
+                self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertEqual(result['provider_calls'],1)
+                self.assertFalse(result['authorized'])
+                self.assertNotIn('SECRET_FAKE',json.dumps(result))
+                self.assertLess(time.monotonic()-started,4)
+                self.assertIsNone(h.issuer.pending_job)
+
+    def test_cancellation_and_baseexception_retain_actual_services(self):
+        import signal
+        from llmtool.providers.cli_lifecycle import CLIProcessLifecycle
+        original=CLIProcessLifecycle.check
+        for sig in (signal.SIGINT,signal.SIGTERM):
+            with self.subTest(sig=sig):
+                h=self.harness();before=signal.getsignal(sig)
+                def cancel(lifecycle):
+                    if lifecycle.deadline is not None and lifecycle.process is not None:
+                        lifecycle._record(sig,None)
+                    original(lifecycle)
+                with patch.object(CLIProcessLifecycle,'check',cancel):
+                    if sig==signal.SIGINT:self.assertEqual(self.invoke(h)['code'],'REVIEW_CANCELLED')
+                    else:
+                        with self.assertRaises(SystemExit):self.invoke(h)
+                self.assertEqual(signal.getsignal(sig),before)
+                self.assertIsNotNone(h.issuer.foreground_services)
+                self.assertIsNone(h.issuer.pending_job)
+                receipt=next(iter(h.issuer.foreground_services.authority.receipts.values()))
+                self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+        # A BaseException must not replace/lose the retained launcher handle.
+        h=self.harness();marker=object()
+        class HostAbort(BaseException):pass
+        def abort(*args):
+            h.issuer.foreground_services.launcher.pending_job=marker
+            raise HostAbort()
+        with patch.object(r,'run_review',side_effect=abort):
+            with self.assertRaises(HostAbort):self.invoke(h)
+        self.assertIs(h.issuer.pending_job,marker)
 
 
 if __name__ == "__main__":
