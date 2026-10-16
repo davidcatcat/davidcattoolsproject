@@ -3178,3 +3178,65 @@ on the actual PR HEAD, and Developer receiving them through llmtool. If no activ
 Reviewer is available or the bounded wait times out, STOP with real-use incomplete;
 do not call a new model or extend indefinitely. This is not auto-wake, a daemon,
 Git polling, #153 automation, another task ledger/approval store or complete M2.
+
+
+### Safe consumption of reported review decisions
+
+`review-wait` exposes the exact validated `security` and `functional` decision
+enums in both public JSON and its corresponding private report. It derives them
+only after the existing full request/receipt/verdict, source/task/run/epoch,
+identity, digest, expiry and file checks. Public output still excludes findings,
+private paths, Session IDs and model prose. The private `review_report` is retained.
+
+| Security / Functional | `review_disposition` |
+| --- | --- |
+| Either BLOCKED | BLOCKED (including BLOCKED + CHANGES_REQUIRED) |
+| Otherwise either CHANGES_REQUIRED | CHANGES_REQUIRED |
+| APPROVE / APPROVE | DUAL_APPROVAL_REPORTED |
+| No complete valid bound report | null decisions/disposition, never approval |
+
+All projections include `execution_disposition=STOP_NO_EXECUTION_AUTHORITY`.
+Existing transport compatibility is unchanged: a correctly bound BLOCKED or
+CHANGES_REQUIRED report still returns `BOUND_REVIEW_REPORT`/exit 0. Timeout and
+errors remain nonzero. Error responses cannot retain earlier valid decisions.
+`authorized=false`, CALLER_REPORTED identity and NOT_VERIFIED runtime/formal
+acceptance remain unchanged. Receipt, reported approval, independent formal
+Source approval and execution authority are distinct. No caller flag, JSON
+claim or reported decision authorizes repair, tests, Git, merge or a provider.
+
+A caller must parse the JSON, check both decisions and independent expected
+bindings, and stop without separately verified action authority. For example,
+this bounded-data consumer never executes anything:
+
+```python
+def consume_review(report, expected):
+    # expected comes from independent task/request pins and observed digests,
+    # never from the received report itself. Parse strict bounded JSON first.
+    fields = ("task", "epoch", "source_sha", "base_sha", "request_id",
+              "request_sha256", "bundle_sha256", "receipt_sha256", "verdict_sha256")
+    if (report.get("status") != "BOUND_REVIEW_REPORT" or
+            any(report.get(k) != expected[k] for k in fields)):
+        return "STOP_INVALID_OR_UNBOUND_REPORT"
+    pair = (report.get("security"), report.get("functional"))
+    if any(v not in ("APPROVE", "CHANGES_REQUIRED", "BLOCKED") for v in pair):
+        return "STOP_INVALID_DECISION"
+    disposition = ("BLOCKED" if "BLOCKED" in pair else
+                   "CHANGES_REQUIRED" if "CHANGES_REQUIRED" in pair else
+                   "DUAL_APPROVAL_REPORTED")
+    if (report.get("review_disposition") != disposition or
+            report.get("authorized") is not False or
+            report.get("execution_disposition") != "STOP_NO_EXECUTION_AUTHORITY"):
+        return "STOP_INVALID_REPORT"
+    # No independently verified execution grant exists in this workflow.
+    # Do not substitute exit 0, dual APPROVE, a caller flag or model text.
+    return "STOP_NO_EXECUTION_AUTHORITY"
+```
+
+This adds usable decision consumption to the existing foreground artifact
+protocol. It does not install automatic original-Session delivery or wake-up,
+change Reviewer identity, enable a repair/action runner, or complete the M2 loop.
+Original Claude must still actually receive/read the request and write its own
+receipt/verdict. Arrange an active slot before generating short-lived data;
+manual relay counts remain visible. Automatic dispatch and execution need their
+own accepted interface/authority gates; no daemon, polling or alternate provider
+is implied.

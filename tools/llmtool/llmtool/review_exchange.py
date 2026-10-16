@@ -361,6 +361,17 @@ def validate_report(receipt, verdict, request, request_sha, receipt_sha):
     if sorted(covered) != sorted(request['criterion_ids']): reject('EXCHANGE_EVIDENCE_INVALID')
 
 
+def _decision_projection(verdict):
+    """Project only a report already accepted by validate_report; never authority."""
+    security = verdict['security'] if verdict is not None else None
+    functional = verdict['functional'] if verdict is not None else None
+    pair = (security,functional)
+    disposition = (None if verdict is None else 'BLOCKED' if 'BLOCKED' in pair else
+        'CHANGES_REQUIRED' if 'CHANGES_REQUIRED' in pair else 'DUAL_APPROVAL_REPORTED')
+    return {'security':security,'functional':functional,'review_disposition':disposition,
+            'execution_disposition':'STOP_NO_EXECUTION_AUTHORITY'}
+
+
 def wait_report(args, deadline):
     root = Path.cwd(); reader = PrivateData(root,deadline)
     request,request_ref,ctx = _load_request(args,reader)
@@ -395,6 +406,7 @@ def wait_report(args, deadline):
         'review_report':result[0] if result else None,'wait_elapsed_seconds':time.monotonic()-started,
         'identity_provenance':'CALLER_REPORTED','runtime_evidence_status':'NOT_VERIFIED',
         'authorized':False,'formal_acceptance':'NOT_VERIFIED'}
+    report.update(_decision_projection(result[0] if result else None))
     raw = canonical(report)+b'\n'
     if len(raw) > 128*1024: reject('EXCHANGE_TOO_LARGE')
     def validate():
@@ -424,6 +436,10 @@ def run_exchange(args):
             getattr(exc,'lifecycle_code','EXCHANGE_INPUT_INVALID'))}
     except Exception:
         output = {'status':'BLOCKED','code':'EXCHANGE_INTERNAL_ERROR'}
+    if args.action == 'review-wait':
+        for field in ('security','functional','review_disposition'):
+            output.setdefault(field,None)
+        output['execution_disposition'] = 'STOP_NO_EXECUTION_AUTHORITY'
     output.update(schema_version=1,authorized=False,runtime_evidence_status='NOT_VERIFIED')
     try:
         text = json.dumps(output,sort_keys=True,ensure_ascii=True,separators=(',',':'),allow_nan=False)+'\n'
