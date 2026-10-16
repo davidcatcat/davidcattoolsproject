@@ -317,6 +317,111 @@ class ExchangeTests(unittest.TestCase):
         self.wait_args.request_sha256 = self.ref(self.request_path)['sha256']
         with self.assertRaises(LLMToolError): x.wait_report(self.wait_args,time.monotonic()+1)
 
+    def consumer_cli(self, label):
+        # Real local CLI; artifacts below are synthetic, not original Reviewer DATA.
+        self.wait_args.output = str(self.folder/(label+'-report.json'))
+        args = self.wait_args
+        child = subprocess.run([sys.executable,'-B','-I','-m','llmtool','task','review-wait',
+            '--request',args.request,'--request-sha256',args.request_sha256,
+            '--receipt',args.receipt,'--verdict',args.verdict,'--timeout','0',
+            '--output',args.output,'--json'],capture_output=True,timeout=5,
+            env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'))
+        self.assertEqual(child.stderr,b'')
+        public = json.loads(child.stdout)
+        self.assertFalse(public['authorized'])
+        self.assertNotIn(str(self.folder),child.stdout.decode())
+        self.assertNotIn(x.REVIEWER,child.stdout.decode())
+        return child,public
+
+    def test_public_consumer_all_nine_pairs_and_private_projection(self):
+        self.prepare()
+        decisions = ('APPROVE','CHANGES_REQUIRED','BLOCKED')
+        for number,(security,functional) in enumerate((s,f) for s in decisions for f in decisions):
+            with self.subTest(security=security,functional=functional):
+                receipt,verdict = self.envelopes()
+                verdict.update(security=security,functional=functional)
+                self.publish(self.wait_args.receipt,receipt)
+                self.publish(self.wait_args.verdict,verdict)
+                child,public = self.consumer_cli('pair-'+str(number))
+                self.assertEqual(child.returncode,0,public)
+                expected = ('BLOCKED' if 'BLOCKED' in (security,functional) else
+                    'CHANGES_REQUIRED' if 'CHANGES_REQUIRED' in (security,functional) else
+                    'DUAL_APPROVAL_REPORTED')
+                for field,value in (('security',security),('functional',functional),
+                        ('review_disposition',expected),
+                        ('execution_disposition','STOP_NO_EXECUTION_AUTHORITY')):
+                    self.assertEqual(public[field],value)
+                    self.assertEqual(json.loads(Path(self.wait_args.output).read_text())[field],value)
+                # Actual consumer checks correlation and enums, never transport exit alone.
+                correlated = (public['status']=='BOUND_REVIEW_REPORT' and
+                    public['source_sha']==self.request['source_sha'] and
+                    public['task']==self.request['task'] and
+                    public['epoch']==self.request['epoch'] and
+                    public['request_sha256']==self.request_sha and
+                    public['bundle_sha256']==self.request['bundle_sha256'])
+                self.assertTrue(correlated)
+                self.assertEqual(public['formal_acceptance'],'NOT_VERIFIED')
+                self.assertEqual(public['runtime_evidence_status'],'NOT_VERIFIED')
+                independent_action_authority = False
+                action = ('STOP_NO_EXECUTION_AUTHORITY' if not independent_action_authority else
+                          'REQUIRES_SEPARATE_ACTION_CONTRACT')
+                self.assertEqual(action,public['execution_disposition'])
+
+    def test_public_consumer_invalid_decisions_and_timeout_never_reuse_approval(self):
+        self.prepare()
+        receipt,good = self.envelopes()
+        self.publish(self.wait_args.receipt,receipt)
+        self.publish(self.wait_args.verdict,good)
+        child,public = self.consumer_cli('initial-valid')
+        self.assertEqual(child.returncode,0)
+        self.assertEqual(public['review_disposition'],'DUAL_APPROVAL_REPORTED')
+        mutations = [('missing',None),('unknown','PASS'),('bool',True),('integer',1),
+                     ('list',[]),('null',None)]
+        for label,value in mutations:
+            verdict = deepcopy(good)
+            if label=='missing': del verdict['security']
+            else: verdict['security']=value
+            self.publish(self.wait_args.verdict,verdict)
+            child,public = self.consumer_cli(label)
+            self.assertNotEqual(child.returncode,0)
+            self.assertEqual(public['status'],'BLOCKED')
+            self.assertIsNone(public.get('security'))
+            self.assertIsNone(public.get('functional'))
+            self.assertIsNone(public.get('review_disposition'))
+            self.assertEqual(public['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+        # No completion marker means partial DATA, not a previously cached approval.
+        Path(self.wait_args.verdict+'.ready').unlink()
+        child,public = self.consumer_cli('timeout')
+        self.assertNotEqual(child.returncode,0)
+        self.assertEqual(public['status'],'WAIT_TIMEOUT')
+        self.assertIsNone(public['review_disposition'])
+        self.assertIsNone(public['security']); self.assertIsNone(public['functional'])
+        self.assertEqual(public['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+
+    def test_public_consumer_wrong_bindings_and_duplicate_json_fail_closed(self):
+        self.prepare(); receipt,good = self.envelopes()
+        self.publish(self.wait_args.receipt,receipt)
+        changes = {'source_sha':'9'*40,'request_sha256':'9'*64,'bundle_sha256':'9'*64,
+                   'epoch':2,'reviewer':{**good['reviewer'],'session_id':x.AUTHOR},
+                   'task':{**good['task'],'run_id':'other-run'},'functional':False}
+        for field,value in changes.items():
+            verdict = {**good,field:value}
+            self.publish(self.wait_args.verdict,verdict)
+            child,public = self.consumer_cli('wrong-'+field)
+            self.assertNotEqual(child.returncode,0)
+            self.assertEqual(public['status'],'BLOCKED')
+            self.assertIsNone(public['security']); self.assertIsNone(public['functional'])
+            self.assertIsNone(public['review_disposition'])
+            self.assertEqual(public['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+        raw = x.canonical(good)[:-1]+b',"security":"APPROVE"}'
+        self.write(self.wait_args.verdict,raw)
+        self.write(self.wait_args.verdict+'.ready',x.canonical({'schema_version':1,
+            'artifact_sha256':hashlib.sha256(raw).hexdigest()}))
+        child,public = self.consumer_cli('duplicate-json')
+        self.assertNotEqual(child.returncode,0)
+        self.assertIsNone(public['review_disposition'])
+        self.assertEqual(public['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+
     def test_safe_cli_errors_and_interrupt_without_provider_config(self):
         import io
         from llmtool.cli import main
