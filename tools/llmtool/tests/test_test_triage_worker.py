@@ -369,7 +369,7 @@ class WorkerTests(_WorkerFixture, unittest.TestCase):
 
     # --- authority / exit ---------------------------------------------------------
     def test_company_route_cannot_become_formal_reviewer(self):
-        fields = dict(policy_id='route', version=1, provider='openai-compatible', profile='company-test',
+        fields = dict(reviewer_role='llmtool-review/claude-cli', policy_id='route', version=1, provider='openai-compatible', profile='company-test',
                       model='gw', data_classes=('DIFF', 'REVIEW_METADATA', 'SOURCE'), max_packet_bytes=1024,
                       call_timeout_seconds=60, run_timeout_seconds=120, max_attempts=1, retry_count=0,
                       fallback_count=0, per_call_cap=1, per_day_cap=10, unknown_cost_accepted=True,

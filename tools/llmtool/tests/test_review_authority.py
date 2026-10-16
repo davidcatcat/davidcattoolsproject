@@ -65,7 +65,7 @@ class Harness:
         self.clock=self.fake.clock
         self.policy=a.ProviderRoutePolicy('host-route',1,'claude-cli','fake-profile','fake-model',
             ('DIFF','REVIEW_METADATA','SOURCE'),256*1024,2,180,1,0,0,1,cap,True,
-            '2026-10-13T00:00:00Z','2026-10-14T00:10:00Z',REF)
+            '2026-10-13T00:00:00Z','2026-10-14T00:10:00Z',REF,'llmtool-review/claude-cli')
         self.fake.data['route']=self.policy.policy_id
         self.packet_input=self.fake.packet_input
         self.ledger_path=self.hostdir/'provider.sqlite3'
@@ -257,4 +257,265 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
 
 
-if __name__ == '__main__':unittest.main()
+
+
+class WorkerRoleTests(unittest.TestCase):
+    def test_required_policy_role_and_cross_mode_deny(self):
+        h=Harness();self.addCleanup(h.close)
+        b,_=h.binding()
+        worker=replace(b,reviewer_role='llmtool-worker/claude-cli')
+        self.assertNotEqual(worker.digest,b.digest)
+        self.assertFalse(h.authority.admit(worker).admitted)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+
+class WorkerHarness(Harness):
+    def __init__(self, *, mode='success', timeout=2):
+        super().__init__()
+        # Same accepted synthetic fixture authority; new role/runtime policy is
+        # independently host-pinned, never a model/CLI flag or old Session grant.
+        self.argv_file=self.hostdir/'argv.json'
+        script=FAKE_SCRIPT.replace('print(json.dumps(out))', """
+mode=MODE
+if mode == 'invalid-inner': out['source_sha']='9'*40
+if mode == 'private': out['private']='Bearer SECRET_FAKE_VALUE_12345678'
+if mode == 'timeout':
+ import time
+ time.sleep(10)
+if mode == 'stderr': sys.stderr.write('x'*1100000)
+if mode == 'blocked-input':
+ import time
+ time.sleep(10)
+if mode == 'exit': sys.exit(7)
+if mode == 'descendant':
+ import subprocess
+ subprocess.Popen([sys.executable,'-IB','-c','import time;time.sleep(10)'])
+print(json.dumps(dict(type='result',subtype='success',is_error=False,
+ session_id=SESSION,result=json.dumps(out),usage=dict(input_tokens=12,output_tokens=8))))
+""").replace('INTERPRETER',sys.executable).replace('mode=MODE','mode='+repr(mode)).replace('session_id=SESSION',
+ 'session_id='+repr('081de22e-d514-4288-9d1f-48f488979271' if mode=='spoof' else 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'))
+        script=script.replace('v=json.loads', 'open('+repr(str(self.argv_file))+',"w").write(json.dumps(sys.argv[1:]))\nv=json.loads')
+        self.exe.write_text(script)
+        runtime_reg=replace(a.load_host_registration(self.pin),reviewer_role='llmtool-worker/claude-cli',
+            reviewer_version='2.1.301',reviewer_executable_digest=hashlib.sha256(self.exe.read_bytes()).hexdigest())
+        self.policy=replace(self.policy,reviewer_role='llmtool-worker/claude-cli',call_timeout_seconds=timeout,
+                            worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        self.hostdata['reviewer'].update(role=self.policy.reviewer_role,version='2.1.301',
+            executable_sha256=hashlib.sha256(self.exe.read_bytes()).hexdigest())
+        self.hostdata['route_policies']=[dict(policy=self.policy.to_dict(),revoked=False)]
+        self.write_host()
+        self.pin=replace(self.pin,host_digest=hashlib.sha256(self.hostpath.read_bytes()).hexdigest())
+        self.observer=FixtureObserver(self.pin,self.expect,self.events,self.clock,
+                                      baseline_check=lambda reg,f:True,writers_check=lambda reg,f:True)
+        self.issuer=a.ProductionReviewIssuer(self.pin,self.clock,self.observer,self.context)
+        self.authority=FixtureAuthority(self.issuer,self.ledger)
+        self.launcher=FixtureLauncher(self.authority)
+
+    def services(self,**changes):
+        changes.setdefault('reviewer_role',self.policy.reviewer_role)
+        changes.setdefault('worker_runtime_digest',a.worker_runtime_pin(a.load_host_registration(self.pin)))
+        return super().services(**changes)
+
+    def binding(self,**changes):
+        changes.setdefault('reviewer_role',self.policy.reviewer_role)
+        return super().binding(**changes)
+
+
+class WorkerJobIntegrationTests(unittest.TestCase):
+    def harness(self,**changes):
+        h=WorkerHarness(**changes);self.addCleanup(h.close);return h
+
+    def test_fresh_worker_strict_verdict_owned_exit_and_no_legacy_cleanup(self):
+        h=self.harness()
+        import subprocess
+        wait=subprocess.Popen.wait
+        def bounded_wait(process,*args,**kwargs):
+            self.assertIsNotNone(kwargs.get('timeout'), 'worker reached unbounded wait')
+            return wait(process,*args,**kwargs)
+        with patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('legacy cleanup')), \
+                patch.object(subprocess.Popen,'wait',bounded_wait):
+            result=h.run()
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual((result['security'],result['functional']),('APPROVE','APPROVE'))
+        self.assertFalse(result['authorized'])
+        self.assertEqual(result['execution_disposition'],'STOP_NO_EXECUTION_AUTHORITY')
+        self.assertEqual(result['review_authority'],'WORKER_DATA_ONLY')
+        e=result['job_evidence']
+        self.assertEqual(e['identity_source'],'CLI_REPORTED_RUNTIME_ID')
+        self.assertEqual(e['runtime_session_id'],'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+        self.assertEqual(e['launch_nonce'],h.issuer.reviewer_launch_nonce)
+        self.assertEqual(e['wrapper_launches'],1)
+        self.assertTrue(all(e[k] for k in ('reaped','pipes_drained','pipes_closed','runtime_closed')))
+        self.assertIsNone(h.launcher.pending_job)
+        self.assertEqual(result['input_tokens'],12)
+        self.assertNotEqual(e['runtime_session_id'],h.expect.agents[1].session_id)
+        argv=json.loads(h.argv_file.read_text())
+        self.assertEqual(argv,['--print','--output-format','json','--no-session-persistence',
+                               '--safe-mode','--tools','','--model','fake-model'])
+        receipt=next(iter(h.authority.receipts.values()))
+        self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_DONE')
+        with self.assertRaises(Exception):h.launcher.launch(h.packet_input,
+            r.ConsumeToken(receipt.binding.call.digest,h.issuer.reviewer_launch_nonce,receipt.nonce,True,True))
+
+    def test_both_cross_roles_denied_before_any_spawn(self):
+        for worker in (False,True):
+            h=self.harness() if worker else Harness()
+            if not worker:self.addCleanup(h.close)
+            role='llmtool-review/claude-cli' if worker else 'llmtool-worker/claude-cli'
+            changes=dict(reviewer_role=role,worker_runtime_digest=None if worker else 'd'*64)
+            with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+                result=h.run(**changes)
+            self.assertEqual(result['provider_calls'],0,result)
+            self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+    def test_known_invalid_inner_is_not_approve_unknown_transport_stays_counted(self):
+        for mode in ('invalid-inner','private','spoof','exit','stderr'):
+            with self.subTest(mode=mode):
+                h=self.harness(mode=mode)
+                result=h.run()
+                self.assertEqual(result['provider_calls'],1,result)
+                self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertFalse(result['authorized'])
+                self.assertNotIn('SECRET_FAKE',json.dumps(result))
+                receipt=next(iter(h.authority.receipts.values()))
+                self.assertEqual(h.ledger.status(receipt.nonce),
+                    'EFFECT_DONE' if mode=='invalid-inner' else 'EFFECT_UNKNOWN')
+                self.assertIsNone(h.launcher.pending_job)
+
+    def test_real_fake_child_timeout_and_inherited_pipe_drain_no_unbounded_wait(self):
+        import time
+        for mode in ('timeout','descendant'):
+            with self.subTest(mode=mode):
+                h=self.harness(mode=mode,timeout=1)
+                started=time.monotonic()
+                with patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
+                    result=h.run()
+                self.assertLess(time.monotonic()-started,2)
+                self.assertEqual(result['code'],'REVIEW_TIMEOUT',result)
+                self.assertEqual(result['provider_calls'],1)
+                receipt=next(iter(h.authority.receipts.values()))
+                self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+                self.assertIsNone(h.launcher.pending_job)
+
+    def test_pinned_executable_change_zero_launch_and_source_drift(self):
+        h=self.harness()
+        h.exe.write_text(h.exe.read_text()+'\n# drift')
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):result=h.run()
+        self.assertEqual(result['code'],'REVIEW_RUNTIME_INVALID',result)
+        self.assertEqual(result['provider_calls'],1) # committed attempt counted even before actual spawn
+        self.assertFalse(h.argv_file.exists())
+
+    def test_required_constructor_and_legacy_file_decode_only_default(self):
+        h=self.harness()
+        fields=h.policy.to_dict();fields.pop('reviewer_role');fields['data_classes']=tuple(fields['data_classes'])
+        with self.assertRaises(TypeError):a.ProviderRoutePolicy(**fields)
+        legacy=Harness();self.addCleanup(legacy.close)
+        legacy.hostdata['route_policies'][0]['policy'].pop('reviewer_role')
+        reg=a._decode_host(r.canonical(legacy.hostdata).decode())
+        self.assertEqual(reg.route_policies[0][0].reviewer_role,'llmtool-review/claude-cli')
+        h.hostdata['route_policies'][0]['policy'].pop('reviewer_role')
+        with self.assertRaises(Exception):a._decode_host(r.canonical(h.hostdata).decode())
+
+    def test_finalization_uncertainty_blocks_success(self):
+        h=self.harness()
+        with patch.object(h.authority,'finalize',side_effect=RuntimeError('private')):result=h.run()
+        self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN')
+        self.assertNotIn('job_evidence',result)
+        self.assertEqual(result['provider_calls'],1)
+
+
+    def test_cancellation_restores_signals_and_no_unbounded_cleanup(self):
+        import signal
+        from llmtool.providers.cli_lifecycle import CLIProcessLifecycle
+        original=CLIProcessLifecycle.check
+        for sig in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP):
+            h=self.harness()
+            before={s:signal.getsignal(s) for s in (signal.SIGINT,signal.SIGTERM,signal.SIGHUP)}
+            def cancel(lifecycle):
+                if lifecycle.deadline is not None and lifecycle.process is not None:
+                    lifecycle._record(sig,None)
+                original(lifecycle)
+            with self.subTest(sig=sig),patch.object(CLIProcessLifecycle,'check',cancel), \
+                    patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
+                if sig==signal.SIGINT:
+                    self.assertEqual(h.run()['code'],'REVIEW_CANCELLED')
+                else:
+                    # Finalize failure must not replace the original Unix exit.
+                    with patch.object(h.authority,'finalize',side_effect=RuntimeError('private')):
+                        with self.assertRaises(SystemExit) as caught:h.run()
+                    self.assertEqual(caught.exception.code,128+sig)
+            self.assertEqual(before,{s:signal.getsignal(s) for s in before})
+            self.assertIsNone(h.launcher.pending_job)
+
+    def test_reap_unknown_retains_owned_child_and_forbids_relaunch(self):
+        import subprocess
+        h=self.harness()
+        with patch.object(subprocess.Popen,'wait',side_effect=subprocess.TimeoutExpired('fake',1)), \
+                patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
+            result=h.run()
+        pending=h.launcher.pending_job
+        self.assertIsNotNone(pending)
+        try:
+            self.assertFalse(pending.cleanup_confirmed)
+            self.assertTrue(pending.process._llmtool_cleanup_pending)
+            self.assertEqual(result['status'],'BLOCKED')
+            receipt=next(iter(h.authority.receipts.values()))
+            self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+            with patch('subprocess.Popen',side_effect=AssertionError('resend')):
+                with self.assertRaises(Exception):h.launcher.launch(b'',r.ConsumeToken('', '', '',True,True))
+        finally:
+            # Test-owned unreaped fake child only; restore actual bounded wait.
+            pending.process.wait(timeout=2)
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
+            pending.stop();kill.assert_not_called()
+
+    def test_expired_route_and_registration_role_deny_without_spawn(self):
+        h=self.harness()
+        h.fake.utc='2026-10-14T00:10:00Z'
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):result=h.run()
+        self.assertEqual(result['provider_calls'],0)
+        h=self.harness()
+        b,_=h.binding()
+        forged=replace(b,reviewer_launch_nonce='a'*32)
+        with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
+            self.assertFalse(h.authority.admit(forged).admitted)
+
+
+    def test_deadline_and_route_rechecked_after_verdict_and_finalize(self):
+        import time
+        for stage in ('parse','finalize','route','source'):
+            h=self.harness()
+            real=time.monotonic
+            expired=[False]
+            parse=r.parse_verdict
+            finalize=h.authority.finalize
+            def late_parse(*args):
+                verdict=parse(*args)
+                if stage=='parse':expired[0]=True
+                if stage=='route':h.fake.utc='2026-10-14T00:10:00Z'
+                if stage=='source':h.observer.baseline_check=None
+                return verdict
+            def late_finalize(*args):
+                result=finalize(*args)
+                if stage=='finalize':expired[0]=True
+                return result
+            with self.subTest(stage=stage),patch.object(r,'parse_verdict',late_parse), \
+                    patch.object(h.authority,'finalize',late_finalize), \
+                    patch('time.monotonic',side_effect=lambda:real()+(3 if expired[0] else 0)):
+                result=h.run()
+            self.assertEqual(result['status'],'BLOCKED',result)
+            self.assertEqual(result['code'], 'REVIEW_TIMEOUT' if stage in ('parse','finalize') else
+                             'REVIEW_ROUTE_NOT_AUTHORIZED' if stage=='route' else 'REVIEW_IDENTITY_NOT_ATTESTED')
+            self.assertFalse(result['authorized'])
+            self.assertNotIn('job_evidence',result)
+
+    def test_executable_hash_deadline_checked_after_last_read(self):
+        h=self.harness()
+        reg=a.load_host_registration(h.pin)
+        with patch('time.monotonic',side_effect=(0,2)):
+            with self.assertRaises(Exception) as caught:a.verify_worker_executable(reg,1)
+        self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
+
+
+if __name__ == "__main__":
+    unittest.main()

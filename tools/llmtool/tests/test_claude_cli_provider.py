@@ -267,5 +267,83 @@ class ClaudeCLIConfigTests(unittest.TestCase):
                     self.resolve()
 
 
+
+
+class WorkerEnvelopeTests(unittest.TestCase):
+    def envelope(self, **changes):
+        v=dict(type='result',subtype='success',is_error=False,
+               session_id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',result='{}')
+        v.update(changes)
+        return json.dumps(v)
+
+    def test_single_terminal_outer_protocol_not_model_identity(self):
+        from llmtool.providers.claude_cli import decode_review_envelope
+        result=decode_review_envelope(self.envelope())
+        self.assertEqual(result['runtime_session_id'],'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+        self.assertEqual(result['content'],'{}')
+        self.assertIsNone(result['input_tokens'])
+        self.assertEqual(result['identity_source'],'CLI_REPORTED_RUNTIME_ID')
+
+    def test_outer_protocol_rejects_ambiguous_error_and_spoof(self):
+        from llmtool.providers.claude_cli import decode_review_envelope
+        raw=self.envelope()
+        cases=[raw+raw,raw[:-1],self.envelope(subtype='error_during_execution'),
+               self.envelope(is_error=True),self.envelope(session_id='not-uuid'),
+               self.envelope(type='assistant'),self.envelope(extra='private'),
+               self.envelope(result='\ud800'),self.envelope(result='x'*65537),
+               raw.replace('"type": "result"','"type":"result","type":"result"')]
+        for v in cases:
+            with self.subTest(v=v[:70]),self.assertRaises(LLMToolError):decode_review_envelope(v)
+        with self.assertRaises(LLMToolError):
+            decode_review_envelope(raw,forbidden_sessions=('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',))
+
+
+    def test_usage_is_optional_allowlisted_and_never_measured_cost(self):
+        from llmtool.providers.claude_cli import decode_review_envelope
+        for usage in (None,{},dict(input_tokens=True,output_tokens=2),
+                      dict(input_tokens=1),dict(input_tokens=-1,output_tokens=1),
+                      dict(input_tokens=1,output_tokens=2,arbitrary=123)):
+            result=decode_review_envelope(self.envelope(usage=usage))
+            self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
+        result=decode_review_envelope(self.envelope(usage=dict(input_tokens=1,output_tokens=2)))
+        self.assertEqual((result['input_tokens'],result['output_tokens']),(1,2))
+        self.assertEqual(result['usage_source'],'CLI_REPORTED')
+        self.assertNotIn('total_cost_usd',result)
+
+    def test_outer_and_nested_privacy_unicode_depth_and_limits(self):
+        from llmtool.providers.claude_cli import decode_review_envelope
+        cases=[self.envelope(result=json.dumps({'summary':'Bearer FAKE_SECRET_12345678'})),
+               self.envelope(result=json.dumps({'summary':'/Users/alice/private.txt'})),
+               self.envelope(result='['*17+'0'+']'*17),
+               self.envelope(usage={'server_tool_use':{'private':'Bearer FAKE_SECRET_12345678'}}),
+               b'\xff',self.envelope(duration_ms=True),self.envelope(stop_reason='tool_use'),
+               self.envelope(total_cost_usd=-1),self.envelope(uuid='invalid')]
+        for value in cases:
+            with self.subTest(value=str(value)[:50]),self.assertRaises(LLMToolError) as caught:
+                decode_review_envelope(value)
+            self.assertNotIn('FAKE_SECRET',str(caught.exception))
+
+
+    def test_worker_really_blocked_stdin_has_bounded_cleanup(self):
+        import time
+        from llmtool.providers import cli_lifecycle as lifecycle
+        with tempfile.TemporaryDirectory() as tmp:
+            exe=Path(tmp)/'fake-blocked';exe.write_text('#!'+sys.executable+' -IB\nimport time\ntime.sleep(10)\n');exe.chmod(0o700)
+            provider=ClaudeCLIProvider({'model':'fake-model'},None)
+            real_wait=subprocess.Popen.wait
+            def bounded_wait(process,*args,**kwargs):
+                self.assertIsNotNone(kwargs.get('timeout'))
+                return real_wait(process,*args,**kwargs)
+            started=time.monotonic()
+            with patch.object(lifecycle,'terminate',side_effect=AssertionError('unbounded')), \
+                    patch.object(subprocess.Popen,'wait',bounded_wait):
+                with self.assertRaises(LLMToolError) as caught:
+                    provider._invoke_review_job(str(exe),'x'*524288,deadline=started+0.5,
+                        auth_home=tmp,launch_nonce='a'*32,runtime_pin='b'*64,forbidden_sessions=())
+            self.assertEqual(caught.exception.review_code,'REVIEW_TIMEOUT')
+            self.assertLess(time.monotonic()-started,1.5)
+            self.assertIsNone(provider.pending_job)
+
+
 if __name__ == "__main__":
     unittest.main()

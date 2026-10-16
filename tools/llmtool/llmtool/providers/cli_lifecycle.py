@@ -2,6 +2,9 @@
 import os
 import signal
 import threading
+import subprocess
+import time
+import math
 
 from ..errors import coded_error
 
@@ -31,9 +34,45 @@ def terminate(process):
     process.wait()
 
 
+def bounded_terminate(process, deadline):
+    """Opt-in owned-child teardown. False retains pending ownership, never reuses it.
+
+    The lifecycle assigns the private ownership pin immediately after Popen with
+    start_new_session=True. Never poll before kill: an unreaped child pins PGID.
+    This is cooperative host ownership, not protection against hostile same-UID code.
+    """
+    if process.returncode is not None:
+        return True
+    if (type(deadline) not in (int, float) or not math.isfinite(deadline) or
+            type(process.pid) is not int or process.pid <= 1 or
+            getattr(process, '_llmtool_owner_pid', None) != os.getpid() or
+            getattr(process, '_llmtool_owned_pgid', None) != process.pid):
+        return False
+    process._llmtool_cleanup_pending = True
+    if deadline <= time.monotonic():
+        return False
+    try:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    try:
+        process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    process._llmtool_cleanup_pending = process.returncode is None
+    return not process._llmtool_cleanup_pending
+
+
 class CLIProcessLifecycle:
-    def __init__(self, provider_type):
+    def __init__(self, provider_type, *, deadline=None):
         self.component = 'provider.' + provider_type
+        self.deadline = deadline
+        self.cleanup_confirmed = True
         self.process = None
         self.signum = None
         self.previous = {}
@@ -79,6 +118,16 @@ class CLIProcessLifecycle:
 
     def own(self, process):
         self.process = process
+        if self.deadline is not None:
+            self.cleanup_confirmed = False
+            # Only the trusted opt-in launcher uses this seam, immediately after
+            # its own start_new_session Popen. A reaped PID is never newly pinned.
+            if (type(process.pid) is not int or process.returncode is not None or
+                    os.name != 'posix' or os.getpgid(process.pid) != process.pid):
+                raise coded_error('CLI child ownership is unknown',
+                                  'PROVIDER_RUNTIME_ERROR', self.component)
+            process._llmtool_owner_pid = os.getpid()
+            process._llmtool_owned_pgid = process.pid
         self.check()
 
     def check(self):
@@ -87,7 +136,10 @@ class CLIProcessLifecycle:
 
     def stop(self):
         if self.process is not None:
-            terminate(self.process)
+            if self.deadline is None:
+                terminate(self.process)
+            else:
+                self.cleanup_confirmed = bounded_terminate(self.process, self.deadline)
 
     def __exit__(self, kind, value, traceback):
         try:

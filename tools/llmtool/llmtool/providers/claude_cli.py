@@ -6,6 +6,9 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
+import math
+import hashlib
 from pathlib import Path
 
 from ..errors import LLMToolError, coded_error
@@ -14,6 +17,82 @@ from .cli_lifecycle import CLIProcessLifecycle, terminate
 
 OUTPUT_LIMIT = 1024 * 1024
 READ_SIZE = 8192
+
+
+REVIEW_ENVELOPE_LIMIT = 128 * 1024
+
+
+def decode_review_envelope(raw, *, forbidden_sessions=()):
+    """Pinned Claude SDKResultMessage result/success subset (upstream v2.1.301).
+
+    Basis: Claude Code 2.1.301 CLI help output-format=json and the
+    official Claude Agent SDK SDKResultSuccess result envelope (see WORKFLOW). This is a
+    strict fixture codec, NOT evidence of the installed CLI's live protocol.
+    Usage is allowlisted CLI_REPORTED data, never measured billing or identity.
+    """
+    from ..task_review import load_json, screen, reject, VERDICT_LIMIT
+    try:
+        if type(raw) is bytes:
+            raw = raw.decode('utf-8')
+        value = load_json(raw, REVIEW_ENVELOPE_LIMIT)
+        required = {'type', 'subtype', 'is_error', 'session_id', 'result'}
+        # Only this documented subset is consumed. Unknown top-level data is
+        # rejected rather than reflected into diagnostics or interpreted as pins.
+        allowed = required | {'usage', 'duration_ms', 'duration_api_ms',
+                              'num_turns', 'total_cost_usd', 'stop_reason', 'uuid',
+                              'permission_denials', 'modelUsage'}
+        if (type(value) is not dict or not required <= set(value) <= allowed or
+                value['type'] != 'result' or value['subtype'] != 'success' or
+                type(value['is_error']) is not bool or value['is_error'] or
+                type(value['session_id']) is not str or
+                str(uuid.UUID(value['session_id'])) != value['session_id'] or
+                value['session_id'] in forbidden_sessions or
+                type(value['result']) is not str or not value['result'] or
+                len(value['result'].encode('utf-8')) > VERDICT_LIMIT):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        screen(raw)
+        def screen_strings(item):
+            if type(item) is str:
+                screen(item)
+            elif type(item) is dict:
+                for key, child in item.items():
+                    screen(key); screen_strings(child)
+            elif type(item) is list:
+                for child in item: screen_strings(child)
+        screen_strings(value)
+        # The result is itself JSON DATA. Decode it for privacy checks so JSON
+        # escapes cannot hide secrets/paths before the strict verdict parser.
+        screen_strings(load_json(value['result'], VERDICT_LIMIT))
+        for key in ('duration_ms', 'duration_api_ms', 'num_turns'):
+            if key in value and (type(value[key]) is not int or not 0 <= value[key] <= 10**12):
+                reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'total_cost_usd' in value and (type(value['total_cost_usd']) not in (int, float) or
+                not math.isfinite(value['total_cost_usd']) or value['total_cost_usd'] < 0):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'stop_reason' in value and value['stop_reason'] not in (None, 'end_turn', 'stop_sequence'):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'uuid' in value and (type(value['uuid']) is not str or str(uuid.UUID(value['uuid'])) != value['uuid']):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'permission_denials' in value and value['permission_denials'] != []:
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'modelUsage' in value and (type(value['modelUsage']) is not dict or
+                len(value['modelUsage']) > 16):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        # modelUsage is explicitly ignored; no per-model billing is inferred.
+        usage = value.get('usage')
+        counts = dict(input_tokens=None, output_tokens=None)
+        if type(usage) is dict:
+            allowed_usage = {'input_tokens', 'output_tokens', 'cache_creation_input_tokens',
+                             'cache_read_input_tokens', 'server_tool_use', 'service_tier',
+                             'cache_creation', 'inference_geo'}
+            # Optional unsupported usage is UNKNOWN, not a reason to fabricate 0.
+            if set(usage) <= allowed_usage and all(type(usage.get(k)) is int and
+                    0 <= usage[k] <= 10**12 for k in ('input_tokens', 'output_tokens')):
+                counts = {k: usage[k] for k in counts}
+        return dict(content=value['result'], runtime_session_id=value['session_id'],
+                    identity_source='CLI_REPORTED_RUNTIME_ID', usage_source='CLI_REPORTED', **counts)
+    except (LLMToolError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        reject('REVIEW_WORKER_ENVELOPE_INVALID')
 
 
 class ClaudeCLIProvider:
@@ -281,3 +360,137 @@ class ClaudeCLIProvider:
                 char.isalnum() or char in "._:/-" for char in model):
             metadata["model"] = model
         return Reply(content, metadata)
+
+
+    def _invoke_review_job(self, executable, prompt, *, deadline, auth_home,
+                           launch_nonce, runtime_pin, forbidden_sessions):
+        """Trusted Host-only opt-in; generic complete/_invoke stay text-compatible.
+
+        A single immutable monotonic deadline includes a <=20s cleanup reserve.
+        An uncertain lifecycle remains reachable as pending_job; no retry/fallback.
+        Only a fixed, empty runtime directory is removed (no unbounded rmtree).
+        """
+        from ..task_review import reject
+        started = time.monotonic()
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline) or
+                deadline <= started or deadline > started + 120 or
+                not os.path.isabs(executable) or not os.path.isabs(auth_home)):
+            reject('REVIEW_TIMEOUT')
+        work_deadline = deadline - min(20, (deadline - started) * 0.2)
+        raw = prompt.encode('utf-8')
+        selector = selectors.DefaultSelector()
+        output, errors = bytearray(), bytearray()
+        offset = 0
+        drained = False
+        closed = False
+        self.pending_job = None
+        self.pending_runtime = None
+        self.job_evidence = None
+        runtime = self._temporary_directory()
+        # TemporaryDirectory's recursive finalizer is deliberately not used by
+        # this bounded path. Unexpected contents stay private and block success.
+        runtime._finalizer.detach()
+        lifecycle = CLIProcessLifecycle(self.TYPE, deadline=deadline)
+        try:
+            with lifecycle:
+                try:
+                    lifecycle.check()
+                    if time.monotonic() >= work_deadline:
+                        reject('REVIEW_TIMEOUT')
+                    environment = self._child_environment()
+                    environment['HOME'] = auth_home
+                    argv = [executable, '--print', '--output-format', 'json',
+                            '--no-session-persistence', '--safe-mode', '--tools', '',
+                            '--model', self.provider['model']]
+                    process = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                        shell=False, close_fds=True, start_new_session=True,
+                        cwd=runtime.name, env=environment)
+                    self.pending_job = lifecycle
+                    lifecycle.own(process)
+                    evidence = dict(launch_nonce=launch_nonce, owned_pid=process.pid,
+                        owned_pgid=process.pid, host_pid=os.getpid(),
+                        executable_path_digest=hashlib.sha256(executable.encode()).hexdigest(),
+                        runtime_pin=runtime_pin, started=started, deadline=deadline, wrapper_launches=1)
+                    for stream, event, kind in ((process.stdin, selectors.EVENT_WRITE, 'stdin'),
+                            (process.stdout, selectors.EVENT_READ, 'stdout'),
+                            (process.stderr, selectors.EVENT_READ, 'stderr')):
+                        os.set_blocking(stream.fileno(), False)
+                        selector.register(stream, event, kind)
+                    while selector.get_map():
+                        lifecycle.check()
+                        remaining = work_deadline - time.monotonic()
+                        if remaining <= 0:
+                            reject('REVIEW_TIMEOUT')
+                        for key, _ in selector.select(min(remaining, 0.05)):
+                            stream, kind = key.fileobj, key.data
+                            if kind == 'stdin':
+                                try:
+                                    if offset < len(raw):
+                                        offset += os.write(stream.fileno(), raw[offset:offset+READ_SIZE])
+                                    else:
+                                        selector.unregister(stream); stream.close()
+                                except (BlockingIOError, InterruptedError):
+                                    continue
+                                except BrokenPipeError:
+                                    reject('REVIEW_WORKER_INPUT_INCOMPLETE')
+                            else:
+                                target = output if kind == 'stdout' else errors
+                                result = self._read_pipe(stream, target)
+                                if result == 'limit' or len(output) > REVIEW_ENVELOPE_LIMIT:
+                                    reject('REVIEW_WORKER_OUTPUT_LIMIT')
+                                if result:
+                                    selector.unregister(stream); stream.close()
+                    drained = True
+                    while process.returncode is None:
+                        lifecycle.check()
+                        remaining = work_deadline - time.monotonic()
+                        if remaining <= 0:
+                            reject('REVIEW_TIMEOUT')
+                        try:
+                            process.wait(timeout=min(remaining, 0.05))
+                        except subprocess.TimeoutExpired:
+                            pass
+                    if process.returncode != 0:
+                        reject('REVIEW_WORKER_PROCESS_FAILED')
+                    parsed = decode_review_envelope(bytes(output), forbidden_sessions=forbidden_sessions)
+                    if time.monotonic() >= work_deadline:
+                        reject('REVIEW_TIMEOUT')
+                    evidence.update(runtime_session_id=parsed.pop('runtime_session_id'),
+                        identity_source=parsed.pop('identity_source'), actual_exit=process.returncode,
+                        reaped=True, pipes_drained=drained, pipes_closed=False)
+                    self.job_evidence = evidence
+                finally:
+                    lifecycle.stop()  # Always bounded; __exit__ also stays bounded.
+                    close_failed = False
+                    try:
+                        selector.close()
+                    except OSError:
+                        close_failed = True
+                    if lifecycle.process is not None:
+                        streams = (lifecycle.process.stdin, lifecycle.process.stdout, lifecycle.process.stderr)
+                        for stream in streams:
+                            try:
+                                if stream is not None and not stream.closed:
+                                    stream.close()  # unbuffered descriptors, no flush/wait
+                            except OSError:
+                                close_failed = True  # preserve original exception/cancellation
+                        closed = not close_failed and all(s is not None and s.closed for s in streams)
+                        if self.job_evidence is not None:
+                            self.job_evidence['pipes_closed'] = closed
+        finally:
+            try:
+                os.rmdir(runtime.name)
+                runtime_closed = True
+            except OSError:
+                runtime_closed = False
+                self.pending_runtime = runtime.name
+            if lifecycle.cleanup_confirmed and runtime_closed and (closed or lifecycle.process is None):
+                self.pending_job = None
+            else:
+                self.job_evidence = None
+        if self.pending_job is not None or not drained or time.monotonic() >= deadline:
+            reject('REVIEW_WORKER_CLEANUP_UNKNOWN')
+        self.job_evidence['runtime_closed'] = True
+        parsed['elapsed_seconds'] = time.monotonic() - started
+        return parsed
