@@ -221,6 +221,35 @@ llmtool 通知或喚醒 Integrator，保留 context / task identity
 - 針對各種工作定義 **品質下限／容錯門檻、誤判等級、回退觸發器、抽樣規模及淨節省基準**。目前不預設某個百分比已達成。
 - 已有實驗只支援特定 L01 大型 test-triage 路徑，**不能將其外推成所有公司 LLM 工作都節省 Token**。
 
+## D-007 — Codex Cloud 手機獨立開發支線（Mobile Cloud Development Lane）
+
+- **決策狀態：ACCEPTED（使用者 2026-10-17 明確要求新增）**
+- **落地現況：WORKFLOW DECISION ONLY / 不是 llmtool Worker 整合或 M2 Live 完成**
+- **定位：與本機 Integrator/llmtool 主線平行的雲端開發途徑；不增設本機 Controller，不改 A11b/A11c Roadmap。**
+
+### 使用者需求與確定的分工
+
+1. 使用者人在外面、只有手機時，可透過 ChatGPT App 的 **Codex Cloud** 啟動／繼續雲端開發；不需要開啟本機 Mac，也不要求連線到本機 llmtool、其常駐執行環境、公司 VPN 或 Mac-local 憑證。
+2. **ChatGPT Coordinator 或現有 Codex Integrator/PM** 可判斷將哪個適合雲端獨立完成的工作包拆給 Codex Cloud；它不須等本機 llmtool 能執行 M2。避免同一工作包同時由本機與 Cloud 不知情重複實作。
+3. **Codex Cloud 自行開發、自行預審、執行雲端可執行的檢查與修復**，保留實際變更／測試證據。這種自我檢查是 developer pre-review，**不假裝已得到 non-author independent Security/Functional/QA 驗收**。
+4. 完成後，Codex Cloud 應在有相應 GitHub 授權與連線時提交自己獨立的 feature branch／Draft PR（或提供明確失敗與可用成果）。**使用者主動把完成的 PR／交接資料交給既有 Integrator reviewer** 進行後續審查；這是使用者明確接受的手機 Cloud 支線人工交接例外，不等於本機 D-003c 自動續工已實作。
+5. Integrator 對照原始任務、exact SHA、diff、CI 與雲端實測證據作最終整合審查，必要時再安排真正獨立的 non-author reviewer 或 Mac native acceptance。沒有完整要求的 review/gates 不宣稱 DONE／可合併，Cloud **不得自動合併 main**。
+6. Cloud 與本機透過 **GitHub commit/branch/PR** 交接，不透過本機 llmtool 事件或 Codex CLI Session callback；GitHub 提交與本機 Integrator 自動喚醒是兩回事。尚未驗證的自動雲端派工、手機 UI 可用性／環境狀態及 GitHub 推送權限不得推定已經配置完成。
+
+### 範圍、界線與候選工作
+
+- 優先將文件、單元測試、可在 Cloud 可重現的純程式碼修正、獨立模組、有限重構等 **不需 Mac/VPN/本機 llmtool Live** 的工作包拆至 Cloud。
+- 需要 Mac 原生驗證、公司私有 VPN 模型、真實本機憑證、特定既有 Mac Worktree 狀態或 F2 真實使用者 Repo execution 的工作，**不以 Cloud 自評取代**所需驗收。
+- Cloud 實際修改的是其**獨立雲端 checkout**；它不直接操作使用者 Mac，卻可能依 GitHub 授權寫入共享遠端 Git 分支／PR，因此必須與本機 Worktree／任務 ownership 隔離、避免碰 main 與其他 Agent 分支。
+- 建議交接最小資料：任務範圍／驗收標準、branch、base/head SHA、Draft PR URL、變更摘要、實際執行的測試與未執行的環境性測試、self-review findings、已知風險／限制、下一位 Integrator reviewer 所需注意事項。沒有證據標 NOT_TESTED/UNKNOWN。
+- 此獨立 Cloud 線**不需 llmtool 派工／PM→llmtool→Worker 回傳事件才可啟動**；目前由使用者在手機主動發起，PM／Coordinator 僅負責提出或選擇適合拆出的範圍。本線亦不帶來公司 LLM token-saving 宣告、任何跨 trust-boundary 資料傳送或新費用授權。
+
+### 實作前提與仍 OPEN 的細節
+
+- OpenAI 現行 Codex Cloud 文件說明：環境先在 Web/桌面建立並發布，才可從支援的手機介面啟動／繼續 Cloud Task；實際功能視帳號／工作區及 repo 連線權限而定。
+- 後續每次 Cloud 任務的具體拆工、允許檔案範圍、並行衝突、GitHub 發布權限、測試要求與正式審查需求仍要按任務確定；**本決策不授權任何特定開發任務，也不改動 llmtool 的正式 A11b F2 Git Executor**。
+- 是否未來讓 Integrator 自動派送／回收 Codex Cloud 任務，目前 **OPEN / NOT_VERIFIED**；此時以手機手動啟動與手動告知 Integrator 為準。
+
 ## OPEN：後續逐項討論，不預先授權或排程開發
 
 | ID | 議題 | 決策狀態 | 備註 |
