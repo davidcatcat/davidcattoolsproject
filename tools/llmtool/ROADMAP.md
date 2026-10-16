@@ -36,6 +36,40 @@ This is a **parallel delivery lane, not a new A milestone**. Continue the single
 A11b/A11c Roadmap and existing M1a/M1b/M2 gates. Cloud production/CI progress
 cannot replace required canonical Mac Live acceptance for native llmtool cutover.
 
+### 2026-10-17 revised delivery order and dependency graph
+
+**Coordinator execution priority derived from the accepted D-003a/b/c and D-007
+architecture (Issue #172): get llmtool useful on its own real development tasks
+before requiring all optional execution paths to be finished.** This is a
+Roadmap sequencing clarification, **not** a new owner decision, new milestone,
+authorization, production-ready assertion, or bypass of an action's actual gate.
+
+| Sequence / owner | Earliest useful product evidence | Hard dependency; explicitly **not** a prerequisite |
+| --- | --- | --- |
+| **1 — A11c.1 M1a → M1b, FIRST** | Invoke the *existing* llmtool CLI/provider with permitted evidence from one real llmtool task; Developer materially adopts or rejects its source-checked advice. For M1b, the **Developer** makes a scoped source/test change, runs tests, publishes per its existing Git authority and obtains the required distinct non-author review. Record actual invocation, source/HEAD, adoption, verification and Owner relays. | Existing permitted text route, authentic task context, real acceptance evidence. **Do not wait for F2, the production reviewer Worker, same-Session wake, company live route or M2** for this read-only advisory/Developer-owned mutation. |
+| **2 — A11c.1 foreground real Worker (Issue #120), NEXT** | Complete the already-scoped trusted-host composition/source, exact-head tests and non-author review; separately authorize **one** bounded real reviewer Worker call with actual runtime/Host, identity/ledger/receipt, permitted data route, spend cap/usage and cleanup evidence. | Genuine host, reviewer and real-call grants and exact-HEAD proof. Fake PASS, docs and prior CLI smoke **do not** count as real Worker Live; initial Worker review is DATA/pre-review until formal non-author gates are independently fulfilled. No llmtool F2 needed **unless this action performs a real llmtool Git/file mutation**. |
+| **3 — A11c.1 → A11c.2 delegated-Worker M2 loop, THEN** | Existing Codex Integrator (= PM) makes plan, llmtool executes authorized Worker route, validates completion events and **reliably resumes the same Integrator**; pre-authorized Developer CLI performs source edits/tests/Commit/Push in its own registered checkout; a distinct non-author Reviewer accepts/rejects; bounded repair repeats and produces an auditable Draft PR or STOP, **without the owner forwarding intermediate local prompts**. | Trustworthy actual Worker/Host/Session dispatch and wake, dedup/replay handling, Worktree ownership, per-action Git authorizations, review, CI/Mac gates and applicable A11b policy. If **Workers** perform their own already-authorized Git writes, **llmtool's F2 direct-repo writer is not a blanket prerequisite**; a future llmtool-executed file/Git action still requires F2/S2 approval. An assumed callback, fake test or owner courier cannot count as this M2 gate. |
+| **Parallel — A11b F2 and A11b.3–6** | Complete [Issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97) action/issuer policy, independently reviewed F2 implementation and real-repository authorized test, rollback and audit. Enables direct `llmtool chat` source/Git actions, not just Worker-mediated work. | **Required before llmtool itself modifies a user repo, stages, commits, pushes or publishes**; not required for M1b where the authorized Developer does the write. Full A11b DONE retains all its own mandatory controls. |
+| **Parallel — company LLM task route (A11c)** | Try an actually useful bounded company-gw task class with permission/VPN, deterministic/source-grounded verification and independent serious-error checks; measure **net** premium-model saving including retry, PM and review. | Privacy authorization, live reachability, route-specific accuracy and usage. Not a universal blocker to M1b or first non-company Worker call; only a proved route can advertise saving. |
+| **Parallel — D-007 Codex Cloud** | Coordinator/Integrator splits a standalone task; owner starts Cloud on mobile; Cloud self-pre-reviews and prepares an own feature branch/Draft PR; owner deliberately hands completed result to Integrator reviewer for formal gates. | Published Cloud environment and real GitHub access; no Mac/llmtool runtime dependency. Cloud results are not native M2 or Mac acceptance; avoid colliding remote refs. |
+
+**Dependency sketch:** `M1a → M1b` (first demonstrable usefulness) runs
+**in parallel** with `foreground Worker real invocation → trusted event /
+original Integrator resume → delegated-Worker M2 acceptance`;
+**A11b F2 → direct llmtool Git/file mutation** is another parallel path.
+Company-route qualification and Codex Cloud are parallel branches, **not
+serial preconditions** for these earliest useful proofs.
+
+**Release labels:** `M1b_VERIFIED` means *useful assisted development*,
+not unattended coordination. `WORKER_LIVE_VERIFIED` means one real
+authorized Worker call, **not** same-session auto-resume or completed M2.
+`M2_LIVE_VERIFIED` needs an actual full source/review/repair/PR-or-STOP
+cycle with no intermediate local owner relay and proper independent gates.
+Only complete applicable native A11c.2 and A11b cutover acceptance permits
+retiring temporary ai-loop; delegated-Worker pilot progress by itself does not.
+Document failure, pending proof and next evidence per existing A11c records;
+avoid extra release boards/controllers or new artificial micro-milestones.
+
 ### One A-roadmap with legacy C references (no duplicate implementation)
 
 | Existing C alias, for old evidence only | **A owner / disposition** | Current truth / gate |
@@ -47,7 +81,7 @@ cannot replace required canonical Mac Live acceptance for native llmtool cutover
 | C2 native self-development execution | **A11b Action/Policy/Executor, then A11c integration** | A11b.2.2.1 synthetic containment DONE; **A11b.2.2.2 F1 disposable-fixture-only Git ADD DONE/merged via PR #84**. F2 user-repository mutation remains **NOT AUTHORIZED** |
 | C3 ai-loop cutover | **A11c real-world acceptance and transition** | NOT STARTED; require actual Mac tasks, Security/Functional QA and comparable behavior before cutover |
 
-**Next critical path after F1 delivery:** [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84) merged **private disposable-fixture-only Git ADD** to `main@46b17b13` after independent Security/Functional QA, exact-head CI and Mac native acceptance. F1 does **not** grant F2/public/user-repository mutation. Next define a separate **F2 real user-repository action and approval contract** (scope, authentic issuer, sandbox/same-UID/detached escape, rollback/audit), obtain independent Security review, then authorize a distinct implementation slice. A11b.3–6 and A11c real-world verification remain required.
+**Parallel F2 direct-mutation track (not a universal M1b / authorized Worker-owned Git dependency):** [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84) merged **private disposable-fixture-only Git ADD** to `main@46b17b13` after independent Security/Functional QA, exact-head CI and Mac native acceptance. F1 does **not** grant F2/public/user-repository mutation. Next define a separate **F2 real user-repository action and approval contract** (scope, authentic issuer, sandbox/same-UID/detached escape, rollback/audit), obtain independent Security review, then authorize a distinct implementation slice. A11b.3–6 and A11c real-world verification remain required.
 
 **Parallel nonblocking safety work:** [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) may proceed as a narrowly scoped, independently tested C1 excerpt-output fix. Its completion is a hard gate for the specific excerpt **egress** path, not for offline A11b design or offline tests. It does **not** sanitize arbitrary diff/source/log data; those exports need separate permission and data-boundary review. Defer full company-only Phase 0 and paid-model cost benchmarking until an applicable route is actually usable; if quality/cost evidence is poor, disable that cost route without declaring a failed executor secure or a token-saving claim proven.
 
@@ -126,7 +160,7 @@ current roadmap.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
-| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD** | S1a accepted via PR #128; S1b contract merged via PR #129; B native attestation/production-grant/route gates remain; full production integration/cutover retains A11b DONE + validation/review/route gates |
+| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD; M1b useful real-task adoption and full M2 NOT_VERIFIED** | **Priority: verify first M1a/M1b real-task adoption now**, independently of F2; finish separately granted production foreground Worker trial, then verified same-Integrator resume / delegated-Worker M2. Full native cutover still needs all applicable A11b/QA/Mac/route gates; F2 specifically gates direct llmtool Git mutation |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
@@ -1054,7 +1088,7 @@ real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
 | **S1a — DONE/MERGED via PR #128** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`. Independent expectation input pins identity/source/epoch; bounded explicit files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
 | **S1b — Product A fake-only MERGED via PR #131** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
 | **S1b-B — B1 fake-first source MERGED via PR #133; native/production enablement gated** | [B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft) accepted via PR #130; A fake-only merged via PR #131. B1 implements typed host composition, static-policy validation and provider-only layout in the same ReceiptLedger under its task-specific scope. Native fake fixture plan APPROVE; actual fake tests are separate from product review/T1 release acceptance. D1 v1 unchanged. Public factory remains unavailable; no production Host installation/ledger, data export or real Claude call. T2/T3 and real handoff remain NOT_AUTHORIZED/BLOCKED. |
-| **S2 — future separate authority/execution contract** | Permission-controlled repair/execution; retain A11b approval, sandbox, recovery/audit, budgets and F2 gates. No automatic merge authority. |
+| **S2 — future separate authority/execution contract** | Permission-controlled llmtool-executed repair/execution retains A11b approval, sandbox, recovery/audit, budgets and **F2 for any direct llmtool repository mutation**. Separately authorized Developer CLI source edits/Commit/Push are Worker-owned Git actions, not evidence that llmtool F2 passed. No automatic merge authority. |
 
 S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
 run/error/evidence conventions without changing the diagnostics schema/store.
@@ -1178,7 +1212,7 @@ milestones, executors or permission grants.
 | --- | --- | --- |
 | M1a supervised advisory | Existing llmtool CLI/provider processes permitted evidence from a real llmtool task; a source-checked artifact is adopted or dispositioned with invocation provenance | No F2 dependency for read-only/text assistance; no formal review or merge authority |
 | M1b assisted development | The assigned Developer adopts a useful llmtool proposal into a real scoped source/test change, with tests, Git evidence and independent review | Developer performs the authorized writes; this is not llmtool-executed mutation or S2 enablement |
-| M2 bounded autonomous cycle | Real development, independent review, bounded repair and tests reach an eligible Draft PR or STOP without Owner prompt relays | Per-action S2/A11b/F2 and provider/Host gates remain applicable; an idle wake or advisory response alone is insufficient |
+| M2 bounded autonomous cycle | PM-approved plan → llmtool launches authorized Workers / captures trustworthy events → **original Integrator resumes** → bounded Developer-owned changes, independent review, repair/tests and Draft PR or STOP without intermediate Owner prompt relays | Actual cross-CLI Worker/Host/Session authority and wake, per-action Git/scope/review gates remain mandatory. **F2 applies when llmtool itself performs Git/file mutation**, but is not a blanket prerequisite for Git actions performed by an independently authorized Developer CLI in its registered worktree. No implied auto-merge or ai-loop cutover |
 
 Prefer existing foreground text providers/A9 for the first useful task. An active
 Developer can wait for a fresh advisory child without an original-session wake;
