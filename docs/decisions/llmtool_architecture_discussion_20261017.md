@@ -81,12 +81,46 @@
 - D-003：PM Agent 採用的模型、職責、啟動條件與是否作為跨 AI 唯一入口仍 OPEN。
 - 尚未宣稱已具有經 llmtool 驗證的真實 Repo 寫入、Commit、Push 或 PR 全流程。
 
+## D-003a — PM Agent 擁有 AI 指派決策；llmtool 僅執行既定計畫
+
+- **決策狀態：ACCEPTED（使用者 2026-10-17 明確糾正原先 M2 角色描述）**
+- **實作狀態：NOT_IMPLEMENTED / 尚無 PM→llmtool→跨 CLI Live 驗收**
+- **詳細 PM Agent 設計 D-003：OPEN**
+
+### 已接受的架構原則
+
+1. **llmtool 不負責以 AI 推理決定**把複雜任務交給 Codex、Claude、AGY、公司 LLM 中的哪個、如何拆分、排依賴。這是 **PM Agent 的語意決策職責**；原先「llmtool 自動指派 Codex 修復、Claude 審查」的說法應更正為 **PM Agent 制定分工／審查計畫，llmtool 經權限與契約檢查後負責執行、派送、紀錄和回收結果**。
+2. **PM Agent 可以由 Codex 啟動**，可研究使用 Codex 原生 Agent/Subagent 能力，而非預設需為 llmtool 另建一個獨立 AI 引擎。但啟動方式、Session 身分、生命週期、用量與受限時的替代模型，仍屬 **OPEN/NOT_VERIFIED**；「Codex 可啟動」不等於「只能由 Codex 啟動」。
+3. llmtool 可使用**確定性的路由規則**執行已核准的工作計畫（或 D-002a 中已明確、已授權的簡單工作）；這是程序執行而不是 llmtool 自主做複雜 AI 決策。遇到需要改變目標／重新分工／判斷未知能力的情況，應交回 PM，而不是由 llmtool 猜測。
+4. **決策權與執行權分離**：PM 的任務分派、模型輸出的命令、Codex 啟動 Subagent 都不授予 Git/檔案寫入、外部 Provider、預算擴張、正式 Release 或獨立審查的權限。既有 A11b/F2/Source Review Gate 繼續生效；同一 Developer 啟動的子代理不能僅憑角色名稱取代所需的獨立審查。
+5. **M2 的正確目標表述**：PM Agent 規劃與決策，llmtool 以可驗證的 Task/Execution/Events/Policy 實際安排 Worker、測試、獨立審查和已授權 Git/PR 工作，最終得出 Draft PR 或明確 STOP；**整條 Live 閉環尚未驗證**。
+
+### 概念資料流
+
+```text
+需求 →（簡單、已授權、預先明確的規則）→ llmtool 執行
+     └→（需拆分、判斷、跨 AI 協調）→ PM Agent（可由 Codex 啟動）
+                                         ↓ 已授權的計畫
+                                        llmtool
+                                         ↓
+                          Codex / Claude / AGY / 公司 LLM / 本機工具
+                                         ↓
+                                   結果／證據 → PM
+```
+
+### 尚待討論
+
+- PM Agent 是 Codex Developer 開啟的 Subagent、另一個 Codex PM Session，還是可替換 Provider 的獨立 Role？不預先選定。
+- PM Agent 何時啟動／停止、誰能啟動、如何保留跨 Session Task/Decision、如何處理 Codex Quota 耗盡？
+- PM 能否提出 Git 提交／合併建議、如何保持真正的獨立驗收與可追溯責任？
+- 如何在不加入第二套 Controller 或額外永久 Background AI 的前提下完成 M2？
+
 ## OPEN：後續逐項討論，不預先授權或排程開發
 
 | ID | 議題 | 決策狀態 | 備註 |
 |---|---|---|---|
 | D-002 | Git Executor：如何從 LLM 文字建議到本機檔案修改、Git Commit/Push、PR | OPEN | 需對照 F2/A11b 權限與現有能力 |
-| D-003 | llmtool 輕量化：PM Agent 負責判斷與拆分，llmtool 負責執行 | OPEN | 不假定新 PM 架構已定案 |
+| D-003 | PM Agent 詳細設計、Codex 啟動方式／生命週期 | OPEN | D-003a 職責原則已接受；具體機制仍待討論 |
 | D-004 | llmtool 可做的具體工作／最小可用自我開發案例 | OPEN | 区分既有能力、測試、Live 驗收 |
 | D-005 | 任務分流圖、資料路徑、Token/Quota 成本控制與等待／恢復 | OPEN | 需訂驗收與資料證據 |
 | D-006 | Pixel-Crew、codex-claude-code-config 的 PM、跨 Agent 設計是否採用 | OPEN | 避免第二套 Controller |
