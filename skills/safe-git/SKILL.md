@@ -442,6 +442,35 @@ a required independent review, bug hunt, security review, QA or live/runtime gat
 
 Keep one Git writer per publication batch when multiple agents are involved.
 
+## D-007 Codex Cloud / GitHub branch separation (owner decision 2026-10-17)
+
+[Architecture Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172)
+accepts **independent mobile-initiated Codex Cloud development**, not
+llmtool F2 Git-write capability. Coordinator/Integrator may split out
+a Cloud-suitable nonoverlapping work package; the owner starts it from
+the mobile app. Cloud uses only its **task-configured isolated checkout**,
+not the canonical Mac repo or a locally agent-created extra worktree.
+
+- **Before Cloud source changes:** pin unique task owner, permitted paths,
+  base/head, expected outcome and tests; compare local/other Cloud task
+  ownership. Cloud VM independence does not isolate **shared GitHub refs**.
+  Conflicting branch/file ownership means STOP and Integrator reconciliation.
+- **Publication:** only the Cloud-owned feature branch and eligible
+  **Draft PR**, with verified GitHub permission, observed commit/head,
+  diff/CI and actual test evidence. Do not assume push permission, overwrite
+  peer branches, force push or merge main automatically.
+- **Review handoff:** Cloud developer/self-agent review is **pre-review**
+  only. The **owner explicitly passes the completed PR to the existing
+  Integrator reviewer**. That reviewer checks exact task/diff/revision,
+  obtains required **distinct non-author** Security/Functional/QA and
+  Mac-native acceptance, and decides next integration steps only with
+  valid evidence. This one manual Cloud handoff is an owner-chosen
+  exception to the local no-prompt-courier target.
+- **No false PASS:** Cloud CI/offline tests do not establish Mac VPN/auth,
+  native process/OS behavior, production company LLM, F2 actual local
+  mutation, original Integrator Session wake, or full A11c M2 cutover.
+  Keep unavailable required gates NOT_TESTED/BLOCKED.
+
 ## Cloud/Mac evidence gate
 
 For llmtool work, follow [the development workflow](../../tools/llmtool/WORKFLOW.md).
