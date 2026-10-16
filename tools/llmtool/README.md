@@ -3051,3 +3051,130 @@ review; a prepared bundle never means tests PASS or Review APPROVE.
 
 This is one local evidence handoff slice, not the complete M2 autonomous cycle,
 Agent wake-up, production review authority, Native/Company Live or F2/S2 execution.
+
+### Cooperative foreground review request / return (original Reviewer only)
+
+```sh
+llmtool task review-request --bundle ABS_PRIVATE_BUNDLE --bundle-sha256 FULL_SHA256 \
+  --expect ABS_PRIVATE_EXPECT --output ABS_NEW_REQUEST --json
+llmtool task review-wait --request ABS_REQUEST --request-sha256 FULL_SHA256 \
+  --receipt EXACT_RECEIPT_PATH --verdict EXACT_VERDICT_PATH --timeout 600 \
+  --output ABS_NEW_REPORT --json
+```
+
+This task-scoped local DATA protocol binds the original Codex author Session
+`01a12f8c-6a46-71c2-a7b3-3e6211ec2e9c` in its fixed Codex root and original
+Claude Independent Reviewer `081de22e-d514-4288-9d1f-48f488979271` in canonical.
+These fixed pins cannot be replaced by a response's claimed role or a new model
+process. Caller and environment identities remain cooperative claims, not Host
+authentication. The original Reviewer must separately attest actual receipt/use
+and source review in its signed-in GitHub review. Do not synthesize its real
+receipt/verdict or execute unreviewed candidate code in its Session.
+
+`review-request` revalidates the existing bundle digest, independent EXPECT,
+referenced TaskContract/events/evidence, current UTC readiness and non-author
+handoff. It binds exact task/run/epoch/source/base, private bundle/EXPECT references,
+complete changed paths, criterion IDs and evidence reference IDs. Its unpredictable
+request ID and expiry (at most 15 minutes, never later than readiness expiry) are
+DATA, not an authorization grant. The new private request contains static writer
+instructions and complete bound receipt/verdict JSON examples with explicit
+placeholders for actual request/receipt digests and observed timestamps.
+
+Public `REQUEST_PREPARED` is **not** delivered, read, review-started or approved.
+There is no queue/send/resume/provider/network/GitHub action or Agent launch.
+The original idle Reviewer wake-up interface remains unavailable. Arrange an
+actually active Reviewer slot separately; a GitHub post alone is not that evidence.
+No Owner-written JSON or copied verdict is required.
+
+For each recipient artifact, the original Reviewer uses its own ordinary trusted
+read/evidence-writing tools, not the candidate package. Follow this publication
+order: create the exact named DATA file exclusively, ensure mode 0600, finish and
+flush/close it, compute SHA256 of those actual bytes, then exclusively publish and
+close `DATA_PATH.ready`. Each ready marker has exactly:
+
+```json
+{"schema_version":1,"artifact_sha256":"ACTUAL_DATA_SHA256"}
+```
+
+Do not overwrite, rename over or clean any existing artifact/marker. Parent must
+already be physical, owner0700 and outside protected workspaces. DATA/markers must
+be owner0600 regular nonsymlink single-link files. Ready markers are completion
+indicators, not identity proof or locks. Missing marker means uncommitted DATA is
+not read; a committed malformed/missing/changed/aliased artifact is BLOCKED.
+
+Recipient receipt schema (all fields required, no extras; substitute the complete
+bindings/examples from the request):
+
+```json
+{
+  "schema_version":1,"kind":"REVIEW_RECEIPT",
+  "request_id":"BOUND_REQUEST_ID","request_sha256":"ACTUAL_REQUEST_SHA256",
+  "task":{"task_id":"BOUND_TASK","run_id":"BOUND_RUN",
+          "contract_version":1,"contract_digest":"BOUND_CONTRACT_SHA256"},
+  "epoch":1,"source_sha":"BOUND_SOURCE_SHA","base_sha":"BOUND_BASE_SHA",
+  "bundle_sha256":"BOUND_BUNDLE_SHA256",
+  "reviewer":{"agent_id":"BOUND_REVIEWER_AGENT","session_id":"BOUND_REVIEWER_SESSION",
+              "role":"REVIEWER","root":"BOUND_REVIEWER_ROOT",
+              "common_dir":"BOUND_COMMON_DIR","branch":"BOUND_REVIEWER_BRANCH"},
+  "received_at":"ACTUAL_SECOND_RESOLUTION_UTC_Z","bundle_read":true
+}
+```
+
+Result uses the same bound common fields and a **different** kind:
+
+```json
+{
+  "schema_version":1,"kind":"REVIEW_VERDICT",
+  "request_id":"BOUND_REQUEST_ID","request_sha256":"ACTUAL_REQUEST_SHA256",
+  "task":{"task_id":"BOUND_TASK","run_id":"BOUND_RUN",
+          "contract_version":1,"contract_digest":"BOUND_CONTRACT_SHA256"},
+  "epoch":1,"source_sha":"BOUND_SOURCE_SHA","base_sha":"BOUND_BASE_SHA",
+  "bundle_sha256":"BOUND_BUNDLE_SHA256",
+  "reviewer":{"agent_id":"BOUND_REVIEWER_AGENT","session_id":"BOUND_REVIEWER_SESSION",
+              "role":"REVIEWER","root":"BOUND_REVIEWER_ROOT",
+              "common_dir":"BOUND_COMMON_DIR","branch":"BOUND_REVIEWER_BRANCH"},
+  "receipt_sha256":"ACTUAL_RECEIPT_SHA256","reviewed_sha":"BOUND_SOURCE_SHA",
+  "completed_at":"ACTUAL_SECOND_RESOLUTION_UTC_Z",
+  "security":"APPROVE","functional":"APPROVE","findings":[],
+  "criterion_evidence":[{"criterion_id":"BOUND_CRITERION","evidence_refs":["source-manifest"]}]
+}
+```
+
+Separate Security/Functional values are APPROVE, CHANGES_REQUIRED or BLOCKED.
+Each criterion must occur exactly once; evidence references must come from the
+request. Findings (at most 32) have exactly finding_id, category (Security or
+Functional), severity (SEV-0 through SEV-4), priority (P0 through P3), release_blocker
+(boolean), summary/reproducer (each 1..1024 UTF-8 bytes, screened), path (selected
+changed path), criterion_id and evidence_refs. IDs are unique. A mandatory blocker
+or SEV-0/1/2 finding prevents that category's APPROVE. These are structured
+**reports**, never a new meaning of model text as approval. Receipt time must be
+after request creation; completion cannot precede receipt or follow UTC expiry.
+
+`review-wait` only checks the exact receipt/verdict names fixed inside the one
+private request directory, at most twice a second, with no Git/network/provider
+operations or background worker. Timeout is integer 0..600 (default 300), including
+input validation, parsing and output. Timeout 0 performs one non-sleeping status
+pass, with its local I/O bounded to 1 second; it never starts a waiting loop.
+Request/recipient DATA are capped at 64KiB, marker at 1KiB, private report at128KiB,
+public JSON at16KiB. Existing bundle/input/artifact read limits remain unchanged.
+Symlinks, FIFOs/devices, aliases, oversized/invalid Unicode/deep/duplicate-key JSON,
+wrong identities/digests/paths, changed inodes, expiry and unsafe metadata fail
+closed. Request/inputs/committed artifacts are rechecked before output. Output is
+new/private/O_EXCL; failure evidence is preserved, never automatically cleaned.
+
+Final observations keep REQUEST_PREPARED, RECEIPT_REPORTED and VERDICT_REPORTED
+distinct. Only both correctly bound committed reports before deadline give exit0
+`BOUND_REVIEW_REPORT`. Missing result/receipt is WAIT_TIMEOUT/nonzero (with any
+partial receipt observation retained); verdict without receipt is BLOCKED.
+Interrupt is nonzero. Actual elapsed and digests are recorded, not invented model
+turn/token counters. Runtime/identity remain NOT_VERIFIED/CALLER_REPORTED and
+authorized=false even when both reported verdicts APPROVE. A BLOCKED verdict can
+be successfully *received* without becoming review PASS. Late/unknown reports are
+preserved, never silently reused, resent, retried or transformed into TaskEvents.
+
+Synthetic file roundtrips test the protocol only. Real acceptance additionally
+requires the original Reviewer's own receipt/result plus formal nonauthor review
+on the actual PR HEAD, and Developer receiving them through llmtool. If no active
+Reviewer is available or the bounded wait times out, STOP with real-use incomplete;
+do not call a new model or extend indefinitely. This is not auto-wake, a daemon,
+Git polling, #153 automation, another task ledger/approval store or complete M2.
