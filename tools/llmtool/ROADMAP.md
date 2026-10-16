@@ -18,6 +18,24 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 **Product goal:** `llmtool` coordinates scoped Codex CLI implementation, independent Claude CLI review, deterministic tests, bounded repair, permitted Git/PR publication and optional permitted company-LLM triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
+### Owner-accepted collaboration architecture and mobile Codex Cloud lane (2026-10-17)
+
+[Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172) and
+[Draft decision PR #173](https://github.com/davidcatcat/davidcattoolsproject/pull/173)
+record D-001, D-002a, D-003a/b/c, D-005a and D-007 as ACCEPTED architecture/workflow,
+not IMPLEMENTED or LIVE_VERIFIED product capabilities.
+
+- **Product and PM:** the owner discusses goals and decisions with ChatGPT Coordinator. For complex approved work, the owner provides **one initial prompt** to the **existing canonical Codex Integrator**, serving simultaneously as **PM Agent + Integration Manager**. The Integrator decides decomposition, dependency, provider/Worker selection, number of agents and independent review; no permanently separate PM CLI.
+- **llmtool runtime:** receives an approved plan and handles authorized Provider calls, bounded Worker lifecycle, policy, Git/action gates, Task/Session/run state, evidence, events, usage and handoff. **llmtool must not become a model-based PM/semantic router.** The desired Worker completion -> llmtool verified event -> same Integrator resume is **TARGET / NOT_LIVE_VERIFIED**. Do not add another controller or assert GitHub comments wake a Mac CLI.
+- **Simple work:** clear, independently authorized and objectively verifiable L0/L1/L2 work may eventually go through llmtool chat without PM; mechanical Git state/status can use deterministic tools with no LLM. This does **not** activate real Repo write, Commit, Push or PR in llmtool; F2/A11b gates remain.
+- **Company LLM:** company gw is API-only advisory behind llmtool, not a direct Shell/Git executor. Quality-first, task-class-specific route evidence and data-egress permission precede use; verify serious errors, independent tests/reviews and **net** premium-Token saving including PM, retries and repairs. Unknown usage/cost is UNKNOWN; no blanket company-first.
+- **D-007 parallel mobile Codex Cloud:** Coordinator or Integrator may identify a bounded, **nonoverlapping** package for Codex Cloud. The owner can launch it on ChatGPT mobile in a previously published Cloud environment, with no local Mac/llmtool/VPN dependency. Cloud independently develops, tests, self-pre-reviews and, when GitHub-authorized, publishes a unique feature branch/Draft PR. **The owner then manually gives the completed PR to the existing Integrator reviewer** for final integration review, necessary distinct non-author Security/Functional/QA and Mac-native checks. Cloud self-review alone is not independent acceptance.
+- **Separate machines, shared GitHub:** Cloud cannot presume Mac local data/Keychain/VPN or unpushed changes, but Cloud GitHub writes still affect common remote refs; verify branch ownership, base/head SHA, nonoverlapping files and push rights. No Cloud automatic main merge, original Mac Session auto-wake, F2 authority or A11c M2 PASS is implied. Environment is created/published on web/desktop before supported mobile use: [Codex Cloud guide](https://help.openai.com/en/articles/20001545-using-codex-cloud).
+
+This is a **parallel delivery lane, not a new A milestone**. Continue the single
+A11b/A11c Roadmap and existing M1a/M1b/M2 gates. Cloud production/CI progress
+cannot replace required canonical Mac Live acceptance for native llmtool cutover.
+
 ### One A-roadmap with legacy C references (no duplicate implementation)
 
 | Existing C alias, for old evidence only | **A owner / disposition** | Current truth / gate |
