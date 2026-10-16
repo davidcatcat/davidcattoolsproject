@@ -239,6 +239,185 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
         self.assertIsNone(process.returncode)
         self.assertGreaterEqual(process.wait.call_args.kwargs['timeout'],0)
 
+    def test_expired_deadline_still_signals_owned_group_with_zero_wait(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import math, subprocess, sys, time
+        events = []
+        process = Mock(returncode=None, pid=12345)
+        process._llmtool_owned_pgid = 12345
+        process._llmtool_owner_pid = os.getpid()
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            raise subprocess.TimeoutExpired('fake', timeout)
+        process.wait.side_effect = wait
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=lambda pgid, sig: events.append(('killpg', pgid, sig))):
+            self.assertFalse(bounded_terminate(process, time.monotonic() - 1.0))
+        self.assertEqual(events, [('killpg', 12345, signal.SIGKILL), ('wait', 0)])
+        self.assertTrue(process._llmtool_cleanup_pending)
+        self.assertIsNone(process.returncode)
+
+        events.clear()
+        reaped = Mock(returncode=None, pid=23456)
+        reaped._llmtool_owned_pgid = 23456
+        reaped._llmtool_owner_pid = os.getpid()
+        def wait_reaped(*, timeout=None):
+            events.append(('wait', timeout))
+            reaped.returncode = -signal.SIGKILL
+            return reaped.returncode
+        reaped.wait.side_effect = wait_reaped
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=lambda pgid, sig: events.append(('killpg', pgid, sig))):
+            self.assertTrue(bounded_terminate(reaped, time.monotonic() - 0.5))
+        self.assertEqual(events, [('killpg', 23456, signal.SIGKILL), ('wait', 0)])
+        self.assertFalse(reaped._llmtool_cleanup_pending)
+
+        for bad_deadline in (None, 'bad', math.nan, math.inf, -math.inf):
+            bad = Mock(returncode=None, pid=12345)
+            bad._llmtool_owned_pgid = 12345
+            bad._llmtool_owner_pid = os.getpid()
+            with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
+                self.assertFalse(bounded_terminate(bad, bad_deadline))
+                kill.assert_not_called()
+            bad.kill.assert_not_called()
+            bad.wait.assert_not_called()
+
+        if os.name == 'posix':
+            child = subprocess.Popen(
+                [sys.executable, '-B', '-I', '-c', 'import time; time.sleep(30)'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                start_new_session=True)
+            try:
+                with CLIProcessLifecycle('claude-cli', deadline=time.monotonic() + 5) as lifecycle:
+                    lifecycle.own(child)
+                    lifecycle.deadline = time.monotonic() - 1.0
+                child.wait(timeout=2)
+                self.assertIsNotNone(child.returncode)
+                self.assertNotEqual(child.returncode, 0)
+            finally:
+                for stream in (child.stdin, child.stdout, child.stderr):
+                    if stream is not None and not stream.closed:
+                        stream.close()
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=2)
+
+    def test_group_eperm_falls_back_to_direct_kill_and_retains_pending_unknown(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        events = []
+        process = Mock(returncode=None, pid=12345)
+        process._llmtool_owned_pgid = 12345
+        process._llmtool_owner_pid = os.getpid()
+        process.kill.side_effect = lambda: events.append('kill')
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            process.returncode = -signal.SIGKILL
+            return process.returncode
+        process.wait.side_effect = wait
+        def fail_killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            raise PermissionError('synthetic EPERM')
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=fail_killpg):
+            self.assertFalse(bounded_terminate(process, time.monotonic() + 0.5))
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0], ('killpg', 12345, signal.SIGKILL))
+        self.assertEqual(events[1], 'kill')
+        self.assertEqual(events[2][0], 'wait')
+        self.assertGreaterEqual(events[2][1], 0)
+        self.assertLessEqual(events[2][1], 0.5)
+        self.assertTrue(process._llmtool_cleanup_pending)
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+            process.kill.reset_mock()
+            process.wait.reset_mock()
+            self.assertFalse(bounded_terminate(process, time.monotonic() + 0.5))
+            killpg.assert_not_called()
+            process.kill.assert_not_called()
+            process.wait.assert_not_called()
+        self.assertTrue(process._llmtool_cleanup_pending)
+
+        failing_fallback = Mock(returncode=None, pid=34567)
+        failing_fallback._llmtool_owned_pgid = 34567
+        failing_fallback._llmtool_owner_pid = os.getpid()
+        failing_fallback.kill.side_effect = PermissionError('fallback EPERM')
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=PermissionError('group EPERM')):
+            self.assertFalse(bounded_terminate(failing_fallback, time.monotonic() + 0.5))
+        failing_fallback.kill.assert_called_once_with()
+        failing_fallback.wait.assert_not_called()
+        self.assertTrue(failing_fallback._llmtool_cleanup_pending)
+
+        unowned = Mock(returncode=None, pid=45678)
+        unowned._llmtool_owned_pgid = 45678
+        unowned._llmtool_owner_pid = os.getpid() + 1
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=PermissionError('group EPERM')) as killpg:
+            self.assertFalse(bounded_terminate(unowned, time.monotonic() + 0.5))
+            killpg.assert_not_called()
+        unowned.kill.assert_not_called()
+        unowned.wait.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process groups')
+    def test_own_validation_failure_cleans_up_fresh_child_without_group_kill_and_retains_unknown(self):
+        import subprocess, sys, time
+        for mode in ('mismatch', 'oserror'):
+            with self.subTest(mode=mode):
+                child = subprocess.Popen(
+                    [sys.executable, '-B', '-I', '-c', 'import time; time.sleep(30)'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True)
+                try:
+                    side_effect = (OSError('synthetic getpgid failure')
+                                   if mode == 'oserror' else (lambda pid: pid + 1))
+                    with patch('llmtool.providers.cli_lifecycle.os.getpgid', side_effect=side_effect), \
+                            patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+                        with self.assertRaises(LLMToolError) as caught:
+                            with CLIProcessLifecycle('claude-cli', deadline=time.monotonic() + 1.0) as lifecycle:
+                                lifecycle.own(child)
+                        killpg.assert_not_called()
+                    self.assertEqual(caught.exception.diagnostic.code.value, 'PROVIDER_RUNTIME_ERROR')
+                    self.assertIsNone(getattr(child, '_llmtool_owned_pgid', None))
+                    self.assertEqual(getattr(child, '_llmtool_owned_pid', None), child.pid)
+                    self.assertFalse(lifecycle.cleanup_confirmed)
+                    self.assertTrue(child._llmtool_cleanup_pending)
+                    child.wait(timeout=2)
+                    self.assertIsNotNone(child.returncode)
+                    self.assertNotEqual(child.returncode, 0)
+                    with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg, \
+                            patch.object(child, 'kill') as direct_kill:
+                        lifecycle.stop()
+                        killpg.assert_not_called()
+                        direct_kill.assert_not_called()
+                    self.assertFalse(lifecycle.cleanup_confirmed)
+                    self.assertTrue(child._llmtool_cleanup_pending)
+                finally:
+                    for stream in (child.stdin, child.stdout, child.stderr):
+                        if stream is not None and not stream.closed:
+                            stream.close()
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=2)
+
+        for invalid in (
+            Mock(returncode=0, pid=12345),
+            Mock(returncode=None, pid=1),
+            Mock(returncode=None, pid=0),
+            Mock(returncode=None, pid=-5),
+            Mock(returncode=None, pid='12345'),
+        ):
+            with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+                with self.assertRaises(LLMToolError):
+                    with CLIProcessLifecycle('claude-cli', deadline=time.monotonic() + 1.0) as lifecycle:
+                        lifecycle.own(invalid)
+                killpg.assert_not_called()
+            invalid.kill.assert_not_called()
+            invalid.wait.assert_not_called()
+            self.assertIsNone(getattr(invalid, '_llmtool_owned_pid', None))
+            self.assertIsNone(getattr(invalid, '_llmtool_owned_pgid', None))
+            self.assertFalse(lifecycle.cleanup_confirmed)
+
 
 if __name__ == "__main__":
     unittest.main()

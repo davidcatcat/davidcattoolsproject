@@ -42,19 +42,34 @@ def bounded_terminate(process, deadline):
     This is cooperative host ownership, not protection against hostile same-UID code.
     """
     if process.returncode is not None:
+        if getattr(process, '_llmtool_group_unconfirmed', None) is True:
+            process._llmtool_cleanup_pending = True
+            return False
+        if getattr(process, '_llmtool_cleanup_pending', None) is True:
+            process._llmtool_cleanup_pending = False
         return True
-    if (type(deadline) not in (int, float) or not math.isfinite(deadline) or
-            type(process.pid) is not int or process.pid <= 1 or
-            getattr(process, '_llmtool_owner_pid', None) != os.getpid() or
-            getattr(process, '_llmtool_owned_pgid', None) != process.pid):
+    owner_ok = (type(deadline) in (int, float) and math.isfinite(deadline) and
+                type(process.pid) is int and process.pid > 1 and
+                getattr(process, '_llmtool_owner_pid', None) == os.getpid())
+    group_owned = (owner_ok and
+                   getattr(process, '_llmtool_owned_pgid', None) == process.pid)
+    child_owned = (owner_ok and
+                   (group_owned or
+                    getattr(process, '_llmtool_owned_pid', None) == process.pid))
+    if not child_owned:
         return False
     process._llmtool_cleanup_pending = True
-    if deadline <= time.monotonic():
-        return False
+    if not group_owned:
+        process._llmtool_group_unconfirmed = True
     try:
-        if os.name == 'posix':
-            os.killpg(process.pid, signal.SIGKILL)
+        if group_owned and os.name == 'posix':
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except PermissionError:
+                process._llmtool_group_unconfirmed = True
+                process.kill()
         else:
+            process._llmtool_group_unconfirmed = True
             process.kill()
     except ProcessLookupError:
         pass
@@ -64,8 +79,11 @@ def bounded_terminate(process, deadline):
         process.wait(timeout=max(0, deadline - time.monotonic()))
     except (subprocess.TimeoutExpired, OSError):
         return False
-    process._llmtool_cleanup_pending = process.returncode is None
-    return not process._llmtool_cleanup_pending
+    if process.returncode is None or getattr(process, '_llmtool_group_unconfirmed', None) is True:
+        process._llmtool_cleanup_pending = True
+        return False
+    process._llmtool_cleanup_pending = False
+    return True
 
 
 class CLIProcessLifecycle:
@@ -120,14 +138,28 @@ class CLIProcessLifecycle:
         self.process = process
         if self.deadline is not None:
             self.cleanup_confirmed = False
+            process._llmtool_owner_pid = None
+            process._llmtool_owned_pid = None
+            process._llmtool_owned_pgid = None
+            process._llmtool_cleanup_pending = True
+            process._llmtool_group_unconfirmed = True
             # Only the trusted opt-in launcher uses this seam, immediately after
             # its own start_new_session Popen. A reaped PID is never newly pinned.
-            if (type(process.pid) is not int or process.returncode is not None or
-                    os.name != 'posix' or os.getpgid(process.pid) != process.pid):
+            if (type(process.pid) is not int or process.pid <= 1 or
+                    process.returncode is not None):
                 raise coded_error('CLI child ownership is unknown',
                                   'PROVIDER_RUNTIME_ERROR', self.component)
             process._llmtool_owner_pid = os.getpid()
+            process._llmtool_owned_pid = process.pid
+            try:
+                pgid = os.getpgid(process.pid) if os.name == 'posix' else None
+            except OSError:
+                pgid = None
+            if pgid != process.pid:
+                raise coded_error('CLI child ownership is unknown',
+                                  'PROVIDER_RUNTIME_ERROR', self.component)
             process._llmtool_owned_pgid = process.pid
+            process._llmtool_group_unconfirmed = False
         self.check()
 
     def check(self):
