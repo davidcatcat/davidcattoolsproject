@@ -110,17 +110,55 @@
 
 ### 尚待討論
 
-- PM Agent 是 Codex Developer 開啟的 Subagent、另一個 Codex PM Session，還是可替換 Provider 的獨立 Role？不預先選定。
+- **已由 D-003b 確定**：現有 Codex Integrator 兼任 PM，不另設固定 PM CLI；是否在該 Integrator 內使用子代理，以及其他模型的替代策略仍待技術驗證。
 - PM Agent 何時啟動／停止、誰能啟動、如何保留跨 Session Task/Decision、如何處理 Codex Quota 耗盡？
 - PM 能否提出 Git 提交／合併建議、如何保持真正的獨立驗收與可追溯責任？
 - 如何在不加入第二套 Controller 或額外永久 Background AI 的前提下完成 M2？
+
+## D-003b — 現有 Codex Integrator 兼任 PM，自主判斷是否需要多 Agent
+
+- **決策狀態：ACCEPTED（使用者 2026-10-17 明確同意，並補充「如果需要多 agent，請該 Integrator 自己判斷」）**
+- **實作狀態：ROLE DECISION ONLY / llmtool M2 自動多 AI 閉環未 Live 驗收**
+
+### 已確認的角色與工作方式
+
+1. **現有的 Codex Integrator CLI Session 同時擔任 PM Agent / Integration Manager**，通常使用既有 canonical 主 Repository 作為工作環境；**不另外啟動一個固定的 Codex PM CLI**，也不為了 PM 再建一個 worktree 或獨立 Controller。
+2. 對大型／多階段需求，**Integrator／PM 自己判斷是否需要多 Agent**、是否拆成子任務、需要哪些 Agent／Worker、依賴順序與何時呼叫其他 AI；使用者不必逐項做技術分工，不必負責傳遞提示詞。
+3. **單一 Agent 足以完成的工作就不強制開多 Agent**；多 Agent 是因工作性質與審查需求而按需使用，不是預設越多越好。任務簡單且符合 D-002a 時可直接走 llmtool 已授權流程，無須喚起 PM。
+4. Integrator／PM 可規劃及協調 Codex Developer、Claude Reviewer、公司 LLM 和其他已驗證的 Workers；llmtool 只負責依**已授權的計畫**執行、路由、狀態／成本／證據記錄與交接，不自行做跨 Agent 語意派工決策。
+5. Integrator／PM 同時是 Integration Manager：收取並檢查工作成果、核對測試／PR 證據、安排已授權整合；**不能用 PM 身分跳過獨立的 Security/Functional 審查**，也不得將其自行編寫或修改的內容視為已被獨立核准。
+6. Integrator／PM 的「自行判斷需不需要多 Agent」是**工作規劃與分工權**，不是新授予的檔案／Git mutation、Provider egress、憑證、額外付費、無限重試或正式上線權限；仍需遵守既有 Task Contract、預算與授權，已無可用額度的 Provider 應等待或按預先核准的路徑處理。
+7. **PM 可從現有 Integrator Session 負責任務，也可研究在該 Session 按需使用子代理**；具體 CLI Subagent 能力、呼叫機制與跨 Session 協作仍待後續實測，不能把此架構決議當成已完成的產品功能。
+
+### 目標工作流
+
+```text
+Owner 大型需求
+  → Codex Integrator (= PM Agent + Integration Manager)
+       ├─ 判斷單一 Agent 是否足夠
+       ├─ 必要時拆工與挑選多 Agent
+       └─ 交付工作計畫／授權範圍
+  → llmtool（確定性執行與追蹤，依實際可用的整合階段）
+       ├─ Codex Developer（實作）
+       ├─ Claude Reviewer（獨立驗證）
+       ├─ 公司 LLM API（已驗證且授權的輔助工作）
+       └─ 其他已驗證 Agent / deterministic tools
+  → llmtool 回傳證據
+  → 同一 Codex Integrator／PM 整合／回報或 STOP
+```
+
+### 仍未決定／未完成
+
+- 以何種最小整合方式完成 Codex Integrator → llmtool → Workers 的實際指派、喚醒、會話保留及失敗恢復；M2 Live E2E 仍未驗證。
+- Integrator 自主多 Agent 的具體預算、任務上限、額度耗盡替代與防止無限重試；不因本決策自動提高花費。
+- 若將來要把 PM 角色從 Codex Integrator 移轉到別的模型，需另行討論；**此階段的已選方向是現有 Integrator 兼任 PM**。
 
 ## OPEN：後續逐項討論，不預先授權或排程開發
 
 | ID | 議題 | 決策狀態 | 備註 |
 |---|---|---|---|
 | D-002 | Git Executor：如何從 LLM 文字建議到本機檔案修改、Git Commit/Push、PR | OPEN | 需對照 F2/A11b 權限與現有能力 |
-| D-003 | PM Agent 詳細設計、Codex 啟動方式／生命週期 | OPEN | D-003a 職責原則已接受；具體機制仍待討論 |
+| D-003 | PM／Integrator 的多 Agent 執行機制、生命週期與成本上限 | OPEN | D-003a 職責分離與 D-003b Integrator 兼 PM、按需多 Agent 已接受；技術實作仍待討論 |
 | D-004 | llmtool 可做的具體工作／最小可用自我開發案例 | OPEN | 区分既有能力、測試、Live 驗收 |
 | D-005 | 任務分流圖、資料路徑、Token/Quota 成本控制與等待／恢復 | OPEN | 需訂驗收與資料證據 |
 | D-006 | Pixel-Crew、codex-claude-code-config 的 PM、跨 Agent 設計是否採用 | OPEN | 避免第二套 Controller |
