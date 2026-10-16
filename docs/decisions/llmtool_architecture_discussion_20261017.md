@@ -153,14 +153,82 @@ Owner 大型需求
 - Integrator 自主多 Agent 的具體預算、任務上限、額度耗盡替代與防止無限重試；不因本決策自動提高花費。
 - 若將來要把 PM 角色從 Codex Integrator 移轉到別的模型，需另行討論；**此階段的已選方向是現有 Integrator 兼任 PM**。
 
+## D-003c — ChatGPT → Integrator/PM → llmtool → Worker → Integrator 的單次交接持續閉環
+
+- **決策狀態：ACCEPTED（使用者 2026-10-17 明確描述所需的產品工作流）**
+- **產品現況：TARGET / M2 跨 CLI Live 閉環未完成**
+- **不表示授權實際寫入主 Repo、無限制 Token 使用或自動 Merge**
+
+### 使用者體驗與責任
+
+1. **需求入口：ChatGPT**。使用者與 ChatGPT Coordinator 先充分討論要做的項目；只有使用者確認執行方向時，Coordinator 才產出一份 Integrator/PM 能理解並執行的完整提示。
+2. **人工交接限定一次**：使用者自行將初始提示貼到既有主 Repository 的 **Codex Integrator CLI**（兼 PM Agent）。之後一般的子任務分派、結果回傳及下一輪續工，不應再要求使用者重複說「review repo」或搬運 Agent 提示／報告。
+3. **Integrator/PM 決策**：評估工作、拆解、判斷是否啟動多 Agent、選擇 Worker/Provider、依賴與驗收標準，透過 llmtool 交付可執行／已授權的工作計畫。
+4. **llmtool 是確定性的執行與協作系統**：接收工作計畫、核對可用 Provider / 任務合約 / 資料邊界 / Git 權限 / 額度、啟動已批准工作、等待執行、保留狀態及事件、驗證工作身分與輸出。它不替 PM 進行複雜語意派工決策。
+5. **Workers 執行與回報**：各自完成分派工作、測試；在各自授權的 Worktree 與分支上記錄 Commit，符合該任務 Git 權限時 Push 自己的分支／提交 Draft PR；提交可核實的完成事件與報告（至少 task_id、agent/role、branch、commit SHA、結果／測試／review evidence、失敗與未知），不是僅憑模型宣稱 DONE。
+6. **事件驅動回到 PM**：llmtool 在 Worker 結束、需要審查、阻礙、超預算或完成時，可靠地通知／喚醒既有 Integrator/PM，由其閱讀原始可信證據及摘要，自主決定下一個步驟或修復；簡單的等待、狀態查詢與排程無需持續耗費 PM 模型 Token。
+7. **閉環終止條件**：Integrator 持續推進到經證據支持的 `DONE`（完成並通知使用者）、`NEEDS_DECISION`（真正需要使用者產品／授權決策）、或 `STOP/BLOCKED`（安全、品質、額度、環境或有限重試無法滿足）。回報包含實際 Git/PR 引用、驗證與尚未完成項目，不捏造通過結果。
+8. **保留原先接受的簡單路徑**：D-002a 仍可在事先明確授權／無跨 Agent 決策的情形直接由 llmtool chat 執行，不強制喚醒 PM。
+
+### 概念回路（目標，不是已完成技術能力）
+
+```text
+使用者 ↔ ChatGPT 討論、確認需求
+               │ 產生一份完整 Integrator/PM 提示
+               ▼ 使用者只貼一次
+Codex Integrator CLI (= PM / Integration Manager)
+       │ 任務拆分、決策與多 Agent 選擇
+       ▼
+llmtool：Policy / Dispatch / Events / State / Evidence
+       │ 依計畫與既有權限
+       ├── Codex Developer
+       ├── Claude Reviewer
+       ├── 公司 LLM API（僅限通過品質與資料路由的工作）
+       └── 其他合格 Worker / 確定性本機工具
+       │
+       ├── 已授權的 Commit / Push / Draft PR 與驗證證據
+       └── 可靠完成／阻礙事件
+               │
+               ▼
+llmtool 通知或喚醒 Integrator，保留 context / task identity
+               │
+               ├── 尚需工作：由 PM 再決策 → llmtool（循環）
+               ├── 需要 Owner 决策：NEEDS_DECISION → 使用者
+               └── 驗收完成：DONE → 使用者
+```
+
+### 重要的技術待議事項（不因本決議自動通過）
+
+- 現有 Codex CLI Session 如何做到可靠喚醒／續接並證明同一 Task/Session 身分？不能假定已有可驗證的 callback 或 resume 功能。
+- llmtool 事件格式、去重／replay、防冒用、Worker 工作目錄／Git SHA 綁定與阻礙恢復，盡量沿用現有 A11c state/event/controller，**不做第二套長期控制器**。
+- Worker Push 的授權界線、獨立 Reviewer Gate、CI 與 Draft PR／Merge 的差別沿用 A11b/F2；是否 Push 不由 Agent 自稱完成決定。
+- Token 不夠、VPN 斷線、Claude Reviewer 不可用時，PM 應等待、保留進度、視已授權的其他 Provider 能力判斷下一步，不能用未經品質驗證的低階替代模型偷換必要審查。
+
+## D-005a — 公司 LLM 分流的最高原則：節省主模型 Token 且不明顯犧牲品質
+
+- **決策狀態：ACCEPTED（使用者 2026-10-17 強調最重要的品質底線）**
+- **產品現況：GOAL / 公司 LLM 全面生產路由與品質／成本 E2E 尚未驗證**
+
+1. 公司 `gw` API 的主要產品價值，是**減少 Codex/Claude 等主模型不必要的 Token／額度消耗**，不是取代所有 AI 的能力，也不是為了使用公司 LLM 而使用。
+2. **品質優先於節省**：公司 LLM 的錯誤不能離譜，不可因便宜就容忍關鍵邏輯錯誤、錯誤的 Git 變更／指令、不實根因或憑空捏造測試與審查證據。沒有足夠的任務品質證據時，公司路徑停留在候選／輔助；不能主張生產已可靠。
+3. **按任務類型測量品質**：先從公司 LLM 比較擅長且允許資料外傳的低風險項目試做（如有界 log/test 分類、摘要、Commit Message、簡單文件建議）；以真實題目、客觀檢查及必要的獨立強模型抽查比對，評估誤判／漏判、修復成本和採用結果，再決定該 route 能否開啟。
+4. **計算實際淨效益**：不能只計公司模型的報告；要把 Coordinator/PM、重試、跨模型驗證、錯誤修復、人工介入，以及來源中可觀測的 Codex/Claude Token/Quota 一起考慮。成本資料不完整就標記 UNKNOWN，不宣稱已經省錢或不虛構主模型訂閱額度與 API Token 的換算。
+5. **失敗即回退，不盲目重試**：公司輸出缺證據、格式不符、品質不達標時，依已核准路徑升級給較強模型／PM，或明確 STOP／等待額度，不允許「低成本」資料直接支配正式 Git 修改、獨立 Review 或自動 Merge。
+6. **資料與網路授權仍必要**：公司 LLM 只有 API；透過 VPN 連線，哪一類 Repo Diff／測試 Log／程式原始碼能送出必須分別確定允許範圍，不能因同屬公司就無條件外傳。
+
+### 尚待量化
+
+- 針對各種工作定義 **品質下限／容錯門檻、誤判等級、回退觸發器、抽樣規模及淨節省基準**。目前不預設某個百分比已達成。
+- 已有實驗只支援特定 L01 大型 test-triage 路徑，**不能將其外推成所有公司 LLM 工作都節省 Token**。
+
 ## OPEN：後續逐項討論，不預先授權或排程開發
 
 | ID | 議題 | 決策狀態 | 備註 |
 |---|---|---|---|
 | D-002 | Git Executor：如何從 LLM 文字建議到本機檔案修改、Git Commit/Push、PR | OPEN | 需對照 F2/A11b 權限與現有能力 |
-| D-003 | PM／Integrator 的多 Agent 執行機制、生命週期與成本上限 | OPEN | D-003a 職責分離與 D-003b Integrator 兼 PM、按需多 Agent 已接受；技術實作仍待討論 |
+| D-003 | PM／Integrator 自動喚醒、Worker event／handoff、生命週期實作 | OPEN | D-003a/b/c 角色、單次交接與持續閉環目標已接受；技術實作仍待驗證 |
 | D-004 | llmtool 可做的具體工作／最小可用自我開發案例 | OPEN | 区分既有能力、測試、Live 驗收 |
-| D-005 | 任務分流圖、資料路徑、Token/Quota 成本控制與等待／恢復 | OPEN | 需訂驗收與資料證據 |
+| D-005 | 任務分流品質／Token 淨效益量化、資料路徑、額度控制 | OPEN | D-005a 品質優先的節省原則已接受；路由驗收標準仍待決定 |
 | D-006 | Pixel-Crew、codex-claude-code-config 的 PM、跨 Agent 設計是否採用 | OPEN | 避免第二套 Controller |
 
 ## 記錄規則
