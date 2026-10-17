@@ -14,7 +14,7 @@ from .providers import create_client
 from .providers.base import Reply
 from .retrieval_files import (
     MAX_SELECTED_FILES, MAX_SCOPES, MAX_TOTAL_EVIDENCE_BYTES,
-    authorize_root, build_manifest, manifest_json,
+    ExclusionCounts, authorize_root, build_manifest_with_exclusions, manifest_json,
     read_selected, relative_path,
 )
 from .terminal import contains_unsafe_controls
@@ -176,8 +176,11 @@ class ContextRetrievalResult:
     planner_runtime: BenchmarkRuntime
     synthesizer_runtime: BenchmarkRuntime
     packet: ContextPacket
+    exclusion_counts: ExclusionCounts = ExclusionCounts()
 
     def __post_init__(self):
+        if type(self.exclusion_counts) is not ExclusionCounts:
+            raise LLMToolError('retrieval result requires typed exclusion counts')
         _provider_name(self.planner_provider)
         _provider_name(self.synthesizer_provider)
         if (not isinstance(self.scopes, (list, tuple)) or not 1 <= len(self.scopes) <= MAX_SCOPES
@@ -211,6 +214,7 @@ class ContextRetrievalResult:
             "synthesizer_provider": self.synthesizer_provider,
             "scopes": list(self.scopes),
             "retrieved_files": [f.to_dict() for f in self.retrieved_files],
+            "exclusion_counts": self.exclusion_counts.to_dict(),
             "planner_runtime": self.planner_runtime.to_dict(),
             "synthesizer_runtime": self.synthesizer_runtime.to_dict(),
             "packet": self.packet.to_dict(),
@@ -229,7 +233,7 @@ def retrieve_context(root, scopes, planner_provider, synthesizer_provider, text=
         planner = resolve_profile_config(planner_provider, require_configured=True)
         synthesizer = resolve_profile_config(synthesizer_provider, require_configured=True)
         task = _task(read_input(text, filename, stdin))
-        manifest = build_manifest(access)
+        manifest, exclusions = build_manifest_with_exclusions(access)
         planner_text, planner_runtime = _complete(planner, PLANNER_SYSTEM, {
             "task": task, "candidates": json.loads(manifest_json(manifest)),
         })
@@ -243,12 +247,14 @@ def retrieve_context(root, scopes, planner_provider, synthesizer_provider, text=
         return ContextRetrievalResult(
             planner_provider, synthesizer_provider, access.scopes,
             tuple(RetrievedFileMetadata(**d.metadata()) for d in documents),
-            planner_runtime, synthesizer_runtime, packet,
+            planner_runtime, synthesizer_runtime, packet, exclusions,
         )
 
 
 def format_retrieval_result(result):
-    lines = ["RETRIEVED FILES:"]
+    counts = result.exclusion_counts
+    lines = ['EXCLUDED FILE COUNTS: oversize=' + str(counts.oversize)
+             + ' obvious_binary_suffix=' + str(counts.obvious_binary_suffix), '', 'RETRIEVED FILES:']
     for item in result.retrieved_files:
         lines.append("- " + item.path + " (" + str(item.byte_count) + " original bytes, sha256 " + item.sha256
                      + ", control_escaped=" + str(item.control_escaped).lower() + ")")

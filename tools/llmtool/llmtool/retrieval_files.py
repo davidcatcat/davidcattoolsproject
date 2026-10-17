@@ -26,6 +26,8 @@ OBVIOUS_BINARY_SUFFIXES = frozenset((
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".gz",
     ".bz2", ".xz", ".7z", ".woff", ".woff2", ".ttf", ".otf", ".mp3", ".mp4",
     ".mov", ".sqlite", ".sqlite3",
+    # Native executables/libraries, bytecode, wheels and common binary stores.
+    ".so", ".dylib", ".dll", ".exe", ".pyc", ".whl", ".bin", ".db",
 ))
 
 
@@ -181,18 +183,47 @@ def manifest_json(manifest):
                       separators=(",", ":"), allow_nan=False)
 
 
+@dataclass(frozen=True)
+class ExclusionCounts:
+    """Count-only, disjoint reasons; oversize takes precedence over suffix."""
+    oversize: int = 0
+    obvious_binary_suffix: int = 0
+
+    def __post_init__(self):
+        values = (self.oversize, self.obvious_binary_suffix)
+        # Directory scans and directly scoped files retain their existing caps.
+        if (any(type(value) is not int or value < 0 for value in values)
+                or sum(values) > MAX_SCAN_ENTRIES + MAX_SCOPES):
+            raise LLMToolError('retrieval exclusion counts are invalid')
+
+    def to_dict(self):
+        return {'oversize': self.oversize, 'obvious_binary_suffix': self.obvious_binary_suffix}
+
+
 def build_manifest(root):
+    """Preserve the tuple-only API for existing manifest consumers."""
+    return build_manifest_with_exclusions(root)[0]
+
+
+def build_manifest_with_exclusions(root):
     """Metadata only. Bounds fail the whole scan; never silently truncate."""
     files = {}
+    seen = set()
+    excluded = {'oversize': 0, 'obvious_binary_suffix': 0}
     scanned = 0
     serialized_bytes = 2
 
     def add(path, info):
         nonlocal serialized_bytes
         # Eligibility uses metadata/name only; never sniff candidate contents.
-        if info.st_size > MAX_FILE_BYTES or PurePosixPath(path).suffix.lower() in OBVIOUS_BINARY_SUFFIXES:
+        if path in seen:
             return
-        if path in files:
+        seen.add(path)
+        if info.st_size > MAX_FILE_BYTES:
+            excluded['oversize'] += 1
+            return
+        if PurePosixPath(path).suffix.lower() in OBVIOUS_BINARY_SUFFIXES:
+            excluded['obvious_binary_suffix'] += 1
             return
         if len(files) >= MAX_MANIFEST_FILES:
             raise LLMToolError("retrieval manifest file limit exceeded; narrow --scope")
@@ -241,7 +272,7 @@ def build_manifest(root):
                     raise LLMToolError("retrieval scope changed before manifest construction")
     except OSError:
         raise LLMToolError("retrieval manifest access failed; details omitted") from None
-    return tuple(files[path] for path in sorted(files))
+    return tuple(files[path] for path in sorted(files)), ExclusionCounts(**excluded)
 
 
 @dataclass(frozen=True)
