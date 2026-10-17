@@ -814,9 +814,13 @@ sys.exit(0 if result.wasSuccessful() else 1)
         self.assertIn(b'\nERROR:root:synthetic observation\n', raw)
         result = self.select(raw, code)
         self.assertEqual(result['status'], 'COMPLETE')
-        self.assertEqual(result['failure_ids'], [
-            'test_error (__main__.ObservedCase.test_error)',
-            'test_failure (__main__.ObservedCase.test_failure)'])
+        # unittest 3.9 renders Class, newer versions render Class.method.
+        # Ask the framework for exact expected IDs instead of assuming a version.
+        case_type = type('ObservedCase', (unittest.TestCase,), {
+            '__module__': '__main__', 'test_error': lambda case: None,
+            'test_failure': lambda case: None})
+        self.assertEqual(result['failure_ids'], [str(case_type(name)) for name in
+                         ('test_error', 'test_failure')])
         self.assertEqual(result['coverage']['reported_counts'], {'FAIL': 2, 'ERROR': 1})
         self.assertEqual(result['coverage']['observed_counts'], {'FAIL': 2, 'ERROR': 1})
         self.assertEqual(result['failure_sources'][1]['occurrences'], 2)
