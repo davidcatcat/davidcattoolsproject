@@ -82,6 +82,99 @@ class ReaderTests(unittest.TestCase):
         self.assertTrue(writer.finish(summary))
         return self.home / 'runs' / run_id
 
+    def test_inspection_isolates_damaged_metadata_not_safety_failures(self):
+        directory = self.completed()
+        self.completed('b' * 32)
+        summary = directory / 'summary.json'
+        original = summary.read_bytes()
+        cases = (b'PRIVATE_PROMPT_MARKER', b'{}',
+                 original.replace(b'"schema_version":1', b'"schema_version":2'))
+        for raw in cases:
+            with self.subTest(raw=raw[:20]):
+                summary.write_bytes(raw)
+                before = snapshot(self.base)
+                for unused in range(2):
+                    result = self.reader.inspect_store()
+                    self.assertEqual((result['state'], result['run_count'], result['damaged_count']),
+                                     ('degraded', 2, 1))
+                    self.assertEqual(result['recovery'], 'BLOCKED')
+                    self.assertNotIn(PROMPT, json.dumps(result))
+                self.assertEqual(snapshot(self.base), before)
+        summary.write_bytes(original)
+        foreign = directory / 'PRIVATE_UNKNOWN.tmp'
+        foreign.write_bytes(b'PRIVATE_RESPONSE_MARKER')
+        foreign.chmod(0o600)
+        self.assertEqual(self.reader.inspect_store()['damaged_count'], 1)
+        foreign.unlink()
+        summary.chmod(0o644)
+        with self.assertRaises(r.ReaderError) as caught:
+            self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNSAFE')
+
+    def test_inspection_corrupt_reservation_and_aggregate_budget(self):
+        writer = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID)
+        self.assertIsNotNone(writer)
+        writer.close()
+        reservation = self.home / 'runs' / RUN_ID / '.reservation'
+        original = reservation.read_bytes()
+        malformed = json.loads(original)
+        malformed['max_run_bytes'] = True
+        for raw in (b'PRIVATE_PROMPT_MARKER', b'{}', json.dumps(malformed).encode()):
+            reservation.write_bytes(raw)
+            self.assertEqual(self.reader.inspect_store()['damaged_count'], 1)
+        reservation.write_bytes(original)
+        with patch.object(r, 'RUNS_READ_MAX_BYTES', len(original) - 1):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'LIMIT_EXCEEDED')
+        with patch.object(r, 'RUN_SCAN_LIMIT', 1):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'LIMIT_EXCEEDED')
+
+    def test_inspection_damaged_header_does_not_skip_snapshot_recheck(self):
+        directory = self.completed()
+        summary = directory / 'summary.json'
+        summary.write_bytes(b'PRIVATE_PROMPT_MARKER')
+        original_read = r._read
+        def changed_after_read(parent, name, limit):
+            raw = original_read(parent, name, limit)
+            if name == 'summary.json':
+                summary.write_bytes(b'PRIVATE_RESPONSE_MARKER_LONGER')
+            return raw
+        with patch.object(r, '_read', side_effect=changed_after_read):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+
+    def test_inspection_root_names_are_bounded_stable_and_count_only(self):
+        self.completed()
+        stage = self.home / '.run-init-PRIVATE_PROMPT_MARKER'
+        stage.symlink_to(self.base / 'PRIVATE_RESPONSE_MARKER')
+        unknown = self.home / 'PRIVATE_UNKNOWN'
+        unknown.write_bytes(b'PRIVATE_RESPONSE_MARKER')
+        unknown.chmod(0o600)
+        before = snapshot(self.base)
+        result = self.reader.inspect_store()
+        self.assertEqual((result['state'], result['staging_count'], result['root_unknown_count']),
+                         ('blocked', 1, 1))
+        self.assertNotIn('PRIVATE', json.dumps(result))
+        self.assertEqual(snapshot(self.base), before)
+        original_names = r._names
+        changed = []
+        def add_after_root_scan(directory, limit):
+            names = original_names(directory, limit)
+            if not changed:
+                path = self.home / 'PRIVATE_NEW'
+                path.write_bytes(b'PRIVATE')
+                path.chmod(0o600)
+                changed.append(path)
+            return names
+        with patch.object(r, '_names', side_effect=add_after_root_scan):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+
     def rewrite_events(self, directory, values):
         raw = b''.join(json.dumps(value, ensure_ascii=True).encode() + b'\n' for value in values)
         (directory / 'trace.jsonl').write_bytes(raw)

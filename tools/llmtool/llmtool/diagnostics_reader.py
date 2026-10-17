@@ -10,7 +10,7 @@ from dataclasses import fields
 
 from . import diagnostics as d
 from .diagnostics_settings import resolve_diagnostics_home
-from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES
+from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES, RESERVATION_SCHEMA
 from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
@@ -343,7 +343,7 @@ class DiagnosticsReader:
         self.home, self.platform = home, platform
 
     @contextmanager
-    def _store(self):
+    def _store(self, *, include_root=False):
         if not persistence_supported(self.platform):
             raise ReaderError('STORE_UNAVAILABLE')
         try:
@@ -361,7 +361,7 @@ class DiagnosticsReader:
                 with _lock(root, '.store.lock') as acquired:
                     if not acquired:
                         raise ReaderError('STORE_UNAVAILABLE')
-                    yield runs
+                    yield (root, runs) if include_root else runs
                     _check_link(root, 'runs', runs, True)
             finally:
                 os.close(runs)
@@ -439,19 +439,35 @@ class DiagnosticsReader:
         return result
 
     def inspect_store(self):
-        """Check existing structure/permissions only, never metadata contents.
+        """Bounded read-only header inspection, not repair or write health.
 
         A busy run's artifacts are deliberately not inspected. Unknown names
-        are counted without displaying, following or repairing them. This is
-        neither a completion check nor proof that persistence can be written.
+        and staging namespaces are counted without opening or repairing them.
+        Damaged metadata is isolated; unsafe paths, races and limits stay fatal.
+        Trace bodies/completion and capacity/write access remain unverified.
         """
-        result = {'state': 'absent', 'run_count': 0, 'active_count': 0, 'unknown_count': 0}
+        result = {'state': 'absent', 'run_count': 0, 'active_count': 0, 'unknown_count': 0,
+                  'damaged_count': 0, 'staging_count': 0, 'root_unknown_count': 0,
+                  'recovery': 'NOT_ATTEMPTED'}
         if not persistence_supported(self.platform):
             result['state'] = 'unsupported'
             return result
+        used = 0
+
+        def metadata(directory, name, limit):
+            nonlocal used
+            raw = _read(directory, name, limit)
+            used += len(raw)
+            if used > RUNS_READ_MAX_BYTES:
+                raise ReaderError('LIMIT_EXCEEDED')
+            return raw
+
         try:
-            with self._store() as runs:
+            with self._store(include_root=True) as (root, runs):
                 result['state'] = 'present'
+                root_names = set(_names(root, RUN_SCAN_LIMIT))
+                result['staging_count'] = sum(name.startswith('.run-init-') for name in root_names)
+                result['root_unknown_count'] = len(root_names - {'.store.lock', 'runs'}) - result['staging_count']
                 names = _names(runs, RUN_SCAN_LIMIT)
                 for name in names:
                     try:
@@ -459,20 +475,53 @@ class DiagnosticsReader:
                     except ValueError:
                         result['unknown_count'] += 1
                         continue
-                    with self._run(runs, name) as (directory, files, acquired):
-                        result['run_count'] += 1
-                        if not acquired:
-                            result['active_count'] += 1
-                            continue
-                        for filename in files:
-                            info = os.stat(filename, dir_fd=directory, follow_symlinks=False)
-                            limit = (SUMMARY_MAX_BYTES if filename == 'summary.json' else
-                                     RESERVATION_MAX_BYTES if filename == '.reservation' else
-                                     TRACE_MAX_BYTES if filename in ('trace.jsonl', 'trace.partial.jsonl')
-                                     else 0)
-                            if info.st_size > limit:
-                                raise ReaderError('LIMIT_EXCEEDED')
+                    result['run_count'] += 1
+                    damaged = False
+                    try:
+                        with self._run(runs, name) as (directory, files, acquired):
+                            if not acquired:
+                                result['active_count'] += 1
+                                continue
+                            for filename in files:
+                                info = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+                                limit = (SUMMARY_MAX_BYTES if filename == 'summary.json' else
+                                         RESERVATION_MAX_BYTES if filename == '.reservation' else
+                                         TRACE_MAX_BYTES if filename in ('trace.jsonl', 'trace.partial.jsonl')
+                                         else 0)
+                                if info.st_size > limit:
+                                    raise ReaderError('LIMIT_EXCEEDED')
+                            try:
+                                if '.reservation' in files:
+                                    value = strict_object(metadata(directory, '.reservation', RESERVATION_MAX_BYTES),
+                                                          RESERVATION_MAX_BYTES)
+                                    _version(value, RESERVATION_SCHEMA)
+                                    if (set(value) != {'schema', 'schema_version', 'run_id', 'max_run_bytes', 'created_at'}
+                                            or value['run_id'] != name or type(value['max_run_bytes']) is not int
+                                            or not 65536 <= value['max_run_bytes'] <= MAX_STORED_RUN_BYTES):
+                                        raise ValueError('invalid reservation')
+                                    d.validate_timestamp(value['created_at'])
+                                if 'summary.json' in files:
+                                    _summary(metadata(directory, 'summary.json', SUMMARY_MAX_BYTES), name)
+                                    if 'trace.jsonl' not in files or 'trace.partial.jsonl' in files:
+                                        raise ValueError('inconsistent completion artifacts')
+                                elif '.reservation' not in files or 'trace.jsonl' in files:
+                                    raise ValueError('unverifiable incomplete run')
+                            except (ValueError, TypeError, KeyError):
+                                damaged = True
+                            except ReaderError as exc:
+                                if exc.code not in ('FORMAT_INVALID', 'FORMAT_UNSUPPORTED'):
+                                    raise
+                                damaged = True
+                            # Exit normally even on malformed headers so _run's
+                            # post-read identity/name checks cannot be bypassed.
+                    except ReaderError as exc:
+                        if exc.code not in ('FORMAT_INVALID', 'FORMAT_UNSUPPORTED'):
+                            raise
+                        damaged = True
+                    result['damaged_count'] += damaged
                 if set(_names(runs, RUN_SCAN_LIMIT)) != set(names):
+                    raise ReaderError('STORE_UNAVAILABLE')
+                if set(_names(root, RUN_SCAN_LIMIT)) != root_names:
                     raise ReaderError('STORE_UNAVAILABLE')
         except _AbsentStore:
             pass
@@ -480,6 +529,12 @@ class DiagnosticsReader:
             raise
         except (OSError, ValueError, TypeError, KeyError):
             raise ReaderError('STORE_UNAVAILABLE') from None
+        if result['damaged_count']:
+            result['state'] = 'degraded'
+        elif result['staging_count'] or result['root_unknown_count'] or result['unknown_count']:
+            result['state'] = 'blocked'
+        if result['state'] in ('degraded', 'blocked'):
+            result['recovery'] = 'BLOCKED'
         return result
 
     def trace(self, run_id, *, errors=False):

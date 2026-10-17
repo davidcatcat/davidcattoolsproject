@@ -143,6 +143,7 @@ class DoctorTests(DoctorFixture):
         self.assertIn('persist_metadata=false\n', result[1])
         self.assertIn('readiness=not-configured executable=not-applicable credential=not-configured', result[1])
         self.assertIn('store=absent ', result[1])
+        self.assertIn('recovery=NOT_ATTEMPTED', result[1])
         self.assertIn('authentication and inference unverified', result[1])
         self.assertEqual(snapshot(self.base), before)
         self.assert_safe(result)
@@ -358,7 +359,48 @@ class DoctorStoreTests(DoctorFixture):
         self.addCleanup(writer.close)
         return writer
 
-    def test_existing_store_never_reads_artifact_bodies_or_writes(self):
+    def test_damaged_run_isolated_with_sanitized_nonhealthy_output(self):
+        self.start().close()
+        healthy = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.state).start('b' * 32)
+        self.assertIsNotNone(healthy)
+        healthy.close()
+        artifact = self.state / 'runs' / RUN_ID / 'summary.json'
+        artifact.write_text(PRIVATE + SECRET)
+        artifact.chmod(0o600)
+        before = snapshot(self.base)
+        for unused in range(2):
+            result = self.invoke()
+            self.assertEqual((result[0], result[2]), (1, ''))
+            self.assertIn('provider_type=', result[1])
+            self.assertIn('store=degraded run_count=2', result[1])
+            self.assertIn('damaged_count=1', result[1])
+            self.assertIn('recovery=BLOCKED', result[1])
+            self.assert_safe(result)
+            self.assertEqual(snapshot(self.base), before)
+
+    def test_unverified_staging_is_visible_but_never_opened_or_repaired(self):
+        self.start().close()
+        stage = self.state / ('.run-init-' + 'c' * 32)
+        stage.mkdir(mode=0o700)
+        (stage / PRIVATE).write_text(SECRET)
+        (stage / PRIVATE).chmod(0o600)
+        unknown = self.state / PRIVATE
+        unknown.symlink_to(self.path)
+        before = snapshot(self.base)
+        original_open = os.open
+        def no_unknown_open(name, *args, **kwargs):
+            self.assertNotIn(str(name), (stage.name, PRIVATE))
+            return original_open(name, *args, **kwargs)
+        with patch('llmtool.diagnostics_reader.os.open', side_effect=no_unknown_open):
+            result = self.invoke()
+        self.assertEqual((result[0], result[2]), (1, ''))
+        self.assertIn('store=blocked', result[1])
+        self.assertIn('staging_count=1 root_unknown_count=1', result[1])
+        self.assertIn('recovery=BLOCKED', result[1])
+        self.assert_safe(result)
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_existing_store_checks_headers_but_never_reads_trace_or_writes(self):
         writer = self.start()
         writer.close()
         directory = self.state / 'runs' / RUN_ID
@@ -367,19 +409,28 @@ class DoctorStoreTests(DoctorFixture):
         (self.state / 'runs' / PRIVATE).symlink_to(self.path)
         before = snapshot(self.base)
         original_open = os.open
+        original_read = os.read
+        opened = {}
         def readonly(name, flags, *args, **kwargs):
             self.assertFalse(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-            self.assertNotIn(str(name), ('summary.json', 'trace.jsonl', 'trace.partial.jsonl', '.reservation'))
-            return original_open(name, flags, *args, **kwargs)
+            self.assertNotIn(str(name), ('trace.jsonl', 'trace.partial.jsonl'))
+            fd = original_open(name, flags, *args, **kwargs)
+            opened[fd] = str(name)
+            return fd
+        def headers_only(fd, size):
+            self.assertIn(opened[fd], ('summary.json', '.reservation'))
+            self.assertLessEqual(size, r.SUMMARY_MAX_BYTES + 1)
+            return original_read(fd, size)
         with ExitStack() as stack:
             stack.enter_context(patch('llmtool.diagnostics_reader.os.open', side_effect=readonly))
-            stack.enter_context(patch('llmtool.diagnostics_reader.os.read', side_effect=AssertionError('body read')))
+            stack.enter_context(patch('llmtool.diagnostics_reader.os.read', side_effect=headers_only))
             for target in ('os.mkdir', 'os.chmod', 'os.unlink', 'os.rename', 'os.replace', 'os.link', 'os.write',
                            'llmtool.diagnostics_store.DiagnosticsStore.start'):
                 stack.enter_context(patch(target, side_effect=AssertionError(target)))
             result = self.invoke()
-        self.assertEqual(result[0], 0)
-        self.assertIn('store=present run_count=1 active_count=0 unknown_count=1', result[1])
+        self.assertEqual(result[0], 1)
+        self.assertIn('store=degraded run_count=1 active_count=0 unknown_count=1', result[1])
+        self.assertIn('damaged_count=1', result[1])
         self.assertIn('metadata completion and write access unverified', result[1])
         self.assertEqual(snapshot(self.base), before)
         self.assert_safe(result)

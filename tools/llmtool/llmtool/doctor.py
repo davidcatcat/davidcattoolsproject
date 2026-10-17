@@ -10,7 +10,7 @@ from .diagnostics_store import persistence_supported
 from .errors import LLMToolError
 
 
-def doctor_output():
+def _doctor_snapshot():
     """Buffer the complete safe projection before touching stdout."""
     try:
         view = inspect_config()
@@ -36,16 +36,26 @@ def doctor_output():
     lines.append('store=' + store['state'] + ' run_count=' + str(store['run_count']) +
                  ' active_count=' + str(store['active_count']) +
                  ' unknown_count=' + str(store['unknown_count']))
-    lines.append('Store structure/permissions only; metadata completion and write access unverified.')
-    return '\n'.join(lines) + '\n'
+    lines.append('damaged_count=' + str(store['damaged_count']) +
+                 ' staging_count=' + str(store['staging_count']) +
+                 ' root_unknown_count=' + str(store['root_unknown_count']) +
+                 ' recovery=' + store['recovery'])
+    lines.append('Bounded metadata headers checked; trace contents, metadata completion and write access unverified.')
+    if store['recovery'] == 'BLOCKED':
+        lines.append('Preserve store data; inspect runs metadata before any separately reviewed repair. No automatic cleanup.')
+    return '\n'.join(lines) + '\n', int(store['recovery'] == 'BLOCKED')
+
+
+def doctor_output():
+    return _doctor_snapshot()[0]
 
 
 def run_doctor():
     try:
-        output = doctor_output()
+        output, status = _doctor_snapshot()
         sys.stdout.write(output)
         sys.stdout.flush()
-        return 0
+        return status
     except ReaderError as exc:
         print(exc.line(), file=sys.stderr)
         return 1

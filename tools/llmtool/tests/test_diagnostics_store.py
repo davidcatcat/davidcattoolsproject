@@ -723,6 +723,11 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(store.start())
         self.assertEqual(store.warning.code, d.ErrorCode.DIAGNOSTICS_STORE_FULL)
         self.assertEqual(evidence.stat().st_size, 1048576)
+        before = evidence.read_bytes(), evidence.stat().st_ino
+        result = DiagnosticsReader(home=self.home).inspect_store()
+        self.assertEqual((result['state'], result['staging_count'], result['recovery']),
+                         ('blocked', 1, 'BLOCKED'))
+        self.assertEqual((evidence.read_bytes(), evidence.stat().st_ino), before)
 
     def test_initialization_reservation_short_writes_complete(self):
         original = os.write
