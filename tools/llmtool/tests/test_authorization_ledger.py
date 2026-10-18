@@ -583,38 +583,93 @@ class StoreSecurityTests(LedgerCase):
 class AdmissionAfterLockTests(LedgerCase):
     """Codex PR #103 D1-R2-01/02: admit time and store only once the lock is held."""
 
+    def test_contention_observes_sqlite_begin_without_sleep(self):
+        receipt = self.issue(ttl=2)
+        with patch.object(time, 'sleep', side_effect=AssertionError('blind contention sleep')):
+            outcome, sink = self.contended_redeem(receipt, release_at=1001)
+        self.assertTrue(outcome['begin_immediate_attempted'])
+        self.assertIs(outcome['result'].code, l.RedeemCode.FAKE_EFFECT_DONE)
+        self.assertEqual(sink.calls, [receipt.binding])
+
+    def test_contention_surfaces_worker_close_failure(self):
+        receipt = self.issue(ttl=2)
+        original_open = l.ReceiptLedger.open
+        failure = RuntimeError('synthetic close failure')
+
+        def open_with_close_failure(*args, **kwargs):
+            ledger = original_open(*args, **kwargs)
+            close = ledger.close
+            def failing_close():
+                close()
+                raise failure
+            ledger.close = failing_close
+            return ledger
+
+        with patch.object(l.ReceiptLedger, 'open', side_effect=open_with_close_failure):
+            with self.assertRaises(RuntimeError) as caught:
+                self.contended_redeem(receipt, release_at=1001)
+        self.assertIs(caught.exception, failure)
+
     def contended_redeem(self, receipt, release_at=None, busy=5.0):
         # Real SQLite writer contention: another connection holds the write
         # lock while the redeem waits in BEGIN IMMEDIATE.
         holder = sqlite3.connect(self.path, isolation_level=None)
         holder.execute('BEGIN IMMEDIATE')
-        started, outcome, sink = threading.Event(), {}, FakeSink()
+        reached, outcome, sink = threading.Event(), {}, FakeSink()
+
+        def trace(statement):
+            if statement == 'BEGIN IMMEDIATE':
+                # SQLite itself has started this statement, not merely a
+                # Python thread or redeem(). The held writer prevents its
+                # admission until rollback (or the real busy timeout).
+                outcome['begin_immediate_attempted'] = True
+                reached.set()
 
         def worker():
-            ledger = l.ReceiptLedger.open(self.path, clock=self.clock)
+            ledger = None
             try:
-                started.set()
+                ledger = l.ReceiptLedger.open(self.path, clock=self.clock)
+                ledger._db.set_trace_callback(trace)
                 outcome['result'] = ledger.redeem(receipt, redeem_run_id=REDEEM_RUN,
                                                   observed=make_observed(), sink=sink)
             except l.LedgerError as error:
                 outcome['error'] = error.code
+            except BaseException as error:
+                outcome['unexpected'] = error
             finally:
-                ledger.close()
+                try:
+                    if ledger is not None:
+                        ledger.close()
+                except BaseException as error:
+                    outcome.setdefault('unexpected', error)
+                finally:
+                    reached.set()  # Surface startup/hook/close errors promptly.
+        thread = threading.Thread(target=worker)
         try:
             with patch.object(l, 'BUSY_TIMEOUT_SECONDS', busy):
-                thread = threading.Thread(target=worker)
-                thread.start()
-                self.assertTrue(started.wait(10))
-                time.sleep(0.3)  # the worker is now blocked in BEGIN IMMEDIATE
-                if release_at is not None:
-                    self.clock.now = release_at
-                    holder.execute('ROLLBACK')
-                thread.join(15)
-                self.assertFalse(thread.is_alive())
+                try:
+                    thread.start()
+                    self.assertTrue(reached.wait(10), 'SQLite BEGIN was not observed')
+                    if 'unexpected' in outcome:
+                        raise outcome['unexpected']
+                    self.assertTrue(outcome.get('begin_immediate_attempted'))
+                    self.assertTrue(holder.in_transaction)
+                    if release_at is not None:
+                        self.clock.now = release_at
+                        holder.execute('ROLLBACK')
+                    thread.join(15)
+                finally:
+                    if holder.in_transaction:
+                        holder.execute('ROLLBACK')
+                    if thread.ident is not None:
+                        thread.join(15)
+                self.assertFalse(thread.is_alive(), 'owned SQLite worker did not stop')
         finally:
             if holder.in_transaction:
                 holder.execute('ROLLBACK')
             holder.close()
+        if 'unexpected' in outcome:
+            raise outcome['unexpected']
         return outcome, sink
 
     def test_lock_released_after_expiry_is_expired_without_effect(self):
