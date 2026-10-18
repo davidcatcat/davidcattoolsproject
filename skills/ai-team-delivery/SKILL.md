@@ -68,6 +68,12 @@ Do not interpret any architecture ACCEPTED state as IMPLEMENTED or
 LIVE_VERIFIED. In particular the Codex Integrator original-session
 auto-wake, llmtool F2 and complete M2 remain unverified.
 
+### 2026-10-19 secondary Developer role and quota policy (D1–D5)
+
+Use [the owner decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and normative [safe-git](../safe-git/SKILL.md). The **existing Codex Integrator remains PM**, assigning Codex Developer as **first-line** and OpenCode v2/DeepSeek Developer as **second-line** (the existing second fixed root only **after** independent reviewed Mac ownership transfer). Same-model DeepSeek and cross-model GLM are **internal pre-review**, not formal acceptance. **Claude Code remains independent Reviewer/QA; Claude Developer PAUSED**. Company-gw retains qualified authorized task triage; AGY is backup; no new Codex/Claude Cloud automation.
+
+When Claude quota runs out, keep exact-SHA pending formal review evidence, bound the backlog and continue only unrelated/otherwise authorized Developer work; never self-approve, auto-merge unreviewed source or auto-enable paid API. OpenCode may read all **non-sensitive repository** material, but sensitive source, provider-export authorization, outside-Mac paths, task-bounded edits and Git actions remain distinct constraints. D5 permits a proven alternate free model or Integrator-to-Codex reassignment. First deliver foreground **same-active-Integrator** handoff, then verify original-session wake/ACK/recovery for full G3; no second orchestrator or milestone.
+
 ### Owner-approved outcome reporting (2026-10-19)
 
 Follow [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md): **G1 real adopted M1b fix; G2 live authorized Worker; G3 complete independent-agent M2 cycle; G4 three real Mac-supervised tasks and Owner GO/LIMITED GO/NO-GO**. These are checkpoint **reports mapped to current A11c**, not new engineering milestones or bypasses. Integrator produces one exact-evidence report at each actual acceptance, one weekly concise pulse, and a decision brief only for material product/risk/authority choices; routine authorized fixes and eligible merges continue without Owner microstep approval. Two completed no-progress work packages trigger scope re-evaluation. GitHub publication, notification delivery and ChatGPT acknowledgment are distinct; do not claim automatic Owner notification, 24-hour service or M2 Live from a plan or peer-message ACK.
