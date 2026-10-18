@@ -48,6 +48,45 @@ class Fixture(unittest.TestCase):
 
 
 class FilesystemTests(Fixture):
+    def test_extended_binary_suffixes_excluded_without_reading(self):
+        suffixes = ('.so', '.dylib', '.dll', '.exe', '.pyc', '.whl', '.bin', '.db')
+        for suffix in suffixes:
+            self.write('PRIVATE_ARTIFACT' + suffix.upper(), b'PRIVATE_CONTENT\0')
+        with patch.object(f.os, 'fdopen', side_effect=AssertionError('content sniffed')):
+            self.assertEqual(self.manifest(), ())
+
+    def test_exclusion_counts_mixed_overlapping_and_direct_scopes(self):
+        self.write('src/ok.py')
+        self.write('src/big.bin', b'x' * (f.MAX_FILE_BYTES + 1))
+        self.write('src/image.PNG', b'\0')
+        self.write('src/.env', 'PRIVATE_CREDENTIAL')
+        with f.authorize_root(self.root, ['src', 'src/big.bin', 'src/image.PNG', 'src']) as access:
+            with patch.object(f.os, 'fdopen', side_effect=AssertionError('content sniffed')):
+                manifest, counts = f.build_manifest_with_exclusions(access)
+        self.assertEqual([item.path for item in manifest], ['src/ok.py'])
+        self.assertEqual(counts.to_dict(), {'oversize': 1, 'obvious_binary_suffix': 1})
+        with f.authorize_root(self.root, ['src/big.bin']) as access:
+            manifest, counts = f.build_manifest_with_exclusions(access)
+        self.assertEqual(manifest, ())
+        self.assertEqual(counts.to_dict(), {'oversize': 1, 'obvious_binary_suffix': 0})
+
+    def test_exclusion_counts_do_not_bypass_scan_limits(self):
+        self.write('excluded.bin', b'\0')
+        with patch.object(f, 'MAX_SCAN_ENTRIES', 0), \
+                self.assertRaisesRegex(LLMToolError, 'scan entry limit'):
+            self.manifest()
+
+    def test_exclusion_counts_are_typed_frozen_and_bounded(self):
+        self.assertEqual(f.ExclusionCounts().to_dict(), {'oversize': 0, 'obvious_binary_suffix': 0})
+        for values in ((True, 0), (-1, 0), ('PRIVATE', 0), (0, 1.0),
+                       (f.MAX_SCAN_ENTRIES, f.MAX_SCOPES + 1)):
+            with self.subTest(values=values), self.assertRaises(LLMToolError):
+                f.ExclusionCounts(*values)
+        counts = f.ExclusionCounts(f.MAX_SCAN_ENTRIES, f.MAX_SCOPES)
+        self.assertLess(len(json.dumps(counts.to_dict())), 100)
+        with self.assertRaises(FrozenInstanceError):
+            counts.oversize = 0
+
     def test_metadata_eligibility_without_content_sniffing(self):
         self.write("big.log", b"x" * (f.MAX_FILE_BYTES + 1))
         self.write("image.PNG", b"\0\xff")
@@ -466,6 +505,58 @@ class PipelineTests(Fixture):
         self.assertNotIn("PRIVATE", result.to_json())
         self.assertNotIn("SELECTED_CONTENT", result.to_json())
         self.assertFalse(result.planner_runtime.token_usage_available)
+
+    def test_public_cli_exclusion_counts_are_bounded_and_name_free(self):
+        self.write('PRIVATE_OVERSIZE', b'x' * (f.MAX_FILE_BYTES + 1))
+        self.write('PRIVATE_BINARY.DLL', b'PRIVATE_CONTENT\0')
+        self.write('.env', 'PRIVATE_CREDENTIAL')
+        self.write('.git/PRIVATE_GIT.bin', b'PRIVATE_GIT_CONTENT')
+        with self.mocks():
+            code, out, err = self.cli()
+        self.assertEqual((code, err), (0, ''))
+        self.assertEqual(json.loads(out)['exclusion_counts'],
+                         {'oversize': 1, 'obvious_binary_suffix': 1})
+        for marker in ('PRIVATE_', '.env', '.git'):
+            self.assertNotIn(marker, out)
+            self.assertNotIn(marker, json.dumps(self.events))
+        self.assertEqual([e[1] for e in self.events if e[0] == 'complete'],
+                         ['planner', 'synthesizer'])
+        # Human output uses the same typed counts, without excluded paths.
+        self.events = []
+        self.clients = [Mock(complete=lambda messages: self.reply('planner', messages)),
+                        Mock(complete=lambda messages: self.reply('synthesizer', messages))]
+        with self.mocks():
+            code, out, err = self.cli(args=['Original task'])
+        self.assertEqual((code, err), (0, ''))
+        self.assertIn('oversize=1 obvious_binary_suffix=1', out)
+        self.assertNotIn('PRIVATE_', out)
+
+    def test_public_empty_eligible_result_still_makes_two_calls(self):
+        (self.root / 'a.py').unlink()
+        (self.root / 'b.py').unlink()
+        self.write('PRIVATE_BIG', b'x' * (f.MAX_FILE_BYTES + 1))
+        self.write('PRIVATE_BINARY.bin', b'\0')
+        self.planner_text = '{"files":[]}'
+        self.packet_text = packet().to_json()
+        with self.mocks():
+            code, out, err = self.cli()
+        self.assertEqual((code, err), (0, ''))
+        data = json.loads(out)
+        self.assertEqual(data['retrieved_files'], [])
+        self.assertEqual(data['exclusion_counts'], {'oversize': 1, 'obvious_binary_suffix': 1})
+        self.assertNotIn('PRIVATE_', out + json.dumps(self.events))
+        self.assertEqual(json.loads(self.events[3][2][1]['content'])['candidates'], [])
+        for client in self.clients:
+            client.complete.assert_called_once()
+
+    def test_all_eligible_zero_counts_and_result_rejects_untyped_metadata(self):
+        with self.mocks():
+            result = self.run_pipeline()
+        self.assertEqual(result.to_dict()['exclusion_counts'],
+                         {'oversize': 0, 'obvious_binary_suffix': 0})
+        for invalid in ({'oversize': 0, 'obvious_binary_suffix': 0}, None, 'PRIVATE'):
+            with self.assertRaises(LLMToolError):
+                replace(result, exclusion_counts=invalid)
 
     def test_strict_planner_failure_before_reads_and_second_profile(self):
         fence = chr(96) * 3

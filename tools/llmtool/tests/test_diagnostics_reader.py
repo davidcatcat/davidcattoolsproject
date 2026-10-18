@@ -1,5 +1,6 @@
 """Public offline reader behavior, real POSIX containment and adversarial snapshots."""
 
+import calendar
 import io
 import json
 import os
@@ -29,6 +30,19 @@ def event(number, kind, data, *, run_id=RUN_ID, timestamp=None, component='cli.a
     return d.DiagnosticEvent(run_id=run_id, event_id=number,
         timestamp=timestamp or '2026-10-04T00:00:00.000Z', type=kind,
         component=component, severity=d.DiagnosticSeverity(severity), data=data)
+
+
+# Default fixture events are stamped 2026-10-04T00:00:00Z. Writer retention
+# (max_age_days=14) compares completed-run ages with the wall clock, so a later
+# DiagnosticsStore.start() would age-evict earlier fixtures once real time
+# passes 2026-10-18. Pin only the writer's clock to the fixture instant.
+FIXTURE_EPOCH = calendar.timegm((2026, 10, 4, 0, 0, 0))
+
+
+@contextmanager
+def fixture_clock():
+    with patch.object(diagnostics_store.time, 'time', return_value=FIXTURE_EPOCH):
+        yield
 
 
 def sample_events(run_id=RUN_ID):
@@ -589,7 +603,8 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(snapshot(self.home), before)
 
     def test_runs_reads_summaries_only_and_newest_order_with_ties(self):
-        directories = [self.completed(identity) for identity in ('a' * 32, 'b' * 32, 'c' * 32)]
+        with fixture_clock():
+            directories = [self.completed(identity) for identity in ('a' * 32, 'b' * 32, 'c' * 32)]
         summary = json.loads((directories[0] / 'summary.json').read_bytes())
         summary.update(started_at='2026-10-03T00:00:00.000Z', ended_at='2026-10-03T00:00:00.000Z')
         (directories[0] / 'summary.json').write_text(json.dumps(summary))
