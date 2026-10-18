@@ -20,7 +20,7 @@ from .authorization_policy import (HostIssuer,IssuerClass,Decision,ProviderRevie
 from .authorization_ledger import ReceiptLedger,LedgerError
 from .task_review import (HostServices,PairApproval,ReviewPacket,ReviewCallBinding,Admission,
     ConsumeToken,CallOutcome,LaunchResult,UnavailableReviewAuthority,load_json,canonical,
-    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen,REVIEWER_ROLES)
+    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen,REVIEWER_ROLES,_clocks_agree)
 from .task_lifecycle import utc_time,inspect_task,Role
 from .task_review_collector import physical_directory,collect_local_facts,Observation
 
@@ -292,7 +292,9 @@ class HostAuthorshipObserver:
             (root+'/tools/llmtool/.venv/bin/python',root+'/tools/llmtool/.venv',root+'/tools/llmtool/llmtool/__init__.py'),
             digest((self.pin.host_digest,facts),'llmtool.host-observation-state.v1'))
         self.samples[o.digest]=o
-        while len(self.samples)>8: self.samples.pop(next(iter(self.samples)))
+        # Bounded headroom beyond the eight observations of a normal worker run.
+        # A cache miss still refuses the original binding; it never renews it.
+        while len(self.samples)>16: self.samples.pop(next(iter(self.samples)))
         return o
 
 
@@ -359,6 +361,7 @@ class ProductionReviewIssuer(HostIssuer):
         self._foreground_lock=threading.Lock()
         self._foreground_attempted=False
         self._foreground_services=None
+        self._provider_ledger=None
 
     @property
     def foreground_services(self):
@@ -389,7 +392,23 @@ class ProductionReviewIssuer(HostIssuer):
 
     def daily_cap(self,route_digest): return self.policy(route_digest).per_day_cap
 
-    def matches(self,call,observed):
+    def _check_ledger_bindings(self):
+        # Old timestamp-keyed receipts cannot be mapped to semantic payloads:
+        # the originals were not stored. Hold the ledger for separate host
+        # reconciliation, never clear charges or silently grant a new key.
+        # consume_provider calls matches inside its existing write transaction,
+        # so this check is atomic with consume, even after an earlier admission.
+        ledger=self._provider_ledger
+        if ledger is None: reject('REVIEW_LEDGER_UNSAFE')
+        ledger._check_identity()
+        for (stored,) in ledger._db.execute('SELECT binding FROM receipts'):
+            call=load_json(stored,65536).get('call',{})
+            if 'reviewed_object_digest' not in call:
+                reject('REVIEW_LEDGER_RECONCILIATION_REQUIRED')
+            _hex(call['reviewed_object_digest'])
+
+    def matches(self,call,observed,*,fresh_before=True):
+        self._check_ledger_bindings()
         c=self.context;p=self.policy(call.route_digest)
         if (pair_pin(c.approval) != self.pin.pair_digest or
                 hashlib.sha256(c.packet_input).hexdigest() != self.pin.packet_input_digest): return False
@@ -398,8 +417,11 @@ class ProductionReviewIssuer(HostIssuer):
         before=self.observer.samples.get(call.observation_digest)
         if before is None: return False
         now=datetime_utc(self.clock.utc());mono=self.clock.monotonic()
-        before.validate(c.expect,c.events,now,mono)
-        current=self.observer.observe();current.validate(c.expect,c.events,now,mono)
+        if fresh_before: before.validate(c.expect,c.events,now,mono)
+        current=self.observer.observe()
+        now=datetime_utc(self.clock.utc());mono=self.clock.monotonic()
+        current.validate(c.expect,c.events,now,mono)
+        _clocks_agree(before,current)
         if current.state_digest != before.state_digest: return False
         c.approval.validate(c.ready,c.final,c.expect,now)
         snapshot=inspect_task(c.ready,c.expect,c.events,now)
@@ -412,6 +434,7 @@ class ProductionReviewIssuer(HostIssuer):
             call.task_id == c.expect.task.task_id and call.run_id == c.expect.task.run_id and
             call.source_sha == c.expect.source_sha and call.epoch == c.expect.epoch and
             call.sequence == snapshot.last_sequence and call.packet_digest == packet.digest and
+            call.reviewed_object_digest == packet.reviewed_object_digest and
             call.author_agents == tuple(sorted(a.agent_id for a in c.expect.authored_by)) and
             call.reviewer_role == p.reviewer_role == load_host_registration(self.pin).reviewer_role and
             call.reviewer_role not in call.author_agents and
@@ -440,6 +463,7 @@ class ProductionReviewAuthority:
                 reg.ledger_path,(reg.ledger_device,reg.ledger_inode),reg.ledger_nonce):
             reject('REVIEW_LEDGER_UNSAFE')
         self.issuer,self.ledger=issuer,ledger
+        issuer._provider_ledger=ledger
         self.receipts={}
 
     def _observed(self,binding):
@@ -563,7 +587,7 @@ class ProductionReviewerLauncher:
                 runtime_pin=p.worker_runtime_digest,forbidden_sessions=forbidden)
             evidence=provider.job_evidence
             if (time.monotonic() >= deadline or
-                    not self.authority.issuer.matches(c,self.authority._observed(c))):
+                    not self.authority.issuer.matches(c,self.authority._observed(c),fresh_before=False)):
                 reject('REVIEW_SOURCE_DRIFT')
             verify_worker_executable(reg,deadline)
             content=result.pop('content')
@@ -579,7 +603,7 @@ class ProductionReviewerLauncher:
         c=receipt.binding.call
         deadline=self._job_deadlines.get(c.reviewer_launch_nonce)
         if deadline is None or time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
-        if not self.authority.issuer.matches(c,self.authority._observed(c)):
+        if not self.authority.issuer.matches(c,self.authority._observed(c),fresh_before=False):
             reject('REVIEW_SOURCE_DRIFT')
         if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
 

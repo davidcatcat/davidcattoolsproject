@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -115,7 +116,7 @@ class Harness:
         values=dict(task_id=self.expect.task.task_id,ready_task=self.expect.task,
             acceptance_task=self.fake.approval.acceptance_task,criterion_map=self.fake.approval.criterion_map,
             run_id=self.expect.task.run_id,epoch=self.expect.epoch,sequence=4,source_sha=self.expect.source_sha,
-            packet_digest=packet.digest,observation_digest=o.digest,author_agents=(self.expect.authored_by[0].agent_id,),
+            packet_digest=packet.digest,reviewed_object_digest=packet.reviewed_object_digest,observation_digest=o.digest,author_agents=(self.expect.authored_by[0].agent_id,),
             reviewer_role='llmtool-review/claude-cli',reviewer_launch_nonce=self.issuer.reviewer_launch_nonce,route_id=self.policy.policy_id,
             route_version=1,route_digest=self.policy.digest,provider='claude-cli',profile=self.policy.profile,
             model=self.policy.model,export_scope_digest=scope,issuer_class='PRODUCTION_REVIEW',
@@ -131,13 +132,14 @@ class AuthorityTests(unittest.TestCase):
         if code:self.assertEqual(result['code'],code)
     def test_complete_real_adapters_fake_transport(self):
         result=self.h.run()
-        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['code'],'REVIEW_BUDGET_UNKNOWN',result)
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['budget']['status'],'UNKNOWN')
         self.assertEqual(result['provider_calls'],1);self.assertTrue(result['test_only'])
         self.assertFalse(result['authorized']);self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
         self.assertIsNone(result['input_tokens']);self.assertIsNone(result['cost'])
         receipt=next(iter(self.h.authority.receipts.values()))
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
-        self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
     def test_default_never_loads_host_or_provider(self):
         with patch.object(a,'read_host_file',side_effect=AssertionError()),patch('subprocess.Popen',side_effect=AssertionError()):
             self.assertIsInstance(a.review_authority_factory(),r.UnavailableReviewAuthority)
@@ -173,7 +175,7 @@ class AuthorityTests(unittest.TestCase):
         for changes in ({'source_sha':'9'*40},{'author_agents':('forged-author',)},
             {'route_digest':'9'*64},{'model':'other-model'},{'export_scope_digest':'9'*64},
             {'observation_digest':'9'*64},{'criterion_map':(('tests','security'),)},
-            {'packet_digest':'9'*64},{'epoch':8},{'issuer_capability_id':'forged-issuer'}):
+            {'packet_digest':'9'*64},{'reviewed_object_digest':'9'*64},{'epoch':8},{'issuer_capability_id':'forged-issuer'}):
             with self.subTest(changes=changes):
                 self.assertFalse(self.h.authority.admit(replace(b,**changes)).admitted)
         self.assertEqual(self.h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
@@ -753,6 +755,86 @@ class ForegroundEntryTests(unittest.TestCase):
         with patch.object(r,'run_review',side_effect=abort):
             with self.assertRaises(HostAbort):self.invoke(h)
         self.assertIs(h.issuer.pending_job,marker)
+
+
+class Issue192Tests(unittest.TestCase):
+    """Advance trusted clocks around the real adapter's offline fake job."""
+    def harness(self):
+        h=WorkerHarness(timeout=120);self.addCleanup(h.close);return h
+
+    def advance(self,h,seconds):
+        h.fake.utc=(r.utc_time(h.fake.utc)+timedelta(seconds=seconds)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        h.fake.mono+=seconds
+
+    def invoke(self,h,**kwargs):
+        return a.run_foreground_review(h.issuer,h.ledger,budget=kwargs.get('budget',h.fake.budget))
+
+    def job(self,h,*,seconds=0,metadata=None,drift=False):
+        from llmtool.providers.claude_cli import ClaudeCLIProvider
+        original=ClaudeCLIProvider._invoke_review_job
+        def finish(provider,*args,**kwargs):
+            result=original(provider,*args,**kwargs)
+            self.advance(h,seconds)
+            if drift:
+                h.observer._facts=lambda root:replace(FixtureObserver._facts(h.observer,root),index_digest='9'*64)
+            if metadata is not None:result.update(metadata)
+            return result
+        return patch.object(ClaudeCLIProvider,'_invoke_review_job',finish)
+
+    def test_advancing_observation_new_issuer_cannot_buy_second_review(self):
+        h=self.harness()
+        self.assertEqual(self.invoke(h)['code'],'REVIEW_APPROVED')
+        first=h.ledger._db.execute('SELECT object_key,status FROM receipts').fetchall()
+        self.advance(h,1)
+        h.issuer=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
+        with self.job(h) as unused:
+            result=self.invoke(h)
+        self.assertEqual(result['provider_calls'],0,result)
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(h.ledger._db.execute('SELECT object_key,status FROM receipts').fetchall(),first)
+
+    def test_six_and_sixty_second_stable_jobs_remain_valid(self):
+        for seconds in (6,60):
+            with self.subTest(seconds=seconds):
+                h=self.harness()
+                with self.job(h,seconds=seconds):result=self.invoke(h)
+                self.assertEqual(result['code'],'REVIEW_APPROVED',result)
+                self.assertEqual(result['provider_calls'],1)
+                self.assertFalse(result['authorized'])
+                self.assertIsNone(h.issuer.pending_job)
+                self.assertEqual(h.ledger._db.execute('SELECT status FROM receipts').fetchall(),[('EFFECT_DONE',)])
+
+    def test_actual_token_overage_never_approves(self):
+        for metadata in (dict(input_tokens=100001,output_tokens=8),dict(input_tokens=12,output_tokens=100001)):
+            with self.subTest(metadata=metadata):
+                h=self.harness()
+                with self.job(h,metadata=metadata):result=self.invoke(h)
+                self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertEqual(result['code'],'REVIEW_BUDGET_EXCEEDED')
+                self.assertEqual(result['budget']['status'],'EXCEEDED')
+                self.assertEqual(result['provider_calls'],1)
+                self.assertEqual(result['input_tokens'],metadata['input_tokens'])
+                self.assertEqual(result['output_tokens'],metadata['output_tokens'])
+                self.assertIsNone(result['cost'])
+                self.assertEqual(h.ledger._db.execute('SELECT status FROM receipts').fetchall(),[('EFFECT_DONE',)])
+
+    def test_unknown_usage_is_null_and_never_approves(self):
+        h=self.harness()
+        with self.job(h,metadata=dict(input_tokens=None,output_tokens=None)):result=self.invoke(h)
+        self.assertEqual(result['code'],'REVIEW_BUDGET_UNKNOWN',result)
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['budget']['status'],'UNKNOWN')
+        self.assertEqual(result['provider_calls'],1)
+        self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens']);self.assertIsNone(result['cost'])
+
+    def test_tiny_input_budget_is_denied_before_consume_or_spawn(self):
+        h=self.harness()
+        budget=replace(h.fake.budget,max_input_tokens=1,max_output_tokens=1)
+        with patch('subprocess.Popen',side_effect=AssertionError('budget must prevent spawn')):
+            result=self.invoke(h,budget=budget)
+        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
+        self.assertEqual(result['provider_calls'],0)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
 
 
 if __name__ == "__main__":

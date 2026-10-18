@@ -22,7 +22,7 @@ from .errors import coded_error, LLMToolError
 from .task_lifecycle import inspect_task, State, utc_time
 from .task_verification import CriterionKind, EvidenceSource, EvidenceOutcome, parse_evidence_record
 from .run_budget import (RunBudget, UsageLedger, CallPhase, BudgetCode, admit_next,
-                         usage_from_provider)
+                         usage_from_provider, assess_budget, BudgetStatus)
 
 PACKET_LIMIT = 256 * 1024
 SOURCE_LIMIT = 128 * 1024
@@ -169,6 +169,7 @@ class ReviewCallBinding:
     issuer_capability_id: str
     redeem_run_id: str
     deadline: str
+    reviewed_object_digest: str
 
     def __post_init__(self):
         if type(self.ready_task) is not TaskBinding or type(self.acceptance_task) is not TaskBinding:
@@ -180,7 +181,8 @@ class ReviewCallBinding:
             reject('REVIEW_BINDING_INVALID')
         for value in (self.task_id,self.route_id,self.issuer_capability_id): safe_id(value)
         for value in (self.profile,self.model): safe_diagnostic_text(value,1024)
-        for value in (self.packet_digest,self.observation_digest,self.route_digest,self.export_scope_digest): _hex(value)
+        for value in (self.packet_digest,self.observation_digest,self.route_digest,self.export_scope_digest,
+                      self.reviewed_object_digest): _hex(value)
         _hex(self.source_sha,(40,64));_hex(self.run_id,(32,));_hex(self.redeem_run_id,(32,))
         _hex(self.reviewer_launch_nonce,(32,))
         for value in (self.epoch,self.sequence,self.route_version): _integer(value,minimum=1)
@@ -381,6 +383,16 @@ class ReviewPacket:
     @property
     def digest(self):
         return hashlib.sha256(b'llmtool.review-packet.v1\0' + self.data).hexdigest()
+
+    @property
+    def reviewed_object_digest(self):
+        # Preserve source/base, contracts, approval, scope and all review data.
+        # Sampling time and event sequence still bind the exact call/verdict,
+        # but a fresh observation alone must not purchase another review.
+        payload = self.to_dict()
+        del payload['observation_digest']
+        del payload['sequence']
+        return digest(payload, 'llmtool.reviewed-packet-payload.v1')
 
     def to_dict(self):
         return load_json(self.data.decode('utf-8'), PACKET_LIMIT)
@@ -634,7 +646,13 @@ def run_review(ready, final, expect, events, fixture):
         ledger = UsageLedger((),0,int((submit_mono-start)*1000))
         if admit_next(budget,ledger,CallPhase.REVIEW) is not BudgetCode.WITHIN_BUDGET:
             reject('REVIEW_BUDGET_BLOCKED')
-        packet.messages()  # Validate the complete fixed-instruction/data rendering before consume.
+        messages = packet.messages()
+        # Conservative byte admission, including instructions, echo and role
+        # framing. This is not a tokenizer or a hard cost-cap guarantee; actual
+        # provider usage must independently satisfy the budget after the call.
+        rendered = '\n\n'.join(m['role'].upper() + ':\n' + m['content'] for m in messages)
+        if len(rendered.encode('utf-8')) > budget.max_input_tokens:
+            reject('REVIEW_BUDGET_BLOCKED')
         route=fixture.route
         binding=ReviewCallBinding(approval.ready_task.task_id,approval.ready_task,approval.acceptance_task,
             approval.criterion_map,approval.ready_task.run_id,expect.epoch,snapshot.last_sequence,
@@ -646,7 +664,7 @@ def run_review(ready, final, expect, events, fixture):
                     'path_list_digest':digest([s['path'] for s in packet.to_dict()['sources']],
                                             'llmtool.review-path-list.v1')}),
             'FAKE_TEST_ONLY' if fake and type(fixture) is not HostServices else 'PRODUCTION_REVIEW',fixture.issuer_capability_id,
-            fixture.redeem_run_id,approval.expires_at)
+            fixture.redeem_run_id,approval.expires_at,packet.reviewed_object_digest)
         admission=fixture.authority.admit(binding)
         if (type(admission) is not Admission or admission.admitted is not True or
                 admission.code != 'REVIEW_ADMITTED' or
@@ -716,7 +734,18 @@ def run_review(ready, final, expect, events, fixture):
                         ('reaped','pipes_drained','pipes_closed','runtime_closed')) or
                     time.monotonic() >= real_deadline):
                 reject('REVIEW_LAUNCH_NOT_ATTESTED')
-        approve = verdict['security'] == verdict['functional'] == 'APPROVE'
+        assessment = assess_budget(budget,UsageLedger((usage,),0,int((end-start)*1000)))
+        budget_fields = dict(budget=assessment.to_dict(),elapsed_ms=int((end-start)*1000),
+                             usage_source='PROVIDER_REPORTED' if usage.known else 'UNKNOWN')
+        if assessment.status is not BudgetStatus.WITHIN:
+            return envelope('REVIEW_BUDGET_' + assessment.status.value,
+                snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,
+                collector_status='FAKE_VALIDATED' if fake else 'HOST_VALIDATED',
+                verdict_validation='SUCCESS',packet_digest=packet.digest,
+                post_observation_digest=after.digest,input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,job_evidence=job_evidence,
+                execution_disposition='STOP_NO_EXECUTION_AUTHORITY',**budget_fields)
+        approve = verdict['security'] == verdict['functional'] == 'APPROVE' 
         return envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
             'CHANGES_REQUIRED' in (verdict['security'],verdict['functional']) else 'REVIEW_BLOCKED',
             snapshot=snapshot,fake=fake,calls=calls,status='APPROVE' if approve else 'BLOCKED',
@@ -728,7 +757,7 @@ def run_review(ready, final, expect, events, fixture):
             input_tokens=usage.input_tokens,output_tokens=usage.output_tokens,
             execution_disposition='STOP_NO_EXECUTION_AUTHORITY',
             reviewer_role=binding.reviewer_role,job_evidence=job_evidence,
-            review_authority='WORKER_DATA_ONLY' if worker else 'REVIEW_DATA_ONLY')
+            review_authority='WORKER_DATA_ONLY' if worker else 'REVIEW_DATA_ONLY',**budget_fields)
     except (LLMToolError,ValueError,TypeError,AttributeError,KeyError,UnicodeError,RecursionError,TimeoutError) as exc:
         return envelope(getattr(exc,'review_code','REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID'),
                         snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,

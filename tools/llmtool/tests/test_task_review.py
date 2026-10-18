@@ -135,7 +135,8 @@ class FakeHost:
             criterion_evidence=[{'criterion_id':c['criterion_id'],'evidence_refs':['actual-test-artifact','exact-ci']}
                                 for c in p['acceptance_contract']['criteria']])
         self.during_call()
-        return Reply(json.dumps(self.response_mutate(verdict)),{})
+        return Reply(json.dumps(self.response_mutate(verdict)),
+                     dict(prompt_tokens=7,completion_tokens=5,total_tokens=12))
 
 
 class ReviewTests(unittest.TestCase):
@@ -160,7 +161,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED'); self.assertFalse(result['authorized'])
         self.assertEqual(result['reported_state'],'WAITING_REVIEW')
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
-        self.assertIsNone(result['input_tokens']); self.assertIsNone(result['cost'])
+        self.assertEqual(result['input_tokens'],7); self.assertEqual(result['output_tokens'],5)
+        self.assertEqual(result['budget']['status'],'WITHIN'); self.assertIsNone(result['cost'])
         self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
         self.assertFalse(result['handoff']['triggered'])
     def test_n1_success_nonreview_states_never_trigger(self):
@@ -418,7 +420,7 @@ class FrozenInterfaceTests(unittest.TestCase):
             'epoch','sequence','source_sha','packet_digest','observation_digest','author_agents',
             'reviewer_role','reviewer_launch_nonce','route_id','route_version','route_digest',
             'provider','profile','model','export_scope_digest','issuer_class','issuer_capability_id',
-            'redeem_run_id','deadline'})
+            'redeem_run_id','deadline','reviewed_object_digest'})
     def test_fresh_submit_sample_cannot_renew_stale_packet_observation(self):
         original=self.host.bundle
         def delayed_packet():
