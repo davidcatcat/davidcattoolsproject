@@ -73,6 +73,73 @@ security, QA or Mac/runtime gates remain blocking regardless of the
 owner's general merge delegation. This document describes workflow,
 not an installed autonomous Mac executor or background service.
 
+### 2026-10-17 accepted Coordinator / Integrator PM / llmtool boundary
+
+[Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172) /
+[Draft PR #173](https://github.com/davidcatcat/davidcattoolsproject/pull/173)
+are the owner-approved architecture source; they do not implement new runtime rights.
+
+1. ChatGPT Coordinator discusses owner goals, architecture and product decisions.
+   For a complex approved work package, produce **one initial handoff** for the
+   **existing canonical Codex Integrator (= PM Agent + Integration Manager)**.
+2. Integrator/PM decides when to use a local subagent, a distinct Worker or a
+   company-LLM advisory call, and chooses dependencies, validation and bounded
+   repairs. **llmtool executes an approved route/plan and records status, policy,
+   usage, evidence and events; it does not independently reason about which AI
+   should own complex work.** Do not add a second controller or fixed PM CLI.
+3. The target Worker report -> llmtool trusted event -> **same Integrator**
+   wake/resume loop must reduce owner prompt relays. Automatic original Session
+   resume, trusted CLI handoff and full M2 Live E2E are **NOT_VERIFIED**;
+   GitHub records alone do not awaken an existing Mac CLI.
+4. Simple, clear, authorized tasks may later bypass PM through llmtool chat.
+   Pure Git status/diff queries can remain deterministic; no F2 real-repository
+   mutation/Commit/Push is made live by this decision.
+5. Company gw is an API-only reasoning Provider, not Shell/Git authority.
+   Use only a tested, privacy-authorized task class after factual and serious
+   error gates; include independent QA, retries/repairs and PM token overhead
+   in any net saving claim. Mark missing usage or price UNKNOWN.
+
+### D-007 independent mobile Codex Cloud delivery
+
+This separate lane is **selected by Coordinator or Integrator/PM**, and the
+owner starts/continues the Cloud task from ChatGPT mobile. It does not require
+the local Mac, llmtool runtime or VPN and does not prove automatic Cloud dispatch.
+
+1. **Scope first:** assign a unique independent task, source/base SHA, allowed
+   files, acceptance tests and owner; check overlap against local and other
+   Cloud work packages before coding. Do not place Mac-native, private VPN,
+   Keychain or unpushed local-state work on this lane as Cloud-only acceptance.
+2. **Environment:** use the original task's already-configured Cloud checkout.
+   A Cloud environment must first be created/published on web/desktop and
+   GitHub repository access must actually work. Do not assume /workspace is
+   a checkout, add another project clone or copy Mac credentials into Cloud.
+3. **Deliverable:** Cloud develops, executes available tests, **self-pre-reviews**
+   and fixes within scope. With verified GitHub rights it publishes **only its
+   own feature branch/Draft PR**, never main; if publication fails, retain the
+   task/link/diff and report BLOCKED rather than inventing a remote SHA.
+4. **Integrator pickup (2026-10-18 disposition):** the 2026-10-17 mobile
+   lane specified an owner completion handoff. The existing Integrator now
+   picks up the completed PR/task through actually available, authorized
+   CLI/GitHub workflows. Owner link sharing remains an optional fallback,
+   not a required completion relay. If remote launch is unavailable, record
+   the concrete task and limitation; a GitHub comment does not prove that
+   Cloud has started.
+   Integrator checks original task, actual base/head SHA, full diff, conflicts,
+   CI/test provenance and risks, then obtains **separate non-author**
+   Security/Functional/QA and native Mac evidence when required. Cloud's
+   self-review is not formal independent QA or authorization to merge.
+5. **Evidence:** preserve Cloud task ID, branch/remote, base/head SHA, PR link,
+   changed files, actual test commands and exit codes, self-review findings,
+   untested Mac/Live requirements as NOT_TESTED, and unknown token/cost as
+   UNKNOWN. Keep GitHub branch ownership isolated, never force-push peer refs
+   or auto-merge main.
+
+This **does not** activate llmtool F2 Git mutation, the native M2 autonomous
+cycle, Codex Integrator wake/resume, or a second scheduler/daemon. Follow
+[safe-git](../../skills/safe-git/SKILL.md) and
+[ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Cloud setup:
+https://help.openai.com/en/articles/20001545-using-codex-cloud.
+
 ### Complete-work-package execution and local reviewer handoff (2026-10-14)
 
 Apply the [normative work-package policy](../../skills/ai-team-delivery/SKILL.md#work-package-delivery-and-in-session-reviewer-subagents-owner-decision-2026-10-14) and [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235). One already-authorized Developer CLI owns a complete deliverable: plan and safe-git preflight, scoped implementation, targeted tests, a **read-only in-session Reviewer child** if supported, bounded repair/recheck and one consolidated Draft PR/evidence packet. Avoid separately asking the owner to advance each microstep.

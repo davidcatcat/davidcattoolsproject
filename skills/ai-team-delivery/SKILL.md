@@ -25,6 +25,49 @@ technical capability never confers runtime, network, Git or merge authority.
 Reviewer/developer independence requires distinct roles and separate review
 evidence, not two labels on a single self-review.
 
+### 2026-10-17 owner-approved PM/llmtool and mobile Cloud roles
+
+[Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172) /
+[Draft decision PR #173](https://github.com/davidcatcat/davidcattoolsproject/pull/173)
+clarify these **accepted responsibilities**, without authorizing new runtime
+capabilities, Git mutation, model spending or a second controller:
+
+- **ChatGPT Coordinator** leads high-level requirement and architecture
+  discussion and can nominate a work package to split into Cloud.
+  For authorized complex local work the **existing canonical Codex
+  Integrator** is **PM Agent + Integration Manager**, deciding scope split,
+  agent/provider selection, dependencies and review. No separate fixed
+  PM CLI or owner-managed AI-by-AI task allocation.
+- **llmtool** executes permitted task/provider choices and records policy,
+  Worker state, event, usage and evidence; it is **not** the semantic task
+  planner. The local one-paste Worker->llmtool->same Integrator autonomous
+  continuation remains TARGET/NOT_LIVE_VERIFIED. Simple authorized work
+  may eventually skip PM; this does not make F2 Git writes active.
+- **Company gw** is an API-only advisory Provider. Quality-first route
+  evidence, independent validation, severe-error checks, permitted
+  data egress and **net** premium-model token/cost comparisons (including
+  retries/verification/repairs/PM) govern use. Unknown is UNKNOWN;
+  no company-first blanket routing.
+- **D-007 Codex Cloud** is a parallel **mobile-initiated** independent
+  work package selected by Coordinator/Integrator. Cloud self-develops,
+  tests and self-pre-reviews a task-owned Cloud checkout/feature branch;
+  where authorized it publishes a Draft PR. The 2026-10-17 mobile lane
+  specified an owner completion handoff. **The 2026-10-18 disposition makes
+  the existing Integrator responsible for pickup through actually available,
+  authorized CLI/GitHub workflows; owner link sharing is an optional
+  fallback, not a required completion relay.** If remote launch is unavailable,
+  record the concrete task and limitation; a GitHub comment does not prove
+  that Cloud has started. Do not claim automatic PM-to-Cloud dispatch
+  without observed execution evidence.
+  Cloud self-review is **pre-review**, not distinct non-author
+  Security/Functional/QA acceptance. Integrator must arrange required
+  separate review, CI and Mac-native validation before eligible merge.
+  Follow [safe-git](../safe-git/SKILL.md) for shared remote refs.
+
+Do not interpret any architecture ACCEPTED state as IMPLEMENTED or
+LIVE_VERIFIED. In particular the Codex Integrator original-session
+auto-wake, llmtool F2 and complete M2 remain unverified.
+
 ## Delegated decisions and required escalation
 
 The owner **delegates routine technical management, risk recommendations and

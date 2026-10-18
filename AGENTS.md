@@ -51,6 +51,32 @@ Apply the canonical user-impact-first defect triage in the Skill;
 keep C1 excerpt export safety
 (Issue #66) distinct from offline local executor design.
 
+### 2026-10-17 accepted collaboration and Codex Cloud roles
+
+Read [Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172),
+[Roadmap](tools/llmtool/ROADMAP.md#owner-accepted-collaboration-architecture-and-mobile-codex-cloud-lane-2026-10-17)
+and [ai-team-delivery](skills/ai-team-delivery/SKILL.md).
+The **existing canonical Codex Integrator is PM + Integration Manager**
+for complex tasks; it selects agents, subagents and dependencies.
+**llmtool only executes/records authorized plans**, without becoming
+an independent semantic PM. Original-session auto-wake and M2 Live
+remain unverified.
+
+**D-007:** Coordinator or Integrator may select an independent task for
+mobile-initiated Codex Cloud development. Cloud uses its own configured
+checkout and self-pre-review, then publishes an authorized task-owned
+feature branch/Draft PR. **Under the 2026-10-18 handoff disposition,
+the existing Integrator picks up the completed Cloud PR through actually available, authorized
+CLI/GitHub workflows and arranges final assessment.** Owner link sharing
+is an optional fallback, not a required completion relay. If remote launch
+is unavailable, record the concrete task and limitation; a GitHub comment
+does not prove that Cloud has started.
+Self-review is not formal non-author Security/Functional/QA; maintain
+shared-remote Git branch isolation and required native Mac gates.
+No additional Mac worktree, Cloud auto-dispatch, llmtool F2 authority or
+automatic main merge results from this workflow. See
+[safe-git](skills/safe-git/SKILL.md).
+
 ## Canonical repository and pre-change checks
 
 The canonical local Mac project repository directory is:
