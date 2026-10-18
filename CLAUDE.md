@@ -28,6 +28,8 @@ No unapproved clone, extra worktree or project archive copy, no `main`
 checkout in developer worktrees, no llmtool F2 mutation or automated cleanup
 of historical processes. Canonical native F1 acceptance remains unchanged.
 
+**2026-10-19 current Owner D1–D5 override for Developer ownership:** Claude **Developer is PAUSED**. Claude Code continues as the dedicated independent **Reviewer/QA**, not a default code writer. OpenCode v2 is approved to take over the **same existing** Claude-named fixed root **only after** independently reviewed safe-git policy and actual Mac release/C2/C3 turnover. Read [owner decisions](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). This supersedes the earlier historical Claude Developer task guidance in this file; do not re-enter an OpenCode-owned root to write, fetch or change refs. Review context must remain separately authorized/read-only; DeepSeek/GLM pre-review does not replace Claude formal verdict. Quota-exhausted work awaits exact-SHA formal review, not automatic paid fallback. No new worktree or native M2 proof implied.
+
 Give actionable, human-readable findings, reproduction evidence, severity,
 a disposition recommendation and the exact reviewed SHA. Classify required
 gates separately. If all findings are nonblocking Low, recommend

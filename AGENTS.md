@@ -8,8 +8,7 @@ The user is the requirements owner/product acceptor, **not** the day-to-day
 PM, source-code reviewer, prompt courier or Mac test diagnostician. ChatGPT,
 when available as the authorized coordinator, owns technical planning,
 Codex/Claude delegation, evidence reconciliation, routine Low-risk
-dispositions and eligible PR merges under delegated scope. Codex is normally
-the sole implementation writer; Claude (or a separately evidenced reviewer)
+dispositions and eligible PR merges under delegated scope. Codex Developer is the primary implementation writer; OpenCode is the secondary Developer only after reviewed fixed-root ownership transfer. Claude (or a separately evidenced reviewer)
 performs the independent review. The same agent's own checks do not become
 independent QA or a security-review gate.
 
@@ -38,6 +37,8 @@ it. Apply [safe-git](skills/safe-git/SKILL.md) and the relevant
 independent evidence gates before merging.
 
 **Owner reporting (approved 2026-10-19):** follow [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for evidence-backed M1b/M2/Mac-pilot milestone reports, one weekly compact pulse and material Owner decisions. Integrator handles routine work and independent gates; do not confuse a GitHub report with a notification delivered to ChatGPT or the Owner. The policy creates no new controller, authority or release milestone.
+
+**Owner D1–D5 (2026-10-19):** Read [OpenCode developer allocation](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). Codex Developer first-line; OpenCode second-line only after reviewed existing second-root Mac transfer; no third checkout. Claude Developer PAUSED, Claude Code remains formal Reviewer, company-gw unchanged, AGY backup, Cloud integration undecided. Non-sensitive whole-repo **reading** is not secret/egress/writing permission; never silently use paid fallback. Foreground active-Integrator handoff comes before separately verified original-session wake/G3.
 
 **llmtool product direction:** Read
 [the single A11 roadmap](tools/llmtool/ROADMAP.md) and the canonical
