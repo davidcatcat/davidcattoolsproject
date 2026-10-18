@@ -341,6 +341,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
 
     def test_reaped_worker_with_silent_descendant_is_unknown_not_approved(self):
         import time
+        from llmtool.errors import LLMToolError
         h=self.harness(mode='silent-descendant')
         def release():
             h.descendant_release.touch()
@@ -365,9 +366,11 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         self.assertTrue(pending.process._llmtool_cleanup_pending)
         receipt=next(iter(h.authority.receipts.values()))
         self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
-        with patch('subprocess.Popen',side_effect=AssertionError('resend')):
-            with self.assertRaises(Exception):
+        with patch('subprocess.Popen',side_effect=AssertionError('resend')) as spawn:
+            with self.assertRaises(LLMToolError) as caught:
                 h.launcher.launch(b'',r.ConsumeToken('', '', '',True,True))
+        self.assertEqual(caught.exception.review_code,'REVIEW_WORKER_CLEANUP_UNKNOWN')
+        spawn.assert_not_called()
 
     def test_fresh_worker_strict_verdict_owned_exit_and_no_legacy_cleanup(self):
         h=self.harness()
