@@ -275,6 +275,11 @@ class WorkerHarness(Harness):
         # Same accepted synthetic fixture authority; new role/runtime policy is
         # independently host-pinned, never a model/CLI flag or old Session grant.
         self.argv_file=self.hostdir/'argv.json'
+        self.descendant_release=self.hostdir/'descendant-release'
+        self.descendant_ready=self.hostdir/'descendant-ready'
+        descendant_script=('import signal,time;from pathlib import Path;signal.alarm(5);'
+            'Path('+repr(str(self.descendant_ready))+').touch();'
+            '\nwhile not Path('+repr(str(self.descendant_release))+').exists(): time.sleep(0.01)\n')
         script=FAKE_SCRIPT.replace('print(json.dumps(out))', """
 mode=MODE
 if mode == 'changes': out['functional']='CHANGES_REQUIRED'
@@ -292,9 +297,16 @@ if mode == 'exit': sys.exit(7)
 if mode == 'descendant':
  import subprocess
  subprocess.Popen([sys.executable,'-IB','-c','import time;time.sleep(10)'])
+if mode == 'silent-descendant':
+ import signal,subprocess,time
+ from pathlib import Path
+ signal.alarm(5)
+ subprocess.Popen([sys.executable,'-IB','-c',DESCENDANT_SCRIPT],
+  stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+ while not Path(DESCENDANT_READY).exists(): time.sleep(0.01)
 print(json.dumps(dict(type='result',subtype='success',is_error=False,
  session_id=SESSION,result=json.dumps(out),usage=dict(input_tokens=12,output_tokens=8))))
-""").replace('INTERPRETER',sys.executable).replace('mode=MODE','mode='+repr(mode)).replace('session_id=SESSION',
+""").replace('DESCENDANT_SCRIPT',repr(descendant_script)).replace('DESCENDANT_READY',repr(str(self.descendant_ready))).replace('INTERPRETER',sys.executable).replace('mode=MODE','mode='+repr(mode)).replace('session_id=SESSION',
  'session_id='+repr('081de22e-d514-4288-9d1f-48f488979271' if mode=='spoof' else 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'))
         script=script.replace('v=json.loads', 'open('+repr(str(self.argv_file))+',"w").write(json.dumps(sys.argv[1:]))\nv=json.loads')
         self.exe.write_text(script)
@@ -326,6 +338,39 @@ print(json.dumps(dict(type='result',subtype='success',is_error=False,
 class WorkerJobIntegrationTests(unittest.TestCase):
     def harness(self,**changes):
         h=WorkerHarness(**changes);self.addCleanup(h.close);return h
+
+    def test_reaped_worker_with_silent_descendant_is_unknown_not_approved(self):
+        import time
+        from llmtool.errors import LLMToolError
+        h=self.harness(mode='silent-descendant')
+        def release():
+            h.descendant_release.touch()
+            pending=h.launcher.pending_job
+            if pending is not None:
+                until=time.monotonic()+3
+                while True:
+                    try:os.killpg(pending.process.pid,0)
+                    except ProcessLookupError:break
+                    self.assertLess(time.monotonic(),until,'fixture group still present')
+                    time.sleep(0.01)
+        self.addCleanup(release)
+        result=h.run()
+        self.assertEqual(result['status'],'BLOCKED',result)
+        self.assertEqual(result['code'],'REVIEW_WORKER_CLEANUP_UNKNOWN',result)
+        self.assertEqual(result['provider_calls'],1)
+        self.assertNotIn('job_evidence',result)
+        pending=h.launcher.pending_job
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.process.returncode,0)
+        self.assertFalse(pending.cleanup_confirmed)
+        self.assertTrue(pending.process._llmtool_cleanup_pending)
+        receipt=next(iter(h.authority.receipts.values()))
+        self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
+        with patch('subprocess.Popen',side_effect=AssertionError('resend')) as spawn:
+            with self.assertRaises(LLMToolError) as caught:
+                h.launcher.launch(b'',r.ConsumeToken('', '', '',True,True))
+        self.assertEqual(caught.exception.review_code,'REVIEW_WORKER_CLEANUP_UNKNOWN')
+        spawn.assert_not_called()
 
     def test_fresh_worker_strict_verdict_owned_exit_and_no_legacy_cleanup(self):
         h=self.harness()
@@ -386,18 +431,31 @@ class WorkerJobIntegrationTests(unittest.TestCase):
 
     def test_real_fake_child_timeout_and_inherited_pipe_drain_no_unbounded_wait(self):
         import time
+        from llmtool.providers import cli_lifecycle
         for mode in ('timeout','descendant'):
             with self.subTest(mode=mode):
                 h=self.harness(mode=mode,timeout=1)
                 started=time.monotonic()
-                with patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
+                observations=[]
+                actual_absent=cli_lifecycle._group_absent
+                def observe(pgid):
+                    absent=actual_absent(pgid);observations.append(absent);return absent
+                with patch('llmtool.providers.cli_lifecycle._group_absent',side_effect=observe), \
+                        patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
                     result=h.run()
                 self.assertLess(time.monotonic()-started,2)
                 self.assertEqual(result['code'],'REVIEW_TIMEOUT',result)
                 self.assertEqual(result['provider_calls'],1)
                 receipt=next(iter(h.authority.receipts.values()))
                 self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
-                self.assertIsNone(h.launcher.pending_job)
+                pending=h.launcher.pending_job
+                if pending is None:
+                    self.assertTrue(observations[-1])
+                else:
+                    self.assertFalse(pending.cleanup_confirmed)
+                    self.assertTrue(pending.process._llmtool_cleanup_pending)
+                    self.assertTrue(pending.process._llmtool_group_unconfirmed is True or
+                                    (observations and observations[-1] is False))
 
     def test_pinned_executable_change_zero_launch_and_source_drift(self):
         h=self.harness()
@@ -468,8 +526,10 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         finally:
             # Test-owned unreaped fake child only; restore actual bounded wait.
             pending.process.wait(timeout=2)
-        with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
-            pending.stop();kill.assert_not_called()
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as probe:
+            pending.stop();probe.assert_not_called()
+        self.assertFalse(pending.cleanup_confirmed)
+        self.assertTrue(pending.process._llmtool_cleanup_pending)
 
     def test_expired_route_and_registration_role_deny_without_spawn(self):
         h=self.harness()
@@ -713,16 +773,29 @@ class ForegroundEntryTests(unittest.TestCase):
 
     def test_real_fake_timeout_pipe_and_invalid_reply_fail_closed(self):
         import time
+        from llmtool.providers import cli_lifecycle
         for mode in ('timeout','descendant','stderr','invalid-inner','private','spoof','exit'):
             with self.subTest(mode=mode):
                 h=self.harness(mode=mode,timeout=1);started=time.monotonic()
-                result=self.invoke(h)
+                observations=[]
+                actual_absent=cli_lifecycle._group_absent
+                def observe(pgid):
+                    absent=actual_absent(pgid);observations.append(absent);return absent
+                with patch('llmtool.providers.cli_lifecycle._group_absent',side_effect=observe):
+                    result=self.invoke(h)
                 self.assertEqual(result['status'],'BLOCKED',result)
                 self.assertEqual(result['provider_calls'],1)
                 self.assertFalse(result['authorized'])
                 self.assertNotIn('SECRET_FAKE',json.dumps(result))
                 self.assertLess(time.monotonic()-started,4)
-                self.assertIsNone(h.issuer.pending_job)
+                pending=h.issuer.pending_job
+                if pending is None:
+                    self.assertTrue(observations[-1])
+                else:
+                    self.assertFalse(pending.cleanup_confirmed)
+                    self.assertTrue(pending.process._llmtool_cleanup_pending)
+                    self.assertTrue(pending.process._llmtool_group_unconfirmed is True or
+                                    (observations and observations[-1] is False))
 
     def test_cancellation_and_baseexception_retain_actual_services(self):
         import signal
