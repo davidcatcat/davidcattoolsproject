@@ -71,6 +71,8 @@ First independently verify the paused Claude Developer's real Session/descendant
 
 Owner D4 permits OpenCode to **read the entire non-sensitive repository**, not secrets, arbitrary external Mac directories, automatic provider data egress, writes outside the authorized task or llmtool F2. Verify the installed OpenCode **v2** permission schema, effective read/search/shell/task/external-directory effects, provider-specific privacy/egress authorization, redaction and negative leakage tests **before real external source transfer**. Prompt-only rules are not an OS boundary. Preserve all the C2/C3, single-writer, shared-ref and existing Git-authority gates below; **no third checkout, rename, clone, cleanup, forced branch operation or automatic paid fallback**.
 
+For OpenCode/DeepSeek and GLM pre-review, repository reads/searches and command outputs entering agent context **are external provider egress**. Record the D4 gate for the exact models and permitted data scope **before the first such repository inspection**; until then only explicitly provider-cleared content may be used. [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) and [company delegation](../company-llm-delegation/SKILL.md) retain their separate route-specific limits and supply no implicit OpenCode source-export grant.
+
 ### Immediate single-checkout handoff (active now)
 
 Before branch/source/Git writes in the shared canonical root, verify its exact
