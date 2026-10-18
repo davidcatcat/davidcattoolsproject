@@ -189,19 +189,19 @@ Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
 When the user chooses Codex Cloud, use only the repository checkout configured for
 that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
-This Cloud exception does not authorize new project checkouts. Separately, the
-owner approved **only two fixed linked developer worktrees** (Codex/Claude)
-subject to independent policy review and Mac activation gates in
-[safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-Independent G5 and G6 native evidence passed, and the G7 independent review
-[Issue #115 #6118588175](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6118588175)
-supports activation subject to C1-C6. Exactly two fixed worktrees become
-**ACTIVE for ordinary development only upon merge** of the separately
-reviewed activation-status PR, not merely by this proposal. The
-[safe-git task-turnover and failure constraints](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-remain binding; canonical F1 acceptance is separate. All other worktrees,
-archive project copies, independent/milestone clones and alternate Mac
-checkouts remain forbidden.
+Cloud still uses only its own configured checkout, with no automatic new
+Mac root. Subsequent **Owner D6 (2026-10-19)** supersedes the earlier G7
+two-fixed-developer-worktree limit: task-scoped linked worktrees are allowed
+under the dedicated verified workspace parent. Per-task admission is a
+lightweight root/branch/owner/runtime check, not a new G1-G7 pilot. Complete
+merged-and-accepted tasks retire automatically only after PR evidence,
+process-liveness, tracked/untracked/ignored data and unpublished-commit
+preservation checks. Retain pending review/repair and ambiguous/crashed
+work; no forced deletion or age-only cleanup. The canonical Integrator/F1
+root, D1 historical-root handoff, shared-ref coordination and independent
+QA/F2/provider gates remain unchanged. See [safe-git](../../skills/safe-git/SKILL.md).
+Status: **D6 POLICY APPROVED; Mac create/cleanup automation NOT LIVE VERIFIED**.
+This is an operating-policy simplification, not a new A milestone.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
