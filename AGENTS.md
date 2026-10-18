@@ -161,6 +161,17 @@ from that repository and name only files belonging to the task.
   start the next milestone or merge main.
 - Provider != Profile != Role != Agent != Skill. Capability/role/model identity never grants execution authority.
 
+## Repository hygiene
+
+- Do not commit raw logs, full test transcripts or large captured fixtures
+  under `reports/`. Keep them as CI artifacts or private evidence and record
+  command, exit, counts, SHA and a SHA-256 digest instead
+  ([reports/README.md](reports/README.md)). The repository is public: no home
+  paths, usernames or tokens in committed evidence.
+- Milestone status belongs in the [Roadmap](tools/llmtool/ROADMAP.md), not in
+  AGENTS.md, CLAUDE.md or Skills. Keep `SKILL.md` files short and move long
+  approval/evidence chains into sibling reference files.
+
 ## CI incident knowledge base
 
 Before diagnosing CI failures or cost regressions, consult [CI Knowledge Base](docs/ci/README.md) and follow [debug-ci](skills/debug-ci/SKILL.md). Add a concise reusable, evidence-linked lesson after a confirmed fix; do not create report-only commits that change an already reviewed release HEAD.

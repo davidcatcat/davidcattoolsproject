@@ -67,3 +67,19 @@ coverage limits. Author-run tests do not constitute independent QA.
 
 CI 3.9/3.14 and both independent verdicts remain PENDING until observed on published
 HEAD. PR stays Draft / MERGE BLOCKED / NO A11b.2.2.2.
+
+## Archived raw logs (removed from the working tree 2026-10-18)
+
+Three full test transcripts were removed from the tree under the
+[reports hygiene rule](../README.md). They stay in Git history and are
+byte-identical to the evidence reviewed in PR #49. Retrieve one with:
+
+```sh
+git show cd7ee6494938df469ce7c9fc3f8b8948d9354ed9:reports/pr49_security_remediation_20261008/<file>
+```
+
+| File | Bytes | SHA-256 | Git blob |
+| --- | ---: | --- | --- |
+| `mac-py313-full.log` | 174173 | `93619cddadaa4f8415153f79d5df221ada0af296c41727bc1b127a68cf00e77b` | `f05983cda4f57a5a6f0752bf2fea0943113f1124` |
+| `mac-py313-sandbox-failed.log` | 313272 | `3966cdaf3f8f98411be58cbbb6e1a69177912a248ca214738249e2353c32c02d` | `6a309ea505f055217e69fece05511afd6fbf9528` |
+| `mac-py39-full.log` | 115736 | `9c6307c5b38e28829a352c0e153fa9bd1a9961ef921dbde8b9172eb535edf822` | `a3c065ed6e5d27ee87a03a29eb6a6ecdb9db9894` |
