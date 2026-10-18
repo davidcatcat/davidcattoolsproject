@@ -37,6 +37,8 @@ the product direction, who authorized Git work and who actually executed
 it. Apply [safe-git](skills/safe-git/SKILL.md) and the relevant
 independent evidence gates before merging.
 
+**Owner reporting (approved 2026-10-19):** follow [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for evidence-backed M1b/M2/Mac-pilot milestone reports, one weekly compact pulse and material Owner decisions. Integrator handles routine work and independent gates; do not confuse a GitHub report with a notification delivered to ChatGPT or the Owner. The policy creates no new controller, authority or release milestone.
+
 **llmtool product direction:** Read
 [the single A11 roadmap](tools/llmtool/ROADMAP.md) and the canonical
 [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md).

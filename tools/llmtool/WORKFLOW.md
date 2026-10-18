@@ -41,6 +41,10 @@ safety gate and explicit authorization; other source/log/diff exports
 need their own distinct trust review. Claim Token savings only after
 quality-equivalent, attributable measurements for the actual route.
 
+## Owner outcome reports and decision boundary (2026-10-19)
+
+Read the [Owner-approved outcome and reporting contract](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) when planning a milestone, review handoff or release disposition. Reuse Issue #120 and existing PR evidence. The Mac Integrator (= PM) submits a short **evidence-backed** G1/M1b, G2/Worker Live, G3/M2 closed-loop or G4/three-task Mac-pilot report when the corresponding outcome actually passes; publishes one weekly project pulse; and escalates **only** changes to product/scope, permissions/data egress, costs, accepted material risk or the final GO/LIMITED GO/NO-GO. Otherwise keep authorized development moving. Two completed task packages with no real gate progress trigger a priority correction, not extra process or an automatic STOP. Report/notification/Owner ACK are separate observed states; a GitHub comment cannot wake ChatGPT or a Mac CLI. This policy does not add a daemon, tool, product gate or llmtool F2/Host authority.
+
 ## AI-led team operating model
 
 This project's delivery responsibility is documented in
