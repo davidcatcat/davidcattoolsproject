@@ -7,24 +7,82 @@ description: Safely inspect, synchronize, commit, and push Git changes. Use when
 
 ## Owner D6 (2026-10-19): dynamic, task-scoped worktree lifecycle — NEW NORMATIVE POLICY
 
-**Owner decision: APPROVED.** Remove the old `two fixed developer worktrees / no third worktree` ceiling. The historical G1-G7 two-root pilot and its exact-root findings remain audit evidence, **not a standing worktree-count limit or a new per-task approval gate**. This section supersedes any contradictory fixed-root, no-create, no-remove or no-extra-worktree wording in older llmtool policies. The canonical Mac Integrator/native acceptance checkout remains unchanged and is **never** a disposable worktree. Existing Codex and `/claude` roots retain their live ownership/paused-Developer transfer constraints until explicitly reconciled; this decision does not silently take over an active root.
+**Owner decision: APPROVED** ([D6 decision record](../../docs/decisions/llmtool_dynamic_worktree_20261019.md), attributed to the Owner's 2026-10-19 ChatGPT instruction, not a signed GitHub approval). Remove the old `two fixed developer worktrees / no third worktree` ceiling. The historical G1-G7 two-root pilot and its exact-root findings remain audit evidence, **not a standing worktree-count limit or a new per-task approval gate**. This section supersedes any contradictory fixed-root, no-create, no-remove or no-extra-worktree wording in older llmtool policies. The canonical Mac Integrator/native acceptance checkout remains unchanged and is **never** a disposable worktree. Existing Codex and `/claude` roots retain their live ownership/paused-Developer transfer constraints until explicitly reconciled; this decision does not silently take over an active root.
 
-**Scope and authority.** Integrator/PM assigns a bounded task and controls shared-ref integration; an authorized Developer/Worker may **create and remove linked worktrees without asking the Owner again**, provided each task has a unique branch, a single registered writer/Session, and a workspace under a verified, dedicated llmtool workspaces parent (not the canonical checkout, another user's directory, an arbitrary clone, or another agent's root). Parallel count is determined by real machine resources/active work, not a hard-coded two-root ceiling. Other agents may review read-only but must not write into a peer worktree. Git common-dir/object database and remote-tracking refs are shared; serialize conflicting ref updates and integration. A new worktree is not permission for llmtool F2 Git mutation, secret/provider egress, force push, auto-merge, bypassed review, or unrestricted filesystem actions.
+**Scope and authority.** Integrator/PM assigns a bounded task and controls shared-ref integration; an authorized Developer/Worker may **create and remove linked worktrees without asking the Owner again**, provided each task has a unique branch, a single registered writer/Session, and a registered workspace strictly under `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/` (not the canonical checkout, another user's directory, an arbitrary clone, or another agent's root). Parallel count is determined by real machine resources/active work, not a hard-coded two-root ceiling. Other agents may review read-only but must not write into a peer worktree. Git common-dir/object database and remote-tracking refs are shared; serialize conflicting ref updates and integration. A new worktree is not permission for llmtool F2 Git mutation, secret/provider egress, force push, auto-merge, bypassed review, or unrestricted filesystem actions.
+
+**Registration carrier and workspace root.** The allowed parent on this Mac is
+`/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/`.
+New D6 workspaces use unique children of `tasks/`; the pre-existing
+`codex` and `claude` roots require their own verified ownership
+release/transfer and are never silently repurposed. Resolve the existing
+canonical Git common-dir from the **canonical checkout**, and use
+`<absolute-real-git-common-dir>/llmtool-worktrees/<task-id>.json` for
+a minimal host-owned **local** registry. Validate the common-dir/root
+identity, safe task-id characters, no symlink/path escape, 0700 registry
+directory and 0600 records; create/update atomically under the existing
+Integrator's serialized coordination. This is a host-owned inventory, **not
+a PID-based lock or permission granted by model-authored JSON**.
+Required fields: `schema_version=1`, `task_id`, trusted `agent_id`,
+`session_ref` and `lease_ref` (verify actual liveness independently),
+`root_realpath` and physical identity, `git_common_dir`, `branch`,
+`base_sha`, `head_sha`, optional `pr_number`, `state`,
+`last_verified_at`, `evidence_refs`, exact-path `retention_paths`,
+`lock_state`, and `disposition`. A missing/malformed or conflicting
+entry means `RETAIN_BLOCKED` for an existing directory, not authority
+to adopt or remove it. Mirror only non-sensitive task-id/branch/PR/state
+in the PR body or task handoff; never put local secrets, session tokens
+or detailed private filesystem inventory into GitHub.
+Do not add a new daemon, service, PM or G1-G7 per-task re-approval.
 
 **Lightweight create admission (repeat per new task, not G1-G7).**
-1. Bind trusted Task/Issue/PR identifier, responsible Agent + actual Session, unique branch, approved base SHA, canonical common-dir and destination path in a host-side/task record. Validate destination is absent or empty and owned, with no symlink/path traversal, conflicting writer, existing checkout of that branch, or unexpected files; do not adopt/overwrite uncertain data.
-2. Create the linked worktree with normal `git worktree add -b <unique-branch> <task-path> <approved-base>` (never `-B` or `--force`). Confirm root, common-dir, HEAD, branch, ownership and initial tracked/untracked/ignored inventory before writing. Dedicate runtime/venv/build state to that task; verify interpreter/import provenance when applicable. Do not repeat historical two-root native pilot and reviews for every workspace.
+1. Bind trusted Task/Issue/PR identifier, responsible Agent + actual Session, unique branch, approved base SHA, canonical common-dir and destination path in the above host-owned registration record. Validate destination is absent or empty and owned, with no symlink/path traversal, conflicting writer, existing checkout of that branch, or unexpected files; do not adopt/overwrite uncertain data.
+2. Create the linked worktree with normal `git worktree add -b <unique-branch> <task-path> <approved-base>` (never `-B` or `--force`). After verifying its registration, run ordinary `git worktree lock <task-path>` for protection from incidental prune. Confirm root, common-dir, HEAD, branch, ownership and initial tracked/untracked/ignored inventory before writing. Dedicate runtime/venv/build state to that task; verify interpreter/import provenance when applicable. Do not repeat historical two-root native pilot and reviews for every workspace.
 3. Record the task-to-worktree mapping and state: `ACTIVE`, `REVIEW_PENDING`, `REPAIR`, `RETIRE_READY`, `RETAIN_BLOCKED` or `REMOVED`. Keep source/QA/PR evidence bound to the actual commit/SHA. Ordinary checks are batched; only material conflicts escalate.
 
 **When a worktree is finished.** Opening/pushing a PR, an in-session self-review PASS or an Agent saying `done` is **not** a completion signal. Retire only when (a) the PR is merged **and the task is accepted/closed**, or (b) the task is explicitly cancelled/rejected/closed with a recorded disposition to retain or discard its published results. A successfully published PR waiting for formal review or merge normally remains `REVIEW_PENDING`; failed review is `REPAIR`. A review-wait workspace may be released early **only** by the same strict preservation/no-active-owner checks and with a verified re-create-from-pushed-branch path. Neither elapsed time nor an apparently dead PID alone makes a workspace disposable.
 
+**Publication proof for squash merge.** Do **not** require `git branch -d`
+or ancestry to `main` for a squash-merged PR: the original head
+commits remain outside the squash merge ancestry, and the remote
+head branch may be deleted. For an accepted merged PR, verify from
+authoritative GitHub PR metadata that `merged=true`, the exact
+task/PR identity and its final published `head.sha` /
+`headRefOid` (or a separately trusted pre-deletion SHA-bound PR
+head snapshot). Require that SHA to equal the local task branch
+HEAD, with no later unpublished commit, plus the accepted completion
+disposition and independently retained review/CI evidence. This
+proves the task candidate was published even if GitHub deleted the
+head branch; it does **not** imply Git's source commits were
+fast-forward merged. If the final PR head identity cannot be
+attested, retain the worktree and branch. For cancelled/unmerged
+tasks require explicit recorded retain/discard disposition.
+
+**Scratch and ignored-file disposition.** Non-forced `git worktree
+remove` may delete ignored files *silently*, including venv,
+secrets or evidence. Therefore inspect **all** staged, unstaged,
+untracked and ignored entries *before* remove. The task's
+host-owned `retention_paths` must identify exact relative paths
+(no wildcards, globbing, whole-root shortcuts) and classify each as
+`KEEP/EXPORT` with verified off-tree preservation, or
+`DISCARD_REGENERABLE` after verifying no secrets, unique data,
+evidence or needed recovery state. Unknown items block removal.
+Untracked paths may be deleted **only** when individually verified
+against `DISCARD_REGENERABLE`, confined to the verified task root,
+with no symlink traversal and ordinary exact-path deletion;
+this narrowly supersedes the old blanket scratch cleanup ban.
+For ignored paths, verify the inventory and classification
+before Git's own ordinary removal; ignored does not mean
+disposable. No `rm -rf` on the entire root, `git clean`,
+`reset --hard`, or forced worktree removal.
+
 **Automated retirement gate (all checks required, at the moment of deletion).**
 1. Re-read current task/PR state and registered writer/Session/lease; verify no running Agent, tests, child processes, open work or active reviewer requiring this local root. If liveness or release is uncertain, mark `RETAIN_BLOCKED`; do not kill processes as part of cleanup.
-2. Verify this is the exact registered, noncanonical linked worktree with expected physical path/common-dir/branch/HEAD and no Git locks/foreign ownership. Inventory staged, unstaged, untracked **and ignored** contents, including evidence, secrets, build products and venvs. Nothing unique or needed for recovery may be destroyed. Explicitly identified regenerable scratch/cache may be discarded only according to the task's recorded retention rule; unclassified files mean `RETAIN_BLOCKED`.
-3. Verify all useful code is committed and pushed to the intended branch/PR, that PR/closure disposition and review/CI evidence are available outside the worktree, and that no unpublished commits or local-only recovery artifacts would be lost. A merged PR must be verified from the authoritative remote, not model text. Closed-unmerged tasks require an explicit retain/discard decision for their commits.
-4. Only then run ordinary `git worktree remove <exact-registered-path>` **without `--force`**, then verify `git worktree list --porcelain` no longer includes it and record `REMOVED` with reason, task/PR, final SHA, evidence locations and time. Git branch deletion is a separate, non-forced operation only after checking remote reachability and other task references. Never silently `rm -rf`, `git clean`, `reset --hard`, `prune`, forced `worktree remove`, or delete a branch to make removal succeed.
+2. Verify this is the exact registered, noncanonical linked worktree with expected physical path/common-dir/branch/HEAD, the registered worktree lock, no unexpected Git index/ref locks or foreign ownership. Inventory staged, unstaged, untracked **and ignored** contents, including evidence, secrets, build products and venvs. Nothing unique or needed for recovery may be destroyed. Only exact, positively inventoried scratch may be discarded under the preceding rule; ignored files require explicit retain/discard classification; unknown contents mean `RETAIN_BLOCKED`.
+3. Verify all useful code is committed and published by the squash-aware authoritative PR-head proof above, that PR/closure disposition and review/CI evidence are available outside the worktree, and that no later local-only commits or recovery artifacts would be lost. A merged PR must be verified from the authoritative remote, not model text. Closed-unmerged tasks require an explicit retain/discard decision for their commits.
+4. Once the complete gate passes and the actual owner/Integrator holds exclusive cleanup control, `git worktree unlock <exact-registered-path>` **only for a D6-owned locked task tree**; recheck identity, task and writer liveness, then `git worktree remove <exact-registered-path>` **without `--force`**. Check `git worktree list --porcelain` no longer contains it; record `REMOVED`, final SHA, task/PR, disposition, evidence and timestamp. A failed unlock/remove means `RETAIN_BLOCKED`, not a forced retry. Local branch retirement is a **separate serialized Integrator action**: `git branch -d` on an actually merged ancestral branch, or **`git branch -D <exact-task-branch>` only for a squash-merged, accepted PR** whose authoritative final PR head SHA equals local branch HEAD and whose branch has no other active worktree/task/PR dependency. Keep PR/review evidence outside the tree. Do not delete remote refs, force-push, or discard branches of cancelled/unmerged tasks without separately recorded disposition. Never use `rm -rf` on the root, `git clean`, `reset --hard`, `prune` or forced `worktree remove` to bypass preservation.
 
-**Failure handling.** On interruption, stale ownership, status mismatch, unmerged work, unexpected ignored/untracked data, worktree locks or ambiguous processes, preserve the directory/refs and report a concise `RETAIN_BLOCKED` reason to Integrator. Retry inspection when the blocking condition is actually resolved; do not stop unrelated agents or require an Owner micro-approval for a normal safe lifecycle. The owner is involved only for significant policy/resource or data-loss decisions. No age-only garbage collector and no new daemon/controller is authorized.
+**Failure handling.** On interruption, stale ownership, status mismatch, unmerged work, unexpected ignored/untracked data, unexpected worktree/ref locks or ambiguous processes, preserve the directory/refs and report a concise `RETAIN_BLOCKED` reason to Integrator. Retry inspection when the blocking condition is actually resolved; do not stop unrelated agents or require an Owner micro-approval for a normal safe lifecycle. The owner is involved only for significant policy/resource or data-loss decisions. No age-only garbage collector and no new daemon/controller is authorized.
 
 **Activation truth.** This is Git policy approval, not evidence that Mac host-side worktree registration/retirement automation is already installed or active. Until the actual Developer/Integrator execution path has performed a small native create → parallel work → completed-task clean remove → interrupted-task preserve demonstration, report `D6_POLICY_APPROVED / D6_AUTOCLEAN_NOT_LIVE_VERIFIED`; do not claim that a GitHub PR, model prompt or policy document created/deleted any local directory. Integrate the rule into the existing workflow/skills, not a parallel orchestrator.
 
@@ -32,7 +90,16 @@ description: Safely inspect, synchronize, commit, and push Git changes. Use when
 
 Treat remote history and unrelated local work as protected state.
 
-## Owner-approved two-agent developer worktree exception (NOT ACTIVATED)
+<a id="owner-approved-two-agent-developer-worktree-exception-not-activated"></a>
+## HISTORICAL G1–G7: two-fixed-root pilot (NOT ACTIVATED under its original policy)
+
+**HISTORICAL / SUPERSEDED by Owner D6 as to root count, root provisioning,
+worktree unlock/remove and routine safe cleanup.** These older requirements
+are retained as evidence, not current limits. Still enforce one writer per
+worktree, canonical-only integration/native F1, no `main` checkout by
+Developers, no unclaimed fetch in canonical, registered session/branch
+ownership, no arbitrary clones, and no automatic F2, egress or merge grant.
+The explicit anchor above preserves older intra-repository references.
 
 The requirements owner explicitly approved **at most two fixed, reviewed linked Git
 worktrees** for trusted Codex CLI and Claude CLI development in
@@ -41,7 +108,7 @@ This is a narrowly scoped exception to the former canonical-only prohibition,
 **not** general permission to create project checkouts, clones, Git archive copies
 or arbitrary temporary worktrees.
 
-**Operational mode: ACTIVE only when the independently reviewed activation-status
+**HISTORICAL — superseded for root count and removal by D6.** Operational mode was ACTIVE only when the independently reviewed activation-status
 documentation PR containing this record has merged into `main`.** While this
 record exists only on a PR branch, the published `main` policy remains
 **DISABLED**. Once merged, ordinary development is permitted to exactly one
@@ -94,7 +161,7 @@ The **only** eligible fixed developer roots, during an explicitly authorized
 
 First independently verify the paused Claude Developer's real Session/descendants/tests are released; inspect exact root/common-dir, branch/HEAD/index, tracked/untracked/ignored files, Git locks, permissions and dedicated venv/import identity. Preserve old work, retain unknown data and STOP if another writer or incomplete release is found. Only then admit **one** task-bound OpenCode writer in that root, with distinct OpenCode CLI/Session/task/branch evidence. Claude **Reviewer** must use separately authorized *read-only* review context and may not interfere with OpenCode Git refs, worktree or tests. The paused Claude **Developer** must not keep writing in the second root.
 
-Owner D4 permits OpenCode to **read the entire non-sensitive repository**, not secrets, arbitrary external Mac directories, automatic provider data egress, writes outside the authorized task or llmtool F2. Verify the installed OpenCode **v2** permission schema, effective read/search/shell/task/external-directory effects, provider-specific privacy/egress authorization, redaction and negative leakage tests **before real external source transfer**. Prompt-only rules are not an OS boundary. Preserve all the C2/C3, single-writer, shared-ref and existing Git-authority gates below; **no third checkout, rename, clone, cleanup, forced branch operation or automatic paid fallback**.
+Owner D4 permits OpenCode to **read the entire non-sensitive repository**, not secrets, arbitrary external Mac directories, automatic provider data egress, writes outside the authorized task or llmtool F2. Verify the installed OpenCode **v2** permission schema, effective read/search/shell/task/external-directory effects, provider-specific privacy/egress authorization, redaction and negative leakage tests **before real external source transfer**. Prompt-only rules are not an OS boundary. Preserve all the C2/C3, single-writer, shared-ref and existing Git-authority gates below; **no unreviewed historical-root takeover, rename, clone, forced branch operation or automatic paid fallback**; the earlier no-third-worktree and no-cleanup limits are **SUPERSEDED by D6** for newly registered task roots.
 
 For OpenCode/DeepSeek and GLM pre-review, repository reads/searches and command outputs entering agent context **are external provider egress**. Record the D4 gate for the exact models and permitted data scope **before the first such repository inspection**; until then only explicitly provider-cleared content may be used. [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) and [company delegation](../company-llm-delegation/SKILL.md) retain their separate route-specific limits and supply no implicit OpenCode source-export grant.
 
@@ -112,7 +179,7 @@ without switching/cleaning. Audit comments are **not atomic locks**: the next
 agent must independently verify exclusive local ownership and fresh state.
 Never infer current local ownership from a historical comment or bare PID.
 
-### Pre-activation limited Mac pilot (NOT general activation)
+### HISTORICAL — pre-activation limited Mac pilot (not repeated for D6)
 
 Before any real-project worktree is created, the #115 native plan must be
 independently Security/Functional reviewed at exact source/command revision.
@@ -136,9 +203,9 @@ A verified fail-closed test or recovered interrupted session is evidence to
 review, not an automatic activation. The coordinator must obtain an
 independent native gate verdict before any ACTIVE-status PR.
 
-### Controls for both the limited pilot and formally activated development
+### HISTORICAL G7 controls — fixed-root provisioning/removal superseded by D6
 
-- Only the named, approved integrator/provisioner may stage a linked worktree at
+- **HISTORICAL / SUPERSEDED by D6:** only the named, approved integrator/provisioner formerly staged a linked worktree at
   one of the two exact, empty, verified roots. Check parent ownership, 0700
   permissions, symlink/ACL risks, canonical common-dir identity and existing
   Git worktree/branch inventory first. Preexisting data or ambiguous identity
@@ -162,8 +229,10 @@ independent native gate verdict before any ACTIVE-status PR.
   `git fetch origin` is permitted within an authorized worktree subject to
   known-safe Git environment/config and conflict/lock handling.
 - No `reset --hard`, `clean`, arbitrary stash, forced checkout/push,
-  `gc`, `prune`, `worktree remove/move/repair`, shared config mutation,
-  unattended process kill or automatic workspace cleanup. Preserve dirty,
+  `gc`, `prune`, shared config mutation or unattended process kill.
+  **SUPERSEDED by D6:** the old blanket ban on `worktree unlock/remove`
+  and ordinary task cleanup; only D6's registered, evidence-gated path
+  is permitted. Unregistered worktree remove/move/repair remains forbidden. Preserve dirty,
   ignored and unknown user data, commits and active descendants on crash or
   failed validation. Fall back to the single canonical writer on uncertainty.
 - Git linked worktrees share refs and object storage. Same-UID permissions
@@ -234,9 +303,12 @@ independent native gate verdict before any ACTIVE-status PR.
   `main`/the peer branch in a developer root. After switching, verify new
   HEAD/source/working tree and use a separately reviewed, exact-branch new
   inventory/baseline under the existing preflight process **before writing**;
-  never silently re-pin the old G6 or other approved baseline. The integrator
-  alone handles old branch-ref retirement under a separate reviewed scope;
-  developer agents must not prune/delete any ref or worktree.
+  never silently re-pin the old G6 or other approved baseline. **HISTORICAL / SUPERSEDED by D6:** the integrator formerly
+  alone handled old branch-ref retirement under a separate reviewed scope,
+  and developer agents formerly could not delete any worktree.
+  D6 permits normal removal of an exclusively owned task worktree;
+  local branch deletion stays with Integrator under D6 squash-aware proof.
+  Arbitrary prune/ref deletion remains forbidden.
 - **Task-final evidence at publication:** Before retiring each completed source task, retain a distinct off-repo task-final inventory/candidate pinned to the actual published branch HEAD, separate from the independently accepted task-start baseline. The next C3 handoff must independently reconcile the final source delta and run the formal pinned baseline gate. Never represent the original pre-edit baseline as an unchanged post-commit inventory or silently regenerate an accepted baseline. A missing final artifact permits one bounded evidence-only recovery, not repetition of product tests or a claim of source corruption ([Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6155426463)).
 - **Batch reports, not mandatory gate removal:** Report routine same-task state/claim/verification/release evidence as one cohesive Developer work package where actual ordering permits, with separate genuine Integrator ACK and independent candidate acceptance where required. Do not ask the owner to ferry every micro-gate prompt. An in-session child Reviewer can pre-review but cannot grant a shared-ref lease, independently accept a C3 baseline, mutate a peer root or substitute for non-author security approval. GitHub comments remain records, not Mac session commands ([Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235)).
 
@@ -259,9 +331,11 @@ independent native gate verdict before any ACTIVE-status PR.
   filesystem and interpreter skips remain documented, not silently converted
   to PASS for unrelated future tests.
 - **C5 scope unchanged:** llmtool F2/model-initiated real-repository mutation is
-  NOT AUTHORIZED; native F1 containment remains canonical-only. No third
-  checkout/clone/archive copy, no worktree unlock/move/remove/prune, no
-  automated kill/cleanup of the historical 70 `test-model` PIDs, and no
+  NOT AUTHORIZED; native F1 containment remains canonical-only.
+  **SUPERSEDED by D6:** no-third-worktree and blanket worktree unlock/remove
+  bans for registered task roots. Arbitrary checkout/clone/archive copy,
+  unregistered worktree move/prune, automated kill/cleanup of the historical
+  70 `test-model` PIDs, and no
   new CI/Runner/ai-loop controller authority. G6 accepted evidence remains
   private/preserved; links and hashes in GitHub are the durable record,
   because `/private/tmp` can be cleared on restart or periodic maintenance.
