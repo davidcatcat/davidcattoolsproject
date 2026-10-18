@@ -4,6 +4,8 @@
 >
 > Applies within **existing A11b/A11c, M1b/M2 and G1–G4 only**; no new A milestones, third linked worktree, permanent controller, PM, daemon or automatic Cloud integration.
 
+> **Superseded worktree-scope note (Owner D6, later on 2026-10-19):** The D1 constraint "no third worktree" and its fixed-root ceiling describe the decision *at that time*, not current authority. [Owner D6 dynamic worktree policy](../../skills/safe-git/SKILL.md) now permits additional task-owned linked worktrees with automatic evidence-gated retirement. D1's requirement to verify safe transfer **before reusing the historical /claude root** still applies. GitHub policy is not proof of Mac activation; provider-privacy, single-writer and review constraints remain unchanged.
+
 Authorities: [Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172), [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120), [ROADMAP](../../tools/llmtool/ROADMAP.md), [WORKFLOW](../../tools/llmtool/WORKFLOW.md), [safe-git](../../skills/safe-git/SKILL.md), [owner G1–G4](../governance/llmtool_owner_outcome_reporting_v1_1_20261019.md).
 
 ## Accepted allocation
