@@ -223,8 +223,8 @@ llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](WORKFLOW.md
 - 任務開始先列出 Cloud-capable / Mac-required / not-required 驗收項目。
 - Cloud 可完成開發、review、offline/mock tests、build、CI 與已授權的 feature branch/PR。
 - 只有依賴實際 Mac 的 VPN、既有 provider auth、macOS sandbox、本機檔案或服務的
-  必要驗證才交給 Mac；canonical Mac path 保留原樣；只有 safe-git 明列的兩個
-  固定 developer worktree 在獨立審查及 Mac 驗收後才可啟用，其他 checkout 禁止。
+  必要驗證才交給 Mac；canonical Mac path 保留原樣；Owner D6 允許註冊的任務型
+  developer worktree 並於完成後安全自動清理，沒有固定兩個的上限；其他 clone 或任意 checkout 仍禁止。
 - 每個交接報告綁定 implementation SHA，附 prerequisites、commands、expected
   marker/exit、Cloud/CI 結果和 Mac pending checks。
 - 必要本機驗證未完成時標示 LOCAL VERIFICATION REQUIRED / MERGE BLOCKED；
