@@ -38,7 +38,7 @@ independent evidence gates before merging.
 
 **Owner reporting (approved 2026-10-19):** follow [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for evidence-backed M1b/M2/Mac-pilot milestone reports, one weekly compact pulse and material Owner decisions. Integrator handles routine work and independent gates; do not confuse a GitHub report with a notification delivered to ChatGPT or the Owner. The policy creates no new controller, authority or release milestone.
 
-**Owner D1–D5 (2026-10-19):** Read [OpenCode developer allocation](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). Codex Developer first-line; OpenCode second-line only after reviewed existing second-root Mac transfer; no third checkout. Claude Developer PAUSED, Claude Code remains formal Reviewer, company-gw unchanged, AGY backup, Cloud integration undecided. Non-sensitive whole-repo **reading** is not secret/egress/writing permission; never silently use paid fallback. Foreground active-Integrator handoff comes before separately verified original-session wake/G3.
+**Owner D1–D5 (2026-10-19):** Read [OpenCode developer allocation](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). Codex Developer first-line; OpenCode second-line only after safe handoff of any still-active historical second root; Owner D6 allows additional registered task-scoped worktrees without a two-root ceiling. Claude Developer PAUSED, Claude Code remains formal Reviewer, company-gw unchanged, AGY backup, Cloud integration undecided. Non-sensitive whole-repo **reading** is not secret/egress/writing permission; never silently use paid fallback. Foreground active-Integrator handoff comes before separately verified original-session wake/G3.
 
 **llmtool product direction:** Read
 [the single A11 roadmap](tools/llmtool/ROADMAP.md) and the canonical
@@ -88,12 +88,14 @@ The canonical local Mac project repository directory is:
 /Users/davidsun/git/davidcataiporject/davidcattoolsproject
 ```
 
-Local Mac project work uses this canonical repository unless the **two fixed,
-independently reviewed developer-worktree exception** in
-[safe-git](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-has passed its activation gates. Approval permits only the specified Codex/Claude
-roots for their own development and tests; this docs change does NOT activate or
-provision them. Canonical remains the integrator and required native acceptance root.
+Local Mac Integrator/native acceptance remains at the canonical root. For
+ordinary local Developer tasks, **Owner D6** permits authorized Agents to create
+and retire additional registered task-scoped linked worktrees under the verified
+llmtool workspace parent. There is no two-root cap or per-task G1-G7 pilot.
+The authoritative create/cleanup gates and safe fallback are in
+[safe-git](skills/safe-git/SKILL.md#owner-d6-2026-10-19-dynamic-task-scoped-worktree-lifecycle--new-normative-policy).
+Historical Codex and Claude-named roots must not be claimed by a new Agent
+without checking actual Session/process release and preserving existing data.
 
 Before any repository-changing work, verify:
 
@@ -104,11 +106,11 @@ git branch --show-current
 git status --short --branch
 ```
 
-For local Mac work, the root must resolve exactly to the canonical path above.
-Only a **named executor during a separately authorized, bounded #115 pilot**
-may provision/validate one of the two safe-git fixed roots before activation.
-After separately reviewed and merged activation-status documentation, each
-agent may use only its assigned fixed root. Any other Mac path is STOP.
+For local Mac work, the root must resolve to either the canonical Integrator
+checkout or an explicitly registered, verified D6 task worktree. All other
+project paths and project clones remain prohibited. Before each mutation or
+retirement, verify actual task owner, root, branch, HEAD, common-dir and
+working-tree data; a model's claim of completion is insufficient.
 For user-selected Codex Cloud work, use only the checkout configured for that task.
 Discover its root with Git and verify it is `davidcatcat/davidcattoolsproject`;
 do not assume `/workspace` is the repository. Record environment, root, branch,
@@ -124,35 +126,28 @@ Read [llmtool development workflow](tools/llmtool/WORKFLOW.md) when using Cloud 
 handing verification between Cloud and Mac. Keep Mac-only VPN/auth/local-service
 checks pending until verified on the actual Mac; complete independent Cloud work.
 
-Codex must NOT independently create alternate project checkouts. Only a
-named, separately authorized integrator/provisioner may create the **two
-fixed developer worktree roots named in safe-git**, for an independently
-approved limited #115 pilot or after formally recorded activation. Until
-then they are not usable for ordinary development. Prohibited:
+Authorized Developers may create and remove **task-scoped linked Git worktrees**
+in the verified dedicated llmtool workspace parent under Owner D6, following
+safe-git's normal create/retire checks. A Worktree normally retires
+automatically after merged-and-accepted completion; cancelled or rejected work
+requires a recorded preserve/discard disposition. Open PR/review/repair means
+retain unless safe early-release/recreate is proven. Never delete an active,
+dirty, ambiguous, or evidence-bearing tree, never use forced removal, and
+never alter the canonical checkout. All ordinary removal decisions belong
+to the Agent/Integrator without Owner micro-approval.
 
-- Any other Git worktree, including extra or temporary project worktrees
-- Independent clones, including milestone clones
-- Sibling project repositories
-- Nested Git repositories
-- Project checkouts under `/tmp` or `/private/tmp`
-- Project checkouts under `/Users/davidsun/git/davidcataiporject/tmp/`
-- Agent-created project checkouts under any other path or alternate project workspaces
-  (the task-configured Codex Cloud checkout is allowed)
-
-Do not invent alternate project workspaces or move this project. The former
-independent-clone/worktree workflow remains prohibited; only the narrowly
-approved, separately activated fixed-root arrangement in safe-git is eligible.
+Independent project clones (including milestone clones), sibling/nested
+repositories, arbitrary alternate checkout locations, and project checkouts
+under temporary directories remain prohibited. The independently managed
+Codex Cloud checkout is unchanged.
 
 ## Testing and runtime isolation
 
-Mac developer unit/targeted/regression checks must run from canonical unless
-the named #115 pilot executor is running **only the independently approved,
-bounded pilot checks** in the two fixed roots. After the activation-status PR
-is reviewed and merged, assigned developers may run ordinary checks in their
-own fixed root and dedicated Python venv. Required native F1 containment and
-canonical acceptance stay in the unchanged canonical root.
-Cloud checks use the task's verified configured checkout. No other project
-checkout, worktree, copy or clone is allowed for testing.
+Mac Developers run ordinary targeted/regression checks from their registered,
+task-owned worktrees with isolated venv/import/build state. Required native F1
+containment and canonical integration acceptance remain in the unchanged
+canonical root. Cloud runs only in its task-configured checkout; it does
+not inherit local Mac D6 provisioning rights.
 
 Test-generated temporary files may use normal temporary directories only when
 required by the test/runtime itself. The llmtool `codex-cli` provider may continue
@@ -236,6 +231,5 @@ For future Codex Cloud tasks, use Developer `gpt-6.1-sol` / high,
 independent read-only Reviewer `gpt-6.1-sol` / high, and a bounded Git agent
 `gpt-5.6-luna` / low when available. Reviewer replaces the previous Astra default.
 Read [the role and handoff rules](tools/llmtool/WORKFLOW.md#default-codex-cloud-agent-roles--user-decision-2026-10-04).
-Keep one writer in canonical until reviewed activation; afterward keep one
-writer **per** registered worktree and serialize shared-ref/canonical operations.
+Maintain one writer **per** registered worktree; Integrator serializes shared-ref/canonical operations. Follow D6 task-scoped creation and retirement gates.
 Verify model availability and preserve all existing review/merge gates.
