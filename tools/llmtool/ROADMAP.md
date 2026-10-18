@@ -40,6 +40,12 @@ This is a **parallel delivery lane, not a new A milestone**. Continue the single
 A11b/A11c Roadmap and existing M1a/M1b/M2 gates. Cloud production/CI progress
 cannot replace required canonical Mac Live acceptance for native llmtool cutover.
 
+### 2026-10-19 Owner D1–D5: first-line Codex, second-line OpenCode (accepted; NOT LIVE)
+
+[Single owner decision record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) adds **OpenCode v2 / DeepSeek** as second-line Developer alongside first-line **Codex Developer**, both assigned by the **existing Codex Integrator/PM**. OpenCode's same-model DeepSeek reviewer and fresh-context GLM cross-model Reviewer are internal pre-review; **Claude Code remains formal independent code/test/security/QA Reviewer**, while **Claude Developer is PAUSED** for quota. Company-gw continues task-qualified, authorized cost-aware advisory work; AGY is backup. Codex Cloud and Claude Cloud VM remain independent environments, with no new Mac automatic Cloud integration.
+
+D1 reuses the existing physical `/claude` fixed root only after independently reviewed [safe-git](../../skills/safe-git/SKILL.md) ownership transfer and Mac evidence, **never a third worktree**. D4 permits non-sensitive whole-repo browsing by OpenCode, not automatic external-model export, secret access, wider code edits or Git/F2 rights. D5 forbids automatic paid API fallback. Under D3 Developer work may continue when Claude quota is exhausted with exact-SHA **pending formal review** and bounded queue, not self-approval. Under D2 **an active/foreground Integrator waiting for verified Worker results** is the first useful delivery slice; reliable original-session wake/ACK/recovery remains a **separate mandatory G3 acceptance**. Existing G1–G4 and F2/A11b parallel track stay unchanged. Historical OpenCode Lab success is not live llmtool integration evidence.
+
 ### 2026-10-17 revised delivery order and dependency graph
 
 **Coordinator execution priority derived from the accepted D-003a/b/c and D-007
