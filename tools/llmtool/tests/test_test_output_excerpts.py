@@ -784,5 +784,206 @@ class TestOutputExcerptsTests(unittest.TestCase):
         self.assertLess(sum(len(item['text'].encode()) for item in result['excerpts']), len(UNIT_FAILURE))
 
 
+    def actual_runner_capture(self, message='', verbosity=1):
+        # Real stdlib run in our interpreter, not a formatted report imitation.
+        program = '''import logging, sys, unittest
+logging.basicConfig(stream=sys.stdout)
+class ObservedCase(unittest.TestCase):
+ def test_failure(self):
+  if sys.argv[1]:
+   logging.error(sys.argv[1])
+   logging.error(sys.argv[1])
+  self.fail('synthetic assertion evidence')
+ def test_error(self):
+  raise ValueError('synthetic error evidence')
+suite = unittest.TestSuite([ObservedCase('test_failure'), ObservedCase('test_error'),
+                            ObservedCase('test_failure')])
+result = unittest.TextTestRunner(stream=sys.stdout, verbosity=int(sys.argv[2])).run(suite)
+sys.exit(0 if result.wasSuccessful() else 1)
+'''
+        completed = subprocess.run([sys.executable, '-B', '-I', '-c', program,
+                                   message, str(verbosity)], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, timeout=5, env={'PATH': os.defpath})
+        self.assertEqual(completed.returncode, 1)
+        self.assertLess(len(completed.stdout), 48 * 1024)
+        self.assertNotIn(str(self.root).encode(), completed.stdout)
+        return completed.stdout, completed.returncode
+
+    def test_actual_default_unittest_root_logging_preserves_failure_coverage(self):
+        raw, code = self.actual_runner_capture('synthetic observation')
+        self.assertIn(b'\nERROR:root:synthetic observation\n', raw)
+        result = self.select(raw, code)
+        self.assertEqual(result['status'], 'COMPLETE')
+        # unittest 3.9 renders Class, newer versions render Class.method.
+        # Ask the framework for exact expected IDs instead of assuming a version.
+        case_type = type('ObservedCase', (unittest.TestCase,), {
+            '__module__': '__main__', 'test_error': lambda case: None,
+            'test_failure': lambda case: None})
+        self.assertEqual(result['failure_ids'], [str(case_type(name)) for name in
+                         ('test_error', 'test_failure')])
+        self.assertEqual(result['coverage']['reported_counts'], {'FAIL': 2, 'ERROR': 1})
+        self.assertEqual(result['coverage']['observed_counts'], {'FAIL': 2, 'ERROR': 1})
+        self.assertEqual(result['failure_sources'][1]['occurrences'], 2)
+        self.assertEqual((result['test_exit_code'], result['test_status']), (1, 'FAILED'))
+        # Caller-provided provenance is retained; parser never authenticates it.
+        mismatched = self.select(raw, 0)
+        self.assert_incomplete(mismatched, 'exit_summary_mismatch')
+        self.assertEqual(mismatched['test_status'], 'FAILED')
+
+    def test_curated_capture_quality_denominators_and_security_tradeoffs(self):
+        actual = [('plain', '', 1, 'COMPLETE'),
+                  ('root-log', 'synthetic observation', 1, 'COMPLETE'),
+                  # Interrupted verbose progress leaves standalone FAIL/ERROR.
+                  # Keep that ambiguity INCOMPLETE, rather than discard signals.
+                  ('verbose-root', 'synthetic observation', 2, 'INCOMPLETE'),
+                  ('benign-basic', 'Basic arithmetic is checked', 1, 'REJECTED'),
+                  ('benign-redacted-token', 'token = <REDACTED>', 1, 'REJECTED'),
+                  ('unsafe-basic', 'Authorization: Basic c3ludGhldGljOnNlY3JldA==', 1, 'REJECTED'),
+                  ('unsafe-token', 'token = SYNTHETIC_PRIVATE_VALUE', 1, 'REJECTED'),
+                  ('unsafe-root-bearer', 'Bearer SYNTHETIC_PRIVATE_VALUE', 1, 'REJECTED')]
+        cases = [('actual_unittest', label, *self.actual_runner_capture(message, verbosity), status)
+                 for label, message, verbosity, status in actual]
+        node = 'tests/test_matrix.py::test_value[hello - 測試]'
+        escaped = 'test_測試 (sample.Case.test_測試)'
+        forged = unittest_capture([('ERROR', 'root:synthetic', ERROR_BODY)])
+        cases += [('synthetic', 'pytest-duplicates', pytest_capture(
+                    ['FAILED ' + node + ' - AssertionError: synthetic'] * 2, '2 failed'), 1, 'COMPLETE'),
+                  ('synthetic', 'pytest-collection', pytest_capture(
+                    ['ERROR tests/test_import.py - ImportError: synthetic'], '1 error'), 2, 'COMPLETE'),
+                  ('synthetic', 'unicode-id', unittest_capture([('FAIL', escaped, FAIL_BODY)]), 1, 'COMPLETE'),
+                  ('synthetic', 'empty', b'', 7, 'INCOMPLETE'),
+                  ('synthetic', 'unknown', b'opaque synthetic build failure\n', 7, 'INCOMPLETE'),
+                  ('synthetic', 'anchored-root-forgery', forged, 1, 'INCOMPLETE'),
+                  ('synthetic', 'pytest-root-log', pytest_capture(
+                    ['ERROR:root:synthetic observation', 'FAILED tests/test_a.py::test_a'],
+                    '1 failed'), 1, 'INCOMPLETE'),
+                  ('synthetic', 'ascii-escape-sensitive', unittest_capture([
+                    ('FAIL', FAIL_ID, FAIL_BODY + '\n' + SYNTHETIC_AWS_KEY + '測')]), 1, 'REJECTED')]
+        measured = {'actual_unittest': Counter(), 'synthetic': Counter()}
+        for source, label, raw, code, expected in cases:
+            with self.subTest(source=source, capture=label):
+                self.path.write_bytes(raw)
+                try:
+                    result = select_test_excerpts(self.path, code)
+                except LLMToolError as error:
+                    observed = 'REJECTED'
+                    self.assertIn(str(error), (
+                        'test-excerpts: source contains sensitive-content indicators; details omitted',
+                        EMITTED_SENSITIVE_ERROR))
+                    self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', str(error))
+                    self.assertNotIn(str(self.path), str(error))
+                else:
+                    observed = result['status']
+                    self.assert_provenance(result, raw)
+                    self.assertEqual(result['test_exit_code'], code)
+                    self.assertEqual(result['test_status'], 'FAILED')
+                    wire = json.dumps(result, ensure_ascii=True)
+                    self.assertNotIn('SYNTHETIC_PRIVATE_VALUE', wire)
+                    self.assertNotIn(SYNTHETIC_AWS_KEY, wire)
+                self.assertEqual(self.path.read_bytes(), raw)
+                self.assertEqual(observed, expected)
+                measured[source][observed] += 1
+        self.assertEqual(measured, {
+            'actual_unittest': Counter(COMPLETE=2, INCOMPLETE=1, REJECTED=5),
+            'synthetic': Counter(COMPLETE=3, INCOMPLETE=4, REJECTED=1)})
+        # Fixed, curated denominators; no production precision/recall claim.
+        print('Issue186 curated quality ' + json.dumps(measured, sort_keys=True))
+
+    def test_root_logging_does_not_hide_sensitive_original_or_emitted_forms(self):
+        prefix = b'ERROR:root:synthetic observation\n'
+        for tail, expected in ((SYNTHETIC_AWS_KEY, 'source'),
+                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+            raw = prefix + unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
+            with self.subTest(form=expected):
+                self.path.write_bytes(raw)
+                with self.assertRaises(LLMToolError) as error:
+                    select_test_excerpts(self.path, 1)
+                self.assertEqual(str(error.exception), 'test-excerpts: ' + expected +
+                                 ' contains sensitive-content indicators; details omitted')
+                self.assertNotIn(SYNTHETIC_AWS_KEY, str(error.exception))
+                self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_repeated_large_unicode_captures_keep_byte_provenance_and_deadline(self):
+        # Constructed stress cases, distinct from the actual runner cohort.
+        for size in (48 * 1024 + 17, MAX_FILE_BYTES - 1):
+            for repetition in range(3):
+                with self.subTest(size=size, repetition=repetition):
+                    base = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY)])
+                    pad = ('測試🙂' * (size // 10 + 1)).encode()[:size - len(base)]
+                    pad = pad.decode('utf-8', errors='ignore').encode() + b'\n'
+                    raw = pad + base
+                    self.assertLessEqual(len(raw), MAX_FILE_BYTES)
+                    result = self.select_with_deadline(raw)
+                    self.assertEqual(result['status'], 'COMPLETE')
+                    self.assertEqual(result['failure_ids'], [FAIL_ID])
+                    self.assert_provenance(result, raw)
+
+    @unittest.skipUnless(os.name == 'posix', 'requires real POSIX pipe closure')
+    def test_real_closed_stdout_preserves_captured_failure_exit(self):
+        raw, code = self.actual_runner_capture()
+        self.path.write_bytes(raw)
+        for exit_code in (code, 7, -15):
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)  # No reader exists before the child starts.
+            try:
+                done = subprocess.run([sys.executable, '-B', '-I', '-m', 'llmtool',
+                    'test-excerpts', '--file', str(self.path), '--exit-code', str(exit_code), '--json'],
+                    stdout=write_fd, stderr=subprocess.PIPE, timeout=5,
+                    cwd=self.root, env={'PATH': os.defpath})
+            finally:
+                os.close(write_fd)
+            self.assertEqual(done.returncode, exit_code if exit_code > 0 else 1, done.stderr)
+            self.assertEqual(done.stderr, b'')
+            self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_root_logging_cli_rejections_have_no_partial_json_or_private_echo(self):
+        for tail, category in ((SYNTHETIC_AWS_KEY, 'source'),
+                               (SYNTHETIC_AWS_KEY + '測', 'emitted excerpt')):
+            raw = b'ERROR:root:synthetic observation\n' + unittest_capture([
+                ('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
+            self.path.write_bytes(raw)
+            done = subprocess.run([sys.executable, '-B', '-I', '-m', 'llmtool',
+                'test-excerpts', '--file', str(self.path), '--exit-code', '1', '--json'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                cwd=self.root, env={'PATH': os.defpath})
+            self.assertEqual((done.returncode, done.stdout), (1, b''))
+            self.assertEqual(done.stderr, ('llmtool: test-excerpts: ' + category +
+                ' contains sensitive-content indicators; details omitted\n').encode())
+            self.assertNotIn(SYNTHETIC_AWS_KEY.encode(), done.stderr)
+            self.assertNotIn(str(self.path).encode(), done.stderr)
+            self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_near_limit_unicode_jwt_candidates_keep_bounded_oracles(self):
+        for repetition in range(2):
+            with self.subTest(repetition=repetition, outcome='reject'):
+                prefix, suffix = b'eyJaaaaaaaa.', b'.aaaaaaaa\n'
+                unit = 'İ'.encode('utf-8')  # IGNORECASE's non-ASCII JWT letter.
+                raw = prefix + unit * ((MAX_FILE_BYTES - len(prefix) - len(suffix)) // len(unit)) + suffix
+                self.assertGreater(len(raw), MAX_FILE_BYTES - 3)
+                self.assert_sensitive_with_deadline(raw)
+            with self.subTest(repetition=repetition, outcome='incomplete'):
+                unit = '測eyJ-'.encode('utf-8')  # No word boundary before eyJ.
+                raw = unit * ((MAX_FILE_BYTES - 1) // len(unit)) + b'\n'
+                self.assertGreater(len(raw), MAX_FILE_BYTES - len(unit))
+                self.assert_unknown_with_deadline(raw)
+
+    def test_actual_pytest_when_already_available(self):
+        import importlib.util
+        if importlib.util.find_spec('pytest') is None:
+            self.skipTest('pytest is not installed; no packages installed for this fixture')
+        source = self.root / 'test_observed.py'
+        source.write_text('def test_failure():\n    assert False, "synthetic assertion"\n'
+                          'def test_error():\n    raise ValueError("synthetic error")\n')
+        done = subprocess.run([sys.executable, '-B', '-I', '-m', 'pytest', '-q',
+            '--tb=short', '--color=no', source.name], cwd=self.root,
+            env={'PATH': os.defpath, 'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1'},
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5)
+        self.assertEqual(done.returncode, 1)
+        result = self.select(done.stdout, done.returncode)
+        self.assertEqual(result['status'], 'COMPLETE')
+        self.assertEqual(result['failure_ids'], ['test_observed.py::test_failure',
+                                               'test_observed.py::test_error'])
+
+
 if __name__ == '__main__':
     unittest.main()
