@@ -68,6 +68,10 @@ Do not interpret any architecture ACCEPTED state as IMPLEMENTED or
 LIVE_VERIFIED. In particular the Codex Integrator original-session
 auto-wake, llmtool F2 and complete M2 remain unverified.
 
+### Owner-approved outcome reporting (2026-10-19)
+
+Follow [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md): **G1 real adopted M1b fix; G2 live authorized Worker; G3 complete independent-agent M2 cycle; G4 three real Mac-supervised tasks and Owner GO/LIMITED GO/NO-GO**. These are checkpoint **reports mapped to current A11c**, not new engineering milestones or bypasses. Integrator produces one exact-evidence report at each actual acceptance, one weekly concise pulse, and a decision brief only for material product/risk/authority choices; routine authorized fixes and eligible merges continue without Owner microstep approval. Two completed no-progress work packages trigger scope re-evaluation. GitHub publication, notification delivery and ChatGPT acknowledgment are distinct; do not claim automatic Owner notification, 24-hour service or M2 Live from a plan or peer-message ACK.
+
 ## Delegated decisions and required escalation
 
 The owner **delegates routine technical management, risk recommendations and
