@@ -41,13 +41,6 @@ def bounded_terminate(process, deadline):
     start_new_session=True. Never poll before kill: an unreaped child pins PGID.
     This is cooperative host ownership, not protection against hostile same-UID code.
     """
-    if process.returncode is not None:
-        if getattr(process, '_llmtool_group_unconfirmed', None) is True:
-            process._llmtool_cleanup_pending = True
-            return False
-        if getattr(process, '_llmtool_cleanup_pending', None) is True:
-            process._llmtool_cleanup_pending = False
-        return True
     owner_ok = (type(deadline) in (int, float) and math.isfinite(deadline) and
                 type(process.pid) is int and process.pid > 1 and
                 getattr(process, '_llmtool_owner_pid', None) == os.getpid())
@@ -56,6 +49,17 @@ def bounded_terminate(process, deadline):
     child_owned = (owner_ok and
                    (group_owned or
                     getattr(process, '_llmtool_owned_pid', None) == process.pid))
+    if process.returncode is not None:
+        # Reaping only confirms the leader's exit, not its descendants. The
+        # old pin never authorizes signalling a potentially recycled PGID.
+        # Signal zero is only an existence query; even a recycled group keeps
+        # cleanup UNKNOWN, and must never regain termination authority.
+        absent = False
+        if (group_owned and os.name == 'posix' and
+                getattr(process, '_llmtool_group_unconfirmed', None) is not True):
+            absent = _group_absent(process.pid)
+        process._llmtool_cleanup_pending = not absent
+        return absent
     if not child_owned:
         return False
     process._llmtool_cleanup_pending = True
@@ -82,8 +86,21 @@ def bounded_terminate(process, deadline):
     if process.returncode is None or getattr(process, '_llmtool_group_unconfirmed', None) is True:
         process._llmtool_cleanup_pending = True
         return False
-    process._llmtool_cleanup_pending = False
-    return True
+    # A successful kill and wait still do not prove that every group member
+    # disappeared. Observe absence without delivering another signal after reap.
+    absent = group_owned and os.name == 'posix' and _group_absent(process.pid)
+    process._llmtool_cleanup_pending = not absent
+    return absent
+
+
+def _group_absent(pgid):
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pass  # EPERM and other observation failures remain UNKNOWN.
+    return False
 
 
 class CLIProcessLifecycle:
