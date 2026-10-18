@@ -103,6 +103,14 @@ are the owner-approved architecture source; they do not implement new runtime ri
    error gates; include independent QA, retries/repairs and PM token overhead
    in any net saving claim. Mark missing usage or price UNKNOWN.
 
+### 2026-10-19 Owner D1–D5: Codex primary + OpenCode secondary Worker
+
+Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, worktree, notification system or milestone. The existing Codex Integrator/PM may split nonoverlapping work between first-line Codex Developer and second-line OpenCode v2/DeepSeek Developer. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
+
+**Target path, not yet live:** Integrator Task Contract → llmtool authorized Worker lifecycle → task-owned Developer changes/tests/pre-review → host-reconstructed original-contract/exact-SHA Diff/CI packet → formal Claude verdict → bounded repair or return to **same active foreground Integrator**. `WAITING_CLAUDE_REVIEW` is a **logical pending disposition**, not a newly proven persisted enum: on Claude quota exhaustion keep reviewed candidate SHA, test evidence and bounded pending work; no false PASS or new paid provider. Later prove native original-session wake/ACK/replay/recovery before G3. GitHub comments do not awaken Mac sessions.
+
+**Pre-activation:** D1 requires exact reviewed Mac ownership turnover of the historical `/claude` root; no simultaneous OpenCode/Claude Developer writers and no third checkout. D4 permits non-sensitive whole-repo reading, but must validate real OpenCode v2 read/search/shell/subagent/external-directory permissions and provider-specific egress/redaction controls before model transfer. Source writes/Git still task-bound. D5 chooses a qualified free substitute or Codex fallback, never unapproved paid API. Keep the original G1–G4, A11b/F2 and independent gates.
+
 ### D-007 independent mobile Codex Cloud delivery
 
 This separate lane is **selected by Coordinator or Integrator/PM**, and the
