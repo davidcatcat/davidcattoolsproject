@@ -117,10 +117,13 @@ the local Mac, llmtool runtime or VPN and does not prove automatic Cloud dispatc
    and fixes within scope. With verified GitHub rights it publishes **only its
    own feature branch/Draft PR**, never main; if publication fails, retain the
    task/link/diff and report BLOCKED rather than inventing a remote SHA.
-4. **Manual final handoff by owner's choice:** when Cloud work is finished the
-   owner sends the PR/task link to the **existing Integrator reviewer**. This
-   one Cloud completion handoff is an express exception to the local D-003c
-   no-courier target; do not require repeated owner microstep handoffs.
+4. **Integrator pickup (2026-10-18 disposition):** the 2026-10-17 mobile
+   lane specified an owner completion handoff. The existing Integrator now
+   picks up the completed PR/task through actually available, authorized
+   CLI/GitHub workflows. Owner link sharing remains an optional fallback,
+   not a required completion relay. If remote launch is unavailable, record
+   the concrete task and limitation; a GitHub comment does not prove that
+   Cloud has started.
    Integrator checks original task, actual base/head SHA, full diff, conflicts,
    CI/test provenance and risks, then obtains **separate non-author**
    Security/Functional/QA and native Mac evidence when required. Cloud's

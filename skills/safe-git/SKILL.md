@@ -460,12 +460,16 @@ not the canonical Mac repo or a locally agent-created extra worktree.
   diff/CI and actual test evidence. Do not assume push permission, overwrite
   peer branches, force push or merge main automatically.
 - **Review handoff:** Cloud developer/self-agent review is **pre-review**
-  only. The **owner explicitly passes the completed PR to the existing
-  Integrator reviewer**. That reviewer checks exact task/diff/revision,
+  only. Under the **2026-10-18 handoff disposition, the existing Integrator
+  picks up the completed PR through actually available, authorized CLI/GitHub
+  workflows**. Owner link sharing remains an optional fallback. If remote
+  launch is unavailable, record the concrete task and limitation; a GitHub
+  comment does not prove that Cloud has started. The Integrator checks
+  exact task/diff/revision,
   obtains required **distinct non-author** Security/Functional/QA and
   Mac-native acceptance, and decides next integration steps only with
-  valid evidence. This one manual Cloud handoff is an owner-chosen
-  exception to the local no-prompt-courier target.
+  valid evidence. The earlier 2026-10-17 mobile handoff remains available
+  as an optional fallback under this disposition, not a required owner relay.
 - **No false PASS:** Cloud CI/offline tests do not establish Mac VPN/auth,
   native process/OS behavior, production company LLM, F2 actual local
   mutation, original Integrator Session wake, or full A11c M2 cutover.

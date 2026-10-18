@@ -51,11 +51,14 @@ capabilities, Git mutation, model spending or a second controller:
 - **D-007 Codex Cloud** is a parallel **mobile-initiated** independent
   work package selected by Coordinator/Integrator. Cloud self-develops,
   tests and self-pre-reviews a task-owned Cloud checkout/feature branch;
-  where authorized it publishes a Draft PR. **The owner personally
-  hands the finished Cloud PR to the existing Integrator reviewer.**
-  This single mobile completion handoff is an explicit exception to
-  the **local** no-courier target, not permission for repeated owner
-  microstep relays or an automatic PM-to-Cloud dispatch claim.
+  where authorized it publishes a Draft PR. The 2026-10-17 mobile lane
+  specified an owner completion handoff. **The 2026-10-18 disposition makes
+  the existing Integrator responsible for pickup through actually available,
+  authorized CLI/GitHub workflows; owner link sharing is an optional
+  fallback, not a required completion relay.** If remote launch is unavailable,
+  record the concrete task and limitation; a GitHub comment does not prove
+  that Cloud has started. Do not claim automatic PM-to-Cloud dispatch
+  without observed execution evidence.
   Cloud self-review is **pre-review**, not distinct non-author
   Security/Functional/QA acceptance. Integrator must arrange required
   separate review, CI and Mac-native validation before eligible merge.

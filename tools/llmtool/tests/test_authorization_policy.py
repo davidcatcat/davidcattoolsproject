@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from llmtool import action_contract as c
 from llmtool import authorization_policy as p
@@ -487,7 +488,7 @@ class ProviderPolicyBoundaryTests(unittest.TestCase):
         self.assertIsInstance(a.review_authority_factory(),r.UnavailableReviewAuthority)
         denied=p.decide_provider_review({'issuer_class':'PRODUCTION_REVIEW'},issuer={'trusted':True},observed={})
         self.assertIs(denied.decision,p.Decision.DENY)
-        with self.assertRaises(Exception):p.ProviderPolicyDecision(p.Decision.ALLOW_WITH_TRUSTED_RECEIPT,p.DecisionCode.POLICY_ALLOWED,None)
+        with self.assertRaisesRegex(LLMToolError, '^provider decision invalid; details omitted$'):p.ProviderPolicyDecision(p.Decision.ALLOW_WITH_TRUSTED_RECEIPT,p.DecisionCode.POLICY_ALLOWED,None)
 
 
 if __name__ == '__main__':
@@ -542,7 +543,7 @@ class NativeDeltaPolicyTests(unittest.TestCase):
         self.assertIs(p.decide_notification(t.binding,issuer=t.issuer,observed=o).decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
         for changes in ({'audit_coverage':False},{'risk_acceptance_digest':'f'*64}):
             self.assertIs(p.decide_notification(t.binding,issuer=t.issuer,observed=dataclasses.replace(o,**changes)).decision,p.Decision.DENY)
-        with self.assertRaises(Exception):dataclasses.replace(t.binding,risk_acceptance_digest='0'*64)
+        with self.assertRaisesRegex(LLMToolError, '^notification audit acceptance missing; details omitted$'):dataclasses.replace(t.binding,risk_acceptance_digest='0'*64)
         enforced=dataclasses.replace(t.binding,tool_mode='ENFORCED_NO_TOOLS');t.issuer.binding=enforced
         self.assertIs(p.decide_notification(enforced,issuer=t.issuer,observed=dataclasses.replace(o,binding_digest=enforced.digest)).decision,p.Decision.DENY)
     def test_native_issuer_requires_sealed_acceptance_and_cannot_authorize_d1(self):
@@ -550,7 +551,8 @@ class NativeDeltaPolicyTests(unittest.TestCase):
         from llmtool import codex_pickup_native as n
         t=DeltaTrial();self.addCleanup(t.close)
         grant=n.NativeGrant(t.binding,'f'*64,n.PROTOCOL_SHA,n.CLI_VERSION,'reviewer-route','author-route','a'*64,'b'*64,True,'STOP_PRESERVE_CONTEXT',True,'c'*64)
-        with self.assertRaises(Exception):n.NativePickupIssuer(grant,{'accepted':True})
+        with self.assertRaisesRegex(LLMToolError, '^review rejected; details omitted$') as refused:n.NativePickupIssuer(grant,{'accepted':True})
+        self.assertEqual(refused.exception.review_code, 'PICKUP_NOT_AUTHORIZED')
         issuer=n._fixture_issuer(grant)
         self.assertTrue(issuer.vouches_for(t.binding.digest));self.assertFalse(issuer.vouches_for(t.binding.grant_digest))
         self.assertIs(allow(make_create(),make_policy(),issuer=issuer).decision,p.Decision.DENY)
@@ -561,7 +563,7 @@ class CompositionPolicyTests(unittest.TestCase):
         from test_codex_handoff_transport import DeltaTrial
         t=DeltaTrial();self.addCleanup(t.close)
         for changes in ({'topology':'IN_PROCESS_ZERO_CHILD'},{'composition_digest':'f'*64},{'topology':'OWNED_CHILD'}):
-            with self.assertRaises(Exception):dataclasses.replace(t.binding,**changes)
+            with self.assertRaisesRegex(LLMToolError, '^notification topology invalid; details omitted$'):dataclasses.replace(t.binding,**changes)
         b=dataclasses.replace(t.binding,topology='IN_PROCESS_ZERO_CHILD',composition_digest='f'*64)
         t.issuer.binding=b
         obs=p.NotificationObserved(b.digest,b.host_pin,True,True,True,True,False,True,True,True,b.risk_acceptance_digest)
@@ -573,3 +575,43 @@ class CompositionPolicyTests(unittest.TestCase):
         old_digest=b.digest;t.issuer.binding=dataclasses.replace(b,composition_digest='e'*64)
         self.assertFalse(t.issuer.vouches_for(old_digest))
         self.assertIs(allow(make_create(),make_policy(),issuer=t.issuer).decision,p.Decision.DENY)
+
+
+class ExceptionSpecificityTests(unittest.TestCase):
+    def test_unrelated_faults_at_real_refusal_guards_are_not_accepted(self):
+        # Inject only at construction of the expected error, after the real
+        # constructor/replace validation has reached its refusal guard.
+        cases = (
+            (ProviderPolicyBoundaryTests, 'test_data_fake_issuer_and_receipt_cannot_be_provider_grant',
+             'provider decision invalid; details omitted'),
+            (NativeDeltaPolicyTests, 'test_audit_only_is_separate_and_requires_whole_binding_acceptance',
+             'notification audit acceptance missing; details omitted'),
+            (NativeDeltaPolicyTests, 'test_native_issuer_requires_sealed_acceptance_and_cannot_authorize_d1',
+             'review rejected; details omitted'),
+            (CompositionPolicyTests, 'test_zero_child_topology_requires_complete_binding_and_observed_pins',
+             'notification topology invalid; details omitted'),
+        )
+        original_init = LLMToolError.__init__
+        for fault_type in (AssertionError, RuntimeError):
+            for case, method, message in cases:
+                with self.subTest(method=method, fault=fault_type.__name__):
+                    fault = fault_type('synthetic unrelated refusal fault')
+                    reached, surfaced = [], []
+                    def injected_init(instance, *args, **kwargs):
+                        if args == (message,):
+                            reached.append(True)
+                            raise fault
+                        original_init(instance, *args, **kwargs)
+                    class Result(unittest.TestResult):
+                        def addError(self, test, error):
+                            surfaced.append(error[1])
+                            super().addError(test, error)
+                        def addFailure(self, test, error):
+                            surfaced.append(error[1])
+                            super().addFailure(test, error)
+                    with patch.object(LLMToolError, '__init__', injected_init):
+                        result = Result()
+                        case(method).run(result)  # Includes all registered cleanups.
+                    self.assertEqual(reached, [True])
+                    self.assertEqual(len(surfaced), 1, 'unrelated fault silently accepted')
+                    self.assertIs(surfaced[0], fault)

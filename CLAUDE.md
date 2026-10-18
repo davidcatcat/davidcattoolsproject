@@ -88,9 +88,13 @@ The same Integrator Session automatic wake/resume is NOT_LIVE_VERIFIED.
 
 **D-007 Codex Cloud** independently handles mobile-initiated tasks
 in its configured remote checkout, with tests and self-pre-review,
-then an own feature branch/Draft PR where GitHub permits. The owner
-deliberately hands the completed result to the **existing Integrator
-reviewer**. Cloud self-review or Integrator bookkeeping cannot replace
+then an own feature branch/Draft PR where GitHub permits. Under the
+2026-10-18 handoff disposition, the **existing Integrator** picks up the completed result through actually available, authorized
+CLI/GitHub workflows and arranges review. Owner link sharing is an optional
+fallback, not a required completion relay. If remote launch is unavailable,
+record the concrete task and limitation; a GitHub comment does not prove
+that Cloud has started. Cloud self-review or Integrator bookkeeping cannot
+replace
 formal distinct non-author Security/Functional/QA or required Mac-native
 gates. Cloud publication does not prove local llmtool F2 mutation,
 M2 parity or permission to auto-merge main. Respect

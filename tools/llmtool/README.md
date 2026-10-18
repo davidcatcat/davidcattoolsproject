@@ -51,10 +51,14 @@ Cloud environment was configured/published on web/desktop. Coordinator or
 Integrator/PM decides which independent, nonoverlapping work package suits
 Cloud. Cloud works in its own checkout, implements, tests, **self-pre-reviews**
 and, when GitHub permissions allow, publishes its own branch/Draft PR.
-**The owner manually hands the finished PR to the existing Integrator
-reviewer**, who verifies the change and obtains independent non-author
-Security/Functional/QA plus Mac-only checks as applicable. This single
-Cloud final handoff is intentional, not an llmtool Worker, an automated
+**Under the 2026-10-18 handoff disposition, the existing Integrator picks
+up the finished PR through actually available, authorized CLI/GitHub
+workflows**, verifies the change and obtains independent non-author
+Security/Functional/QA plus Mac-only checks as applicable. The
+Cloud completion may use optional owner link sharing as a fallback; no
+owner completion relay is required. If remote launch is unavailable, record
+the concrete task and limitation; a GitHub comment does not prove that Cloud
+has started. This handoff is not an llmtool Worker, an automated
 original-session callback, or evidence of M2/F2 Live acceptance. Self-review
 does not replace independent review. Do not auto-merge main.
 

@@ -35,9 +35,26 @@ def _parent(filename, *, context='feedback'):
             os.close(descriptor)
 
 
+@contextmanager
+def _owned_stream(descriptor, mode):
+    # Keep raw-FD ownership even if stream/buffer construction partly succeeds.
+    # The stream closes its wrappers; only this scope closes the raw descriptor.
+    try:
+        with os.fdopen(descriptor, mode, closefd=False) as stream:
+            yield stream
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass  # Preserve the primary failure; never retry an ambiguous close.
+        raise
+    else:
+        os.close(descriptor)
+
+
 def _read(directory, name, *, context='feedback'):
     descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
-    with os.fdopen(descriptor, 'rb') as stream:
+    with _owned_stream(descriptor, 'rb') as stream:
         info = os.fstat(stream.fileno())
         if not stat.S_ISREG(info.st_mode):
             raise LLMToolError(context + ' input requires a regular file')
@@ -89,7 +106,7 @@ def write_feedback_file(filename, case, previous=None):
             descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                  0o600, dir_fd=directory)
             created = True
-            with os.fdopen(descriptor, 'wb') as stream:
+            with _owned_stream(descriptor, 'wb') as stream:
                 stream.write(raw)
                 stream.flush()
                 os.fchmod(stream.fileno(), mode)

@@ -65,8 +65,12 @@ remain unverified.
 **D-007:** Coordinator or Integrator may select an independent task for
 mobile-initiated Codex Cloud development. Cloud uses its own configured
 checkout and self-pre-review, then publishes an authorized task-owned
-feature branch/Draft PR. **The owner explicitly transfers the completed
-Cloud PR to the existing Integrator reviewer for final assessment.**
+feature branch/Draft PR. **Under the 2026-10-18 handoff disposition,
+the existing Integrator picks up the completed Cloud PR through actually available, authorized
+CLI/GitHub workflows and arranges final assessment.** Owner link sharing
+is an optional fallback, not a required completion relay. If remote launch
+is unavailable, record the concrete task and limitation; a GitHub comment
+does not prove that Cloud has started.
 Self-review is not formal non-author Security/Functional/QA; maintain
 shared-remote Git branch isolation and required native Mac gates.
 No additional Mac worktree, Cloud auto-dispatch, llmtool F2 authority or

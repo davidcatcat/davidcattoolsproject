@@ -249,6 +249,12 @@ def _unittest(lines, reasons):
         outcome = _UNIT_FAILED.fullmatch(line.text) or _UNIT_OK.fullmatch(line.text)
         if outcome and (index == 0 or not lines[index - 1].text):
             summaries.append((index, outcome))
+        # Stdlib logging can emit this line between unittest progress tokens.
+        # It is not a test header. Keep an ambiguous separator-anchored form
+        # malformed, and retain the full-source and final-emission privacy gates.
+        if (line.text.startswith('ERROR:root:')
+                and (index == 0 or lines[index - 1].text != '=' * 70)):
+            continue
         if not line.text.startswith(('FAIL:', 'ERROR:')):
             if re.match(r'(?:FAIL|ERROR)(?: |$)', line.text):
                 _reason(reasons, 'malformed_failure_header')
