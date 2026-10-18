@@ -109,7 +109,7 @@ This is a narrowly scoped exception to the former canonical-only prohibition,
 or arbitrary temporary worktrees.
 
 **HISTORICAL — superseded for root count and removal by D6.** Operational mode was ACTIVE only when the independently reviewed activation-status
-documentation PR containing this record has merged into `main`.** While this
+documentation PR containing this record had merged into `main`. While this
 record exists only on a PR branch, the published `main` policy remains
 **DISABLED**. Once merged, ordinary development is permitted to exactly one
 trusted Codex CLI in its fixed Codex worktree and one trusted Claude CLI in its
@@ -232,9 +232,9 @@ independent native gate verdict before any ACTIVE-status PR.
   `gc`, `prune`, shared config mutation or unattended process kill.
   **SUPERSEDED by D6:** the old blanket ban on `worktree unlock/remove`
   and ordinary task cleanup; only D6's registered, evidence-gated path
-  is permitted. Unregistered worktree remove/move/repair remains forbidden. Preserve dirty,
-  ignored and unknown user data, commits and active descendants on crash or
-  failed validation. Fall back to the single canonical writer on uncertainty.
+  is permitted. Unregistered worktree remove/move/repair remains forbidden.
+  Preserve dirty, ignored and unknown user data, commits and active descendants
+  on crash or failed validation. Fall back to the single canonical writer on uncertainty.
 - Git linked worktrees share refs and object storage. Same-UID permissions
   and advisory ownership are **cooperative race protection, not an OS security
   sandbox**. This exception does **not** authorize llmtool F2/model-initiated
@@ -303,7 +303,8 @@ independent native gate verdict before any ACTIVE-status PR.
   `main`/the peer branch in a developer root. After switching, verify new
   HEAD/source/working tree and use a separately reviewed, exact-branch new
   inventory/baseline under the existing preflight process **before writing**;
-  never silently re-pin the old G6 or other approved baseline. **HISTORICAL / SUPERSEDED by D6:** the integrator formerly
+  never silently re-pin the old G6 or other approved baseline.
+  **HISTORICAL / SUPERSEDED by D6:** the integrator formerly
   alone handled old branch-ref retirement under a separate reviewed scope,
   and developer agents formerly could not delete any worktree.
   D6 permits normal removal of an exclusively owned task worktree;
@@ -335,8 +336,8 @@ independent native gate verdict before any ACTIVE-status PR.
   **SUPERSEDED by D6:** no-third-worktree and blanket worktree unlock/remove
   bans for registered task roots. Arbitrary checkout/clone/archive copy,
   unregistered worktree move/prune, automated kill/cleanup of the historical
-  70 `test-model` PIDs, and no
-  new CI/Runner/ai-loop controller authority. G6 accepted evidence remains
+  70 `test-model` PIDs, and any new CI/Runner/ai-loop controller authority
+  remain prohibited. G6 accepted evidence remains
   private/preserved; links and hashes in GitHub are the durable record,
   because `/private/tmp` can be cleared on restart or periodic maintenance.
 
