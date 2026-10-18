@@ -63,6 +63,16 @@ The **only** eligible fixed developer roots, during an explicitly authorized
 - Codex CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex`
 - Claude CLI: `/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude`
 
+### 2026-10-19 Owner D1: OpenCode takes over the existing second fixed root — NOT YET LIVE
+
+[Owner D1–D5 decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) approves **reassigning ownership, not adding a worktree**. The existing physical root ending `/claude` will remain at that pathname but become the exclusive OpenCode Developer root **only after** independent Security/Functional review of the ownership rule and source-bound **Mac native release/C2/C3 evidence**. Its earlier two-root G7 acceptance proves the historical Codex+Claude layout; it does not automatically prove transfer to OpenCode. Do not treat a GitHub decision or document merge as physical activation.
+
+First independently verify the paused Claude Developer's real Session/descendants/tests are released; inspect exact root/common-dir, branch/HEAD/index, tracked/untracked/ignored files, Git locks, permissions and dedicated venv/import identity. Preserve old work, retain unknown data and STOP if another writer or incomplete release is found. Only then admit **one** task-bound OpenCode writer in that root, with distinct OpenCode CLI/Session/task/branch evidence. Claude **Reviewer** must use separately authorized *read-only* review context and may not interfere with OpenCode Git refs, worktree or tests. The paused Claude **Developer** must not keep writing in the second root.
+
+Owner D4 permits OpenCode to **read the entire non-sensitive repository**, not secrets, arbitrary external Mac directories, automatic provider data egress, writes outside the authorized task or llmtool F2. Verify the installed OpenCode **v2** permission schema, effective read/search/shell/task/external-directory effects, provider-specific privacy/egress authorization, redaction and negative leakage tests **before real external source transfer**. Prompt-only rules are not an OS boundary. Preserve all the C2/C3, single-writer, shared-ref and existing Git-authority gates below; **no third checkout, rename, clone, cleanup, forced branch operation or automatic paid fallback**.
+
+For OpenCode/DeepSeek and GLM pre-review, repository reads/searches and command outputs entering agent context **are external provider egress**. Record the D4 gate for the exact models and permitted data scope **before the first such repository inspection**; until then only explicitly provider-cleared content may be used. [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) and [company delegation](../company-llm-delegation/SKILL.md) retain their separate route-specific limits and supply no implicit OpenCode source-export grant.
+
 ### Immediate single-checkout handoff (active now)
 
 Before branch/source/Git writes in the shared canonical root, verify its exact
