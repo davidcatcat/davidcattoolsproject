@@ -705,7 +705,8 @@ class ProviderLedgerTests(unittest.TestCase):
         self.base,_=self.h.binding()
 
     def issue(self,tag='1',ttl=120):
-        call=replace(self.base,packet_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+        call=replace(self.base,packet_digest=tag*64,reviewed_object_digest=tag*64,
+                     deadline='2026-10-14T00:05:00Z')
         binding=p.ProviderReviewBinding(call)
         observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
         decision=p.decide_provider_review(binding,issuer=self.issuer,observed=observed)

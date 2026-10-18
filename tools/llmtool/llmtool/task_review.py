@@ -8,7 +8,6 @@ import hashlib
 import json
 import re
 import time
-import sys
 import math
 from dataclasses import dataclass
 from typing import Protocol, TYPE_CHECKING, Mapping
@@ -605,6 +604,8 @@ def run_review(ready, final, expect, events, fixture):
     token = binding = None
     call_complete = False
     consumed = False
+    unwinding = False
+    accounting = {}
     fake = getattr(fixture.authority,'test_only',False) is True
     try:
         real_start = time.monotonic()
@@ -620,13 +621,13 @@ def run_review(ready, final, expect, events, fixture):
         approval = fixture.approval
         approval.validate(ready, final, expect, now)
         before = fixture.observer.observe()
-        before.validate(expect, events, now, fixture.clock.monotonic())
+        before.validate(expect, events, clock_utc(fixture.clock), fixture.clock.monotonic())
         packet = make_packet(ready, final, expect, snapshot, approval, before, load_json(fixture.packet_input.decode(),1024*1024),
                              expected_route='FAKE_TEST_ONLY' if fake and type(fixture) is not HostServices else fixture.route['id'])
         # Packet construction must not leave time/state unchecked before effect.
+        submit = fixture.observer.observe()
         submit_now = clock_utc(fixture.clock)
         submit_mono = fixture.clock.monotonic()
-        submit = fixture.observer.observe()
         submit.validate(expect, events, submit_now, submit_mono)
         # The exact observation pinned into the packet/binding must remain fresh
         # too; a new equivalent sample cannot renew an old observation digest.
@@ -701,8 +702,19 @@ def run_review(ready, final, expect, events, fixture):
         if end < call_start or end-call_start > 120 or end-start > min(180,budget.wall_clock_ms/1000):
             reject('REVIEW_TIMEOUT')
         invocation = 'FAKE_RETURNED' if fake else 'HOST_RETURNED'
-        after_now = clock_utc(fixture.clock)
+        metadata = load_json(reply.metadata_json.decode(),4096)
+        if (binding.reviewer_role == REVIEWER_ROLES[1] and
+                type(metadata.get('input_tokens')) is int and type(metadata.get('output_tokens')) is int):
+            metadata = dict(prompt_tokens=metadata['input_tokens'],
+                            completion_tokens=metadata['output_tokens'],
+                            total_tokens=metadata['input_tokens'] + metadata['output_tokens'])
+        usage = usage_from_provider(CallPhase.REVIEW,metadata)
+        assessment = assess_budget(budget,UsageLedger((usage,),0,int((end-start)*1000)))
+        accounting = dict(input_tokens=usage.input_tokens,output_tokens=usage.output_tokens,
+            budget=assessment.to_dict(),elapsed_ms=int((end-start)*1000),
+            usage_source='PROVIDER_REPORTED' if usage.known else 'UNKNOWN')
         after = fixture.observer.observe()
+        after_now = clock_utc(fixture.clock)
         after.validate(expect, events, after_now, fixture.clock.monotonic())
         _clocks_agree(submit, after)
         if fixture.approval != approval:
@@ -716,13 +728,6 @@ def run_review(ready, final, expect, events, fixture):
                for value in (a.session_id,a.root,a.common_dir)):
             reject('REVIEW_PRIVACY_BLOCKED')
         verdict = parse_verdict(reply.content,packet)
-        metadata = load_json(reply.metadata_json.decode(),4096)
-        if (binding.reviewer_role == REVIEWER_ROLES[1] and
-                type(metadata.get('input_tokens')) is int and type(metadata.get('output_tokens')) is int):
-            metadata = dict(prompt_tokens=metadata['input_tokens'],
-                            completion_tokens=metadata['output_tokens'],
-                            total_tokens=metadata['input_tokens'] + metadata['output_tokens'])
-        usage = usage_from_provider(CallPhase.REVIEW,metadata)
         job_evidence = load_json(reply.job_evidence_json.decode(),4096)
         if worker:
             # Host-only launcher evidence is separate from the model's verdict.
@@ -734,9 +739,11 @@ def run_review(ready, final, expect, events, fixture):
                         ('reaped','pipes_drained','pipes_closed','runtime_closed')) or
                     time.monotonic() >= real_deadline):
                 reject('REVIEW_LAUNCH_NOT_ATTESTED')
+        end = fixture.clock.monotonic()
         assessment = assess_budget(budget,UsageLedger((usage,),0,int((end-start)*1000)))
         budget_fields = dict(budget=assessment.to_dict(),elapsed_ms=int((end-start)*1000),
                              usage_source='PROVIDER_REPORTED' if usage.known else 'UNKNOWN')
+        accounting.update(budget_fields)
         if assessment.status is not BudgetStatus.WITHIN:
             return envelope('REVIEW_BUDGET_' + assessment.status.value,
                 snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,
@@ -745,7 +752,7 @@ def run_review(ready, final, expect, events, fixture):
                 post_observation_digest=after.digest,input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,job_evidence=job_evidence,
                 execution_disposition='STOP_NO_EXECUTION_AUTHORITY',**budget_fields)
-        approve = verdict['security'] == verdict['functional'] == 'APPROVE' 
+        approve = verdict['security'] == verdict['functional'] == 'APPROVE'
         return envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
             'CHANGES_REQUIRED' in (verdict['security'],verdict['functional']) else 'REVIEW_BLOCKED',
             snapshot=snapshot,fake=fake,calls=calls,status='APPROVE' if approve else 'BLOCKED',
@@ -761,19 +768,23 @@ def run_review(ready, final, expect, events, fixture):
     except (LLMToolError,ValueError,TypeError,AttributeError,KeyError,UnicodeError,RecursionError,TimeoutError) as exc:
         return envelope(getattr(exc,'review_code','REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID'),
                         snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,
-                        limit_metadata=getattr(exc,'review_metadata',{}))
+                        limit_metadata=getattr(exc,'review_metadata',{}),**accounting)
     except Exception:
         # Consume already happened: unexpected transport errors must retain the
         # attempted call and UNKNOWN effect rather than reset CLI accounting.
         return envelope('REVIEW_PROVIDER_UNAVAILABLE' if calls else 'REVIEW_INPUT_INVALID',
-                        snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
+                        snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,**accounting)
     except KeyboardInterrupt:
         return envelope('REVIEW_CANCELLED',snapshot=snapshot,fake=fake,calls=calls,
-                        invocation_status=invocation)
+                        invocation_status=invocation,**accounting)
+    except BaseException:
+        # Track only an exception actually escaping THIS call. An outer handled
+        # exception must not suppress finalization/completion failures.
+        unwinding = True
+        raise
 
     finally:
         if consumed and binding is not None:
-            unwinding = sys.exc_info()[0] is not None
             try:
                 fixture.authority.finalize(token,CallOutcome(binding.digest,
                     'EFFECT_DONE' if call_complete else 'EFFECT_UNKNOWN',invocation))
@@ -781,14 +792,14 @@ def run_review(ready, final, expect, events, fixture):
                 # Preserve original SystemExit/BaseException on unwind.
                 if not unwinding:
                     return envelope('REVIEW_FINALIZE_UNKNOWN',snapshot=snapshot,fake=fake,calls=calls,
-                                    invocation_status=invocation)
+                                    invocation_status=invocation,**accounting)
             if not unwinding and binding.reviewer_role == REVIEWER_ROLES[1] and call_complete:
                 try:
                     fixture.launcher.validate_completion(token)
                     if time.monotonic() >= real_deadline: reject('REVIEW_TIMEOUT')
                 except Exception as exc:
                     return envelope(getattr(exc,'review_code','REVIEW_FINALIZE_UNKNOWN'),
-                                    snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation)
+                                    snapshot=snapshot,fake=fake,calls=calls,invocation_status=invocation,**accounting)
 
 
 def _run_fake_review(ready,final,expect,events,fixture):

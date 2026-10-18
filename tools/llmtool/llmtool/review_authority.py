@@ -25,6 +25,14 @@ from .task_lifecycle import utc_time,inspect_task,Role
 from .task_review_collector import physical_directory,collect_local_facts,Observation
 
 
+# Compatibility inspection is fail-closed and bounded per check, including
+# inside the ledger's consume transaction. Exceeding these ceilings requires
+# separate host reconciliation; no receipt/charge is pruned or migrated here.
+MAX_REVIEW_LEDGER_ROWS = 4096
+MAX_REVIEW_LEDGER_BYTES = 8 * 1024 * 1024
+REVIEW_LEDGER_SCAN_SECONDS = 1.0
+
+
 def _reference(value):
     if type(value) is not str or not re.fullmatch(
             r'https://github\.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-[0-9]+',value):
@@ -399,13 +407,27 @@ class ProductionReviewIssuer(HostIssuer):
         # consume_provider calls matches inside its existing write transaction,
         # so this check is atomic with consume, even after an earlier admission.
         ledger=self._provider_ledger
-        if ledger is None: reject('REVIEW_LEDGER_UNSAFE')
+        if type(ledger) is not ReceiptLedger or ledger.kind != 'PROVIDER_REVIEW' or ledger._db is None:
+            reject('REVIEW_LEDGER_UNSAFE')
         ledger._check_identity()
-        for (stored,) in ledger._db.execute('SELECT binding FROM receipts'):
-            call=load_json(stored,65536).get('call',{})
-            if 'reviewed_object_digest' not in call:
-                reject('REVIEW_LEDGER_RECONCILIATION_REQUIRED')
-            _hex(call['reviewed_object_digest'])
+        deadline=time.monotonic()+REVIEW_LEDGER_SCAN_SECONDS
+        rows=total=0
+        # Bound SQLite's returned cell before Python materializes/decodes it.
+        cursor=ledger._db.execute('SELECT length(CAST(binding AS BLOB)), '
+            'substr(CAST(binding AS BLOB),1,65537) FROM receipts')
+        try:
+            for size,stored in cursor:
+                rows+=1;total+=size
+                if (rows > MAX_REVIEW_LEDGER_ROWS or total > MAX_REVIEW_LEDGER_BYTES or
+                        size > 65536 or time.monotonic() >= deadline):
+                    reject('REVIEW_LEDGER_SCAN_LIMIT')
+                call=load_json(stored.decode('utf-8'),65536).get('call')
+                if type(call) is not dict or 'reviewed_object_digest' not in call:
+                    reject('REVIEW_LEDGER_RECONCILIATION_REQUIRED')
+                _hex(call['reviewed_object_digest'])
+            if time.monotonic() >= deadline: reject('REVIEW_LEDGER_SCAN_LIMIT')
+        finally:
+            cursor.close()
 
     def matches(self,call,observed,*,fresh_before=True):
         self._check_ledger_bindings()
@@ -421,6 +443,7 @@ class ProductionReviewIssuer(HostIssuer):
         current=self.observer.observe()
         now=datetime_utc(self.clock.utc());mono=self.clock.monotonic()
         current.validate(c.expect,c.events,now,mono)
+        if fresh_before: before.validate(c.expect,c.events,now,mono)
         _clocks_agree(before,current)
         if current.state_digest != before.state_digest: return False
         c.approval.validate(c.ready,c.final,c.expect,now)
@@ -429,7 +452,7 @@ class ProductionReviewIssuer(HostIssuer):
                            load_json(c.packet_input.decode(),1024*1024),expected_route=p.policy_id)
         scope=digest({'data_classes':('SOURCE','DIFF','REVIEW_METADATA'),
             'path_list_digest':digest([s['path'] for s in packet.to_dict()['sources']],'llmtool.review-path-list.v1')})
-        return (type(call) is ReviewCallBinding and call.ready_task == c.approval.ready_task and
+        matched=(type(call) is ReviewCallBinding and call.ready_task == c.approval.ready_task and
             call.acceptance_task == c.approval.acceptance_task and call.criterion_map == c.approval.criterion_map and
             call.task_id == c.expect.task.task_id and call.run_id == c.expect.task.run_id and
             call.source_sha == c.expect.source_sha and call.epoch == c.expect.epoch and
@@ -444,6 +467,14 @@ class ProductionReviewIssuer(HostIssuer):
                 (p.policy_id,p.version,p.provider,p.profile,p.model) and
             call.export_scope_digest == scope and len(packet.data) <= p.max_packet_bytes and
             utc_time(call.deadline) <= min(utc_time(c.approval.expires_at),utc_time(p.not_after)))
+        # Reconstructing/validating originals must not age either pre-effect
+        # sample out. Post-effect only the fresh current sample has a TTL.
+        p=self.policy(call.route_digest)
+        now=datetime_utc(self.clock.utc());mono=self.clock.monotonic()
+        c.approval.validate(c.ready,c.final,c.expect,now)
+        current.validate(c.expect,c.events,now,mono)
+        if fresh_before: before.validate(c.expect,c.events,now,mono)
+        return matched
 
 
 def pair_pin(approval):
@@ -461,6 +492,10 @@ class ProductionReviewAuthority:
         reg=load_host_registration(issuer.pin)
         if (ledger._path,ledger._identity,ledger.creation_nonce) != (
                 reg.ledger_path,(reg.ledger_device,reg.ledger_inode),reg.ledger_nonce):
+            reject('REVIEW_LEDGER_UNSAFE')
+        if (ledger._db is None or
+                issuer._provider_ledger is not None and issuer._provider_ledger is not ledger):
+            # The consume-time guard must inspect this transaction's connection.
             reject('REVIEW_LEDGER_UNSAFE')
         self.issuer,self.ledger=issuer,ledger
         issuer._provider_ledger=ledger
@@ -580,6 +615,11 @@ class ProductionReviewerLauncher:
                 *self.authority.issuer.context.expect.authored_by)) + (
                 '081de22e-d514-4288-9d1f-48f488979271',)
             prompt=provider._prompt(ReviewPacket(packet).messages())
+            if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
+            # Verification/rendering can be slow. Recheck the original packet
+            # observation and current source immediately before the effect.
+            if not self.authority.issuer.matches(c,self.authority._observed(c)):
+                reject('REVIEW_GRANT_NOT_AUTHORIZED')
             if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
             result=provider._invoke_review_job(reg.reviewer_executable,
                 prompt,deadline=deadline,

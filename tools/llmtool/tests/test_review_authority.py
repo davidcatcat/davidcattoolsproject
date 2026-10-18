@@ -787,8 +787,9 @@ class Issue192Tests(unittest.TestCase):
         first=h.ledger._db.execute('SELECT object_key,status FROM receipts').fetchall()
         self.advance(h,1)
         h.issuer=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
-        with self.job(h) as unused:
+        with patch('subprocess.Popen',side_effect=AssertionError('second provider spawn')) as spawn:
             result=self.invoke(h)
+            spawn.assert_not_called()
         self.assertEqual(result['provider_calls'],0,result)
         self.assertEqual(result['status'],'BLOCKED')
         self.assertEqual(h.ledger._db.execute('SELECT object_key,status FROM receipts').fetchall(),first)
@@ -835,6 +836,244 @@ class Issue192Tests(unittest.TestCase):
         self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
         self.assertEqual(result['provider_calls'],0)
         self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+
+    def test_original_freshness_rechecked_after_slow_current_observation(self):
+        for phase in ('admit','consume'):
+            with self.subTest(phase=phase):
+                h=self.harness();binding,_=h.binding()
+                admission=h.authority.admit(binding) if phase=='consume' else None
+                observe=h.observer.observe
+                def slow():
+                    self.advance(h,6)
+                    return observe()
+                with patch.object(h.observer,'observe',side_effect=slow):
+                    if admission is None:
+                        self.assertFalse(h.authority.admit(binding).admitted)
+                    else:
+                        self.assertFalse(h.authority.consume(admission).committed)
+                self.assertFalse(h.argv_file.exists())
+
+    def test_prelaunch_rechecks_after_executable_verification(self):
+        for change in ('time','index'):
+            with self.subTest(change=change):
+                h=self.harness();verify=a.verify_worker_executable;checks=[]
+                def delayed(reg,deadline):
+                    verify(reg,deadline);checks.append(True)
+                    if len(checks)==1:
+                        if change=='time':self.advance(h,6)
+                        else:h.observer._facts=lambda root:replace(FixtureObserver._facts(h.observer,root),index_digest='9'*64)
+                with patch.object(a,'verify_worker_executable',side_effect=delayed), \
+                        patch('subprocess.Popen',side_effect=AssertionError('stale prelaunch')) as spawn:
+                    result=self.invoke(h)
+                self.assertEqual(result['code'],'REVIEW_OBSERVATION_STALE' if change=='time' else 'REVIEW_GRANT_NOT_AUTHORIZED',result)
+                spawn.assert_not_called()
+                self.assertEqual(result['provider_calls'],1)
+                self.assertEqual(h.ledger._db.execute('SELECT status FROM receipts').fetchall(),[('EFFECT_UNKNOWN',)])
+
+    def test_slow_packet_reconstruction_cannot_expire_pre_effect_observation(self):
+        h=self.harness();binding,_=h.binding();original=a.make_packet
+        def slow(*args,**kwargs):
+            result=original(*args,**kwargs);self.advance(h,6);return result
+        with patch.object(a,'make_packet',side_effect=slow):
+            self.assertFalse(h.authority.admit(binding).admitted)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+    def test_postcall_advancing_drift_and_clock_disagreement_are_refused(self):
+        for change in ('index','source','guard','stale','rollback','disagree'):
+            with self.subTest(change=change):
+                h=self.harness();from llmtool.providers.claude_cli import ClaudeCLIProvider
+                original=ClaudeCLIProvider._invoke_review_job
+                def finish(provider,*args,**kwargs):
+                    result=original(provider,*args,**kwargs);self.advance(h,6)
+                    if change=='index':h.observer._facts=lambda root:replace(FixtureObserver._facts(h.observer,root),index_digest='9'*64)
+                    elif change=='source':h.observer._facts=lambda root:replace(FixtureObserver._facts(h.observer,root),source_sha='9'*40)
+                    elif change=='guard':h.observer.writers_check=lambda reg,f:False
+                    elif change=='rollback':self.advance(h,-7)
+                    elif change=='disagree':h.fake.mono+=6
+                    else:
+                        observe=h.observer.observe
+                        def stale():
+                            sample=observe();self.advance(h,6);return sample
+                        h.observer.observe=stale
+                    return result
+                with patch.object(ClaudeCLIProvider,'_invoke_review_job',finish):result=self.invoke(h)
+                self.assertEqual(result['status'],'BLOCKED',result)
+                self.assertEqual(result['provider_calls'],1)
+                self.assertFalse(result['authorized']);self.assertIsNone(h.issuer.pending_job)
+                self.assertNotEqual(h.ledger._db.execute('SELECT status FROM receipts').fetchone()[0],'ISSUED')
+
+    def test_legacy_rows_hold_admission_without_resetting_spent_charge(self):
+        h=self.harness();self.assertEqual(self.invoke(h)['code'],'REVIEW_APPROVED')
+        old=h.ledger._db.execute('SELECT binding,consumed_at,consumed_day FROM receipts').fetchone()
+        legacy=json.loads(old[0]);legacy['call'].pop('reviewed_object_digest')
+        h.ledger._db.execute('UPDATE receipts SET binding=?,object_key=?',(r.canonical(legacy).decode(),'f'*64))
+        rows=h.ledger._db.execute('SELECT * FROM receipts').fetchall()
+        self.advance(h,1);h.issuer=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
+        with patch('subprocess.Popen',side_effect=AssertionError('legacy replay')) as spawn:result=self.invoke(h)
+        spawn.assert_not_called();self.assertEqual(result['provider_calls'],0)
+        self.assertEqual(h.ledger._db.execute('SELECT * FROM receipts').fetchall(),rows)
+
+    def test_legacy_race_is_rechecked_inside_consume_transaction(self):
+        h=self.harness();binding,_=h.binding();admission=h.authority.admit(binding)
+        row=list(h.ledger._db.execute('SELECT * FROM receipts').fetchone())
+        legacy=json.loads(row[1]);legacy['call'].pop('reviewed_object_digest')
+        row[0]='e'*64;row[1]=r.canonical(legacy).decode();row[-1]='f'*64
+        h.ledger._db.execute('INSERT INTO receipts VALUES (?,?,?,?,?,?,?,?,?,?)',row)
+        inside=[];check=h.issuer._check_ledger_bindings
+        def atomic():inside.append(h.ledger._db.in_transaction);check()
+        with patch.object(h.issuer,'_check_ledger_bindings',side_effect=atomic):token=h.authority.consume(admission)
+        self.assertEqual(inside,[True]);self.assertFalse(token.committed)
+        self.assertEqual(h.ledger.status(admission.grant_ref),'DENIED')
+        self.assertFalse(h.argv_file.exists())
+
+    def test_ledger_guard_bounds_rows_bytes_cell_size_and_time(self):
+        for bound in ('rows','bytes','cell','time'):
+            with self.subTest(bound=bound):
+                h=self.harness();binding,_=h.binding();h.authority.admit(binding)
+                if bound=='cell':
+                    large=r.canonical(dict(call=dict(reviewed_object_digest='a'*64,padding='x'*65536))).decode()
+                    h.ledger._db.execute('UPDATE receipts SET binding=?',(large,))
+                    guard=patch.object(a,'MAX_REVIEW_LEDGER_BYTES',8*1024*1024,create=True)
+                elif bound=='rows':guard=patch.object(a,'MAX_REVIEW_LEDGER_ROWS',0,create=True)
+                elif bound=='bytes':guard=patch.object(a,'MAX_REVIEW_LEDGER_BYTES',1,create=True)
+                else:guard=patch.object(a.time,'monotonic',side_effect=(0,2,2,2))
+                before=h.ledger._db.execute('SELECT * FROM receipts').fetchall()
+                with guard,self.assertRaises(r.LLMToolError) as caught:h.issuer._check_ledger_bindings()
+                self.assertEqual(getattr(caught.exception,'review_code',None),'REVIEW_LEDGER_SCAN_LIMIT')
+                self.assertEqual(h.ledger._db.execute('SELECT * FROM receipts').fetchall(),before)
+
+    def test_malformed_new_binding_and_connection_rebinding_are_refused(self):
+        for bad in (None,True,'not-a-digest'):
+            h=self.harness();binding,_=h.binding();h.authority.admit(binding)
+            stored=json.loads(h.ledger._db.execute('SELECT binding FROM receipts').fetchone()[0])
+            stored['call']['reviewed_object_digest']=bad
+            h.ledger._db.execute('UPDATE receipts SET binding=?',(r.canonical(stored).decode(),))
+            with self.subTest(bad=bad),self.assertRaises(r.LLMToolError):h.issuer._check_ledger_bindings()
+        h=self.harness()
+        other=l.ReceiptLedger.open(h.ledger_path,clock=h.clock.utc,kind='PROVIDER_REVIEW',creation_nonce=h.ledger.creation_nonce)
+        try:
+            with self.assertRaises(r.LLMToolError):a.ProductionReviewAuthority(h.issuer,other)
+        finally:other.close()
+
+    def test_outer_handled_exception_does_not_hide_finalize_failure_or_usage(self):
+        h=self.harness()
+        try:raise ValueError('outer exception is already handled')
+        except ValueError:
+            with patch.object(a.ProductionReviewAuthority,'finalize',side_effect=RuntimeError('fake failure')):
+                result=self.invoke(h)
+        self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN',result)
+        self.assertEqual(result['provider_calls'],1)
+        self.assertEqual((result['input_tokens'],result['output_tokens']),(12,8))
+        self.assertEqual(result['budget']['status'],'WITHIN')
+        self.assertIsNone(result['cost'])
+
+
+    def repin_object(self,h,change):
+        # Independently trusted fixture host republishes *different* originals;
+        # the same physical source/route ledger and its existing charge remain.
+        ready=replace(h.ready,task_id='other-ready') if change=='task' else h.ready
+        if change=='contract':ready=replace(ready,goal='Prepare a different approved review')
+        binding=ready.binding(h.expect.task.run_id)
+        source='3'*40 if change=='source' else h.expect.source_sha
+        expect=replace(h.expect,task=binding,source_sha=source)
+        events=tuple(replace(e,task=binding,source_sha=source,
+            evidence=tuple(replace(v,task=binding,subject_digest=source) for v in e.evidence),
+            handoff=replace(e.handoff,task=binding,source_sha=source) if e.handoff else None)
+            for e in h.events)
+        originals=FakeHost(ready,h.final,expect,events)
+        originals.data['route']=h.policy.policy_id
+        if change=='base':originals.data['base_sha']='4'*40
+        if change=='payload':
+            content='def answer():\n    return 43\n'
+            originals.data['sources'][0].update(content=content,sha256=hashlib.sha256(content.encode()).hexdigest())
+        if change=='approval':originals.approval=replace(originals.approval,record_ref='other-approved-pair')
+        h.ready,h.expect,h.events=ready,expect,events
+        h.fake.data=originals.data;h.fake.approval=originals.approval
+        h.packet_input=h.fake.packet_input
+        h.pin=replace(h.pin,pair_digest=a.pair_pin(h.fake.approval),packet_input_digest=hashlib.sha256(h.packet_input).hexdigest())
+        h.context=a.ReviewContext(h.ready,h.final,h.expect,h.events,h.fake.approval,h.packet_input)
+        h.observer=FixtureObserver(h.pin,h.expect,h.events,h.clock,
+            baseline_check=lambda reg,f:True,writers_check=lambda reg,f:True)
+        h.issuer=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
+
+    def test_distinct_host_pinned_source_base_task_contract_payload_and_approval(self):
+        for change in ('source','base','task','contract','payload','approval'):
+            with self.subTest(change=change):
+                h=self.harness();self.assertEqual(self.invoke(h)['code'],'REVIEW_APPROVED')
+                self.advance(h,1);self.repin_object(h,change)
+                result=self.invoke(h)
+                self.assertEqual(result['code'],'REVIEW_APPROVED',result)
+                self.assertEqual(result['provider_calls'],1)
+                rows=h.ledger._db.execute('SELECT object_key,status,consumed_day FROM receipts').fetchall()
+                self.assertEqual(len(rows),2);self.assertNotEqual(rows[0][0],rows[1][0])
+                self.assertEqual([row[1] for row in rows],['EFFECT_DONE','EFFECT_DONE'])
+                self.assertEqual(rows[0][2],rows[1][2])
+
+    def test_only_sampling_fields_are_removed_and_semantic_forgery_is_denied(self):
+        h=self.harness();binding,packet=h.binding();payload=packet.to_dict()
+        sampled=copy.deepcopy(payload);sampled.update(sequence=99,observation_digest='f'*64)
+        fresh=r.ReviewPacket(r.canonical(sampled))
+        self.assertNotEqual(fresh.digest,packet.digest)
+        self.assertEqual(fresh.reviewed_object_digest,packet.reviewed_object_digest)
+        altered=replace(binding,sequence=99,observation_digest='f'*64,packet_digest=fresh.digest)
+        self.assertEqual(p.ProviderReviewBinding(altered).object_key,p.ProviderReviewBinding(binding).object_key)
+        for key in ('base_sha','source_sha','grant_ref','authors_digest','reviewer_binding_digest','handoff_digest','check_digest'):
+            with self.subTest(key=key):
+                changed=copy.deepcopy(payload)
+                changed[key]='9'*40 if key.endswith('_sha') else '9'*64
+                other=r.ReviewPacket(r.canonical(changed))
+                self.assertNotEqual(other.reviewed_object_digest,packet.reviewed_object_digest)
+                forged=replace(binding,packet_digest=other.digest,reviewed_object_digest=other.reviewed_object_digest)
+                self.assertFalse(h.authority.admit(forged).admitted)
+        self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
+
+    def test_advancing_sample_cache_has_room_for_extra_inflight_checks(self):
+        h=self.harness();observe=h.observer.observe;count=[]
+        def ticking():
+            h.fake.mono+=0.1;count.append(True);return observe()
+        from llmtool.providers.claude_cli import ClaudeCLIProvider
+        original=ClaudeCLIProvider._invoke_review_job
+        def finish(provider,*args,**kwargs):
+            result=original(provider,*args,**kwargs);self.advance(h,6)
+            for _ in range(4):h.observer.observe()
+            return result
+        with patch.object(h.observer,'observe',side_effect=ticking),patch.object(ClaudeCLIProvider,'_invoke_review_job',finish):
+            result=self.invoke(h)
+        self.assertEqual(result['code'],'REVIEW_APPROVED',result)
+        self.assertGreater(len(count),8);self.assertLessEqual(len(h.observer.samples),16)
+        receipt=next(iter(h.issuer.foreground_services.authority.receipts.values()))
+        self.assertIn(receipt.binding.call.observation_digest,h.observer.samples)
+        self.assertGreaterEqual(result['elapsed_ms'],6000)
+
+    def test_exact_output_budget_boundary_and_partial_unknown_usage(self):
+        for output,metadata,code in (
+                (8,None,'REVIEW_APPROVED'),(7,None,'REVIEW_BUDGET_EXCEEDED'),
+                (8,dict(input_tokens=None,output_tokens=8),'REVIEW_BUDGET_UNKNOWN'),
+                (8,dict(input_tokens=True,output_tokens=8),'REVIEW_BUDGET_UNKNOWN'),
+                (8,dict(input_tokens=-1,output_tokens=8),'REVIEW_BUDGET_UNKNOWN')):
+            with self.subTest(output=output,metadata=metadata):
+                h=self.harness()
+                with self.job(h,metadata=metadata):result=self.invoke(h,budget=replace(h.fake.budget,max_output_tokens=output))
+                self.assertEqual(result['code'],code,result)
+                self.assertEqual(result['provider_calls'],1)
+                if code=='REVIEW_BUDGET_UNKNOWN':
+                    self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
+                self.assertIsNone(result['cost'])
+                self.assertEqual(h.ledger._db.execute('SELECT status FROM receipts').fetchall(),[('EFFECT_DONE',)])
+
+    def test_final_completion_failure_preserves_spent_unknown_or_exceeded_usage(self):
+        for metadata,status in ((dict(input_tokens=None,output_tokens=None),'UNKNOWN'),
+                                (dict(input_tokens=12,output_tokens=100001),'EXCEEDED')):
+            h=self.harness()
+            with self.job(h,metadata=metadata),patch.object(a.ProductionReviewerLauncher,'validate_completion',side_effect=RuntimeError('synthetic completion failure')):
+                result=self.invoke(h)
+            self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN')
+            self.assertEqual(result['status'],'BLOCKED');self.assertEqual(result['provider_calls'],1)
+            self.assertEqual(result['budget']['status'],status)
+            self.assertEqual(result['input_tokens'],metadata['input_tokens'])
+            self.assertEqual(result['output_tokens'],metadata['output_tokens'])
+            self.assertIsNone(result['cost'])
 
 
 if __name__ == "__main__":
