@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -40,8 +41,9 @@ NO_EXPAND = frozenset({"Claude Desktop"})
 @dataclass(frozen=True)
 class Snapshot:
     processes: list
-    watched_groups: frozenset  # agent-led groups to keep following next poll
-    lingering: list            # watched groups whose leader is gone/zombie
+    watched_groups: dict   # pgid -> member PIDs seen while the group was agent-led
+    lingering: list        # watched groups whose leader is gone/zombie (ps-based: POSSIBLE)
+    hosts: frozenset = frozenset()  # (evidence dir, stage) of live llmtool harness hosts
 
 
 @dataclass(frozen=True)
@@ -147,11 +149,31 @@ def classify(command: str) -> str | None:
     return _agent_role(exe, args, command)
 
 
-def parse_processes(output: str, self_pid: int,
-                    remembered: frozenset = frozenset()) -> Snapshot:
-    """remembered: PGIDs of agent-led groups seen in earlier polls. A leader that
-    exited and was reaped leaves members whose only link is that PGID."""
+def _host_job(command: str) -> tuple[str, str] | None:
+    """(evidence directory, stage) of a live invoke_once.py/live_once.py host."""
+    parts = command.split()
+    if not parts or not _base(parts[0]).lower().startswith("python"):
+        return None
+    args = parts[1:]
+    for i, arg in enumerate(args):
+        if _base(arg) in ("invoke_once.py", "live_once.py") and not arg.startswith("-"):
+            stage = args[i + 1] if i + 1 < len(args) else ""
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", stage or "-"):
+                return None
+            return os.path.dirname(os.path.realpath(arg)), stage
+    return None
+
+
+def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
+    """remembered: {pgid: member PIDs} of agent-led groups seen in earlier polls.
+
+    A leader that exited and was reaped leaves members whose only link is the
+    PGID. Only PIDs already seen in that group while it was agent-led count as
+    left behind, so an unrelated newer process reusing the PGID is not blamed.
+    """
+    remembered = remembered or {}
     rows = {}
+    hosts = set()
     for line in output.splitlines():
         found = LINE.match(line)
         if found is None:
@@ -161,17 +183,23 @@ def parse_processes(output: str, self_pid: int,
             continue
         elapsed = found.group(4)
         stat = found.group(5)
+        role = classify(found.group(6))
+        if role == "llmtool HOST":
+            job = _host_job(found.group(6))
+            if job:
+                hosts.add(job)
         rows[pid] = (ppid, pgid,
                      elapsed if len(elapsed) <= 18 else "UNKNOWN",
                      stat if ALLOWED_STATE.fullmatch(stat) else "?",
-                     classify(found.group(6)), safe_name(found.group(6)))
+                     role, safe_name(found.group(6)))
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
     # start_new_session children do); otherwise unrelated apps would flood in.
     groups = {rows[pid][1] for pid in matched if rows[pid][1] == pid}
-    present = {row[1] for row in rows.values()}
-    watched = groups | {g for g in remembered if g in present}
+    orphans = {g: {pid for pid in members if pid in rows and rows[pid][1] == g}
+               for g, members in remembered.items() if g not in groups}
+    orphans = {g: members for g, members in orphans.items() if members}
 
     def label(pid: int) -> str:
         return f"{rows[pid][4]} {pid}"
@@ -194,7 +222,7 @@ def parse_processes(output: str, self_pid: int,
                 role, owner = "  child", label(ancestor)
             elif pgid in groups:
                 role, owner = "  group member", label(pgid)
-            elif pgid in watched:
+            elif pid in orphans.get(pgid, ()):
                 role, owner = "  orphaned group member", f"group {pgid} (leader gone)"
             else:
                 continue
@@ -203,16 +231,17 @@ def parse_processes(output: str, self_pid: int,
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner))
+    watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
+    watched.update(orphans)
     lingering = sorted(
-        g for g in watched
-        if any(pid != g and row[1] == g for pid, row in rows.items())
-        and (g not in rows or rows[g][3].startswith("Z")))
+        g for g, members in watched.items()
+        if any(pid != g for pid in members) and (g not in rows or rows[g][3].startswith("Z")))
     # Group leaders first, then their members, within each process group.
     result.sort(key=lambda p: (p.pgid, p.pid != p.pgid, p.ppid, p.pid))
-    return Snapshot(result, frozenset(watched), lingering)
+    return Snapshot(result, watched, lingering, frozenset(hosts))
 
 
-def collect(remembered: frozenset = frozenset()) -> Snapshot:
+def collect(remembered: dict | None = None) -> Snapshot:
     response = subprocess.run(PS_ARGS, check=False, capture_output=True, text=True,
                               timeout=4, shell=False)
     if response.returncode:
@@ -252,7 +281,7 @@ def summary(processes: list[Process], lingering: list) -> str:
             counts[family(p.role)] = counts.get(family(p.role), 0) + 1
     text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "llmtool", "ai-loop", "other")
                      if k in counts) or "no agent process"
-    return text + (f"  ·  ⚠ lingering groups: {', '.join(map(str, lingering))}" if lingering else "")
+    return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
 
 def _fit(text: str, width: int) -> str:
@@ -280,7 +309,8 @@ class Monitor:
                  summary_every: float = 30.0) -> None:
         self.min_age, self.show_all, self.summary_every = min_age, show_all, summary_every
         self.prev: dict[int, Process] = {}
-        self.remembered: frozenset = frozenset()
+        self.remembered: dict = {}
+        self.hosts: frozenset = frozenset()
         self.processes: list[Process] = []
         self.lingering: list = []
         self.error: str | None = None
@@ -342,13 +372,13 @@ class Monitor:
                 counts[key] = counts.get(key, 0) + 1
             self.announced.discard(pid)
             self.first_seen.pop(pid, None)
-        new += [(stamp, "!", f"process group {g}: leader gone/zombie but members remain "
-                             f"(llmtool would report cleanup UNKNOWN)")
+        new += [(stamp, "!", f"process group {g}: POSSIBLE leftover members after the leader "
+                             f"is gone/zombie (ps-based; llmtool would report cleanup UNKNOWN)")
                 for g in result.lingering if g not in self.lingering]
         new += [(stamp, "ok", f"process group {g}: no members left behind any more")
                 for g in self.lingering if g not in result.lingering]
         try:
-            tasks = scan_tasks()
+            tasks = scan_tasks(hosts=result.hosts)
         except Exception:  # task evidence is optional; never break process monitoring
             tasks = self.tasks
         new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks)]
@@ -361,7 +391,7 @@ class Monitor:
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
-        self.prev, self.remembered = current, result.watched_groups
+        self.prev, self.remembered, self.hosts = current, result.watched_groups, result.hosts
         self.processes, self.lingering, self.error = result.processes, result.lingering, None
         self.log.extend(new)
         return new
@@ -370,9 +400,11 @@ class Monitor:
 # ---------------------------------------------------------------- task view
 # Reads the llmtool foreground-harness evidence layout (manifest.json,
 # <stage>-attempt.json, <stage>-result.json) plus each job's private OpenCode
-# database, strictly read-only. Only identifiers, statuses, token counts, tool
-# names and admitted file paths are used: never prompts, model text, reasoning
-# or tool output.
+# database, strictly read-only. SQL json_extract returns only identifiers,
+# statuses, token counts, tool names and admitted file paths to this process;
+# prompts, model text, reasoning and tool output are never returned to Python,
+# rendered or logged. A database is opened only when its state root provably
+# belongs to the evidence directory (see _verified_db); otherwise UNKNOWN.
 import glob
 import json
 import sqlite3
@@ -381,6 +413,7 @@ TASK_GLOB = "/private/tmp/llmtool-*"
 STAGE_FILE = re.compile(r"^([A-Za-z0-9_-]{1,32})-attempt\.json$")
 CODE_TEXT = re.compile(r"^[A-Z0-9_]{1,64}$")
 SHORT_MODEL = re.compile(r"(?:^|/)([a-z0-9]+)[a-z0-9.-]*$")
+STATE_ROOT_NAME = re.compile(r"^opencode-[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True)
@@ -403,6 +436,8 @@ class Stage:
     tokens_out: int
     idle: str            # native session idle outcome, "" while busy
     tools: tuple
+    live: bool = False   # a live llmtool host process for this exact stage is observed
+    meta: str = "ok"     # "ok", "none" (no DB yet) or "UNKNOWN (...)" when unverifiable
 
 
 @dataclass(frozen=True)
@@ -436,49 +471,86 @@ def _relative(path: str, root: str) -> str:
 SAFE_PATH = re.compile(r"[^A-Za-z0-9._/+-]")
 
 
-def _native(state_root: str, root: str) -> tuple:
-    """(steps, tokens_in, tokens_out, idle_outcome, tools) from the job's own DB."""
-    db_path = os.path.join(state_root, "data", "opencode", "opencode.db")
-    if not os.path.isfile(db_path):
-        return 0, 0, 0, "", ()
+def _verified_db(state_root: str, directory: str) -> tuple[str | None, str]:
+    """Path of the job's own OpenCode DB, or (None, reason).
+
+    The attempt file is only a hint: the state root must be a direct
+    opencode-<32 hex> child of this evidence directory with no symlink in
+    between, and the DB must be a regular file owned by this user. Anything else
+    (for example a hint pointing at the Owner's own OpenCode DB) is UNKNOWN.
+    """
+    if not state_root:
+        return None, "none"
+    try:
+        real_dir = os.path.realpath(directory)
+        real_root = os.path.realpath(state_root)
+        if (os.path.normpath(state_root) != real_root or os.path.dirname(real_root) != real_dir
+                or not STATE_ROOT_NAME.fullmatch(os.path.basename(real_root))):
+            return None, "UNKNOWN (state root not owned by this task)"
+        db_path = os.path.join(real_root, "data", "opencode", "opencode.db")
+        if not os.path.lexists(db_path):
+            return None, "none"
+        info = os.lstat(db_path)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or os.path.realpath(db_path) != db_path):
+            return None, "UNKNOWN (unverified task database)"
+        return db_path, "ok"
+    except OSError:
+        return None, "UNKNOWN (task database unreadable)"
+
+
+TOKENS_SQL = ("SELECT json_extract(data,'$.tokens.input'), json_extract(data,'$.tokens.output'), "
+              "json_extract(data,'$.tokens.reasoning'), json_extract(data,'$.tokens.cache.read') "
+              "FROM session_message WHERE type='assistant' AND json_valid(data) ORDER BY seq")
+TOOLS_SQL = ("SELECT json_extract(j.value,'$.id'), json_extract(j.value,'$.name'), "
+             "json_extract(j.value,'$.state.status'), json_extract(j.value,'$.state.input.path') "
+             "FROM (SELECT seq, data FROM session_message WHERE type='assistant' AND json_valid(data)) m, "
+             "json_each(m.data,'$.content') j "
+             "WHERE json_extract(j.value,'$.type')='tool' ORDER BY m.seq, j.key")
+
+
+def _int(value) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _native(state_root: str, root: str, directory: str) -> tuple:
+    """(steps, tokens_in, tokens_out, idle_outcome, tools, meta) from the job's own DB."""
+    db_path, meta = _verified_db(state_root, directory)
+    if db_path is None:
+        return 0, 0, 0, "", (), meta
     try:
         db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2)
     except sqlite3.Error:
-        return 0, 0, 0, "", ()
+        return 0, 0, 0, "", (), "UNKNOWN (task database unreadable)"
     try:
         steps = tin = tout = 0
         idle = ""
-        tools = []
         for (outcome,) in db.execute("SELECT idle_outcome FROM session_v2 ORDER BY time_created"):
             idle = outcome if isinstance(outcome, str) and CODE_TEXT.fullmatch(outcome.upper()) else idle
-        for (data,) in db.execute("SELECT data FROM session_message WHERE type='assistant' ORDER BY seq"):
-            try:
-                message = json.loads(data)
-            except ValueError:
-                continue
+        for i, o, r, c in db.execute(TOKENS_SQL):
             steps += 1
-            usage = message.get("tokens") or {}
-            cache = usage.get("cache") or {}
-            tin += int(usage.get("input") or 0) + int(cache.get("read") or 0)
-            tout += int(usage.get("output") or 0) + int(usage.get("reasoning") or 0)
-            for item in message.get("content") or ():
-                if not isinstance(item, dict) or item.get("type") != "tool":
-                    continue
-                state = item.get("state") or {}
-                given = state.get("input") or {}  # only the path is used
-                name = SAFE_NAME.sub("", str(item.get("name") or "?"))[:16] or "?"
-                status = SAFE_NAME.sub("", str(state.get("status") or "?"))[:12] or "?"
-                tools.append(Tool(str(item.get("id") or len(tools))[:64], name,
-                                  _relative(str(given.get("path") or ""), root), status))
-        return steps, tin, tout, idle, tuple(tools)
-    except (sqlite3.Error, TypeError, ValueError):
-        return 0, 0, 0, "", ()
+            tin += _int(i) + _int(c)
+            tout += _int(o) + _int(r)
+        tools = []
+        for key, name, status, path in db.execute(TOOLS_SQL):
+            tools.append(Tool(SAFE_NAME.sub("", str(key or len(tools)))[:64],
+                              SAFE_NAME.sub("", str(name or "?"))[:16] or "?",
+                              _relative(str(path or ""), root),
+                              SAFE_NAME.sub("", str(status or "?"))[:12] or "?"))
+        return steps, tin, tout, idle, tuple(tools), "ok"
+    except sqlite3.Error:
+        return 0, 0, 0, "", (), "UNKNOWN (task database unreadable)"
     finally:
         db.close()
 
 
-def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0) -> list[Task]:
-    """Recently active llmtool harness evidence directories, newest first."""
+def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
+               hosts: frozenset = frozenset()) -> list[Task]:
+    """Recently active llmtool harness evidence directories, newest first.
+
+    hosts: (evidence dir, stage) pairs of live harness processes; a stage
+    without a result is RUNNING only when its own host is observed alive.
+    """
     cutoff = time.time() - window_hours * 3600
     tasks = []
     for directory in glob.glob(pattern):
@@ -507,13 +579,14 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0) -> list[Tas
             code = code if CODE_TEXT.fullmatch(code) else ("?" if result else "")
             cleanup = "" if not result else ("ok" if result.get("cleanup_confirmed") is True else "UNKNOWN")
             state_root = str(attempt.get("state_root") or "")
-            steps, tin, tout, idle, tools = _native(state_root, root) if state_root else (0, 0, 0, "", ())
+            steps, tin, tout, idle, tools, meta = _native(state_root, root, directory)
+            live = (os.path.realpath(directory), stage) in hosts
             try:
                 started = os.path.getmtime(attempt_path)
             except OSError:
                 started = 0.0
             stages.append(Stage(stage, _model_short(str(attempt.get("model") or "")), started,
-                                code, cleanup, steps, tin, tout, idle, tools))
+                                code, cleanup, steps, tin, tout, idle, tools, live, meta))
         stages.sort(key=lambda s: s.started)
         task_id = SAFE_NAME.sub("", str(manifest.get("task_id") or os.path.basename(directory)))[:48]
         branch = SAFE_PATH.sub("", str(manifest.get("branch") or ""))[:60]
@@ -523,9 +596,12 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0) -> list[Tas
 
 
 def stage_state(stage: Stage) -> str:
+    """Never claims liveness from missing data: RUNNING needs an observed host."""
     if stage.result:
         return stage.result
-    return "RUNNING" if stage.idle == "" else f"NO RESULT FILE (native {stage.idle})"
+    if stage.live:
+        return "RUNNING"
+    return "UNKNOWN (no result, no live host)"
 
 
 def task_events(old: dict, new: list[Task]) -> list[tuple[str, str]]:
@@ -566,6 +642,8 @@ def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
             lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage):<28} "
                          f"cleanup {stage.cleanup or '-':<7} steps {stage.steps:<3} "
                          f"{stage.tokens_in / 1000:.1f}k in / {stage.tokens_out / 1000:.1f}k out")
+            if stage.meta not in ("ok", "none"):
+                lines.append(f"        task metadata {stage.meta}")
             for tool in stage.tools[-6:]:
                 mark = "✓" if tool.status == "completed" else tool.status
                 lines.append(f"        {tool.name:<6} {tool.path}  {mark}")
