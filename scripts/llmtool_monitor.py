@@ -381,7 +381,7 @@ class Monitor:
             tasks = scan_tasks(hosts=result.hosts)
         except Exception:  # task evidence is optional; never break process monitoring
             tasks = self.tasks
-        new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks)]
+        new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks, initial=(self.polls == 1))]
         if self.polls == 1 and tasks:
             latest = tasks[0]
             last = latest.stages[-1] if latest.stages else None
@@ -605,7 +605,7 @@ def stage_state(stage: Stage) -> str:
     return "UNKNOWN (no result, no live host)"
 
 
-def task_events(old: dict, new: list[Task]) -> list[tuple[str, str]]:
+def task_events(old: dict, new: list[Task], *, initial: bool = False) -> list[tuple[str, str]]:
     """(kind, text) for new stages, new tool calls and finished stages."""
     out = []
     for task in new:
@@ -613,7 +613,7 @@ def task_events(old: dict, new: list[Task]) -> list[tuple[str, str]]:
         known = {s.name: s for s in before.stages} if before else {}
         for stage in task.stages:
             prior = known.get(stage.name)
-            if before is None:
+            if before is None and initial:
                 continue  # first sight of a task: summarised, not replayed
             if prior is None:
                 out.append(("▶", f"{task.task_id}: stage {stage.name} started ({stage.model})"))
