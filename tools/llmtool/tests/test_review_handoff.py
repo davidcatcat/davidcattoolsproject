@@ -76,7 +76,29 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertGreater(len(draft_buffer), 0)
 
         # 2. Dispatch through review_handoff -> claude -p (--print --output-format json) + stdin EOF
+        # Have the spawned worker process record exact stdin EOF / trailing bytes to prove 0 Enter/CR was needed.
         h = self.harness(mode='success')
+        stdin_audit = h.hostdir / 'stdin-audit.json'
+        script = h.exe.read_text().replace(
+            "v=json.loads(sys.stdin.read().split('\\n\\nUSER:\\n',1)[1])",
+            "_raw_stdin=sys.stdin.read()\n"
+            "_eof_after_read=(sys.stdin.read()=='')\n"
+            f"open({str(stdin_audit)!r},'w').write(json.dumps({{'eof':_eof_after_read,'ends_with_cr':_raw_stdin.endswith('\\r'),'len':len(_raw_stdin)}}))\n"
+            "v=json.loads(_raw_stdin.split('\\n\\nUSER:\\n',1)[1])"
+        )
+        h.exe.write_text(script)
+        exe_sha = hashlib.sha256(h.exe.read_bytes()).hexdigest()
+        h.hostdata['reviewer']['executable_sha256'] = exe_sha
+        runtime_reg = replace(a.load_host_registration(h.pin), reviewer_executable_digest=exe_sha)
+        h.policy = replace(h.policy, worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        h.hostdata['route_policies'] = [dict(policy=h.policy.to_dict(), revoked=False)]
+        h.write_host()
+        h.pin = replace(h.pin, host_digest=hashlib.sha256(h.hostpath.read_bytes()).hexdigest())
+        h.observer = FixtureObserver(h.pin, h.expect, h.events, h.clock,
+                                     baseline_check=lambda reg, f: True,
+                                     writers_check=lambda reg, f: True)
+        h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+
         receipt, raw = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
         self.assertEqual(receipt.verdict, 'PASS')
         self.assertEqual(receipt.execution_status, 'SUCCEEDED')
@@ -98,9 +120,16 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertEqual(receipt.runtime_session_id, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
         self.assertEqual(receipt.identity_source, 'CLI_REPORTED_RUNTIME_ID')
         argv = json.loads(h.argv_file.read_text())
-        self.assertIn('--print', argv)
-        self.assertIn('--output-format', argv)
+        self.assertEqual(
+            argv,
+            ['--print', '--output-format', 'json', '--no-session-persistence',
+             '--safe-mode', '--tools', '', '--model', 'fake-model'],
+        )
         self.assertNotIn('--bare', argv)
+        audit = json.loads(stdin_audit.read_text())
+        self.assertTrue(audit['eof'])
+        self.assertFalse(audit['ends_with_cr'])
+        self.assertGreater(audit['len'], 0)
 
     def test_installed_claude_2_1_303_pin_and_telemetry_envelope_supported(self):
         """Red-first test: version 2.1.303 and real Claude CLI 2.1.303 JSON envelope keys must be accepted."""

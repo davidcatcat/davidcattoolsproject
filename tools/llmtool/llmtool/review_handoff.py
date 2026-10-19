@@ -126,6 +126,7 @@ class ReviewHandoffReceipt(ContractValue):
                 self.ledger_status != 'EFFECT_DONE' or
                 not self.cleanup_confirmed or
                 self.runtime_session_id is None or
+                self.identity_source != 'CLI_REPORTED_RUNTIME_ID' or
                 self.packet_digest is None or
                 self.grant_nonce is None):
             reject('REVIEW_HANDOFF_RECEIPT_INVALID')
@@ -245,7 +246,8 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
         }
 
     code = raw.get('code') if type(raw.get('code')) is str else 'REVIEW_BLOCKED'
-    provider_calls = raw.get('provider_calls') if raw.get('provider_calls') in (0, 1) else 0
+    raw_calls = raw.get('provider_calls')
+    provider_calls = raw_calls if type(raw_calls) is int and raw_calls in (0, 1) else 0
     grant_nonce, ledger_status = _extract_grant_and_ledger_status(issuer, ledger)
     if grant_nonce is not None and provider_calls == 0 and ledger_status in ('CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):
         provider_calls = 1
@@ -263,15 +265,26 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     )
     runtime_session_id = job_evidence.get('runtime_session_id') if type(job_evidence.get('runtime_session_id')) is str else None
     identity_source = job_evidence.get('identity_source') if job_evidence.get('identity_source') == 'CLI_REPORTED_RUNTIME_ID' else None
-    wrapper_launches = 1 if job_evidence.get('wrapper_launches') == 1 else (1 if provider_calls == 1 and runtime_session_id else 0)
+    wrapper_launches = 1 if type(job_evidence.get('wrapper_launches')) is int and job_evidence.get('wrapper_launches') == 1 else (
+        1 if provider_calls == 1 and runtime_session_id else 0
+    )
 
+    packet_digest = raw.get('packet_digest') if type(raw.get('packet_digest')) is str else None
     verdict_obj = raw.get('verdict') if type(raw.get('verdict')) is dict else None
+    findings_list = verdict_obj.get('findings') if verdict_obj is not None and type(verdict_obj.get('findings')) is list else None
+    sec_raw = raw.get('security')
+    func_raw = raw.get('functional')
     verdict_valid = (
         raw.get('verdict_validation') == 'SUCCESS' and
         verdict_obj is not None and
         verdict_obj.get('source_sha') == source_sha and
-        raw.get('security') in ('APPROVE', 'CHANGES_REQUIRED', 'BLOCKED') and
-        raw.get('functional') in ('APPROVE', 'CHANGES_REQUIRED', 'BLOCKED') and
+        sec_raw in ('APPROVE', 'CHANGES_REQUIRED', 'BLOCKED') and
+        func_raw in ('APPROVE', 'CHANGES_REQUIRED', 'BLOCKED') and
+        (sec_raw != 'APPROVE' or func_raw != 'APPROVE' or code == 'REVIEW_APPROVED') and
+        packet_digest is not None and
+        grant_nonce is not None and
+        findings_list is not None and
+        0 <= len(findings_list) <= 32 and
         cleanup_confirmed and
         bool(job_evidence) and
         all(job_evidence.get(k) is True for k in ('reaped', 'pipes_drained', 'pipes_closed', 'runtime_closed')) and
@@ -282,22 +295,19 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     )
 
     if verdict_valid:
-        sec = raw['security']
-        func = raw['functional']
-        if sec == 'APPROVE' and func == 'APPROVE' and code == 'REVIEW_APPROVED':
+        sec = sec_raw
+        func = func_raw
+        if sec == 'APPROVE' and func == 'APPROVE':
             verdict = 'PASS'
         elif 'BLOCKED' in (sec, func):
             verdict = 'BLOCKED'
         else:
             verdict = 'FAIL'
-        packet_digest = raw.get('packet_digest') if type(raw.get('packet_digest')) is str else None
-        findings = verdict_obj.get('findings') if type(verdict_obj.get('findings')) is list else []
-        findings_count = len(findings)
+        findings_count = len(findings_list)
     else:
         sec = 'BLOCKED'
         func = 'BLOCKED'
         verdict = 'BLOCKED'
-        packet_digest = raw.get('packet_digest') if type(raw.get('packet_digest')) is str else None
         findings_count = 0
 
     in_tok = raw.get('input_tokens')
