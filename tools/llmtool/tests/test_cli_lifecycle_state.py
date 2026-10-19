@@ -398,8 +398,12 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
                 with patch('llmtool.providers.cli_lifecycle.os.killpg',
                            side_effect=signal_or_probe) as calls:
                     self.assertFalse(bounded_terminate(process, time.monotonic() + 0.1))
-                    self.assertEqual([call.args for call in calls.call_args_list],
-                                     [(12345, signal.SIGKILL), (12345, 0)])
+                    # One owned SIGKILL before wait; every later observation of
+                    # the newly reaped group is a signal-0 existence query only.
+                    observed = [call.args for call in calls.call_args_list]
+                    self.assertEqual(observed[0], (12345, signal.SIGKILL))
+                    self.assertTrue(observed[1:])
+                    self.assertTrue(all(args == (12345, 0) for args in observed[1:]))
                     calls.reset_mock()
                     self.assertFalse(bounded_terminate(process, time.monotonic() + 0.1))
                     # The now-reaped group is re-observed until the cleanup
@@ -408,6 +412,167 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
                     self.assertTrue(all(call.args == (12345, 0) for call in calls.call_args_list))
                 self.assertTrue(process._llmtool_cleanup_pending)
                 process.kill.assert_not_called()
+
+    def _assert_post_wait_transient_reobserved(self, pid, transient):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = Clock()
+        process = Mock(returncode=None, pid=pid)
+        process._llmtool_owned_pgid = pid
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        events = []
+        probes = 0
+
+        def killpg(pgid, sig):
+            nonlocal probes
+            events.append((pgid, sig))
+            if sig != 0:
+                return
+            probes += 1
+            if probes == 1:
+                # Cleanup must stay pending until an actual ESRCH observation.
+                self.assertTrue(process._llmtool_cleanup_pending)
+                if transient is None:
+                    return  # Transient presence.
+                raise transient
+            raise ProcessLookupError()
+
+        def wait(*, timeout):
+            events.append(('wait',))
+            process.returncode = -signal.SIGKILL
+
+        process.wait.side_effect = wait
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg), \
+                patch('llmtool.providers.cli_lifecycle.time', clock):
+            self.assertTrue(bounded_terminate(process, clock.now + 1.0))
+
+        self.assertFalse(process._llmtool_cleanup_pending)
+        self.assertEqual(probes, 2)
+        self.assertEqual(events[0], (pid, signal.SIGKILL))
+        self.assertEqual(events[1], ('wait',))
+        self.assertEqual([event for event in events if event == (pid, signal.SIGKILL)],
+                         [(pid, signal.SIGKILL)])
+        self.assertTrue(all(sig == 0 for _, sig in events[2:]),
+                        'a reaped owned group may only receive existence queries')
+        process.kill.assert_not_called()
+
+    def test_post_wait_transient_group_presence_is_reobserved_to_esrch(self):
+        # A newly reaped group can briefly remain observable. One signal-zero
+        # probe after wait would leave cleanup permanently UNKNOWN; the
+        # post-wait path must re-observe transient presence until ESRCH.
+        cases = (('server-like', 24680), ('client-like', 24681))
+        self.assertEqual(len({pid for _, pid in cases}), len(cases))
+        for role, pid in cases:
+            with self.subTest(role=role, pid=pid):
+                self._assert_post_wait_transient_reobserved(pid, None)
+
+    def test_post_wait_transient_group_eperm_is_reobserved_to_esrch(self):
+        # Darwin can transiently report EPERM for an owned zombie-only group.
+        # That observation is UNKNOWN, not proof of presence; only a later
+        # ESRCH may clear cleanup pending.
+        cases = (('server-like', 35790), ('client-like', 35791))
+        self.assertEqual(len({pid for _, pid in cases}), len(cases))
+        for role, pid in cases:
+            with self.subTest(role=role, pid=pid):
+                self._assert_post_wait_transient_reobserved(pid, PermissionError())
+
+    def _assert_post_wait_persistent_stays_unknown(self, pid, persistent):
+        from llmtool.providers.cli_lifecycle import bounded_terminate, _REOBSERVE_GRACE
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = Clock()
+        process = Mock(returncode=None, pid=pid)
+        process._llmtool_owned_pgid = pid
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        events = []
+
+        def killpg(pgid, sig):
+            events.append((pgid, sig))
+            if sig == 0 and persistent is not None:
+                raise persistent
+
+        def wait(*, timeout):
+            events.append(('wait',))
+            process.returncode = -signal.SIGKILL
+
+        process.wait.side_effect = wait
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg), \
+                patch('llmtool.providers.cli_lifecycle.time', clock):
+            # Persistent presence/unobservability must stay UNKNOWN, but the
+            # re-observation is capped to the grace and never consumes a far
+            # job deadline that sibling cleanup still needs.
+            self.assertFalse(bounded_terminate(process, clock.now + 600))
+
+        self.assertTrue(process._llmtool_cleanup_pending)
+        self.assertEqual(events[0], (pid, signal.SIGKILL))
+        self.assertEqual(events[1], ('wait',))
+        probes = events[2:]
+        self.assertGreaterEqual(len(probes), 2,
+                                'must re-observe, not decide on one probe')
+        self.assertTrue(all(event == (pid, 0) for event in probes),
+                        'a reaped owned group may only receive existence queries')
+        self.assertLessEqual(clock.now - 1000.0, _REOBSERVE_GRACE + 0.1,
+                             're-observation must not consume the far deadline')
+        process.kill.assert_not_called()
+
+    def test_post_wait_persistent_group_presence_stays_unknown_and_bounded(self):
+        # The newly reaped path must not treat persistent presence (or
+        # persistent EPERM/other observation failure) as absence, and must not
+        # spin against a far future cleanup deadline.
+        cases = (('present', 46802, None),
+                 ('eperm', 46803, PermissionError()),
+                 ('oserror', 46804, OSError()))
+        self.assertEqual(len({pid for _, pid, _ in cases}), len(cases))
+        for role, pid, persistent in cases:
+            with self.subTest(role=role, pid=pid):
+                self._assert_post_wait_persistent_stays_unknown(pid, persistent)
+
+    def test_post_wait_expired_deadline_probes_once_without_waiting(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        process = Mock(returncode=None, pid=57913)
+        process._llmtool_owned_pgid = 57913
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        events = []
+
+        def wait(*, timeout):
+            events.append(('wait', timeout))
+            process.returncode = -signal.SIGKILL
+
+        def killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+
+        process.wait.side_effect = wait
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg):
+            self.assertFalse(bounded_terminate(process, time.monotonic() - 0.5))
+        # Original owned SIGKILL and zero-timeout wait remain; after reap the
+        # expired deadline allows exactly one signal-0 probe and no sleeping.
+        self.assertEqual(events, [('killpg', 57913, signal.SIGKILL), ('wait', 0),
+                                  ('killpg', 57913, 0)])
+        self.assertTrue(process._llmtool_cleanup_pending)
+        process.kill.assert_not_called()
 
     def test_unowned_and_reaped_never_signal(self):
         from llmtool.providers.cli_lifecycle import bounded_terminate

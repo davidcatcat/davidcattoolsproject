@@ -90,8 +90,11 @@ def bounded_terminate(process, deadline):
         process._llmtool_cleanup_pending = True
         return False
     # A successful kill and wait still do not prove that every group member
-    # disappeared. Observe absence without delivering another signal after reap.
-    absent = group_owned and os.name == 'posix' and _group_absent(process.pid)
+    # disappeared. Observe absence without delivering another signal after reap;
+    # the newly reaped group gets the same bounded, signal-zero-only
+    # re-observation as an already-reaped one.
+    absent = (group_owned and os.name == 'posix' and
+              _group_absent_until(process.pid, deadline))
     process._llmtool_cleanup_pending = not absent
     return absent
 
