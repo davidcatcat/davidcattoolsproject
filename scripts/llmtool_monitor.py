@@ -196,90 +196,204 @@ def collect(remembered: frozenset = frozenset()) -> Snapshot:
     return parse_processes(response.stdout, os.getpid(), remembered)
 
 
-def events(previous: dict[int, Process], current: dict[int, Process]) -> list[str]:
-    # Lifecycle is limited to visibility in ps. Disappeared != completed.
-    added = [f"Detected {p.role.strip()}  PID {p.pid} (PGID {p.pgid})"
-             for pid, p in current.items() if pid not in previous]
-    gone = [f"No longer observed {p.role.strip()}  PID {p.pid} (PGID {p.pgid})"
+def family(role: str) -> str:
+    for name in ("OpenCode", "Claude", "Codex", "llmtool", "ai-loop"):
+        if name in role:
+            return name
+    return "other"
+
+
+def events(previous: dict[int, Process], current: dict[int, Process],
+           old_lingering: list, lingering: list) -> list[tuple[str, str]]:
+    """(kind, text). Lifecycle is limited to visibility in ps; gone != completed."""
+    out = [("+", f"{p.role.strip()}  PID {p.pid}  PGID {p.pgid}")
+           for pid, p in current.items() if pid not in previous]
+    out += [("-", f"{p.role.strip()}  PID {p.pid}  no longer observed")
             for pid, p in previous.items() if pid not in current]
-    return added + gone
+    out += [("!", f"group {g}: leader gone/zombie while members remain (possible cleanup UNKNOWN)")
+            for g in lingering if g not in old_lingering]
+    out += [("ok", f"group {g}: no lingering members any more")
+            for g in old_lingering if g not in lingering]
+    return out
 
 
-def render(current: list[Process], history: deque[str], error: str | None,
-           use_color: bool, iterations: int, lingering: list | None = None) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    esc = "\x1b[96m" if use_color else ""
-    warn = "\x1b[93m" if use_color else ""
-    end = "\x1b[0m" if use_color else ""
-    out = [f"{esc}AI agents (OpenCode / Claude / Codex / llmtool) · Local Process Monitor{end}",
-           f"Observed at: {now}    Polls: {iterations}",
-           "Read-only OS snapshot · no AI/API calls · Ctrl+C to quit", ""]
-    if error:
-        out.append(f"STATUS: UNKNOWN (unable to read process table: {error})")
-    elif not current:
-        out.append("STATUS: NO MATCHING LOCAL PROCESS OBSERVED")
-        out.append("This does NOT mean a queued or remote task is complete or idle.")
-    else:
-        out.append(f"STATUS: {len(current)} matching local process(es) observed")
-        if lingering:
-            out.append(f"{warn}NOTE: group(s) {', '.join(map(str, lingering))} still have members "
-                       f"while the leader is gone/zombie (possible cleanup UNKNOWN){end}")
-        out.append("ROLE                         PID     PPID    PGID    ELAPSED       OS STATE")
-        out.append("-" * 79)
-        for p in current[:50]:
-            out.append(f"{p.role:<28} {p.pid:<7} {p.ppid:<7} {p.pgid:<7} {p.elapsed:<13} {p.state}")
-        if len(current) > 50:
-            out.append(f"... {len(current)-50} additional processes not shown")
-    out += ["", "RECENT OBSERVATIONS (this monitor session only)"]
-    if history:
-        out.extend("  " + e for e in list(history)[-10:])
-    else:
-        out.append("  No process arrival/departure observed yet")
-    out += ["", "Note: process RUNNING != model actively generating; a missing process != task DONE."]
-    return "\n".join(out)
+def summary(processes: list[Process], lingering: list) -> str:
+    counts: dict[str, int] = {}
+    for p in processes:
+        if not p.role.startswith(" "):
+            counts[family(p.role)] = counts.get(family(p.role), 0) + 1
+    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "llmtool", "ai-loop", "other")
+                     if k in counts) or "no agent process"
+    return text + (f"  ·  ⚠ lingering groups: {', '.join(map(str, lingering))}" if lingering else "")
+
+
+def table_lines(processes: list[Process]) -> list[str]:
+    lines = ["ROLE                         PID     PPID    PGID    ELAPSED       STATE"]
+    lines += [f"{p.role:<28} {p.pid:<7} {p.ppid:<7} {p.pgid:<7} {p.elapsed:<13} {p.state}"
+              for p in processes]
+    return lines
+
+
+class Monitor:
+    """Polling state shared by every view. Never signals or modifies anything."""
+
+    def __init__(self) -> None:
+        self.prev: dict[int, Process] = {}
+        self.remembered: frozenset = frozenset()
+        self.processes: list[Process] = []
+        self.lingering: list = []
+        self.error: str | None = None
+        self.polls = 0
+        self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
+
+    def poll(self) -> list[tuple[str, str, str]]:
+        self.polls += 1
+        stamp = datetime.now().strftime("%H:%M:%S")
+        try:
+            result = collect(self.remembered)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            # On a failed read, do not generate fake departure events.
+            message = type(exc).__name__ + ": " + str(exc)[:65]
+            new = [] if message == self.error else [(stamp, "?", f"cannot read process table: {message}")]
+            self.error = message
+            self.log.extend(new)
+            return new
+        current = {p.pid: p for p in result.processes}
+        new = [(stamp, k, t) for k, t in events(self.prev, current, self.lingering, result.lingering)]
+        if self.polls == 1:
+            new.insert(0, (stamp, "i", f"monitor started; {summary(result.processes, result.lingering)}"))
+        self.prev, self.remembered = current, result.watched_groups
+        self.processes, self.lingering, self.error = result.processes, result.lingering, None
+        self.log.extend(new)
+        return new
+
+
+MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·"}
+FOOTNOTE = "running != model generating; gone != task done"
+
+
+def run_once() -> int:
+    mon = Monitor()
+    mon.poll()
+    print(f"AI agents · {datetime.now():%Y-%m-%d %H:%M:%S} · {summary(mon.processes, mon.lingering)}")
+    if mon.error:
+        print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
+        return 1
+    print("\n".join(table_lines(mon.processes)))
+    print(f"\nNote: {FOOTNOTE}.")
+    return 0
+
+
+def run_plain(interval: float) -> int:
+    """Append-only stream: one line per change, never a repainted screen."""
+    mon = Monitor()
+    print(f"AI agents · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit", flush=True)
+    try:
+        while True:
+            for stamp, kind, text in mon.poll():
+                print(f"{stamp} {MARK.get(kind, ' ')} {text}", flush=True)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nMonitor stopped; no worker was signalled or modified.")
+        return 0
+
+
+def run_curses(stdscr, interval: float, use_color: bool) -> None:
+    import curses
+    curses.curs_set(0)
+    stdscr.timeout(100)
+    stdscr.keypad(True)
+    colors = {}
+    if use_color and curses.has_colors():
+        curses.use_default_colors()
+        for n, (key, fg) in enumerate((("title", curses.COLOR_CYAN), ("!", curses.COLOR_YELLOW),
+                                       ("+", curses.COLOR_GREEN), ("-", curses.COLOR_MAGENTA),
+                                       ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN)), start=1):
+            curses.init_pair(n, fg, -1)
+            colors[key] = curses.color_pair(n)
+    mon = Monitor()
+    view, offset, next_poll = "log", 0, 0.0
+
+    def put(y: int, text: str, attr: int = 0) -> None:
+        h, w = stdscr.getmaxyx()
+        if 0 <= y < h and w > 1:
+            try:
+                stdscr.addnstr(y, 0, text, w - 1, attr)
+            except curses.error:
+                pass
+
+    while True:
+        if time.monotonic() >= next_poll:
+            mon.poll()
+            next_poll = time.monotonic() + interval
+        h, w = stdscr.getmaxyx()
+        body = max(1, h - 4)
+        stdscr.erase()
+        put(0, f"AI agents · read-only process monitor · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+            colors.get("title", 0) | curses.A_BOLD)
+        status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
+                  else summary(mon.processes, mon.lingering))
+        put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
+        if view == "log":
+            entries = list(mon.log)
+            offset = max(0, min(offset, len(entries) - body))
+            end = len(entries) - offset
+            for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
+                put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
+            hint = "Tab: processes  ↑↓/PgUp/PgDn: scroll  End: follow  q: quit"
+            if offset:
+                hint = f"[scrolled back {offset}]  " + hint
+        else:
+            lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
+            offset = max(0, min(offset, len(lines) - body))
+            for row, line in enumerate(lines[offset:offset + body]):
+                put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
+            hint = "Tab: event log  ↑↓/PgUp/PgDn: scroll  q: quit"
+        put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
+        stdscr.refresh()
+        key = stdscr.getch()
+        if key in (ord("q"), ord("Q"), 27):
+            return
+        if key in (9, ord("p"), ord("l")):  # Tab, or p/l to pick processes/log
+            view = "table" if (key == ord("p") or (key == 9 and view == "log")) else "log"
+            offset = 0
+        elif key == curses.KEY_UP:
+            offset += 1 if view == "log" else -1
+        elif key == curses.KEY_DOWN:
+            offset -= 1 if view == "log" else -1
+        elif key == curses.KEY_PPAGE:
+            offset += body if view == "log" else -body
+        elif key == curses.KEY_NPAGE:
+            offset -= body if view == "log" else -body
+        elif key in (curses.KEY_END, ord("G")):
+            offset = 0
+        offset = max(0, offset)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
-    parser.add_argument("--once", action="store_true", help="print one snapshot and exit")
-    parser.add_argument("--no-color", action="store_true", help="disable ANSI title color")
+    parser.add_argument("--once", action="store_true", help="print one process table and exit")
+    parser.add_argument("--plain", action="store_true",
+                        help="append-only event lines instead of the interactive screen")
+    parser.add_argument("--no-color", action="store_true", help="disable colors")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
-    prev: dict[int, Process] = {}
-    remembered: frozenset = frozenset()
-    history: deque[str] = deque(maxlen=10)
-    iteration = 0
-    use_color = sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR")
+    if args.once:
+        return run_once()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
+    if args.plain or not interactive:
+        return run_plain(args.interval)
+    import curses
+    use_color = not args.no_color and not os.environ.get("NO_COLOR")
     try:
-        while True:
-            iteration += 1
-            try:
-                result = collect(remembered)
-                snapshot, lingering = result.processes, result.lingering
-                remembered = result.watched_groups
-                current = {p.pid: p for p in snapshot}
-                for entry in events(prev, current):
-                    history.append(entry)
-                prev = current
-                error = None
-            except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-                snapshot, lingering = [], []
-                error = type(exc).__name__ + ": " + str(exc)[:65]
-                # On a failed read, do not generate fake departure events.
-            if not args.once and sys.stdout.isatty():
-                sys.stdout.write("\x1b[2J\x1b[H")
-            print(render(snapshot, history, error, use_color, iteration, lingering), flush=True)
-            if args.once:
-                return 0 if error is None else 1
-            if not sys.stdout.isatty():
-                print("\n" + "-" * 79, flush=True)
-            time.sleep(args.interval)
+        curses.wrapper(run_curses, args.interval, use_color)
     except KeyboardInterrupt:
-        print("\nMonitor stopped; no worker was signalled or modified.")
-        return 0
+        pass
+    print("Monitor stopped; no worker was signalled or modified.")
+    return 0
 
 
 if __name__ == "__main__":
