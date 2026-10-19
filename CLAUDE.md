@@ -12,23 +12,18 @@ merge decisions to the AI coordinator; they are **not** the everyday PM or
 a Codex/Claude prompt relay. Claude's core role is a distinct, independent
 reviewer/QA role, not a self-authorizing implementation or merge authority.
 
-**Owner-approved two-fixed-worktree exception (G7 activation is merge-gated):**
-Codex and Claude may each use only their one reviewed fixed linked Git worktree
-under the [single normative safe-git policy](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-General developer use becomes **ACTIVE only after** the independently reviewed
-G7 activation-status PR is merged into `main`; while the PR is OPEN/Draft,
-continue single canonical CHECKOUT-CLAIM/RELEASE for non-pilot work.
-After activation, Claude's developer CLI must start with CWD set to its
-registered Claude root and use a unique owned task branch, clean handoff,
-pinned preflight and its own verified venv. A Claude reviewer remains separate
-from development of the same source, with no unclaimed Git fetch in canonical.
-Unknown writer, crash, dirty/ignored state, wrong-root import or shared-ref
-conflict means STOP/preserve and fall back to canonical single-writer handoff.
-No unapproved clone, extra worktree or project archive copy, no `main`
-checkout in developer worktrees, no llmtool F2 mutation or automated cleanup
-of historical processes. Canonical native F1 acceptance remains unchanged.
+**Owner D6 (2026-10-19):** The former G7 two-fixed-worktree ceiling is
+superseded by [dynamic task-scoped lifecycle](skills/safe-git/SKILL.md).
+Authorized Developer Agents may create and safely retire registered worktrees
+without Owner micro-approval. The canonical Mac Integrator/F1 root stays
+unchanged; each worktree has one writer, a unique branch and isolated runtime.
+Merged-and-accepted tasks are automatically retired only after published
+source/evidence, zero active Sessions/processes and all tracked/untracked/
+ignored data are checked. Open review/repair, interrupted or ambiguous work
+is retained. No force cleanup, extra clones, F2 grant or auto merge.
+Historical G7/G1-G6 evidence remains valid but is not repeated per worktree. **Developer worktrees must never check out `main`; neither a Developer nor a Reviewer may perform an unclaimed Git fetch in the canonical Integrator checkout.** These explicit G7 safeguards remain operative under D6. Follow the [Owner's recorded D6 decision](docs/decisions/llmtool_dynamic_worktree_20261019.md).
 
-**2026-10-19 current Owner D1–D5 override for Developer ownership:** Claude **Developer is PAUSED**. Claude Code continues as the dedicated independent **Reviewer/QA**, not a default code writer. OpenCode v2 is approved to take over the **same existing** Claude-named fixed root **only after** independently reviewed safe-git policy and actual Mac release/C2/C3 turnover. Read [owner decisions](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). This supersedes the earlier historical Claude Developer task guidance in this file; do not re-enter an OpenCode-owned root to write, fetch or change refs. Review context must remain separately authorized/read-only; DeepSeek/GLM pre-review does not replace Claude formal verdict. Quota-exhausted work awaits exact-SHA formal review, not automatic paid fallback. No new worktree or native M2 proof implied.
+**2026-10-19 current Owner D1–D5 override for Developer ownership:** Claude **Developer is PAUSED**. Claude Code continues as the dedicated independent **Reviewer/QA**, not a default code writer. OpenCode v2 is approved to take over the **same existing** Claude-named fixed root **only after** independently reviewed safe-git policy and actual Mac release/C2/C3 turnover. Read [owner decisions](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). This supersedes the earlier historical Claude Developer task guidance in this file; do not re-enter an OpenCode-owned root to write, fetch or change refs. Review context must remain separately authorized/read-only; DeepSeek/GLM pre-review does not replace Claude formal verdict. Quota-exhausted work awaits exact-SHA formal review, not automatic paid fallback. D1 did not itself create a worktree or prove native M2; subsequent Owner D6 authorizes additional task worktrees under its separate cleanup/verification rules.
 
 Give actionable, human-readable findings, reproduction evidence, severity,
 a disposition recommendation and the exact reviewed SHA. Classify required

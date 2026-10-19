@@ -70,7 +70,7 @@ auto-wake, llmtool F2 and complete M2 remain unverified.
 
 ### 2026-10-19 secondary Developer role and quota policy (D1–D5)
 
-Use [the owner decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and normative [safe-git](../safe-git/SKILL.md). The **existing Codex Integrator remains PM**, assigning Codex Developer as **first-line** and OpenCode v2/DeepSeek Developer as **second-line** (the existing second fixed root only **after** independent reviewed Mac ownership transfer). Same-model DeepSeek and cross-model GLM are **internal pre-review**, not formal acceptance. **Claude Code remains independent Reviewer/QA; Claude Developer PAUSED**. Company-gw retains qualified authorized task triage; AGY is backup; no new Codex/Claude Cloud automation.
+Use [the owner decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and normative [safe-git](../safe-git/SKILL.md). The **existing Codex Integrator remains PM**, assigning Codex Developer as **first-line** and OpenCode v2/DeepSeek Developer as **second-line** (the historical second root only **after** verified Mac ownership transfer; new registered task worktrees are separately permitted by Owner D6). Same-model DeepSeek and cross-model GLM are **internal pre-review**, not formal acceptance. **Claude Code remains independent Reviewer/QA; Claude Developer PAUSED**. Company-gw retains qualified authorized task triage; AGY is backup; no new Codex/Claude Cloud automation.
 
 When Claude quota runs out, keep exact-SHA pending formal review evidence, bound the backlog and continue only unrelated/otherwise authorized Developer work; never self-approve, auto-merge unreviewed source or auto-enable paid API. OpenCode may read all **non-sensitive repository** material, but sensitive source, provider-export authorization, outside-Mac paths, task-bounded edits and Git actions remain distinct constraints. D5 permits a proven alternate free model or Integrator-to-Codex reassignment. First deliver foreground **same-active-Integrator** handoff, then verify original-session wake/ACK/recovery for full G3; no second orchestrator or milestone.
 
@@ -273,10 +273,11 @@ The delivery unit is **one complete authorized work package**, not many owner-me
 2. Inspect the repo first. Choose the smallest product-focused solution and
    bounded budget; avoid speculative controller/QA orchestration.
 3. Ask the developer to implement and test. Collect SHA-bound, reproducible
-   diagnostics; keep one source/Git writer in canonical until a separately
-   reviewed two-fixed-worktree pilot is activated; then one writer per owned
-   workspace and one integrator for shared refs/native canonical acceptance.
-   Follow [safe-git](../safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
+   diagnostics; use one writer per registered D6 task-scoped worktree and one
+   Integrator for shared refs/native canonical acceptance. Retire completed
+   task worktrees automatically only after safe-git's evidence-and-liveness
+   checks; pending review/repair and unknown local data must be preserved.
+   Follow [safe-git](../safe-git/SKILL.md).
 4. Run an independent review and required functional, security, runtime and
    platform tests. A normal review is **not** a security or QA gate.
 5. On a reproducible defect, retain evidence, repair within the scope, rerun
