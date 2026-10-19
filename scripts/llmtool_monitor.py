@@ -50,6 +50,20 @@ class Process:
     elapsed: str
     state: str
     role: str
+    name: str = "?"   # executable basename only, never arguments
+    owner: str = ""   # nearest agent this process belongs to / was started by
+
+
+SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
+
+
+def safe_name(command: str) -> str:
+    """Executable basename only (no arguments, which may contain secrets)."""
+    if command.startswith("(") and command.endswith(")"):
+        command = command[1:-1]
+    first = command.split()[0] if command.split() else ""
+    name = SAFE_NAME.sub("", _base(first).lstrip("-"))[:24]
+    return name or "?"
 
 
 def _base(token: str) -> str:
@@ -146,7 +160,7 @@ def parse_processes(output: str, self_pid: int,
         rows[pid] = (ppid, pgid,
                      elapsed if len(elapsed) <= 18 else "UNKNOWN",
                      stat if ALLOWED_STATE.fullmatch(stat) else "?",
-                     classify(found.group(6)))
+                     classify(found.group(6)), safe_name(found.group(6)))
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
@@ -155,30 +169,36 @@ def parse_processes(output: str, self_pid: int,
     present = {row[1] for row in rows.values()}
     watched = groups | {g for g in remembered if g in present}
 
-    def descends_from_match(pid: int) -> bool:
+    def label(pid: int) -> str:
+        return f"{rows[pid][4]} {pid}"
+
+    def agent_ancestor(pid: int) -> int | None:
         seen = 0
         parent = rows[pid][0]
         while parent in rows and seen < MAX_ANCESTRY:
             if parent in matched:
-                return True
+                return parent
             parent = rows[parent][0]
             seen += 1
-        return False
+        return None
 
     result = []
-    for pid, (ppid, pgid, elapsed, stat, role) in rows.items():
+    for pid, (ppid, pgid, elapsed, stat, role, name) in rows.items():
+        ancestor = agent_ancestor(pid)
         if role is None:
-            if pgid in groups:
-                role = "  group member"
+            if ancestor is not None:
+                role, owner = "  child", label(ancestor)
+            elif pgid in groups:
+                role, owner = "  group member", label(pgid)
             elif pgid in watched:
-                role = "  orphaned group member"
-            elif descends_from_match(pid):
-                role = "  descendant"
+                role, owner = "  orphaned group member", f"group {pgid} (leader gone)"
             else:
                 continue
+        else:
+            owner = label(ancestor) if ancestor is not None else ""
         if stat.startswith("Z"):
             role += " (zombie)"
-        result.append(Process(pid, ppid, pgid, elapsed, stat, role))
+        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner))
     lingering = sorted(
         g for g in watched
         if any(pid != g and row[1] == g for pid, row in rows.items())
@@ -203,18 +223,16 @@ def family(role: str) -> str:
     return "other"
 
 
-def events(previous: dict[int, Process], current: dict[int, Process],
-           old_lingering: list, lingering: list) -> list[tuple[str, str]]:
-    """(kind, text). Lifecycle is limited to visibility in ps; gone != completed."""
-    out = [("+", f"{p.role.strip()}  PID {p.pid}  PGID {p.pgid}")
-           for pid, p in current.items() if pid not in previous]
-    out += [("-", f"{p.role.strip()}  PID {p.pid}  no longer observed")
-            for pid, p in previous.items() if pid not in current]
-    out += [("!", f"group {g}: leader gone/zombie while members remain (possible cleanup UNKNOWN)")
-            for g in lingering if g not in old_lingering]
-    out += [("ok", f"group {g}: no lingering members any more")
-            for g in old_lingering if g not in lingering]
-    return out
+def describe(p: Process) -> str:
+    """Human-readable line: what the process is and which agent it belongs to."""
+    zombie = " [zombie]" if p.state.startswith("Z") else ""
+    if not p.role.startswith(" "):
+        started = f"  (started by {p.owner})" if p.owner else ""
+        return f"{p.role.replace(' (zombie)', '')}{zombie}  PID {p.pid}{started}"
+    kind = p.role.strip().replace(" (zombie)", "")
+    relation = {"child": "child of", "group member": "in process group of",
+                "orphaned group member": "left behind in"}.get(kind, kind)
+    return f"{p.name}{zombie}  PID {p.pid}  ({relation} {p.owner})"
 
 
 def summary(processes: list[Process], lingering: list) -> str:
@@ -227,27 +245,55 @@ def summary(processes: list[Process], lingering: list) -> str:
     return text + (f"  ·  ⚠ lingering groups: {', '.join(map(str, lingering))}" if lingering else "")
 
 
+def _fit(text: str, width: int) -> str:
+    return text if len(text) <= width else text[:width - 1] + "…"
+
+
 def table_lines(processes: list[Process]) -> list[str]:
-    lines = ["ROLE                         PID     PPID    PGID    ELAPSED       STATE"]
-    lines += [f"{p.role:<28} {p.pid:<7} {p.ppid:<7} {p.pgid:<7} {p.elapsed:<13} {p.state}"
-              for p in processes]
+    # Owner sits next to PID so it stays visible in an 80-column terminal.
+    lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
+    lines += [f"{_fit(p.role, 25):<25} {_fit(p.name, 12):<12} {p.pid:<7} {_fit(p.owner or '-', 30):<30} "
+              f"{p.pgid:<7} {p.state:<5} {p.elapsed}" for p in processes]
     return lines
 
 
 class Monitor:
-    """Polling state shared by every view. Never signals or modifies anything."""
+    """Polling state shared by every view. Never signals or modifies anything.
 
-    def __init__(self) -> None:
+    Agents are logged as soon as they appear or disappear. Their helper
+    processes are logged only once they have lived min_age seconds (or at once
+    when they are zombies or left behind in a lingering group); shorter-lived
+    helpers are counted and summarised every summary_every seconds.
+    """
+
+    def __init__(self, min_age: float = 3.0, show_all: bool = False,
+                 summary_every: float = 30.0) -> None:
+        self.min_age, self.show_all, self.summary_every = min_age, show_all, summary_every
         self.prev: dict[int, Process] = {}
         self.remembered: frozenset = frozenset()
         self.processes: list[Process] = []
         self.lingering: list = []
         self.error: str | None = None
         self.polls = 0
+        self.first_seen: dict[int, float] = {}
+        self.announced: set[int] = set()
+        self.short_lived: dict[str, dict[str, int]] = {}
+        self.last_summary = time.monotonic()
         self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
+
+    def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
+        out = []
+        for owner, names in sorted(self.short_lived.items()):
+            total = sum(names.values())
+            detail = ", ".join(f"{n}×{c}" for n, c in sorted(names.items(), key=lambda kv: -kv[1])[:5])
+            out.append((stamp, "i", f"{owner or 'unknown owner'} ran {total} short-lived helper "
+                                    f"process{'es' if total != 1 else ''} ({detail})"))
+        self.short_lived.clear()
+        return out
 
     def poll(self) -> list[tuple[str, str, str]]:
         self.polls += 1
+        now = time.monotonic()
         stamp = datetime.now().strftime("%H:%M:%S")
         try:
             result = collect(self.remembered)
@@ -259,9 +305,36 @@ class Monitor:
             self.log.extend(new)
             return new
         current = {p.pid: p for p in result.processes}
-        new = [(stamp, k, t) for k, t in events(self.prev, current, self.lingering, result.lingering)]
+        new: list[tuple[str, str, str]] = []
         if self.polls == 1:
-            new.insert(0, (stamp, "i", f"monitor started; {summary(result.processes, result.lingering)}"))
+            new.append((stamp, "i", f"monitor started; {summary(result.processes, result.lingering)}"))
+        for pid, p in current.items():
+            if pid in self.announced:
+                continue
+            self.first_seen.setdefault(pid, now)
+            urgent = (self.show_all or self.polls == 1 or not p.role.startswith(" ")
+                      or p.state.startswith("Z") or p.pgid in result.lingering)
+            if urgent or now - self.first_seen[pid] >= self.min_age:
+                self.announced.add(pid)
+                new.append((stamp, "+", describe(p)))
+        for pid, p in self.prev.items():
+            if pid in current:
+                continue
+            if pid in self.announced:
+                new.append((stamp, "-", describe(p) + "  — no longer observed"))
+            else:
+                counts = self.short_lived.setdefault(p.owner, {})
+                counts[p.name] = counts.get(p.name, 0) + 1
+            self.announced.discard(pid)
+            self.first_seen.pop(pid, None)
+        new += [(stamp, "!", f"process group {g}: leader gone/zombie but members remain "
+                             f"(llmtool would report cleanup UNKNOWN)")
+                for g in result.lingering if g not in self.lingering]
+        new += [(stamp, "ok", f"process group {g}: no members left behind any more")
+                for g in self.lingering if g not in result.lingering]
+        if self.short_lived and now - self.last_summary >= self.summary_every:
+            new += self._flush_short_lived(stamp)
+            self.last_summary = now
         self.prev, self.remembered = current, result.watched_groups
         self.processes, self.lingering, self.error = result.processes, result.lingering, None
         self.log.extend(new)
@@ -284,9 +357,8 @@ def run_once() -> int:
     return 0
 
 
-def run_plain(interval: float) -> int:
+def run_plain(interval: float, mon: "Monitor") -> int:
     """Append-only stream: one line per change, never a repainted screen."""
-    mon = Monitor()
     print(f"AI agents · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit", flush=True)
     try:
         while True:
@@ -298,7 +370,7 @@ def run_plain(interval: float) -> int:
         return 0
 
 
-def run_curses(stdscr, interval: float, use_color: bool) -> None:
+def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None:
     import curses
     curses.curs_set(0)
     stdscr.timeout(100)
@@ -311,7 +383,6 @@ def run_curses(stdscr, interval: float, use_color: bool) -> None:
                                        ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN)), start=1):
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
-    mon = Monitor()
     view, offset, next_poll = "log", 0, 0.0
 
     def put(y: int, text: str, attr: int = 0) -> None:
@@ -378,18 +449,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plain", action="store_true",
                         help="append-only event lines instead of the interactive screen")
     parser.add_argument("--no-color", action="store_true", help="disable colors")
+    parser.add_argument("--all", action="store_true",
+                        help="log every helper process immediately (no short-lived filtering)")
+    parser.add_argument("--min-age", type=float, default=3.0,
+                        help="seconds a helper must live before it is logged (default 3)")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
     if args.once:
         return run_once()
+    mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
     if args.plain or not interactive:
-        return run_plain(args.interval)
+        return run_plain(args.interval, mon)
     import curses
     use_color = not args.no_color and not os.environ.get("NO_COLOR")
     try:
-        curses.wrapper(run_curses, args.interval, use_color)
+        curses.wrapper(run_curses, args.interval, use_color, mon)
     except KeyboardInterrupt:
         pass
     print("Monitor stopped; no worker was signalled or modified.")
