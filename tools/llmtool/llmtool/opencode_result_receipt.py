@@ -151,8 +151,17 @@ def _reconcile(job, result, host_final, observed_head, seen, expect):
     if type(result.usage) is not UsageLedger or len(result.usage.calls) <= len(job.usage.calls):
         return _receipt(UNKNOWN, 'USAGE_NOT_RECORDED', job, result)
     prior = len(job.usage.calls)
-    if result.usage.calls[:prior] != job.usage.calls or result.usage.calls[-1].phase is not (
-            CallPhase.PRIMARY if job.phase == 'DEVELOP' else CallPhase.REVIEW):
+    # One Worker invocation appends one CallUsage per native assistant step (1..max_steps,
+    # worker._persisted), does no repairs and cannot rewind time.
+    if (not 1 <= len(result.usage.calls) - prior <= job.max_steps
+            or result.usage.repair_attempts != job.usage.repair_attempts
+            or type(job.usage.elapsed_ms) is not int or type(result.usage.elapsed_ms) is not int
+            or result.usage.elapsed_ms < job.usage.elapsed_ms
+            or assess_budget(job.budget, job.usage).status is not BudgetStatus.WITHIN):
+        return _receipt(UNKNOWN, 'USAGE_NOT_CONTINUOUS', job, result)
+    phase = CallPhase.PRIMARY if job.phase == 'DEVELOP' else CallPhase.REVIEW
+    if (result.usage.calls[:prior] != job.usage.calls
+            or any(c.phase is not phase for c in result.usage.calls[prior:])):
         return _receipt(UNKNOWN, 'USAGE_NOT_CONTINUOUS', job, result)
     status = assess_budget(job.budget, result.usage).status
     if status is BudgetStatus.UNKNOWN:

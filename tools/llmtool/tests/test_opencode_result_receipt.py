@@ -167,6 +167,61 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(self.receipt(result=replace(self.good, processes=[1])).verdict, 'UNKNOWN')
         self.assertEqual(self.receipt(seen=[]).verdict, 'UNKNOWN')
 
+    def test_ledger_continuity_repair_elapsed_and_single_call(self):
+        calls = self.good.usage.calls
+        prior = self.job.usage
+        ok = self.good.usage
+        self.assertEqual(self.receipt().verdict, 'SUCCESS')
+        cases = {
+            'repair_reset': UsageLedger(calls, prior.repair_attempts + 1, ok.elapsed_ms),
+            'elapsed_none': UsageLedger(calls, prior.repair_attempts, None),
+            'extra_review_call': UsageLedger(prior.calls + (CallUsage(CallPhase.REVIEW, 1, 1), CallUsage(CallPhase.PRIMARY, 10, 5)),
+                                             prior.repair_attempts, ok.elapsed_ms),
+            'extra_review_after_primary': UsageLedger(prior.calls + (CallUsage(CallPhase.PRIMARY, 10, 5), CallUsage(CallPhase.REVIEW, 1, 1)),
+                                                      prior.repair_attempts, ok.elapsed_ms),
+            'no_new_call': UsageLedger(prior.calls, prior.repair_attempts, ok.elapsed_ms),
+        }
+        for name, ledger in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(self.receipt(result=replace(self.good, usage=ledger)).verdict, 'UNKNOWN')
+
+    def test_prior_calls_prefix_must_be_unchanged(self):
+        job = replace(self.job, usage=UsageLedger((CallUsage(CallPhase.PRIMARY, 1, 1),), 0, 0))
+        new = CallUsage(CallPhase.PRIMARY, 10, 5)
+        good = UsageLedger(job.usage.calls + (new,), 0, 100)
+        self.assertEqual(self.receipt(job=job, result=replace(self.good, usage=good)).verdict, 'SUCCESS')
+        rewritten = UsageLedger((CallUsage(CallPhase.PRIMARY, 2, 2), new), 0, 100)
+        self.assertEqual(self.receipt(job=job, result=replace(self.good, usage=rewritten)).verdict, 'UNKNOWN')
+
+    def test_elapsed_must_not_go_backwards(self):
+        job = replace(self.job, usage=UsageLedger(self.job.usage.calls, 0, 50))
+        back = UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),), 0, 10)
+        self.assertEqual(self.receipt(job=job, result=replace(self.good, usage=back)).verdict, 'UNKNOWN')
+        same = UsageLedger(back.calls, 0, 50)
+        self.assertEqual(self.receipt(job=job, result=replace(self.good, usage=same)).verdict, 'SUCCESS')
+        none_prior = replace(self.job, usage=UsageLedger(self.job.usage.calls, 0, None))
+        self.assertEqual(self.receipt(job=none_prior).verdict, 'UNKNOWN')
+
+    def test_already_over_budget_job_with_reset_counter_is_not_success(self):
+        over = replace(self.job, usage=UsageLedger(self.job.usage.calls, self.job.budget.max_repair_attempts + 1,
+                                                  self.job.usage.elapsed_ms))
+        reset = UsageLedger(over.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),), 0, 100)
+        x = self.receipt(job=over, result=replace(self.good, usage=reset))
+        self.assertEqual((x.verdict, x.reason), ('UNKNOWN', 'USAGE_NOT_CONTINUOUS'))
+
+    def test_legitimate_multistep_run_is_success_within_max_steps(self):
+        prior = self.job.usage
+        many = lambda n: UsageLedger(prior.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),) * n,
+                                     prior.repair_attempts, 100)
+        self.assertEqual(self.receipt(result=replace(self.good, usage=many(2))).verdict, 'SUCCESS')
+        too_many = many(self.job.max_steps + 1)
+        self.assertNotEqual(self.receipt(result=replace(self.good, usage=too_many)).verdict, 'SUCCESS')
+
+    def test_result_ledger_exceeding_budget_fails(self):
+        big = UsageLedger(self.job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10**6, 5),),
+                          self.job.usage.repair_attempts, 100)
+        self.assertEqual(self.receipt(result=replace(self.good, usage=big)).verdict, 'FAILED')
+
     def test_receipt_carries_no_content_or_secrets(self):
         x = self.receipt()
         self.assertNotIn('synthetic model text', repr(x))
