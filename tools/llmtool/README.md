@@ -3139,9 +3139,13 @@ Agent wake-up, production review authority, Native/Company Live or F2/S2 executi
 ### Cooperative foreground review request / return (original Reviewer only)
 
 The separate trusted-host Worker entry is
-`llmtool.review_authority.run_foreground_review(issuer, ledger, budget=budget)`.
+`llmtool.review_authority.run_foreground_review(issuer, ledger, budget=budget)`
+(with the finite Integrator-facing receipt wrapper
+`llmtool.review_handoff.dispatch_review_handoff(issuer, ledger, budget=budget)`).
 It uses the issuer's existing pinned context and actual `compose_host_services`
-with the `llmtool-worker/claude-cli` role; legacy Reviewer routes are rejected
+with the `llmtool-worker/claude-cli` role (`claude --print --output-format json
+--no-session-persistence --safe-mode --tools ''` and `stdin` EOF closure, never
+interactive terminal paste or manual `Enter`); legacy Reviewer routes are rejected
 before consumption/spawn. There is no new CLI flag, default Host path, grant
 file, ledger creation or enabled public factory. Only already authorized trusted
 host code with permitted Host/route/runtime/auth/ledger pins may call it.

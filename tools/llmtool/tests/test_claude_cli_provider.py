@@ -323,6 +323,58 @@ class WorkerEnvelopeTests(unittest.TestCase):
                 decode_review_envelope(value)
             self.assertNotIn('FAKE_SECRET',str(caught.exception))
 
+    def test_claude_2_1_303_telemetry_and_usage_fields_accepted_and_validated(self):
+        from llmtool.providers.claude_cli import decode_review_envelope
+        valid = self.envelope(
+            api_error_status=None,
+            duration_ms=18968,
+            duration_api_ms=18656,
+            fast_mode_disabled_reason='sdk_opt_in_required',
+            fast_mode_state='off',
+            first_content_frame_ms=1797,
+            num_turns=1,
+            permission_denials=[],
+            queued_turn_count=0,
+            result_index=0,
+            safety_stops=0,
+            stop_reason='end_turn',
+            subagent_stats={'spawned': 0},
+            terminal_reason='completed',
+            time_to_request_ms=208,
+            total_cost_usd=0.30,
+            ttft_ms=1987,
+            ttft_stream_ms=1796,
+            uuid='a9c25395-d0c0-4453-95d6-27d06c0c50fa',
+            modelUsage={'claude': {'tokens': 10}},
+            usage=dict(
+                input_tokens=42,
+                output_tokens=19,
+                cache_creation=dict(ephemeral_5m_input_tokens=0),
+                cache_creation_input_tokens=100,
+                cache_read_input_tokens=200,
+                fallback_credit=None,
+                inference_geo='global',
+                iterations=[],
+                output_tokens_details=dict(reasoning_tokens=0),
+                server_tool_use=dict(web_search_requests=0),
+                service_tier='standard',
+                speed='standard',
+            ),
+        )
+        decoded = decode_review_envelope(valid)
+        self.assertEqual((decoded['input_tokens'], decoded['output_tokens']), (42, 19))
+        for bad in (
+            self.envelope(api_error_status=500),
+            self.envelope(terminal_reason='aborted'),
+            self.envelope(fast_mode_state='invalid'),
+            self.envelope(ttft_ms=-1),
+            self.envelope(ttft_ms=True),
+            self.envelope(safety_stops=False),
+            self.envelope(subagent_stats=['not-dict']),
+        ):
+            with self.subTest(bad=bad[:60]), self.assertRaises(LLMToolError):
+                decode_review_envelope(bad)
+
 
     def test_worker_really_blocked_stdin_has_bounded_cleanup(self):
         import time

@@ -1,0 +1,307 @@
+"""Red-first and integration tests for non-interactive Claude Reviewer handoff."""
+
+import hashlib
+import json
+import multiprocessing
+import os
+import sys
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+from llmtool import authorization_ledger as l
+from llmtool import review_authority as a
+from llmtool import review_handoff as rh
+from llmtool import task_review as r
+from llmtool.errors import LLMToolError
+from llmtool.providers.claude_cli import decode_review_envelope
+from test_review_authority import FAKE_SCRIPT, FixtureObserver, WorkerHarness
+
+
+def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue):
+    """Subprocess worker for cross-process / concurrent barrier replay test."""
+    try:
+        from test_task_review import FakeHost
+        fclock = FakeHost(ready, final, expect, events).clock
+        pin = a.HostPin(*pin_args)
+        observer = FixtureObserver(pin, expect, events, fclock,
+                                   baseline_check=lambda reg, f: True,
+                                   writers_check=lambda reg, f: True)
+        context = a.ReviewContext(ready, final, expect, events, approval, packet_input)
+        issuer = a.ProductionReviewIssuer(pin, fclock, observer, context)
+        ledger = l.ReceiptLedger.open(ledger_path, clock=fclock.utc,
+                                      kind='PROVIDER_REVIEW', creation_nonce=ledger_nonce)
+        try:
+            barrier.wait(timeout=5)
+            receipt, raw = rh.dispatch_review_handoff(issuer, ledger, budget=budget)
+            result_queue.put((receipt.verdict, receipt.execution_status, receipt.provider_calls, receipt.code))
+        finally:
+            ledger.close()
+    except BaseException as exc:
+        result_queue.put(('EXCEPTION', type(exc).__name__, 0, getattr(exc, 'review_code', 'ERR')))
+
+
+class ReviewHandoffTests(unittest.TestCase):
+    def harness(self, **changes):
+        h = WorkerHarness(**changes)
+        self.addCleanup(h.close)
+        return h
+
+    def test_interactive_bracketed_paste_requires_enter_while_print_stdin_eof_submits_automatically(self):
+        """Root-cause reproduction: interactive draft waits for CR; -p stdin EOF submits with 0 Enter."""
+        # 1. Simulate an interactive TUI draft parser receiving bracketed paste without ASCII 13 (\r)
+        paste_stream = b'\x1b[200~{"review_packet_data":{}}\n\x1b[201~'
+        in_paste = False
+        draft_buffer = bytearray()
+        submitted_payload = None
+        i = 0
+        while i < len(paste_stream):
+            if paste_stream[i:i+6] == b'\x1b[200~':
+                in_paste = True
+                i += 6
+                continue
+            if paste_stream[i:i+6] == b'\x1b[201~':
+                in_paste = False
+                i += 6
+                continue
+            byte = paste_stream[i:i+1]
+            if not in_paste and byte == b'\r':
+                submitted_payload = bytes(draft_buffer)
+                break
+            draft_buffer.extend(byte)
+            i += 1
+        self.assertIsNone(submitted_payload, 'Interactive bracketed paste must stay in draft without manual Enter')
+        self.assertGreater(len(draft_buffer), 0)
+
+        # 2. Dispatch through review_handoff -> claude -p (--print --output-format json) + stdin EOF
+        h = self.harness(mode='success')
+        receipt, raw = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        self.assertEqual(receipt.verdict, 'PASS')
+        self.assertEqual(receipt.execution_status, 'SUCCEEDED')
+        self.assertEqual(receipt.transport_mode, 'CLAUDE_PRINT_JSON_STDIN_EOF')
+        self.assertFalse(receipt.manual_enter_required)
+        self.assertFalse(receipt.authorized)
+        self.assertEqual(receipt.execution_disposition, 'STOP_NO_EXECUTION_AUTHORITY')
+        self.assertEqual(receipt.review_authority, 'WORKER_DATA_ONLY')
+        self.assertEqual(receipt.provider_calls, 1)
+        self.assertEqual(receipt.wrapper_launches, 1)
+        self.assertTrue(receipt.cleanup_confirmed)
+        self.assertEqual(receipt.ledger_status, 'EFFECT_DONE')
+        self.assertEqual(receipt.usage_status, 'KNOWN')
+        self.assertEqual((receipt.input_tokens, receipt.output_tokens), (12, 8))
+        self.assertEqual(receipt.source_sha, h.expect.source_sha)
+        self.assertEqual(receipt.task_id, h.expect.task.task_id)
+        self.assertEqual(receipt.run_id, h.expect.task.run_id)
+        self.assertEqual(receipt.launch_nonce, h.issuer.reviewer_launch_nonce)
+        self.assertEqual(receipt.runtime_session_id, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee')
+        self.assertEqual(receipt.identity_source, 'CLI_REPORTED_RUNTIME_ID')
+        argv = json.loads(h.argv_file.read_text())
+        self.assertIn('--print', argv)
+        self.assertIn('--output-format', argv)
+        self.assertNotIn('--bare', argv)
+
+    def test_installed_claude_2_1_303_pin_and_telemetry_envelope_supported(self):
+        """Red-first test: version 2.1.303 and real Claude CLI 2.1.303 JSON envelope keys must be accepted."""
+        h = self.harness(mode='success')
+        # Update host registration to version 2.1.303 and emit real 2.1.303 telemetry keys
+        real_envelope_snippet = (
+            "print(json.dumps(dict(type='result',subtype='success',is_error=False,"
+            "session_id='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',result=json.dumps(out),"
+            "api_error_status=None,duration_ms=18968,duration_api_ms=18656,"
+            "fast_mode_disabled_reason='sdk_opt_in_required',fast_mode_state='off',"
+            "first_content_frame_ms=1797,num_turns=1,permission_denials=[],"
+            "queued_turn_count=0,result_index=0,safety_stops=0,stop_reason='end_turn',"
+            "subagent_stats={'spawned':0},terminal_reason='completed',time_to_request_ms=208,"
+            "total_cost_usd=0.30,ttft_ms=1987,ttft_stream_ms=1796,"
+            "uuid='a9c25395-d0c0-4453-95d6-27d06c0c50fa',modelUsage={'claude':dict(tokens=10)},"
+            "usage=dict(input_tokens=42,output_tokens=19,cache_creation=dict(ephemeral_5m_input_tokens=0),"
+            "cache_creation_input_tokens=100,cache_read_input_tokens=200,fallback_credit=None,"
+            "inference_geo='global',iterations=[],output_tokens_details=dict(reasoning_tokens=0),"
+            "server_tool_use=dict(web_search_requests=0),service_tier='standard',speed='standard'))))"
+        )
+        script = FAKE_SCRIPT.replace('INTERPRETER', sys.executable).replace(
+            'print(json.dumps(out))', real_envelope_snippet
+        )
+        h.exe.write_text(script)
+        exe_sha = hashlib.sha256(h.exe.read_bytes()).hexdigest()
+        h.hostdata['reviewer'].update(version='2.1.303', executable_sha256=exe_sha)
+        runtime_reg = replace(a.load_host_registration(h.pin),
+                              reviewer_role='llmtool-worker/claude-cli',
+                              reviewer_version='2.1.303',
+                              reviewer_executable_digest=exe_sha)
+        h.policy = replace(h.policy, worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        h.hostdata['route_policies'] = [dict(policy=h.policy.to_dict(), revoked=False)]
+        h.write_host()
+        h.pin = replace(h.pin, host_digest=hashlib.sha256(h.hostpath.read_bytes()).hexdigest())
+        h.observer = FixtureObserver(h.pin, h.expect, h.events, h.clock,
+                                     baseline_check=lambda reg, f: True,
+                                     writers_check=lambda reg, f: True)
+        h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+
+        receipt, raw = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        self.assertEqual(receipt.verdict, 'PASS', raw)
+        self.assertEqual(receipt.execution_status, 'SUCCEEDED')
+        self.assertEqual(receipt.usage_status, 'KNOWN')
+        self.assertEqual((receipt.input_tokens, receipt.output_tokens), (42, 19))
+
+    def test_verdict_mapping_pass_fail_blocked_and_cli_exit_zero_not_approval(self):
+        # 1. CHANGES_REQUIRED -> verdict='FAIL', execution_status='SUCCEEDED'
+        h_fail = self.harness(mode='changes')
+        r_fail, _ = rh.dispatch_review_handoff(h_fail.issuer, h_fail.ledger, budget=h_fail.fake.budget)
+        self.assertEqual(r_fail.verdict, 'FAIL')
+        self.assertEqual((r_fail.security, r_fail.functional), ('APPROVE', 'CHANGES_REQUIRED'))
+        self.assertEqual(r_fail.execution_status, 'SUCCEEDED')
+        self.assertFalse(r_fail.authorized)
+
+        # 2. BLOCKED decision -> verdict='BLOCKED', execution_status='SUCCEEDED'
+        h_blk = self.harness(mode='blocked')
+        r_blk, _ = rh.dispatch_review_handoff(h_blk.issuer, h_blk.ledger, budget=h_blk.fake.budget)
+        self.assertEqual(r_blk.verdict, 'BLOCKED')
+        self.assertEqual((r_blk.security, r_blk.functional), ('APPROVE', 'BLOCKED'))
+        self.assertEqual(r_blk.execution_status, 'SUCCEEDED')
+        self.assertFalse(r_blk.authorized)
+
+        # 3. CLI exit 0 with wrong inner SHA -> verdict='BLOCKED', execution_status='FAILED'
+        h_bad = self.harness(mode='invalid-inner')
+        r_bad, _ = rh.dispatch_review_handoff(h_bad.issuer, h_bad.ledger, budget=h_bad.fake.budget)
+        self.assertEqual(r_bad.verdict, 'BLOCKED')
+        self.assertEqual(r_bad.execution_status, 'FAILED')
+        self.assertEqual(r_bad.code, 'REVIEW_VERDICT_INVALID')
+        self.assertFalse(r_bad.authorized)
+
+    def test_missing_usage_is_unknown_never_zero(self):
+        h = self.harness(mode='success')
+        script = h.exe.read_text().replace(
+            ",usage=dict(input_tokens=12,output_tokens=8)", ""
+        )
+        h.exe.write_text(script)
+        exe_sha = hashlib.sha256(h.exe.read_bytes()).hexdigest()
+        h.hostdata['reviewer']['executable_sha256'] = exe_sha
+        runtime_reg = replace(a.load_host_registration(h.pin), reviewer_executable_digest=exe_sha)
+        h.policy = replace(h.policy, worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        h.hostdata['route_policies'] = [dict(policy=h.policy.to_dict(), revoked=False)]
+        h.write_host()
+        h.pin = replace(h.pin, host_digest=hashlib.sha256(h.hostpath.read_bytes()).hexdigest())
+        h.observer = FixtureObserver(h.pin, h.expect, h.events, h.clock,
+                                     baseline_check=lambda reg, f: True,
+                                     writers_check=lambda reg, f: True)
+        h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+
+        receipt, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        self.assertEqual(receipt.verdict, 'PASS')
+        self.assertEqual(receipt.usage_status, 'UNKNOWN')
+        self.assertIsNone(receipt.input_tokens)
+        self.assertIsNone(receipt.output_tokens)
+
+    def test_replay_denied_across_same_issuer_fresh_issuer_and_reopened_ledger(self):
+        h = self.harness(mode='success')
+        r1, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        self.assertEqual(r1.verdict, 'PASS')
+        self.assertEqual(r1.provider_calls, 1)
+
+        # Same issuer replay -> blocked without spawning
+        with patch('subprocess.Popen', side_effect=AssertionError('same-issuer replay')) as spawn:
+            r2, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+            spawn.assert_not_called()
+        self.assertEqual(r2.verdict, 'BLOCKED')
+        self.assertEqual(r2.code, 'REVIEW_GRANT_NOT_AUTHORIZED')
+
+        # Fresh issuer object + reopened ledger from disk -> blocked without spawning
+        reopened = l.ReceiptLedger.open(
+            h.ledger_path, clock=h.clock.utc, kind='PROVIDER_REVIEW',
+            creation_nonce=h.ledger.creation_nonce
+        )
+        self.addCleanup(reopened.close)
+        fresh_issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+        with patch('subprocess.Popen', side_effect=AssertionError('fresh-issuer replay')) as spawn:
+            r3, _ = rh.dispatch_review_handoff(fresh_issuer, reopened, budget=h.fake.budget)
+            spawn.assert_not_called()
+        self.assertEqual(r3.verdict, 'BLOCKED')
+        self.assertEqual(r3.execution_status, 'BLOCKED')
+        self.assertEqual(r3.provider_calls, 0)
+        self.assertEqual(reopened._db.execute('SELECT count(*) FROM receipts').fetchone()[0], 1)
+
+    def test_concurrent_multiprocess_barrier_launches_at_most_once(self):
+        h = self.harness(mode='success')
+        spawn_counter = h.hostdir / 'spawn-count.txt'
+        script = h.exe.read_text().replace(
+            'import json,sys',
+            'import json,sys,os\n'
+            f'with open({str(spawn_counter)!r}, "a") as sf: sf.write("1\\n")'
+        )
+        h.exe.write_text(script)
+        exe_sha = hashlib.sha256(h.exe.read_bytes()).hexdigest()
+        h.hostdata['reviewer']['executable_sha256'] = exe_sha
+        runtime_reg = replace(a.load_host_registration(h.pin), reviewer_executable_digest=exe_sha)
+        h.policy = replace(h.policy, worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        h.hostdata['route_policies'] = [dict(policy=h.policy.to_dict(), revoked=False)]
+        h.write_host()
+        h.pin = replace(h.pin, host_digest=hashlib.sha256(h.hostpath.read_bytes()).hexdigest())
+
+        ctx = multiprocessing.get_context('spawn')
+        barrier = ctx.Barrier(2)
+        queue = ctx.Queue()
+        pin_args = (h.pin.path, h.pin.host_digest, h.pin.authorizer_ref,
+                    h.pin.pair_digest, h.pin.packet_input_digest, h.pin.repository_roots)
+        procs = [
+            ctx.Process(
+                target=_mp_worker_dispatch,
+                args=(str(h.hostpath), pin_args, h.ready, h.final, h.expect, h.events,
+                      h.fake.approval, h.packet_input, str(h.ledger_path),
+                      h.ledger.creation_nonce, h.fake.budget, barrier, queue)
+            )
+            for _ in range(2)
+        ]
+        for proc in procs:
+            proc.start()
+        for proc in procs:
+            proc.join(timeout=10)
+            self.assertFalse(proc.is_alive())
+        results = [queue.get(timeout=2) for _ in range(2)]
+        passes = [item for item in results if item[0] == 'PASS']
+        blocked = [item for item in results if item[0] == 'BLOCKED']
+        self.assertEqual(len(passes), 1, results)
+        self.assertEqual(len(blocked), 1, results)
+        lines = spawn_counter.read_text().splitlines() if spawn_counter.exists() else []
+        self.assertEqual(len(lines), 1, 'Provider executable must be launched at most once across processes')
+
+    def test_timeout_nonzero_spoof_and_secret_failures_stay_unknown_or_blocked_without_leak(self):
+        for mode in ('timeout', 'exit', 'spoof', 'private'):
+            with self.subTest(mode=mode):
+                h = self.harness(mode=mode, timeout=1)
+                receipt, raw = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+                self.assertEqual(receipt.verdict, 'BLOCKED')
+                self.assertEqual(receipt.execution_status, 'UNKNOWN')
+                self.assertEqual(receipt.ledger_status, 'EFFECT_UNKNOWN')
+                self.assertEqual(receipt.provider_calls, 1)
+                self.assertFalse(receipt.authorized)
+                serialized = json.dumps(receipt.to_dict()) + json.dumps(raw)
+                self.assertNotIn('SECRET_FAKE', serialized)
+
+    def test_receipt_dataclass_invariants_reject_forged_or_inconsistent_states(self):
+        h = self.harness(mode='success')
+        valid, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        self.assertEqual(len(valid.digest), 64)
+        for bad_changes in (
+            dict(authorized=True),
+            dict(manual_enter_required=True),
+            dict(execution_disposition='ALLOW'),
+            dict(review_authority='REVIEW_DATA_ONLY'),
+            dict(transport_mode='INTERACTIVE_PASTE'),
+            dict(verdict='PASS', security='CHANGES_REQUIRED'),
+            dict(verdict='FAIL', security='APPROVE', functional='APPROVE'),
+            dict(verdict='PASS', execution_status='UNKNOWN', security='BLOCKED', functional='BLOCKED'),
+            dict(execution_status='SUCCEEDED', cleanup_confirmed=False),
+            dict(execution_status='SUCCEEDED', ledger_status='EFFECT_UNKNOWN'),
+            dict(execution_status='UNKNOWN', verdict='PASS'),
+            dict(usage_status='UNKNOWN', input_tokens=0, output_tokens=0),
+            dict(usage_status='KNOWN', input_tokens=None, output_tokens=None),
+        ):
+            with self.subTest(bad_changes=bad_changes), self.assertRaises(LLMToolError):
+                replace(valid, **bad_changes)
+
+
+if __name__ == '__main__':
+    unittest.main()
