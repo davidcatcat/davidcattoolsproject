@@ -1,5 +1,25 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
+## Owner D7 — OpenCode PRIMARY; Codex Developer PAUSED
+
+[PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
+delivers source/offline-reviewed Worker adapter `c421c3a`
+but **not** a verified live OpenCode CLI/Host handoff. Its operational
+Host scripts currently live as GitHub-comment/private artifacts rather
+than a native-installed runtime. OpenCode becomes the source owner of
+the remaining Host connection and one actual S3 development package
+on the registered D6 `tasks/a11c-opencode-193-s3` root. Pause all
+Codex Developer author/subagent work; do not rewrite source already
+independently accepted. Codex Integrator stays PM/launcher/merge owner.
+
+OpenCode develop/test → DeepSeek separate-context self-review →
+authorized actually free different-model pre-review → independent
+Claude formal source/security/native review → Claude FAIL back to
+OpenCode repair, PASS to Integrator with exact-SHA CI and Mac evidence.
+No implicit F2, privacy-export, paid-model, historical root takeover
+or Session wake grant. Stop after one actual S3 PASS and report.
+
+
 ## Single A-roadmap and interim controller (owner decision 2026-10-09)
 
 **A11b and A11c are the only active native delivery milestones.**
@@ -105,15 +125,15 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### 2026-10-19 Owner token-efficiency correction — Developer pre-review and S3 stop
 
-The normative rules for **one meaningful dispatch → Developer's own isolated-context pre-review/fix/test → one formal Claude review → Integrator acceptance** and **the mandatory end-of-round S3 STOP** are in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md#2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop). They apply **now** to all already-authorized A11c work, including primary Codex Developer and secondary OpenCode, and are not conditional on a new llmtool feature.
+The normative rules for **one meaningful dispatch → Developer's own isolated-context pre-review/fix/test → one formal Claude review → Integrator acceptance** and **the mandatory end-of-round S3 STOP** are in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md#2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop). They apply **now** to all already-authorized A11c work, with OpenCode PRIMARY and Codex Developer PAUSED under Owner D7, and are not conditional on a new llmtool feature.
 
 **Integrator must not become a second routine Developer/Reviewer** and must not bounce every failing test or minor review comment between expensive Codex sessions. A Developer may conduct its own separate-context Reviewer subagent pre-check and bounded fixes, while Claude remains a distinct **formal** reviewer. The company `gw` route remains an explicitly qualified, bounded **low-cost advisory** for appropriate test/log triage and summaries, **not** a new mandatory model layer or independent formal QA. Capture actual work-package-level total usage, relay count, correction/overhead and missing values as `UNKNOWN`; do not make unsupported saving claims or add a new telemetry service.
 
 **S1** architecture PR #198 review/merge; **S2** reviewed Mac OpenCode second-root handoff and real Worker launch/permissions; **S3** one real OpenCode source/test/pre-review → Claude formal review → original **active foreground** Codex Integrator return and integration, with no Owner relay. **After S3 verified, stop dispatching new tasks and report.** Inactive original-Session wake and G4 remain future rounds, despite the previously approved full G3/M2 outcome target. A documentation merge, fake fixture, self-review or GitHub comment does not prove the S3 Live acceptance. The previous generic guidance to keep progressing does not override this explicit current-round stop point.
 
-### 2026-10-19 Owner D1–D5: Codex primary + OpenCode secondary Worker
+### HISTORICAL Owner D1–D5: Codex-primary role order (superseded by D7)
 
-Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, notification system or milestone. Owner D6 independently authorizes registered task-scoped worktrees; D1's historical two-root limit is superseded. The existing Codex Integrator/PM may split nonoverlapping work between first-line Codex Developer and second-line OpenCode v2/DeepSeek Developer. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
+Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, notification system or milestone. Owner D6 independently authorizes registered task-scoped worktrees; D1's historical two-root limit is superseded. The existing Codex Integrator/PM assigns the active Developer role to **OpenCode v2/DeepSeek**, with **Codex Developer PAUSED** after reviewed PR #202; no Codex Developer fallback absent renewed Owner direction. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
 
 **Target path, not yet live:** Integrator Task Contract → llmtool authorized Worker lifecycle → task-owned Developer changes/tests/pre-review → host-reconstructed original-contract/exact-SHA Diff/CI packet → formal Claude verdict → bounded repair or return to **same active foreground Integrator**. `WAITING_CLAUDE_REVIEW` is a **logical pending disposition**, not a newly proven persisted enum: on Claude quota exhaustion keep reviewed candidate SHA, test evidence and bounded pending work; no false PASS or new paid provider. Later prove native original-session wake/ACK/replay/recovery before G3. GitHub comments do not awaken Mac sessions.
 
