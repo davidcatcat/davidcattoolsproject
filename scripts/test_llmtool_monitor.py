@@ -173,5 +173,20 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertFalse(any(secret in text for secret in SECRETS))
 
 
+class TaskEventTests(unittest.TestCase):
+    def test_tool_calls_are_reported_once_with_final_status_and_path(self):
+        def task(*tools):
+            stage = mon.Stage("red", "deepseek", 1.0, "", "", 1, 0, 0, "", tuple(tools), True, "ok")
+            return mon.Task("/d", "t", "b", (stage,))
+        streaming = task(mon.Tool("1", "edit", "?", "streaming"))
+        running = task(mon.Tool("1", "edit", "tests/x.py", "running"))
+        done = task(mon.Tool("1", "edit", "tests/x.py", "completed"), mon.Tool("2", "read", "a.py", "error"))
+        self.assertEqual(mon.task_events({"/d": task()}, [streaming]), [])
+        self.assertEqual(mon.task_events({"/d": streaming}, [running]), [])
+        self.assertEqual(mon.task_events({"/d": running}, [done]),
+                         [("→", "t red: edit tests/x.py"), ("→", "t red: read a.py [error]")])
+        self.assertEqual(mon.task_events({"/d": done}, [done]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
