@@ -87,6 +87,8 @@ def parser_for_cli():
         add_options(child)
     chat = sub.add_parser("chat", help="Start a memory-only interactive chat")
     chat.add_argument("--skill", help="explicit runtime skill name")
+    chat.add_argument("--tui", action="store_true",
+                      help="opt-in full-screen terminal UI (needs llmtool[tui]); falls back to line chat")
     add_options(chat)
     git = sub.add_parser("git", help="Collect a read-only local Git snapshot offline")
     git.add_argument("--json", action="store_true", help="output snapshot as JSON")
@@ -417,7 +419,12 @@ def main(argv=None):
             print(show_config(config), end="")
             return 0
         if args.command == "chat":
-            return run_chat(ChatSession(config, selected_skill))
+            session = ChatSession(config, selected_skill)
+            if args.tui:
+                # Lazy import: the default line chat never loads the optional UI.
+                from .chat_tui import run_chat_tui
+                return run_chat_tui(session)
+            return run_chat(session)
         text = read_input(args.text, args.file, sys.stdin)
         result = create_client(config, api_key(config)).complete(messages_for(args.command, text, selected_skill))
         # Validation completes before stdout is touched, including truncation checks.

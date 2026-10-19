@@ -1,3 +1,6 @@
 # CI runtime/test dependency, matching the validated Python 3.13 environment.
 # Exact version pin only; this is not a hash lock or a package dependency change.
 PyYAML==6.0.3
+# Optional `tui` extra, pinned so CI exercises `llmtool chat --tui` widget tests.
+prompt-toolkit==3.0.52
+wcwidth==0.9.2

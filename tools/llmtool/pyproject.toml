@@ -9,6 +9,10 @@ description = "Read-only, provider-agnostic LLM CLI foundation"
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=6.0,<7"]
 
+[project.optional-dependencies]
+# Opt-in `llmtool chat --tui` only; the default line chat never imports it.
+tui = ["prompt-toolkit>=3.0.52,<3.1"]
+
 [project.scripts]
 llmtool = "llmtool.entrypoint:main"
 

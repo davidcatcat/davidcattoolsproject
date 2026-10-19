@@ -1237,6 +1237,7 @@ argv、stdin、timeout、output limit 與 sanitized errors。Live runtime valida
 ```text
 llmtool/cli.py                         CLI 與輸出
 llmtool/chat.py                        memory-only chat session and REPL
+llmtool/chat_tui.py                    opt-in full-screen chat UI (`chat --tui`)
 llmtool/context.py                     immutable packets, bounded parsing and rendering
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
 llmtool/inputs.py                      明確輸入來源、文字驗證
@@ -1372,7 +1373,7 @@ are resolved only when sending a user turn, not during slash commands or startup
 | Command | Behavior |
 |---|---|
 | `/help` | Show commands without a request |
-| `/status` | Show profile name, provider type, skill, and message count |
+| `/status` | Show profile name, provider type, skill, message count, and last-request status (below) |
 | `/provider` | Show current profile and sorted configured profiles/types |
 | `/provider <profile>` | Switch for subsequent requests; preserve history |
 | `/skill` | Show selected skill and available runtime names |
@@ -1399,7 +1400,8 @@ messages: one completed exchange is two turns.
 One input line is one user turn. Leading/trailing spaces and Unicode are preserved;
 the terminal line-ending delimiter is removed by input(). Blank lines make no
 request. Lines whose first non-space character is `/` are command syntax. Malformed
-commands fail safely and the session continues. There is no multiline editor yet.
+commands fail safely and the session continues. The default line mode has no
+multiline editor; use the opt-in `--tui` described below.
 EOF or Ctrl-C at input or during a request exits cleanly with status 0 and no
 traceback. Ctrl-C does not resume the shell. A failed request prints a generic
 sanitized error, discards that attempted turn, preserves prior successful history,
@@ -1418,6 +1420,49 @@ Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains i
 subcommand-required behavior; automatic interactive entry is a future UX option.
 History grows in memory without token budgeting or automatic truncation; provider
 context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+### A3.5 UX-1/UX-2 — opt-in full-screen chat and truthful status
+
+```sh
+pip install -e 'tools/llmtool[tui]'   # optional extra: prompt-toolkit 3.0.x (BSD-3-Clause)
+llmtool chat --tui
+```
+
+`--tui` is opt-in; plain `llmtool chat` is unchanged and never imports the UI.
+It uses the same `ChatSession` (same commands, provider/skill rules, memory-only
+history, error rollback); it adds no second chat core, disk history, tools,
+shell, Git or file-write permission. Layout: a scrollable conversation pane, a
+persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
+Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
+on the first/last input line recall earlier inputs from this process only; Tab
+switches focus between input and conversation; PageUp/PageDown scroll; F1 toggles
+key help; Ctrl-C (or Ctrl-D on empty input) exits with status 0. Resize and wide
+Unicode are handled by the terminal UI. Model output, reported model names and
+errors are untrusted and rendered through the same control-character escaping as
+TTY line mode. New output only auto-scrolls when the conversation caret is at the
+end, so a scrolled-back position is preserved.
+
+One request is in flight at a time: Enter while busy keeps the typed input and
+sends nothing; commands such as `/provider` are not run while busy. A request
+cannot be cancelled: exit while busy is marked pending and happens once the
+request finishes or reaches the provider's own timeout. If prompt-toolkit 3.x is
+absent, or stdin/stdout is not a terminal (pipes, redirects), `--tui` prints a
+notice to stderr and runs the line chat before any UI starts. If the UI fails
+after starting, it prints a sanitized error and exits 1; it never replays input
+through the line REPL.
+
+Status (status bar and `/status`) reports only what is known: the selected profile
+and its configured model (`provider default` when none is configured); the
+response-reported model only for `openai`/`openai-compatible` (CLI providers echo
+configuration, so `UNKNOWN`); state `idle`/`working`/`error (<typed diagnostic
+code>|unclassified)`, never inferred from message text (for example a rate limit
+shows `PROVIDER_RATE_LIMITED` only from the typed provider diagnostic); elapsed time
+measured locally with a monotonic clock; and provider-reported
+`prompt_tokens`/`completion_tokens`/`total_tokens` validated as one consistent
+triplet, otherwise `UNKNOWN` (missing, partial, bool, mismatched or failed
+requests; no stale value from an earlier turn). Connectivity is `not probed`; no
+VPN/API readiness is implied. `/clear` and a successful provider switch reset the
+last-request status. Other reply metadata (reasoning, internal fields) is not shown.
+
 See the [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md)
 for exact commands and evidence: 30 targeted tests PASS; canonical syntax check and
 237 tests PASS, plus packaging and manual fake-provider UX validation.

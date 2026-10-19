@@ -341,3 +341,161 @@ providers:
         self.assertEqual(result[0], 0)
         self.assertIn('unsupported control', result[2])
         self.assertEqual(self.session.history[0]['content'], 'valid')
+
+    # --- A3.5 UX-2: truthful runtime status (offline; no live provider) ---
+
+    USAGE = {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 7}
+
+    def test_status_reports_known_usage_and_ignores_extra_metadata(self):
+        self.client.complete.return_value = Reply('reply', dict(self.USAGE, model='served-model', elapsed_seconds=9.9,
+                                                                internal='PRIVATE_REASONING'))
+        self.assertEqual(self.send(), 'reply')
+        self.assertEqual(dict(self.session.last_usage), self.USAGE)
+        out = self.session.command('/status')
+        self.assertIn('usage: prompt 3 / completion 4 / total 7 (provider-reported)', out)
+        self.assertIn('reported model: served-model', out)
+        self.assertIn('model: test (configured)', out)
+        self.assertIn('state: idle', out)
+        self.assertIn('connectivity: not probed', out)
+        self.assertNotIn('PRIVATE', out)
+        self.assertNotIn('9.9', out)
+        self.assertEqual(len(self.session.history), 2)
+
+    def test_status_zero_usage_is_known_not_unknown(self):
+        self.client.complete.return_value = Reply('reply', {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0})
+        self.send()
+        self.assertIn('usage: prompt 0 / completion 0 / total 0', self.session.command('/status'))
+
+    def test_invalid_usage_is_unknown_and_reply_still_succeeds(self):
+        cases = (
+            None, [], 'usage', {},
+            {'prompt_tokens': 3, 'completion_tokens': 4},
+            {'prompt_tokens': True, 'completion_tokens': 4, 'total_tokens': 5},
+            {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 8},
+            {'prompt_tokens': -1, 'completion_tokens': 4, 'total_tokens': 3},
+            {'prompt_tokens': 3.0, 'completion_tokens': 4, 'total_tokens': 7},
+            {'prompt_tokens': '3', 'completion_tokens': 4, 'total_tokens': 7},
+            {'prompt_tokens': 10**13, 'completion_tokens': 0, 'total_tokens': 10**13},
+        )
+        for index, metadata in enumerate(cases):
+            with self.subTest(metadata=metadata):
+                self.client.complete.return_value = Reply('ok %d' % index, metadata)
+                self.assertEqual(self.send('q %d' % index), 'ok %d' % index)
+                self.assertIsNone(self.session.last_usage)
+                self.assertIn('usage: UNKNOWN', self.session.command('/status'))
+                self.assertEqual(self.session.history[-1]['content'], 'ok %d' % index)
+        self.assertEqual(len(self.session.history), 2 * len(cases))
+
+    def test_usage_is_not_stale_after_reply_without_usage(self):
+        self.client.complete.return_value = Reply('first', dict(self.USAGE))
+        self.send()
+        self.assertIsNotNone(self.session.last_usage)
+        self.client.complete.return_value = Reply('second', {'model': 'm'})
+        self.send('again')
+        self.assertIsNone(self.session.last_usage)
+        self.assertIn('usage: UNKNOWN', self.session.command('/status'))
+
+    def test_failure_sets_error_unknown_usage_and_keeps_history(self):
+        from llmtool.errors import coded_error
+        self.client.complete.return_value = Reply('first', dict(self.USAGE))
+        self.send('prior')
+        before = copy.deepcopy(self.session.history)
+        self.client.complete.side_effect = coded_error('provider rate limited the request', 'PROVIDER_RATE_LIMITED',
+                                                       'provider.openai-compatible', retryable=True,
+                                                       provider_metadata=dict(self.USAGE))
+        with self.assertRaises(LLMToolError):
+            self.send('next')
+        self.assertEqual(self.session.history, before)
+        self.assertIsNone(self.session.last_usage)
+        out = self.session.command('/status')
+        self.assertIn('state: error (PROVIDER_RATE_LIMITED)', out)
+        self.assertIn('usage: UNKNOWN', out)
+        self.client.complete.side_effect = RuntimeError('PRIVATE 429 Too Many Requests')
+        with self.assertRaises(LLMToolError):
+            self.send('next')
+        out = self.session.command('/status')
+        self.assertIn('state: error (unclassified)', out)
+        self.assertNotIn('429', out)
+        self.assertNotIn('PRIVATE', out)
+        self.assertEqual(self.session.history, before)
+
+    def test_legacy_error_text_is_not_classified_as_rate_limit(self):
+        self.client.complete.side_effect = LLMToolError('HTTP 429 rate limited')
+        with self.assertRaises(LLMToolError):
+            self.send()
+        self.assertIn('state: error (unclassified)', self.session.command('/status'))
+
+    def test_elapsed_is_measured_with_monotonic_clock(self):
+        self.client.complete.return_value = Reply('reply', {'elapsed_seconds': 99.0})
+        with patch('llmtool.chat.time.monotonic', side_effect=[10.0, 12.5]):
+            self.send()
+        self.assertEqual(self.session.last_elapsed, 2.5)
+        self.assertIn('elapsed: 2.500s (measured locally)', self.session.command('/status'))
+
+    def test_state_is_working_only_during_request(self):
+        seen = []
+        def complete(messages):
+            seen.append((self.session.state, self.session.request_started is not None))
+            return Reply('reply', {})
+        self.client.complete.side_effect = complete
+        self.assertEqual(self.session.state, 'idle')
+        self.send()
+        self.assertEqual(seen, [('working', True)])
+        self.assertEqual(self.session.state, 'idle')
+        self.assertIsNone(self.session.request_started)
+
+    def test_clear_and_provider_switch_reset_status(self):
+        for command in ('/clear', '/provider second'):
+            with self.subTest(command=command):
+                self.client.complete.side_effect = None
+                self.client.complete.return_value = Reply('reply', dict(self.USAGE, model='m'))
+                self.session.command('/provider first')
+                self.send()
+                self.session.command(command)
+                self.assertEqual(self.session.state, 'idle')
+                self.assertIsNone(self.session.last_usage)
+                self.assertIsNone(self.session.last_elapsed)
+                out = self.session.command('/status')
+                self.assertIn('usage: UNKNOWN', out)
+                self.assertIn('reported model: UNKNOWN', out)
+                self.assertIn('elapsed: UNKNOWN', out)
+
+    def test_failed_provider_switch_keeps_status(self):
+        self.client.complete.return_value = Reply('reply', dict(self.USAGE))
+        self.send()
+        with self.assertRaises(LLMToolError):
+            self.session.command('/provider incomplete')
+        self.assertEqual(dict(self.session.last_usage), self.USAGE)
+
+    def test_cli_provider_reported_model_is_not_trusted(self):
+        self.session.command('/provider second')
+        self.client.complete.return_value = Reply('reply', {'model': 'configured-echo'})
+        self.send()
+        out = self.session.command('/status')
+        self.assertIn('reported model: UNKNOWN', out)
+        self.assertIn('model: provider default (not configured)', out)
+
+    def test_status_commands_never_call_provider(self):
+        self.session.command('/status')
+        self.factory.assert_not_called()
+
+    def test_line_mode_banner_unchanged(self):
+        status, out, err = self.repl(['/exit'])
+        self.assertEqual(out.splitlines()[:5], ['LLMTool interactive chat', 'provider: first', 'type: openai-compatible',
+                                                'skill: none', 'conversation turns: 0'])
+        self.assertNotIn('usage:', out.split('History stays')[0])
+
+    def test_cli_tui_falls_back_to_line_chat_when_not_a_terminal(self):
+        with patch('sys.stdin', io.StringIO('')):
+            status, out, err = self.cli(['chat', '--tui'], ['/exit'])
+        self.assertEqual(status, 0)
+        self.assertIn('LLMTool interactive chat', out)
+        self.assertIn('--tui unavailable', err)
+        self.assertIn('using line chat', err)
+        self.factory.assert_not_called()
+
+    def test_default_chat_never_loads_optional_tui(self):
+        with patch.dict(sys.modules, {'llmtool.chat_tui': None, 'prompt_toolkit': None}):
+            status, out, err = self.cli(['chat'], ['/exit'])
+        self.assertEqual((status, err), (0, ''))
+        self.assertIn('LLMTool interactive chat', out)
