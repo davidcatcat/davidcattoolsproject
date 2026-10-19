@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -182,6 +183,29 @@ class OpenCodeWorkerTests(unittest.TestCase):
             result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID');spawn.assert_not_called()
 
+    def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
+        job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
+        os.link(executable,alias)
+        self.assertEqual(os.lstat(executable).st_nlink,2)
+        self.assertEqual(os.lstat(alias).st_ino,os.lstat(executable).st_ino)
+        result=w.run_worker(job,Host())
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertTrue(result.cleanup_confirmed)
+
+    def test_symlinked_group_writable_or_wrong_hash_runtime_is_rejected_before_launch(self):
+        def symlink(exe):
+            target=exe.parent/'synthetic-target';exe.rename(target);exe.symlink_to(target)
+        for name,mutate,pin in (('symlink',symlink,None),('group-writable',lambda exe:exe.chmod(0o770),None),
+                                ('wrong-hash',lambda exe:None,'0'*64)):
+            with self.subTest(name=name):
+                job=self.job();executable=Path(job.runtime.executable)
+                if pin is not None:object.__setattr__(job.runtime,'executable_sha256',pin)
+                mutate(executable)
+                with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
+                    result=w.run_worker(job,Host())
+                self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID',result)
+                spawn.assert_not_called()
+
     def test_prereview_has_no_write_permission_or_other_tool_bypass(self):
         job=self.job(phase='PREREVIEW',model='opencode/glm-5.3-flash-free',write_paths=())
         cfg=w.configuration(job)
@@ -255,6 +279,68 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertTrue(all(x.process.returncode is not None for x in job.pending))
         host=Host();host.fail_final=True
         self.assertEqual(w.run_worker(self.job(),host).code,'OPENCODE_FINALIZE_UNKNOWN')
+
+
+@unittest.skipUnless(os.name == 'posix', 'POSIX hard-link and fd identity required')
+class RuntimeFileHashTests(unittest.TestCase):
+    """Executable content pin: a hard-linked runtime stays compatible, while an alias,
+    mode, owner or inode swap stays fail-closed."""
+
+    def _runtime(self):
+        temp=tempfile.TemporaryDirectory(prefix='opencode-hash-',dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        executable=Path(temp.name)/'runtime'
+        executable.write_bytes(b'synthetic pinned runtime\n');executable.chmod(0o700)
+        return executable
+
+    @staticmethod
+    def _digest(executable):
+        return hashlib.sha256(executable.read_bytes()).hexdigest()
+
+    @staticmethod
+    def _restat(path,ino=None,uid=None):
+        info=os.lstat(path)
+        return os.stat_result((info.st_mode,info.st_ino if ino is None else ino,info.st_dev,info.st_nlink,
+            info.st_uid if uid is None else uid,info.st_gid,info.st_size,
+            info.st_atime,info.st_mtime,info.st_ctime))
+
+    def test_single_link_pinned_runtime_hash_is_unchanged(self):
+        executable=self._runtime()
+        self.assertEqual(os.lstat(executable).st_nlink,1)
+        self.assertEqual(w._file_hash(executable,time.monotonic()+5),self._digest(executable))
+
+    def test_same_inode_hard_link_count_two_is_admitted(self):
+        executable=self._runtime();alias=executable.parent/'runtime-alias'
+        os.link(executable,alias)
+        self.assertEqual(os.lstat(executable).st_nlink,2)
+        self.assertEqual(os.lstat(alias).st_ino,os.lstat(executable).st_ino)
+        self.assertEqual(w._file_hash(executable,time.monotonic()+5),self._digest(executable))
+
+    def test_symlink_runtime_is_rejected(self):
+        executable=self._runtime();link=executable.parent/'runtime-link';link.symlink_to(executable)
+        with self.assertRaises(w.WorkerError) as caught:
+            w._file_hash(link,time.monotonic()+5)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+
+    def test_group_writable_runtime_is_rejected(self):
+        executable=self._runtime();executable.chmod(0o770)
+        with self.assertRaises(w.WorkerError) as caught:
+            w._file_hash(executable,time.monotonic()+5)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+
+    def test_foreign_owner_is_rejected(self):
+        executable=self._runtime()
+        with patch.object(Path,'lstat',return_value=self._restat(executable,uid=os.getuid()+1)):
+            with self.assertRaises(w.WorkerError) as caught:
+                w._file_hash(executable,time.monotonic()+5)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+
+    def test_inode_swap_between_stat_and_open_is_rejected(self):
+        executable=self._runtime()
+        with patch.object(w.os,'fstat',return_value=self._restat(executable,ino=os.lstat(executable).st_ino+1)):
+            with self.assertRaises(w.WorkerError) as caught:
+                w._file_hash(executable,time.monotonic()+5)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
 
 
 if __name__=='__main__':
