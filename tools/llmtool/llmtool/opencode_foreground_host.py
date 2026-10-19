@@ -308,10 +308,11 @@ def provision_runtime(parent):
     return state
 
 
-def build(*, policy, run_id, assignment_session, expected_branch, expected_head,
+def build(*, policy, run_id=None, assignment_session=None, expected_branch, expected_head,
           executable, executable_sha256, common_dir, private_parent, prompt, phase,
           write_paths, usage, budget, current_integrator_session, c2_c3_reference,
-          source_route_privacy_reference, runtime_policy_reference, max_steps=8):
+          source_route_privacy_reference, runtime_policy_reference, max_steps=8,
+          task_binding=None, agent_binding=None):
     """Concrete constructors for ONE active Integrator invocation (data, not authority).
 
     run_id: existing 32-hex task run ID (same across authorized phases).
@@ -332,10 +333,27 @@ def build(*, policy, run_id, assignment_session, expected_branch, expected_head,
         fail()
     if expected_branch != git(policy.root, 'branch', '--show-current').decode().strip():
         fail()
+    if (task_binding is None) != (agent_binding is None):
+        raise w.WorkerError('bindings must be provided as a pair')
+    if task_binding is not None:
+        if type(task_binding) is not TaskBinding or type(agent_binding) is not AgentBinding:
+            raise w.WorkerError('invalid binding types')
+        if task_binding.contract_digest != policy.contract:
+            raise w.WorkerError('contract mismatch')
+        if agent_binding.root != policy.root or agent_binding.common_dir != common_dir or agent_binding.branch != expected_branch or agent_binding.role is not Role.DEVELOPER:
+            raise w.WorkerError('binding mismatch')
+        if run_id is not None and run_id != task_binding.run_id:
+            raise w.WorkerError('run_id mismatch')
+        if assignment_session is not None and assignment_session != agent_binding.session_id:
+            raise w.WorkerError('session mismatch')
+        task = task_binding
+        agent = agent_binding
+    else:
+        if run_id is None or assignment_session is None:
+            raise w.WorkerError('legacy args required')
+        task = TaskBinding(TASK_ID, run_id, 1, policy.contract)
+        agent = AgentBinding(AGENT_ID, assignment_session, Role.DEVELOPER, policy.root, common_dir, expected_branch)
     state = provision_runtime(private_parent)
-    task = TaskBinding(TASK_ID, run_id, 1, policy.contract)
-    agent = AgentBinding(AGENT_ID, assignment_session, Role.DEVELOPER,
-                         policy.root, common_dir, expected_branch)
     job = w.WorkerJob(task=task, agent=agent, source_sha=expected_head, phase=phase,
         model=w.MODELS[phase], prompt=prompt, read_paths=tuple(sorted(policy.files)),
         write_paths=tuple(sorted(write_paths)),
