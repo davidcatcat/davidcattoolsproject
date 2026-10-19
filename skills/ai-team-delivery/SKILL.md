@@ -9,9 +9,10 @@ description: Coordinate AI-led development for a requirements owner who delegate
 
 **Codex Developer is PAUSED after PR #202 review**, with no new
 source edits, repair attempts, tests or Codex Reviewer subagents.
-OpenCode v2/DeepSeek owns current A11c/S3 implementation work on the
-already registered D6 task root. Preserve frozen #202's source/CI/
-independent Claude review and reuse rather than rewrite its adapter.
+OpenCode v2/DeepSeek owns current A11c/S3 implementation work; merged
+PR #202's Worker and merged PR #204's Host/F2 code have independent
+source/native acceptance. The original D6 root also hosted the Owner's
+manual TUI, so its output **cannot** be called a host-contained S3 run.
 Existing Codex Integrator continues semantic PM, real dispatch/receipt,
 integration and release authority if actually available, not routine
 source bug fixing. Do not confuse issue comments with Session wake.
@@ -27,6 +28,21 @@ model, credentials, model pricing or provider egress grant is BLOCKED:
 do not silently pay or re-enable Codex Developer. Keep existing S3
 STOP-after-first-verified-cycle instruction.
 
+**D4 exact-file bootstrapping and no self-attestation:** Before **every**
+OpenCode invocation, a changed read/write set versus the last accepted
+source admission requires its **own new exact-file D4 admission** before
+that invocation, including source screening and provider privacy/price
+checks. Any OpenCode-authored Host/containment change (permissions,
+negative probes, source/diff guard or free-price check) **must pass
+independent formal Claude Security review before being used to admit any
+OpenCode invocation**. The first host-contained S3 invocation must use
+the already reviewed/merged PR #204 Host (with G2 search/network probes)
+for the explicitly admitted two-file task. A manual Owner TUI and/or
+OpenCode's own review is not evidence of Host containment; use a clean,
+sole-owned task runtime without a concurrent interactive writer, and
+record actual Host `run()`, model usage, process cleanup and same-active
+Integrator receipt. Never mark S3 PASS from code merge alone.
+
 
 This is the shared collaboration contract for this repository. Read it together
 with `AGENTS.md`, `CLAUDE.md`, the task's pinned contract, and specialist skills.
@@ -39,7 +55,7 @@ implicit shell permissions, or an always-running service.
 | --- | --- | --- |
 | Requirements owner / product acceptor (user) | State the desired tool behavior, outcomes, constraints, priorities; report real-use problems; decide whether the delivered behavior meets the goal | Be the day-to-day PM, developer, technical QA judge, model-prompt courier or Git release engineer |
 | AI coordinator / technical PM (ChatGPT when connected and authorized) | Turn the goal into scoped requirements and acceptance checks, plan/sequence work, choose reviewers, track the evidence and roadmap, triage findings, decide routine technical disposition and merge eligible PRs under delegated authority | Invent platform access, waive mandatory gates, or attribute technical judgments to the owner |
-| Developer (normally Codex) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
+| Developer (OpenCode PRIMARY under D7; Codex Developer PAUSED) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
 | Independent reviewer (normally Claude) | Read the exact diff/requirements/evidence, do the requested ordinary/security/functional assessment, report severity, reproducers, limitations and recommendations | Approve its own implementation or turn a normal review into formal security/QA proof without running that gate |
 | Bounded Git publisher | Execute validated, explicitly authorized Git operations at exact refs and report remote status | Override the coordinator's gates, rewrite history, or repair code while acting as publisher |
 
