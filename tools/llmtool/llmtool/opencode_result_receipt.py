@@ -32,6 +32,7 @@ RETURNED_CODE = 'OPENCODE_OUTPUT_RETURNED'
 STORE_SCHEMA = 'llmtool.opencode.result_receipt_store.v1'
 STORE_LIMIT = 256 * 1024
 MAX_STORE_RECORDS = 256
+MAX_DELIVERY_SESSION = 128
 # Refused before any launch (Host/Worker admission). Anything else unlisted is UNKNOWN.
 BLOCKED_CODES = frozenset({'OPENCODE_NOT_AUTHORIZED', 'OPENCODE_BUDGET_BLOCKED',
                            'OPENCODE_JOB_INVALID', 'OPENCODE_ATTEMPT_ALREADY_USED'})
@@ -204,7 +205,9 @@ def _reconcile(job, result, host_final, observed_head, seen, expect):
 
 
 def _validate_store_payload(data):
-    if (type(data) is not dict or set(data) != {'schema', 'schema_version', 'seen', 'receipts'}
+    if (type(data) is not dict
+            or set(data) not in ({'schema', 'schema_version', 'seen', 'receipts'},
+                                 {'schema', 'schema_version', 'seen', 'receipts', 'deliveries'})
             or data['schema'] != STORE_SCHEMA or type(data['schema_version']) is not int
             or data['schema_version'] != 1 or type(data['seen']) is not list
             or type(data['receipts']) is not dict or len(data['seen']) > 2 * MAX_STORE_RECORDS
@@ -227,6 +230,25 @@ def _validate_store_payload(data):
             sid = rec.get('backend_session_id')
             if type(sid) is str and sid and ('session:' + sid) not in seen_set:
                 raise ValueError('terminal session missing from seen')
+    if 'deliveries' in data:
+        _validate_deliveries(data['deliveries'], set(data['receipts']))
+
+
+def _validate_deliveries(deliveries, receipt_digests):
+    if type(deliveries) is not dict or len(deliveries) > MAX_STORE_RECORDS:
+        raise ValueError('invalid delivery envelope')
+    for k, rec in deliveries.items():
+        if (type(k) is not str or not k or k not in receipt_digests or type(rec) is not dict
+                or set(rec) != {'integrator_session', 'state', 'reason', 'receipt_digest'}
+                or rec.get('state') != 'DELIVERED'
+                or type(rec.get('integrator_session')) is not str
+                or not 0 < len(rec['integrator_session']) <= MAX_DELIVERY_SESSION
+                or rec['integrator_session'] != rec['integrator_session'].strip()
+                or any(ord(c) < 0x20 or ord(c) == 0x7f for c in rec['integrator_session'])
+                or rec.get('reason') != 'RECEIPT_DELIVERED'
+                or type(rec.get('receipt_digest')) is not str or len(rec['receipt_digest']) != 64
+                or any(c not in '0123456789abcdef' for c in rec['receipt_digest'])):
+            raise ValueError('invalid delivery record')
 
 
 def _read_store(path):
@@ -327,6 +349,31 @@ def _with_store_lock(job, store_path, fn, result=None):
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
+
+
+def _mutate_store(*, job, store_path, mutate, result=None):
+    """Run ``mutate(data, write)`` under the existing receipt-store lock and validation.
+
+    Adds no second store, ledger, database or daemon: ``data`` is the same already
+    validated durable envelope read by ``_read_store``, and ``write(new_data)`` is the
+    same validated atomic ``_write_store`` (file and parent-directory fsync) used by
+    ``reserve_host_launch``/``record_host_receipt``. The callback decides whether to
+    persist; nothing is written unless it calls ``write``. Private by design: the only
+    caller is the G3 result-delivery adapter, so no generic public writer exists that
+    could bypass the terminal-receipt immutability rule. The callback must not call
+    another store function (a second ``flock`` on a new descriptor self-deadlocks).
+    Returns the callback's return value, or a fail-closed ``UNKNOWN`` ResultReceipt
+    when the store path, file, lock or envelope cannot be trusted. Never raises.
+    """
+    def _run(path, data):
+        def write(new_data):
+            _write_store(path, new_data)
+        return mutate(data, write)
+
+    try:
+        return _with_store_lock(job, store_path, _run, result)
+    except Exception:
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
 
 
 def reserve_host_launch(*, job, expect, store_path):

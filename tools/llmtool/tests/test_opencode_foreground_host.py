@@ -401,6 +401,75 @@ class CompositionTests(unittest.TestCase):
         persisted = json.loads(Path(store).read_text())
         self.assertEqual(persisted['receipts'][job.digest]['verdict'], 'SUCCESS')
 
+    def test_run_with_delivery_returns_correlated_machine_readable_handoff(self):
+        from llmtool.run_budget import CallPhase, CallUsage
+        from llmtool.opencode_result_delivery import DELIVERED
+        job, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = str(Path(tmp.name) / 'host_receipts.json')
+        exp = {'task': job.task, 'agent': job.agent}
+        session = 'synthetic-foreground-integrator'
+        processes = (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
+                     dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True))
+        good_res = h.w.WorkerResult(
+            'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
+            UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
+                        job.usage.repair_attempts, 100),
+            True, processes, 'a' * 64, 'HOST_OBSERVED')
+        calls = []
+
+        def fake_worker(j, host):
+            calls.append(j.digest)
+            tok = host.admit(j, h.hashlib.sha256(h.canonical(h.w.configuration(j))).hexdigest())
+            host.check(tok, j, 'before')
+            host.consume(tok, j)
+            host.check(tok, j, 'after')
+            host.finalize(tok, 'OPENCODE_OUTPUT_RETURNED', True)
+            return good_res
+
+        def git_ok(root, *args):
+            if args == ('rev-parse', 'HEAD'):
+                return (job.source_sha + '\n').encode()
+            return ((job.agent.common_dir if args[-1] == '--git-common-dir' else policy.root)
+                    + '\n').encode()
+
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h, 'snapshot', return_value=snap), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker):
+            res, final, rec, delivered = h.run_with_delivery(
+                job, policy, a, {'synthetic': 'cred'}, expect=exp,
+                receipt_store=store, integrator_session=session)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        self.assertEqual((delivered.state, delivered.reason), (DELIVERED, 'RECEIPT_DELIVERED'))
+        self.assertFalse(delivered.redelivery)
+        self.assertFalse(delivered.accepted)
+        self.assertEqual((delivered.worker_launches, delivered.provider_calls), (0, 0))
+        self.assertEqual(delivered.job_digest, job.digest)
+        self.assertEqual(delivered.task_id, job.task.task_id)
+        self.assertEqual(delivered.agent_id, job.agent.agent_id)
+        self.assertEqual(delivered.source_sha, job.source_sha)
+        self.assertEqual(delivered.integrator_session, session)
+        self.assertEqual(len(delivered.receipt_digest), 64)
+        self.assertEqual(len(delivered.delivery_digest), 64)
+        persisted = json.loads(Path(store).read_text())
+        self.assertEqual(persisted['deliveries'][job.digest]['integrator_session'], session)
+        # A replayed invocation must not relaunch the Worker and must not fabricate a
+        # durable receipt for the duplicate-refusal receipt returned by the reservation.
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h, 'snapshot', return_value=snap), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker):
+            _, _, rec_dup, delivered_dup = h.run_with_delivery(
+                replace(job), policy, replace(a), {'synthetic': 'cred'}, expect=exp,
+                receipt_store=store, integrator_session=session)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual((rec_dup.verdict, rec_dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        self.assertEqual((delivered_dup.state, delivered_dup.reason),
+                         ('NOT_DELIVERED', 'RECEIPT_NOT_DURABLE'))
+        self.assertEqual(json.loads(Path(store).read_text())['receipts'][job.digest]['verdict'],
+                         'SUCCESS')
+
     def test_run_with_receipt_blocks_before_worker_on_invalid_expect_corrupt_store_in_flight_or_concurrency(self):
         import multiprocessing, os
         from llmtool.run_budget import CallPhase, CallUsage
