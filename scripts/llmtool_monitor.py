@@ -493,7 +493,7 @@ def _verified_db(state_root: str, directory: str) -> tuple[str | None, str]:
             return None, "none"
         info = os.lstat(db_path)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-                or os.path.realpath(db_path) != db_path):
+                or os.path.realpath(db_path) != db_path or info.st_nlink != 1):
             return None, "UNKNOWN (unverified task database)"
         return db_path, "ok"
     except OSError:

@@ -9,6 +9,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 _PATH = Path(__file__).with_name("llmtool_monitor.py")
@@ -171,6 +172,34 @@ class TaskEvidenceTests(unittest.TestCase):
         text = "\n".join(mon.task_lines(tasks))
         self.assertIn("RUNNING", text)
         self.assertFalse(any(secret in text for secret in SECRETS))
+
+
+    def test_hardlink_db_rejected(self):
+        outside_root = os.path.join(self.base, "opencode-" + "a" * 32)
+        self.make_db(outside_root)
+        valid_root = os.path.join(self.evidence, "opencode-" + "b" * 32)
+        os.makedirs(os.path.join(valid_root, "data", "opencode"))
+        os.link(os.path.join(outside_root, "data", "opencode", "opencode.db"),
+                os.path.join(valid_root, "data", "opencode", "opencode.db"))
+        self.attempt("red", valid_root)
+        with patch.object(mon.sqlite3, "connect", side_effect=AssertionError("connect called")):
+            stage = self.scan()
+        self.assertEqual(stage.meta, "UNKNOWN (unverified task database)")
+        self.assertEqual(stage.steps, 0)
+        self.assertEqual(stage.tools, ())
+
+    def test_singlelink_db_accepted(self):
+        valid_root = os.path.join(self.evidence, "opencode-" + "c" * 32)
+        self.make_db(valid_root)
+        self.attempt("red", valid_root)
+        with patch.object(mon.sqlite3, "connect", wraps=sqlite3.connect) as spy:
+            stage = self.scan()
+        self.assertEqual(stage.meta, "ok")
+        self.assertEqual(stage.steps, 1)
+        self.assertEqual(stage.tokens_in, 150)
+        self.assertEqual(stage.tokens_out, 12)
+        self.assertEqual(spy.call_count, 1)
+        self.assertIn("mode=ro", spy.call_args[0][0])
 
 
 class TaskEventTests(unittest.TestCase):
