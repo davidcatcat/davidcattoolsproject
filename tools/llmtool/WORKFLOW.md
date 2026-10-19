@@ -1005,6 +1005,22 @@ data; compression/redaction is not permission to export it. If policy denies the
 transfer, stop that path and preserve bounded evidence for authorized resolution.
 Use the agreed repair limit; exhaustion never permits weaker criteria.
 
+**Company-gw guided-repair cost rule (Owner 2026-10-20):** Follow
+[the accepted A11c company Developer fallback and guided-repair decision](../../docs/decisions/llmtool_company_developer_assistance_fallback_20261020.md).
+After the first failed company-authored candidate, prefer **at most one**
+evidence-guided, narrow company-gw correction using real source/API signatures,
+pinned tests and actual failure output, only if the current task authorizes the
+call and has remaining known budget; skip it for unsafe, unsupported or repeated
+guesswork. On another failure the **Integrator/PM chooses** whether to obtain a
+narrow different-model diagnosis, transfer code repair to a qualified stronger
+Developer, propose a separately authorized revised company strategy, or preserve
+a resumable blocker. This is **not** automatic model fallback or a new repair
+allowance. Compare recorded company, PM, Reviewer and takeover usage plus
+validation/retry effort and eventual independent acceptance; unknown costs stay
+UNKNOWN. A new author cannot self-approve the final change. Preserve prior
+failed attempts/ledger, existing #92 and task-specific caps, egress/permission
+boundaries, unchanged G3/G4/M2 gates and progress of unrelated tasks.
+
 Treat model completion as a **claim**. Record evidence per acceptance criterion:
 contract version/digest, tested revision or patch digest, command, exit status,
 environment and required artifacts/references. For uncommitted changes, include
