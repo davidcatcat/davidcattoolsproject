@@ -351,6 +351,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
                 while True:
                     try:os.killpg(pending.process.pid,0)
                     except ProcessLookupError:break
+                    except PermissionError:pass  # Still unconfirmed; existing deadline applies.
                     self.assertLess(time.monotonic(),until,'fixture group still present')
                     time.sleep(0.01)
         self.addCleanup(release)

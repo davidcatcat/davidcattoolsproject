@@ -261,6 +261,8 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
                     os.killpg(leader.pid, 0)
                 except ProcessLookupError:
                     break
+                except PermissionError:
+                    pass  # Present/unobservable; keep waiting through the same deadline.
                 self.assertLess(time.monotonic(), until, 'fixture group still present')
                 time.sleep(0.01)
 
