@@ -53,11 +53,14 @@ def bounded_terminate(process, deadline):
         # Reaping only confirms the leader's exit, not its descendants. The
         # old pin never authorizes signalling a potentially recycled PGID.
         # Signal zero is only an existence query; even a recycled group keeps
-        # cleanup UNKNOWN, and must never regain termination authority.
+        # cleanup UNKNOWN, and must never regain termination authority. A single
+        # probe would misreport a short-lived descendant (or Darwin's transient
+        # EPERM window on a zombie-only group) as still-present, so absence is
+        # re-observed with signal zero only until the existing cleanup deadline.
         absent = False
         if (group_owned and os.name == 'posix' and
                 getattr(process, '_llmtool_group_unconfirmed', None) is not True):
-            absent = _group_absent(process.pid)
+            absent = _group_absent_until(process.pid, deadline)
         process._llmtool_cleanup_pending = not absent
         return absent
     if not child_owned:
@@ -101,6 +104,34 @@ def _group_absent(pgid):
     except OSError:
         pass  # EPERM and other observation failures remain UNKNOWN.
     return False
+
+
+_REOBSERVE_GRACE = 1.0
+_REOBSERVE_INTERVAL = 0.02
+
+
+def _group_absent_until(pgid, deadline, interval=_REOBSERVE_INTERVAL, grace=_REOBSERVE_GRACE):
+    """Bounded, signal-0-only re-observation of an owned, already-reaped group.
+
+    A leader may be reaped while a short-lived same-group descendant, or Darwin's
+    transient EPERM window on a zombie-only group, is still observable. One
+    immediate probe would turn that benign race into a permanent false UNKNOWN.
+    Re-probe with signal zero only: ESRCH confirms absence; continued presence or
+    unobservability stays UNKNOWN. A destructive signal is never sent to a
+    stale/reaped PGID. The observation is capped to a small grace (and never past
+    the caller's cleanup deadline) so it cannot consume the reserve that sibling
+    owned processes still need to be terminated. Callers pass a finite deadline.
+    """
+    if not (type(deadline) in (int, float) and math.isfinite(deadline)):
+        return _group_absent(pgid)
+    bound = min(deadline, time.monotonic() + grace)
+    while True:
+        if _group_absent(pgid):
+            return True
+        remaining = bound - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(interval, remaining))
 
 
 class CLIProcessLifecycle:
