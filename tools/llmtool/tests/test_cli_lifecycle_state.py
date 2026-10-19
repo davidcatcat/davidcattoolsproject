@@ -277,11 +277,108 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
                 process._llmtool_owner_pid = os.getpid()
                 process._llmtool_group_unconfirmed = False
                 with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=effect) as probe:
-                    self.assertIs(bounded_terminate(process, time.monotonic() + 1), expected)
-                probe.assert_called_once_with(12345, 0)
+                    self.assertIs(bounded_terminate(process, time.monotonic() + 0.1), expected)
+                # Absence is re-observed (signal 0 only) within the cleanup deadline;
+                # a reaped PGID must never receive a terminating signal.
+                self.assertTrue(probe.called)
+                self.assertTrue(all(call.args == (12345, 0) for call in probe.call_args_list),
+                                'reaped PGID may only receive existence queries')
                 process.kill.assert_not_called()
                 process.wait.assert_not_called()
                 self.assertIs(process._llmtool_cleanup_pending, not expected)
+
+    def test_reaped_group_absence_is_reobserved_within_deadline_without_signals(self):
+        # A leader can be reaped while a short-lived same-group descendant (or
+        # Darwin's transient EPERM window on a zombie-only group) is still visible.
+        # A single immediate probe would turn that benign race into a permanent
+        # false UNKNOWN; a bounded, signal-0-only re-observation must confirm
+        # absence before the existing cleanup deadline.
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        for transient in (None, PermissionError(), OSError()):
+            with self.subTest(transient=transient):
+                process = Mock(returncode=0, pid=12345)
+                process._llmtool_owned_pgid = 12345
+                process._llmtool_owner_pid = os.getpid()
+                process._llmtool_group_unconfirmed = False
+                effects = iter([transient, transient, ProcessLookupError()])
+                probes = []
+                def observe(pgid, sig):
+                    self.assertEqual(sig, 0, 'reaped PGID may only receive existence queries')
+                    probes.append((pgid, sig))
+                    effect = next(effects)
+                    if effect is not None:
+                        raise effect
+                with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=observe):
+                    self.assertTrue(bounded_terminate(process, time.monotonic() + 1))
+                self.assertEqual(probes, [(12345, 0)] * 3)
+                self.assertFalse(process._llmtool_cleanup_pending)
+                process.kill.assert_not_called()
+                process.wait.assert_not_called()
+
+    def test_reaped_group_persistent_absence_stays_unknown_and_stays_bounded(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        for persistent in (None, PermissionError(), OSError()):
+            with self.subTest(persistent=persistent):
+                process = Mock(returncode=0, pid=12345)
+                process._llmtool_owned_pgid = 12345
+                process._llmtool_owner_pid = os.getpid()
+                process._llmtool_group_unconfirmed = False
+                deadline = time.monotonic() + 0.2
+                probes = []
+                def observe(pgid, sig):
+                    probes.append((pgid, sig))
+                    if persistent is not None:
+                        raise persistent
+                with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=observe):
+                    self.assertFalse(bounded_terminate(process, deadline))
+                self.assertGreaterEqual(len(probes), 2, 'must re-observe, not decide on one probe')
+                self.assertTrue(all(sig == 0 for _, sig in probes))
+                self.assertLessEqual(time.monotonic(), deadline + 0.5,
+                                     're-observation must not extend the cleanup bound')
+                self.assertTrue(process._llmtool_cleanup_pending)
+                process.kill.assert_not_called()
+                process.wait.assert_not_called()
+
+    def test_reaped_group_after_expired_deadline_probes_once_without_waiting(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        process = Mock(returncode=0, pid=12345)
+        process._llmtool_owned_pgid = 12345
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as probe:
+            self.assertFalse(bounded_terminate(process, time.monotonic() - 1.0))
+        probe.assert_called_once_with(12345, 0)
+        self.assertTrue(process._llmtool_cleanup_pending)
+        process.kill.assert_not_called()
+        process.wait.assert_not_called()
+
+    def test_reaped_group_reobservation_never_consumes_a_far_cleanup_deadline(self):
+        # Re-observing a reaped group must be capped to a small grace. A worker
+        # cleanup deadline can be far in the future (up to the job budget); if the
+        # re-observation waited the whole deadline, sibling owned processes (for
+        # example a private server) would never be terminated and leak.
+        from llmtool.providers.cli_lifecycle import bounded_terminate, _REOBSERVE_GRACE
+        import time
+        process = Mock(returncode=0, pid=12345)
+        process._llmtool_owned_pgid = 12345
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        start = time.monotonic()
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as probe:
+            # A persistently-present group observed against a ~10-minute deadline.
+            self.assertFalse(bounded_terminate(process, start + 600))
+        elapsed = time.monotonic() - start
+        self.assertLessEqual(elapsed, _REOBSERVE_GRACE + 1.0,
+                             're-observation must not consume the whole job deadline')
+        self.assertGreaterEqual(probe.call_count, 2,
+                                'must re-observe with signal 0, not decide on one probe')
+        self.assertTrue(all(call.args == (12345, 0) for call in probe.call_args_list))
+        self.assertTrue(process._llmtool_cleanup_pending)
+        process.kill.assert_not_called()
+        process.wait.assert_not_called()
 
     def test_kill_and_wait_do_not_confirm_remaining_group_absence(self):
         from llmtool.providers.cli_lifecycle import bounded_terminate
@@ -300,12 +397,15 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
                 process.wait.side_effect = wait
                 with patch('llmtool.providers.cli_lifecycle.os.killpg',
                            side_effect=signal_or_probe) as calls:
-                    self.assertFalse(bounded_terminate(process, time.monotonic() + 1))
+                    self.assertFalse(bounded_terminate(process, time.monotonic() + 0.1))
                     self.assertEqual([call.args for call in calls.call_args_list],
                                      [(12345, signal.SIGKILL), (12345, 0)])
                     calls.reset_mock()
-                    self.assertFalse(bounded_terminate(process, time.monotonic() + 1))
-                    calls.assert_called_once_with(12345, 0)
+                    self.assertFalse(bounded_terminate(process, time.monotonic() + 0.1))
+                    # The now-reaped group is re-observed until the cleanup
+                    # deadline, but only ever with a signal-0 existence query.
+                    self.assertTrue(calls.call_args_list)
+                    self.assertTrue(all(call.args == (12345, 0) for call in calls.call_args_list))
                 self.assertTrue(process._llmtool_cleanup_pending)
                 process.kill.assert_not_called()
 
