@@ -61,6 +61,8 @@ def safe_name(command: str) -> str:
     """Executable basename only (no arguments, which may contain secrets)."""
     if command.startswith("(") and command.endswith(")"):
         command = command[1:-1]
+    if command.strip() in ("<defunct>", "defunct"):
+        return "zombie"  # macOS/Linux show zombies without their original name
     first = command.split()[0] if command.split() else ""
     name = SAFE_NAME.sub("", _base(first).lstrip("-"))[:24]
     return name or "?"
@@ -225,7 +227,9 @@ def family(role: str) -> str:
 
 def describe(p: Process) -> str:
     """Human-readable line: what the process is and which agent it belongs to."""
-    zombie = " [zombie]" if p.state.startswith("Z") else ""
+    zombie = ""
+    if p.state.startswith("Z"):
+        zombie = " (exited, not yet reaped)" if p.name == "zombie" else " [zombie: exited, not yet reaped]"
     if not p.role.startswith(" "):
         started = f"  (started by {p.owner})" if p.owner else ""
         return f"{p.role.replace(' (zombie)', '')}{zombie}  PID {p.pid}{started}"
@@ -286,8 +290,8 @@ class Monitor:
         for owner, names in sorted(self.short_lived.items()):
             total = sum(names.values())
             detail = ", ".join(f"{n}×{c}" for n, c in sorted(names.items(), key=lambda kv: -kv[1])[:5])
-            out.append((stamp, "i", f"{owner or 'unknown owner'} ran {total} short-lived helper "
-                                    f"process{'es' if total != 1 else ''} ({detail})"))
+            out.append((stamp, "i", f"{owner or 'unknown owner'}: {total} short-lived "
+                                    f"helper{'s' if total != 1 else ''} ({detail})"))
         self.short_lived.clear()
         return out
 
@@ -312,8 +316,10 @@ class Monitor:
             if pid in self.announced:
                 continue
             self.first_seen.setdefault(pid, now)
+            # A brief zombie window is normal until the parent reaps; only a
+            # lingering group (leader gone) is urgent.
             urgent = (self.show_all or self.polls == 1 or not p.role.startswith(" ")
-                      or p.state.startswith("Z") or p.pgid in result.lingering)
+                      or p.pgid in result.lingering)
             if urgent or now - self.first_seen[pid] >= self.min_age:
                 self.announced.add(pid)
                 new.append((stamp, "+", describe(p)))
@@ -321,10 +327,11 @@ class Monitor:
             if pid in current:
                 continue
             if pid in self.announced:
-                new.append((stamp, "-", describe(p) + "  — no longer observed"))
+                new.append((stamp, "-", describe(p) + "  — gone"))
             else:
                 counts = self.short_lived.setdefault(p.owner, {})
-                counts[p.name] = counts.get(p.name, 0) + 1
+                key = p.name.lower()
+                counts[key] = counts.get(key, 0) + 1
             self.announced.discard(pid)
             self.first_seen.pop(pid, None)
         new += [(stamp, "!", f"process group {g}: leader gone/zombie but members remain "
