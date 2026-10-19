@@ -528,7 +528,10 @@ class WorkerJobIntegrationTests(unittest.TestCase):
             # Test-owned unreaped fake child only; restore actual bounded wait.
             pending.process.wait(timeout=2)
         with patch('llmtool.providers.cli_lifecycle.os.killpg') as probe:
-            pending.stop();probe.assert_not_called()
+            pending.stop()
+        self.assertTrue(all(call.args == (pending.process.pid, 0)
+                            for call in probe.call_args_list),
+                        'reaped PGID may only receive existence queries')
         self.assertFalse(pending.cleanup_confirmed)
         self.assertTrue(pending.process._llmtool_cleanup_pending)
 
