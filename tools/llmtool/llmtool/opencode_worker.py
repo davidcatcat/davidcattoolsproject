@@ -146,8 +146,14 @@ def _clock(deadline):
 
 def _file_hash(path, deadline):
     before = path.lstat()
+    # A hard-linked runtime (st_nlink > 1, e.g. a package manager that also exposes
+    # the pinned binary under an alias) is admitted. A hard link shares one inode, so
+    # owner, write bits, size and the content hash computed below are identical for
+    # every name, and the O_NOFOLLOW open plus the dev/ino/mtime re-observation still
+    # reject a swap. Only the sole-link requirement is dropped; every other check
+    # stays fail-closed and st_nlink < 1 remains only a defensive floor.
     if (not stat.S_ISREG(before.st_mode) or before.st_uid not in (0,os.getuid()) or
-            before.st_mode & 0o022 or before.st_nlink != 1 or before.st_size > 256*LIMIT):
+            before.st_mode & 0o022 or before.st_nlink < 1 or before.st_size > 256*LIMIT):
         reject('OPENCODE_RUNTIME_INVALID')
     digest = hashlib.sha256()
     with os.fdopen(os.open(path,os.O_RDONLY|os.O_NOFOLLOW),'rb') as stream:
