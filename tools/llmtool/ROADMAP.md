@@ -8,8 +8,11 @@ Developer is PAUSED** after source review of frozen
 at `c421c3a`; no further costly Codex Developer source/repair/reviewer
 calls. The existing Codex Integrator remains semantic PM/actual
 OpenCode launcher/receipt owner/final merger when available.
-Immediately reuse the registered D6 OpenCode task root and existing
-Worker adapter to finish the missing real Host hookup, one real
+Reuse merged PR #202 Worker and merged PR #204 reviewed Host/F2 source;
+these remain **NOT LIVE VERIFIED** as a genuine llmtool-owned dispatch.
+Do not reuse an Owner-active manual TUI root as a Host-owned Worker
+without independent liveness, attribution and clean ownership checks.
+Next prove one real
 source-change/tests/DeepSeek self-review/qualified free different-model
 pre-review/independent Claude formal PASS/Integrator receipt cycle.
 Older D1–D5 Codex-first language below is HISTORICAL under D7.
@@ -17,6 +20,14 @@ D6 auto-retirement is not yet Mac-live verified; it is not a blocker
 for a safely registered new task. No new A milestone, extra daemon,
 provider-export/F2 waiver or auto paid fallback. Stop at actual S3
 PASS with evidence; do not infer live proof from docs or fake CI.
+
+**D4/Host launch condition:** exact-file re-admit any new source read/write
+set **before** OpenCode provider inference. No OpenCode-authored Host/
+containment patch may authorize itself: require independent Claude
+Security ACCEPT before its changed permission, diff, negative-probe
+or price guards admit any subsequent invocation. The reviewed PR #204
+Host is the first allowed S3 host candidate; its code merge is not
+proof that `run()` or same-Integrator ACK happened.
 
 
 目標是 generic, portable LLM CLI and future orchestration foundation。
