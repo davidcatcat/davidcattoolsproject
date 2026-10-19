@@ -338,5 +338,148 @@ class EnvelopeShapeTests(unittest.TestCase):
             self.assertEqual(out.recovery, 'REDELIVER_PERSISTED_ENVELOPE')
 
 
+
+
+class DeliveryPromotionTests(unittest.TestCase):
+    """Formal-review M-1: an UNKNOWN status delivery must not block the real result."""
+
+    def setUp(self):
+        case = fixtures.OpenCodeWorkerTests()
+        self.addCleanup(case.doCleanups)
+        self.job = case.job()
+        self.expect = {'task': self.job.task, 'agent': self.job.agent}
+        self.tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(self.tmp.cleanup)
+        self.store = str(Path(self.tmp.name) / 'receipts.json')
+        self.session = 'integrator-logical-session-1'
+
+    def persist(self, result=None):
+        result = returned(self.job) if result is None else result
+        final = {'code': result.code, 'launched': True, 'one_use_consumed': True,
+                 'job_digest': self.job.digest}
+        return r.record_host_receipt(job=self.job, result=result, host_final=final,
+                                     observed_head=self.job.source_sha, expect=self.expect,
+                                     store_path=self.store)
+
+    def deliver(self, receipt=None):
+        if receipt is not None:
+            return d.deliver_result(job=self.job, receipt=receipt, expect=self.expect,
+                                    integrator_session=self.session, store_path=self.store)
+        return d.deliver_persisted(job=self.job, expect=self.expect,
+                                   integrator_session=self.session, store_path=self.store)
+
+    def stored(self):
+        return json.loads(Path(self.store).read_text())
+
+    def test_unknown_status_then_terminal_receipt_is_delivered_five_steps(self):
+        self.assertIsNone(r.reserve_host_launch(job=self.job, expect=self.expect,
+                                                store_path=self.store))
+        with patch.object(w, 'run_worker', side_effect=AssertionError('relaunch')) as worker, \
+                patch('subprocess.Popen', side_effect=AssertionError('spawn')) as spawn:
+            status = self.deliver()                    # step 2: status while in flight
+            self.assertEqual((status.state, status.receipt_verdict, status.receipt_reason),
+                             ('DELIVERED', 'UNKNOWN', 'LAUNCH_IN_FLIGHT'))
+            self.assertFalse(status.redelivery)
+            rec = self.persist()                       # step 3: real terminal receipt
+            self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+            final_status = self.deliver()              # step 4: stored result, no receipt in hand
+            final_caller = self.deliver(rec)           # step 5: same result via caller receipt
+        worker.assert_not_called()
+        spawn.assert_not_called()
+        for out in (final_status, final_caller):
+            self.assertEqual((out.state, out.receipt_verdict, out.receipt_reason),
+                             ('DELIVERED', 'SUCCESS', 'WORKER_RUN_OBSERVED'))
+            self.assertFalse(out.accepted)
+        self.assertFalse(final_status.redelivery)
+        self.assertTrue(final_caller.redelivery)
+        self.assertEqual(final_status.delivery_digest, final_caller.delivery_digest)
+        stored = self.stored()
+        self.assertEqual(stored['receipts'][self.job.digest]['verdict'], 'SUCCESS')
+        self.assertEqual(stored['deliveries'][self.job.digest]['receipt_verdict'], 'SUCCESS')
+        self.assertEqual(stored['deliveries'][self.job.digest]['receipt_digest'],
+                         d.receipt_digest(stored['receipts'][self.job.digest]))
+
+    def test_unknown_delivery_is_promoted_by_the_first_terminal_receipt(self):
+        self.assertIsNone(r.reserve_host_launch(job=self.job, expect=self.expect,
+                                                store_path=self.store))
+        self.assertEqual(self.deliver().receipt_reason, 'LAUNCH_IN_FLIGHT')
+        failed = self.persist(provider_failed(self.job))
+        self.assertEqual(failed.verdict, 'FAILED')
+        out = self.deliver()
+        self.assertEqual((out.state, out.receipt_verdict, out.receipt_reason),
+                         ('DELIVERED', 'FAILED', 'OPENCODE_PROVIDER_FAILED'))
+        # A terminal delivery is final: the same FAILED result is now a redelivery.
+        again = self.deliver()
+        self.assertTrue(again.redelivery)
+        self.assertEqual((again.receipt_verdict, again.receipt_digest),
+                         ('FAILED', out.receipt_digest))
+
+    def test_terminal_delivery_is_never_superseded_by_a_rewritten_receipt(self):
+        rec = self.persist()
+        self.assertEqual(self.deliver(rec).state, 'DELIVERED')
+        edited = replace(rec, reason='OTHER_REASON')
+        data = self.stored()
+        data['receipts'][self.job.digest] = edited.to_dict()
+        Path(self.store).write_text(json.dumps(data))
+        os.chmod(self.store, 0o600)
+        out = self.deliver()
+        self.assertEqual((out.state, out.reason), ('UNKNOWN', 'DELIVERY_DRIFT_UNKNOWN'))
+        self.assertEqual((out.receipt_verdict, out.receipt_reason), ('SUCCESS', 'OTHER_REASON'))
+        direct = self.deliver(edited)
+        self.assertEqual((direct.state, direct.reason), ('UNKNOWN', 'DELIVERY_DRIFT_UNKNOWN'))
+        self.assertEqual(self.stored()['deliveries'][self.job.digest]['receipt_verdict'],
+                         'SUCCESS')
+
+    def test_different_integrator_session_cannot_promote_or_take_over(self):
+        self.assertIsNone(r.reserve_host_launch(job=self.job, expect=self.expect,
+                                                store_path=self.store))
+        self.assertEqual(self.deliver().state, 'DELIVERED')
+        self.persist()
+        other = d.deliver_persisted(job=self.job, expect=self.expect,
+                                    integrator_session='another-integrator-session',
+                                    store_path=self.store)
+        self.assertEqual((other.state, other.reason),
+                         ('NOT_DELIVERED', 'INTEGRATOR_SESSION_MISMATCH'))
+        self.assertEqual(self.stored()['deliveries'][self.job.digest]['integrator_session'],
+                         self.session)
+        promoted = self.deliver()
+        self.assertEqual((promoted.state, promoted.receipt_verdict), ('DELIVERED', 'SUCCESS'))
+        data = self.stored()
+        data['receipts'][self.job.digest]['reason'] = 'OTHER_REASON'
+        Path(self.store).write_text(json.dumps(data))
+        os.chmod(self.store, 0o600)
+        drifted_other = d.deliver_persisted(job=self.job, expect=self.expect,
+                                            integrator_session='another-integrator-session',
+                                            store_path=self.store)
+        self.assertEqual((drifted_other.state, drifted_other.reason),
+                         ('NOT_DELIVERED', 'INTEGRATOR_SESSION_MISMATCH'))
+        drifted = self.deliver()
+        self.assertEqual((drifted.state, drifted.reason), ('UNKNOWN', 'DELIVERY_DRIFT_UNKNOWN'))
+
+
+    def test_legacy_status_record_without_verdict_cannot_be_promoted(self):
+        self.assertIsNone(r.reserve_host_launch(job=self.job, expect=self.expect,
+                                                store_path=self.store))
+        self.assertEqual(self.deliver().state, 'DELIVERED')
+        data = self.stored()
+        data['deliveries'][self.job.digest].pop('receipt_verdict')
+        Path(self.store).write_text(json.dumps(data))
+        os.chmod(self.store, 0o600)
+        self.assertEqual(self.persist().verdict, 'SUCCESS')
+        out = self.deliver()
+        self.assertEqual((out.state, out.reason), ('UNKNOWN', 'DELIVERY_DRIFT_UNKNOWN'))
+        self.assertEqual(out.receipt_verdict, 'SUCCESS')
+
+    def test_unknown_to_different_unknown_change_is_not_promoted(self):
+        self.assertIsNone(r.reserve_host_launch(job=self.job, expect=self.expect,
+                                                store_path=self.store))
+        self.assertEqual(self.deliver().receipt_reason, 'LAUNCH_IN_FLIGHT')
+        unknown = self.persist(replace(returned(self.job), cleanup_confirmed=False))
+        self.assertEqual((unknown.verdict, unknown.reason), ('UNKNOWN', 'CLEANUP_NOT_CONFIRMED'))
+        out = self.deliver()
+        self.assertEqual((out.state, out.reason), ('UNKNOWN', 'DELIVERY_DRIFT_UNKNOWN'))
+        self.assertEqual(out.receipt_reason, 'CLEANUP_NOT_CONFIRMED')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -238,9 +238,14 @@ def _validate_deliveries(deliveries, receipt_digests):
     if type(deliveries) is not dict or len(deliveries) > MAX_STORE_RECORDS:
         raise ValueError('invalid delivery envelope')
     for k, rec in deliveries.items():
+        keys = set(rec) if type(rec) is dict else set()
         if (type(k) is not str or not k or k not in receipt_digests or type(rec) is not dict
-                or set(rec) != {'integrator_session', 'state', 'reason', 'receipt_digest'}
+                or keys not in ({'integrator_session', 'state', 'reason', 'receipt_digest'},
+                                {'integrator_session', 'state', 'reason', 'receipt_digest',
+                                 'receipt_verdict'})
                 or rec.get('state') != 'DELIVERED'
+                or ('receipt_verdict' in rec
+                    and rec['receipt_verdict'] not in (SUCCESS, FAILED, BLOCKED, UNKNOWN))
                 or type(rec.get('integrator_session')) is not str
                 or not 0 < len(rec['integrator_session']) <= MAX_DELIVERY_SESSION
                 or rec['integrator_session'] != rec['integrator_session'].strip()

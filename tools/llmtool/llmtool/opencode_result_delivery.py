@@ -35,6 +35,10 @@ the durable store instead of re-running anything::
         job=job, expect={'task': task, 'agent': agent},
         integrator_session=my_logical_integrator_session, store_path=store)
 
+``deliver_persisted`` is also the recovery call when a replayed ``run_with_delivery``
+returns a non-durable duplicate-refusal receipt: the refused reservation receipt is not
+the persisted record, so ask the store for the durable result instead.
+
 Envelope states (``delivery.state``):
 
 - ``DELIVERED`` — the receipt already persisted in the durable store was correlated
@@ -44,6 +48,15 @@ Envelope states (``delivery.state``):
   ``UNKNOWN`` or ``FAILED`` receipt is never presented as a good result; that includes
   a delivered ``UNKNOWN``/``LAUNCH_IN_FLIGHT`` reservation, which is how the Integrator
   learns that a launch was reserved but no result exists.
+- Status deliveries are promotable at most once. If an ``UNKNOWN`` receipt was already
+  delivered and the same job is later reconciled to a terminal receipt (``SUCCESS``,
+  ``FAILED`` or ``BLOCKED``) by the same ``integrator_session``, the next delivery
+  supersedes that status record with the terminal one (``redelivery: False``, real
+  ``receipt_verdict``). An ``UNKNOWN`` receipt that merely changed to a different
+  ``UNKNOWN`` is not promoted. A terminal delivery is final: any later differing
+  receipt for that job is ``UNKNOWN``/``DELIVERY_DRIFT_UNKNOWN``, and a different
+  ``integrator_session`` is always refused. A delivery record written before this
+  promotion feature carries no recorded verdict and is deliberately never promoted.
 - ``MISSING`` — no receipt was ever persisted for this job; nothing is invented and
   no Worker/provider is started to produce one.
 - ``NOT_DELIVERED`` — refused before any effect (invalid job/receipt/bindings/
@@ -51,8 +64,8 @@ Envelope states (``delivery.state``):
   delivery already owned by a different Integrator session).
 - ``UNKNOWN`` — the durable outcome could not be verified (untrusted/corrupt or
   unsafe store path, failed write, internal error, or a delivery record that no longer
-  matches the receipt digest). ``UNKNOWN`` means keep and recover; it never means
-  retry a Worker or provider.
+  matches the receipt digest; a different ``integrator_session`` is refused first).
+  ``UNKNOWN`` means keep and recover; it never means retry a Worker or provider.
 
 HONEST LIMITS. Delivery is a local, non-atomic hand-off: this module proves which
 envelope was returned to the calling process and that the stored receipt was not
@@ -62,10 +75,13 @@ process acted on it, and ``at_most_once_effect`` stays ``NOT_CLAIMED``. If the
 process dies after persisting a delivery record, ``deliver_persisted`` (or another
 ``deliver_result`` with the same durable receipt) returns that same record with
 ``redelivery: True`` (``recovery``: ``REDELIVER_PERSISTED_ENVELOPE``) and never
-relaunches anything. A delivery record is never silently rebound: a different
-``integrator_session`` or a changed receipt digest is refused/``UNKNOWN`` forever
-until an operator decides what happened. ``accepted`` is always False: a delivered
-receipt is not review, QA, security, acceptance or merge evidence.
+relaunches anything. A delivery record is never rebound to a different Integrator:
+another ``integrator_session`` is always refused, and a *terminal* delivery is final
+(any later changed receipt digest stays ``UNKNOWN``/``DELIVERY_DRIFT_UNKNOWN`` until
+an operator decides what happened). The only automatic rebinding is the documented
+one-way ``UNKNOWN`` -> terminal promotion for the same job and the same session.
+``accepted`` is always False: a delivered receipt is not review, QA, security,
+acceptance or merge evidence.
 ``integrator_session`` is caller-supplied correlation data, not an attestation of the
 live foreground session, and must not be a bearer secret.
 
@@ -91,6 +107,7 @@ DELIVERED_REASON = 'RECEIPT_DELIVERED'
 ACK_RETURNED, ACK_UNOBSERVED = 'CALLER_RETURNED', 'UNKNOWN'
 AT_MOST_ONCE = 'NOT_CLAIMED'
 RECOVERY = 'REDELIVER_PERSISTED_ENVELOPE'
+_RECEIPT_VERDICTS = frozenset({'SUCCESS', 'FAILED', 'BLOCKED', 'UNKNOWN'})
 _FROM_STORE = object()   # explicit durable-store source; never a caller-supplied receipt
 
 
@@ -272,22 +289,36 @@ def _locked(data, write, job, caller, receipt, integrator_session):
     if caller is not None and _canonical(persisted) != _canonical(caller):
         return _envelope(NOT_DELIVERED, 'RECEIPT_NOT_DURABLE', job=job,
                          verdict=verdict, verdict_reason=verdict_reason)
+    if verdict not in _RECEIPT_VERDICTS:
+        # Defense in depth: the store validator normally rejects such a receipt first.
+        # Never persist a delivery record whose verdict would poison the whole store
+        # envelope; refuse this job instead of writing an invalid receipt_verdict.
+        return _envelope(UNKNOWN, 'RECEIPT_VERDICT_INVALID', job=job,
+                         verdict=verdict, verdict_reason=verdict_reason)
     digest = receipt_digest(persisted)
     deliveries = data.get('deliveries')
     prior = deliveries.get(job.digest) if type(deliveries) is dict else None
     if type(prior) is dict:
-        if prior.get('receipt_digest') != digest:
-            return _envelope(UNKNOWN, 'DELIVERY_DRIFT_UNKNOWN', job=job,
-                             verdict=verdict, verdict_reason=verdict_reason,
-                             receipt_digest_value=digest)
         if prior.get('integrator_session') != integrator_session:
             return _envelope(NOT_DELIVERED, 'INTEGRATOR_SESSION_MISMATCH', job=job,
                              verdict=verdict, verdict_reason=verdict_reason,
                              receipt_digest_value=digest)
-        return _envelope(DELIVERED, DELIVERED_REASON, job=job,
-                         verdict=verdict, verdict_reason=verdict_reason,
-                         receipt_digest_value=digest,
-                         integrator_session=integrator_session, redelivery=True)
+        if prior.get('receipt_digest') != digest:
+            # One-way UNKNOWN -> terminal promotion for the same job and the same
+            # Integrator: an in-flight status delivery must never hide the real
+            # result that lands later. A legacy record without the recorded verdict
+            # cannot prove it was non-terminal, so it stays drift (fail-closed).
+            terminal_now = verdict != 'UNKNOWN'
+            was_unknown = prior.get('receipt_verdict') == 'UNKNOWN'
+            if not (terminal_now and was_unknown):
+                return _envelope(UNKNOWN, 'DELIVERY_DRIFT_UNKNOWN', job=job,
+                                 verdict=verdict, verdict_reason=verdict_reason,
+                                 receipt_digest_value=digest)
+        else:
+            return _envelope(DELIVERED, DELIVERED_REASON, job=job,
+                             verdict=verdict, verdict_reason=verdict_reason,
+                             receipt_digest_value=digest,
+                             integrator_session=integrator_session, redelivery=True)
     new_data = dict(data)
     new_data['deliveries'] = dict(deliveries or {})
     new_data['deliveries'][job.digest] = {
@@ -295,6 +326,7 @@ def _locked(data, write, job, caller, receipt, integrator_session):
         'state': DELIVERED,
         'reason': DELIVERED_REASON,
         'receipt_digest': digest,
+        'receipt_verdict': verdict,
     }
     try:
         write(new_data)
