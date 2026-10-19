@@ -1,6 +1,30 @@
-# Codex repository guidance
+# Repository AI collaboration guidance
 
 ## AI team delivery and delegated authority
+
+## Owner D7 — OpenCode PRIMARY / Codex Developer PAUSED (2026-10-19)
+
+**New operative role order supersedes all older Codex-first text.**
+OpenCode CLI/DeepSeek becomes the default local Developer. The previous
+Codex Developer completed [PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202);
+its source is frozen and it must not write, retest, start Reviewer
+subagents or new PRs without a further Owner decision.
+The Codex Integrator remains PM/launch/receipt/merge owner when available,
+not a routine code writer. Claude Code stays formal independent Reviewer.
+
+Review chain: OpenCode tests/fixes → separate-context DeepSeek self-review →
+fresh-context **authorized free different-model** review (GLM only if
+actually free; otherwise qualified free alternative or BLOCKED) →
+independent Claude Security/Functional/QA; FAIL returns to **OpenCode**
+for bounded repair/retest/affected rereview. Only formal PASS plus
+required CI/native evidence goes to Codex Integrator for merge.
+
+Reuse the accepted offline PR #202 adapter and existing registered D6
+`tasks/a11c-opencode-193-s3` root to complete actual Host wiring and
+the first S3 development cycle. No new controller, automatic paid
+fallback, F2/egress waiver or historical `/claude` root takeover.
+GitHub dispatch is not a Mac CLI launch; stop and report after actual S3 PASS.
+
 
 **Always read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) at the
 start of product development, review, QA handoff or Git publication.**
@@ -8,7 +32,7 @@ The user is the requirements owner/product acceptor, **not** the day-to-day
 PM, source-code reviewer, prompt courier or Mac test diagnostician. ChatGPT,
 when available as the authorized coordinator, owns technical planning,
 Codex/Claude delegation, evidence reconciliation, routine Low-risk
-dispositions and eligible PR merges under delegated scope. Codex Developer is the primary implementation writer; OpenCode is the secondary Developer only after reviewed fixed-root ownership transfer. Claude (or a separately evidenced reviewer)
+dispositions and eligible PR merges under delegated scope. **Owner D7 supersedes this: OpenCode CLI/DeepSeek is PRIMARY Developer; Codex Developer is PAUSED after frozen PR #202.** The existing D6 task worktree makes the historical `/claude` transfer unnecessary for new tasks. Claude (or a separately evidenced reviewer)
 performs the independent review. The same agent's own checks do not become
 independent QA or a security-review gate.
 
@@ -38,7 +62,7 @@ independent evidence gates before merging.
 
 **Owner reporting (approved 2026-10-19):** follow [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for evidence-backed M1b/M2/Mac-pilot milestone reports, one weekly compact pulse and material Owner decisions. Integrator handles routine work and independent gates; do not confuse a GitHub report with a notification delivered to ChatGPT or the Owner. The policy creates no new controller, authority or release milestone.
 
-**Owner D1–D5 (2026-10-19):** Read [OpenCode developer allocation](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). Codex Developer first-line; OpenCode second-line only after safe handoff of any still-active historical second root; Owner D6 allows additional registered task-scoped worktrees without a two-root ceiling. Claude Developer PAUSED, Claude Code remains formal Reviewer, company-gw unchanged, AGY backup, Cloud integration undecided. Non-sensitive whole-repo **reading** is not secret/egress/writing permission; never silently use paid fallback. Foreground active-Integrator handoff comes before separately verified original-session wake/G3.
+**Owner D1–D5 (2026-10-19):** Read [OpenCode developer allocation](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). **D7 overrides this historical role order: OpenCode PRIMARY, Codex Developer PAUSED; D6 task root is independent of the historical `/claude` transfer; Owner D6 allows additional registered task-scoped worktrees without a two-root ceiling. Claude Developer PAUSED, Claude Code remains formal Reviewer, company-gw unchanged, AGY backup, Cloud integration undecided. Non-sensitive whole-repo **reading** is not secret/egress/writing permission; never silently use paid fallback. Foreground active-Integrator handoff comes before separately verified original-session wake/G3.
 
 **Owner token-efficiency + S3 stop (2026-10-19):** Before delegating llmtool work read [Developer-owned pre-review and S3 STOP](skills/ai-team-delivery/SKILL.md#2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop). Codex/OpenCode Developers must implement, test, and fix ordinary findings **before** formal independent Claude Code review. **Codex Developer may** run a bounded separate-context Reviewer subagent when the expected risk reduction justifies using its shared Codex quota; otherwise prefer deterministic tests and formal Claude review. **OpenCode Developer must** perform its authorized qualified free cross-model pre-review (or record BLOCKED if no permitted qualified model is available). Codex Integrator/PM assigns complete work packages, avoids micro-handoff/token churn and handles final gates/integration, not routine duplicate code review. Company-gw participates only for route-qualified, privacy-authorized, actually useful low-cost advisory work; measure whole-work-package net token effects or `UNKNOWN`. **Current execution round forcibly STOPS on real OpenCode foreground S3 acceptance and evidence report**; do not automatically begin inactive-session wake or G4. This is not a new milestone, permission or waiver of independent QA.
 
