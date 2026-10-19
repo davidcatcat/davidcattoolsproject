@@ -3,11 +3,11 @@
 ## Owner D7 — OpenCode PRIMARY; Codex Developer PAUSED
 
 [PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
-delivers source/offline-reviewed Worker adapter `c421c3a`
-but **not** a verified live OpenCode CLI/Host handoff. Its operational
-Host scripts currently live as GitHub-comment/private artifacts rather
-than a native-installed runtime. OpenCode becomes the source owner of
-the remaining Host connection and one actual S3 development package
+delivered a source/offline-reviewed Worker adapter `c421c3a` and is
+**merged**, while PR #204 has since merged the independently reviewed
+foreground Host and #193 F2 fix into source. **No host-owned live S3
+invocation has yet been verified.** OpenCode remains primary Developer
+for the remaining real S3 execution package
 on the registered D6 `tasks/a11c-opencode-193-s3` root. Pause all
 Codex Developer author/subagent work; do not rewrite source already
 independently accepted. Codex Integrator stays PM/launcher/merge owner.
@@ -18,6 +18,14 @@ Claude formal source/security/native review → Claude FAIL back to
 OpenCode repair, PASS to Integrator with exact-SHA CI and Mac evidence.
 No implicit F2, privacy-export, paid-model, historical root takeover
 or Session wake grant. Stop after one actual S3 PASS and report.
+
+**Bootstrapping boundary:** apply the normative D4 exact-file
+re-admission and independent formal Claude Security review of any
+OpenCode-authored Host/containment code **before** using that code to
+admit a new OpenCode invocation. PR #204 code is reviewed/merged, but
+the Owner's manual TUI authored the candidate, so its activity is not
+host-contained S3. The first trusted Host run retains the exact two-file
+D4 admission and has no concurrent manual writer.
 
 
 ## Single A-roadmap and interim controller (owner decision 2026-10-09)
