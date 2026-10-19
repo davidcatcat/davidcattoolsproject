@@ -153,6 +153,94 @@ class CompositionTests(unittest.TestCase):
                         self.assertEqual(routes.count('/api/credential'), 1)
                         self.assertIsNone(host.credential)
 
+    def native_opener(self, job, catalog, agent_model, routes):
+        # Offline fake transport only: no provider, socket or credential file.
+        class Response:
+            def __init__(self, data, secret=False):
+                self.data = data
+                self.secret = secret
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def read(self, n):
+                if self.secret:
+                    raise AssertionError('credential response must not be read')
+                return json.dumps({'data': self.data}).encode()
+
+        class Opener:
+            def open(self, req, timeout):
+                route = req.full_url.split('127.0.0.1:12345')[-1]
+                routes.append(route)
+                if route == '/api/model':
+                    return Response(catalog)
+                if route == '/api/agent':
+                    return Response([{'id': h.w.AGENT, 'steps': job.max_steps,
+                        'model': agent_model,
+                        'permissions': h.w.configuration(job)['permissions']}])
+                raise AssertionError(route)
+
+        return Opener()
+
+    def assert_admission_unknown_without_credential(self, host, job, opener, routes):
+        with patch.object(h.urllib.request, 'build_opener', return_value=opener):
+            with self.assertRaises(h.w.WorkerError) as caught:
+                host.prepare_server(host.token, job, 'http://127.0.0.1:12345', 'SYNTHETIC',
+                                    h.time.monotonic() + 10)
+        self.assertEqual(caught.exception.worker_code, 'OPENCODE_HOST_ADMISSION_UNKNOWN')
+        self.assertNotIn('/api/credential', routes)
+
+    def test_native_catalog_missing_provider_or_id_refused_before_credential(self):
+        # Untrusted native catalog metadata missing or malformed providerID/id must
+        # refuse with a typed admission error, not an unhandled TypeError, and must
+        # never reach the credential import.
+        for field in ('providerID', 'id'):
+            for bad in ('<missing>', None, '', 123):
+                with self.subTest(field=field, bad=bad):
+                    job, policy, a, snap = self.fixture()
+                    host = h.Host(policy, a, {'synthetic': 'NOT_REAL'})
+                    host.token = object()
+                    host.consumed = True
+                    entry = {'providerID': 'opencode', 'id': job.model.split('/', 1)[1],
+                             'enabled': True,
+                             'cost': [{'input': 0, 'output': 0,
+                                       'cache': {'read': 0, 'write': 0}}]}
+                    if bad == '<missing>':
+                        del entry[field]
+                    else:
+                        entry[field] = bad
+                    routes = []
+                    opener = self.native_opener(job, [entry],
+                        {'providerID': 'opencode', 'id': job.model.split('/', 1)[1]}, routes)
+                    self.assert_admission_unknown_without_credential(host, job, opener, routes)
+
+    def test_agent_model_missing_provider_or_id_refused_before_credential(self):
+        # The selected agent's own model metadata is also untrusted native data:
+        # missing or malformed providerID/id must refuse admission instead of
+        # raising TypeError, before any credential import is attempted.
+        for field in ('providerID', 'id'):
+            for bad in ('<missing>', None, '', 123):
+                with self.subTest(field=field, bad=bad):
+                    job, policy, a, snap = self.fixture()
+                    host = h.Host(policy, a, {'synthetic': 'NOT_REAL'})
+                    host.token = object()
+                    host.consumed = True
+                    catalog = [{'providerID': 'opencode', 'id': job.model.split('/', 1)[1],
+                                'enabled': True,
+                                'cost': [{'input': 0, 'output': 0,
+                                          'cache': {'read': 0, 'write': 0}}]}]
+                    agent_model = {'providerID': 'opencode', 'id': job.model.split('/', 1)[1]}
+                    if bad == '<missing>':
+                        del agent_model[field]
+                    else:
+                        agent_model[field] = bad
+                    routes = []
+                    opener = self.native_opener(job, catalog, agent_model, routes)
+                    self.assert_admission_unknown_without_credential(host, job, opener, routes)
+
     def test_build_constructs_policy_bound_job_and_refuses_source_drift(self):
         job0, policy, a, snap = self.fixture()
         tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))

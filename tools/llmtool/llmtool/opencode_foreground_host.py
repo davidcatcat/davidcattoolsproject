@@ -38,6 +38,24 @@ def fail():
     raise w.WorkerError('OPENCODE_HOST_ADMISSION_UNKNOWN')
 
 
+def model_identity(entry):
+    """Fail-closed identity of one untrusted native model record.
+
+    Only a nonempty string providerID plus nonempty string id form a name. Any
+    other shape (absent, None, empty, non-string, non-mapping) yields None, so
+    the caller's existing admission comparisons fail() instead of raising an
+    unhandled TypeError. This never grants: a None identity cannot equal the
+    contracted model name.
+    """
+    if type(entry) is not dict:
+        return None
+    provider = entry.get('providerID')
+    name = entry.get('id')
+    if type(provider) is not str or not provider or type(name) is not str or not name:
+        return None
+    return provider + '/' + name
+
+
 @dataclass(frozen=True)
 class HostPolicy:
     """Integrator-supplied, already-accepted composition constants (data, not authority).
@@ -217,7 +235,7 @@ class Host:
                 return json.loads(data)
 
         models = request('/api/model')['data']  # native plugin readiness barrier
-        selected = [m for m in models if m.get('providerID') + '/' + m.get('id') == job.model]
+        selected = [m for m in models if model_identity(m) == job.model]
         if len(selected) != 1 or selected[0].get('enabled') is not True:
             fail()
         prices = selected[0].get('cost')
@@ -230,7 +248,7 @@ class Host:
             fail()
         agent = agents[0]
         model = agent.get('model', {})
-        if (model.get('providerID') + '/' + model.get('id') != job.model or
+        if (model_identity(model) != job.model or
             agent.get('steps') != job.max_steps):
             fail()
         rules = agent.get('permissions', [])
