@@ -280,10 +280,11 @@ evidence. Runtime stays NOT_VERIFIED and production handoff NOT_DELIVERED.
 The opt-in provider invocation is foreground `--print --output-format json
 --no-session-persistence --safe-mode --tools "" --model <pinned model>`, with
 shell disabled, isolated empty cwd, sanitized environment and pinned auth HOME.
-The syntax basis is the previously inspected installed **2.1.301/2.1.303 help**, plus
+The syntax basis is the previously inspected installed **2.1.301 help** (with
+installed **2.1.303** version/telemetry codec fixture support), plus
 Anthropic's [CLI reference](https://code.claude.com/docs/en/cli-reference) and
 [SDKResultMessage reference](https://platform.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage).
-These references are schema/design input, **not installed live protocol proof**.
+These references are schema/design input (codec fixture, **not installed live protocol/ABI proof**).
 The supported fixture codec accepts exactly one bounded `type=result`,
 `subtype=success`, `is_error=false`, canonical UUID `session_id`, JSON-string
 `result`. Optional keys are `usage`, `duration_ms`, `duration_api_ms`,

@@ -325,11 +325,43 @@ class ReviewHandoffTests(unittest.TestCase):
             dict(execution_status='SUCCEEDED', cleanup_confirmed=False),
             dict(execution_status='SUCCEEDED', ledger_status='EFFECT_UNKNOWN'),
             dict(execution_status='UNKNOWN', verdict='PASS'),
+            dict(provider_calls=1, execution_status='BLOCKED', verdict='BLOCKED', security='BLOCKED', functional='BLOCKED'),
             dict(usage_status='UNKNOWN', input_tokens=0, output_tokens=0),
             dict(usage_status='KNOWN', input_tokens=None, output_tokens=None),
         ):
             with self.subTest(bad_changes=bad_changes), self.assertRaises(LLMToolError):
                 replace(valid, **bad_changes)
+
+    def test_post_launch_anomalies_and_unreadable_ledger_never_return_blocked_execution_status(self):
+        """M-1 regression: once provider_calls > 0, execution_status must be UNKNOWN or FAILED, never BLOCKED."""
+        for anomaly in ('source_sha', 'launch_nonce', 'missing_evidence', 'changes_nonce_mismatch', 'unreadable_ledger', 'multiple_receipts'):
+            with self.subTest(anomaly=anomaly):
+                h = self.harness(mode='changes' if anomaly == 'changes_nonce_mismatch' else 'success')
+                real_run = rh.run_foreground_review
+
+                def mutated_run(issuer, ledger, *, budget):
+                    res = real_run(issuer, ledger, budget=budget)
+                    if anomaly == 'source_sha':
+                        res['verdict'] = dict(res['verdict'], source_sha='9' * 40)
+                    elif anomaly in ('launch_nonce', 'changes_nonce_mismatch'):
+                        res['job_evidence'] = dict(res['job_evidence'], launch_nonce='f' * 32)
+                    elif anomaly == 'missing_evidence':
+                        res.pop('job_evidence', None)
+                    elif anomaly == 'unreadable_ledger':
+                        issuer.foreground_services.authority.receipts.clear()
+                    elif anomaly == 'multiple_receipts':
+                        issuer.foreground_services.authority.receipts['e' * 64] = object()
+                    return res
+
+                with patch.object(rh, 'run_foreground_review', side_effect=mutated_run):
+                    receipt, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+                self.assertEqual(receipt.provider_calls, 1)
+                self.assertNotEqual(receipt.execution_status, 'BLOCKED', anomaly)
+                self.assertEqual(receipt.execution_status, 'UNKNOWN', anomaly)
+                self.assertEqual(receipt.verdict, 'BLOCKED')
+                self.assertFalse(receipt.authorized)
+                if anomaly in ('unreadable_ledger', 'multiple_receipts'):
+                    self.assertEqual(receipt.ledger_status, 'EFFECT_UNKNOWN')
 
 
 if __name__ == '__main__':

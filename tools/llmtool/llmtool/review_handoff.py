@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .action_contract import ContractValue, _hex, _identifier, _integer, _typed
-from .authorization_ledger import LedgerError, ReceiptLedger
+from .authorization_ledger import ReceiptLedger
 from .errors import LLMToolError
 from .review_authority import (
     HostPin,
@@ -112,6 +112,8 @@ class ReviewHandoffReceipt(ContractValue):
             _integer(self.output_tokens, minimum=0, maximum=10**12)
         elif self.input_tokens is not None or self.output_tokens is not None:
             reject('REVIEW_HANDOFF_RECEIPT_INVALID')
+        if self.provider_calls > 0 and self.execution_status == 'BLOCKED':
+            reject('REVIEW_HANDOFF_RECEIPT_INVALID')
         if self.verdict == 'PASS' and (
                 self.security != 'APPROVE' or
                 self.functional != 'APPROVE' or
@@ -142,15 +144,17 @@ class ReviewHandoffReceipt(ContractValue):
         return digest(self.to_dict(), 'llmtool.review-handoff-receipt.v1')
 
 
-def _extract_grant_and_ledger_status(issuer, ledger):
+def _extract_grant_and_ledger_status(issuer, ledger, provider_calls=0):
     grant_nonce = None
     services = getattr(issuer, 'foreground_services', None)
     if services is not None:
         receipts = getattr(services.authority, 'receipts', None) or {}
         if len(receipts) == 1:
             grant_nonce = next(iter(receipts))
+        elif len(receipts) > 1:
+            return None, 'EFFECT_UNKNOWN'
     if grant_nonce is None:
-        return None, 'NOT_CONSUMED'
+        return None, ('EFFECT_UNKNOWN' if provider_calls > 0 else 'NOT_CONSUMED')
     try:
         status = ledger.status(grant_nonce)
     except Exception:
@@ -162,23 +166,14 @@ def _extract_grant_and_ledger_status(issuer, ledger):
 
 def _classify_execution_status(code, provider_calls, ledger_status, cleanup_confirmed, pending_job_present, verdict_valid):
     if ledger_status in ('CONSUMED', 'EFFECT_UNKNOWN') or pending_job_present:
-        return 'UNKNOWN' if provider_calls > 0 else 'BLOCKED'
+        return 'UNKNOWN'
     if verdict_valid and ledger_status == 'EFFECT_DONE' and cleanup_confirmed:
         return 'SUCCEEDED'
-    if provider_calls == 0 and ledger_status == 'NOT_CONSUMED':
+    if provider_calls == 0 and ledger_status in ('NOT_CONSUMED', 'DENIED', 'EXPIRED'):
         return 'BLOCKED'
-    if code in (
-        'REVIEW_WORKER_PROCESS_FAILED',
-        'REVIEW_WORKER_ENVELOPE_INVALID',
-        'REVIEW_WORKER_OUTPUT_LIMIT',
-        'REVIEW_WORKER_INPUT_INCOMPLETE',
-        'REVIEW_VERDICT_INVALID',
-    ):
-        return 'FAILED' if ledger_status == 'EFFECT_DONE' else 'UNKNOWN'
-    if code in ('REVIEW_TIMEOUT', 'REVIEW_WORKER_CLEANUP_UNKNOWN', 'REVIEW_FINALIZE_UNKNOWN',
-                'REVIEW_PROVIDER_UNAVAILABLE', 'REVIEW_CANCELLED'):
-        return 'UNKNOWN'
-    return 'BLOCKED'
+    if code == 'REVIEW_VERDICT_INVALID' and ledger_status == 'EFFECT_DONE' and not pending_job_present:
+        return 'FAILED'
+    return 'UNKNOWN'
 
 
 def dispatch_review_handoff(issuer, ledger, *, budget):
@@ -248,7 +243,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     code = raw.get('code') if type(raw.get('code')) is str else 'REVIEW_BLOCKED'
     raw_calls = raw.get('provider_calls')
     provider_calls = raw_calls if type(raw_calls) is int and raw_calls in (0, 1) else 0
-    grant_nonce, ledger_status = _extract_grant_and_ledger_status(issuer, ledger)
+    grant_nonce, ledger_status = _extract_grant_and_ledger_status(issuer, ledger, provider_calls=provider_calls)
     if grant_nonce is not None and provider_calls == 0 and ledger_status in ('CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):
         provider_calls = 1
 
@@ -256,8 +251,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     pending = getattr(issuer, 'pending_job', None)
     cleanup_confirmed = (
         pending is None and (
-            provider_calls == 0 or
-            ledger_status == 'EFFECT_DONE' or (
+            provider_calls == 0 or (
                 bool(job_evidence) and
                 all(job_evidence.get(k) is True for k in ('reaped', 'pipes_drained', 'pipes_closed', 'runtime_closed'))
             )
