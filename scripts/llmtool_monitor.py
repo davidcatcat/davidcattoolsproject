@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Read-only macOS/Linux process monitor for local AI agent jobs.
 
-Shows OpenCode, Claude Code, Codex and llmtool processes. No model calls,
+Shows OpenCode, Claude Code, Codex and llmtool processes, and the progress of
+recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
+read from the harness evidence and each job's own OpenCode database. No model calls,
 repository mutation, credentials, network requests or daemon. This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions.
@@ -239,6 +241,10 @@ def describe(p: Process) -> str:
     return f"{p.name}{zombie}  PID {p.pid}  ({relation} {p.owner})"
 
 
+def running_stages(tasks: list) -> int:
+    return sum(1 for t in tasks for s in t.stages if stage_state(s) == "RUNNING")
+
+
 def summary(processes: list[Process], lingering: list) -> str:
     counts: dict[str, int] = {}
     for p in processes:
@@ -284,6 +290,8 @@ class Monitor:
         self.short_lived: dict[str, dict[str, int]] = {}
         self.last_summary = time.monotonic()
         self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
+        self.tasks: list = []
+        self.task_map: dict = {}
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -339,6 +347,17 @@ class Monitor:
                 for g in result.lingering if g not in self.lingering]
         new += [(stamp, "ok", f"process group {g}: no members left behind any more")
                 for g in self.lingering if g not in result.lingering]
+        try:
+            tasks = scan_tasks()
+        except Exception:  # task evidence is optional; never break process monitoring
+            tasks = self.tasks
+        new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks)]
+        if self.polls == 1 and tasks:
+            latest = tasks[0]
+            last = latest.stages[-1] if latest.stages else None
+            new.append((stamp, "i", f"{len(tasks)} recent llmtool task(s); latest {latest.task_id}"
+                                    + (f": {last.name} {stage_state(last)}" if last else ": not started")))
+        self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -348,7 +367,215 @@ class Monitor:
         return new
 
 
-MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·"}
+# ---------------------------------------------------------------- task view
+# Reads the llmtool foreground-harness evidence layout (manifest.json,
+# <stage>-attempt.json, <stage>-result.json) plus each job's private OpenCode
+# database, strictly read-only. Only identifiers, statuses, token counts, tool
+# names and admitted file paths are used: never prompts, model text, reasoning
+# or tool output.
+import glob
+import json
+import sqlite3
+
+TASK_GLOB = "/private/tmp/llmtool-*"
+STAGE_FILE = re.compile(r"^([A-Za-z0-9_-]{1,32})-attempt\.json$")
+CODE_TEXT = re.compile(r"^[A-Z0-9_]{1,64}$")
+SHORT_MODEL = re.compile(r"(?:^|/)([a-z0-9]+)[a-z0-9.-]*$")
+
+
+@dataclass(frozen=True)
+class Tool:
+    key: str
+    name: str
+    path: str
+    status: str
+
+
+@dataclass(frozen=True)
+class Stage:
+    name: str
+    model: str
+    started: float
+    result: str          # "" while running/unknown, else worker result code
+    cleanup: str         # "ok", "UNKNOWN" or ""
+    steps: int
+    tokens_in: int
+    tokens_out: int
+    idle: str            # native session idle outcome, "" while busy
+    tools: tuple
+
+
+@dataclass(frozen=True)
+class Task:
+    directory: str
+    task_id: str
+    branch: str
+    stages: tuple
+
+
+def _read_json(path: str, limit: int = 1 << 20):
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(limit + 1)
+        return json.loads(raw) if len(raw) <= limit else None
+    except (OSError, ValueError):
+        return None
+
+
+def _model_short(model: str) -> str:
+    found = SHORT_MODEL.search(model or "")
+    return found.group(1) if found else "?"
+
+
+def _relative(path: str, root: str) -> str:
+    if root and path.startswith(root.rstrip("/") + "/"):
+        path = path[len(root.rstrip("/")) + 1:]
+    return SAFE_PATH.sub("", path)[:80] or "?"
+
+
+SAFE_PATH = re.compile(r"[^A-Za-z0-9._/+-]")
+
+
+def _native(state_root: str, root: str) -> tuple:
+    """(steps, tokens_in, tokens_out, idle_outcome, tools) from the job's own DB."""
+    db_path = os.path.join(state_root, "data", "opencode", "opencode.db")
+    if not os.path.isfile(db_path):
+        return 0, 0, 0, "", ()
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.2)
+    except sqlite3.Error:
+        return 0, 0, 0, "", ()
+    try:
+        steps = tin = tout = 0
+        idle = ""
+        tools = []
+        for (outcome,) in db.execute("SELECT idle_outcome FROM session_v2 ORDER BY time_created"):
+            idle = outcome if isinstance(outcome, str) and CODE_TEXT.fullmatch(outcome.upper()) else idle
+        for (data,) in db.execute("SELECT data FROM session_message WHERE type='assistant' ORDER BY seq"):
+            try:
+                message = json.loads(data)
+            except ValueError:
+                continue
+            steps += 1
+            usage = message.get("tokens") or {}
+            cache = usage.get("cache") or {}
+            tin += int(usage.get("input") or 0) + int(cache.get("read") or 0)
+            tout += int(usage.get("output") or 0) + int(usage.get("reasoning") or 0)
+            for item in message.get("content") or ():
+                if not isinstance(item, dict) or item.get("type") != "tool":
+                    continue
+                state = item.get("state") or {}
+                given = state.get("input") or {}  # only the path is used
+                name = SAFE_NAME.sub("", str(item.get("name") or "?"))[:16] or "?"
+                status = SAFE_NAME.sub("", str(state.get("status") or "?"))[:12] or "?"
+                tools.append(Tool(str(item.get("id") or len(tools))[:64], name,
+                                  _relative(str(given.get("path") or ""), root), status))
+        return steps, tin, tout, idle, tuple(tools)
+    except (sqlite3.Error, TypeError, ValueError):
+        return 0, 0, 0, "", ()
+    finally:
+        db.close()
+
+
+def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0) -> list[Task]:
+    """Recently active llmtool harness evidence directories, newest first."""
+    cutoff = time.time() - window_hours * 3600
+    tasks = []
+    for directory in glob.glob(pattern):
+        manifest_path = os.path.join(directory, "manifest.json")
+        try:
+            if not os.path.isfile(manifest_path) or os.path.getmtime(directory) < cutoff:
+                continue
+        except OSError:
+            continue
+        manifest = _read_json(manifest_path) or {}
+        root = str(manifest.get("root") or "")
+        stages = []
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for entry in names:
+            found = STAGE_FILE.match(entry)
+            if not found:
+                continue
+            stage = found.group(1)
+            attempt_path = os.path.join(directory, entry)
+            attempt = _read_json(attempt_path) or {}
+            result = _read_json(os.path.join(directory, f"{stage}-result.json")) or {}
+            code = str(result.get("code") or "")
+            code = code if CODE_TEXT.fullmatch(code) else ("?" if result else "")
+            cleanup = "" if not result else ("ok" if result.get("cleanup_confirmed") is True else "UNKNOWN")
+            state_root = str(attempt.get("state_root") or "")
+            steps, tin, tout, idle, tools = _native(state_root, root) if state_root else (0, 0, 0, "", ())
+            try:
+                started = os.path.getmtime(attempt_path)
+            except OSError:
+                started = 0.0
+            stages.append(Stage(stage, _model_short(str(attempt.get("model") or "")), started,
+                                code, cleanup, steps, tin, tout, idle, tools))
+        stages.sort(key=lambda s: s.started)
+        task_id = SAFE_NAME.sub("", str(manifest.get("task_id") or os.path.basename(directory)))[:48]
+        branch = SAFE_PATH.sub("", str(manifest.get("branch") or ""))[:60]
+        tasks.append(Task(directory, task_id or "?", branch, tuple(stages)))
+    tasks.sort(key=lambda t: max([s.started for s in t.stages] or [0]), reverse=True)
+    return tasks
+
+
+def stage_state(stage: Stage) -> str:
+    if stage.result:
+        return stage.result
+    return "RUNNING" if stage.idle == "" else f"NO RESULT FILE (native {stage.idle})"
+
+
+def task_events(old: dict, new: list[Task]) -> list[tuple[str, str]]:
+    """(kind, text) for new stages, new tool calls and finished stages."""
+    out = []
+    for task in new:
+        before = old.get(task.directory)
+        known = {s.name: s for s in before.stages} if before else {}
+        for stage in task.stages:
+            prior = known.get(stage.name)
+            if before is None:
+                continue  # first sight of a task: summarised, not replayed
+            if prior is None:
+                out.append(("▶", f"{task.task_id}: stage {stage.name} started ({stage.model})"))
+            seen = {t.key for t in prior.tools} if prior else set()
+            for tool in stage.tools:
+                if tool.key not in seen:
+                    out.append(("→", f"{task.task_id} {stage.name}: {tool.name} {tool.path}"
+                                     f"{'' if tool.status == 'completed' else ' [' + tool.status + ']'}"))
+            if stage.result and (prior is None or not prior.result):
+                kind = "■" if stage.result.endswith("RETURNED") and stage.cleanup == "ok" else "!"
+                out.append((kind, f"{task.task_id}: stage {stage.name} finished: {stage.result}, "
+                                  f"cleanup {stage.cleanup}, {stage.steps} steps, "
+                                  f"{stage.tokens_in / 1000:.1f}k in / {stage.tokens_out / 1000:.1f}k out"))
+    return out
+
+
+def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
+    if not tasks:
+        return ["No recent llmtool task evidence under /private/tmp/llmtool-* (last 12 h)."]
+    lines = []
+    for task in tasks[:limit]:
+        lines.append(f"TASK {task.task_id}   branch {task.branch or '-'}")
+        if not task.stages:
+            lines.append("    (prepared, no model stage started yet)")
+        for stage in task.stages:
+            when = datetime.fromtimestamp(stage.started).strftime("%H:%M:%S") if stage.started else "--:--:--"
+            lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage):<28} "
+                         f"cleanup {stage.cleanup or '-':<7} steps {stage.steps:<3} "
+                         f"{stage.tokens_in / 1000:.1f}k in / {stage.tokens_out / 1000:.1f}k out")
+            for tool in stage.tools[-6:]:
+                mark = "✓" if tool.status == "completed" else tool.status
+                lines.append(f"        {tool.name:<6} {tool.path}  {mark}")
+            if len(stage.tools) > 6:
+                lines.append(f"        … {len(stage.tools) - 6} earlier tool calls")
+        lines.append("")
+    return lines
+
+
+MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
 FOOTNOTE = "running != model generating; gone != task done"
 
 
@@ -360,7 +587,9 @@ def run_once() -> int:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
     print("\n".join(table_lines(mon.processes)))
-    print(f"\nNote: {FOOTNOTE}.")
+    print("\nRECENT LLMTOOL TASKS")
+    print("\n".join(task_lines(mon.tasks, 3)))
+    print(f"Note: {FOOTNOTE}.")
     return 0
 
 
@@ -387,7 +616,9 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         curses.use_default_colors()
         for n, (key, fg) in enumerate((("title", curses.COLOR_CYAN), ("!", curses.COLOR_YELLOW),
                                        ("+", curses.COLOR_GREEN), ("-", curses.COLOR_MAGENTA),
-                                       ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN)), start=1):
+                                       ("?", curses.COLOR_RED), ("ok", curses.COLOR_GREEN),
+                                       ("▶", curses.COLOR_CYAN), ("→", curses.COLOR_BLUE),
+                                       ("■", curses.COLOR_GREEN)), start=1):
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "log", 0, 0.0
@@ -411,6 +642,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             colors.get("title", 0) | curses.A_BOLD)
         status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
                   else summary(mon.processes, mon.lingering))
+        running = running_stages(mon.tasks)
+        status += f"  ·  llmtool stages running: {running}" if running else ""
         put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
         if view == "log":
             entries = list(mon.log)
@@ -418,23 +651,36 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             end = len(entries) - offset
             for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
                 put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-            hint = "Tab: processes  ↑↓/PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
+        elif view == "tasks":
+            lines = task_lines(mon.tasks)
+            offset = max(0, min(offset, len(lines) - body))
+            for row, line in enumerate(lines[offset:offset + body]):
+                attr = curses.A_BOLD if line.startswith("TASK") else 0
+                if "RUNNING" in line:
+                    attr |= colors.get("+", 0)
+                elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
+                    attr |= colors.get("!", 0)
+                put(3 + row, line, attr)
+            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  q: quit"
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-            hint = "Tab: event log  ↑↓/PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  q: quit"
         put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (ord("q"), ord("Q"), 27):
             return
-        if key in (9, ord("p"), ord("l")):  # Tab, or p/l to pick processes/log
-            view = "table" if (key == ord("p") or (key == 9 and view == "log")) else "log"
-            offset = 0
+        views = ("log", "tasks", "table")
+        if key == 9:  # Tab cycles log -> tasks -> processes
+            view, offset = views[(views.index(view) + 1) % 3], 0
+        elif key in (ord("1"), ord("2"), ord("3")):
+            view, offset = views[key - ord("1")], 0
         elif key == curses.KEY_UP:
             offset += 1 if view == "log" else -1
         elif key == curses.KEY_DOWN:
