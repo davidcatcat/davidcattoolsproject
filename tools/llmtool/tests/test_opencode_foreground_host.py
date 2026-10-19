@@ -277,6 +277,72 @@ class CompositionTests(unittest.TestCase):
             with self.assertRaises(h.w.WorkerError):
                 h.build(**bad)
 
+    def test_explicit_bindings_retention_and_validation(self):
+        job0, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        task = h.TaskBinding('custom-task-id', 'b' * 32, 1, policy.contract)
+        agent = h.AgentBinding('custom-agent-id', 'custom-session', h.Role.DEVELOPER, policy.root, job0.agent.common_dir, 'feat/developer')
+        values = dict(policy=policy, run_id='b' * 32, assignment_session='custom-session', expected_branch='feat/developer', expected_head=job0.source_sha, executable='/synthetic/opencode.exe', executable_sha256='d' * 64, common_dir=job0.agent.common_dir, private_parent=str(Path(tmp.name).resolve()), prompt='bounded developer prompt', phase='DEVELOP', write_paths=('PUBLIC.txt',), usage=UsageLedger((), 0, 0), budget=RunBudget(1, 8, 0, 600000, 100000, 10000), current_integrator_session='synthetic-current-session', c2_c3_reference='accepted-c3', source_route_privacy_reference='accepted-egress', runtime_policy_reference='atomic-native-job-policy', task_binding=task, agent_binding=agent)
+        def git(root, *args):
+            return ((job0.source_sha if args[-1] == 'HEAD' else 'feat/developer') + chr(10)).encode()
+        with patch.object(h, 'git', side_effect=git):
+            job, admission = h.build(**values)
+        self.assertIs(job.task, task)
+        self.assertIs(job.agent, agent)
+        self.assertEqual(job.task.run_id, 'b' * 32)
+        self.assertEqual(job.agent.session_id, 'custom-session')
+        bad_task = replace(task, contract_digest='c' * 64)
+        bad_values = dict(values, task_binding=bad_task)
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as mock_provision:
+            with self.assertRaises(h.w.WorkerError):
+                h.build(**bad_values)
+            mock_provision.assert_not_called()
+        bad_agent = replace(agent, role=h.Role.REVIEWER)
+        bad_values = dict(values, agent_binding=bad_agent)
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as mock_provision:
+            with self.assertRaises(h.w.WorkerError):
+                h.build(**bad_values)
+            mock_provision.assert_not_called()
+        half_values = dict(values, agent_binding=None)
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as mock_provision:
+            with self.assertRaises(h.w.WorkerError):
+                h.build(**half_values)
+            mock_provision.assert_not_called()
+        mismatch_values = dict(values, run_id='a' * 32)
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as mock_provision:
+            with self.assertRaises(h.w.WorkerError):
+                h.build(**mismatch_values)
+            mock_provision.assert_not_called()
+        legacy_values = dict(values, task_binding=None, agent_binding=None, run_id='a' * 32, assignment_session='synthetic-integrator-session')
+        with patch.object(h, 'git', side_effect=git):
+            job_legacy, _ = h.build(**legacy_values)
+        self.assertEqual(job_legacy.task.run_id, 'a' * 32)
+
+    def test_build_missing_required_kwarg_fails_at_bind_time(self):
+        job0, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        values = dict(policy=policy, run_id='a' * 32,
+            assignment_session='synthetic-integrator-session', expected_branch='feat/developer',
+            expected_head=job0.source_sha, executable='/synthetic/opencode.exe',
+            executable_sha256='d' * 64, common_dir=job0.agent.common_dir,
+            private_parent=str(Path(tmp.name).resolve()), prompt='bounded developer prompt',
+            phase='DEVELOP', write_paths=('PUBLIC.txt',), usage=UsageLedger((), 0, 0),
+            budget=RunBudget(1, 8, 0, 600000, 100000, 10000),
+            current_integrator_session='synthetic-current-session', c2_c3_reference='accepted-c3',
+            source_route_privacy_reference='accepted-egress',
+            runtime_policy_reference='atomic-native-job-policy')
+        required = ['policy', 'expected_branch', 'expected_head', 'executable', 'executable_sha256', 'common_dir', 'private_parent', 'prompt', 'phase', 'write_paths', 'usage', 'budget', 'current_integrator_session', 'c2_c3_reference', 'source_route_privacy_reference', 'runtime_policy_reference']
+        for kw in required:
+            bad = dict(values)
+            del bad[kw]
+            with patch.object(h, 'git', return_value=b'') as mock_git, patch.object(h, 'provision_runtime') as mock_prov:
+                with self.assertRaises(TypeError):
+                    h.build(**bad)
+                mock_prov.assert_not_called()
+                mock_git.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()
