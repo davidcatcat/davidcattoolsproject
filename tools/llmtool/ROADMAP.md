@@ -434,6 +434,19 @@ manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
 External ChatGPT review PASS; A4 status is documented below.
 
+### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20)
+
+**Status: PLANNED / NOT IMPLEMENTED.** This is a staged UX enhancement owned by existing A3.5, **not** a new A-series product milestone or a prerequisite for A11c G3/G4/M2. The accepted A3.5 line-based chat, Provider/Skill commands, safe error handling and non-interactive CLI remain functional. No new Shell/Git/File-write/model tool authority is implied. Deliver each slice independently with review and regression evidence.
+
+| Delivery checkpoint | Scope and acceptance | Dependencies / priority |
+| --- | --- | --- |
+| **UX-1 — Usable TUI foundation** | Preserve `llmtool chat` entry; add scrollable conversation, persistent input, multiline edit, keyboard help, resize behavior, Unicode and clean exit. Legacy line-mode/fallback remains available, including non-TTY/piped use. Automated input/state tests and Mac terminal smoke. | **First**; prefer small optional terminal/UI dependency rather than a new daemon/controller. |
+| **UX-2 — Truthful runtime status** | Show selected Provider/model, local connectivity result only when actually probed, working/idle/error/429, measured elapsed and Provider-reported tokens or UNKNOWN; no fake progress or implied VPN/API readiness. Sanitize errors and never expose credentials, prompts or model internals in diagnostics. | **Second**, may follow UX-1 immediately; reuse A11a/task evidence. |
+| **UX-3 — Development evidence UI** | Render Markdown and fenced code, bounded diff/test output, task/worktree references, self-review vs non-author Claude review status, explicit BLOCKED/NEEDS_DECISION and provenance. READ-ONLY display; do not add executor permissions. | **After existing evidence interfaces are usable**; never gate G3/G4/M2 on a richer UI. |
+| **UX-4 — Default UX acceptance** | Mac native PTY/resize/Ctrl-C/EOF, long output and history, Python 3.9/3.14 supported-path CI, offline fake-Provider tests, VPN/API failure recovery, no secret rendering, independent Security/Functional/QA review. Only make TUI default after fallback parity and review. | **Last**, optional release acceptance, separate from M2. |
+
+**Delivery rules:** Prioritize UX-1 and UX-2 before polish, avoid duplicate Status/Monitor subsystems (reuse Issue #209/PR #210 read-only evidence when appropriate), do not touch canonical Owner-active worktrees without safe-git ownership checks, and keep UX tasks disjoint from the active G3 Worker path. PM/Integrator may assign a small independently owned worktree and reviewer through existing authorized workflows. Report demonstrable usage, regressions, and exact-head acceptance; documentation is not deployment proof.
+
 ## A4 — Evidence-first Context Packet ✅ DONE and merged to main
 
 Provider != Role != Agent != Skill != Context Packet. Frozen typed ContextPacket
