@@ -15,8 +15,10 @@ to switch primary development to OpenCode CLI because of Codex Developer
 token consumption, review prior Codex source, then pause Codex Developer.
 This is an attributed chat decision, **not a signed GitHub comment**.
 [PR #202 source/offline handover](https://github.com/davidcatcat/davidcattoolsproject/pull/202#issuecomment-6258306864)
-accepts the existing adapter as a foundation **only**; actual model
-inference, native Host, S3 and formal source QA remain independent gates.
+accepted the adapter as a foundation at the time; PRs #202 and #204
+have since **merged** after source/offline and original Mac Claude
+Security/Functional/native QA. A real host-owned OpenCode `run()`, S3
+and same-active-Integrator receipt are **still NOT VERIFIED**.
 Existing Codex Integrator/PM and separate Codex Cloud lane are not
 blanket-paused by this Developer-only instruction.
 
@@ -31,6 +33,16 @@ privacy/auth, free-pricing or actual Mac runner means BLOCKED,
 not an automatic paid API or Codex Developer fallback.
 No new controller/milestone or simulated live claim. Stop after
 the first accepted S3 and report.
+
+**D4 bootstrapping clarification (independent Claude #203 review):**
+Any different OpenCode read/write file set needs new exact-file D4
+source/egress admission **before** the call. A Host/containment code
+change written by OpenCode cannot authorize its own next invocation:
+independent original Claude formal Security review must accept the
+actual changed Host code before the Host may use it to admit a Worker.
+The initial host-contained S3 task uses the already independently
+reviewed PR #204 Host and exact admitted two-file source window,
+without the Owner's manual TUI acting as the Host Worker.
 
 ## Accepted allocation
 
