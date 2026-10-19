@@ -215,6 +215,100 @@ class LifecycleStateTests(unittest.TestCase):
 
 
 class BoundedWorkerLifecycleTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process groups')
+    def test_reaped_leader_with_live_descendant_keeps_cleanup_unknown(self):
+        import select, subprocess, sys, time
+        release_read, release_write = os.pipe()
+        # Only the test holds the writer; EOF releases the descendant even if
+        # assertions fail. The alarm bounds a broken fixture independently.
+        descendant_script = ('import os,signal; signal.alarm(5); '
+                             'os.read(%d,1)' % release_read)
+        script = ('import os,signal,subprocess,sys; signal.alarm(5); '
+                  'child=subprocess.Popen([sys.executable,"-B","-I","-c",'
+                  + repr(descendant_script) + '],pass_fds=(' + str(release_read) + ',),'
+                  'stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); '
+                  'print(child.pid,flush=True); sys.stdin.buffer.read(1)')
+        leader = subprocess.Popen([sys.executable, '-B', '-I', '-c', script],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            start_new_session=True, pass_fds=(release_read,))
+        os.close(release_read)
+        lifecycle = CLIProcessLifecycle('claude-cli', deadline=time.monotonic() + 3)
+        try:
+            lifecycle.own(leader)
+            self.assertTrue(select.select([leader.stdout], [], [], 2)[0])
+            descendant = int(leader.stdout.readline())
+            leader.stdin.write(b'x'); leader.stdin.close()
+            leader.wait(timeout=2)
+            self.assertEqual(leader.returncode, 0)
+            os.kill(descendant, 0)
+            actual_killpg = os.killpg
+            with patch('llmtool.providers.cli_lifecycle.os.killpg', wraps=actual_killpg) as probe:
+                lifecycle.stop()
+            self.assertFalse(lifecycle.cleanup_confirmed)
+            self.assertTrue(leader._llmtool_cleanup_pending)
+            self.assertTrue(all(call.args[1] == 0 for call in probe.call_args_list),
+                            'reaped PGID must never receive a terminating signal')
+        finally:
+            os.close(release_write)
+            for stream in (leader.stdin, leader.stdout):
+                if stream is not None and not stream.closed:
+                    stream.close()
+            leader.wait(timeout=5)
+            # Read-only probes after release; never kill an orphan by stale ID.
+            until = time.monotonic() + 3
+            while True:
+                try:
+                    os.killpg(leader.pid, 0)
+                except ProcessLookupError:
+                    break
+                except PermissionError:
+                    pass  # Present/unobservable; keep waiting through the same deadline.
+                self.assertLess(time.monotonic(), until, 'fixture group still present')
+                time.sleep(0.01)
+
+    def test_reaped_group_absence_is_required_and_never_signals(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        for effect, expected in ((None, False), (PermissionError(), False),
+                                 (OSError(), False), (ProcessLookupError(), True)):
+            with self.subTest(effect=effect):
+                process = Mock(returncode=0, pid=12345)
+                process._llmtool_owned_pgid = 12345
+                process._llmtool_owner_pid = os.getpid()
+                process._llmtool_group_unconfirmed = False
+                with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=effect) as probe:
+                    self.assertIs(bounded_terminate(process, time.monotonic() + 1), expected)
+                probe.assert_called_once_with(12345, 0)
+                process.kill.assert_not_called()
+                process.wait.assert_not_called()
+                self.assertIs(process._llmtool_cleanup_pending, not expected)
+
+    def test_kill_and_wait_do_not_confirm_remaining_group_absence(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        for observation in (None, PermissionError(), OSError()):
+            with self.subTest(observation=observation):
+                process = Mock(returncode=None, pid=12345)
+                process._llmtool_owned_pgid = 12345
+                process._llmtool_owner_pid = os.getpid()
+                process._llmtool_group_unconfirmed = False
+                def wait(*, timeout):
+                    process.returncode = -signal.SIGKILL
+                def signal_or_probe(pgid, sig):
+                    if sig == 0 and observation is not None:
+                        raise observation
+                process.wait.side_effect = wait
+                with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                           side_effect=signal_or_probe) as calls:
+                    self.assertFalse(bounded_terminate(process, time.monotonic() + 1))
+                    self.assertEqual([call.args for call in calls.call_args_list],
+                                     [(12345, signal.SIGKILL), (12345, 0)])
+                    calls.reset_mock()
+                    self.assertFalse(bounded_terminate(process, time.monotonic() + 1))
+                    calls.assert_called_once_with(12345, 0)
+                self.assertTrue(process._llmtool_cleanup_pending)
+                process.kill.assert_not_called()
+
     def test_unowned_and_reaped_never_signal(self):
         from llmtool.providers.cli_lifecycle import bounded_terminate
         import time
@@ -223,7 +317,9 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
             self.assertFalse(bounded_terminate(process,time.monotonic()+1))
             kill.assert_not_called();process.wait.assert_not_called()
         process.returncode=0
-        self.assertTrue(bounded_terminate(process,time.monotonic()+1))
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as kill:
+            self.assertFalse(bounded_terminate(process,time.monotonic()+1))
+            kill.assert_not_called()
 
     def test_unknown_teardown_keeps_pending_ownership_no_unbounded_wait(self):
         from llmtool.providers.cli_lifecycle import bounded_terminate
@@ -266,10 +362,15 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
             reaped.returncode = -signal.SIGKILL
             return reaped.returncode
         reaped.wait.side_effect = wait_reaped
+        def signal_or_probe(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError()
         with patch('llmtool.providers.cli_lifecycle.os.killpg',
-                   side_effect=lambda pgid, sig: events.append(('killpg', pgid, sig))):
+                   side_effect=signal_or_probe):
             self.assertTrue(bounded_terminate(reaped, time.monotonic() - 0.5))
-        self.assertEqual(events, [('killpg', 23456, signal.SIGKILL), ('wait', 0)])
+        self.assertEqual(events, [('killpg', 23456, signal.SIGKILL), ('wait', 0),
+                                  ('killpg', 23456, 0)])
         self.assertFalse(reaped._llmtool_cleanup_pending)
 
         for bad_deadline in (None, 'bad', math.nan, math.inf, -math.inf):
