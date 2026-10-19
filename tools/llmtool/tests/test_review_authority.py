@@ -509,8 +509,12 @@ class WorkerJobIntegrationTests(unittest.TestCase):
             self.assertIsNone(h.launcher.pending_job)
 
     def test_reap_unknown_retains_owned_child_and_forbids_relaunch(self):
-        import subprocess
-        h=self.harness()
+        import signal,subprocess
+        # 'timeout' keeps the owned fixture child alive until the bounded teardown
+        # kills it. An already-exited child would instead be reaped by the
+        # EPERM->kill() poll on Darwin and then confirmed absent with signal zero,
+        # so the unknown-reap branch would never be exercised on this platform.
+        h=self.harness(mode='timeout')
         with patch.object(subprocess.Popen,'wait',side_effect=subprocess.TimeoutExpired('fake',1)), \
                 patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
             result=h.run()
@@ -527,6 +531,9 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         finally:
             # Test-owned unreaped fake child only; restore actual bounded wait.
             pending.process.wait(timeout=2)
+        # The retained child was a live owned process ended by SIGKILL, not an
+        # already-exited one whose reap was merely patched (that would be 0).
+        self.assertEqual(pending.process.returncode,-signal.SIGKILL)
         with patch('llmtool.providers.cli_lifecycle.os.killpg') as probe:
             pending.stop()
         self.assertTrue(all(call.args == (pending.process.pid, 0)
@@ -677,14 +684,17 @@ class ForegroundEntryTests(unittest.TestCase):
         self.assertEqual(h.ledger._db.execute('SELECT count(*) FROM receipts').fetchone()[0],1)
 
     def test_finalize_failure_and_unknown_owned_child_stay_inspectable(self):
-        import subprocess
+        import signal,subprocess
         h=self.harness()
         with patch.object(a.ProductionReviewAuthority,'finalize',side_effect=RuntimeError('private')):
             result=self.invoke(h)
         self.assertEqual(result['code'],'REVIEW_FINALIZE_UNKNOWN')
         self.assertEqual(result['provider_calls'],1)
         self.assertIsNotNone(h.issuer.foreground_services)
-        h=self.harness()
+        # Same live-child requirement as the retained-child case in
+        # WorkerJobIntegrationTests: the fixture must still own a running child
+        # when the bounded reap fails.
+        h=self.harness(mode='timeout')
         with patch.object(subprocess.Popen,'wait',side_effect=subprocess.TimeoutExpired('fake',1)):
             result=self.invoke(h)
         pending=h.issuer.pending_job
@@ -697,6 +707,7 @@ class ForegroundEntryTests(unittest.TestCase):
             self.assertIs(h.issuer.pending_job,pending)
         finally:
             pending.process.wait(timeout=2) # bounded test-owned cleanup only
+        self.assertEqual(pending.process.returncode,-signal.SIGKILL)
 
     def test_concurrent_claim_rejects_without_waiting_or_replacing_holder(self):
         import threading
