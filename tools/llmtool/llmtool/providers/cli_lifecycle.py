@@ -73,7 +73,10 @@ def bounded_terminate(process, deadline):
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except PermissionError:
-                process._llmtool_group_unconfirmed = True
+                # A fresh EPERM on an owned, unreaped group is Darwin's
+                # zombie-only window, not proof that group ownership was lost.
+                # Keep the existing pin (a prior UNKNOWN stays UNKNOWN), reap
+                # this still-pinned child, then re-observe with signal zero.
                 process.kill()
         else:
             process._llmtool_group_unconfirmed = True

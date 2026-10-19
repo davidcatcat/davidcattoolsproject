@@ -686,20 +686,28 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
             raise PermissionError('synthetic EPERM')
         with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=fail_killpg):
             self.assertFalse(bounded_terminate(process, time.monotonic() + 0.5))
-        self.assertEqual(len(events), 3)
+        self.assertGreaterEqual(len(events), 3)
         self.assertEqual(events[0], ('killpg', 12345, signal.SIGKILL))
         self.assertEqual(events[1], 'kill')
         self.assertEqual(events[2][0], 'wait')
         self.assertGreaterEqual(events[2][1], 0)
         self.assertLessEqual(events[2][1], 0.5)
+        self.assertTrue(all(event == ('killpg', 12345, 0) for event in events[3:]),
+                        'after the child is reaped only signal-zero probes are allowed')
         self.assertTrue(process._llmtool_cleanup_pending)
         self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertIsNot(getattr(process, '_llmtool_group_unconfirmed', None), True,
+                         'a fresh owned-group EPERM must not become permanent UNKNOWN')
 
-        with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=PermissionError('persistent EPERM')) as killpg:
             process.kill.reset_mock()
             process.wait.reset_mock()
             self.assertFalse(bounded_terminate(process, time.monotonic() + 0.5))
-            killpg.assert_not_called()
+            probes = killpg.call_args_list
+            self.assertTrue(probes)
+            self.assertTrue(all(call.args == (12345, 0) for call in probes),
+                            'an already-reaped group may only receive signal zero')
             process.kill.assert_not_called()
             process.wait.assert_not_called()
         self.assertTrue(process._llmtool_cleanup_pending)
@@ -783,6 +791,367 @@ class BoundedWorkerLifecycleTests(unittest.TestCase):
             self.assertIsNone(getattr(invalid, '_llmtool_owned_pid', None))
             self.assertIsNone(getattr(invalid, '_llmtool_owned_pgid', None))
             self.assertFalse(lifecycle.cleanup_confirmed)
+
+    def test_group_kill_eperm_then_reap_then_esrch_confirms_absence(self):
+        # Darwin can return EPERM for both killpg(0) and killpg(SIGKILL) on an
+        # owned, unreaped zombie-only group. EPERM is not proof of absence, but
+        # once the owned leader is reaped, a signal-zero ESRCH does confirm it.
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        pid = 61001
+        events = []
+        process = Mock(returncode=None, pid=pid)
+        process._llmtool_owned_pgid = pid
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+        process.kill.side_effect = lambda: events.append(('kill',))
+
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            process.returncode = -signal.SIGKILL
+
+        process.wait.side_effect = wait
+
+        def killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            if sig == signal.SIGKILL:
+                raise PermissionError('synthetic Darwin zombie-only EPERM')
+            raise ProcessLookupError()
+
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg):
+            self.assertTrue(bounded_terminate(process, time.monotonic() + 1.0))
+
+        self.assertFalse(process._llmtool_cleanup_pending)
+        killpg_events = [(index, event) for index, event in enumerate(events)
+                         if event[0] == 'killpg']
+        wait_indices = [index for index, event in enumerate(events)
+                        if event[0] == 'wait']
+        self.assertEqual(len(wait_indices), 1)
+        wait_index = wait_indices[0]
+        self.assertEqual(killpg_events[0][1], ('killpg', pid, signal.SIGKILL))
+        self.assertTrue(all(event[2] == 0 for _, event in killpg_events[1:]),
+                        'only signal-zero probes are allowed after the EPERM attempt')
+        self.assertTrue(all(index > wait_index for index, _ in killpg_events[1:]),
+                        'no group signal may be delivered after the leader is reaped')
+        self.assertTrue(any(index > wait_index and event[2] == 0
+                            for index, event in killpg_events),
+                        'the reaped group must be re-observed with signal zero')
+        kill_events = [index for index, event in enumerate(events)
+                       if event[0] == 'kill']
+        self.assertLessEqual(len(kill_events), 1)
+        self.assertTrue(all(index < wait_index for index in kill_events),
+                        'no destructive signal may follow the bounded reap')
+
+    def test_group_kill_eperm_then_reap_persistent_eperm_or_presence_stays_unknown_and_bounded(self):
+        # After the owned leader is reaped, persistent EPERM or persistent
+        # presence is still UNKNOWN. Re-observation must stay signal-zero-only
+        # and be capped by the grace, not consume a far job deadline.
+        from llmtool.providers.cli_lifecycle import bounded_terminate, _REOBSERVE_GRACE
+        cases = (('eperm', 61101, PermissionError()),
+                 ('presence', 61102, None),
+                 ('oserror', 61103, OSError()))
+        for role, pid, observation in cases:
+            with self.subTest(role=role):
+                class Clock:
+                    def __init__(self):
+                        self.now = 1000.0
+
+                    def monotonic(self):
+                        return self.now
+
+                    def sleep(self, seconds):
+                        self.now += seconds
+
+                clock = Clock()
+                events = []
+                process = Mock(returncode=None, pid=pid)
+                process._llmtool_owned_pgid = pid
+                process._llmtool_owner_pid = os.getpid()
+                process._llmtool_group_unconfirmed = False
+
+                def wait(*, timeout=None):
+                    events.append(('wait', timeout))
+                    process.returncode = -signal.SIGKILL
+
+                process.wait.side_effect = wait
+
+                def killpg(pgid, sig):
+                    events.append(('killpg', pgid, sig))
+                    if sig == signal.SIGKILL:
+                        raise PermissionError('synthetic group EPERM')
+                    if observation is not None:
+                        raise observation
+
+                start = clock.now
+                with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                           side_effect=killpg), \
+                        patch('llmtool.providers.cli_lifecycle.time', clock):
+                    self.assertFalse(bounded_terminate(process, clock.now + 600))
+
+                self.assertTrue(process._llmtool_cleanup_pending)
+                wait_indices = [index for index, event in enumerate(events)
+                                if event[0] == 'wait']
+                self.assertEqual(len(wait_indices), 1)
+                wait_index = wait_indices[0]
+                probes = events[wait_index + 1:]
+                self.assertGreaterEqual(len(probes), 2,
+                                        'must re-observe, not decide on one probe')
+                self.assertTrue(all(event == ('killpg', pid, 0) for event in probes),
+                                'a reaped owned group may only receive existence queries')
+                destructive = [index for index, event in enumerate(events)
+                               if event[0] == 'killpg' and event[2] != 0]
+                self.assertEqual(len(destructive), 1)
+                self.assertLess(destructive[0], wait_index)
+                self.assertLessEqual(clock.now - start, _REOBSERVE_GRACE + 0.1,
+                                     're-observation must not consume the far deadline')
+
+    def test_group_kill_eperm_then_reap_expired_deadline_probes_once_without_sleep(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = Clock()
+        pid = 61201
+        events = []
+        process = Mock(returncode=None, pid=pid)
+        process._llmtool_owned_pgid = pid
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            process.returncode = -signal.SIGKILL
+
+        process.wait.side_effect = wait
+
+        def killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            if sig == signal.SIGKILL:
+                raise PermissionError('synthetic group EPERM')
+            # Persistent presence after reap.
+
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg), \
+                patch('llmtool.providers.cli_lifecycle.time', clock):
+            self.assertFalse(bounded_terminate(process, clock.now - 1.0))
+
+        self.assertEqual(events, [('killpg', pid, signal.SIGKILL), ('wait', 0),
+                                  ('killpg', pid, 0)])
+        self.assertEqual(clock.now, 1000.0, 'an expired deadline must not sleep')
+        self.assertTrue(process._llmtool_cleanup_pending)
+
+    def test_foreign_and_previously_unconfirmed_groups_are_never_signalled_or_cleared(self):
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+
+        # A PGID that does not match the owned leader is foreign and stale.
+        foreign = Mock(returncode=None, pid=62001)
+        foreign._llmtool_owned_pgid = 62002
+        foreign._llmtool_owner_pid = os.getpid()
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+            self.assertFalse(bounded_terminate(foreign, time.monotonic() + 1.0))
+            killpg.assert_not_called()
+        foreign.kill.assert_not_called()
+        foreign.wait.assert_not_called()
+
+        foreign_owner = Mock(returncode=None, pid=62005)
+        foreign_owner._llmtool_owned_pgid = 62005
+        foreign_owner._llmtool_owner_pid = os.getpid() + 1
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+            self.assertFalse(bounded_terminate(foreign_owner, time.monotonic() + 1.0))
+            killpg.assert_not_called()
+        foreign_owner.kill.assert_not_called()
+        foreign_owner.wait.assert_not_called()
+
+        # A prior UNKNOWN ownership pin is never upgraded by a later ESRCH and
+        # never receives a destructive group signal.
+        unconfirmed = Mock(returncode=None, pid=62003)
+        unconfirmed._llmtool_owned_pgid = 62003
+        unconfirmed._llmtool_owner_pid = os.getpid()
+        unconfirmed._llmtool_group_unconfirmed = True
+        events = []
+
+        def killpg_unconfirmed(pgid, sig):
+            events.append((pgid, sig))
+            if sig == 0:
+                raise ProcessLookupError()
+            raise PermissionError('prior unconfirmed ownership')
+
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            unconfirmed.returncode = -signal.SIGKILL
+
+        unconfirmed.wait.side_effect = wait
+        with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                   side_effect=killpg_unconfirmed):
+            self.assertFalse(bounded_terminate(unconfirmed, time.monotonic() + 1.0))
+        self.assertTrue(unconfirmed._llmtool_group_unconfirmed,
+                        'a prior lost/unconfirmed ownership pin must never be cleared')
+        self.assertTrue(unconfirmed._llmtool_cleanup_pending)
+        wait_indices = [index for index, event in enumerate(events)
+                        if event[0] == 'wait']
+        self.assertEqual(len(wait_indices), 1)
+        self.assertTrue(all(event[1] == 0
+                            for event in events[wait_indices[0] + 1:]
+                            if event[0] == 'killpg'),
+                        'no destructive signal may follow the reap')
+
+        # A reaped prior UNKNOWN group is not even probed, because the stale
+        # PGID could have been recycled.
+        reaped = Mock(returncode=0, pid=62004)
+        reaped._llmtool_owned_pgid = 62004
+        reaped._llmtool_owner_pid = os.getpid()
+        reaped._llmtool_group_unconfirmed = True
+        with patch('llmtool.providers.cli_lifecycle.os.killpg') as killpg:
+            self.assertFalse(bounded_terminate(reaped, time.monotonic() + 1.0))
+            killpg.assert_not_called()
+        self.assertTrue(reaped._llmtool_group_unconfirmed)
+        self.assertTrue(reaped._llmtool_cleanup_pending)
+
+    @staticmethod
+    def _zombie_fixture_cleanup(child):
+        for stream in (child.stdin, child.stdout, child.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+        if child.returncode is None:
+            try:
+                child.wait(timeout=2)
+            except Exception:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+                try:
+                    child.wait(timeout=2)
+                except Exception:
+                    pass
+
+    def _spawn_self_expiring_owned_child(self):
+        import subprocess, sys
+        child = subprocess.Popen(
+            [sys.executable, '-B', '-I', '-c', 'pass'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True)
+        self.addCleanup(self._zombie_fixture_cleanup, child)
+        return child
+
+    @unittest.skipUnless(
+        os.name == 'posix' and hasattr(os, 'waitid') and hasattr(os, 'WNOWAIT')
+        and hasattr(os, 'WEXITED') and hasattr(os, 'P_PID'),
+        'requires POSIX waitid WNOWAIT')
+    def test_native_zombie_only_group_eperm_then_reap_confirms_absence(self):
+        # Real Darwin regression: an owned child exits but is not reaped, so its
+        # zombie-only process group pins the PGID and killpg reports EPERM. The
+        # bounded teardown must reap its own leader, then use only signal zero.
+        from llmtool.providers.cli_lifecycle import bounded_terminate
+        import time
+        child = self._spawn_self_expiring_owned_child()
+        deadline = time.monotonic() + 5.0
+        while os.waitid(os.P_PID, child.pid,
+                        os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            self.assertLess(time.monotonic(), deadline,
+                            'self-expiring child did not become observable')
+            time.sleep(0.01)
+        self.assertIsNone(child.returncode)
+        child._llmtool_owner_pid = os.getpid()
+        child._llmtool_owned_pgid = child.pid
+        child._llmtool_owned_pid = child.pid
+        child._llmtool_group_unconfirmed = False
+        events = []
+        real_killpg = os.killpg
+        real_wait = child.wait
+
+        def record_wait(*args, **kwargs):
+            events.append(('wait',))
+            return real_wait(*args, **kwargs)
+
+        def record_killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            return real_killpg(pgid, sig)
+
+        child.wait = record_wait
+        try:
+            with patch('llmtool.providers.cli_lifecycle.os.killpg',
+                       side_effect=record_killpg):
+                self.assertTrue(bounded_terminate(child, time.monotonic() + 2.0))
+        finally:
+            child.wait = real_wait
+
+        self.assertFalse(child._llmtool_cleanup_pending)
+        wait_indices = [index for index, event in enumerate(events)
+                        if event[0] == 'wait']
+        self.assertEqual(len(wait_indices), 1)
+        wait_index = wait_indices[0]
+        destructive = [index for index, event in enumerate(events)
+                       if event[0] == 'killpg' and event[2] != 0]
+        self.assertLessEqual(len(destructive), 1)
+        if destructive:
+            self.assertLess(destructive[0], wait_index)
+        after = events[wait_index + 1:]
+        self.assertTrue(after)
+        self.assertTrue(all(event == ('killpg', child.pid, 0) for event in after),
+                        'after reaping its own leader, only signal-zero probes are allowed')
+
+    def test_live_descendant_after_owned_leader_reap_stays_unknown_without_post_reap_kill(self):
+        # A live descendant can keep the owned group observable after the leader
+        # is reaped. It must be preserved: no destructive signal after the reap,
+        # and cleanup remains UNKNOWN.
+        from llmtool.providers.cli_lifecycle import bounded_terminate, _REOBSERVE_GRACE
+
+        class Clock:
+            def __init__(self):
+                self.now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+
+        clock = Clock()
+        pid = 63001
+        events = []
+        process = Mock(returncode=None, pid=pid)
+        process._llmtool_owned_pgid = pid
+        process._llmtool_owner_pid = os.getpid()
+        process._llmtool_group_unconfirmed = False
+
+        def wait(*, timeout=None):
+            events.append(('wait', timeout))
+            process.returncode = -signal.SIGKILL
+
+        process.wait.side_effect = wait
+
+        def killpg(pgid, sig):
+            events.append(('killpg', pgid, sig))
+            if sig == signal.SIGKILL:
+                raise PermissionError('synthetic unsignalable group member')
+            # The live descendant remains in the owned group: signal 0 succeeds.
+
+        with patch('llmtool.providers.cli_lifecycle.os.killpg', side_effect=killpg), \
+                patch('llmtool.providers.cli_lifecycle.time', clock):
+            self.assertFalse(bounded_terminate(process, clock.now + 600))
+
+        self.assertTrue(process._llmtool_cleanup_pending)
+        wait_indices = [index for index, event in enumerate(events)
+                        if event[0] == 'wait']
+        self.assertEqual(len(wait_indices), 1)
+        wait_index = wait_indices[0]
+        after = events[wait_index + 1:]
+        self.assertGreaterEqual(len(after), 2)
+        self.assertTrue(all(event == ('killpg', pid, 0) for event in after),
+                        'a live descendant must not be destroyed after the leader reap')
+        destructive = [index for index, event in enumerate(events)
+                       if event[0] == 'killpg' and event[2] != 0]
+        self.assertEqual(destructive, [0])
+        self.assertLessEqual(clock.now - 1000.0, _REOBSERVE_GRACE + 0.1)
 
 
 if __name__ == "__main__":
