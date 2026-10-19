@@ -62,6 +62,43 @@ else:
 '''
 
 
+NATIVE_FAKE = FAKE.replace(
+"""if sys.argv[1]=='serve':
+ print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
+ sys.stdin.buffer.read()""",
+"""if sys.argv[1]=='serve':
+ import subprocess
+ child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)'])
+ Path('SERVER_DESCENDANT.json').write_text(json.dumps({'pid':child.pid,'pgid':os.getpgid(child.pid)}))
+ print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
+ sys.stdin.buffer.read()
+ sys.exit(0)""")
+
+
+SERVER_NONZERO = FAKE.replace(
+"""if sys.argv[1]=='serve':
+ print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
+ sys.stdin.buffer.read()""",
+"""if sys.argv[1]=='serve':
+ print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
+ sys.stdin.buffer.read()
+ sys.exit(3)""")
+
+
+def _still_waitable(process):
+    """True iff the direct child is still ours and has not been consumed.
+
+    WNOWAIT+WNOHANG returns None while the child is still running, its siginfo once
+    it has exited without consuming it, and raises ChildProcessError if some other
+    waiter already consumed it.
+    """
+    try:
+        info=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+    except ChildProcessError:
+        return False
+    return info is None or info.si_pid==process.pid
+
+
 class Host:
     """Fixture capability, not a production issuer or identity attestation."""
     test_only = True
@@ -92,7 +129,7 @@ class Host:
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX owned process groups required')
 class OpenCodeWorkerTests(unittest.TestCase):
-    def job(self, prompt='success', **changes):
+    def job(self, prompt='success', script=FAKE, **changes):
         temp = tempfile.TemporaryDirectory(prefix='opencode-worker-', dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -102,7 +139,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         for name in ('home','config','cache','data','state','tmp'):
             (state/name).mkdir(mode=0o700)
         executable = root/'synthetic-cli'
-        executable.write_text(FAKE.replace('PYTHON', sys.executable)); executable.chmod(0o700)
+        executable.write_text(script.replace('PYTHON', sys.executable)); executable.chmod(0o700)
         values = dict(
             task=TaskBinding('worker-task','a'*32,1,'b'*64),
             agent=AgentBinding('developer','developer-session',Role.DEVELOPER,
@@ -279,6 +316,255 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertTrue(all(x.process.returncode is not None for x in job.pending))
         host=Host();host.fail_final=True
         self.assertEqual(w.run_worker(self.job(),host).code,'OPENCODE_FINALIZE_UNKNOWN')
+
+    def test_server_leader_stays_unreaped_until_owned_lifecycle_stop(self):
+        observed=[]
+        real_exit=w.CLIProcessLifecycle.__exit__
+        def record_exit(lifecycle,*args):
+            process=lifecycle.process
+            observed.append((None if process is None else process.pid,
+                             None if process is None else process.returncode,
+                             None if process is None or process.returncode is not None
+                             else _still_waitable(process)))
+            return real_exit(lifecycle,*args)
+        with patch.object(w.CLIProcessLifecycle,'__exit__',record_exit):
+            result=w.run_worker(self.job(),Host())
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        server=[p for p in result.processes if p['kind']=='server'][0]
+        at_stop=[(code,waitable) for pid,code,waitable in observed if pid==server['pid']]
+        self.assertEqual(len(at_stop),1)
+        self.assertIsNone(at_stop[0][0],'server leader was reaped before lifecycle stop')
+        # A bare Popen.returncode proxy is insufficient: a non-WNOWAIT waitid can
+        # consume the child without updating returncode. The leader must still be
+        # waitable (WNOWAIT returns its siginfo) when the lifecycle takes over.
+        self.assertTrue(at_stop[0][1],'server leader was already consumed before lifecycle stop')
+
+    def test_missing_nonreaping_observation_api_fails_closed_without_reaping(self):
+        class OsWithout:
+            def __init__(self,name): self._missing=name
+            def __getattr__(self,name):
+                if name==self._missing: raise AttributeError(name)
+                return getattr(os,name)
+        real_exit=w.CLIProcessLifecycle.__exit__
+        real_reject=w.reject
+        for missing in ('waitid','WNOWAIT'):
+            with self.subTest(missing=missing):
+                observed=[];order=[]
+                def record_exit(lifecycle,*args):
+                    process=lifecycle.process
+                    order.append(('exit',None if process is None else process.pid))
+                    observed.append((None if process is None else process.pid,
+                                     None if process is None else process.returncode,
+                                     None if process is None or process.returncode is not None
+                                     else _still_waitable(process)))
+                    return real_exit(lifecycle,*args)
+                def record_reject(code):
+                    order.append(('reject',code))
+                    return real_reject(code)
+                with patch.object(w,'os',OsWithout(missing)), \
+                     patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
+                     patch.object(w,'reject',record_reject):
+                    result=w.run_worker(self.job(),Host())
+                self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
+                self.assertEqual(result.status,'BLOCKED')
+                self.assertIsNone(result.content)
+                # No Popen.poll/wait fallback: the leader is still unreaped and
+                # waitable when the owned lifecycle takes over and cleans the group.
+                server=[p for p in result.processes if p['kind']=='server'][0]
+                at_stop=[(code,waitable) for pid,code,waitable in observed if pid==server['pid']]
+                self.assertEqual(len(at_stop),1)
+                self.assertIsNone(at_stop[0][0])
+                self.assertTrue(at_stop[0][1])
+                self.assertTrue(result.cleanup_confirmed)
+                self.assertTrue(server['reaped'] and server['group_absent'])
+                # The fail-closed rejection is applied only after lifecycle teardown,
+                # never from inside the finally.
+                server_stop=next(i for i,(kind,value) in enumerate(order)
+                                 if kind=='exit' and value==server['pid'])
+                self.assertTrue(
+                    any(kind=='reject' and value=='OPENCODE_CLEANUP_UNKNOWN'
+                        for kind,value in order[server_stop+1:]),
+                    'fail-closed rejection was not applied after lifecycle teardown')
+
+    def test_nonzero_server_exit_is_rejected_only_after_owned_cleanup(self):
+        order=[]
+        real_exit=w.CLIProcessLifecycle.__exit__
+        real_reject=w.reject
+        def record_exit(lifecycle,*args):
+            order.append(('exit',None if lifecycle.process is None else lifecycle.process.pid))
+            return real_exit(lifecycle,*args)
+        def record_reject(code):
+            order.append(('reject',code))
+            return real_reject(code)
+        with patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
+             patch.object(w,'reject',record_reject):
+            result=w.run_worker(self.job(script=SERVER_NONZERO),Host())
+        self.assertEqual(result.code,'OPENCODE_RUNTIME_UNKNOWN',result)
+        self.assertEqual(result.status,'BLOCKED')
+        self.assertIsNone(result.content)
+        self.assertTrue(result.cleanup_confirmed)
+        facts={p['kind']:p for p in result.processes}
+        self.assertTrue(facts['server']['reaped'])
+        self.assertEqual(facts['server']['exit'],3)
+        self.assertTrue(facts['server']['group_absent'])
+        self.assertTrue(facts['client']['reaped'])
+        # Ordering proof: the non-zero check must run AFTER the server lifecycle
+        # exit (reap), not before it on an unreaped (None != 0) leader.
+        server_stop=next(i for i,(kind,value) in enumerate(order)
+                         if kind=='exit' and value==facts['server']['pid'])
+        runtime_reject=next(i for i,(kind,value) in enumerate(order)
+                            if kind=='reject' and value=='OPENCODE_RUNTIME_UNKNOWN')
+        self.assertLess(server_stop,runtime_reject,
+                        'non-zero check ran before owned cleanup')
+
+    def test_nonreaping_observation_is_bounded_and_does_not_reap(self):
+        process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.5)'])
+        try:
+            start=time.monotonic()
+            self.assertFalse(w._observe_exit_without_reap(
+                process,.05,time.monotonic()+2))
+            self.assertLess(time.monotonic()-start,.3)
+            self.assertIsNone(process.returncode)
+            # A deadline sooner than the caller timeout must bound the wait.
+            start=time.monotonic()
+            self.assertFalse(w._observe_exit_without_reap(
+                process,2,time.monotonic()+.05))
+            self.assertLess(time.monotonic()-start,.3)
+            self.assertIsNone(process.returncode)
+            self.assertFalse(w._observe_exit_without_reap(
+                process,0,time.monotonic()))
+            self.assertIsNone(process.returncode)
+            start=time.monotonic()
+            self.assertFalse(w._observe_exit_without_reap(
+                process,.2,time.monotonic()-1))
+            self.assertLess(time.monotonic()-start,.05)
+            self.assertIsNone(process.returncode)
+            self.assertTrue(w._observe_exit_without_reap(
+                process,2,time.monotonic()+2))
+            self.assertIsNone(process.returncode)
+            # WNOWAIT must leave the child waitable: a second WNOWAIT observation still
+            # returns its siginfo rather than ChildProcessError, proving no early reap.
+            info=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+            self.assertIsNotNone(info)
+            self.assertEqual(info.si_pid,process.pid)
+            self.assertIsNone(process.returncode)
+        finally:
+            process.wait(timeout=5)
+
+    def test_nonreaping_observation_errors_fail_closed(self):
+        process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.2)'])
+        try:
+            with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone')):
+                with self.assertRaises(w.WorkerError) as caught:
+                    w._observe_exit_without_reap(process,.2,time.monotonic()+2)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
+            self.assertIsNone(process.returncode)
+        finally:
+            process.wait(timeout=5)
+
+    def test_nonreaping_observation_rejects_foreign_identity_and_error_types(self):
+        process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.4)'])
+        try:
+            foreign=type('ForeignSignalInfo',(),{'si_pid':process.pid+999999})()
+            for label,effect,result in (('foreign-pid',None,foreign),
+                                        ('missing-si-pid',None,type('NoPid',(),{})()),
+                                        ('os-error',OSError(5,'i/o error'),None),
+                                        ('value-error',ValueError('bad id'),None),
+                                        ('type-error',TypeError('bad option'),None)):
+                with self.subTest(label=label):
+                    with patch.object(w.os,'waitid',side_effect=effect,return_value=result):
+                        with self.assertRaises(w.WorkerError) as caught:
+                            w._observe_exit_without_reap(process,.2,time.monotonic()+2)
+                    self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
+                    self.assertIsNone(process.returncode)
+        finally:
+            process.wait(timeout=5)
+
+    def test_cancellation_survives_failed_nonreaping_observation(self):
+        # A fail-closed observation must not mask an in-flight cancellation: the
+        # unsupported-API condition is recorded, the still-unreaped leader passes to
+        # owned lifecycle teardown, and the cancellation still unwinds.
+        class OsWithout:
+            def __init__(self,name): self._missing=name
+            def __getattr__(self,name):
+                if name==self._missing: raise AttributeError(name)
+                return getattr(os,name)
+        job=self.job('cancel')
+        with patch.object(w,'os',OsWithout('WNOWAIT')):
+            with self.assertRaises(KeyboardInterrupt):
+                w.run_worker(job,Host())
+        self.assertEqual(job.pending,())
+
+    def test_earlier_worker_error_wins_over_failed_observation(self):
+        # A fail-closed observation must also not replace an earlier non-cancellation
+        # WorkerError: the original code is preserved after owned lifecycle teardown.
+        class OsWithout:
+            def __init__(self,name): self._missing=name
+            def __getattr__(self,name):
+                if name==self._missing: raise AttributeError(name)
+                return getattr(os,name)
+        with patch.object(w,'os',OsWithout('WNOWAIT')):
+            result=w.run_worker(self.job('auth'),Host())
+        self.assertEqual(result.code,'OPENCODE_AUTH_REQUIRED',result)
+        self.assertTrue(result.cleanup_confirmed)
+
+    def test_nonreaping_observation_rejects_missing_constants_and_bad_pid(self):
+        class OsWithout:
+            def __init__(self,name): self._missing=name
+            def __getattr__(self,name):
+                if name==self._missing: raise AttributeError(name)
+                return getattr(os,name)
+        for missing in ('P_PID','WEXITED','WNOHANG'):
+            with self.subTest(missing=missing):
+                with patch.object(w,'os',OsWithout(missing)):
+                    with self.assertRaises(w.WorkerError) as caught:
+                        w._observe_exit_without_reap(
+                            type('Pid',(),{'pid':1})(),.2,time.monotonic()+2)
+                self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
+        for pid in (0,-1,None,'1',1.5):
+            with self.subTest(pid=pid):
+                with self.assertRaises(w.WorkerError) as caught:
+                    w._observe_exit_without_reap(
+                        type('Pid',(),{'pid':pid})(),.2,time.monotonic()+2)
+                self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
+
+    def test_nonreaping_observation_rejects_zero_wait_flags(self):
+        # A zero WEXITED/WNOHANG/WNOWAIT would drop the exit/non-blocking/non-consuming
+        # flag and change the wait semantics.
+        for zero in ('WEXITED','WNOHANG','WNOWAIT'):
+            with self.subTest(zero=zero):
+                with patch.object(w.os,zero,0):
+                    with self.assertRaises(w.WorkerError) as caught:
+                        w._observe_exit_without_reap(
+                            type('Pid',(),{'pid':1})(),.2,time.monotonic()+2)
+                self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
+
+    def test_native_owned_group_descendant_cleanup_is_bounded_and_trusted(self):
+        job=self.job(script=NATIVE_FAKE,budget=RunBudget(1,8,0,8000,100,100))
+        start=time.monotonic()
+        result=w.run_worker(job,Host())
+        elapsed=time.monotonic()-start
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertIn('self-review',result.content)
+        facts={p['kind']:p for p in result.processes}
+        server=facts['server'];client=facts['client']
+        self.assertTrue(server['reaped']);self.assertEqual(server['exit'],0)
+        self.assertTrue(server['group_absent'])
+        self.assertTrue(client['reaped']);self.assertEqual(client['exit'],0)
+        self.assertLess(elapsed,8.0)
+        descendant=json.loads((Path(job.agent.root)/'SERVER_DESCENDANT.json').read_text())
+        self.assertEqual(descendant['pgid'],server['pid'])
+        self.assertNotEqual(descendant['pid'],server['pid'])
+        # Lifecycle-independent proof the descendant is gone, not merely that it would
+        # have self-expired: the owned group cleanup must have killed it, so its PID
+        # must be ESRCH within a short bound.
+        end=time.monotonic()+2
+        while True:
+            try: os.kill(descendant['pid'],0)
+            except ProcessLookupError: break
+            if time.monotonic()>end: self.fail('descendant survived owned group cleanup')
+            time.sleep(.02)
 
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX hard-link and fd identity required')

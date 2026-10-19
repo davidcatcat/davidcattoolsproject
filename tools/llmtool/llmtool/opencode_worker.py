@@ -144,6 +144,45 @@ def _clock(deadline):
         reject('OPENCODE_TIMEOUT')
 
 
+def _observe_exit_without_reap(process, timeout, deadline):
+    """Observe a direct child's exit while keeping it waitable for lifecycle teardown.
+
+    A zombie leader is still group/identity evidence: the lifecycle must own the
+    SIGKILL and bounded reap for the whole group. WNOWAIT observes without consuming
+    that state. Missing primitives, wait errors and ambiguous identity are UNKNOWN,
+    never a reason to fall back to Popen.poll/wait (which would reap early).
+    """
+    waitid=getattr(os,'waitid',None)
+    p_pid=getattr(os,'P_PID',None)
+    w_exited=getattr(os,'WEXITED',None)
+    w_nohang=getattr(os,'WNOHANG',None)
+    w_nowait=getattr(os,'WNOWAIT',None)
+    pid=getattr(process,'pid',None)
+    # WNOWAIT must be a real nonzero bit, or the flag would silently drop and reap;
+    # WEXITED==0 cannot observe an exit and WNOHANG==0 would block past the deadline,
+    # so all three are UNKNOWN rather than a guess.
+    if (not callable(waitid) or
+            any(not isinstance(x,int) for x in (p_pid,w_exited,w_nohang,w_nowait)) or
+            w_exited==0 or w_nohang==0 or w_nowait==0 or
+            type(pid) is not int or pid<=0):
+        reject('OPENCODE_CLEANUP_UNKNOWN')
+    end=min(time.monotonic()+max(0,timeout),deadline)
+    while True:
+        try:
+            info=waitid(p_pid,pid,w_exited|w_nohang|w_nowait)
+        except Exception:
+            # Any waitid failure is UNKNOWN: never fall back to poll/wait (early reap).
+            reject('OPENCODE_CLEANUP_UNKNOWN')
+        if info is not None:
+            if getattr(info,'si_pid',None)!=pid:
+                reject('OPENCODE_CLEANUP_UNKNOWN')
+            return True
+        remaining=end-time.monotonic()
+        if remaining<=0:
+            return False
+        time.sleep(min(.01,remaining))
+
+
 def _file_hash(path, deadline):
     before = path.lstat()
     # A hard-linked runtime (st_nlink > 1, e.g. a package manager that also exposes
@@ -377,6 +416,7 @@ def run_worker(job, host):
     work_deadline=deadline-min(5,(deadline-started)*.2)
     token=None; launched=False; code='OPENCODE_HOST_UNKNOWN'; content=None;sid=None
     ledger=job.usage; pipes=None; holders=[]; output=b''; facts=[]; raw_usage=()
+    observation_failed=False
     evidence='OFFLINE_FIXTURE' if getattr(host,'test_only',None) is True else 'HOST_OBSERVED'
     try:
         _validate(job,work_deadline)
@@ -434,8 +474,20 @@ def run_worker(job, host):
             finally:
                 if server.process is not None and server.process.stdin is not None:
                     server.process.stdin.close()  # Release only this private server's lease.
-                    try: server.process.wait(timeout=min(.2,max(0,deadline-time.monotonic())))
-                    except subprocess.TimeoutExpired: pass
+                    # Observe the leader exit without reaping it: the lifecycle owns
+                    # group teardown, SIGKILL and the bounded reap. Bounded by the
+                    # original .2s and the cleanup deadline. A non-observed exit is not
+                    # an early-reap: the still-unreaped leader passes to lifecycle
+                    # teardown. Record (do not raise here) an unsupported/errored
+                    # observation so an in-flight cancellation/error still propagates
+                    # unchanged; the fail-closed rejection is applied below once the
+                    # lifecycle has run.
+                    try:
+                        _observe_exit_without_reap(server.process,
+                            min(.2,max(0,deadline-time.monotonic())),deadline)
+                    except WorkerError:
+                        observation_failed=True
+        if observation_failed: reject('OPENCODE_CLEANUP_UNKNOWN')
         if any(not x.cleanup_confirmed for x in holders): reject('OPENCODE_CLEANUP_UNKNOWN')
         if server.process.returncode!=0: reject('OPENCODE_RUNTIME_UNKNOWN')
         content,calls,raw_usage=_persisted(job,sid,title,started_ms,deadline)
