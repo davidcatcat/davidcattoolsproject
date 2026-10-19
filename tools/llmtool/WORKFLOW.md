@@ -113,11 +113,11 @@ The normative rules for **one meaningful dispatch → Developer's own isolated-c
 
 ### 2026-10-19 Owner D1–D5: Codex primary + OpenCode secondary Worker
 
-Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, worktree, notification system or milestone. The existing Codex Integrator/PM may split nonoverlapping work between first-line Codex Developer and second-line OpenCode v2/DeepSeek Developer. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
+Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, notification system or milestone. Owner D6 independently authorizes registered task-scoped worktrees; D1's historical two-root limit is superseded. The existing Codex Integrator/PM may split nonoverlapping work between first-line Codex Developer and second-line OpenCode v2/DeepSeek Developer. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
 
 **Target path, not yet live:** Integrator Task Contract → llmtool authorized Worker lifecycle → task-owned Developer changes/tests/pre-review → host-reconstructed original-contract/exact-SHA Diff/CI packet → formal Claude verdict → bounded repair or return to **same active foreground Integrator**. `WAITING_CLAUDE_REVIEW` is a **logical pending disposition**, not a newly proven persisted enum: on Claude quota exhaustion keep reviewed candidate SHA, test evidence and bounded pending work; no false PASS or new paid provider. Later prove native original-session wake/ACK/replay/recovery before G3. GitHub comments do not awaken Mac sessions.
 
-**Pre-activation:** D1 requires exact reviewed Mac ownership turnover of the historical `/claude` root; no simultaneous OpenCode/Claude Developer writers and no third checkout. D4 permits non-sensitive whole-repo reading, but must validate real OpenCode v2 read/search/shell/subagent/external-directory permissions and provider-specific egress/redaction controls before model transfer. Source writes/Git still task-bound. D5 chooses a qualified free substitute or Codex fallback, never unapproved paid API. Keep the original G1–G4, A11b/F2 and independent gates.
+**D1 historical-root handoff:** Existing `/claude` ownership must still be released and verified before reuse by OpenCode. Under subsequent Owner D6, other new task-owned worktrees may be created separately; no simultaneous writers in one root. D4 permits non-sensitive whole-repo reading, but must validate real OpenCode v2 read/search/shell/subagent/external-directory permissions and provider-specific egress/redaction controls before model transfer. Source writes/Git still task-bound. D5 chooses a qualified free substitute or Codex fallback, never unapproved paid API. Keep the original G1–G4, A11b/F2 and independent gates.
 
 ### D-007 independent mobile Codex Cloud delivery
 
@@ -522,19 +522,20 @@ or make token savings a security/QA acceptance substitute.
 
 Read AGENTS.md, README, ROADMAP, applicable skills and current review reports.
 Local Mac canonical root remains `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`.
-Ordinary Codex/Claude development in **exactly the two existing, fixed,
-separately owned worktrees** becomes ACTIVE **only after** the independently
-reviewed G7 activation-status PR is merged to `main`; a draft/OPEN copy
-remains DISABLED. The [safe-git exception](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-is the single normative policy. Before every task, require independently
-verified owner/root/session/branch/child state, clean worktree, bounded
-no-prune fetch, a fresh unique owned branch from verified `origin/main`,
-then own-root venv/import provenance and pinned preflight/baseline; see
-safe-git's activated task-turnover procedure. Retain the single-canonical
-CLAIM/RELEASE fallback on any uncertain or crashed state. Required native F1
-containment/acceptance stays canonical-only. No third checkout, F2
-repository mutation, historical process cleanup, CI/Runner or ai-loop
-control activation is authorized by G7.
+Owner D6 removes the two-fixed-root cap. Authorized Developers may create
+independent, registered task-specific linked worktrees, with a unique branch,
+one writer, verified task/Session identity and dedicated runtime, following
+the [normative safe-git D6 policy](../../skills/safe-git/SKILL.md).
+Integrator serializes shared ref changes and canonical integration. Each
+worktree is retired automatically after merged/accepted task completion
+(or documented cancelled/rejected disposition), **only** after checking
+current PR/task state, no live Agent/tests, no unpublished work or unknown
+tracked/untracked/ignored files, and evidence retained off-tree. Open PR,
+repair or unknown/interrupted state is not deletable by default. No force
+deletion; preserve on uncertainty. Do not repeat historic G1-G7 pilot per
+task. Canonical native F1 acceptance remains canonical-only; D6 grants
+neither llmtool F2 mutation nor auto-merge, provider egress or new controllers.
+Mac automation is NOT LIVE VERIFIED merely by merging these docs.
 In Cloud discover the task-configured checkout; do not create a clone/worktree to
 repair a missing repository. Verify the repository is `davidcatcat/davidcattoolsproject`.
 
