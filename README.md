@@ -107,15 +107,17 @@ that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
 This Cloud exception does not authorize worktrees, independent/milestone clones,
 sibling/nested repositories, or alternate local Mac checkouts.
-Separately, [safe-git](skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-records the owner-approved exception for exactly two fixed Codex/Claude
-developer worktrees. General use is **ACTIVE only after** the independently
-reviewed G7 activation-status PR is merged into `main`, never while it remains
-OPEN or Draft. Each agent uses its own verified root, unique task branch and
-dedicated venv, with serialized shared-ref integration and canonical-only
-native F1 acceptance. On unknown/crashed state, STOP/preserve and revert to
-single canonical CLAIM/RELEASE. G7 does not permit F2, extra checkouts,
-automatic process cleanup or CI/Runner/ai-loop changes.
+Owner D6 (2026-10-19) supersedes the historical G7 two-fixed-root limit:
+authorized local Developer Agents may create **multiple task-scoped linked
+worktrees** under the verified dedicated workspace parent, with unique owned
+branches and independent runtime state. The [safe-git policy](skills/safe-git/SKILL.md)
+governs simple admission, task/PR-bound completion, automatic clean removal,
+and preserve-on-uncertainty. PR opening is not completion; merged-and-accepted
+tasks normally retire immediately after checking no live agent, dirty/ignored
+data, unpublished commits or needed evidence. Historical roots require safe
+ownership transfer; the canonical Integrator/F1 root, independent QA,
+shared-ref coordination, provider privacy/F2 restrictions and Cloud exception
+are unchanged. GitHub policy text does not itself activate a Mac runtime.
 
 Follow the [llmtool development workflow](tools/llmtool/WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent

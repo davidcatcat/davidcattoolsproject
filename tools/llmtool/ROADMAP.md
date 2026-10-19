@@ -44,7 +44,7 @@ cannot replace required canonical Mac Live acceptance for native llmtool cutover
 
 [Single owner decision record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) adds **OpenCode v2 / DeepSeek** as second-line Developer alongside first-line **Codex Developer**, both assigned by the **existing Codex Integrator/PM**. OpenCode's same-model DeepSeek reviewer and fresh-context GLM cross-model Reviewer are internal pre-review; **Claude Code remains formal independent code/test/security/QA Reviewer**, while **Claude Developer is PAUSED** for quota. Company-gw continues task-qualified, authorized cost-aware advisory work; AGY is backup. Codex Cloud and Claude Cloud VM remain independent environments, with no new Mac automatic Cloud integration.
 
-D1 reuses the existing physical `/claude` fixed root only after independently reviewed [safe-git](../../skills/safe-git/SKILL.md) ownership transfer and Mac evidence, **never a third worktree**. D4 permits non-sensitive whole-repo browsing by OpenCode, not automatic external-model export, secret access, wider code edits or Git/F2 rights. D5 forbids automatic paid API fallback. Under D3 Developer work may continue when Claude quota is exhausted with exact-SHA **pending formal review** and bounded queue, not self-approval. Under D2 **an active/foreground Integrator waiting for verified Worker results** is the first useful delivery slice; reliable original-session wake/ACK/recovery remains a **separate mandatory G3 acceptance**. Existing G1–G4 and F2/A11b parallel track stay unchanged. Historical OpenCode Lab success is not live llmtool integration evidence.
+D1 reuses the existing physical `/claude` root **only after** verified [safe-git](../../skills/safe-git/SKILL.md) ownership transfer and Mac evidence. The subsequent [Owner D6 decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) **supersedes the earlier no-third-worktree limit** for separately registered task worktrees; it does not automatically transfer or delete that historical root. D4 permits non-sensitive whole-repo browsing by OpenCode, not automatic external-model export, secret access, wider code edits or Git/F2 rights. D5 forbids automatic paid API fallback. Under D3 Developer work may continue when Claude quota is exhausted with exact-SHA **pending formal review** and bounded queue, not self-approval. Under D2 **an active/foreground Integrator waiting for verified Worker results** is the first useful delivery slice; reliable original-session wake/ACK/recovery remains a **separate mandatory G3 acceptance**. Existing G1–G4 and F2/A11b parallel track stay unchanged. Historical OpenCode Lab success is not live llmtool integration evidence.
 
 ### 2026-10-17 revised delivery order and dependency graph
 
@@ -189,19 +189,19 @@ Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
 When the user chooses Codex Cloud, use only the repository checkout configured for
 that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
-This Cloud exception does not authorize new project checkouts. Separately, the
-owner approved **only two fixed linked developer worktrees** (Codex/Claude)
-subject to independent policy review and Mac activation gates in
-[safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated).
-Independent G5 and G6 native evidence passed, and the G7 independent review
-[Issue #115 #6118588175](https://github.com/davidcatcat/davidcattoolsproject/issues/115#issuecomment-6118588175)
-supports activation subject to C1-C6. Exactly two fixed worktrees become
-**ACTIVE for ordinary development only upon merge** of the separately
-reviewed activation-status PR, not merely by this proposal. The
-[safe-git task-turnover and failure constraints](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-remain binding; canonical F1 acceptance is separate. All other worktrees,
-archive project copies, independent/milestone clones and alternate Mac
-checkouts remain forbidden.
+Cloud still uses only its own configured checkout, with no automatic new
+Mac root. Subsequent **Owner D6 (2026-10-19)** supersedes the earlier G7
+two-fixed-developer-worktree limit: task-scoped linked worktrees are allowed
+under the dedicated verified workspace parent. Per-task admission is a
+lightweight root/branch/owner/runtime check, not a new G1-G7 pilot. Complete
+merged-and-accepted tasks retire automatically only after PR evidence,
+process-liveness, tracked/untracked/ignored data and unpublished-commit
+preservation checks. Retain pending review/repair and ambiguous/crashed
+work; no forced deletion or age-only cleanup. The canonical Integrator/F1
+root, D1 historical-root handoff, shared-ref coordination and independent
+QA/F2/provider gates remain unchanged. See [safe-git](../../skills/safe-git/SKILL.md).
+Status: **D6 POLICY APPROVED; Mac create/cleanup automation NOT LIVE VERIFIED**.
+This is an operating-policy simplification, not a new A milestone.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
@@ -223,8 +223,8 @@ llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](WORKFLOW.md
 - 任務開始先列出 Cloud-capable / Mac-required / not-required 驗收項目。
 - Cloud 可完成開發、review、offline/mock tests、build、CI 與已授權的 feature branch/PR。
 - 只有依賴實際 Mac 的 VPN、既有 provider auth、macOS sandbox、本機檔案或服務的
-  必要驗證才交給 Mac；canonical Mac path 保留原樣；只有 safe-git 明列的兩個
-  固定 developer worktree 在獨立審查及 Mac 驗收後才可啟用，其他 checkout 禁止。
+  必要驗證才交給 Mac；canonical Mac path 保留原樣；Owner D6 允許註冊的任務型
+  developer worktree 並於完成後安全自動清理，沒有固定兩個的上限；其他 clone 或任意 checkout 仍禁止。
 - 每個交接報告綁定 implementation SHA，附 prerequisites、commands、expected
   marker/exit、Cloud/CI 結果和 Mac pending checks。
 - 必要本機驗證未完成時標示 LOCAL VERIFICATION REQUIRED / MERGE BLOCKED；
