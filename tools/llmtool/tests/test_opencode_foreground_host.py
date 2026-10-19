@@ -358,7 +358,10 @@ class CompositionTests(unittest.TestCase):
                         job.usage.repair_attempts, 100),
             True, processes, 'a' * 64, 'HOST_OBSERVED')
 
+        calls = []
+
         def fake_worker(j, host):
+            calls.append(j.digest)
             tok = host.admit(j, h.hashlib.sha256(h.canonical(h.w.configuration(j))).hexdigest())
             host.check(tok, j, 'before')
             host.consume(tok, j)
@@ -377,19 +380,157 @@ class CompositionTests(unittest.TestCase):
              patch.object(h.w, 'run_worker', side_effect=fake_worker):
             res, final, rec = h.run_with_receipt(job, policy, a, {'synthetic': 'cred'},
                                                  expect=exp, receipt_store=store)
+        self.assertEqual(len(calls), 1)
         self.assertEqual(final['job_digest'], job.digest)
         self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
         self.assertFalse(rec.accepted)
-        # Replay with the same store must return FAILED DUPLICATE_RESULT and keep prior SUCCESS in store.
-        a2 = replace(a)
+        # Fresh WorkerJob + Admission + Host objects with same pinned task/store after restart:
+        # must refuse BEFORE calling fake_worker a second time (len(calls) remains 1, not 2),
+        # and must preserve prior SUCCESS in store.
+        fresh_job = replace(job)
+        fresh_a = replace(a)
         with patch.object(h, 'git', side_effect=git_ok), \
              patch.object(h, 'snapshot', return_value=snap), \
              patch.object(h.w, 'run_worker', side_effect=fake_worker):
-            _, _, rec_dup = h.run_with_receipt(job, policy, a2, {'synthetic': 'cred'},
-                                               expect=exp, receipt_store=store)
+            res_dup, final_dup, rec_dup = h.run_with_receipt(fresh_job, policy, fresh_a,
+                                                             {'synthetic': 'cred'},
+                                                             expect=exp, receipt_store=store)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(res_dup.content)
         self.assertEqual((rec_dup.verdict, rec_dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
         persisted = json.loads(Path(store).read_text())
         self.assertEqual(persisted['receipts'][job.digest]['verdict'], 'SUCCESS')
+
+    def test_run_with_receipt_blocks_before_worker_on_invalid_expect_corrupt_store_in_flight_or_concurrency(self):
+        import multiprocessing, os
+        from llmtool.run_budget import CallPhase, CallUsage
+        job, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        exp = {'task': job.task, 'agent': job.agent}
+        processes = (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
+                     dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True))
+        good_res = h.w.WorkerResult(
+            'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-m1',
+            UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
+                        job.usage.repair_attempts, 100),
+            True, processes, 'a' * 64, 'HOST_OBSERVED')
+
+        def git_ok(root, *args):
+            if args == ('rev-parse', 'HEAD'):
+                return (job.source_sha + '\n').encode()
+            return ((job.agent.common_dir if args[-1] == '--git-common-dir' else policy.root)
+                    + '\n').encode()
+
+        # 1. Invalid expect (missing binding, wrong type, identity mismatch) -> 0 fake_worker calls.
+        store_exp = str(Path(tmp.name) / 'exp_store.json')
+        calls = []
+        for bad_exp, expected_verdict in (
+            (None, ('UNKNOWN', 'EXPECTATION_INVALID')),
+            ({'task': job.task}, ('UNKNOWN', 'EXPECTATION_INVALID')),
+            ({'task': replace(job.task, run_id='b' * 32), 'agent': job.agent}, ('FAILED', 'TASK_IDENTITY_MISMATCH')),
+            ({'task': job.task, 'agent': replace(job.agent, session_id='other-sess')}, ('FAILED', 'AGENT_IDENTITY_MISMATCH')),
+        ):
+            with self.subTest(bad_exp=bad_exp):
+                with patch.object(h, 'git', side_effect=git_ok), \
+                     patch.object(h.w, 'run_worker', side_effect=lambda j, host: calls.append(1) or good_res):
+                    _, _, rec = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                   expect=bad_exp, receipt_store=store_exp)
+                self.assertEqual(len(calls), 0)
+                self.assertEqual((rec.verdict, rec.reason), expected_verdict)
+        self.assertFalse(Path(store_exp).exists())
+
+        # 2. Corrupt / unsafe / inside-repo store -> 0 fake_worker calls.
+        corrupt = Path(tmp.name) / 'corrupt_store.json'
+        corrupt.write_text('{corrupt')
+        os.chmod(corrupt, 0o600)
+        in_repo = str(Path(job.agent.root) / 'inside_repo_store.json')
+        for bad_store in (str(corrupt), in_repo, ''):
+            with self.subTest(bad_store=bad_store):
+                with patch.object(h, 'git', side_effect=git_ok), \
+                     patch.object(h.w, 'run_worker', side_effect=lambda j, host: calls.append(1) or good_res):
+                    _, _, rec = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                   expect=exp, receipt_store=bad_store)
+                self.assertEqual(len(calls), 0)
+                self.assertEqual((rec.verdict, rec.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+
+        # 3. Crash / in-flight / UNKNOWN state -> no automatic resend on fresh objects.
+        store_crash = str(Path(tmp.name) / 'crash_store.json')
+        crash_calls = []
+
+        def crashing_worker(j, host):
+            crash_calls.append(1)
+            raise RuntimeError('simulated mid-run host crash')
+
+        with patch.object(h, 'git', side_effect=git_ok):
+            with self.assertRaises(RuntimeError):
+                with patch.object(h.w, 'run_worker', side_effect=crashing_worker):
+                    h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                       expect=exp, receipt_store=store_crash)
+        self.assertEqual(len(crash_calls), 1)
+        # Fresh objects after crash must NOT call fake_worker again; store stays UNKNOWN (reserved)
+        # until missing host-side evidence is supplied via record_host_receipt without re-running worker.
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h.w, 'run_worker', side_effect=lambda j, host: crash_calls.append(2) or good_res):
+            _, _, rec_after_crash = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                       expect=exp, receipt_store=store_crash)
+        self.assertEqual(len(crash_calls), 1)
+        self.assertEqual(rec_after_crash.verdict, 'UNKNOWN')
+
+        # 4. Separate-process store reopen and synchronized concurrent starts: at most 1 fake Worker launch.
+        store_mp = str(Path(tmp.name) / 'mp_store.json')
+        ctx = multiprocessing.get_context('fork')
+        barrier = ctx.Barrier(2)
+        worker_counter = ctx.Value('i', 0)
+        out_q = ctx.Queue()
+
+        def mp_entry(idx):
+            def mp_worker(j, host):
+                with worker_counter.get_lock():
+                    worker_counter.value += 1
+                host.final = {'code': 'OPENCODE_OUTPUT_RETURNED', 'launched': True,
+                              'one_use_consumed': True, 'job_digest': j.digest}
+                return good_res
+
+            with patch.object(h, 'git', side_effect=git_ok), \
+                 patch.object(h.w, 'run_worker', side_effect=mp_worker):
+                barrier.wait(timeout=5)
+                _, _, rec_mp = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                  expect=exp, receipt_store=store_mp)
+                out_q.put((idx, rec_mp.verdict, rec_mp.reason))
+
+        p1 = ctx.Process(target=mp_entry, args=(1,))
+        p2 = ctx.Process(target=mp_entry, args=(2,))
+        p1.start()
+        p2.start()
+        p1.join(timeout=10)
+        p2.join(timeout=10)
+        self.assertEqual(p1.exitcode, 0)
+        self.assertEqual(p2.exitcode, 0)
+        self.assertEqual(worker_counter.value, 1)
+        verdicts = sorted(out_q.get(timeout=2)[1:] for _ in range(2))
+        self.assertIn(('SUCCESS', 'WORKER_RUN_OBSERVED'), verdicts)
+        other = verdicts[0] if verdicts[1] == ('SUCCESS', 'WORKER_RUN_OBSERVED') else verdicts[1]
+        self.assertIn(other, (('UNKNOWN', 'LAUNCH_IN_FLIGHT'), ('FAILED', 'DUPLICATE_RESULT')))
+        # Separate process after completion reopening the same store: worker_counter remains 1.
+        def mp_reopen():
+            def mp_worker_never(j, host):
+                with worker_counter.get_lock():
+                    worker_counter.value += 1
+                return good_res
+
+            with patch.object(h, 'git', side_effect=git_ok), \
+                 patch.object(h.w, 'run_worker', side_effect=mp_worker_never):
+                _, _, rec_reopen = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                      expect=exp, receipt_store=store_mp)
+                out_q.put(('reopen', rec_reopen.verdict, rec_reopen.reason))
+
+        p3 = ctx.Process(target=mp_reopen)
+        p3.start()
+        p3.join(timeout=10)
+        self.assertEqual(p3.exitcode, 0)
+        self.assertEqual(worker_counter.value, 1)
+        self.assertEqual(out_q.get(timeout=2), ('reopen', 'FAILED', 'DUPLICATE_RESULT'))
 
     def test_run_with_receipt_fails_closed_when_git_head_observation_fails_or_tampered_facts(self):
         from llmtool.run_budget import CallPhase, CallUsage
@@ -397,6 +538,7 @@ class CompositionTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(tmp.cleanup)
         store = str(Path(tmp.name) / 'host_receipts2.json')
+        store_no_git = str(Path(tmp.name) / 'host_receipts3.json')
         exp = {'task': job.task, 'agent': job.agent}
         processes = (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
                      dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True))
@@ -427,8 +569,8 @@ class CompositionTests(unittest.TestCase):
 
         with patch.object(h, 'git', side_effect=OSError('git unavailable')), \
              patch.object(h.w, 'run_worker', side_effect=fake_worker_ok):
-            _, _, rec_no_git = h.run_with_receipt(job, policy, a, {'synthetic': 'cred'},
-                                                  expect=exp, receipt_store=store)
+            _, _, rec_no_git = h.run_with_receipt(replace(job), policy, replace(a), {'synthetic': 'cred'},
+                                                  expect=exp, receipt_store=store_no_git)
         self.assertEqual((rec_no_git.verdict, rec_no_git.reason), ('UNKNOWN', 'SOURCE_NOT_OBSERVED'))
 
 

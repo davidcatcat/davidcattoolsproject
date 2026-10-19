@@ -364,6 +364,44 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((b2.verdict, b2.reason), ('FAILED', 'DUPLICATE_RESULT'))
         self.assertEqual(json.loads(store.read_text())['receipts'][blocked_job.digest]['verdict'], 'BLOCKED')
 
+    def test_reserve_host_launch_persists_in_flight_blocks_known_session_and_fsyncs_parent(self):
+        import json, os, tempfile
+        from unittest.mock import patch
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / 'reserve.json'
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        fsynced_fds = []
+        orig_fsync = os.fsync
+
+        def track_fsync(fd):
+            fsynced_fds.append(os.fstat(fd).st_ino)
+            return orig_fsync(fd)
+
+        with patch.object(os, 'fsync', side_effect=track_fsync):
+            self.assertIsNone(r.reserve_host_launch(job=self.job, expect=exp, store_path=str(store)))
+        self.assertIn(store.parent.stat().st_ino, fsynced_fds)
+        persisted = json.loads(store.read_text())
+        self.assertEqual(persisted['receipts'][self.job.digest]['verdict'], 'UNKNOWN')
+        self.assertEqual(persisted['receipts'][self.job.digest]['reason'], 'LAUNCH_IN_FLIGHT')
+        # Second reservation while in-flight / UNKNOWN is refused without resending.
+        in_flight = r.reserve_host_launch(job=replace(self.job), expect=exp, store_path=str(store))
+        self.assertEqual((in_flight.verdict, in_flight.reason), ('UNKNOWN', 'LAUNCH_IN_FLIGHT'))
+        # Post-run reconciliation with host-side evidence promotes LAUNCH_IN_FLIGHT -> SUCCESS.
+        s = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                  observed_head=self.job.source_sha, expect=exp, store_path=str(store))
+        self.assertEqual((s.verdict, s.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        # Subsequent reservation after terminal verdict returns FAILED DUPLICATE_RESULT.
+        dup = r.reserve_host_launch(job=replace(self.job), expect=exp, store_path=str(store))
+        self.assertEqual((dup.verdict, dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        # Known backend session reuse as agent.session_id in a new job is refused pre-launch.
+        reused_agent = replace(self.job.agent, session_id=self.good.session_id)
+        reused_job = replace(self.job, agent=reused_agent, prompt='new prompt with reused session')
+        reused_exp = {'task': reused_job.task, 'agent': reused_agent}
+        dup_sess = r.reserve_host_launch(job=reused_job, expect=reused_exp, store_path=str(store))
+        self.assertEqual((dup_sess.verdict, dup_sess.reason), ('FAILED', 'DUPLICATE_RESULT'))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -277,6 +277,101 @@ def _write_store(path, data):
         raise
     os.close(fd)
     os.replace(tmp, path)
+    dir_fd = os.open(path.parent, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _expect_check(job, expect, result=None):
+    if (type(expect) is not dict or set(expect) != {'task', 'agent'}
+            or type(expect['task']) is not TaskBinding or type(expect['agent']) is not AgentBinding):
+        return _receipt(UNKNOWN, 'EXPECTATION_INVALID', job, result)
+    if not _same(expect['task'], job.task, TaskBinding):
+        return _receipt(FAILED, 'TASK_IDENTITY_MISMATCH', job, result)
+    if not _same(expect['agent'], job.agent, AgentBinding):
+        return _receipt(FAILED, 'AGENT_IDENTITY_MISMATCH', job, result)
+    return None
+
+
+def _with_store_lock(job, store_path, fn, result=None):
+    if type(store_path) is not str or not store_path:
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+    path = Path(store_path)
+    if not path.is_absolute() or str(path) != os.path.abspath(path):
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+    physical_directory(path.parent)
+    for excluded in (job.agent.root, job.agent.common_dir):
+        if type(excluded) is str and excluded:
+            for ex in (Path(excluded), Path(excluded).resolve()):
+                if path == ex or ex in path.parents:
+                    return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+    lock_path = path.parent / ('.' + path.name + '.lock')
+    if lock_path.is_symlink():
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+    locked = False
+    try:
+        lst = os.fstat(lock_fd)
+        if not stat.S_ISREG(lst.st_mode) or lst.st_uid != os.getuid() or lst.st_nlink != 1:
+            return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+        os.fchmod(lock_fd, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        locked = True
+        data = _read_store(path)
+        return fn(path, data)
+    finally:
+        try:
+            if locked:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def reserve_host_launch(*, job, expect, store_path):
+    """Fail-closed durable pre-launch admission/reservation in the existing receipt store.
+
+    Atomically under the store ``flock``, before releasing the lock or invoking any
+    Worker/provider:
+    1. Validates ``job``, mandatory ``expect`` (both ``task`` and ``agent`` bindings
+       matching ``job``), and safe off-repo ``store_path``.
+    2. Rejects if ``job.digest`` or ``'session:' + job.agent.session_id`` is already
+       in ``seen`` (or has a persisted terminal receipt) with ``FAILED`` /
+       ``DUPLICATE_RESULT``.
+    3. Rejects if ``job.digest`` already has an in-flight / prior ``UNKNOWN`` record
+       in ``receipts`` (returning ``UNKNOWN`` with the persisted reason; never resend
+       on crash, uncertainty, or fresh Python objects).
+    4. Otherwise persists an ``UNKNOWN`` / ``LAUNCH_IN_FLIGHT`` reservation record
+       (syncing both the file and parent directory) and returns ``None`` to permit
+       exactly one launch. Never raises.
+    """
+    try:
+        if type(job) is not WorkerJob or _digest(job) is None:
+            return _receipt(UNKNOWN, 'JOB_MISSING')
+        err = _expect_check(job, expect)
+        if err is not None:
+            return err
+
+        def _reserve(path, data):
+            seen = set(data['seen'])
+            existing = data['receipts'].get(job.digest)
+            sid = getattr(job.agent, 'session_id', None)
+            if (job.digest in seen
+                    or (type(sid) is str and sid and ('session:' + sid) in seen)
+                    or (existing is not None and existing.get('verdict') != UNKNOWN)):
+                return _receipt(FAILED, 'DUPLICATE_RESULT', job)
+            if existing is not None:
+                reason = existing.get('reason')
+                return _receipt(UNKNOWN, reason if type(reason) is str and reason else 'LAUNCH_IN_FLIGHT', job)
+            pending = _receipt(UNKNOWN, 'LAUNCH_IN_FLIGHT', job)
+            data['receipts'][job.digest] = pending.to_dict()
+            _write_store(path, data)
+            return None
+
+        return _with_store_lock(job, store_path, _reserve)
+    except Exception:
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job)
 
 
 def record_host_receipt(*, job, result, host_final, observed_head, expect, store_path):
@@ -300,38 +395,16 @@ def record_host_receipt(*, job, result, host_final, observed_head, expect, store
             return _receipt(UNKNOWN, 'JOB_MISSING')
         if type(result) is not WorkerResult:
             return _receipt(UNKNOWN, 'RESULT_MISSING', job)
-        if (type(expect) is not dict or set(expect) != {'task', 'agent'}
-                or type(expect['task']) is not TaskBinding or type(expect['agent']) is not AgentBinding):
-            return _receipt(UNKNOWN, 'EXPECTATION_INVALID', job, result)
+        err = _expect_check(job, expect, result)
+        if err is not None:
+            return err
         pre_admit = (host_final is None and result.code != RETURNED_CODE
                      and result.content is None and not result.processes)
         if not pre_admit:
             if type(host_final) is not dict or host_final.get('job_digest') != job.digest:
                 return _receipt(UNKNOWN, 'HOST_FACTS_DISAGREE', job, result)
-        if type(store_path) is not str or not store_path:
-            return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
-        path = Path(store_path)
-        if not path.is_absolute() or str(path) != os.path.abspath(path):
-            return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
-        physical_directory(path.parent)
-        for excluded in (job.agent.root, job.agent.common_dir):
-            if type(excluded) is str and excluded:
-                for ex in (Path(excluded), Path(excluded).resolve()):
-                    if path == ex or ex in path.parents:
-                        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
-        lock_path = path.parent / ('.' + path.name + '.lock')
-        if lock_path.is_symlink():
-            return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
-        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
-        locked = False
-        try:
-            lst = os.fstat(lock_fd)
-            if not stat.S_ISREG(lst.st_mode) or lst.st_uid != os.getuid() or lst.st_nlink != 1:
-                return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
-            os.fchmod(lock_fd, 0o600)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
-            locked = True
-            data = _read_store(path)
+
+        def _record(path, data):
             seen = set(data['seen'])
             out = reconcile(job=job, result=result, host_final=host_final,
                             observed_head=observed_head, seen=seen, expect=expect)
@@ -344,11 +417,7 @@ def record_host_receipt(*, job, result, host_final, observed_head, expect, store
             data['receipts'][job.digest] = out.to_dict()
             _write_store(path, data)
             return out
-        finally:
-            try:
-                if locked:
-                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            finally:
-                os.close(lock_fd)
+
+        return _with_store_lock(job, store_path, _record, result)
     except Exception:
         return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)

@@ -386,15 +386,24 @@ def run(job, policy, admission, one_native_credential):
 def run_with_receipt(job, policy, admission, one_native_credential, *, expect, receipt_store):
     """Active Integrator invocation wired to durable G3 ResultReceipt reconciliation.
 
-    Executes ``run()`` once, independently observes post-run Git HEAD in
-    ``policy.root`` (fail-closed to None on error), and calls
-    ``record_host_receipt`` with mandatory ``expect`` (both ``task`` and
-    ``agent`` bindings), same-invocation ``host.final`` (carrying
-    ``job_digest``), and durable ``receipt_store``. Returns
-    ``(result, host.final, receipt)``. A ``SUCCESS`` receipt is NOT acceptance
-    or merge authorization (``receipt.accepted`` is False).
+    Atomically reserves one-shot launch in ``receipt_store`` via
+    ``reserve_host_launch`` BEFORE invoking ``run()`` (refusing invalid ``expect``,
+    unsafe/corrupt store, prior terminal replay, or in-flight/``UNKNOWN`` state with
+    0 Worker launches). When admitted, executes ``run()`` once, independently
+    observes post-run Git HEAD in ``policy.root`` (fail-closed to None on error),
+    and calls ``record_host_receipt`` with mandatory ``expect`` (both ``task`` and
+    ``agent`` bindings), same-invocation ``host.final`` (carrying ``job_digest``),
+    and durable ``receipt_store``. Returns ``(result, host.final, receipt)``. A
+    ``SUCCESS`` receipt is NOT acceptance or merge authorization
+    (``receipt.accepted`` is False).
     """
-    from .opencode_result_receipt import record_host_receipt
+    from .opencode_result_receipt import record_host_receipt, reserve_host_launch
+    refused = reserve_host_launch(job=job, expect=expect, store_path=receipt_store)
+    if refused is not None:
+        usage = job.usage if type(getattr(job, 'usage', None)) is UsageLedger else UsageLedger((), 0, 0)
+        return (w.WorkerResult('OPENCODE_ATTEMPT_ALREADY_USED', 'BLOCKED', None, None,
+                               usage, False, (), None, 'NOT_VERIFIED'),
+                None, refused)
     result, final = run(job, policy, admission, one_native_credential)
     try:
         observed_head = git(policy.root, 'rev-parse', 'HEAD').decode().strip()
