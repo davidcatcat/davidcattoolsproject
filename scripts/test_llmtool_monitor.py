@@ -217,5 +217,23 @@ class TaskEventTests(unittest.TestCase):
         self.assertEqual(mon.task_events({"/d": done}, [done]), [])
 
 
+    def test_initial_true_suppresses_existing_stages(self):
+        stage = mon.Stage("red", "deepseek", 1.0, "", "", 1, 0, 0, "", (), True, "ok")
+        task = mon.Task("/d", "t", "b", (stage,))
+        self.assertEqual(mon.task_events({}, [task], initial=True), [])
+
+    def test_noninitial_firstseen_completed_stage_emits_events(self):
+        stage = mon.Stage("red", "deepseek", 1.0, "RETURNED", "ok", 1, 0, 0, "", (), True, "ok")
+        task = mon.Task("/d", "t", "b", (stage,))
+        events = mon.task_events({}, [task], initial=False)
+        self.assertIn(("▶", "t: stage red started (deepseek)"), events)
+        self.assertIn(("■", "t: stage red finished: RETURNED, cleanup ok, 1 steps, 0.0k in / 0.0k out"), events)
+
+    def test_repeated_same_snapshot_does_not_duplicate(self):
+        stage = mon.Stage("red", "deepseek", 1.0, "", "", 1, 0, 0, "", (), True, "ok")
+        task = mon.Task("/d", "t", "b", (stage,))
+        self.assertEqual(mon.task_events({"/d": task}, [task], initial=False), [])
+
+
 if __name__ == "__main__":
     unittest.main()
