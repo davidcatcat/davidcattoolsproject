@@ -5,6 +5,45 @@ description: Coordinate AI-led development for a requirements owner who delegate
 
 # AI team delivery contract
 
+## Owner D7 (2026-10-19) supersession: OpenCode PRIMARY Developer
+
+**Codex Developer is PAUSED after PR #202 review**, with no new
+source edits, repair attempts, tests or Codex Reviewer subagents.
+OpenCode v2/DeepSeek owns current A11c/S3 implementation work; merged
+PR #202's Worker and merged PR #204's Host/F2 code have independent
+source/native acceptance. The original D6 root also hosted the Owner's
+manual TUI, so its output **cannot** be called a host-contained S3 run.
+Existing Codex Integrator continues semantic PM, real dispatch/receipt,
+integration and release authority if actually available, not routine
+source bug fixing. Do not confuse issue comments with Session wake.
+
+**Mandatory review path:** OpenCode code + actual tests/ordinary repairs →
+distinct-context DeepSeek self-review → fresh-context permitted and
+actually free different-model review → original independent Claude Code
+Security/Functional/QA → on FAIL, back to **OpenCode** for bounded
+fix/retest and affected formal rereview → formal PASS with native/CI
+gates to Codex Integrator for final merge. Same-model or free cross-model
+checks never substitute for Claude formal verdict. Missing real free
+model, credentials, model pricing or provider egress grant is BLOCKED:
+do not silently pay or re-enable Codex Developer. Keep existing S3
+STOP-after-first-verified-cycle instruction.
+
+**D4 exact-file bootstrapping and no self-attestation:** Before **every**
+OpenCode invocation, a changed read/write set versus the last accepted
+source admission requires its **own new exact-file D4 admission** before
+that invocation, including source screening and provider privacy/price
+checks. Any OpenCode-authored Host/containment change (permissions,
+negative probes, source/diff guard or free-price check) **must pass
+independent formal Claude Security review before being used to admit any
+OpenCode invocation**. The first host-contained S3 invocation must use
+the already reviewed/merged PR #204 Host (with G2 search/network probes)
+for the explicitly admitted two-file task. A manual Owner TUI and/or
+OpenCode's own review is not evidence of Host containment; use a clean,
+sole-owned task runtime without a concurrent interactive writer, and
+record actual Host `run()`, model usage, process cleanup and same-active
+Integrator receipt. Never mark S3 PASS from code merge alone.
+
+
 This is the shared collaboration contract for this repository. Read it together
 with `AGENTS.md`, `CLAUDE.md`, the task's pinned contract, and specialist skills.
 It governs **people, decisions and handoffs**, not new llmtool runtime capabilities,
@@ -16,7 +55,7 @@ implicit shell permissions, or an always-running service.
 | --- | --- | --- |
 | Requirements owner / product acceptor (user) | State the desired tool behavior, outcomes, constraints, priorities; report real-use problems; decide whether the delivered behavior meets the goal | Be the day-to-day PM, developer, technical QA judge, model-prompt courier or Git release engineer |
 | AI coordinator / technical PM (ChatGPT when connected and authorized) | Turn the goal into scoped requirements and acceptance checks, plan/sequence work, choose reviewers, track the evidence and roadmap, triage findings, decide routine technical disposition and merge eligible PRs under delegated authority | Invent platform access, waive mandatory gates, or attribute technical judgments to the owner |
-| Developer (normally Codex) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
+| Developer (OpenCode PRIMARY under D7; Codex Developer PAUSED) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
 | Independent reviewer (normally Claude) | Read the exact diff/requirements/evidence, do the requested ordinary/security/functional assessment, report severity, reproducers, limitations and recommendations | Approve its own implementation or turn a normal review into formal security/QA proof without running that gate |
 | Bounded Git publisher | Execute validated, explicitly authorized Git operations at exact refs and report remote status | Override the coordinator's gates, rewrite history, or repair code while acting as publisher |
 
@@ -70,17 +109,17 @@ auto-wake, llmtool F2 and complete M2 remain unverified.
 
 ### 2026-10-19 secondary Developer role and quota policy (D1–D5)
 
-Use [the owner decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and normative [safe-git](../safe-git/SKILL.md). The **existing Codex Integrator remains PM**, assigning Codex Developer as **first-line** and OpenCode v2/DeepSeek Developer as **second-line** (the historical second root only **after** verified Mac ownership transfer; new registered task worktrees are separately permitted by Owner D6). Same-model DeepSeek and cross-model GLM are **internal pre-review**, not formal acceptance. **Claude Code remains independent Reviewer/QA; Claude Developer PAUSED**. Company-gw retains qualified authorized task triage; AGY is backup; no new Codex/Claude Cloud automation.
+Use [the owner decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and normative [safe-git](../safe-git/SKILL.md). The **existing Codex Integrator remains PM**, assigning **OpenCode v2/DeepSeek as PRIMARY Developer under Owner D7**, with **Codex Developer PAUSED** after PR #202 (the historical second root only **after** verified Mac ownership transfer; new registered task worktrees are separately permitted by Owner D6). Same-model DeepSeek and cross-model GLM are **internal pre-review**, not formal acceptance. **Claude Code remains independent Reviewer/QA; Claude Developer PAUSED**. Company-gw retains qualified authorized task triage; AGY is backup; no new Codex/Claude Cloud automation.
 
-When Claude quota runs out, keep exact-SHA pending formal review evidence, bound the backlog and continue only unrelated/otherwise authorized Developer work; never self-approve, auto-merge unreviewed source or auto-enable paid API. OpenCode may read all **non-sensitive repository** material, but sensitive source, provider-export authorization, outside-Mac paths, task-bounded edits and Git actions remain distinct constraints. D5 permits a proven alternate free model or Integrator-to-Codex reassignment. First deliver foreground **same-active-Integrator** handoff, then verify original-session wake/ACK/recovery for full G3; no second orchestrator or milestone.
+When Claude quota runs out, keep exact-SHA pending formal review evidence, bound the backlog and continue only unrelated/otherwise authorized Developer work; never self-approve, auto-merge unreviewed source or auto-enable paid API. OpenCode may read all **non-sensitive repository** material, but sensitive source, provider-export authorization, outside-Mac paths, task-bounded edits and Git actions remain distinct constraints. D5 permits a proven alternate free model, **not automatic reassignment to the now-paused Codex Developer**. First deliver foreground **same-active-Integrator** handoff, then verify original-session wake/ACK/recovery for full G3; no second orchestrator or milestone.
 
 ### 2026-10-19 Owner direction — Developer-owned pre-review, economical handoffs and S3 STOP
 
 This is the **normative operational rule** for the existing A11c workflow, not a new milestone, permission grant, model router or controller. It supplements [D1–D5](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md), existing bounded convergence and [company LLM delegation](../company-llm-delegation/SKILL.md).
 
 **One meaningful work package, not repeated micro-relays:**
-1. The **existing Codex Integrator/PM** defines one bounded, independently valuable Task Contract: base SHA/allowed writable files, intended behavior, acceptance/CI/native tests, spend/egress limits, existing Worker root/identity and stop triggers. PM selects Codex Developer (primary) or OpenCode Developer (secondary), and does **not** reopen planning after each ordinary code/test step. The Integrator retains routing and final integration/acceptance authority, but is **not** the routine bug fixer or duplicate line-by-line reviewer.
-2. **Codex Developer owns local convergence before formal review**: implement the complete authorized packet, run relevant deterministic tests, **optionally** start its own **separate-context Reviewer subagent** only if supported and the expected risk reduction justifies consuming the same Codex quota, within approved budget; prefer deterministic tests and independent Claude for ordinary candidates, inspect the findings, repair ordinary defects, and rerun affected tests. OpenCode Developer similarly runs DeepSeek self-review and a **qualified different-model, fresh-context** Reviewer (GLM if legitimately available under D5; otherwise a qualified free alternative or explicitly blocked review), fixes and tests. A subagent or same-provider pre-review is **not** a distinct non-author formal Security/Functional/QA acceptance.
+1. The **existing Codex Integrator/PM** defines one bounded, independently valuable Task Contract: base SHA/allowed writable files, intended behavior, acceptance/CI/native tests, spend/egress limits, existing Worker root/identity and stop triggers. PM assigns OpenCode Developer (primary); Codex Developer is paused pending a new Owner decision, and does **not** reopen planning after each ordinary code/test step. The Integrator retains routing and final integration/acceptance authority, but is **not** the routine bug fixer or duplicate line-by-line reviewer.
+2. **OpenCode Developer owns local convergence before formal review**: implement the entire authorized packet, run relevant deterministic tests, conduct distinct-context DeepSeek self-review and a **qualified actually-free different-model fresh-context** review (GLM only if free and authorized; otherwise another qualified free model or BLOCKED), fix ordinary findings, and rerun affected tests. **Codex Developer is PAUSED**, including its Reviewer subagents. Same-model and cross-model internal pre-reviews are **not** distinct non-author formal Claude Security/Functional/QA acceptance.
 3. Gather **one candidate packet per meaningful reviewed revision**: original contract, base/head SHA, complete relevant diff, targeted/full test evidence, relevant failure/fix history, own pre-review and unresolved findings, actual/UNKNOWN usage, and any company-gw evidence with raw source links. Trusted Host/Integrator verifies SHA and raw data; model prose is not a signing authority.
 4. Submit the completed candidate **once** to formal independent **Claude Code Reviewer** (per actual applicable gate); Claude reviews source, behavior, tests and safety, not merely self-review claims. On FAIL, **return specific findings to the original Developer** for bounded fixes and affected rerun/re-review, instead of PM repeatedly re-reading or reclassifying each micro-fix. If a materially new SHA invalidates a formal verdict, only the affected formal review must be refreshed. Preserve root-cause attempt limits and mandatory CI/native gates.
 5. The **Integrator resumes for genuine cross-task conflicts, substantive scope/authority/budget change, exhausted repair policy, formal Reviewer PASS and final integration**. Don't route normal compiler errors, ordinary tests, self-review findings or minor fix attempts through Integrator. Where the actual transport cannot yet deliver directly, report that limitation honestly; GitHub issue comments are **not** live CLI dispatch.
@@ -89,7 +128,7 @@ This is the **normative operational rule** for the existing A11c workflow, not a
 
 **Measure, don't invent savings:** at complete work-package level record when observable Integrator/Developer/reviewer usage (or `UNKNOWN`), company route actually invoked and classified work, OpenCode model/free status if verified, *number of actual Agent handoffs*, repeat-read/review/retry causes, final code/test outcome and Claude gate. Compare total premium-token/cost **including PM, subagents, formal review, retry and repair**, not isolated company-response tokens. Reuse existing `runs`, `trace`, provider accounting and Git/CI receipts; no new metrics service, polling daemon, fixed percentage promise or additional blocker solely for measurement.
 
-**This delivery round's exact STOP — S3, not G3:** S1 = current architecture PR #198 independently reviewed and merged; S2 = approved existing second-root OpenCode ownership plus tested Worker launch/permission/data route; S3 = **one real llmtool source-change work package** in which OpenCode develops, pre-reviews/cross-reviews, fixes and tests; **Claude independently verifies**; result with actual commit/Review/usage/relay evidence reaches the **same active foreground Integrator without the Owner ferrying prompts**; Integrator legitimately integrates/records acceptance. On **all S3 criteria actually verified**, **stop new work-package dispatch immediately**, publish one exact-evidence outcome report (or explain still-unmet G1/G2/G3/G4), and await the next Owner-directed delivery round. Do **not** automatically start inactive original-Session wake work, the G4 three-package pilot, a broad controller, or other unrelated enhancements. Active-foreground S3 PASS is **not full original-Session G3/M2 PASS**. On an unresolved authority/egress/mandatory-review gate or policy-exhausted root-cause, STOP the affected task, preserve evidence, report `BLOCKED`; other explicitly authorized non-dependent work remains eligible within the current scope. This S3 stop overrides generic “keep developing indefinitely” instructions.
+**This delivery round's exact STOP — S3, not G3:** S1 = current architecture PR #198 independently reviewed and merged; S2 = approved D6 registered OpenCode task-root plus tested Worker launch/permission/data route (historical `/claude` transfer not required); S3 = **one real llmtool source-change work package** in which OpenCode develops, pre-reviews/cross-reviews, fixes and tests; **Claude independently verifies**; result with actual commit/Review/usage/relay evidence reaches the **same active foreground Integrator without the Owner ferrying prompts**; Integrator legitimately integrates/records acceptance. On **all S3 criteria actually verified**, **stop new work-package dispatch immediately**, publish one exact-evidence outcome report (or explain still-unmet G1/G2/G3/G4), and await the next Owner-directed delivery round. Do **not** automatically start inactive original-Session wake work, the G4 three-package pilot, a broad controller, or other unrelated enhancements. Active-foreground S3 PASS is **not full original-Session G3/M2 PASS**. On an unresolved authority/egress/mandatory-review gate or policy-exhausted root-cause, STOP the affected task, preserve evidence, report `BLOCKED`; other explicitly authorized non-dependent work remains eligible within the current scope. This S3 stop overrides generic “keep developing indefinitely” instructions.
 
 **Codex quota-exhaustion and reliable Reviewer publication (Owner observation 2026-10-19):** The Owner observed that the shared **Codex 5-hour quota was exhausted** while actual independent Claude Reviewer results were locally completed but not visible to the Integrator. Four session-to-session delivery attempts reportedly failed because the Integrator session address changed. **Once the Owner says Codex quota is exhausted, STOP all Codex Integrator, Developer and Codex subagent inference; do not ask the Owner to reopen them, retransmit large prompts or spend to reconcile results.** Preserve in-progress Git/worktree files and task evidence. This is a pause of dependent Codex execution, not permission to bypass formal reviews or authorize external OpenCode source egress.
 
