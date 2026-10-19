@@ -227,6 +227,181 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotIn('synthetic model text', repr(x))
         self.assertIsNone(getattr(x, 'content', None))
 
+    def test_host_final_job_digest_mismatch_is_unknown(self):
+        with_digest = {**self.final, 'job_digest': self.job.digest}
+        self.assertEqual(self.receipt(host_final=with_digest).verdict, 'SUCCESS')
+        wrong_digest = {**self.final, 'job_digest': 'f' * 64}
+        x = self.receipt(host_final=wrong_digest)
+        self.assertEqual((x.verdict, x.reason), ('UNKNOWN', 'HOST_FACTS_DISAGREE'))
+        blocked_res = replace(self.good, code='OPENCODE_NOT_AUTHORIZED', status='BLOCKED',
+                              content=None, processes=())
+        blocked_wrong = {'code': 'OPENCODE_NOT_AUTHORIZED', 'launched': False,
+                         'one_use_consumed': False, 'job_digest': 'f' * 64}
+        self.assertEqual(self.receipt(result=blocked_res, host_final=blocked_wrong).verdict, 'UNKNOWN')
+
+    def test_record_host_receipt_requires_both_expect_bindings_and_invocation_digest(self):
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / 'receipts.json'
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        for bad_exp in (None, {}, {'task': self.job.task}, {'agent': self.job.agent},
+                        {'task': self.job.task, 'agent': self.job.agent, 'extra': 1}):
+            with self.subTest(bad_exp=bad_exp):
+                x = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                          observed_head=self.job.source_sha, expect=bad_exp,
+                                          store_path=str(store))
+                self.assertEqual((x.verdict, x.reason), ('UNKNOWN', 'EXPECTATION_INVALID'))
+                self.assertFalse(store.exists())
+        no_digest = dict(self.final)
+        x = r.record_host_receipt(job=self.job, result=self.good, host_final=no_digest,
+                                  observed_head=self.job.source_sha, expect=exp,
+                                  store_path=str(store))
+        self.assertEqual((x.verdict, x.reason), ('UNKNOWN', 'HOST_FACTS_DISAGREE'))
+
+    def test_durable_store_prevents_replay_across_restart_and_preserves_prior_success(self):
+        import json, os, stat, tempfile
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / 'receipts.json'
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        first = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                      observed_head=self.job.source_sha, expect=exp,
+                                      store_path=str(store))
+        self.assertEqual((first.verdict, first.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        self.assertFalse(first.accepted)
+        st = os.lstat(store)
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+        persisted_before = json.loads(store.read_text())
+        self.assertEqual(persisted_before['receipts'][self.job.digest]['verdict'], 'SUCCESS')
+        self.assertNotIn('synthetic model text', store.read_text())
+        # Simulated restart / replay of the same job or same backend session:
+        # returns FAILED DUPLICATE_RESULT to caller, but NEVER overwrites prior SUCCESS in store.
+        dup = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                    observed_head=self.job.source_sha, expect=exp,
+                                    store_path=str(store))
+        self.assertEqual((dup.verdict, dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        persisted_after = json.loads(store.read_text())
+        self.assertEqual(persisted_after['receipts'][self.job.digest]['verdict'], 'SUCCESS')
+        self.assertEqual(persisted_after['receipts'][self.job.digest]['reason'], 'WORKER_RUN_OBSERVED')
+        # Replaying the same backend session under a different job is also caught across restart.
+        other_job = replace(self.job, prompt='second prompt')
+        other_fin = {**self.final, 'job_digest': other_job.digest}
+        dup_ses = r.record_host_receipt(job=other_job, result=self.good, host_final=other_fin,
+                                        observed_head=other_job.source_sha, expect=exp,
+                                        store_path=str(store))
+        self.assertEqual((dup_ses.verdict, dup_ses.reason), ('FAILED', 'DUPLICATE_RESULT'))
+
+    def test_durable_store_rejects_symlink_bad_mode_or_corrupt_file_fail_closed(self):
+        import os, tempfile
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        target = Path(tmp.name) / 'target.json'
+        target.write_text('{}')
+        os.chmod(target, 0o600)
+        link = Path(tmp.name) / 'link.json'
+        link.symlink_to(target)
+        x = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                  observed_head=self.job.source_sha, expect=exp,
+                                  store_path=str(link))
+        self.assertEqual((x.verdict, x.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+        bad_mode = Path(tmp.name) / 'bad_mode.json'
+        bad_mode.write_text('{}')
+        os.chmod(bad_mode, 0o644)
+        x2 = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                   observed_head=self.job.source_sha, expect=exp,
+                                   store_path=str(bad_mode))
+        self.assertEqual((x2.verdict, x2.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+        corrupt = Path(tmp.name) / 'corrupt.json'
+        corrupt.write_text('{not-json')
+        os.chmod(corrupt, 0o600)
+        x3 = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                   observed_head=self.job.source_sha, expect=exp,
+                                   store_path=str(corrupt))
+        self.assertEqual((x3.verdict, x3.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+        # Store inside agent.root or agent.common_dir must be rejected fail-closed.
+        in_root = str(Path(self.job.agent.root) / 'receipts.json')
+        x4 = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                   observed_head=self.job.source_sha, expect=exp,
+                                   store_path=in_root)
+        self.assertEqual((x4.verdict, x4.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+        in_common = str(Path(self.job.agent.common_dir) / 'receipts.json')
+        x5 = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                   observed_head=self.job.source_sha, expect=exp,
+                                   store_path=in_common)
+        self.assertEqual((x5.verdict, x5.reason), ('UNKNOWN', 'RECEIPT_STORE_INVALID'))
+
+    def test_durable_store_unknown_re_reconciles_to_success_and_preserves_terminal_verdicts(self):
+        import json, tempfile
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / 'receipts.json'
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        # First reconciliation has missing observed_head -> UNKNOWN persisted, not in seen.
+        u = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                  observed_head=None, expect=exp, store_path=str(store))
+        self.assertEqual((u.verdict, u.reason), ('UNKNOWN', 'SOURCE_NOT_OBSERVED'))
+        self.assertEqual(json.loads(store.read_text())['receipts'][self.job.digest]['verdict'], 'UNKNOWN')
+        # Supplying the missing host-side evidence without re-running the worker updates UNKNOWN -> SUCCESS.
+        s = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                  observed_head=self.job.source_sha, expect=exp, store_path=str(store))
+        self.assertEqual((s.verdict, s.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        self.assertEqual(json.loads(store.read_text())['receipts'][self.job.digest]['verdict'], 'SUCCESS')
+        # A terminal BLOCKED or FAILED receipt for another job is also preserved across replay.
+        blocked_job = replace(self.job, prompt='blocked job prompt')
+        blocked_res = replace(self.good, code='OPENCODE_NOT_AUTHORIZED', status='BLOCKED',
+                              content=None, session_id=None, processes=())
+        b1 = r.record_host_receipt(job=blocked_job, result=blocked_res, host_final=None,
+                                   observed_head=blocked_job.source_sha, expect=exp, store_path=str(store))
+        self.assertEqual((b1.verdict, b1.reason), ('BLOCKED', 'OPENCODE_NOT_AUTHORIZED'))
+        b2 = r.record_host_receipt(job=blocked_job, result=blocked_res, host_final=None,
+                                   observed_head=blocked_job.source_sha, expect=exp, store_path=str(store))
+        self.assertEqual((b2.verdict, b2.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        self.assertEqual(json.loads(store.read_text())['receipts'][blocked_job.digest]['verdict'], 'BLOCKED')
+
+    def test_reserve_host_launch_persists_in_flight_blocks_known_session_and_fsyncs_parent(self):
+        import json, os, tempfile
+        from unittest.mock import patch
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = Path(tmp.name) / 'reserve.json'
+        fin = {**self.final, 'job_digest': self.job.digest}
+        exp = {'task': self.job.task, 'agent': self.job.agent}
+        fsynced_fds = []
+        orig_fsync = os.fsync
+
+        def track_fsync(fd):
+            fsynced_fds.append(os.fstat(fd).st_ino)
+            return orig_fsync(fd)
+
+        with patch.object(os, 'fsync', side_effect=track_fsync):
+            self.assertIsNone(r.reserve_host_launch(job=self.job, expect=exp, store_path=str(store)))
+        self.assertIn(store.parent.stat().st_ino, fsynced_fds)
+        persisted = json.loads(store.read_text())
+        self.assertEqual(persisted['receipts'][self.job.digest]['verdict'], 'UNKNOWN')
+        self.assertEqual(persisted['receipts'][self.job.digest]['reason'], 'LAUNCH_IN_FLIGHT')
+        # Second reservation while in-flight / UNKNOWN is refused without resending.
+        in_flight = r.reserve_host_launch(job=replace(self.job), expect=exp, store_path=str(store))
+        self.assertEqual((in_flight.verdict, in_flight.reason), ('UNKNOWN', 'LAUNCH_IN_FLIGHT'))
+        # Post-run reconciliation with host-side evidence promotes LAUNCH_IN_FLIGHT -> SUCCESS.
+        s = r.record_host_receipt(job=self.job, result=self.good, host_final=fin,
+                                  observed_head=self.job.source_sha, expect=exp, store_path=str(store))
+        self.assertEqual((s.verdict, s.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        # Subsequent reservation after terminal verdict returns FAILED DUPLICATE_RESULT.
+        dup = r.reserve_host_launch(job=replace(self.job), expect=exp, store_path=str(store))
+        self.assertEqual((dup.verdict, dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        # Known backend session reuse as agent.session_id in a new job is refused pre-launch.
+        reused_agent = replace(self.job.agent, session_id=self.good.session_id)
+        reused_job = replace(self.job, agent=reused_agent, prompt='new prompt with reused session')
+        reused_exp = {'task': reused_job.task, 'agent': reused_agent}
+        dup_sess = r.reserve_host_launch(job=reused_job, expect=reused_exp, store_path=str(store))
+        self.assertEqual((dup_sess.verdict, dup_sess.reason), ('FAILED', 'DUPLICATE_RESULT'))
+
 
 if __name__ == '__main__':
     unittest.main()
