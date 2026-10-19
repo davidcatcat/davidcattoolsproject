@@ -151,6 +151,7 @@ class Host:
         self.credential = credential
         self.before = None
         self.token = None
+        self.job_digest = None
         self.consumed = False
         self.final = None
 
@@ -186,6 +187,7 @@ class Host:
             fail()
         if git(root, 'rev-parse', '--git-common-dir').decode().strip() != job.agent.common_dir:
             fail()
+        self.job_digest = job.digest
         self.token = object()
         return self.token
 
@@ -290,7 +292,8 @@ class Host:
         if token is not self.token:
             fail()
         self.credential = None
-        self.final = {'code': code, 'launched': launched, 'one_use_consumed': self.consumed}
+        self.final = {'code': code, 'launched': launched, 'one_use_consumed': self.consumed,
+                      'job_digest': self.job_digest}
 
 
 def provision_runtime(parent):
@@ -378,3 +381,27 @@ def run(job, policy, admission, one_native_credential):
     host = Host(policy, admission, one_native_credential)
     result = w.run_worker(job, host)
     return result, host.final
+
+
+def run_with_receipt(job, policy, admission, one_native_credential, *, expect, receipt_store):
+    """Active Integrator invocation wired to durable G3 ResultReceipt reconciliation.
+
+    Executes ``run()`` once, independently observes post-run Git HEAD in
+    ``policy.root`` (fail-closed to None on error), and calls
+    ``record_host_receipt`` with mandatory ``expect`` (both ``task`` and
+    ``agent`` bindings), same-invocation ``host.final`` (carrying
+    ``job_digest``), and durable ``receipt_store``. Returns
+    ``(result, host.final, receipt)``. A ``SUCCESS`` receipt is NOT acceptance
+    or merge authorization (``receipt.accepted`` is False).
+    """
+    from .opencode_result_receipt import record_host_receipt
+    result, final = run(job, policy, admission, one_native_credential)
+    try:
+        observed_head = git(policy.root, 'rev-parse', 'HEAD').decode().strip()
+    except Exception:
+        observed_head = None
+    receipt = record_host_receipt(job=job, result=result, host_final=final,
+                                  observed_head=observed_head, expect=expect,
+                                  store_path=receipt_store)
+    return result, final, receipt
+

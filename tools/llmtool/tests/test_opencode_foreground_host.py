@@ -343,6 +343,94 @@ class CompositionTests(unittest.TestCase):
                 mock_prov.assert_not_called()
                 mock_git.assert_not_called()
 
+    def test_host_finalize_binds_job_digest_and_run_with_receipt_enforces_wiring(self):
+        from llmtool.run_budget import CallPhase, CallUsage
+        job, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = str(Path(tmp.name) / 'host_receipts.json')
+        exp = {'task': job.task, 'agent': job.agent}
+        processes = (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
+                     dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True))
+        good_res = h.w.WorkerResult(
+            'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-1',
+            UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
+                        job.usage.repair_attempts, 100),
+            True, processes, 'a' * 64, 'HOST_OBSERVED')
+
+        def fake_worker(j, host):
+            tok = host.admit(j, h.hashlib.sha256(h.canonical(h.w.configuration(j))).hexdigest())
+            host.check(tok, j, 'before')
+            host.consume(tok, j)
+            host.check(tok, j, 'after')
+            host.finalize(tok, 'OPENCODE_OUTPUT_RETURNED', True)
+            return good_res
+
+        def git_ok(root, *args):
+            if args == ('rev-parse', 'HEAD'):
+                return (job.source_sha + '\n').encode()
+            return ((job.agent.common_dir if args[-1] == '--git-common-dir' else policy.root)
+                    + '\n').encode()
+
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h, 'snapshot', return_value=snap), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker):
+            res, final, rec = h.run_with_receipt(job, policy, a, {'synthetic': 'cred'},
+                                                 expect=exp, receipt_store=store)
+        self.assertEqual(final['job_digest'], job.digest)
+        self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
+        self.assertFalse(rec.accepted)
+        # Replay with the same store must return FAILED DUPLICATE_RESULT and keep prior SUCCESS in store.
+        a2 = replace(a)
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h, 'snapshot', return_value=snap), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker):
+            _, _, rec_dup = h.run_with_receipt(job, policy, a2, {'synthetic': 'cred'},
+                                               expect=exp, receipt_store=store)
+        self.assertEqual((rec_dup.verdict, rec_dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
+        persisted = json.loads(Path(store).read_text())
+        self.assertEqual(persisted['receipts'][job.digest]['verdict'], 'SUCCESS')
+
+    def test_run_with_receipt_fails_closed_when_git_head_observation_fails_or_tampered_facts(self):
+        from llmtool.run_budget import CallPhase, CallUsage
+        job, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = str(Path(tmp.name) / 'host_receipts2.json')
+        exp = {'task': job.task, 'agent': job.agent}
+        processes = (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
+                     dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True))
+        good_res = h.w.WorkerResult(
+            'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
+            UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
+                        job.usage.repair_attempts, 100),
+            True, processes, 'a' * 64, 'HOST_OBSERVED')
+
+        def fake_worker_tampered(j, host):
+            host.final = {'code': 'OPENCODE_OUTPUT_RETURNED', 'launched': True,
+                          'one_use_consumed': True, 'job_digest': 'f' * 64}
+            return good_res
+
+        def git_ok(root, *args):
+            return (job.source_sha + '\n').encode()
+
+        with patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker_tampered):
+            _, _, rec_tampered = h.run_with_receipt(job, policy, a, {'synthetic': 'cred'},
+                                                    expect=exp, receipt_store=store)
+        self.assertEqual((rec_tampered.verdict, rec_tampered.reason), ('UNKNOWN', 'HOST_FACTS_DISAGREE'))
+
+        def fake_worker_ok(j, host):
+            host.final = {'code': 'OPENCODE_OUTPUT_RETURNED', 'launched': True,
+                          'one_use_consumed': True, 'job_digest': j.digest}
+            return good_res
+
+        with patch.object(h, 'git', side_effect=OSError('git unavailable')), \
+             patch.object(h.w, 'run_worker', side_effect=fake_worker_ok):
+            _, _, rec_no_git = h.run_with_receipt(job, policy, a, {'synthetic': 'cred'},
+                                                  expect=exp, receipt_store=store)
+        self.assertEqual((rec_no_git.verdict, rec_no_git.reason), ('UNKNOWN', 'SOURCE_NOT_OBSERVED'))
+
 
 if __name__ == '__main__':
     unittest.main()
