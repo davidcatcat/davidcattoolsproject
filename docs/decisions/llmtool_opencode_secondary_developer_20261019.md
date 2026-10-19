@@ -1,4 +1,4 @@
-# llmtool — OpenCode secondary Developer: Owner decisions D1–D5 (2026-10-19)
+# llmtool — Developer allocation decisions D1–D7 (2026-10-19)
 
 > **Owner decision:** ACCEPTED, 2026-10-19. **Execution evidence:** NOT IMPLEMENTED / NOT LIVE VERIFIED. The Owner separately authorized starting Git/document updates; this document is not evidence of a physical Mac worktree reassignment, model/data egress authorization, executable Adapter or A11c milestone completion.
 >
@@ -8,13 +8,37 @@
 
 Authorities: [Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172), [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120), [ROADMAP](../../tools/llmtool/ROADMAP.md), [WORKFLOW](../../tools/llmtool/WORKFLOW.md), [safe-git](../../skills/safe-git/SKILL.md), [owner G1–G4](../governance/llmtool_owner_outcome_reporting_v1_1_20261019.md).
 
+## Owner D7 override (2026-10-19): OpenCode PRIMARY, Codex Developer PAUSED
+
+The requirements Owner instructed ChatGPT in the 2026-10-19 conversation
+to switch primary development to OpenCode CLI because of Codex Developer
+token consumption, review prior Codex source, then pause Codex Developer.
+This is an attributed chat decision, **not a signed GitHub comment**.
+[PR #202 source/offline handover](https://github.com/davidcatcat/davidcattoolsproject/pull/202#issuecomment-6258306864)
+accepts the existing adapter as a foundation **only**; actual model
+inference, native Host, S3 and formal source QA remain independent gates.
+Existing Codex Integrator/PM and separate Codex Cloud lane are not
+blanket-paused by this Developer-only instruction.
+
+OpenCode writes in its registered D6 `tasks/a11c-opencode-193-s3`
+worktree, without taking over historical `/claude`. It develops/tests,
+runs DeepSeek own-context review then genuinely qualified *free*
+different-model pre-review, then independent Claude Code formal
+security/functional/native review. Claude FAIL returns to OpenCode
+for bounded fix/rerun/delta-review, not Codex Developer; PASS goes
+to Codex Integrator for final integration/merge. Missing model,
+privacy/auth, free-pricing or actual Mac runner means BLOCKED,
+not an automatic paid API or Codex Developer fallback.
+No new controller/milestone or simulated live claim. Stop after
+the first accepted S3 and report.
+
 ## Accepted allocation
 
 | Role | Current owner decision |
 | --- | --- |
 | Codex Integrator/PM | Existing sole semantic PM and Integration Manager: task splits/routes, priorities, interpretation, merge gates, evidence, next task |
-| Codex Developer | First-line primary code developer |
-| OpenCode v2 / DeepSeek | Second-line code developer; DeepSeek same-model self-review, GLM independent fresh-context cross-model **pre-review** |
+| Codex Developer | **PAUSED** as of Owner D7 after frozen PR #202. No new source changes, tests, subagents or PRs unless Owner explicitly resumes |
+| OpenCode v2 / DeepSeek | **PRIMARY Developer** under Owner D7; DeepSeek separate-context self-review, qualified free different-model cross-review, then Claude formal independent review |
 | Claude Code | Dedicated **independent Reviewer**: code review, functional/security assessment, tests, verification; **Claude Developer PAUSED** pending Owner token availability decision |
 | Company LLM (gw) | Continue previous low-cost, per-task authorized quality-checked advice/triage/context compression, not direct Shell/Git executor |
 | AGY | Backup only due to low token quota |
@@ -48,7 +72,7 @@ For OpenCode Developer, DeepSeek self-review and GLM pre-review, any repository 
 
 ## D5 — free models only unless Owner separately authorizes spend: ACCEPTED (A)
 
-Prefer role-qualified currently free OpenCode models. If DeepSeek/GLM `-free` IDs disappear, change price, quota or performance, qualify an available free substitute with capability/quality/privacy checks. **Never silently switch to paid API** or report historical US$0.00 as current price. If none qualifies, mark OpenCode unavailable and let Integrator allocate authorized work to Codex. Preserve Claude formal independent review and actual usage/cost or UNKNOWN.
+Prefer role-qualified currently free OpenCode models. If DeepSeek/GLM `-free` IDs disappear, change price, quota or performance, qualify an available free substitute with capability/quality/privacy checks. **Never silently switch to paid API** or report historical US$0.00 as current price. If none qualifies, mark OpenCode BLOCKED and report to Integrator; **do not automatically reactivate Codex Developer**. Preserve Claude formal independent review and actual usage/cost or UNKNOWN.
 
 ## Implementation dependencies: existing A11 only
 
