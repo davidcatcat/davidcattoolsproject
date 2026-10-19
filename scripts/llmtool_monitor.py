@@ -414,6 +414,7 @@ STAGE_FILE = re.compile(r"^([A-Za-z0-9_-]{1,32})-attempt\.json$")
 CODE_TEXT = re.compile(r"^[A-Z0-9_]{1,64}$")
 SHORT_MODEL = re.compile(r"(?:^|/)([a-z0-9]+)[a-z0-9.-]*$")
 STATE_ROOT_NAME = re.compile(r"^opencode-[0-9a-f]{32}$")
+FINAL_TOOL = frozenset({"completed", "error"})
 
 
 @dataclass(frozen=True)
@@ -616,9 +617,11 @@ def task_events(old: dict, new: list[Task]) -> list[tuple[str, str]]:
                 continue  # first sight of a task: summarised, not replayed
             if prior is None:
                 out.append(("▶", f"{task.task_id}: stage {stage.name} started ({stage.model})"))
-            seen = {t.key for t in prior.tools} if prior else set()
+            # Report a tool call once, when it has a final status (its path and
+            # outcome are only known then); in-flight calls are not logged yet.
+            seen = {t.key for t in prior.tools if t.status in FINAL_TOOL} if prior else set()
             for tool in stage.tools:
-                if tool.key not in seen:
+                if tool.key not in seen and tool.status in FINAL_TOOL:
                     out.append(("→", f"{task.task_id} {stage.name}: {tool.name} {tool.path}"
                                      f"{'' if tool.status == 'completed' else ' [' + tool.status + ']'}"))
             if stage.result and (prior is None or not prior.result):
