@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -26,8 +27,10 @@ if sys.argv[1]=='serve':
  class Handler(BaseHTTPRequestHandler):
   payload=None
   def log_message(self,*args): pass
-  def _send(self,value):
-   raw=json.dumps({'data':value}).encode();self.send_response(200)
+  def _send(self,value,cursor=False):
+   body={'data':value}
+   if cursor: body['cursor']={}
+   raw=json.dumps(body).encode();self.send_response(200)
    self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)))
    self.end_headers();self.wfile.write(raw)
   def do_POST(self):
@@ -37,7 +40,7 @@ if sys.argv[1]=='serve':
   def do_GET(self):
    if type(self).payload is None: self.send_error(404);return
    if self.path.startswith('/api/session/ses_syntheticWorker/message?'):
-    self._send(type(self).payload['messages']);return
+    self._send(type(self).payload['messages'],cursor=True);return
    if self.path=='/api/session/ses_syntheticWorker':
     self._send(type(self).payload['info']);return
    self.send_error(404)
@@ -63,23 +66,27 @@ else:
  emit('text',part={'type':'text','messageID':'m1','text':'synthetic candidate; self-review recorded'})
  if mode!='no-proof':
   args=sys.argv;model=args[args.index('--model')+1].split('/',1);title=args[args.index('--title')+1]
-  at=int(time.time()*1000);tokens={'input':4,'output':3,'reasoning':2,'cache':{'read':5,'write':1}} if mode!='unknown' else {}
-  item={'id':'msg_synthetic','sessionID':sid,'type':'assistant','agent':'llmtool-worker',
+  at=int(time.time()*1000)
+  tokens={'input':4,'output':3,'reasoning':2,'cache':{'read':5,'write':1}}
+  if mode in ('unknown','zero-usage','missing-cache'):
+   tokens={'input':0,'output':0,'reasoning':0,'cache':{'read':0,'write':0}}
+  item={'id':'msg_synthetic','type':'assistant','time':{'created':at,'completed':at},
+        'agent':'llmtool-worker',
         'model':{'providerID':model[0],'id':model[1]},
-        'time':{'created':at,'completed':at},'finish':'length' if mode=='incomplete' else 'stop',
+        'finish':'length' if mode=='incomplete' else 'stop',
         'content':[{'type':'text','text':'synthetic candidate; self-review recorded'}],
         'tokens':tokens,'cost':0}
   if mode=='model-drift':item['model']['id']='UNAPPROVED'
   if mode=='zero-usage':item['tokens']={'input':0,'output':0,'reasoning':0,'cache':{'read':0,'write':0}}
   if mode=='missing-cache':item['tokens'].pop('cache',None)
   if mode=='nonzero-cost':item['cost']=1
-  info={'id':sid,'directory':os.getcwd(),'location':{'directory':os.getcwd()},
+  info={'id':sid,'projectID':'prj_synthetic','location':{'directory':os.getcwd()},
         'agent':'llmtool-worker','model':{'providerID':model[0],'id':model[1]},
-        'title':title,'time':{'created':at,'idle':at},
+        'title':title,'time':{'created':at,'updated':at,'idle':at},
         'outcome':'succeeded','cost':1 if mode=='nonzero-cost' else 0,
-        'tokens':tokens if mode not in ('unknown','zero-usage','missing-cache') else item['tokens']}
-  fixture={'info':info,'messages':[item,{'id':'idle_synthetic','sessionID':sid,
-          'type':'idle','outcome':'succeeded'}]}
+        'tokens':tokens}
+  fixture={'info':info,'messages':[item,{'id':'msg_idle_synthetic','type':'idle',
+          'time':{'created':at},'outcome':'succeeded'}]}
   req=Request(sys.argv[sys.argv.index('--server')+1]+'/__fixture',
       data=json.dumps(fixture).encode(),headers={'Content-Type':'application/json'})
   with urlopen(req,timeout=2) as response: response.read(1024)
@@ -243,6 +250,61 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertEqual(result.code,code,result)
                 self.assertTrue(result.cleanup_confirmed)
                 self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_ATTEMPT_ALREADY_USED')
+
+    def test_server_json_enforces_absolute_deadline_during_slow_drip(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'value':'x'*1000}}).encode()
+        class DripHandler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)))
+                self.end_headers()
+                try:
+                    for offset in range(0,len(body),27):
+                        self.wfile.write(body[offset:offset+27]);self.wfile.flush()
+                        time.sleep(.02)
+                except (BrokenPipeError,ConnectionResetError):
+                    pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),DripHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/api/session/ses_syntheticWorker','SYNTHETIC',started+.1)
+            elapsed=time.monotonic()-started
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(elapsed,.4,'slow-drip response exceeded the absolute deadline')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_checks_deadline_after_response_close(self):
+        class Socket:
+            def settimeout(self,value): pass
+        class Raw:
+            _sock=Socket()
+        class File:
+            raw=Raw()
+            def __init__(self): self.read=False
+            def read1(self,size):
+                if self.read: return b''
+                self.read=True
+                return b'{"data":{"ok":true}}'
+        class Response:
+            def __init__(self): self.fp=File()
+            def __enter__(self): return self
+            def __exit__(self,*args): time.sleep(.03)
+        class Opener:
+            def open(self,*args,**kwargs): return Response()
+        started=time.monotonic()
+        with patch.object(w.urllib.request,'build_opener',return_value=Opener()):
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:45678','/api/session/ses_syntheticWorker',
+                               'SYNTHETIC',started+.01)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
 
     def test_pinned_executable_and_paths_checked_before_any_launch(self):
         job=self.job();Path(job.runtime.executable).write_text('drift')

@@ -355,10 +355,29 @@ def _server_json(url, route, password, deadline):
     opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
     try:
         with opener.open(request,timeout=min(1,max(.001,deadline-time.monotonic()))) as response:
-            data=response.read(LIMIT+1)
+            stream=getattr(response,'fp',None)
+            raw=getattr(stream,'raw',None)
+            sock=getattr(raw,'_sock',None)
+            read_chunk=getattr(stream,'read1',None)
+            if sock is None or not callable(getattr(sock,'settimeout',None)) or not callable(read_chunk):
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            chunks=[];total=0
+            while True:
+                remaining=deadline-time.monotonic()
+                if remaining<=0: reject('OPENCODE_TIMEOUT')
+                sock.settimeout(min(1,remaining))
+                chunk=read_chunk(min(8192,LIMIT+1-total))
+                if not chunk: break
+                chunks.append(chunk);total+=len(chunk)
+                if total>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+                _clock(deadline)
+    except WorkerError:
+        raise
     except Exception:
+        if time.monotonic()>=deadline: reject('OPENCODE_TIMEOUT')
         reject('OPENCODE_COMPLETION_UNKNOWN')
-    if len(data)>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+    _clock(deadline)  # Include response close/context-manager cleanup in the deadline.
+    data=b''.join(chunks)
     try:
         result=load_json(data.decode('utf-8'),LIMIT)
     except (UnicodeError,WorkerError):
@@ -403,10 +422,14 @@ def _completed_session(job, sid, title, started_ms, url, password, deadline):
                           password,deadline)
     if type(messages) is not list or len(messages)>job.max_steps+8:
         reject('OPENCODE_OUTPUT_LIMIT')
-    assistants=[]
+    assistants=[]; message_ids=set()
     for item in messages:
-        if type(item) is not dict or item.get('sessionID')!=sid:
+        # The authenticated endpoint URL scopes these projected records to ``sid``;
+        # v2.0.32 PublicSessionMessage has no sessionID field.
+        if (type(item) is not dict or type(item.get('id')) is not str or
+                not item['id'].startswith('msg_') or item['id'] in message_ids):
             reject('OPENCODE_COMPLETION_UNKNOWN')
+        message_ids.add(item['id'])
         if item.get('type')!='assistant': continue
         if (item.get('agent')!=AGENT or model_identity(item.get('model'))!=job.model):
             reject('OPENCODE_MODEL_DRIFT')
