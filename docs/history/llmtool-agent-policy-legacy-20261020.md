@@ -1,4 +1,4 @@
-# Archived llmtool role and policy text (through 2026-10-20)
+# Archived llmtool role and policy text from main d41600f (through 2026-10-20)
 
 > **HISTORICAL — NOT CURRENT AUTHORITY.** This file preserves dated role decisions, pilot conditions and one-round stop text removed from always-loaded instructions during the D8 cleanup. Current authority is in [AGENTS.md](../../AGENTS.md), [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md), and [safe-git](../../skills/safe-git/SKILL.md). This archive is not an execution gate.
 
