@@ -339,6 +339,19 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#120）", line)
         self.assertIn("Claude Reviewer → PM", line)
 
+    def test_one_comment_may_carry_several_markers_in_a_stable_order(self):
+        body = ("<!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->\n"
+                "<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                "<!-- activity: type=bogus status=PASS -->\n## Verdict")
+        events = mon.github_events([comment(223, NOW - 9, body)], [], NOW - 99)
+        self.assertEqual([e.event_type for e in events], ["undelivered_reply", "review_verdict"])
+        lines = mon.render_activity(events)
+        self.assertIn("Claude → PM：要求修正後再通過（#223）", lines[0])
+        self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#223）", lines[1])
+        many = "".join("<!-- activity: type=review_verdict status=PASS -->" for _ in range(9)) + "x"
+        self.assertEqual(len(mon.github_events([comment(1, NOW - 9, many)], [], NOW - 99)),
+                         mon.MAX_MARKERS)
+
     def test_invalid_markers_never_create_typed_events(self):
         bodies = ("<!-- activity: type=merge_approved status=PASS -->\nhello",
                   "<!-- activity: type=review_verdict status=SHIPPED -->\nhello",

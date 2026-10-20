@@ -788,6 +788,7 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
 GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
 MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})")
+MAX_MARKERS = 4
 MARKER_TYPES = frozenset({"review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner"})
 PRIVATE_PATH = re.compile(r"(?:/Users|/home|/private|/tmp|/var)/\S*")
 URL = re.compile(r"https?://\S+")
@@ -829,20 +830,21 @@ def _issue_number(url) -> str:
     return found.group(1) if found else ""
 
 
-def _marker_event(body: str, when: float, number: str):
-    found = MARKER.search(body) if type(body) is str else None
-    if not found:
-        return None
-    fields = dict(MARKER_FIELD.findall(found.group(1)))
-    kind, status = fields.get("type", ""), fields.get("status", "UNKNOWN")
-    if kind not in MARKER_TYPES or status not in ACTIVITY_STATUS[kind]:
-        return None
-    actor = fields.get("actor", "")
-    target = fields.get("target", "")
-    return ActivityEvent(when, kind, "", "", status, f"#{number}",
-                         actor=actor if actor in ACTIVITY_ACTORS else "",
-                         target=target if target in ACTIVITY_ACTORS else "",
-                         summary=_headline(body))
+def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
+    """Typed events for each valid marker (at most MAX_MARKERS); invalid ones are ignored."""
+    events = []
+    for found in list(MARKER.finditer(body))[:MAX_MARKERS] if type(body) is str else []:
+        fields = dict(MARKER_FIELD.findall(found.group(1)))
+        kind, status = fields.get("type", ""), fields.get("status", "UNKNOWN")
+        if kind not in MARKER_TYPES or status not in ACTIVITY_STATUS[kind]:
+            continue
+        actor = fields.get("actor", "")
+        target = fields.get("target", "")
+        events.append(ActivityEvent(when, kind, "", "", status, f"#{number}",
+                                    actor=actor if actor in ACTIVITY_ACTORS else "",
+                                    target=target if target in ACTIVITY_ACTORS else "",
+                                    summary=_headline(body)))
+    return events
 
 
 def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
@@ -856,14 +858,14 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         if when < since or not number:
             continue
         body = comment.get("body")
-        event = _marker_event(body, when, number)
-        if event is None:
+        typed = _marker_events(body, when, number)
+        if not typed:
             headline = _headline(body)
             if not headline:
                 continue
-            event = ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
-                                  summary=headline)
-        events.append(event)
+            typed = [ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
+                                   summary=headline)]
+        events.extend(typed)
     for pull in pulls if type(pulls) is list else []:
         if type(pull) is not dict or type(pull.get("number")) is not int:
             continue
