@@ -19,25 +19,29 @@ Before dispatch, record:
 - provider output cap, native retry cap of at most one extra request followed by job termination, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
-For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry limit (at most one extra request, then kill the job) and D6 write scope. A changed file set inside that approved data class does not require a new Owner egress decision. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
+For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry limit (at most one extra request, then kill the job) and D6 write scope. The PM admits the task and checks its data class against D8; a file-set change within that already authorized class does not need a new per-file Owner egress approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
 
 ## Developer convergence and formal review
 
 The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
 
-Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. The Reviewer reports severity, reproducibility, limitations and disposition. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. Never merge on self-review, stale verdict or green CI alone.
+Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. The Reviewer reports severity, reproducibility, limitations and disposition on the PR or tracking Issue with the exact reviewed SHA; this posting is still not a Worker ACK or Owner notification. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. Never merge on self-review, stale verdict or green CI alone.
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review. Use company-gw only for a qualified, privacy-authorized, bounded advisory route; it is not a formal Reviewer and cannot make unsupported net-savings claims.
 
 ## Defect triage and repair bounds
 
-Fix reproducible user-impacting defects in priority order: safety/data loss, blocked core workflows, degraded user-visible behavior, then maintainability. Preserve the root cause and reproducer. Use the smallest repair that addresses it; never weaken tests to clear a finding. A blocking gate stops the affected task, not unrelated authorized work.
+Fix reproducible user-impacting defects under the [normative Issue #92 triage policy](defect-triage.md), in priority order: safety/data loss, blocked core workflows, degraded user-visible behavior, then maintainability. Preserve the root cause and reproducer. Use the smallest repair that addresses it; never weaken tests to clear a finding. A blocking gate stops the affected task, not unrelated authorized work.
 
 ## Mac and live evidence
 
 Before runtime acceptance, establish the tested checkout, exact HEAD, installed executable path/version and required feature ancestry. Run Mac-only checks only on the actual Mac. Record commands, exits, expected markers, usage/receipt/ACK and cleanup as applicable. A resident TUI PID, model assertion, fake fixture or GitHub event alone does not prove a Host-owned Worker launch. Keep source completion, CI, formal review and live acceptance separate.
 
-Evidence must not contain credentials or restricted logs. Use redacted identifiers and exact source hashes. GitHub publication is durable evidence, not proof of Session wake or notification delivery.
+Evidence must not contain credentials or restricted logs. Use redacted identifiers and exact source hashes. Apply [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for G1–G4 milestone checkpoints. GitHub publication is durable evidence, not proof of Session wake or notification delivery.
+
+## Interim controller changes
+
+Changes to the temporary ai-loop controller follow the [controller release and Mac handoff gate](controller-release.md). The `--qa-low*` routes remain frozen and must not be invoked.
 
 ## Efficient handoffs
 
