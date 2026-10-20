@@ -793,6 +793,16 @@ MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})")
 MAX_MARKERS = 4
 MARKER_TYPES = frozenset({"review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner"})
 PRIVATE_PATH = re.compile(r"(?:/Users|/home|/private|/tmp|/var)/\S*")
+# Credential-like or opaque strings are hidden even in a one-line headline.
+SECRETISH = re.compile(
+    r"(?i)(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{8,}"
+    r"|xox[abpr]-[A-Za-z0-9-]{8,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9._-]+"
+    r"|\b(?:bearer|basic)\s+\S+"
+    r"|\b(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key|credential)s?\s*[:=]\s*\S+"
+    r"|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2})")
+# Markers are honoured only from accounts with write access; on a shared account
+# they remain the poster's own claim, so typed lines are labelled 自述.
+TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 URL = re.compile(r"https?://\S+")
 MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
@@ -819,6 +829,7 @@ def _headline(text) -> str:
     for line in text.splitlines():
         line = MD_LINK.sub(r"\1", line)
         line = PRIVATE_PATH.sub("[路徑]", URL.sub("[連結]", line))
+        line = SECRETISH.sub("[已遮蔽]", line)
         line = "".join(char for char in line if char.isprintable())
         line = re.sub(r"[#*`>_|~]+", " ", line)
         line = " ".join(line.split())
@@ -870,7 +881,8 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         if when < since or not number:
             continue
         body = comment.get("body")
-        typed = _marker_events(body, when, number)
+        trusted = comment.get("author_association") in TRUSTED_ASSOCIATION
+        typed = _marker_events(body, when, number) if trusted else []
         if not typed:
             headline = _headline(body)
             if not headline:
@@ -998,6 +1010,8 @@ def _activity_line(event: ActivityEvent) -> str:
     who = f"{actor} → {target}" if target else actor
     if ref and target is None:
         who = f"{actor} {ref}"
+    elif ref and event.event_type in MARKER_TYPES:
+        outcome += f"（{ref}・自述）"
     elif ref:
         outcome += f"（{ref}）"
     summary = _headline(event.summary) if event.summary else ""
@@ -1018,7 +1032,7 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
     if github is None:
         lines.append("GitHub 動態已關閉（--no-github），PM↔Reviewer 的派送、判定、回覆沒有顯示。")
     else:
-        lines.append(github.status + "；派送/判定/未送達只採用代理明確標記的留言。")
+        lines.append(github.status + "；「自述」= 有權限的發文者自己標記，未經驗證。")
     return lines
 
 
