@@ -5,7 +5,6 @@ This is the single normative product-defect disposition policy. Use it with the 
 <a id="user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92"></a>
 ## User-impact-first defect triage and bounded delivery (Owner decision, Issue #92)
 
-This section is the **single normative product-defect disposition policy**.
 The [decision and Claude independent review](https://github.com/davidcatcat/davidcattoolsproject/issues/92)
 adopted C-1 through C-6 with coordinator precision amendments. A report is
 evidence, not an executable automation. Existing P0 escalation, action
