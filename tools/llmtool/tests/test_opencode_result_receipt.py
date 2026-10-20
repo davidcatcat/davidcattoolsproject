@@ -403,5 +403,34 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((dup_sess.verdict, dup_sess.reason), ('FAILED', 'DUPLICATE_RESULT'))
 
 
+class DeliveryRecordValidationTests(unittest.TestCase):
+    """Delivery records stay bounded and legacy 4-key records remain readable."""
+
+    def payload(self, delivery):
+        receipt = {'verdict': 'SUCCESS', 'reason': 'WORKER_RUN_OBSERVED', 'job_digest': 'a' * 64,
+                   'task': None, 'agent': None, 'source_sha': 'b' * 40,
+                   'worker_code': 'OPENCODE_OUTPUT_RETURNED', 'backend_session_id': None,
+                   'output_sha256': 'c' * 64, 'accepted': False}
+        return {'schema': r.STORE_SCHEMA, 'schema_version': 1, 'seen': ['a' * 64],
+                'receipts': {'a' * 64: receipt}, 'deliveries': {'a' * 64: delivery}}
+
+    def test_legacy_and_new_delivery_records_validate(self):
+        base = {'integrator_session': 'session-1', 'state': 'DELIVERED',
+                'reason': 'RECEIPT_DELIVERED', 'receipt_digest': 'd' * 64}
+        r._validate_store_payload(self.payload(dict(base)))
+        for verdict in ('SUCCESS', 'FAILED', 'BLOCKED', 'UNKNOWN'):
+            with self.subTest(verdict=verdict):
+                r._validate_store_payload(self.payload(dict(base, receipt_verdict=verdict)))
+        for bad in ('DONE', None, 'success', 1, ''):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    r._validate_store_payload(self.payload(dict(base, receipt_verdict=bad)))
+        for bad in ({'extra': 'x'}, {'reason': 'OTHER'}, {'state': 'PENDING'},
+                    {'integrator_session': 'bad\nsession'}, {'receipt_digest': 'zz'}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    r._validate_store_payload(self.payload(dict(base, **bad)))
+
+
 if __name__ == '__main__':
     unittest.main()

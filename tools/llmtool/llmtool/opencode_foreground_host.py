@@ -414,3 +414,26 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
                                   store_path=receipt_store)
     return result, final, receipt
 
+
+def run_with_delivery(job, policy, admission, one_native_credential, *, expect,
+                      receipt_store, integrator_session):
+    """One active Integrator invocation that also delivers the receipt to itself.
+
+    Exactly ``run_with_receipt`` (same one-shot durable reservation, single Worker
+    launch, independently observed HEAD and recorded receipt) followed by the bounded
+    ``opencode_result_delivery.deliver_result`` hand-off of that persisted receipt to
+    the SAME foreground ``integrator_session``. Returns
+    ``(result, host.final, receipt, delivery)``. The delivery envelope is the
+    machine-readable hand-off status (``MISSING``/``NOT_DELIVERED``/``UNKNOWN``/
+    ``DELIVERED`` plus correlation fields); it never relaunches the Worker, never
+    rewrites a receipt and is never acceptance, review or merge evidence
+    (``delivery.accepted`` is False). A blocked reservation still returns a delivery
+    envelope rather than raising.
+    """
+    from .opencode_result_delivery import deliver_result
+    result, final, receipt = run_with_receipt(job, policy, admission, one_native_credential,
+                                              expect=expect, receipt_store=receipt_store)
+    delivery = deliver_result(job=job, receipt=receipt, expect=expect,
+                              integrator_session=integrator_session, store_path=receipt_store)
+    return result, final, receipt, delivery
+
