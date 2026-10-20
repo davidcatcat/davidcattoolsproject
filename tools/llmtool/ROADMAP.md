@@ -1,36 +1,10 @@
 # LLMTool Roadmap
 
-> **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
+> Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived below.
 
-## 2026-10-19 Owner D7 (HISTORICAL; see D8) — operative Developer priority
+## Historical role decisions
 
-OpenCode CLI/DeepSeek is now the **PRIMARY Developer**. **Codex
-Developer is PAUSED** after source review of frozen
-[PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
-at `c421c3a`; no further costly Codex Developer source/repair/reviewer
-calls. The existing Codex Integrator remains semantic PM/actual
-OpenCode launcher/receipt owner/final merger when available.
-Reuse merged PR #202 Worker and merged PR #204 reviewed Host/F2 source;
-these remain **NOT LIVE VERIFIED** as a genuine llmtool-owned dispatch.
-Do not reuse an Owner-active manual TUI root as a Host-owned Worker
-without independent liveness, attribution and clean ownership checks.
-Next prove one real
-source-change/tests/DeepSeek self-review/qualified free different-model
-pre-review/independent Claude formal PASS/Integrator receipt cycle.
-Older D1–D5 Codex-first language below is HISTORICAL under D7.
-D6 auto-retirement is not yet Mac-live verified; it is not a blocker
-for a safely registered new task. No new A milestone, extra daemon,
-provider-export/F2 waiver or auto paid fallback. Stop at actual S3
-PASS with evidence; do not infer live proof from docs or fake CI.
-
-**D4/Host launch condition:** exact-file re-admit any new source read/write
-set **before** OpenCode provider inference. No OpenCode-authored Host/
-containment patch may authorize itself: require independent Claude
-Security ACCEPT before its changed permission, diff, negative-probe
-or price guards admit any subsequent invocation. The reviewed PR #204
-Host is the first allowed S3 host candidate; its code merge is not
-proof that `run()` or same-Integrator ACK happened.
-
+D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
 
 目標是 generic, portable LLM CLI and future orchestration foundation。
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
@@ -72,11 +46,7 @@ This is a **parallel delivery lane, not a new A milestone**. Continue the single
 A11b/A11c Roadmap and existing M1a/M1b/M2 gates. Cloud production/CI progress
 cannot replace required canonical Mac Live acceptance for native llmtool cutover.
 
-### HISTORICAL 2026-10-19 D1–D5 developer priorities (superseded by D7)
-
-[Single owner decision record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) previously added **OpenCode v2 / DeepSeek** as second-line Developer alongside first-line **Codex Developer**; subsequent D7 makes OpenCode PRIMARY and Codex Developer PAUSED, both assigned by the **existing Codex Integrator/PM**. OpenCode's same-model DeepSeek reviewer and fresh-context GLM cross-model Reviewer are internal pre-review; **Claude Code remains formal independent code/test/security/QA Reviewer**, while **Claude Developer is PAUSED** for quota. Company-gw continues task-qualified, authorized cost-aware advisory work; AGY is backup. Codex Cloud and Claude Cloud VM remain independent environments, with no new Mac automatic Cloud integration.
-
-D1 reuses the existing physical `/claude` root **only after** verified [safe-git](../../skills/safe-git/SKILL.md) ownership transfer and Mac evidence. The subsequent [Owner D6 decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) **supersedes the earlier no-third-worktree limit** for separately registered task worktrees; it does not automatically transfer or delete that historical root. D4 permits non-sensitive whole-repo browsing by OpenCode, not automatic external-model export, secret access, wider code edits or Git/F2 rights. D5 forbids automatic paid API fallback. Under D3 Developer work may continue when Claude quota is exhausted with exact-SHA **pending formal review** and bounded queue, not self-approval. Under D2 **an active/foreground Integrator waiting for verified Worker results** is the first useful delivery slice; reliable original-session wake/ACK/recovery remains a **separate mandatory G3 acceptance**. Existing G1–G4 and F2/A11b parallel track stay unchanged. Historical OpenCode Lab success is not live llmtool integration evidence.
+Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
 ### 2026-10-17 revised delivery order and dependency graph
 
