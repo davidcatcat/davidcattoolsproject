@@ -30,6 +30,8 @@ For runtime-bound tasks, preserve exact interpreter/import provenance, effective
 
 ## Before any Git mutation
 
+For source/Git mutations in a claimed Mac workspace, run the required [read-only executable preflight](preflight-reference.md) with explicit, independently established expectations. Any nonzero result means preserve the state and stop; it does not authorize the workspace or replace D6 registration. GitHub API documentation edits follow their pinned-base procedure below and do not require a local Mac CLI preflight.
+
 At the actual task root, record:
 
 ```sh
