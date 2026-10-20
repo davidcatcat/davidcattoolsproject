@@ -258,7 +258,7 @@ class ActivityViewTests(unittest.TestCase):
         self.assertIn("審查未通過", lines[positions[1]])
         self.assertIn("卡住，等你決定", lines[positions[3]])
         self.assertIn("失敗：模型呼叫失敗", lines[positions[4]])
-        self.assertIn("沒有顯示；加上 --github", lines[-1])
+        self.assertIn("GitHub 動態已關閉", lines[-1])
         self.assertFalse(any("已送達" in line for line in lines))
 
     def test_production_events_come_only_from_local_stage_evidence(self):
@@ -395,17 +395,30 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("找不到 gh", source.status)
         with self.assertRaises(ValueError):
             mon.GitHubSource("o/r; rm -rf /")
-        with patch("sys.stderr", __import__("io").StringIO()), self.assertRaises(SystemExit):
-            mon.main(["--once", "--github", "not a repo"])
 
-    def test_default_once_never_touches_gh(self):
+    def test_no_github_once_never_touches_gh(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
         with patch.object(mon, "collect", return_value=snapshot), \
              patch.object(mon, "scan_tasks", return_value=[]), \
-             patch.object(mon.shutil, "which", side_effect=AssertionError("gh used without --github")), \
+             patch.object(mon.shutil, "which", side_effect=AssertionError("gh used with --no-github")), \
+             patch("sys.stdout", __import__("io").StringIO()) as out:
+            self.assertEqual(mon.main(["--once", "--no-github"]), 0)
+        self.assertIn("GitHub 動態已關閉", out.getvalue())
+
+    def test_plain_once_reads_github_by_default_with_get_only(self):
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        run = FakeRun((0, [comment(4, NOW - 30, "hello")]), (0, []))
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.subprocess, "run", run), \
+             patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once"]), 0)
-        self.assertIn("加上 --github", out.getvalue())
+        self.assertEqual(len(run.calls), 2)
+        self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
+        self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
+        self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
 
     def test_once_with_github_merges_both_sources_in_time_order(self):
         stage = mon.Stage("red", "deepseek", NOW - 300, "OPENCODE_OUTPUT_RETURNED", "ok",

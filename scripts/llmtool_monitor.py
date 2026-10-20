@@ -324,7 +324,7 @@ class Monitor:
         self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
         self.tasks: list = []
         self.task_map: dict = {}
-        self.github = None   # opt-in GitHubSource (--github); None means no network at all
+        self.github = None   # GitHubSource for the Activity view; None means no network at all
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -777,8 +777,9 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
                                               event.event_type, event.stage, event.status))
 
 
-# ------------------------------------------------------- opt-in GitHub source
-# Enabled only by --github. Read-only `gh api` GETs of recent issue/PR comments
+# ------------------------------------------------------------ GitHub source
+# On by default (Owner 2026-10-20: no flags, just Tab); --no-github turns it off.
+# Used only by the Activity view/--once. Read-only `gh api` GETs of recent issue/PR comments
 # and pull requests; nothing is posted, cached on disk or sent anywhere else.
 # Only a sanitized first line (or PR title) is kept, never a comment body.
 # Cross-session events are typed ONLY from an explicit marker an agent writes:
@@ -879,7 +880,7 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
 
 
 class GitHubSource:
-    """Opt-in, rate-limited, read-only GitHub activity. Failures become a status line."""
+    """Rate-limited, read-only GitHub activity. Failures become a status line."""
 
     def __init__(self, repo: str, window_hours: float = 12.0, runner=None, clock=time.time) -> None:
         if not GITHUB_REPO.fullmatch(repo or ""):
@@ -989,7 +990,7 @@ def render_activity(events: list[ActivityEvent], limit: int = 30,
     if not lines:
         lines.append("目前沒有可顯示的動態。")
     if github is None:
-        lines.append("PM↔Reviewer 的派送、判定、回覆沒有顯示；加上 --github 可從 GitHub 唯讀讀取。")
+        lines.append("GitHub 動態已關閉（--no-github），PM↔Reviewer 的派送、判定、回覆沒有顯示。")
     else:
         lines.append(github.status + "；派送/判定/未送達只採用代理明確標記的留言。")
     return lines
@@ -1143,16 +1144,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="log every helper process immediately (no short-lived filtering)")
     parser.add_argument("--min-age", type=float, default=3.0,
                         help="seconds a helper must live before it is logged (default 3)")
-    parser.add_argument("--github", nargs="?", const=DEFAULT_GITHUB_REPO, metavar="OWNER/REPO",
-                        help="also show recent GitHub comments/PRs in Activity (read-only gh api; "
-                             f"default repo {DEFAULT_GITHUB_REPO}; off unless given)")
+    parser.add_argument("--no-github", action="store_true",
+                        help="do not read recent GitHub comments/PRs for the Activity view "
+                             f"(default: read-only gh api on {DEFAULT_GITHUB_REPO})")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
-    try:
-        github = GitHubSource(args.github) if args.github else None
-    except ValueError as exc:
-        parser.error(str(exc))
+    github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO)
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
