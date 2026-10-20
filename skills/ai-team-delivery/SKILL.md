@@ -72,50 +72,84 @@ technical capability never confers runtime, network, Git or merge authority.
 Reviewer/developer independence requires distinct roles and separate review
 evidence, not two labels on a single self-review.
 
-### Bounded Coding and Debug Agent workflow (D8)
+### Owner direction: Codex Coding and Debug workflow (2026-10-21)
 
 The project custom agents in `.codex/agents/codex-coding.toml` and
-`.codex/agents/codex-debug.toml` provide role defaults; their TOML settings do
-not prove which model or permissions an invocation actually used. They inherit
-the parent session's sandbox and permissions. D8 keeps the Codex Developer
-resumed, and Claude remains the independent formal Reviewer. Exact-head CI and
-the existing GitHub review/merge gates still apply.
+`.codex/agents/codex-debug.toml` use the Owner-selected defaults Coding
+`gpt-6-luna` / high and Debug `gpt-6.1-sol` / medium. The Codex Developer is
+resumed under the operative Owner decisions; Claude remains the independent
+formal Reviewer. TOML settings do not prove which model, reasoning level or
+permissions an invocation actually used. Exact-head CI and the existing
+GitHub review/merge gates still apply.
 
 1. The PM gives one bounded Task Contract: objective and acceptance criteria,
    base SHA, allowed writable paths, required checks and review gates, budget
    and provider limits, handoff destination, and stop conditions.
-2. The PM routes routine root-cause analysis and debugging to the Debug Agent;
-   the PM does not perform routine RCA. Debug reports reproduction, root cause,
-   evidence and a bounded recommendation, and does not own product source edits.
-   Any Debug Agent executing repository commands must run under a separate
-   Codex CLI parent session in the registered D6 task worktree, launched with
-   `--sandbox read-only`, with no active user-level or project MCP
-   configuration and no mutation-capable app, MCP or Git tools. The repository
-   currently has no project `.codex/config.toml` MCP configuration; verify this
-   remains true for the task. Never delegate Debug from a permissive
-   `workspace-write` or `danger-full-access` parent. If any of these conditions
-   cannot be verified, do not execute repository commands; Debug may analyze
-   only evidence already captured, and only from a parent session that itself
-   meets the isolation gate. If no compliant parent session can be verified,
-   do not invoke Debug; preserve the evidence and report the limitation. These
-   instructions alone do not enforce the boundary: custom agents inherit the
-   parent session's sandbox and permissions.
-3. The Coding Agent owns implementation, relevant tests and developer
-   self-review for the whole contract. It returns the exact base/head SHAs,
-   diff scope, checks and results, unresolved findings, and a concise evidence
-   and context packet. A debug result passes directly to this Coding Agent.
-4. Send the completed candidate to Claude for the applicable independent
+2. The PM routes systematic/root-cause investigations to Debug; ordinary
+   bounded coding and test convergence stays with the same Coding Agent. The PM
+   does not perform routine RCA. Debug reports one concise evidence-backed
+   diagnosis and recommendation, and does not own product source edits.
+3. Any Debug Agent executing repository commands must run in a separate Codex
+   CLI parent session in the registered D6 task worktree, launched with
+   `--ignore-user-config --sandbox read-only --ask-for-approval never`. Verify
+   no project MCP configuration is present; `--ignore-user-config` excludes
+   user MCP configuration. Ensure mutation-capable app, MCP and Git tools are
+   unavailable. Never delegate Debug from a permissive `workspace-write` or
+   `danger-full-access` parent. The repository currently has no project
+   `.codex/config.toml` MCP configuration; verify it remains absent. If the
+   parent, flags, worktree, project MCP absence or tool surface cannot be
+   verified, report the concrete capability block. Do not execute repository
+   commands or have the PM perform RCA. `features.apps = false` disables Apps
+   only; it is not a filesystem or Git boundary. Custom agents inherit parent
+   sandbox, approval settings and MCP tools; their instructions cannot replace
+   those controls.
+4. The Coding Agent owns implementation, relevant tests, ordinary bounded
+   failure repair and developer self-review for the whole contract. It follows
+   repository guidance including `AGENTS.md` and `skills/safe-git/SKILL.md`,
+   writes only in its registered D6 task worktree as its sole writer, and does
+   not write in the canonical checkout or a peer worktree. It returns exact
+   base/head SHAs, diff scope, checks and results, unresolved findings, and a
+   concise evidence/context packet. A systematic Debug diagnosis passes
+   directly to this same Coding Agent.
+5. Send the completed candidate to Claude for the applicable independent
    formal review. Claude findings return directly to the same Coding Agent
    for bounded repair, affected checks and rereview. Keep required exact-head
    CI and GitHub review/merge gates; self-review or local pre-review does not
    replace them.
-5. The PM re-enters for cross-workstream conflicts, product or authority
+6. The PM re-enters for cross-workstream conflicts, product or authority
    changes, budget changes, exhausted repair policy, or integration and final
    acceptance. Handoffs carry only task-relevant evidence, exact revision,
    check results, unresolved questions and observed/unknown model or token
    usage; do not repeat broad context or claim model identity from profile
-   configuration alone. This workflow is human coordination guidance, not a
-   new PM service, controller or dispatch system.
+   configuration alone. If custom child runtime settings are not observable,
+   use a separate `codex exec` session with explicit `--model` and
+   `-c model_reasoning_effort=...` values. For Debug, also use the secure flags
+   and `--disable apps`, and verify the project MCP configuration/tool surface.
+   Record what CLI output actually establishes; otherwise mark model/settings
+   unverified. This workflow is human coordination guidance, not a new PM
+   service, controller or dispatch system.
+
+For a direct Debug fallback when child settings are not observable, run a
+separate `codex exec` invocation from the verified D6 root (never the permissive
+Coding parent). Set `REGISTERED_D6_ROOT` to that exact verified worktree path,
+check project MCP absence, and use an explicit role prompt:
+
+```sh
+codex exec --ignore-user-config --sandbox read-only --ask-for-approval never \
+  --disable apps -C "$REGISTERED_D6_ROOT" \
+  --model gpt-6.1-sol -c 'model_reasoning_effort="medium"' \
+  "Perform systematic RCA on the supplied task and return evidence only; do not edit files."
+```
+
+Check project MCP absence and the effective tool surface before use. The command
+line supplies requested values; it is not proof of model identity. Record the
+CLI version, launch flags and any session metadata it exposes. If actual model
+identity is not exposed, report it as unverified. Do not execute repository
+commands unless the read-only sandbox and `never` approval policy are verified.
+A direct Coding fallback uses its own session and explicit
+`--model gpt-6-luna` with
+`-c 'model_reasoning_effort="high"'`; its permissions and publication steps
+remain bounded by the Task Contract and `safe-git`.
 
 ### 2026-10-17 owner-approved PM/llmtool and mobile Cloud roles
 
