@@ -13,6 +13,12 @@
 
 Unchanged: formal independent review before merge, exact-head CI, no paid fallback, no F2 llmtool-owned Git mutation, no force operations.
 
+### Owner D8a — local OpenCode credential use (2026-10-20)
+
+**Owner decision: ACCEPTED** (「同意補充 a」, 2026-10-20, recorded by Claude). llmtool's Host/Worker **may read the single active OpenCode credential** (integration `opencode`) from the local OpenCode store **in memory**, and pass it to the isolated OpenCode worker it starts (e.g. via that worker's private localhost credential endpoint). This is the path the TaskA native runner used and Claude reviewed and accepted. It satisfies the D4 credential boundary for the D4 one-call smoke and for OpenCode tasks.
+
+Still required: never print, log, persist, export or copy the credential into receipts, evidence, GitHub or any file; read only that one active row (no `auth export`, no all-credentials list); drop the reference after handing it to the worker. Config isolation through the Worker's isolated HOME/XDG state is accepted. On this Mac, no system-level or managed (MDM/profile) OpenCode configuration exists (checked 2026-10-20); a launch preflight that fails closed if such sources appear is recommended, not a precondition.
+
 ## Owner D7 — OpenCode PRIMARY / Codex Developer PAUSED (2026-10-19)
 
 **New operative role order supersedes all older Codex-first text.**

@@ -1,6 +1,8 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
-## Owner D7 — OpenCode PRIMARY; Codex Developer PAUSED
+> **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
+
+## Owner D7 — OpenCode PRIMARY; Codex Developer PAUSED (HISTORICAL; see D8)
 
 [PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
 delivered a source/offline-reviewed Worker adapter `c421c3a` and is
