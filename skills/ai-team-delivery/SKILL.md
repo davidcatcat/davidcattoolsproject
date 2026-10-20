@@ -69,7 +69,7 @@ Preserve the report, user impact, reproducible evidence and affected scope. Prio
 <a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
 ### Historical D7 pre-review/S3 note
 
-The former one-round S3 stop and paused-role assignments are historical. Current work follows the Task Contract, independent review, exact-head CI and applicable live gates; no blanket stop follows one milestone.
+The former one-round S3 stop and paused-role assignments are historical. The current Owner direction keeps the unused one-time D4 Live Smoke as a precondition: after it succeeds, immediately begin the first real OpenCode Developer package. Do not infer Smoke success from offline tests or a resident TUI; see the [D8/D8a sequencing record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
 
 <a id="d8-task-admission-and-no-self-attestation"></a>
 ### D8 task admission and Host review
