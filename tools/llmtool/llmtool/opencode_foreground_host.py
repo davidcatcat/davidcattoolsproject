@@ -28,6 +28,7 @@ from .run_budget import UsageLedger
 from .task_lifecycle import AgentBinding, Role
 from .task_review import canonical
 from . import opencode_worker as w
+from . import opencode_native_credential as native_credential
 
 TASK_ID = 'a11c-opencode-foreground-193'
 AGENT_ID = 'opencode-foreground-worker'
@@ -280,13 +281,27 @@ class Host:
                 dict(action=action, resources=[resource], agent=w.AGENT))
             if result.get('data', {}).get('effect') != effect:
                 fail()
-        # Only the Integrator supplies ONE existing native credential in memory.
-        # Never reads credential files or duplicates history. No prompt in this call.
-        if type(self.credential) is not dict or not self.credential:
+        # A lazy D8a source avoids credential access on rejected/replayed jobs.
+        # The source reads only one active v2.0.32 store row; Host hands it to
+        # the isolated worker endpoint and drops every reference immediately.
+        credential = self.credential
+        if type(credential) is native_credential.ActiveOpenCodeCredential:
+            try:
+                credential = credential.take(job.runtime.version)
+            except native_credential.NativeCredentialError:
+                self.credential = None
+                raise w.WorkerError('OPENCODE_CREDENTIAL_UNAVAILABLE') from None
+            self.credential = None
+        if type(credential) is not dict or not credential:
+            credential = None
+            self.credential = None
             fail()
-        request('/api/credential', {'integrationID': 'opencode', 'value': self.credential,
-                                    'activate': True}, secret=True)
-        self.credential = None
+        try:
+            request('/api/credential', {'integrationID': 'opencode', 'value': credential,
+                                        'activate': True}, secret=True)
+        finally:
+            credential = None
+            self.credential = None
 
     def finalize(self, token, code, launched):
         if token is not self.token:

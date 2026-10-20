@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -17,12 +18,38 @@ from llmtool.task_lifecycle import AgentBinding, Role
 
 
 FAKE = '''#!PYTHON -IB
-import json,signal,sys,time,sqlite3,os
+import json,signal,sys,time,os,threading
+from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+from urllib.request import Request,urlopen
 from pathlib import Path
 signal.alarm(8)
 if sys.argv[1]=='serve':
- print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
- sys.stdin.buffer.read()
+ class Handler(BaseHTTPRequestHandler):
+  protocol_version='HTTP/1.1'
+  payload=None
+  def log_message(self,*args): pass
+  def _send(self,value,cursor=False):
+   body={'data':value}
+   if cursor: body['cursor']={}
+   raw=json.dumps(body).encode();self.send_response(200)
+   self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(raw)))
+   self.end_headers();self.wfile.write(raw)
+  def do_POST(self):
+   if self.path!='/__fixture': self.send_error(404);return
+   type(self).payload=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+   self._send({'ok':True})
+  def do_GET(self):
+   if type(self).payload is None: self.send_error(404);return
+   if self.path.startswith('/api/session/ses_syntheticWorker/message?'):
+    self._send(type(self).payload['messages'],cursor=True);return
+   if self.path=='/api/session/ses_syntheticWorker':
+    self._send(type(self).payload['info']);return
+   self.send_error(404)
+ server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+ server.daemon_threads=True
+ threading.Thread(target=lambda:server.serve_forever(poll_interval=.005),daemon=True).start()
+ print(json.dumps({'url':'http://127.0.0.1:%d'%server.server_port}),flush=True)
+ sys.stdin.buffer.read();server.shutdown();server.server_close()
 else:
  mode=sys.stdin.read()
  if mode=='timeout': time.sleep(4)
@@ -39,25 +66,31 @@ else:
  emit('step_start',part={'type':'step-start','messageID':'m1'})
  emit('text',part={'type':'text','messageID':'m1','text':'synthetic candidate; self-review recorded'})
  if mode!='no-proof':
-  dbdir=Path(os.environ['XDG_DATA_HOME'])/'opencode';dbdir.mkdir(mode=0o700,exist_ok=True)
-  db=sqlite3.connect(dbdir/'opencode.db')
-  db.execute('CREATE TABLE session_v2(id,directory,version,agent,model,title,time_created,time_idle,idle_outcome,tokens_input,tokens_output,cost,tokens_reasoning,tokens_cache_read,tokens_cache_write)')
-  db.execute('CREATE TABLE session_message(id,session_id,type,seq,data)')
   args=sys.argv;model=args[args.index('--model')+1].split('/',1);title=args[args.index('--title')+1]
-  at=int(time.time()*1000);tokens={'input':4,'output':3,'reasoning':2,'cache':{'read':5,'write':1}} if mode!='unknown' else {}
-  item={'agent':'llmtool-worker','model':{'providerID':model[0],'id':model[1]},
-        'time':{'completed':at},'finish':'length' if mode=='incomplete' else 'stop',
+  at=int(time.time()*1000)
+  tokens={'input':4,'output':3,'reasoning':2,'cache':{'read':5,'write':1}}
+  if mode in ('unknown','zero-usage','missing-cache'):
+   tokens={'input':0,'output':0,'reasoning':0,'cache':{'read':0,'write':0}}
+  item={'id':'msg_synthetic','type':'assistant','time':{'created':at,'completed':at},
+        'agent':'llmtool-worker',
+        'model':{'providerID':model[0],'id':model[1]},
+        'finish':'length' if mode=='incomplete' else 'stop',
         'content':[{'type':'text','text':'synthetic candidate; self-review recorded'}],
         'tokens':tokens,'cost':0}
   if mode=='model-drift':item['model']['id']='UNAPPROVED'
   if mode=='zero-usage':item['tokens']={'input':0,'output':0,'reasoning':0,'cache':{'read':0,'write':0}}
   if mode=='missing-cache':item['tokens'].pop('cache',None)
   if mode=='nonzero-cost':item['cost']=1
-  db.execute('INSERT INTO session_v2 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
-   (sid,os.getcwd(),'2.0.32','llmtool-worker',json.dumps(item['model']),title,at,at,'succeeded',4,3,0,2,5,1))
-  db.execute('INSERT INTO session_message VALUES(?,?,?,?,?)',('m1',sid,'assistant',1,json.dumps(item)))
-  db.execute('INSERT INTO session_message VALUES(?,?,?,?,?)',('i1',sid,'idle',2,json.dumps({'outcome':'succeeded'})))
-  db.commit();db.close()
+  info={'id':sid,'projectID':'prj_synthetic','location':{'directory':os.getcwd()},
+        'agent':'llmtool-worker','model':{'providerID':model[0],'id':model[1]},
+        'title':title,'time':{'created':at,'updated':at,'idle':at},
+        'outcome':'succeeded','cost':1 if mode=='nonzero-cost' else 0,
+        'tokens':tokens}
+  fixture={'info':info,'messages':[item,{'id':'msg_idle_synthetic','type':'idle',
+          'time':{'created':at},'outcome':'succeeded'}]}
+  req=Request(sys.argv[sys.argv.index('--server')+1]+'/__fixture',
+      data=json.dumps(fixture).encode(),headers={'Content-Type':'application/json'})
+  with urlopen(req,timeout=2) as response: response.read(1024)
  finish={'type':'step-finish','messageID':'m1','reason':'stop'}
  if mode!='unknown': finish['tokens']={'input':4,'output':3}
  if mode=='incomplete':finish['reason']='length'
@@ -66,26 +99,17 @@ else:
 
 
 NATIVE_FAKE = FAKE.replace(
-"""if sys.argv[1]=='serve':
- print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
- sys.stdin.buffer.read()""",
-"""if sys.argv[1]=='serve':
+""" server=ThreadingHTTPServer(('127.0.0.1',0),Handler)""",
+""" server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
  import subprocess
  child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)'])
  Path('SERVER_DESCENDANT.json').write_text(json.dumps({'pid':child.pid,'pgid':os.getpgid(child.pid)}))
- print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
- sys.stdin.buffer.read()
- sys.exit(0)""")
+ """)
 
 
 SERVER_NONZERO = FAKE.replace(
-"""if sys.argv[1]=='serve':
- print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
- sys.stdin.buffer.read()""",
-"""if sys.argv[1]=='serve':
- print(json.dumps({'url':'http://127.0.0.1:45678'}),flush=True)
- sys.stdin.buffer.read()
- sys.exit(3)""")
+"""sys.stdin.buffer.read();server.shutdown();server.server_close()""",
+"""sys.stdin.buffer.read();server.shutdown();server.server_close();sys.exit(3)""")
 
 
 def _still_waitable(process):
@@ -158,8 +182,12 @@ class OpenCodeWorkerTests(unittest.TestCase):
         return w.WorkerJob(**values)
 
     def test_real_private_server_and_client_are_owned_reaped_and_source_bound(self):
-        job=self.job();host=Host()
-        result=w.run_worker(job,host)
+        job=self.job();host=Host();spawn=subprocess.Popen;child_envs=[]
+        def capture_spawn(*args,**kwargs):
+            child_envs.append(kwargs['env'])
+            return spawn(*args,**kwargs)
+        with patch.object(w.subprocess,'Popen',side_effect=capture_spawn):
+            result=w.run_worker(job,host)
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
         self.assertEqual(result.status,'RETURNED')
         self.assertFalse(result.authorized)
@@ -174,6 +202,13 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.usage.calls[-1].input_tokens,10)
         self.assertEqual(result.usage.calls[-1].output_tokens,5)
         self.assertEqual(result.raw_usage,((4,3,2,5,1),))
+        self.assertEqual(len(child_envs),2)
+        self.assertEqual(child_envs[0],child_envs[1])
+        self.assertEqual(child_envs[0]['OPENCODE_DB'],':memory:')
+        state=Path(job.runtime.state_root)
+        self.assertFalse((state/'data/opencode/opencode.db').exists())
+        self.assertFalse(any(b'SYNTHETIC_ONLY' in p.read_bytes()
+                             for p in state.rglob('*') if p.is_file()))
         self.assertEqual([x[0] for x in host.calls].count('consume'),1)
         self.assertEqual(job.pending,())
         with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
@@ -216,6 +251,184 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertEqual(result.code,code,result)
                 self.assertTrue(result.cleanup_confirmed)
                 self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_ATTEMPT_ALREADY_USED')
+
+    def test_server_json_enforces_absolute_deadline_during_slow_drip(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'value':'x'*1000}}).encode()
+        class DripHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)))
+                self.end_headers()
+                try:
+                    for offset in range(0,len(body),27):
+                        self.wfile.write(body[offset:offset+27]);self.wfile.flush()
+                        time.sleep(.02)
+                except (BrokenPipeError,ConnectionResetError):
+                    pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),DripHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/api/session/ses_syntheticWorker','SYNTHETIC',started+.1)
+            elapsed=time.monotonic()-started
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(elapsed,.4,'slow-drip response exceeded the absolute deadline')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_checks_deadline_after_response_close(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=b'{"data":{"ok":true}}'
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        create_connection=w.socket.create_connection
+        class SlowClose:
+            def __init__(self,inner): self.inner=inner
+            def __getattr__(self,name): return getattr(self.inner,name)
+            def close(self): time.sleep(.15);self.inner.close()
+        started=time.monotonic()
+        try:
+            with patch.object(w.socket,'create_connection',side_effect=lambda *a,**kw:
+                              SlowClose(create_connection(*a,**kw))):
+                with self.assertRaises(w.WorkerError) as caught:
+                    w._server_json('http://127.0.0.1:%d'%server.server_port,
+                                   '/api/session/ses_syntheticWorker','SYNTHETIC',started+.1)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+
+    def test_server_json_decodes_keepalive_and_chunked_http11_responses(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class FramingHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                if self.path=='/chunked':
+                    self.send_header('Transfer-Encoding','chunked');self.end_headers()
+                    for chunk in (body[:7],body[7:19],body[19:]):
+                        self.wfile.write(('%X\r\n'%len(chunk)).encode()+chunk+b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n');self.wfile.flush()
+                    return
+                self.send_header('Content-Length',str(len(body)))
+                self.send_header('Connection','keep-alive');self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+        server=ThreadingHTTPServer(('127.0.0.1',0),FramingHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        try:
+            base='http://127.0.0.1:%d'%server.server_port
+            for route in ('/keepalive','/chunked'):
+                with self.subTest(route=route):
+                    result=w._server_json(base,route,'SYNTHETIC',time.monotonic()+1)
+                    self.assertEqual(result,{'ok':True})
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_rejects_truncated_content_length(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class TruncatedHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)+100))
+                self.send_header('Connection','close')
+                self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+                self.close_connection=True
+        server=ThreadingHTTPServer(('127.0.0.1',0),TruncatedHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/truncated','SYNTHETIC',time.monotonic()+1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_COMPLETION_UNKNOWN')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_enforces_deadline_on_persistent_unframed_response(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class PersistentHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+                time.sleep(.3)
+        server=ThreadingHTTPServer(('127.0.0.1',0),PersistentHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start();started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/persistent','SYNTHETIC',started+.1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(time.monotonic()-started,.4)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_deadline_interrupts_slow_chunk_size_line(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        class SlowChunkHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Transfer-Encoding','chunked');self.end_headers()
+                try:
+                    for char in b'0000000000000000000000000000001\r\n':
+                        self.wfile.write(bytes([char]));self.wfile.flush();time.sleep(.02)
+                except (BrokenPipeError,ConnectionResetError): pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),SlowChunkHandler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start();started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/slow-chunk-line','SYNTHETIC',started+.1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(time.monotonic()-started,.4)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_rejects_conflicting_duplicate_content_lengths(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class DuplicateLengthHandler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)))
+                self.send_header('Content-Length',str(len(body)+100))
+                self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),DuplicateLengthHandler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/duplicate-content-length','SYNTHETIC',time.monotonic()+1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_COMPLETION_UNKNOWN')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
 
     def test_pinned_executable_and_paths_checked_before_any_launch(self):
         job=self.job();Path(job.runtime.executable).write_text('drift')
