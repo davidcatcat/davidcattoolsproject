@@ -4,7 +4,7 @@
 
 ## Historical role and stop decisions
 
-The former D7 role order, per-file D4 gate and one-round S3 stop are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the Task Contract.
+The former D7 role order, per-file D4 gate and one-round S3 stop are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the Task Contract. The PM screens each task's file set for the D8-authorized data class; files within that class require no repeated per-file Owner egress approval.
 
 ## Single A-roadmap and interim controller (owner decision 2026-10-09)
 
@@ -111,7 +111,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent Claude Reviewer → Integrator path in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Do not treat the historic S3 stop as current authority.
+Follow the bounded Developer → independent Claude Reviewer → Integrator path in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). The one-time D4 Live Smoke must succeed before the first real OpenCode Developer package; proceed immediately after success. The old one-round S3 stop is historical, not a replacement for this Smoke condition.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
