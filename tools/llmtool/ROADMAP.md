@@ -2,9 +2,9 @@
 
 > Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md).
 
-## D4 live status — 2026-10-20
+## D4 live status — 2026-10-21
 
-The one-time D4 OpenCode Live Smoke remains unused and **NOT LIVE VERIFIED**. The authorized route is Owner D8a's Host/Worker in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server route failed independent configuration-isolation review and is deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt.
+The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one failed with `OPENCODE_RUNTIME_INVALID` before launch because of a symlink path. Attempt two launched and returned `provider.auth`; neither attempt produced inference. The result does not establish that the login was expired. The authorized Host route is Owner D8a's in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server credential route failed independent configuration-isolation review and remains deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt. D4 Host work is background G3/M2 work and does not gate direct OpenCode Developer sessions.
 
 ## Historical role decisions
 

@@ -4,7 +4,7 @@
 
 ## Historical role and stop decisions
 
-Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a. Read the [ai-team delivery workflow](../../skills/ai-team-delivery/SKILL.md) for active D4 screening and task admission.
+Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions.
 
 ## Single A-roadmap and interim controller (owner decision 2026-10-09)
 
@@ -111,7 +111,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent Claude Reviewer → Integrator path in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Follow the D4 sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); earlier D7/S3 wording is historical.
+Follow the bounded Developer → independent Claude Reviewer → Integrator path and 2026-10-21 routing in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 

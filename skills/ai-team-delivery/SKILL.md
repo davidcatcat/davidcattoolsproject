@@ -21,6 +21,8 @@ Before dispatch, record:
 
 For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the actually-free, enabled route at admission (never infer current price from a historical `$0.00` record), D8-authorized non-sensitive data class, provider cap, retry stop and D6 write scope. The PM admits the task and screens each file set for secrets/restricted data; a file-set change within the authorized class needs no repeated per-file Owner approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
 
+**Developer routing (Owner direction, 2026-10-21):** Codex Developer is the default while quota is usable. When quota is exhausted, or the PM routes a task to OpenCode, OpenCode may work directly in its own registered D6 worktree under OpenCode project permissions and a Task Contract. Keep the normal PR, independent Claude review and CI gates. D4 / llmtool-driven OpenCode through the D8a Host handoff is background G3/M2 work, not a prerequisite for Developer sessions.
+
 ## Developer convergence and formal review
 
 The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
@@ -69,7 +71,7 @@ Use the [normative Issue #92 policy](defect-triage.md); preserve this legacy anc
 <a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
 ### Historical D7 pre-review/S3 note
 
-The former one-round S3 stop and paused-role assignments are historical. Follow the D4 sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
+The former one-round S3 stop and paused-role assignments are historical. Current Developer routing is defined above and in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); D4 Host work remains background G3/M2 work.
 
 <a id="d8-task-admission-and-no-self-attestation"></a>
 ### D8 task admission and Host review
