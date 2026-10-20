@@ -5,11 +5,12 @@
 - **Roles:** Codex Integrator/PM owns scope, routing, evidence and integration. Codex Developer is resumed. OpenCode remains an authorized Developer; the PM admits qualifying OpenCode tasks without per-call Owner approval. Claude Code is the independent formal Reviewer; Claude Monitor owns its monitoring tool.
 - **Owner escalation:** ask only when requirements/feature direction is wrong, root/sudo is needed, or a Mac core system setting must change. Resolve ordinary technical decisions within the accepted scope and report them.
 - **OpenCode boundaries:** non-sensitive repository source, tests, docs and Git history may go to free OpenCode models. Do not send credentials, secrets, VPN/auth material, personal/customer data or restricted logs. D8a permits only the single active local OpenCode credential row for integration `opencode` in memory to start an isolated worker; drop its reference after handoff. Never print, log, persist, export or file-copy it, enumerate credentials, read the credential SQLite database, use `auth export`, or include it in evidence/receipts/GitHub. See the [D8/D8a decision](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) for the full boundary.
-- **Required gates:** registered D6 task worktree and file allowlist; provider output cap and native retry stop (at most one extra provider request, then kill the job); distinct review of any OpenCode-authored Host/Worker update before use, formal Security review of admission/containment updates before use, and exact-head CI before merge. F2 llmtool-owned mutation is not authorized. No paid fallback, force push, history rewrite or destructive cleanup.
+- **Required gates:** registered D6 task worktree and file allowlist; provider output cap and native retry stop (at most one extra provider request, then kill the job); distinct review of any OpenCode-authored Host/Worker update before use, formal Security review of admission/containment updates before use, and exact-head CI before merge. F2 llmtool-owned mutation is not authorized. No paid fallback, force push, history rewrite or destructive cleanup. Provider/profile/role/model identity never grants execution authority.
+- **Data and frozen routes:** D8 egress covers only its listed non-sensitive repository data on OpenCode free models. Any spend or provider data export outside an already authorized route/data class is STOP. The `--qa-low*` routes remain frozen; do not invoke or revive them. Do not send raw restricted logs or secrets.
 
 ## Repository scope and changes
 
-The canonical Mac repository is `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Local Mac work uses that root or a registered, verified D6 task worktree. Codex Cloud uses only its task-configured checkout. Do not create independent clones or move project trees to temporary directories.
+The canonical Mac repository is `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Local Mac work uses that root or a registered, verified D6 task worktree. Codex Cloud uses only its task-configured checkout; verify repository identity is `davidcatcat/davidcattoolsproject` and STOP if it cannot be established (never assume `/workspace`). Do not create independent clones or move project trees to temporary directories. Ephemeral provider runtime working directories under `/tmp` or `/var/tmp` are allowed when they contain no project copy/worktree; do not change `codex_cli.py` solely to remove that isolation.
 
 Before repository changes, verify:
 
@@ -26,7 +27,7 @@ For authorized GitHub API documentation edits, pin reads and the change branch t
 
 ## Delivery and claims
 
-Read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for product work, review, QA handoff and publication; read the relevant specialist skill for the gate. Use [safe-git](skills/safe-git/SKILL.md) for Git operations. Documentation-only changes need documentation validation; report missing checks.
+Read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for product work, review, QA handoff and publication; read the relevant specialist skill for the gate. Use [safe-git](skills/safe-git/SKILL.md) for Git operations. Documentation-only changes need documentation validation; report missing checks. Apply [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for milestone outcomes and G1–G4 checkpoints.
 
 Independent review and exact-head CI are separate merge gates. A model's self-review is not independent acceptance. Mac behavior requires evidence from the actual Mac and tested revision. A GitHub comment is not proof of Worker execution, Session wake or Owner notification. Distinguish proposal, review, product acceptance, delegated authority and Git execution in reports.
 
