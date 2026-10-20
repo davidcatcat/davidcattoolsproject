@@ -34,6 +34,26 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 The Owner approved **evidence-based reporting at meaningful outcomes, routine Integrator autonomy, useful Mac delivery before 24-hour unattended hosting, and a Mac-supervised M2 pilot**. The single management contract is [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md). Its G1 (M1b adopted code), G2 (real Worker), G3 (M2 full independent-agent loop), and G4 (three-work-package Mac pilot with Owner GO/LIMITED GO/NO-GO) are **reporting checkpoints within A11c**, not new product milestones, gate waivers or an extra coordinator. Integrator publishes verifiable outcome reports, material Owner decision briefs and one compact weekly status; GitHub publication is not a verified ChatGPT/Owner notification. Existing A11b/F2, provider/Host, native and independent review permissions remain unchanged.
 
+### First-class llmtool entrypoints: CLI and Web UI (Owner clarification, 2026-10-21)
+
+**Product requirement — CONFIRMED; implementation/acceptance — INCOMPLETE.** An end user must operate **llmtool itself**. Opening a Codex, Claude or OpenCode Developer/Integrator CLI and forwarding the user's prompts is a **temporary project bootstrap workflow**, not the finished llmtool UX. Codex/Claude/OpenCode may remain separately installed/authenticated **underlying runtimes** and PM-selected agents. Their existence does not make their interactive CLIs the required user-facing entrypoint. The PM/Integrator remains the semantic task planner; llmtool transports approved assignments, evidence and notifications rather than deciding its own routes.
+
+**Native CLI delivery under existing A11c.1 → A11c.2 (first usable Mac release):**
+
+1. Provide one discoverable `llmtool` user entrypoint for entering an actual development request, not merely a one-provider chat reply. Extend/reuse the existing `llmtool chat` / `chat --tui` and task/diagnostics interfaces, rather than creating another orchestration process. The exact subcommand/launch UX belongs to the implementation design; existing `chat` does **not** yet provide a verified full multi-agent development loop.
+2. The CLI submits a task to the **existing Codex Integrator/PM**, which chooses Developer/Reviewer routes; llmtool invokes only approved capabilities and reports task ID, current owner/agent, stage, tests, review, PR/CI result, blockers and when an actual Owner decision is required. Normal progress must not require the user to open Codex/OpenCode/Claude windows or manually relay agent prompts.
+3. First-run guidance and documentation must show where to **obtain/install llmtool**, prerequisites (Python/platform and any selected external CLI/runtime), how to configure each person's own provider credentials, and truthful readiness/doctor results. Do not assume a PyPI/release download URL exists until a package is actually published, or embed this Owner's private settings.
+4. Validate a real `llmtool`-initiated Task → PM → Developer → independent Reviewer → repair/tests → eligible PR-or-STOP journey on the Mac, with true receipt/notification and permissions. The existing Codex-CLI-initiated workarounds are **not** sufficient evidence for this user-facing acceptance. Keep every separately authorized A11b/Host/Git/egress gate intact.
+
+**Local Web UI: FIRST-CLASS PLANNED FRONTEND, not a delivered A11c feature and not a new controller.** The Owner discussed a web visualization on 2026-10-19 and now confirms that the browser should both **monitor the whole AI workflow and submit prompts/tasks**. Favor a clear, futuristic, animated flow visualization with understandable task/Agent transitions, but prioritize genuine activity/provenance over cosmetic motion:
+
+- **Read-only Web dashboard phase:** once A11c produces trustworthy task/run/event/agent evidence, present the workflow from user request → PM assignment → Developer/company `gw` → tests → independent Reviewer → repair → PR/CI. Show queue/running/blocked/waiting/completed states, agent identities, timestamps, delivery/ACK truth, usage/UNKNOWN and links to detailed test/trace/PR evidence. Never infer progress from a PID alone or expose prompts, private paths or credentials in monitoring output.
+- **Interactive Web phase:** allow a user to enter development requirements and follow tasks via the **same** trusted llmtool task submission/PM route used by the CLI; show responses, review results and specific approval requests. Only authorized existing task-bound approval/cancellation actions may execute. A Web button, text box or browser connection is **not** an authorization to call a model, edit a repo, merge, bypass budgets or launch a second planner.
+- **Security/deployment:** start with local-machine access and an explicitly designed local authentication/origin boundary. No public network binding, multi-tenant hosted service, independent event/ledger store or blanket remote access. Web frontend and CLI share A11 Task/Run/Event/Approval semantics. Use the existing read-only terminal monitor / Issue #225 Activity work as evidence sources when applicable, without pretending either is already a Web backend.
+- **Order:** CLI direct-entry acceptance is part of the first A11c Mac usable-release gate. Begin Web dashboard planning and bounded read-only UI development in parallel when the A11c event contract is stable; integrate prompt submission **only after** the trusted CLI/task/permission backend works. Deliver a usable local Web console as the **next product-facing release**; it is part of the Owner's requested product, **not an optional idea to discard**. Telegram may follow later as an optional remote frontend. No date or existing-Web-implementation claim is made.
+
+**Version/acceptance distinction:** `A11c DONE` proves the native coordination/real-task gates, but `first usable llmtool CLI` additionally requires the direct user entrypoint above; the Owner's **full CLI + Web product vision** additionally requires a browser task-submission and workflow-observation acceptance. Do not label Web complete because terminal monitoring or backend Agent handoff exists.
+
 ### Independent-user installation and portability (Owner product direction, 2026-10-21)
 
 **Product scope — CONFIRMED; implementation — DEFERRED / NOT VERIFIED.** llmtool is a shareable, provider-agnostic **local CLI tool**: another person should eventually be able to install it on their own computer, select their own Codex/Claude/OpenCode or compatible API provider, and use their own Git repository. It must not require this Owner's Mac paths, GitHub repository, account, private credentials or company VPN. The company `gw` connection is an **optional Owner-specific provider**, never an installation default. This is **independent per-user installation**, not a multi-tenant service, shared cloud account, hosted SaaS or new controller.
@@ -179,7 +199,7 @@ was closed without merging the temporary controller into main; it is not a nativ
 
 **Cutover gate (A11c):** llmtool must independently pass canonical-Mac real development tasks (documentation change, bug fix, failed-review repair), bounded approvals, timeouts/child cleanup, source-bound tests, independent Security/Functional QA and safe failure/dirty-tree STOP. Confirm ordinary task → one llmtool command → Codex/Claude/test/repair → audited PR or NEEDS_DECISION, without human prompt relay, before retiring the duplicate temporary runner. Measure quality, token and latency on representative eligible routes; do not claim savings without evidence or force company routing when it fails. Retain ai-loop as an explicitly controlled fallback until parity.
 
-**Optional work is not a prerequisite for this transition:** A2.3 Anthropic HTTP API, A12 Telegram, a dashboard, and full C1b/C1c cost studies are not blanket blockers for starting/designing A11b. Never waive required security, permission, Mac, QA or specific provider-egress gates.
+**Optional work is not a prerequisite for this transition:** A2.3 Anthropic HTTP API, A12 Telegram, Web visualization styling, and full C1b/C1c cost studies are not blanket blockers for starting/designing A11b. However, a direct native **llmtool CLI user entrypoint** is required before declaring the first Mac user-facing version usable; the planned local Web console is a distinct subsequent product acceptance. Never waive required security, permission, Mac, QA or specific provider-egress gates.
 
 ## Current milestone snapshot
 
@@ -196,7 +216,7 @@ current roadmap.
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
 | A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD; M1b useful real-task adoption and full M2 NOT_VERIFIED** | **Priority: verify first M1a/M1b real-task adoption now**, independently of F2; finish separately granted production foreground Worker trial, then verified same-Integrator resume / delegated-Worker M2. Full native cutover still needs all applicable A11b/QA/Mac/route gates; F2 specifically gates direct llmtool Git mutation |
-| A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
+| A12 — User Frontends (Web first; Telegram later) | **WEB PLANNED / NOT IMPLEMENTED; TELEGRAM OPTIONAL** | Local read-only workflow UI then authorized prompt/task submission over accepted A11 CLI/task/event/approval services; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
 PASS WITH REQUIRED A11b DESIGN CONTROLS; [QA round 2](../../reports/llmtool_qg_qa1_targeted_rereview_round2_20261005.md)
@@ -1357,7 +1377,9 @@ company handoff 保留 pinned contract/source/unknown/evidence，獨立 verifica
 且客觀升級與 bounded repair 不降低驗收標準。Coverage limitations 與 unknown cost 如實記錄；
 不宣稱所有語意正確，也不以尚未設計的 cost router 宣告成本最佳化完成。
 
-## A12 — Remote Frontends / Telegram Agent
+## A12 — User Frontends: local Web console, then optional Telegram
+
+**Current sequencing (Owner 2026-10-21):** The native `llmtool` CLI is the required user-facing first release under A11c. A12's first planned frontend is the **local Web dashboard plus user prompt/task submission**, using the existing A11 task/run/event/approval infrastructure. This Web UI is a real product requirement, not just a decorative dashboard. Develop read-only views after trustworthy A11 events, then authorized task submission after the existing task/PM/permissions backend; do not postpone the CLI release waiting for Web styling. The Telegram design below is retained as an **optional later** remote frontend, not the priority of A12. There is no completed Web implementation or authorization to expose a web server publicly.
 
 未來附加功能：llmtool 執行在使用者的筆電或桌上型電腦，使用者可透過手機
 Telegram Bot 遠端與 llmtool 對話、送出自然語言指令與控制命令，並建立 llmtool task。
@@ -1422,7 +1444,7 @@ roles:
 A1 保留 named provider 與共用 response contract 作為擴充點，但拒絕未支援 type、
 roles、command 等欄位。此 roadmap 不加入 RAG、vector DB、embeddings 或 fine-tuning。
 整體方向由 A3.5 Interactive Chat Shell 提供互動入口，主線逐步建立至 A11 Production Workflow，
-再以 A12 Remote Frontends / Telegram Agent 擴充遠端入口；A12 是未來附加功能，不改變
+再以 A12 local Web console（監控 + 提交任務）優先擴充入口，Telegram 遠端功能後續選用；A12 不改變
 既有 milestone 的完成狀態、驗證紀錄或主線開發順序。
 
 ## Post-A9 Hardening ✅ DONE and merged to main
