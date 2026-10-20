@@ -219,10 +219,17 @@ class ReviewHandoffTests(unittest.TestCase):
         h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
 
         receipt, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
-        self.assertEqual(receipt.verdict, 'PASS')
+        # Missing usage is UNKNOWN, never zero: the retrospective budget gate
+        # blocks approval while retaining the one consumed, finalized call.
+        self.assertEqual(receipt.code, 'REVIEW_BUDGET_BLOCKED')
+        self.assertEqual(receipt.verdict, 'BLOCKED')
+        self.assertEqual(receipt.execution_status, 'UNKNOWN')
+        self.assertEqual(receipt.provider_calls, 1)
+        self.assertEqual(receipt.ledger_status, 'EFFECT_DONE')
         self.assertEqual(receipt.usage_status, 'UNKNOWN')
         self.assertIsNone(receipt.input_tokens)
         self.assertIsNone(receipt.output_tokens)
+        self.assertFalse(receipt.authorized)
 
     def test_replay_denied_across_same_issuer_fresh_issuer_and_reopened_ledger(self):
         h = self.harness(mode='success')
