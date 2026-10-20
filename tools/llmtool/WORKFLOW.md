@@ -4,7 +4,7 @@
 
 ## Historical role and stop decisions
 
-The former D7 role order, per-file D4 gate and one-round S3 stop are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the Task Contract. The PM screens each task's file set for the D8-authorized data class; files within that class require no repeated per-file Owner egress approval.
+Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a. Read the [ai-team delivery workflow](../../skills/ai-team-delivery/SKILL.md) for active D4 screening and task admission.
 
 ## Single A-roadmap and interim controller (owner decision 2026-10-09)
 
