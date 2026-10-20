@@ -23,9 +23,9 @@ REVIEW_ENVELOPE_LIMIT = 128 * 1024
 
 
 def decode_review_envelope(raw, *, forbidden_sessions=()):
-    """Pinned Claude SDKResultMessage result/success subset (upstream v2.1.301).
+    """Pinned Claude SDKResultMessage result/success subset (upstream v2.1.301/2.1.303).
 
-    Basis: Claude Code 2.1.301 CLI help output-format=json and the
+    Basis: Claude Code 2.1.301/2.1.303 CLI output-format=json and the
     official Claude Agent SDK SDKResultSuccess result envelope (see WORKFLOW). This is a
     strict fixture codec, NOT evidence of the installed CLI's live protocol.
     Usage is allowlisted CLI_REPORTED data, never measured billing or identity.
@@ -40,7 +40,12 @@ def decode_review_envelope(raw, *, forbidden_sessions=()):
         # rejected rather than reflected into diagnostics or interpreted as pins.
         allowed = required | {'usage', 'duration_ms', 'duration_api_ms',
                               'num_turns', 'total_cost_usd', 'stop_reason', 'uuid',
-                              'permission_denials', 'modelUsage'}
+                              'permission_denials', 'modelUsage',
+                              'api_error_status', 'terminal_reason', 'fast_mode_state',
+                              'fast_mode_disabled_reason', 'ttft_ms', 'ttft_stream_ms',
+                              'time_to_request_ms', 'first_content_frame_ms',
+                              'queued_turn_count', 'result_index', 'safety_stops',
+                              'subagent_stats'}
         if (type(value) is not dict or not required <= set(value) <= allowed or
                 value['type'] != 'result' or value['subtype'] != 'success' or
                 type(value['is_error']) is not bool or value['is_error'] or
@@ -63,9 +68,25 @@ def decode_review_envelope(raw, *, forbidden_sessions=()):
         # The result is itself JSON DATA. Decode it for privacy checks so JSON
         # escapes cannot hide secrets/paths before the strict verdict parser.
         screen_strings(load_json(value['result'], VERDICT_LIMIT))
-        for key in ('duration_ms', 'duration_api_ms', 'num_turns'):
-            if key in value and (type(value[key]) is not int or not 0 <= value[key] <= 10**12):
+        for key in ('duration_ms', 'duration_api_ms', 'num_turns', 'ttft_ms', 'ttft_stream_ms',
+                    'time_to_request_ms', 'first_content_frame_ms', 'queued_turn_count',
+                    'result_index', 'safety_stops'):
+            if key in value and value[key] is not None and (
+                    type(value[key]) is not int or not 0 <= value[key] <= 10**12):
                 reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'api_error_status' in value and value['api_error_status'] is not None:
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'terminal_reason' in value and value['terminal_reason'] not in (None, 'completed'):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'fast_mode_state' in value and value['fast_mode_state'] not in (None, 'off', 'on', 'cooldown'):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'fast_mode_disabled_reason' in value and value['fast_mode_disabled_reason'] is not None and (
+                type(value['fast_mode_disabled_reason']) is not str or
+                len(value['fast_mode_disabled_reason']) > 128):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
+        if 'subagent_stats' in value and value['subagent_stats'] is not None and (
+                type(value['subagent_stats']) is not dict or len(value['subagent_stats']) > 32):
+            reject('REVIEW_WORKER_ENVELOPE_INVALID')
         if 'total_cost_usd' in value and (type(value['total_cost_usd']) not in (int, float) or
                 not math.isfinite(value['total_cost_usd']) or value['total_cost_usd'] < 0):
             reject('REVIEW_WORKER_ENVELOPE_INVALID')
@@ -84,7 +105,8 @@ def decode_review_envelope(raw, *, forbidden_sessions=()):
         if type(usage) is dict:
             allowed_usage = {'input_tokens', 'output_tokens', 'cache_creation_input_tokens',
                              'cache_read_input_tokens', 'server_tool_use', 'service_tier',
-                             'cache_creation', 'inference_geo'}
+                             'cache_creation', 'inference_geo', 'iterations', 'speed',
+                             'fallback_credit', 'output_tokens_details'}
             # Optional unsupported usage is UNKNOWN, not a reason to fabricate 0.
             if set(usage) <= allowed_usage and all(type(usage.get(k)) is int and
                     0 <= usage[k] <= 10**12 for k in ('input_tokens', 'output_tokens')):

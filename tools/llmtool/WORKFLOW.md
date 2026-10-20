@@ -235,7 +235,7 @@ The trusted `compose_host_services` seam can select the explicit
 `llmtool-worker/claude-cli` role. `ProviderRoutePolicy.reviewer_role` is mandatory
 for new construction; only old Host-file decoding fills the absent legacy
 `llmtool-review/claude-cli` value. Both role crossings deny before spawn. Worker
-Host registration additionally pins version `2.1.301` and executable SHA256;
+Host registration additionally pins version `2.1.301` or `2.1.303` and executable SHA256;
 its physical executable/auth-home/version pins form `worker_runtime_digest` in
 that role's route policy. The existing call `route_digest`, issuer-held Host
 file digest, unpredictable pre-admission launch nonce and consumed receipt bind
@@ -244,7 +244,11 @@ schema. A changed executable, revoked route, source, nonce or expired binding
 cannot reuse that grant. Public factories remain unavailable.
 
 Trusted host code can now call
-`run_foreground_review(issuer, ledger, budget=budget)` in `review_authority`.
+`run_foreground_review(issuer, ledger, budget=budget)` in `review_authority`
+(or `dispatch_review_handoff(issuer, ledger, budget=budget)` in `review_handoff`
+for a structured `ReviewHandoffReceipt` with `PASS`/`FAIL`/`BLOCKED` and
+`execution_status` `SUCCEEDED`/`FAILED`/`BLOCKED`/`UNKNOWN` without interactive
+terminal paste or manual `Enter`).
 It composes the actual HostServices and calls the existing `run_review` using
 only `issuer.context`; it accepts no second contract or caller-supplied services.
 Only the Worker role is accepted, before receipt consumption or spawn. This
@@ -276,15 +280,20 @@ evidence. Runtime stays NOT_VERIFIED and production handoff NOT_DELIVERED.
 The opt-in provider invocation is foreground `--print --output-format json
 --no-session-persistence --safe-mode --tools "" --model <pinned model>`, with
 shell disabled, isolated empty cwd, sanitized environment and pinned auth HOME.
-The syntax basis is the previously inspected installed **2.1.301 help**, plus
+The syntax basis is the previously inspected installed **2.1.301 help** (with
+installed **2.1.303** version/telemetry codec fixture support), plus
 Anthropic's [CLI reference](https://code.claude.com/docs/en/cli-reference) and
 [SDKResultMessage reference](https://platform.claude.com/docs/en/agent-sdk/typescript#sdkresultmessage).
-These references are schema/design input, **not installed live protocol proof**.
+These references are schema/design input (codec fixture, **not installed live protocol/ABI proof**).
 The supported fixture codec accepts exactly one bounded `type=result`,
 `subtype=success`, `is_error=false`, canonical UUID `session_id`, JSON-string
-`result`. Optional keys are exactly `usage`, `duration_ms`, `duration_api_ms`,
+`result`. Optional keys are `usage`, `duration_ms`, `duration_api_ms`,
 `num_turns`, `total_cost_usd`, `stop_reason`, `uuid`, empty
-`permission_denials`, and bounded/ignored `modelUsage`. Unknown fields, duplicate
+`permission_denials`, bounded/ignored `modelUsage`, and documented 2.1.303
+result telemetry fields (`api_error_status`, `terminal_reason`, `fast_mode_state`,
+`fast_mode_disabled_reason`, `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`,
+`first_content_frame_ms`, `queued_turn_count`, `result_index`, `safety_stops`,
+`subagent_stats`). Unknown fields, duplicate
 keys, malformed/error/nonterminal/multiple output, private/sensitive decoded
 strings and invalid Unicode fail closed. Outer UTF-8 is at most128KiB; the
 unchanged strict inner verdict is at most64KiB with both decisions separately
