@@ -160,7 +160,7 @@ https://help.openai.com/en/articles/20001545-using-codex-cloud.
 
 Apply the [normative work-package policy](../../skills/ai-team-delivery/SKILL.md#work-package-delivery-and-in-session-reviewer-subagents-owner-decision-2026-10-14) and [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235). One already-authorized Developer CLI owns a complete deliverable: plan and safe-git preflight, scoped implementation, targeted tests, a **read-only in-session Reviewer child** if supported, bounded repair/recheck and one consolidated Draft PR/evidence packet. Avoid separately asking the owner to advance each microstep.
 
-**HISTORICAL (superseded by D7):** Codex Developer formerly used a distinct local Codex Reviewer child; Claude Developer formerly used a distinct local Claude Reviewer child. Neither paused Developer is to be started under this old rule. Verify child identity, actual root and *effective* restrictive tools; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
+**HISTORICAL local-reviewer rule:** The former same-provider Reviewer-child assignments for Codex Developer and Claude Developer sessions are historical. Any current Developer may use a distinct read-only child only when its CLI supports one and effective restrictive permissions are verified; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
 
 Batch deterministic worktree/branch/baseline state checks where permitted, but do not skip real independently accepted C3 old-final/new-start baselines, Git shared-ref serialization, matching release, TaskContract allowlists or meaningful STOP. Preserve the task-final candidate at published HEAD so the next handoff does not mistakenly compare post-commit source to task-start baseline. No current proof exists that GitHub messages awaken Mac CLIs or that a cross-provider listener is installed. If a physical operator action is unavoidable, give one action for a work package; report an A11c capability gap rather than claim impossible unattended progress. Use the reviewed ai-loop only within its actual accepted scope until llmtool provides the full native Codex/Claude/test/repair route.
 
@@ -370,9 +370,7 @@ family gets at most two failed repair attempts before coordinator
 reassessment; overall review/token/time escalation does not waive a
 failing mandatory gate. Place independent QA in the feature PR or
 tracking Issue instead of opening a new report-only PR for every round.
-Only the requirements owner's three P0 cases in the Skill require
-direct owner yes/no escalation; provider egress and spending still
-require distinct pre-existing authorization.
+Only the three cases in the [Owner escalation reference](../../skills/ai-team-delivery/owner-escalation.md)—a wrong product requirement, root/sudo, or a macOS core/system change—require direct Owner escalation. Provider egress and spending still require distinct pre-existing authorization.
 
 ## Execution environment
 
