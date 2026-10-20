@@ -45,7 +45,7 @@ git rev-parse --git-common-dir
 git remote -v
 ```
 
-Confirm repository, branch, HEAD, upstream and worktree ownership. Bind task-start and task-final source plus allowed-file inventory. For runtime-bound work, record interpreter/import provenance and effective permission/hook evidence separately from user-granted settings. Verify the remote PR head against the exact tested candidate (including squash publication); a commit claim is not proof. Inspect the full diff and preserve unrelated work. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means stop and preserve.
+Inspect the full diff and preserve unrelated work. Verify the published PR head against the exact tested candidate (including squash publication); a commit claim is not proof.
 
 ## Fetch and synchronize
 
