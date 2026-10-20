@@ -240,7 +240,9 @@ class TaskEventTests(unittest.TestCase):
 
 
 class MonitorTaskBaselineTests(unittest.TestCase):
-    """A failed first task scan must not replay history on the next success."""
+    """Only a successful task scan may establish the baseline; history is never replayed."""
+
+    TASK_KINDS = ("▶", "→", "■", "!")
 
     def setUp(self):
         self.monitor = mon.Monitor()
@@ -254,6 +256,13 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             with patch.object(mon, "scan_tasks", return_value=tasks):
                 return self.monitor.poll()
 
+    def poll_without_process_table(self):
+        with patch.object(mon, "collect", side_effect=RuntimeError("ps unavailable")):
+            return self.monitor.poll()
+
+    def task_kinds(self, new):
+        return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
+
     @staticmethod
     def stage(name, result="", tools=(), live=False):
         return mon.Stage(name, "deepseek", 1.0, result, "ok" if result else "",
@@ -262,6 +271,58 @@ class MonitorTaskBaselineTests(unittest.TestCase):
     @staticmethod
     def task(directory, *stages):
         return mon.Task(directory, directory.strip("/"), "main", tuple(stages))
+
+    def test_first_successful_scan_baselines_history_and_still_reports_later_stages(self):
+        historical = [self.task("/d", self.stage(
+            "red", "RETURNED", (mon.Tool("1", "read", "a.py", "completed"),)))]
+        first = self.poll(historical)
+        self.assertEqual([kind for _, kind, _ in first], ["i", "i"])
+        self.assertIn("monitor started;", first[0][2])
+        self.assertIn("1 recent llmtool task(s); latest d: red RETURNED", first[1][2])
+        self.assertEqual(self.task_kinds(first), [])
+        self.assertEqual(self.task_kinds(self.poll(historical)), [])
+        self.assertEqual(self.monitor.task_map, {"/d": historical[0]})
+        extended = [self.task("/d", self.stage(
+            "red", "RETURNED", (mon.Tool("1", "read", "a.py", "completed"),)),
+            self.stage("fix", live=True))]
+        self.assertEqual([(kind, text) for _, kind, text in self.poll(extended)],
+                         [("▶", "d: stage fix started (deepseek)")])
+
+    def test_new_task_emits_start_tool_and_finish_once_in_order(self):
+        self.poll([])
+        task = self.task("/new", self.stage(
+            "red", "RETURNED", (mon.Tool("1", "read", "a.py", "completed"),
+                                mon.Tool("2", "edit", "src/b.py", "error"))))
+        first = self.poll([task])
+        self.assertEqual([kind for _, kind, _ in first], ["▶", "→", "→", "■"])
+        self.assertEqual([text for _, _, text in first], [
+            "new: stage red started (deepseek)",
+            "new red: read a.py",
+            "new red: edit src/b.py [error]",
+            "new: stage red finished: RETURNED, cleanup ok, 1 steps, 0.0k in / 0.0k out",
+        ])
+        self.assertEqual(self.poll([task]), [])
+        self.assertEqual(self.monitor.task_map, {"/new": task})
+
+    def test_task_scan_failure_after_baseline_neither_replays_nor_rebaselines(self):
+        historical = [self.task("/d", self.stage("red", "RETURNED"))]
+        self.poll(historical)
+        self.assertEqual(self.poll(RuntimeError("evidence unavailable")), [])
+        self.assertEqual(self.task_kinds(self.poll(historical)), [])
+        added = [self.task("/d", self.stage("red", "RETURNED"),
+                           self.stage("fix", live=True))]
+        self.assertEqual([(kind, text) for _, kind, text in self.poll(added)],
+                         [("▶", "d: stage fix started (deepseek)")])
+
+    def test_unreadable_process_table_never_establishes_a_task_baseline(self):
+        self.assertEqual([kind for _, kind, _ in self.poll_without_process_table()], ["?"])
+        historical = [self.task("/d", self.stage("red", "RETURNED"))]
+        self.assertEqual(self.task_kinds(self.poll(historical)), [])
+        self.assertEqual(self.poll(historical), [])
+        added = [self.task("/d", self.stage("red", "RETURNED"),
+                           self.stage("fix", live=True))]
+        self.assertEqual([(kind, text) for _, kind, text in self.poll(added)],
+                         [("▶", "d: stage fix started (deepseek)")])
 
     def test_failed_first_scan_keeps_start_summary_and_next_scan_is_baseline(self):
         first = self.poll(RuntimeError("evidence unavailable"))
