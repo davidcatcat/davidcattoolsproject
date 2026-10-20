@@ -437,3 +437,98 @@ def run_with_delivery(job, policy, admission, one_native_credential, *, expect,
                               integrator_session=integrator_session, store_path=receipt_store)
     return result, final, receipt, delivery
 
+
+@dataclass(frozen=True)
+class DispatchAck:
+    """Bounded in-process dispatch outcome; never acceptance or merge evidence."""
+    state: str
+    reason: str
+    task_id: object = None
+    agent_id: object = None
+    job_digest: object = None
+    source_sha: object = None
+    integrator_session: object = None
+    receipt: object = None
+    delivery: object = None
+    completion_ack: bool = False
+    accepted: bool = False
+
+
+def dispatch_with_ack(job, policy, admission, one_native_credential, *, expect,
+                      receipt_store, integrator_session):
+    """Run one already-authorized D4 job and correlate observed start + durable ACK.
+
+    This is an in-process Integrator seam over the existing Host/Worker/receipt/
+    delivery path, not a new controller. Admission's logical Integrator session
+    must exactly match the session receiving the durable delivery. STARTED is
+    emitted only when this invocation's Host final facts confirm a launch bound
+    to the same job digest. Completion ACK is true only for a durable receipt
+    delivered back to that same session; neither field means acceptance.
+
+    Any preflight mismatch returns NOT_STARTED without reserving or launching.
+    An exception or unverifiable Host facts returns UNKNOWN and must be recovered
+    from the existing receipt store; callers must never retry the Worker merely
+    because this envelope is UNKNOWN.
+    """
+    task_id = job.task.task_id if type(job) is w.WorkerJob and type(job.task) is TaskBinding else None
+    agent_id = job.agent.agent_id if type(job) is w.WorkerJob and type(job.agent) is AgentBinding else None
+    digest = getattr(job, 'digest', None) if type(job) is w.WorkerJob else None
+    source_sha = getattr(job, 'source_sha', None) if type(job) is w.WorkerJob else None
+    base = dict(task_id=task_id, agent_id=agent_id, job_digest=digest,
+                source_sha=source_sha, integrator_session=integrator_session)
+    if (type(policy) is not HostPolicy or type(admission) is not Admission or
+            type(job) is not w.WorkerJob):
+        return DispatchAck('NOT_STARTED', 'ADMISSION_INVALID', **base)
+    from .opencode_result_delivery import receipt_digest, session_ok
+    from .opencode_result_receipt import ResultReceipt
+    if not session_ok(integrator_session):
+        return DispatchAck('NOT_STARTED', 'INTEGRATOR_SESSION_INVALID', **base)
+    if admission.current_session != integrator_session:
+        return DispatchAck('NOT_STARTED', 'INTEGRATOR_SESSION_MISMATCH', **base)
+    try:
+        result, final, receipt, delivery = run_with_delivery(
+            job, policy, admission, one_native_credential, expect=expect,
+            receipt_store=receipt_store, integrator_session=integrator_session)
+    except Exception:
+        return DispatchAck('UNKNOWN', 'DISPATCH_OUTCOME_UNKNOWN', **base)
+
+    observed_start = (type(final) is dict and final.get('launched') is True and
+                      final.get('job_digest') == digest)
+    definite_no_start = (type(final) is dict and final.get('launched') is False and
+                         final.get('job_digest') == digest)
+    if observed_start:
+        state = 'STARTED'
+        reason = 'HOST_LAUNCH_OBSERVED'
+    elif (definite_no_start or
+          (getattr(receipt, 'job_digest', None) == digest and
+           (getattr(receipt, 'verdict', None) == 'BLOCKED' or
+            (getattr(receipt, 'verdict', None) == 'FAILED' and
+             getattr(receipt, 'reason', None) == 'DUPLICATE_RESULT')))):
+        state = 'NOT_STARTED'
+        reason = ('DUPLICATE_RESULT' if getattr(receipt, 'reason', None) == 'DUPLICATE_RESULT'
+                  else 'HOST_LAUNCH_NOT_OBSERVED')
+    else:
+        state = 'UNKNOWN'
+        reason = 'HOST_LAUNCH_UNVERIFIED'
+
+    ack = (type(receipt) is ResultReceipt and
+           receipt.verdict in ('SUCCESS', 'FAILED', 'BLOCKED') and
+           receipt.accepted is False and
+           receipt.job_digest == digest and receipt.source_sha == source_sha and
+           type(receipt.task) is TaskBinding and receipt.task.task_id == task_id and
+           type(receipt.agent) is AgentBinding and receipt.agent.agent_id == agent_id and
+           getattr(delivery, 'state', None) == 'DELIVERED' and
+           getattr(delivery, 'ack', None) == 'CALLER_RETURNED' and
+           getattr(delivery, 'task_id', None) == task_id and
+           getattr(delivery, 'agent_id', None) == agent_id and
+           getattr(delivery, 'job_digest', None) == digest and
+           getattr(delivery, 'source_sha', None) == source_sha and
+           getattr(delivery, 'integrator_session', None) == integrator_session and
+           type(getattr(delivery, 'receipt_digest', None)) is str and
+           len(delivery.receipt_digest) == 64 and
+           delivery.receipt_digest == receipt_digest(receipt.to_dict()) and
+           getattr(delivery, 'receipt_verdict', None) == getattr(receipt, 'verdict', None) and
+           getattr(delivery, 'receipt_reason', None) == getattr(receipt, 'reason', None))
+    return DispatchAck(state, reason, receipt=receipt, delivery=delivery,
+                       completion_ack=bool(ack), **base)
+
