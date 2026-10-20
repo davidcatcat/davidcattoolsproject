@@ -239,6 +239,73 @@ class TaskEventTests(unittest.TestCase):
         self.assertEqual(mon.task_events({"/d": task}, [task], initial=False), [])
 
 
+class MonitorTaskBaselineTests(unittest.TestCase):
+    """A failed first task scan must not replay history on the next success."""
+
+    def setUp(self):
+        self.monitor = mon.Monitor()
+        self.snapshot = mon.Snapshot([], {}, [], frozenset())
+
+    def poll(self, tasks):
+        with patch.object(mon, "collect", return_value=self.snapshot):
+            if isinstance(tasks, Exception):
+                with patch.object(mon, "scan_tasks", side_effect=tasks):
+                    return self.monitor.poll()
+            with patch.object(mon, "scan_tasks", return_value=tasks):
+                return self.monitor.poll()
+
+    @staticmethod
+    def stage(name, result="", tools=(), live=False):
+        return mon.Stage(name, "deepseek", 1.0, result, "ok" if result else "",
+                         1, 0, 0, "", tuple(tools), live, "ok")
+
+    @staticmethod
+    def task(directory, *stages):
+        return mon.Task(directory, directory.strip("/"), "main", tuple(stages))
+
+    def test_failed_first_scan_keeps_start_summary_and_next_scan_is_baseline(self):
+        first = self.poll(RuntimeError("evidence unavailable"))
+        self.assertEqual([kind for _, kind, _ in first], ["i"])
+        self.assertIn("monitor started;", first[0][2])
+        historical = [self.task("/d", self.stage(
+            "red", "RETURNED", (mon.Tool("1", "read", "a.py", "completed"),)))]
+        self.assertEqual(self.poll(historical), [])
+        self.assertEqual(self.poll(historical), [])
+        self.assertEqual(self.monitor.task_map, {"/d": historical[0]})
+
+    def test_after_failed_first_scan_new_stage_and_tool_emit_once(self):
+        self.poll(RuntimeError("evidence unavailable"))
+        running = self.task("/d", self.stage("red", live=True))
+        self.assertEqual(self.poll([running]), [])
+        finished = self.task("/d", self.stage(
+            "red", "RETURNED", (mon.Tool("1", "edit", "src/a.py", "completed"),)))
+        self.assertEqual([(kind, text) for _, kind, text in self.poll([finished])], [
+            ("→", "d red: edit src/a.py"),
+            ("■", "d: stage red finished: RETURNED, cleanup ok, 1 steps, 0.0k in / 0.0k out"),
+        ])
+        self.assertEqual(self.poll([finished]), [])
+
+    def test_after_failed_first_scan_new_task_emits_once(self):
+        self.poll(RuntimeError("evidence unavailable"))
+        self.assertEqual(self.poll([self.task("/d", self.stage("red", live=True))]), [])
+        added = [self.task("/d", self.stage("red", live=True)),
+                 self.task("/new", self.stage("blue", live=True))]
+        self.assertEqual([(kind, text) for _, kind, text in self.poll(added)],
+                         [("▶", "new: stage blue started (deepseek)")])
+        self.assertEqual(self.poll(added), [])
+
+    def test_repeated_failures_still_adopt_the_next_successful_scan(self):
+        self.poll(RuntimeError("evidence unavailable"))
+        self.poll(RuntimeError("evidence unavailable"))
+        historical = [self.task("/d", self.stage("red", live=True))]
+        self.assertEqual(self.poll(historical), [])
+        added = [self.task("/d", self.stage("red", live=True),
+                           self.stage("fix", live=True))]
+        self.assertEqual([(kind, text) for _, kind, text in self.poll(added)],
+                         [("▶", "d: stage fix started (deepseek)")])
+        self.assertEqual(self.poll(added), [])
+
+
 class ActivityViewTests(unittest.TestCase):
     def test_five_issue_event_classes_render_in_time_order(self):
         events = [
