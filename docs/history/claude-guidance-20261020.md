@@ -1,6 +1,6 @@
 # Archived CLAUDE guidance from main d41600f (2026-10-20)
 
-> **HISTORICAL — NOT CURRENT AUTHORITY; LIGHTLY EDITED FOR ARCHIVAL LINKS.** Source text is from the named main snapshot. Relative source links below point to immutable files at that SHA; use current [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), and [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md) for operative rules.
+> **HISTORICAL — NOT CURRENT AUTHORITY; LIGHTLY EDITED FOR ARCHIVAL LINKS AND TO LABEL SUPERSEDED TEXT.** Source text is from the named main snapshot. Relative source links below point to immutable files at that SHA; use current [CLAUDE.md](../../CLAUDE.md), [AGENTS.md](../../AGENTS.md), and [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md) for operative rules.
 
 Source snapshot: canonical main at `d41600ff98568770fb918fdf4a3309dd144a0dfe`, immediately after PR #233.
 
