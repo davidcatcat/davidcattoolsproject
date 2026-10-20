@@ -358,11 +358,28 @@ def _server_json(url, route, password, deadline):
             stream=getattr(response,'fp',None)
             raw=getattr(stream,'raw',None)
             sock=getattr(raw,'_sock',None)
-            read_chunk=getattr(stream,'read1',None)
+            # Read through HTTPResponse so Content-Length and chunked framing are
+            # decoded; the raw socket is used only to refresh its absolute timeout.
+            read_chunk=getattr(response,'read1',None)
             if sock is None or not callable(getattr(sock,'settimeout',None)) or not callable(read_chunk):
                 reject('OPENCODE_COMPLETION_UNKNOWN')
+            headers=getattr(response,'headers',None)
+            getheader=getattr(headers,'get',None)
+            content_length=getheader('Content-Length') if callable(getheader) else None
+            chunked=bool(getattr(response,'chunked',False))
+            if chunked and content_length is not None:
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            expected=None
+            if content_length is not None:
+                try: expected=int(content_length)
+                except (TypeError,ValueError): reject('OPENCODE_COMPLETION_UNKNOWN')
+                if expected<0 or expected>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
             chunks=[];total=0
             while True:
+                # A declared body is complete exactly at Content-Length. Stop
+                # before HTTPResponse closes its socket, and never mistake an
+                # early EOF for a complete shorter JSON document.
+                if expected is not None and total==expected: break
                 remaining=deadline-time.monotonic()
                 if remaining<=0: reject('OPENCODE_TIMEOUT')
                 sock.settimeout(min(1,remaining))
@@ -370,6 +387,8 @@ def _server_json(url, route, password, deadline):
                 if not chunk: break
                 chunks.append(chunk);total+=len(chunk)
                 if total>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+                if expected is not None and total>expected:
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
                 _clock(deadline)
     except WorkerError:
         raise
@@ -377,6 +396,8 @@ def _server_json(url, route, password, deadline):
         if time.monotonic()>=deadline: reject('OPENCODE_TIMEOUT')
         reject('OPENCODE_COMPLETION_UNKNOWN')
     _clock(deadline)  # Include response close/context-manager cleanup in the deadline.
+    if expected is not None and total!=expected:
+        reject('OPENCODE_COMPLETION_UNKNOWN')
     data=b''.join(chunks)
     try:
         result=load_json(data.decode('utf-8'),LIMIT)

@@ -25,6 +25,7 @@ from pathlib import Path
 signal.alarm(8)
 if sys.argv[1]=='serve':
  class Handler(BaseHTTPRequestHandler):
+  protocol_version='HTTP/1.1'
   payload=None
   def log_message(self,*args): pass
   def _send(self,value,cursor=False):
@@ -255,6 +256,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
         body=json.dumps({'data':{'value':'x'*1000}}).encode()
         class DripHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
             def log_message(self,*args): pass
             def do_GET(self):
                 self.send_response(200)
@@ -297,6 +299,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
             def __init__(self): self.fp=File()
             def __enter__(self): return self
             def __exit__(self,*args): time.sleep(.03)
+            def read1(self,size): return self.fp.read1(size)
         class Opener:
             def open(self,*args,**kwargs): return Response()
         started=time.monotonic()
@@ -305,6 +308,84 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 w._server_json('http://127.0.0.1:45678','/api/session/ses_syntheticWorker',
                                'SYNTHETIC',started+.01)
         self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+
+    def test_server_json_decodes_keepalive_and_chunked_http11_responses(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class FramingHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                if self.path=='/chunked':
+                    self.send_header('Transfer-Encoding','chunked');self.end_headers()
+                    for chunk in (body[:7],body[7:19],body[19:]):
+                        self.wfile.write(('%X\r\n'%len(chunk)).encode()+chunk+b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n');self.wfile.flush()
+                    return
+                self.send_header('Content-Length',str(len(body)))
+                self.send_header('Connection','keep-alive');self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+        server=ThreadingHTTPServer(('127.0.0.1',0),FramingHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        try:
+            base='http://127.0.0.1:%d'%server.server_port
+            for route in ('/keepalive','/chunked'):
+                with self.subTest(route=route):
+                    result=w._server_json(base,route,'SYNTHETIC',time.monotonic()+1)
+                    self.assertEqual(result,{'ok':True})
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_rejects_truncated_content_length(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class TruncatedHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)+100))
+                self.send_header('Connection','close')
+                self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+                self.close_connection=True
+        server=ThreadingHTTPServer(('127.0.0.1',0),TruncatedHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/truncated','SYNTHETIC',time.monotonic()+1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_COMPLETION_UNKNOWN')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_enforces_deadline_on_persistent_unframed_response(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class PersistentHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.end_headers()
+                self.wfile.write(body);self.wfile.flush()
+                time.sleep(.3)
+        server=ThreadingHTTPServer(('127.0.0.1',0),PersistentHandler)
+        server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start();started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/persistent','SYNTHETIC',started+.1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(time.monotonic()-started,.4)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
 
     def test_pinned_executable_and_paths_checked_before_any_launch(self):
         job=self.job();Path(job.runtime.executable).write_text('drift')
