@@ -69,7 +69,7 @@ Use the [normative Issue #92 policy](defect-triage.md); preserve this legacy anc
 <a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
 ### Historical D7 pre-review/S3 note
 
-The former one-round S3 stop and paused-role assignments are historical. Follow the exact D4 Smoke-first sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); offline tests and a resident TUI are not Smoke evidence.
+The former one-round S3 stop and paused-role assignments are historical. Follow the D4 sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
 
 <a id="d8-task-admission-and-no-self-attestation"></a>
 ### D8 task admission and Host review
