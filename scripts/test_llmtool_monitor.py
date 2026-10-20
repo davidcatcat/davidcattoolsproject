@@ -18,7 +18,8 @@ mon = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = mon
 _SPEC.loader.exec_module(mon)
 
-SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "token=abc")
+SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUTPUT-SECRET",
+           "RAW-ARGV-SECRET", "CREDENTIAL-SECRET", "token=abc", "/Users/davidsun")
 
 
 def ps(*rows):
@@ -173,6 +174,9 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertIn("RUNNING", text)
         self.assertFalse(any(secret in text for secret in SECRETS))
 
+    def test_absolute_tool_path_outside_evidence_root_is_not_rendered(self):
+        self.assertEqual(mon._relative("/Users/davidsun/private/secret.py", self.base), "?")
+
 
     def test_hardlink_db_rejected(self):
         outside_root = os.path.join(self.base, "opencode-" + "a" * 32)
@@ -233,6 +237,69 @@ class TaskEventTests(unittest.TestCase):
         stage = mon.Stage("red", "deepseek", 1.0, "", "", 1, 0, 0, "", (), True, "ok")
         task = mon.Task("/d", "t", "b", (stage,))
         self.assertEqual(mon.task_events({"/d": task}, [task], initial=False), [])
+
+
+class ActivityViewTests(unittest.TestCase):
+    def test_five_issue_event_classes_render_in_time_order(self):
+        events = [
+            mon.ActivityEvent(5, "worker_result", "task-1", "stage-1",
+                              "OPENCODE_PROVIDER_FAILED", "task-1/stage-1"),
+            mon.ActivityEvent(1, "review_dispatch", "", "", "DISPATCHED", "ref-1"),
+            mon.ActivityEvent(2, "review_verdict", "", "", "FAIL", "ref-2"),
+            mon.ActivityEvent(3, "undelivered_reply", "", "", "NOT_DELIVERED", "ref-3"),
+            mon.ActivityEvent(3.5, "undelivered_reply", "", "", "DELIVERED", "ref-3b"),
+            mon.ActivityEvent(4, "waiting_owner", "", "", "BLOCKED", "ref-4"),
+        ]
+        lines = mon.render_activity(events)
+        expected = ("PM → Reviewer", "Reviewer → PM", "回覆未送達",
+                    "Integrator → Owner", "llmtool 主機 → 任務 task-1")
+        positions = [next(i for i, line in enumerate(lines) if item in line) for item in expected]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn("審查未通過", lines[positions[1]])
+        self.assertIn("受阻，等待負責人決定", lines[positions[3]])
+        self.assertIn("工作失敗", lines[positions[4]])
+        self.assertIn("未顯示（沒有核准的本機來源）", lines[-1])
+        self.assertFalse(any("已送達" in line for line in lines))
+
+    def test_production_events_come_only_from_local_stage_evidence(self):
+        stage = mon.Stage("red", "deepseek", 10.0, "OPENCODE_PROVIDER_FAILED", "UNKNOWN",
+                          1, 0, 0, "", (mon.Tool("t", "read", "src/a.py", "completed"),),
+                          False, "ok", 12.0)
+        task = mon.Task("/private/tmp/evidence", "task-1", "feature-x", (stage,))
+        events = mon.activity_events([task])
+        self.assertEqual({event.event_type for event in events}, {"stage_attempt", "worker_result"})
+        self.assertEqual([event.occurred_at for event in events], [10.0, 12.0])
+
+    def test_activity_render_redacts_untrusted_absolute_home_paths(self):
+        event = mon.ActivityEvent(1, "worker_result", "/Users/davidsun", "red",
+                                  "OPENCODE_PROVIDER_FAILED", "/Users/davidsun/private.txt")
+        text = "\n".join(mon.render_activity([event]))
+        self.assertNotIn("/Users/davidsun", text)
+        self.assertNotIn("private.txt", text)
+        self.assertIn("工作失敗", text)
+
+    def test_once_includes_activity_and_makes_no_network_calls(self):
+        stage = mon.Stage("red", "deepseek", 10.0, "OPENCODE_PROVIDER_FAILED", "UNKNOWN",
+                          1, 0, 0, "", (mon.Tool("t", "read", "/Users/davidsun/secret.py", "completed"),),
+                          False, "ok", 12.0)
+        task = mon.Task("/private/tmp/fixture", "task-1", "feature-x", (stage,))
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        output = __import__("io").StringIO()
+        def no_network(*args, **kwargs):
+            raise AssertionError("--once must not use network")
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[task]), \
+             patch("socket.socket.connect", side_effect=no_network), \
+             patch("urllib.request.urlopen", side_effect=no_network), \
+             patch("sys.stdout", output):
+            self.assertEqual(mon.run_once(), 0)
+        rendered = output.getvalue()
+        self.assertIn("RECENT ACTIVITY", rendered)
+        self.assertIn("llmtool 主機 → 任務 task-1", rendered)
+        self.assertIn("工作失敗", rendered)
+        self.assertNotIn("/Users/davidsun", rendered)
+        self.assertNotIn("secret.py", rendered)
+        self.assertFalse(any(secret in rendered for secret in SECRETS))
 
 
 if __name__ == "__main__":
