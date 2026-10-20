@@ -91,11 +91,13 @@ class CompositionTests(unittest.TestCase):
         for bad in (False, True):
             with self.subTest(bad=bad):
                 job, policy, a, snap = self.fixture()
-                host = h.Host(policy, a, {'synthetic': 'NOT_REAL'})
+                source = h.native_credential.ActiveOpenCodeCredential('/synthetic/no-read.db')
+                host = h.Host(policy, a, source)
                 token = object()
                 host.token = token
                 host.consumed = True
                 routes = []
+                credential_bodies = []
 
                 class Response:
                     def __init__(self, data, secret=False):
@@ -138,19 +140,29 @@ class CompositionTests(unittest.TestCase):
                                      action == 'edit' and resource in job.write_paths)
                             return Response({'effect': 'allow' if allow else 'deny'})
                         if route == '/api/credential':
+                            credential_bodies.append(json.loads(req.data))
                             return Response(None, secret=True)
                         raise AssertionError(route)
 
-                with patch.object(h.urllib.request, 'build_opener', return_value=Opener()):
+                with patch.object(h.urllib.request, 'build_opener', return_value=Opener()), \
+                     patch.object(h.native_credential.ActiveOpenCodeCredential, 'take',
+                                  return_value={'type': 'key', 'key': 'SYNTHETIC_ONLY'}) as take:
                     if bad:
                         with self.assertRaises(h.w.WorkerError):
                             host.prepare_server(token, job, 'http://127.0.0.1:12345', 'SYNTHETIC',
                                                 h.time.monotonic() + 10)
                         self.assertNotIn('/api/credential', routes)
+                        take.assert_not_called()
                     else:
                         host.prepare_server(token, job, 'http://127.0.0.1:12345', 'SYNTHETIC',
                                             h.time.monotonic() + 10)
                         self.assertEqual(routes.count('/api/credential'), 1)
+                        take.assert_called_once_with(job.runtime.version)
+                        self.assertEqual(credential_bodies, [{
+                            'integrationID': 'opencode',
+                            'value': {'type': 'key', 'key': 'SYNTHETIC_ONLY'},
+                            'activate': True,
+                        }])
                         self.assertIsNone(host.credential)
 
     def native_opener(self, job, catalog, agent_model, routes):
