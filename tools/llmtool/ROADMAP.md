@@ -2,6 +2,10 @@
 
 > Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md).
 
+## D4 live status — 2026-10-20
+
+The one-time D4 OpenCode Live Smoke remains unused and **NOT LIVE VERIFIED**. The OpenCode-owned inference route and a real Host-owned Worker Receipt remain unverified; see [Issue #120, current D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288101015). CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt.
+
 ## Historical role decisions
 
 D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
