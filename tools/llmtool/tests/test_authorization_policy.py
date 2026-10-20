@@ -425,6 +425,7 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 'NotificationBinding','NotificationObserved','NotificationDecision','Decision','decide_notification'})),
             ('codex_handoff_transport.py','authorization_ledger',frozenset({'ReceiptLedger'})),
             ('codex_pickup_native.py','authorization_policy',frozenset({'HostIssuer','IssuerClass','NotificationBinding'})),
+            ('review_handoff.py','authorization_ledger',frozenset({'ReceiptLedger'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
         self.assertEqual(d1_imports, {

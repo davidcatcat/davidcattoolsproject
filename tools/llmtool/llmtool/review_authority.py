@@ -166,7 +166,7 @@ def _decode_host(raw):
         reject('REVIEW_REGISTRATION_INVALID')
     for key in ('executable','auth_home'): _path(reviewer[key],absolute=True)
     if reviewer['role'] == REVIEWER_ROLES[1]:
-        if reviewer['version'] != '2.1.301': reject('REVIEW_RUNTIME_INVALID')
+        if reviewer['version'] not in ('2.1.301','2.1.303'): reject('REVIEW_RUNTIME_INVALID')
         _hex(reviewer['executable_sha256'])
     entries=v['route_policies']
     if type(entries) is not list or not 1 <= len(entries) <= 32: reject('REVIEW_HOST_POLICY_INVALID')
