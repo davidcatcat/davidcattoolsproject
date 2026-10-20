@@ -1,4 +1,16 @@
-# llmtool — Developer allocation decisions D1–D7 (2026-10-19)
+# llmtool — Developer allocation decisions D1–D8 (2026-10-19, D8 2026-10-20)
+
+## Owner D8 (supersedes conflicting D4/D7 gates below) — OpenCode autonomy; no per-call Owner approval (2026-10-20)
+
+**Owner decision: ACCEPTED** (「同意」, 2026-10-20, in the Claude session; recorded by Claude). The Owner had authorized OpenCode early. AI-written follow-up gates turned that into repeated per-call Owner questions and stalled work for hours. D8 removes only per-call Owner-approval requirements. It does not waive technical Host admission, registered D6 worktree ownership, task-scoped file limits, privacy and credential protections, independent review, or CI. It supersedes conflicting D4/D7 wording only where that wording requires a new Owner approval for each OpenCode task.
+
+1. **Egress authorized.** Non-sensitive source, tests, docs and Git history of this repository **may be sent to OpenCode's free models** (DeepSeek, GLM) for Developer work, self-review and pre-review. Still forbidden: credentials, secrets/API keys, VPN/auth material, personal/customer data and restricted logs. The D4 privacy/egress gate is **satisfied by this decision**.
+2. **The PM admits OpenCode work itself.** The Codex Integrator/PM issues each task's OpenCode admission **without asking the Owner**, provided that: the model is free (D5 stays); the provider-side output cap is set (#229); writes are scoped to the task's files in a registered D6 worktree; and the native retry stop is in place (at most one extra request, then the job is killed; Owner accepted this 2026-10-20). An updated Host/Worker written by OpenCode still needs a distinct reviewer before it is used, but **not** an Owner approval.
+3. **Ask the Owner only for:** the wrong feature/requirement, root/sudo, or changes to Mac core system settings. Everything else (routine technical choices, retries of a failed task, ordering, which agent) is resolved by the AI team and reported afterwards.
+4. **Roles today:** Codex Developer is **resumed** (Owner 「恢復 Codex Developer」, 2026-10-20). OpenCode stays a Developer. Claude remains the formal independent Reviewer and owns the monitor tool. While Codex was at its 5 h limit, Claude implemented #229/#230 at the Owner's request; those still need a distinct reviewer.
+
+Unchanged: formal independent review before merge, exact-head CI, no paid fallback, no F2 llmtool-owned Git mutation, no force operations.
+
 
 > **Owner decision:** ACCEPTED, 2026-10-19. **Execution evidence:** NOT IMPLEMENTED / NOT LIVE VERIFIED. The Owner separately authorized starting Git/document updates; this document is not evidence of a physical Mac worktree reassignment, model/data egress authorization, executable Adapter or A11c milestone completion.
 >
