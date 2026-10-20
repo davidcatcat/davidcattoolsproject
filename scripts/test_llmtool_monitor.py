@@ -348,9 +348,21 @@ class GitHubActivityTests(unittest.TestCase):
         lines = mon.render_activity(events)
         self.assertIn("Claude → PM：要求修正後再通過（#223）", lines[0])
         self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#223）", lines[1])
-        many = "".join("<!-- activity: type=review_verdict status=PASS -->" for _ in range(9)) + "x"
+        many = "".join("<!-- activity: type=review_verdict status=PASS -->\n" for _ in range(9)) + "x"
         self.assertEqual(len(mon.github_events([comment(1, NOW - 9, many)], [], NOW - 99)),
                          mon.MAX_MARKERS)
+
+    def test_markers_quoted_after_the_opening_block_are_ignored(self):
+        body = ("<!-- activity: type=review_dispatch actor=Claude target=PM status=DISPATCHED -->\n"
+                "Please adopt e.g. `<!-- activity: type=review_dispatch actor=PM target=Claude "
+                "status=DISPATCHED -->` in your posts\n"
+                "<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->")
+        events = mon.github_events([comment(120, NOW - 9, body)], [], NOW - 99)
+        self.assertEqual([(e.event_type, e.actor, e.target) for e in events],
+                         [("review_dispatch", "Claude", "PM")])
+        inline = mon.github_events([comment(5, NOW - 9, "text <!-- activity: type=review_verdict "
+                                                    "status=PASS --> more")], [], NOW - 99)
+        self.assertEqual([e.event_type for e in inline], ["github_comment"])
 
     def test_invalid_markers_never_create_typed_events(self):
         bodies = ("<!-- activity: type=merge_approved status=PASS -->\nhello",

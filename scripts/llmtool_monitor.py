@@ -782,7 +782,8 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
 # Used only by the Activity view/--once. Read-only `gh api` GETs of recent issue/PR comments
 # and pull requests; nothing is posted, cached on disk or sent anywhere else.
 # Only a sanitized first line (or PR title) is kept, never a comment body.
-# Cross-session events are typed ONLY from an explicit marker an agent writes:
+# Cross-session events are typed ONLY from explicit marker lines an agent writes
+# at the very top of a comment (a marker quoted later in the text is ignored):
 #   <!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->
 # Unmarked comments are shown as plain "GitHub 留言", with no inferred actor.
 GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
@@ -831,9 +832,19 @@ def _issue_number(url) -> str:
 
 
 def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
-    """Typed events for each valid marker (at most MAX_MARKERS); invalid ones are ignored."""
+    """Typed events from the leading marker lines only (at most MAX_MARKERS).
+
+    Markers count only in the opening block of whole-line markers, so an example
+    marker quoted in prose or code cannot create an event. Invalid ones are ignored.
+    """
+    leading = []
+    for line in body.splitlines() if type(body) is str else []:
+        found = MARKER.fullmatch(line.strip())
+        if found is None:
+            break
+        leading.append(found)
     events = []
-    for found in list(MARKER.finditer(body))[:MAX_MARKERS] if type(body) is str else []:
+    for found in leading[:MAX_MARKERS]:
         fields = dict(MARKER_FIELD.findall(found.group(1)))
         kind, status = fields.get("type", ""), fields.get("status", "UNKNOWN")
         if kind not in MARKER_TYPES or status not in ACTIVITY_STATUS[kind]:
@@ -981,7 +992,7 @@ def _activity_line(event: ActivityEvent) -> str:
     return f"{line} — {summary}" if summary else line
 
 
-def render_activity(events: list[ActivityEvent], limit: int = 30,
+def render_activity(events: list[ActivityEvent], limit: int = 60,
                     github: "GitHubSource | None" = None) -> list[str]:
     events = [event for event in events if type(event) is ActivityEvent]
     if github is not None:
@@ -998,7 +1009,7 @@ def render_activity(events: list[ActivityEvent], limit: int = 30,
     return lines
 
 
-def activity_lines(tasks: list[Task], limit: int = 30,
+def activity_lines(tasks: list[Task], limit: int = 60,
                    github: "GitHubSource | None" = None) -> list[str]:
     if github is not None:
         github.refresh()
