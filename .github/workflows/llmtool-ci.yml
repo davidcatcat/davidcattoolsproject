@@ -183,7 +183,8 @@ jobs:
       - name: Offline canonical checks
         run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
       - name: Monitor script checks
-        run: "$JOB_PYTHON" -B -m unittest discover -s scripts
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean
         run: |
           status=$(git status --porcelain)
