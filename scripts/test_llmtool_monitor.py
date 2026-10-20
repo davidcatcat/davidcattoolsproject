@@ -311,11 +311,16 @@ class ActivityViewTests(unittest.TestCase):
         events = [
             mon.ActivityEvent(5, "worker_result", "task-1", "stage-1",
                               "OPENCODE_PROVIDER_FAILED", "task-1/stage-1"),
-            mon.ActivityEvent(1, "review_dispatch", "", "", "DISPATCHED", "ref-1"),
-            mon.ActivityEvent(2, "review_verdict", "", "", "FAIL", "ref-2"),
-            mon.ActivityEvent(3, "undelivered_reply", "", "", "NOT_DELIVERED", "ref-3"),
-            mon.ActivityEvent(3.5, "undelivered_reply", "", "", "DELIVERED", "ref-3b"),
-            mon.ActivityEvent(4, "waiting_owner", "", "", "BLOCKED", "ref-4"),
+            mon.ActivityEvent(1, "review_dispatch", "", "", "DISPATCHED", "#1",
+                              actor="PM", target="Reviewer"),
+            mon.ActivityEvent(2, "review_verdict", "", "", "FAIL", "#2",
+                              actor="Reviewer", target="PM"),
+            mon.ActivityEvent(3, "undelivered_reply", "", "", "NOT_DELIVERED", "#3",
+                              actor="Reviewer", target="PM"),
+            mon.ActivityEvent(3.5, "undelivered_reply", "", "", "DELIVERED", "#3",
+                              actor="Reviewer", target="PM"),
+            mon.ActivityEvent(4, "waiting_owner", "", "", "BLOCKED", "#4",
+                              actor="Integrator", target="Owner"),
         ]
         lines = mon.render_activity(events)
         expected = ("PM → Reviewer", "Reviewer → PM", "回覆沒送到",
@@ -325,7 +330,7 @@ class ActivityViewTests(unittest.TestCase):
         self.assertIn("審查未通過", lines[positions[1]])
         self.assertIn("卡住，等你決定", lines[positions[3]])
         self.assertIn("失敗：模型呼叫失敗", lines[positions[4]])
-        self.assertIn("GitHub 動態已關閉", lines[-1])
+        self.assertIn("GitHub 動態未啟用", lines[-1])
         self.assertFalse(any("已送達" in line for line in lines))
 
     def test_production_events_come_only_from_local_stage_evidence(self):
@@ -411,31 +416,42 @@ class GitHubActivityTests(unittest.TestCase):
                 "<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
                 "<!-- activity: type=bogus status=PASS -->\n## Verdict")
         events = mon.github_events([comment(223, NOW - 9, body)], [], NOW - 99)
-        self.assertEqual([e.event_type for e in events], ["undelivered_reply", "review_verdict"])
-        lines = mon.render_activity(events)
-        self.assertIn("Claude → PM：要求修正後再通過（#223・自述）", lines[0])
-        self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#223・自述）", lines[1])
-        many = "".join("<!-- activity: type=review_verdict status=PASS -->\n" for _ in range(9)) + "x"
-        self.assertEqual(len(mon.github_events([comment(1, NOW - 9, many)], [], NOW - 99)),
-                         mon.MAX_MARKERS)
+        self.assertEqual([e.event_type for e in events], ["github_comment"])
+        self.assertIn("GitHub #223：新留言", mon.render_activity(events)[0])
+        marker = "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\n"
+        many = marker * (mon.MAX_MARKERS + 1) + "x"
+        self.assertEqual([e.event_type for e in mon.github_events(
+            [comment(1, NOW - 9, many)], [], NOW - 99)], ["github_comment"])
 
     def test_markers_quoted_after_the_opening_block_are_ignored(self):
-        body = ("<!-- activity: type=review_dispatch actor=Claude target=PM status=DISPATCHED -->\n"
+        body = ("<!-- activity: type=review_dispatch actor=PM target=Reviewer status=DISPATCHED -->\n"
                 "Please adopt e.g. `<!-- activity: type=review_dispatch actor=PM target=Claude "
                 "status=DISPATCHED -->` in your posts\n"
                 "<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->")
         events = mon.github_events([comment(120, NOW - 9, body)], [], NOW - 99)
         self.assertEqual([(e.event_type, e.actor, e.target) for e in events],
-                         [("review_dispatch", "Claude", "PM")])
+                         [("review_dispatch", "PM", "Reviewer")])
         inline = mon.github_events([comment(5, NOW - 9, "text <!-- activity: type=review_verdict "
                                                     "status=PASS --> more")], [], NOW - 99)
         self.assertEqual([e.event_type for e in inline], ["github_comment"])
+
+    def test_indented_markers_in_markdown_code_are_not_typed(self):
+        marker = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->"
+        for indent in ("    ", "\t"):
+            with self.subTest(indent=repr(indent)):
+                body = indent + marker + "\nexample"
+                events = mon.github_events([comment(121, NOW - 9, body)], [], NOW - 99)
+                self.assertEqual([event.event_type for event in events], ["github_comment"])
+                self.assertNotIn("自述測試通過", mon.render_activity(events)[0])
 
     def test_markers_from_accounts_without_write_access_are_not_typed(self):
         forged = "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\nlgtm"
         for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
             events = mon.github_events([comment(8, NOW - 9, forged, association=association)], [], NOW - 99)
             self.assertEqual([e.event_type for e in events], ["github_comment"], association)
+        malformed = comment(8, NOW - 9, forged, association=["OWNER"])
+        self.assertEqual([e.event_type for e in mon.github_events(
+            [malformed], [], NOW - 99)], ["github_comment"])
         line = mon.render_activity(mon.github_events([comment(8, NOW - 9, forged)], [], NOW - 99))[0]
         self.assertIn("Reviewer → PM：審查通過（#8・自述）", line)   # still visibly a claim
 
@@ -455,6 +471,14 @@ class GitHubActivityTests(unittest.TestCase):
     def test_invalid_markers_never_create_typed_events(self):
         bodies = ("<!-- activity: type=merge_approved status=PASS -->\nhello",
                   "<!-- activity: type=review_verdict status=SHIPPED -->\nhello",
+                  "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS status=FAIL -->\nhello",
+                  "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS extra=value -->\nhello",
+                  "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\n"
+                  "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS",
+                  "<!-- activity: type=review_verdict actor=Reviewer target=Owner status=PASS -->\nhello",
+                  "<!-- activity: type=review_verdict actor=Mallory target=PM status=PASS -->\nhello",
+                  "<!-- activity: type=developer_progress actor=Codex target=Root status=ACTIVE -->\nhello",
+                  "<!-- activity: type=test_result actor=Codex target=Tests status=ACCEPTED -->\nhello",
                   "unmarked text that says ACCEPT and NOT_DELIVERED")
         events = mon.github_events([comment(1, NOW - 10, b) for b in bodies], [], NOW - 3600)
         self.assertEqual({e.event_type for e in events}, {"github_comment"})
@@ -462,7 +486,7 @@ class GitHubActivityTests(unittest.TestCase):
                                                     "actor=Mallory target=root status=PASS -->\nx")],
                                     [], NOW - 3600)
         self.assertEqual((spoofed[0].actor, spoofed[0].target), ("", ""))
-        self.assertIn("Reviewer → PM：審查通過", mon.render_activity(spoofed)[0])
+        self.assertIn("GitHub #2：新留言", mon.render_activity(spoofed)[0])
 
     def test_headline_is_first_line_only_and_redacted(self):
         body = ("## Verdict for `/Users/davidsun/secret/repo.py` see https://example.com/x \x07\n"
@@ -471,6 +495,14 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("GitHub #9：新留言 — Verdict for [路徑] see [連結]", line)
         for leaked in ("/Users/davidsun", "PROMPT-SECRET", "example.com", "\x07", "#"[:0] + "##"):
             self.assertNotIn(leaked, line)
+
+    def test_headline_redacts_absolute_paths_from_any_root(self):
+        for path in ("/Volumes/PrivateCustomer/source.py", "/etc/company.key"):
+            with self.subTest(path=path):
+                line = mon.render_activity(mon.github_events(
+                    [comment(19, NOW - 5, "See " + path)], [], NOW - 99))[0]
+                self.assertIn("[路徑]", line)
+                self.assertNotIn(path, line)
 
     def test_pull_requests_opened_merged_closed_inside_window_only(self):
         pulls = [{"number": 7, "title": "feat: x", "created_at": iso(NOW - 50), "merged_at": iso(NOW - 10),
@@ -537,9 +569,18 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.shutil, "which", side_effect=AssertionError("gh used with --no-github")), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--no-github"]), 0)
-        self.assertIn("GitHub 動態已關閉", out.getvalue())
+        self.assertIn("GitHub 動態未啟用", out.getvalue())
 
-    def test_plain_once_reads_github_by_default_with_get_only(self):
+    def test_once_keeps_github_off_by_default(self):
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon.shutil, "which", side_effect=AssertionError("GitHub must be opt-in")), \
+             patch("sys.stdout", __import__("io").StringIO()) as out:
+            self.assertEqual(mon.main(["--once"]), 0)
+        self.assertIn("GitHub 動態未啟用", out.getvalue())
+
+    def test_github_opt_in_uses_read_only_get_only(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
         run = FakeRun((0, [comment(4, NOW - 30, "hello")]), (0, []))
         with patch.object(mon, "collect", return_value=snapshot), \
@@ -548,11 +589,65 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.subprocess, "run", run), \
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
-            self.assertEqual(mon.main(["--once"]), 0)
+            self.assertEqual(mon.main(["--once", "--github"]), 0)
         self.assertEqual(len(run.calls), 2)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
         self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
+
+    def test_developer_status_markers_are_finite_and_self_reported(self):
+        rows = (
+            ("developer_dispatch", "PM", "Codex", "ASSIGNED", "自述已指派 Developer 任務"),
+            ("developer_progress", "OpenCode", "Integrator", "ACTIVE", "回報進度：處理中"),
+            ("developer_progress", "Codex", "Reviewer", "WAITING", "等待 Reviewer 的下一步"),
+            ("developer_progress", "CompanyGW", "Owner", "BLOCKED", "受阻，等待 Owner 協助"),
+            ("developer_progress", "OpenCode", "PM", "UNKNOWN", "工作狀態未知"),
+            ("test_result", "Codex", "Tests", "PASS", "自述測試通過"),
+            ("test_result", "OpenCode", "CI", "FAIL", "自述測試失敗"),
+            ("test_result", "CompanyGW", "Tests", "UNKNOWN", "測試結果未知"),
+        )
+        comments = [comment(index + 20, NOW - 20 + index,
+                            f"<!-- activity: type={kind} actor={actor} target={target} status={status} -->\n"
+                            "## task status")
+                    for index, (kind, actor, target, status, _) in enumerate(rows)]
+        events = mon.github_events(comments, [], NOW - 99)
+        self.assertEqual([event.event_type for event in events], [row[0] for row in rows])
+        lines = mon.render_activity(events)
+        for index, ((_, actor, target, _, outcome), line) in enumerate(zip(rows, lines)):
+            with self.subTest(index=index):
+                display_actor = mon.MARKER_NAMES.get(actor, actor)
+                display_target = mon.MARKER_NAMES.get(target, target)
+                self.assertIn(f"{display_actor} → {display_target}：", line)
+                self.assertIn(outcome, line)
+                self.assertIn(f"（#{20 + index}・自述）", line)
+
+    def test_invalid_or_unauthorized_developer_markers_fall_back_to_comment(self):
+        bodies = (
+            "<!-- activity: type=developer_dispatch actor=Codex target=PM status=ASSIGNED -->\nTask",
+            "<!-- activity: type=developer_dispatch actor=PM target=CompanyGW status=PASS -->\nTask",
+            "<!-- activity: type=developer_progress actor=CompanyGW target=CompanyGW status=ACTIVE -->\nTask",
+            "<!-- activity: type=test_result actor=Codex target=Tests status=PASS unexpected -->\nTask",
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                events = mon.github_events([comment(31, NOW - 9, body)], [], NOW - 99)
+                self.assertEqual([event.event_type for event in events], ["github_comment"])
+                self.assertIn("GitHub #31：新留言", mon.render_activity(events)[0])
+        malformed_only = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS"
+        fallback = mon.github_events([comment(33, NOW - 9, malformed_only)], [], NOW - 99)
+        self.assertEqual([event.event_type for event in fallback], ["github_comment"])
+        self.assertEqual(mon.render_activity(fallback)[0].split(" — ")[0].split("：", 1)[1], "新留言")
+
+    def test_typed_marker_headline_redacts_secrets_and_private_paths(self):
+        body = ("<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->\n"
+                "## token=abc123xyz789 /Users/davidsun/private/task.py")
+        line = mon.render_activity(mon.github_events(
+            [comment(32, NOW - 9, body)], [], NOW - 99))[0]
+        self.assertIn("自述測試通過", line)
+        self.assertIn("[已遮蔽]", line)
+        self.assertIn("[路徑]", line)
+        self.assertNotIn("abc123xyz789", line)
+        self.assertNotIn("/Users/davidsun", line)
 
     def test_once_with_github_merges_both_sources_in_time_order(self):
         stage = mon.Stage("red", "deepseek", NOW - 300, "OPENCODE_OUTPUT_RETURNED", "ok",

@@ -4,7 +4,8 @@
 Shows OpenCode, Claude Code, Codex and llmtool processes, and the progress of
 recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
-repository mutation, credentials, network requests or daemon. This prototype
+repository mutation, credentials, or daemon. Network access is off unless --github
+is explicitly supplied for read-only Activity headlines. This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions. Its Activity view is limited to local task
 evidence and does not invent cross-session dispatch, delivery, review or acceptance.
@@ -703,6 +704,7 @@ ACTIVITY_TYPES = frozenset({
     "review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner",
     "worker_result", "stage_attempt", "stage_live", "stage_unknown",
     "github_comment", "pr_opened", "pr_merged", "pr_closed",
+    "developer_dispatch", "developer_progress", "test_result",
 })
 ACTIVITY_STATUS = {
     "review_dispatch": frozenset({"DISPATCHED", "UNKNOWN"}),
@@ -717,6 +719,9 @@ ACTIVITY_STATUS = {
     "pr_opened": frozenset({"OPENED"}),
     "pr_merged": frozenset({"MERGED"}),
     "pr_closed": frozenset({"CLOSED"}),
+    "developer_dispatch": frozenset({"ASSIGNED", "UNKNOWN"}),
+    "developer_progress": frozenset({"ACTIVE", "BLOCKED", "WAITING", "UNKNOWN"}),
+    "test_result": frozenset({"PASS", "FAIL", "UNKNOWN"}),
 }
 ACTIVITY_RESULT_CODES = frozenset({
     "OPENCODE_OUTPUT_RETURNED", "OPENCODE_PROVIDER_FAILED", "OPENCODE_CLEANUP_UNKNOWN",
@@ -743,9 +748,7 @@ ACTIVITY_RESULT_LABELS = {
     "BLOCKED": "被擋下",
     "UNKNOWN": "結果未知",
 }
-# Actors a GitHub activity marker may name. Anything else is rendered as "?".
-ACTIVITY_ACTORS = frozenset({"PM", "Integrator", "Reviewer", "Claude", "Codex", "OpenCode",
-                             "AGY", "Developer", "Owner", "llmtool"})
+# Marker actors/targets are finite per event type; invalid values fall back to generic comments.
 TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,48}")
 STAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
 LOCAL_TYPES = frozenset({"worker_result", "stage_attempt", "stage_live", "stage_unknown"})
@@ -787,20 +790,45 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
 
 
 # ------------------------------------------------------------ GitHub source
-# On by default (Owner 2026-10-20: no flags, just Tab); --no-github turns it off.
-# Used only by the Activity view/--once. Read-only `gh api` GETs of recent issue/PR comments
+# Opt-in with --github. Used only by Activity/--once. Read-only `gh api` GETs of recent issue/PR comments
 # and pull requests; nothing is posted, cached on disk or sent anywhere else.
 # Only a sanitized first line (or PR title) is kept, never a comment body.
 # Cross-session events are typed ONLY from explicit marker lines an agent writes
 # at the very top of a comment (a marker quoted later in the text is ignored):
 #   <!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->
+#   <!-- activity: type=developer_dispatch actor=PM target=Codex status=ASSIGNED -->
+#   <!-- activity: type=developer_progress actor=OpenCode target=Reviewer status=WAITING -->
+#   <!-- activity: type=test_result actor=Codex target=Tests status=PASS -->
 # Unmarked comments are shown as plain "GitHub 留言", with no inferred actor.
 GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
-MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})")
+MARKER_LIKE = re.compile(r"^<!--\s*activity\b")
+MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})\Z")
 MAX_MARKERS = 4
-MARKER_TYPES = frozenset({"review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner"})
-PRIVATE_PATH = re.compile(r"(?:/Users|/home|/private|/tmp|/var)/\S*")
+MARKER_TYPES = frozenset({
+    "review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner",
+    "developer_dispatch", "developer_progress", "test_result",
+})
+MARKER_FIELDS = frozenset({"type", "actor", "target", "status"})
+MARKER_ACTOR_TARGETS = {
+    "review_dispatch": (frozenset({"PM", "Integrator", "Reviewer", "Claude", "Codex", "OpenCode"}),
+                        frozenset({"PM", "Integrator", "Reviewer", "Claude", "Codex", "OpenCode"})),
+    "review_verdict": (frozenset({"Reviewer", "Claude", "Codex", "OpenCode", "AGY"}),
+                       frozenset({"PM", "Integrator"})),
+    "undelivered_reply": (frozenset({"Reviewer", "Claude", "Codex", "OpenCode", "AGY"}),
+                          frozenset({"PM", "Integrator"})),
+    "waiting_owner": (frozenset({"Integrator", "PM"}), frozenset({"Owner"})),
+    "developer_dispatch": (frozenset({"PM", "Integrator"}),
+                           frozenset({"Codex", "OpenCode", "CompanyGW"})),
+    "developer_progress": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
+                            frozenset({"PM", "Integrator", "Reviewer", "Owner", "CI"})),
+    "test_result": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
+                    frozenset({"Tests", "CI"})),
+}
+MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
+# Redact every POSIX absolute path, including mounted volumes and system paths.
+# URLs are removed first, so their scheme slashes do not reach this pattern.
+PRIVATE_PATH = re.compile(r"(?<![\w])/(?:[^\s/]+/)*[^\s/]*")
 # Credential-like or opaque strings are hidden even in a one-line headline.
 SECRETISH = re.compile(
     r"(?i)(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{8,}"
@@ -833,6 +861,15 @@ def _headline(text) -> str:
     """First meaningful line of untrusted Markdown, reduced to plain short text."""
     if type(text) is not str:
         return ""
+    safe_lines = []
+    for line in text.splitlines():
+        candidate = line.strip()
+        while candidate.startswith(">"):
+            candidate = candidate[1:].lstrip()
+        if MARKER_LIKE.match(candidate):
+            continue
+        safe_lines.append(line)
+    text = "\n".join(safe_lines)
     text = MARKER.sub("", text)
     for line in text.splitlines():
         line = MD_LINK.sub(r"\1", line)
@@ -852,29 +889,45 @@ def _issue_number(url) -> str:
 
 
 def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
-    """Typed events from the leading marker lines only (at most MAX_MARKERS).
-
-    Markers count only in the opening block of whole-line markers, so an example
-    marker quoted in prose or code cannot create an event. Invalid ones are ignored.
-    """
+    """Type only complete, authorized marker blocks; any invalid marker fails closed."""
     leading = []
     for line in body.splitlines() if type(body) is str else []:
-        found = MARKER.fullmatch(line.strip())
+        # Marker lines must start in column zero. Stripping indentation would
+        # turn a Markdown code example into a live activity claim.
+        found = MARKER.fullmatch(line)
         if found is None:
+            if MARKER_LIKE.match(line.lstrip()):
+                return []
             break
         leading.append(found)
+    if not leading:
+        return []
+    if len(leading) > MAX_MARKERS:
+        return []
     events = []
-    for found in leading[:MAX_MARKERS]:
-        fields = dict(MARKER_FIELD.findall(found.group(1)))
-        kind, status = fields.get("type", ""), fields.get("status", "UNKNOWN")
-        if kind not in MARKER_TYPES or status not in ACTIVITY_STATUS[kind]:
-            continue
-        actor = fields.get("actor", "")
-        target = fields.get("target", "")
+    for found in leading:
+        fields = {}
+        for token in found.group(1).split():
+            match = MARKER_FIELD.fullmatch(token)
+            if match is None or match.group(1) in fields:
+                return []
+            fields[match.group(1)] = match.group(2)
+        if set(fields) != MARKER_FIELDS:
+            return []
+        kind, actor, target, status = (fields[key] for key in ("type", "actor", "target", "status"))
+        if kind not in MARKER_TYPES:
+            return []
+        if status not in ACTIVITY_STATUS[kind]:
+            return []
+        allowed_actors, allowed_targets = MARKER_ACTOR_TARGETS[kind]
+        if actor not in allowed_actors or target not in allowed_targets:
+            return []
+        if kind == "review_dispatch" and actor not in {"PM", "Integrator"}:
+            return []
+        if actor == target:
+            return []
         events.append(ActivityEvent(when, kind, "", "", status, f"#{number}",
-                                    actor=actor if actor in ACTIVITY_ACTORS else "",
-                                    target=target if target in ACTIVITY_ACTORS else "",
-                                    summary=_headline(body)))
+                                    actor=actor, target=target, summary=_headline(body)))
     return events
 
 
@@ -889,12 +942,11 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
         if when < since or not number:
             continue
         body = comment.get("body")
-        trusted = comment.get("author_association") in TRUSTED_ASSOCIATION
+        association = comment.get("author_association")
+        trusted = type(association) is str and association in TRUSTED_ASSOCIATION
         typed = _marker_events(body, when, number) if trusted else []
         if not typed:
             headline = _headline(body)
-            if not headline:
-                continue
             typed = [ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
                                    summary=headline)]
         events.extend(typed)
@@ -992,6 +1044,15 @@ def _activity_line(event: ActivityEvent) -> str:
                                                  "UNKNOWN": "回覆有沒有送到：未知"}),
         "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "卡住，等你決定", "WAITING": "等你決定",
                                                   "UNKNOWN": "狀態未知"}),
+        "developer_dispatch": ("PM", "Codex", {"ASSIGNED": "自述已指派 Developer 任務",
+                                                  "UNKNOWN": "任務指派狀態未知"}),
+        "developer_progress": ("Codex", "PM", {"ACTIVE": "回報進度：處理中（不代表模型正在生成）",
+                                                  "WAITING": "等待下一步",
+                                                  "BLOCKED": "受阻，等待協助",
+                                                  "UNKNOWN": "工作狀態未知"}),
+        "test_result": ("Codex", "Tests", {"PASS": "自述測試通過（不代表審查或接受）",
+                                             "FAIL": "自述測試失敗",
+                                             "UNKNOWN": "測試結果未知"}),
         "worker_result": ("llmtool", stage_target, ACTIVITY_RESULT_LABELS),
         "stage_attempt": ("llmtool", stage_target, {"OBSERVED": "開始一次執行嘗試"}),
         "stage_live": ("llmtool", stage_target, {"RUNNING": "執行中（看得到對應程序，不代表快完成）"}),
@@ -1009,8 +1070,22 @@ def _activity_line(event: ActivityEvent) -> str:
         return ""
     actor, target, outcomes = actors[event.event_type]
     if event.event_type in MARKER_TYPES:
-        actor = event.actor if event.actor in ACTIVITY_ACTORS else actor
-        target = event.target if event.target in ACTIVITY_ACTORS else target
+        allowed_actors, allowed_targets = MARKER_ACTOR_TARGETS[event.event_type]
+        if (event.actor not in allowed_actors or event.target not in allowed_targets
+                or event.actor == event.target
+                or event.status not in ACTIVITY_STATUS[event.event_type]):
+            return ""
+        if not re.fullmatch(r"#\d{1,7}", event.reference or ""):
+            return ""
+        actor = MARKER_NAMES.get(event.actor, event.actor)
+        target = MARKER_NAMES.get(event.target, event.target)
+    if event.event_type == "developer_progress":
+        outcomes = {
+            "ACTIVE": f"回報進度：處理中（下一步通知 {target}；不代表模型正在生成）",
+            "WAITING": f"等待 {target} 的下一步",
+            "BLOCKED": f"受阻，等待 {target} 協助",
+            "UNKNOWN": f"工作狀態未知；下一步交由 {target}",
+        }
     ref = event.reference if re.fullmatch(r"#\d{1,7}", event.reference or "") else ""
     outcome = outcomes[event.status]
     if event.event_type == "worker_result":
@@ -1038,7 +1113,7 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
     if not lines:
         lines.append("目前沒有可顯示的動態。")
     if github is None:
-        lines.append("GitHub 動態已關閉（--no-github），PM↔Reviewer 的派送、判定、回覆沒有顯示。")
+        lines.append("GitHub 動態未啟用（預設零網路；加 --github 才讀取），跨工作階段的標記沒有顯示。")
     else:
         lines.append(github.status + "；「自述」= 有權限的發文者自己標記，未經驗證。")
     return lines
@@ -1198,13 +1273,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="log every helper process immediately (no short-lived filtering)")
     parser.add_argument("--min-age", type=float, default=3.0,
                         help="seconds a helper must live before it is logged (default 3)")
+    parser.add_argument("--github", action="store_true",
+                        help=f"opt in to read-only gh api Activity on {DEFAULT_GITHUB_REPO}")
     parser.add_argument("--no-github", action="store_true",
-                        help="do not read recent GitHub comments/PRs for the Activity view "
-                             f"(default: read-only gh api on {DEFAULT_GITHUB_REPO})")
+                        help="compatibility option; GitHub Activity is already off by default")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
-    github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO)
+    github = GitHubSource(DEFAULT_GITHUB_REPO) if args.github and not args.no_github else None
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
