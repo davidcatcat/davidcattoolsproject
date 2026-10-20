@@ -435,6 +435,15 @@ class GitHubActivityTests(unittest.TestCase):
                                                     "status=PASS --> more")], [], NOW - 99)
         self.assertEqual([e.event_type for e in inline], ["github_comment"])
 
+    def test_indented_markers_in_markdown_code_are_not_typed(self):
+        marker = "<!-- activity: type=test_result actor=Codex target=Tests status=PASS -->"
+        for indent in ("    ", "\t"):
+            with self.subTest(indent=repr(indent)):
+                body = indent + marker + "\nexample"
+                events = mon.github_events([comment(121, NOW - 9, body)], [], NOW - 99)
+                self.assertEqual([event.event_type for event in events], ["github_comment"])
+                self.assertNotIn("自述測試通過", mon.render_activity(events)[0])
+
     def test_markers_from_accounts_without_write_access_are_not_typed(self):
         forged = "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\nlgtm"
         for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
@@ -486,6 +495,14 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("GitHub #9：新留言 — Verdict for [路徑] see [連結]", line)
         for leaked in ("/Users/davidsun", "PROMPT-SECRET", "example.com", "\x07", "#"[:0] + "##"):
             self.assertNotIn(leaked, line)
+
+    def test_headline_redacts_absolute_paths_from_any_root(self):
+        for path in ("/Volumes/PrivateCustomer/source.py", "/etc/company.key"):
+            with self.subTest(path=path):
+                line = mon.render_activity(mon.github_events(
+                    [comment(19, NOW - 5, "See " + path)], [], NOW - 99))[0]
+                self.assertIn("[路徑]", line)
+                self.assertNotIn(path, line)
 
     def test_pull_requests_opened_merged_closed_inside_window_only(self):
         pulls = [{"number": 7, "title": "feat: x", "created_at": iso(NOW - 50), "merged_at": iso(NOW - 10),

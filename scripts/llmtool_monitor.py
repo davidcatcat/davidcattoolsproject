@@ -826,7 +826,9 @@ MARKER_ACTOR_TARGETS = {
                     frozenset({"Tests", "CI"})),
 }
 MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
-PRIVATE_PATH = re.compile(r"(?:/Users|/home|/private|/tmp|/var)/\S*")
+# Redact every POSIX absolute path, including mounted volumes and system paths.
+# URLs are removed first, so their scheme slashes do not reach this pattern.
+PRIVATE_PATH = re.compile(r"(?<![\w])/(?:[^\s/]+/)*[^\s/]*")
 # Credential-like or opaque strings are hidden even in a one-line headline.
 SECRETISH = re.compile(
     r"(?i)(?:gh[pousr]_[A-Za-z0-9]{8,}|github_pat_\w{8,}|sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{8,}"
@@ -890,10 +892,11 @@ def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
     """Type only complete, authorized marker blocks; any invalid marker fails closed."""
     leading = []
     for line in body.splitlines() if type(body) is str else []:
-        candidate = line.strip()
-        found = MARKER.fullmatch(candidate)
+        # Marker lines must start in column zero. Stripping indentation would
+        # turn a Markdown code example into a live activity claim.
+        found = MARKER.fullmatch(line)
         if found is None:
-            if MARKER_LIKE.match(candidate):
+            if MARKER_LIKE.match(line.lstrip()):
                 return []
             break
         leading.append(found)
