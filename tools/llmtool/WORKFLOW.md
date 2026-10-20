@@ -2,6 +2,13 @@
 
 > Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file is used for Cloud handoff and Mac/Cloud verification.
 
+## Current Developer and Reviewer routing (Owner decision 2026-10-21)
+
+Codex and OpenCode are normal Developer routes assigned by the existing PM; direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
+
+Until Claude quota recovers (expected 2026-10-25), a separate read-only Codex Reviewer Agent (GPT-6.1-Sol, Medium) may perform Claude's formal Security/Functional/QA gate. This substitution does not reduce review scope or replace any security, CI or Mac-native gate. Claude resumes as the normal Reviewer when available; accepted reviews do not need repetition. VPN/provider unavailability for Company LLM is recorded and does not block unrelated Developers.
+
+
 ## Historical role and stop decisions
 
 Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](ROADMAP.md#historical-role-decisions) and [README](README.md#archived-parked-implementations).
@@ -56,10 +63,11 @@ Read the [Owner-approved outcome and reporting contract](../../docs/governance/l
 This project's delivery responsibility is documented in
 [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). The **owner**
 defines the tool's functionality, outcomes, constraints and acceptance,
-while the **AI coordinator** acts as technical PM: task scoping, Codex
-implementation, independent Claude review/QA, follow-up tracking and
-authorized safe Git merges. The owner is not an agent prompt courier or
-routine technical signoff authority. Only genuine product/scope/risk
+while the **AI coordinator** acts as technical PM: task scoping, Codex or
+OpenCode implementation, bounded Company LLM Developer assistance through
+llmtool, independent review/QA (Claude or the temporary authorized Codex
+Reviewer), follow-up tracking and authorized safe Git merges. The owner is not an agent prompt
+courier or routine technical signoff authority. Only genuine product/scope/risk
 decisions, or a needed Mac-local command when no execution access exists,
 should interrupt the owner.
 
@@ -93,9 +101,9 @@ are the owner-approved architecture source; they do not implement new runtime ri
    For a complex approved work package, produce **one initial handoff** for the
    **existing canonical Codex Integrator (= PM Agent + Integration Manager)**.
 2. Integrator/PM decides when to use a local subagent, a distinct Worker or a
-   company-LLM advisory call, and chooses dependencies, validation and bounded
-   repairs. **llmtool executes an approved route/plan and records status, policy,
-   usage, evidence and events; it does not independently reason about which AI
+   bounded Company LLM Developer route through llmtool, and chooses dependencies,
+   validation and bounded repairs. **llmtool executes an approved route/plan and records status,
+   policy, usage, evidence and events; it does not independently reason about which AI
    should own complex work.** Do not add a second controller or fixed PM CLI.
 3. The target Worker report -> llmtool trusted event -> **same Integrator**
    wake/resume loop must reduce owner prompt relays. Automatic original Session
@@ -111,7 +119,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent Claude Reviewer → Integrator path and 2026-10-21 routing in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
+Follow the bounded Developer → independent formal Reviewer (Claude; temporary Codex Reviewer while Claude quota is unavailable) → Integrator path and 2026-10-21 routing in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
