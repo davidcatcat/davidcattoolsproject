@@ -10,7 +10,7 @@ Use for Git synchronization and publication. [AGENTS.md](../../AGENTS.md) owns r
 ## Owner D6 — dynamic task-scoped worktrees
 
 <a id="owner-d6-2026-10-19-dynamic-task-scoped-worktree-lifecycle--new-normative-policy"></a>
-D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. Follow the normative [D6 lifecycle and registry reference](worktree-lifecycle.md) for all create, canonical-root handoff, retain and retire decisions. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree must not check out `main`; Developers and Reviewers do not fetch unclaimed refs in the canonical Integrator checkout.
+D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. Follow the normative [D6 lifecycle and registry reference](worktree-lifecycle.md) for all create, canonical-root handoff, retain and retire decisions. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree may check out only its registered task branch; never `main`, a peer task branch or `automation/ai-loop`. Developers and Reviewers do not fetch unclaimed Git in the canonical Integrator checkout.
 
 Before creating a worktree:
 1. Verify repository identity, common Git directory, workspace parent, task owner and clean source state.
@@ -24,9 +24,9 @@ The old G1–G7 fixed-root pilot is historical and archived in [policy history](
 
 ## Task binding and evidence
 
-At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence. The existing Owner authorization for Codex `danger-full-access` / `approval_policy=never` is recorded in the [permission-mode decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md) and [Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440); it records authority, not proof of an effective Mac session mode or native audit. Keep those states separate. It does not waive task scope, D6, secret handling, egress or Git restrictions.
+At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence. The existing Owner authorization for Codex `danger-full-access` / `approval_policy=never` is recorded in the [permission-mode decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md) and [Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440); it records authority, not proof of an effective Mac session mode or native audit. Reviewers may report risks but cannot veto or revoke this Owner authorization; keep authority, effective mode and audit evidence separate. It does not waive task scope, D6, secret handling, egress or Git restrictions.
 
-For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
+For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Before accepting a check result, bind it to the candidate SHA and verify the merge-base, source revision and artifact/test provenance; reject stale results. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
 
 ## Before any Git mutation
 
@@ -49,7 +49,7 @@ Inspect the full diff and preserve unrelated work. Verify the published PR head 
 
 ## Fetch and synchronize
 
-Fetch only when remote state is required and the root/branch is verified. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. On divergence, preserve both sides and resolve in a task branch after reviewing the diff. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits); never stash unrelated work.
+Fetch only when remote state is required and the root/branch is verified. Developers and Reviewers must not perform unclaimed Git fetches in the canonical Integrator checkout. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. On divergence, preserve both sides and resolve in a task branch after reviewing the diff. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits); never stash unrelated work.
 
 ## Commit and publish
 
