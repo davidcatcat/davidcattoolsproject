@@ -33,6 +33,9 @@ else:
   sys.exit(1)
  if mode=='cancel': os.kill(os.getppid(),signal.SIGINT);time.sleep(4)
  if mode=='overflow': print('x'*1100000);sys.exit()
+ if mode=='retry':
+  for n in range(5): emit('step_start',part={'type':'step-start','messageID':'m1'});time.sleep(0.2)
+  time.sleep(4)
  emit('step_start',part={'type':'step-start','messageID':'m1'})
  emit('text',part={'type':'text','messageID':'m1','text':'synthetic candidate; self-review recorded'})
  if mode!='no-proof':
@@ -242,6 +245,26 @@ class OpenCodeWorkerTests(unittest.TestCase):
                     result=w.run_worker(job,Host())
                 self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID',result)
                 spawn.assert_not_called()
+
+    def test_native_config_caps_every_request_at_the_output_budget(self):
+        job=self.job(budget=RunBudget(1,8,0,3000,200,128))
+        cfg=w.configuration(job)
+        self.assertEqual(cfg['providers'],{'opencode':{'models':{'deepseek-v4.1-flash-free':{
+            'limit':{'context':200,'output':128}}}}})
+        self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_OUTPUT_RETURNED')
+
+    def test_native_retry_is_stopped_at_the_first_extra_request(self):
+        job=self.job('retry',max_steps=1,budget=RunBudget(1,8,0,6000,100,100))
+        started=time.monotonic()
+        result=w.run_worker(job,Host())
+        self.assertEqual(result.code,'OPENCODE_PROVIDER_RETRY_BLOCKED',result)
+        self.assertLess(time.monotonic()-started,3)       # well before the fake's 4 s sleep
+        self.assertIsNone(result.content)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_ATTEMPT_ALREADY_USED')
+        self.assertEqual(w._allowed_requests(self.job(max_steps=3,budget=RunBudget(1,2,0,3000,100,100))),2)
+        self.assertEqual(w._request_starts(b'{"type":"step_start"}\nnot json\n{"type":"text"}\n'
+                                           b'{"type":"text","text":"\\"type\\":\\"step_start\\""}\n'),1)
 
     def test_prereview_has_no_write_permission_or_other_tool_bypass(self):
         job=self.job(phase='PREREVIEW',model='opencode/glm-5.3-flash-free',write_paths=())
