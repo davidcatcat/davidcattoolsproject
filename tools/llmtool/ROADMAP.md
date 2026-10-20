@@ -4,7 +4,7 @@
 
 ## D4 live status — 2026-10-20
 
-The one-time D4 OpenCode Live Smoke remains unused and **NOT LIVE VERIFIED**. The OpenCode 2.0.32 ACP path failed the independent configuration-isolation review; no Credential adapter, live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt.
+The one-time D4 OpenCode Live Smoke remains unused and **NOT LIVE VERIFIED**. The authorized route is Owner D8a's Host/Worker in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server route failed independent configuration-isolation review and is deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt.
 
 ## Historical role decisions
 
