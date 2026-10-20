@@ -60,6 +60,14 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(out.failure_stage, 'UNKNOWN')
         self.assertNotIn('SECRET_SENTINEL', repr(out.to_dict()))
 
+    def test_persisted_receipt_rejects_non_enum_failure_stage(self):
+        data={'schema':r.STORE_SCHEMA,'schema_version':1,'seen':[self.job.digest],
+              'receipts':{self.job.digest:{**self.receipt().to_dict(),
+                                           'verdict':'BLOCKED',
+                                           'failure_stage':'SECRET_SENTINEL'}}}
+        with self.assertRaises(ValueError):
+            r._validate_store_payload(data)
+
     def test_exit_zero_or_model_text_alone_is_not_success(self):
         for bad in (replace(self.good, content=None), replace(self.good, content=''),
                     replace(self.good, status='BLOCKED'), replace(self.good, cleanup_confirmed=False),
@@ -423,9 +431,14 @@ class DeliveryRecordValidationTests(unittest.TestCase):
                 'receipts': {'a' * 64: receipt}, 'deliveries': {'a' * 64: delivery}}
 
     def test_legacy_and_new_delivery_records_validate(self):
+        import copy
         base = {'integrator_session': 'session-1', 'state': 'DELIVERED',
                 'reason': 'RECEIPT_DELIVERED', 'receipt_digest': 'd' * 64}
         r._validate_store_payload(self.payload(dict(base)))
+        invalid_stage=copy.deepcopy(self.payload(dict(base)))
+        invalid_stage['receipts']['a'*64]['failure_stage']='SECRET_SENTINEL'
+        with self.assertRaises(ValueError):
+            r._validate_store_payload(invalid_stage)
         for verdict in ('SUCCESS', 'FAILED', 'BLOCKED', 'UNKNOWN'):
             with self.subTest(verdict=verdict):
                 r._validate_store_payload(self.payload(dict(base, receipt_verdict=verdict)))

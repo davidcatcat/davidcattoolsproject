@@ -345,6 +345,13 @@ class CompositionTests(unittest.TestCase):
             with self.assertRaises(h.w.WorkerError):
                 h.build(**bad)
 
+        relative = dict(values, executable='opencode')
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as provision:
+            with self.assertRaises(h.w.WorkerError) as caught:
+                h.build(**relative)
+            self.assertEqual(caught.exception.worker_code, 'OPENCODE_RUNTIME_INVALID')
+            provision.assert_not_called()
+
     def test_explicit_bindings_retention_and_validation(self):
         job0, policy, a, snap = self.fixture()
         tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
@@ -662,6 +669,46 @@ class CompositionTests(unittest.TestCase):
                          ('BLOCKED','OPENCODE_RUNTIME_INVALID','PRELAUNCH'))
         persisted=json.loads(Path(store).read_text())
         self.assertEqual(persisted['receipts'][job.digest]['failure_stage'],'PRELAUNCH')
+
+    def test_invalid_preflight_preserves_existing_launch_reservation(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job, policy, admission, _ = self.fixture()
+        executable=Path(job.runtime.executable)
+        link=executable.parent/'synthetic-reserved-runtime-link'
+        link.symlink_to(executable)
+        job=replace(job,runtime=replace(job.runtime,executable=str(link)))
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        self.assertIsNone(receipt_module.reserve_host_launch(
+            job=job,expect=expect,store_path=store))
+        before=json.loads(Path(store).read_text())['receipts'][job.digest]
+        self.assertEqual((before['verdict'],before['reason']),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+        with patch.object(h,'git',return_value=(job.source_sha+'\n').encode()), \
+             patch.object(h.w,'run_worker',side_effect=AssertionError('worker must not launch')) as worker:
+            result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+                expect=expect,receipt_store=store)
+        worker.assert_not_called()
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+        after=json.loads(Path(store).read_text())['receipts'][job.digest]
+        self.assertEqual(after,before)
+
+    def test_already_reserved_run_refusal_has_prelaunch_stage(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job, policy, admission, _ = self.fixture()
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        self.assertIsNone(receipt_module.reserve_host_launch(
+            job=job,expect=expect,store_path=store))
+        result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+            expect=expect,receipt_store=store)
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
 
     def test_delivered_unknown_receipt_is_not_completion_ack(self):
         from llmtool.opencode_result_delivery import (ACK_RETURNED, DELIVERED,

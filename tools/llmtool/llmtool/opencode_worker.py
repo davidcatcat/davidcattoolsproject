@@ -697,11 +697,11 @@ def run_worker(job, host):
                             starts+=_request_starts(bytes(stream[scanned:end]));scanned=end
                             if starts>allowed: reject('OPENCODE_PROVIDER_RETRY_BLOCKED')
                     child.wait(timeout=max(0,work_deadline-time.monotonic()))
-                    mark_stage('EVIDENCE')
                     output=bytes(pipes.buffers['client_out'])
                     sid=_session(output)
                     if sid==job.agent.session_id: reject('OPENCODE_IDENTITY_REUSE')
                     if child.returncode!=0: reject('OPENCODE_PROVIDER_FAILED')
+                    mark_stage('EVIDENCE')
                     completion=_completed_session(job,sid,title,started_ms,url,
                                                   env['OPENCODE_PASSWORD'],work_deadline)
             finally:
@@ -769,7 +769,8 @@ def run_worker(job, host):
                     code='OPENCODE_SOURCE_UNKNOWN'
                     if stage!='CLEANUP': mark_stage('EVIDENCE')
             try:
-                host.failure_stage=stage
+                try: host.failure_stage=stage
+                except Exception: pass  # Failure stages are optional Host diagnostics.
                 host.finalize(token,code,launched)
             except Exception:
                 code='OPENCODE_FINALIZE_UNKNOWN'

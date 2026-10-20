@@ -379,6 +379,8 @@ def build(*, policy, run_id=None, assignment_session=None, expected_branch, expe
             raise w.WorkerError('legacy args required')
         task = TaskBinding(TASK_ID, run_id, 1, policy.contract)
         agent = AgentBinding(AGENT_ID, assignment_session, Role.DEVELOPER, policy.root, common_dir, expected_branch)
+    if type(executable) is not str or not os.path.isabs(executable):
+        raise w.WorkerError('OPENCODE_RUNTIME_INVALID')
     try:
         executable_pin = os.path.realpath(executable)
     except (OSError, TypeError, ValueError):
@@ -426,7 +428,8 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
     ``SUCCESS`` receipt is NOT acceptance or merge authorization
     (``receipt.accepted`` is False).
     """
-    from .opencode_result_receipt import record_host_receipt, reserve_host_launch
+    from .opencode_result_receipt import (record_preflight_receipt,
+                                          record_host_receipt, reserve_host_launch)
     if type(job) is w.WorkerJob:
         try:
             w.preflight(job)
@@ -444,14 +447,15 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
                                 if type(policy) is HostPolicy else None)
             except Exception:
                 observed_head = None
-            receipt = record_host_receipt(job=job, result=result, host_final=final,
+            receipt = record_preflight_receipt(job=job, result=result, host_final=final,
                 observed_head=observed_head, expect=expect, store_path=receipt_store)
             return result, final, receipt
     refused = reserve_host_launch(job=job, expect=expect, store_path=receipt_store)
     if refused is not None:
         usage = job.usage if type(getattr(job, 'usage', None)) is UsageLedger else UsageLedger((), 0, 0)
         return (w.WorkerResult('OPENCODE_ATTEMPT_ALREADY_USED', 'BLOCKED', None, None,
-                               usage, False, (), None, 'NOT_VERIFIED'),
+                               usage, False, (), None, 'NOT_VERIFIED',
+                               failure_stage='PRELAUNCH'),
                 None, refused)
     result, final = run(job, policy, admission, one_native_credential)
     try:

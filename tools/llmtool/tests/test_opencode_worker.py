@@ -215,7 +215,22 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
             second=w.run_worker(job,host)
         self.assertEqual(second.code,'OPENCODE_ATTEMPT_ALREADY_USED')
+        self.assertEqual(second.failure_stage,'PRELAUNCH')
         spawn.assert_not_called()
+
+    def test_stage_assignment_is_optional_for_compatible_host_objects(self):
+        class HostWithoutStage:
+            __slots__ = ('inner',)
+            def __init__(self): object.__setattr__(self,'inner',Host())
+            def __getattr__(self,name): return getattr(self.inner,name)
+            def __setattr__(self,name,value):
+                if name == 'failure_stage': raise AttributeError('stage is not part of this Host')
+                object.__setattr__(self,name,value)
+        host=HostWithoutStage()
+        result=w.run_worker(self.job(),host)
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertEqual(result.failure_stage,'EVIDENCE')
+        self.assertEqual(host.inner.calls[-1][0],'finalize')
 
     def test_host_denial_and_unknown_prior_usage_never_spawn(self):
         for reason in ('deny','unknown'):
@@ -236,6 +251,8 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertIsNone(result.content)
                 self.assertNotIn('PRIVATE_ERROR',repr(result))
+                self.assertEqual(result.failure_stage,
+                    'CLIENT' if mode == 'auth' else 'EVIDENCE')
 
     def test_omitted_native_stream_terminal_requires_actual_persisted_proof(self):
         result=w.run_worker(self.job('omitted-terminal'),Host())
@@ -452,6 +469,13 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
         self.assertFalse(job._attempted)
         self.assertEqual(job.pending,())
+        bad_sha=self.job()
+        object.__setattr__(bad_sha.runtime,'executable_sha256','0'*64)
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(bad_sha)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+        self.assertFalse(bad_sha._attempted)
+        self.assertEqual(bad_sha.pending,())
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
         job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
@@ -565,6 +589,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.providers.cli_lifecycle._group_absent',return_value=False):
             result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN')
+        self.assertEqual(result.failure_stage,'CLEANUP')
         self.assertIsNone(result.content);self.assertTrue(job.pending)
         self.assertTrue(all(x.process.returncode is not None for x in job.pending))
         host=Host();host.fail_final=True
