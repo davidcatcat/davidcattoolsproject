@@ -1,4 +1,4 @@
-"""Offline configuration, executable-presence and store-structure inspection."""
+"""Offline configuration, executable-presence and read-only diagnostics inspection."""
 
 import os
 import shutil
@@ -11,7 +11,10 @@ from .errors import LLMToolError
 
 
 def doctor_output():
-    """Buffer the complete safe projection before touching stdout."""
+    """Buffer the complete safe projection before touching stdout.
+
+    Returns the rendered report and whether diagnostics metadata is degraded.
+    """
     try:
         view = inspect_config()
     except LLMToolError:
@@ -25,6 +28,7 @@ def doctor_output():
         executable = 'available' if found is not None and os.path.isabs(found) else 'missing'
     supported = persistence_supported()
     store = DiagnosticsReader().inspect_store()
+    degraded = store['metadata'] == 'degraded'
     settings = view['settings']
     lines = ['Offline checks only; authentication and inference unverified.',
              'persistence_supported=' + str(supported).lower(),
@@ -36,16 +40,21 @@ def doctor_output():
     lines.append('store=' + store['state'] + ' run_count=' + str(store['run_count']) +
                  ' active_count=' + str(store['active_count']) +
                  ' unknown_count=' + str(store['unknown_count']))
-    lines.append('Store structure/permissions only; metadata completion and write access unverified.')
-    return '\n'.join(lines) + '\n'
+    lines.append('metadata=' + store['metadata'] + ' damaged_count=' +
+                 str(store['damaged_count']))
+    lines.append('Damaged diagnostics metadata reported; nothing repaired, '
+                 'displayed or traced.' if degraded else
+                 'Metadata validated read-only; trace evidence and write access unverified.')
+    return '\n'.join(lines) + '\n', degraded
 
 
 def run_doctor():
     try:
-        output = doctor_output()
+        output, degraded = doctor_output()
         sys.stdout.write(output)
         sys.stdout.flush()
-        return 0
+        # A damaged-metadata finding is a real nonzero result, never a silent pass.
+        return 1 if degraded else 0
     except ReaderError as exc:
         print(exc.line(), file=sys.stderr)
         return 1
