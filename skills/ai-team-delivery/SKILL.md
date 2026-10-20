@@ -5,7 +5,15 @@ description: Coordinate AI-led development for a requirements owner who delegate
 
 # AI team delivery contract
 
-## Owner D7 (2026-10-19) supersession: OpenCode PRIMARY Developer
+## Owner D8/D8a (2026-10-20) — operative supersession
+
+D8 resumes the Codex Developer and keeps OpenCode as an authorized Developer. The PM admits qualifying OpenCode tasks without per-call Owner approval; registered task ownership, Host admission, source/egress and credential protections, independent review and exact-head CI still apply. OpenCode remains PRIMARY under the non-conflicting D7 role order.
+
+D8a permits the Host/Worker to use only the single active local OpenCode credential (integration `opencode`) in memory to start an isolated OpenCode worker. Never print, log, persist, export, or copy it into a file, receipt, evidence, or GitHub; do not read the credential list or any other credential; do not use `auth export`; drop the reference after handoff. The Owner accepted the worker's isolated HOME/XDG state for config isolation. The Owner reported that this Mac had no system-level or MDM/profile OpenCode configuration as of 2026-10-20; a launch preflight is recommended, not a precondition.
+
+This section supersedes conflicting Codex-paused and per-call-approval text below. Non-conflicting D7 containment, privacy, review, CI and live-evidence requirements remain operative.
+
+## Owner D7 (2026-10-19) HISTORICAL; see D8/D8a — OpenCode PRIMARY Developer
 
 **Codex Developer is PAUSED after PR #202 review**, with no new
 source edits, repair attempts, tests or Codex Reviewer subagents.
@@ -55,7 +63,7 @@ implicit shell permissions, or an always-running service.
 | --- | --- | --- |
 | Requirements owner / product acceptor (user) | State the desired tool behavior, outcomes, constraints, priorities; report real-use problems; decide whether the delivered behavior meets the goal | Be the day-to-day PM, developer, technical QA judge, model-prompt courier or Git release engineer |
 | AI coordinator / technical PM (ChatGPT when connected and authorized) | Turn the goal into scoped requirements and acceptance checks, plan/sequence work, choose reviewers, track the evidence and roadmap, triage findings, decide routine technical disposition and merge eligible PRs under delegated authority | Invent platform access, waive mandatory gates, or attribute technical judgments to the owner |
-| Developer (OpenCode PRIMARY under D7; Codex Developer PAUSED) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
+| Developer (OpenCode PRIMARY under D7; Codex Developer resumed under D8) | Implement the pinned scope, preserve unrelated work, write reproducible tests and record exact revision/outputs | Independently certify the code it just wrote, unilaterally change the goal or grant itself mutation authority |
 | Independent reviewer (normally Claude) | Read the exact diff/requirements/evidence, do the requested ordinary/security/functional assessment, report severity, reproducers, limitations and recommendations | Approve its own implementation or turn a normal review into formal security/QA proof without running that gate |
 | Bounded Git publisher | Execute validated, explicitly authorized Git operations at exact refs and report remote status | Override the coordinator's gates, rewrite history, or repair code while acting as publisher |
 
