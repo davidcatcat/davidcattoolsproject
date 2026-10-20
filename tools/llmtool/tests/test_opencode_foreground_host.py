@@ -470,6 +470,104 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(json.loads(Path(store).read_text())['receipts'][job.digest]['verdict'],
                          'SUCCESS')
 
+    def test_dispatch_ack_binds_observed_start_durable_receipt_and_same_integrator(self):
+        from llmtool.opencode_result_delivery import DELIVERED
+        job, policy, a, snap = self.fixture()
+        tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(tmp.cleanup)
+        store = str(Path(tmp.name) / 'dispatch_receipts.json')
+        expect = {'task': job.task, 'agent': job.agent}
+        session = a.current_session
+        launches = []
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError('offline dispatch seam must not launch subprocess/provider/network')
+
+        def fake_worker(j, host):
+            launches.append(j.digest)
+            config_digest = h.hashlib.sha256(h.canonical(h.w.configuration(j))).hexdigest()
+            token = host.admit(j, config_digest)
+            host.check(token, j, 'before')
+            host.consume(token, j)
+            host.check(token, j, 'after')
+            host.finalize(token, 'OPENCODE_OUTPUT_RETURNED', True)
+            from llmtool.run_budget import CallPhase, CallUsage
+            result = h.w.WorkerResult(
+                'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic output', 'backend-dispatch-1',
+                UsageLedger(j.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
+                            j.usage.repair_attempts, 100),
+                True,
+                (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
+                 dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True)),
+                'b' * 64, 'HOST_OBSERVED')
+            return result
+
+        def git_ok(root, *args):
+            if args == ('rev-parse', 'HEAD'):
+                return (job.source_sha + '\n').encode()
+            if args == ('branch', '--show-current'):
+                return (a.expected_branch + '\n').encode()
+            if args == ('rev-parse', '--show-toplevel'):
+                return (policy.root + '\n').encode()
+            if args == ('rev-parse', '--git-common-dir'):
+                return (job.agent.common_dir + '\n').encode()
+            raise AssertionError('unexpected Git command')
+
+        with patch.object(h.w, 'run_worker', side_effect=fake_worker), \
+             patch.object(h.subprocess, 'Popen', side_effect=forbidden), \
+             patch.object(h.urllib.request, 'build_opener', side_effect=forbidden), \
+             patch.object(h, 'git', side_effect=git_ok), \
+             patch.object(h, 'snapshot', return_value=snap):
+            result = h.dispatch_with_ack(job, policy, a, {'synthetic': 'never real'},
+                                         expect=expect, receipt_store=store,
+                                         integrator_session=session)
+        self.assertEqual(result.state, 'STARTED')
+        self.assertEqual(result.job_digest, job.digest)
+        self.assertEqual(result.task_id, job.task.task_id)
+        self.assertEqual(result.agent_id, job.agent.agent_id)
+        self.assertEqual(result.source_sha, job.source_sha)
+        self.assertEqual(result.integrator_session, session)
+        self.assertEqual(result.delivery.state, DELIVERED)
+        self.assertEqual(result.delivery.integrator_session, session)
+        self.assertEqual(result.delivery.receipt_verdict, 'SUCCESS')
+        self.assertTrue(result.completion_ack)
+        self.assertFalse(result.accepted)
+        self.assertEqual(launches, [job.digest])
+
+        # A mismatch fails before the reservation or worker call, with no replay.
+        before = Path(store).read_bytes()
+        with patch.object(h.w, 'run_worker', side_effect=forbidden):
+            missing = h.dispatch_with_ack(job, policy, None, {'synthetic': 'never real'},
+                                          expect=expect, receipt_store=store,
+                                          integrator_session=session)
+        self.assertEqual((missing.state, missing.reason), ('NOT_STARTED', 'ADMISSION_INVALID'))
+        self.assertEqual(Path(store).read_bytes(), before)
+        with patch.object(h.w, 'run_worker', side_effect=forbidden):
+            invalid_session = h.dispatch_with_ack(
+                job, policy, a, {'synthetic': 'never real'}, expect=expect,
+                receipt_store=store, integrator_session='bad\nsession')
+        self.assertEqual((invalid_session.state, invalid_session.reason),
+                         ('NOT_STARTED', 'INTEGRATOR_SESSION_INVALID'))
+        self.assertEqual(Path(store).read_bytes(), before)
+
+        bad_admission = replace(a, current_session='different-integrator-session')
+        with patch.object(h.w, 'run_worker', side_effect=forbidden):
+            rejected = h.dispatch_with_ack(replace(job), policy, bad_admission,
+                                          {'synthetic': 'never real'}, expect=expect,
+                                          receipt_store=store, integrator_session=session)
+        self.assertEqual(rejected.state, 'NOT_STARTED')
+        self.assertEqual(rejected.reason, 'INTEGRATOR_SESSION_MISMATCH')
+        self.assertEqual(Path(store).read_bytes(), before)
+        self.assertEqual(launches, [job.digest])
+
+        with patch.object(h.w, 'run_worker', side_effect=forbidden):
+            replay = h.dispatch_with_ack(replace(job), policy, replace(a),
+                                         {'synthetic': 'never real'}, expect=expect,
+                                         receipt_store=store, integrator_session=session)
+        self.assertEqual((replay.state, replay.reason), ('NOT_STARTED', 'DUPLICATE_RESULT'))
+        self.assertFalse(replay.completion_ack)
+        self.assertEqual(launches, [job.digest])
+
     def test_run_with_receipt_blocks_before_worker_on_invalid_expect_corrupt_store_in_flight_or_concurrency(self):
         import multiprocessing, os
         from llmtool.run_budget import CallPhase, CallUsage
