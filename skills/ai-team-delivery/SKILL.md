@@ -72,6 +72,39 @@ technical capability never confers runtime, network, Git or merge authority.
 Reviewer/developer independence requires distinct roles and separate review
 evidence, not two labels on a single self-review.
 
+### Bounded Coding and Debug Agent workflow (D8)
+
+The project custom agents in `.codex/agents/codex-coding.toml` and
+`.codex/agents/codex-debug.toml` provide role defaults; their TOML settings do
+not prove which model or permissions an invocation actually used. They inherit
+the parent session's sandbox and permissions. D8 keeps the Codex Developer
+resumed, and Claude remains the independent formal Reviewer. Exact-head CI and
+the existing GitHub review/merge gates still apply.
+
+1. The PM gives one bounded Task Contract: objective and acceptance criteria,
+   base SHA, allowed writable paths, required checks and review gates, budget
+   and provider limits, handoff destination, and stop conditions.
+2. For unclear or failing behavior, the Debug Agent may reproduce, trace and
+   report root cause, evidence and a bounded recommendation. It does not own
+   product source edits. Its role instructions request diagnostic-only work;
+   they are not an access control boundary.
+3. The Coding Agent owns implementation, relevant tests and developer
+   self-review for the whole contract. It returns the exact base/head SHAs,
+   diff scope, checks and results, unresolved findings, and a concise evidence
+   and context packet. A debug result passes directly to this Coding Agent.
+4. Send the completed candidate to Claude for the applicable independent
+   formal review. Claude findings return directly to the same Coding Agent
+   for bounded repair, affected checks and rereview. Keep required exact-head
+   CI and GitHub review/merge gates; self-review or local pre-review does not
+   replace them.
+5. The PM re-enters for cross-workstream conflicts, product or authority
+   changes, budget changes, exhausted repair policy, or integration and final
+   acceptance. Handoffs carry only task-relevant evidence, exact revision,
+   check results, unresolved questions and observed/unknown model or token
+   usage; do not repeat broad context or claim model identity from profile
+   configuration alone. This workflow is human coordination guidance, not a
+   new PM service, controller or dispatch system.
+
 ### 2026-10-17 owner-approved PM/llmtool and mobile Cloud roles
 
 [Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172) /
