@@ -10,7 +10,7 @@ Use for Git synchronization and publication. [AGENTS.md](../../AGENTS.md) owns r
 ## Owner D6 — dynamic task-scoped worktrees
 
 <a id="owner-d6-2026-10-19-dynamic-task-scoped-worktree-lifecycle--new-normative-policy"></a>
-D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree must not check out `main`; Developers and Reviewers do not fetch unclaimed refs in the canonical Integrator checkout.
+D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. New task roots use the host-owned registration contract in the [D6 worktree reference](worktree-lifecycle.md), which defines the physical parent, registry path/schema, owner-only modes and fail-closed retention. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree must not check out `main`; Developers and Reviewers do not fetch unclaimed refs in the canonical Integrator checkout.
 
 Before creating a worktree:
 1. Verify repository identity, common Git directory, workspace parent, task owner and clean source state.
@@ -20,11 +20,11 @@ Before creating a worktree:
 Retire only after merge and task acceptance, published source/evidence and final source/inventory binding, and verified absence of active sessions, owners, children or processes. Classify tracked, untracked and ignored files; check locks and repository/worktree state. Use ordinary non-forced removal only when clean and unambiguous. Preserve active, dirty, evidence-bearing or uncertain work. Never alter the canonical checkout.
 
 <a id="owner-approved-two-agent-developer-worktree-exception-not-activated"></a>
-The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. The D6 worktree lifecycle details remain in the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md).
+The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
 
 ## Task binding and evidence
 
-Developer worktrees never check out `main`; Developers and Reviewers do not perform unclaimed fetches in the canonical Integrator checkout. At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence.
+At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence.
 
 For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. D6 retirement also requires no active owner/children and the accepted task's final source/inventory evidence. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
 
