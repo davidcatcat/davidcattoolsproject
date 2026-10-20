@@ -3,6 +3,7 @@ import ast
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -329,6 +330,23 @@ class ValidatorCLITests(unittest.TestCase):
             code = main(args)
         return code, out.getvalue(), err.getvalue()
 
+    def directory_descriptors(self, directory):
+        identity = directory.stat()
+        owned = []
+        for name in os.listdir('/dev/fd'):
+            if not name.isdigit():
+                continue
+            descriptor = int(name)
+            try:
+                current = os.fstat(descriptor)
+            except OSError:
+                continue
+            if (stat.S_ISDIR(current.st_mode)
+                    and (current.st_dev, current.st_ino, current.st_uid)
+                    == (identity.st_dev, identity.st_ino, identity.st_uid)):
+                owned.append(descriptor)
+        return sorted(owned)
+
     def test_command_human(self):
         code, out, err = self.cli(['validate', 'command', 'cat /etc/company/app/config.yaml'])
         self.assertEqual((code, err), (0, ''))
@@ -375,10 +393,33 @@ class ValidatorCLITests(unittest.TestCase):
     def test_missing_directory_fifo_sanitized(self):
         fifo = self.file.parent/'fifo'; os.mkfifo(fifo)
         for name in (self.file.parent/'PRIVATE_MISSING', self.file.parent, fifo):
+            before = self.directory_descriptors(self.file.parent)
             code, out, err = self.cli(['validate', 'context', '--file', str(name)])
             self.assertEqual((code, out), (1, ''))
             self.assertNotIn('PRIVATE', err)
             self.assertNotIn(str(name), err)
+            if name == self.file.parent:
+                self.assertEqual(before, [])
+                self.assertEqual(self.directory_descriptors(self.file.parent), [])
+
+    def test_fd_cleanup_preserves_primary_error_and_foreign_descriptor(self):
+        foreign = os.open(self.file, os.O_RDONLY)
+        close = os.close
+
+        def close_then_fail(descriptor):
+            close(descriptor)
+            raise OSError('secondary close failure')
+
+        try:
+            with patch('llmtool.cli.os.fdopen', side_effect=LLMToolError('primary validation failure')), \
+                    patch('llmtool.cli.os.close', side_effect=close_then_fail):
+                code, out, err = self.cli(['validate', 'context', '--file', str(self.file.parent)])
+            self.assertEqual((code, out, err),
+                             (1, '', 'llmtool: primary validation failure\n'))
+            os.fstat(foreign)
+            self.assertEqual(self.directory_descriptors(self.file.parent), [])
+        finally:
+            close(foreign)
 
     def test_command_oversize_sanitized(self):
         code, out, err = self.cli(['validate', 'command', 'PRIVATE' * 2000])

@@ -36,10 +36,21 @@ from .review_authority_cli import add_review_authority_parser, run_review_author
 def _validation_packet(filename):
     """Read only the explicit regular file, with A4's byte bound."""
     descriptor = os.open(filename, os.O_RDONLY | os.O_NONBLOCK)
-    with os.fdopen(descriptor, 'rb') as stream:
-        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-            raise LLMToolError('validation --file requires a regular file')
-        raw = stream.read(PACKET_LIMIT + 1)
+    primary_error = None
+    try:
+        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise LLMToolError('validation --file requires a regular file')
+            raw = stream.read(PACKET_LIMIT + 1)
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            if primary_error is None:
+                raise
     if len(raw) > PACKET_LIMIT:
         raise LLMToolError('context packet output exceeds 1 MiB')
     return parse_context_packet(raw.decode('utf-8'))
