@@ -6,7 +6,8 @@ recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
 repository mutation, credentials, network requests or daemon. This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
-task completion/review decisions.
+task completion/review decisions. Its Activity view is limited to local task
+evidence and does not invent cross-session dispatch, delivery, review or acceptance.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -439,6 +440,7 @@ class Stage:
     tools: tuple
     live: bool = False   # a live llmtool host process for this exact stage is observed
     meta: str = "ok"     # "ok", "none" (no DB yet) or "UNKNOWN (...)" when unverifiable
+    result_at: float = 0.0  # local result-record mtime, never a review/acceptance time
 
 
 @dataclass(frozen=True)
@@ -466,6 +468,16 @@ def _model_short(model: str) -> str:
 def _relative(path: str, root: str) -> str:
     if root and path.startswith(root.rstrip("/") + "/"):
         path = path[len(root.rstrip("/")) + 1:]
+    elif os.path.isabs(path):
+        # A task database path outside its evidence root is not a safe reference;
+        # never render an unredacted home or other absolute path.
+        return "?"
+    return SAFE_PATH.sub("", path)[:80] or "?"
+
+
+def _safe_relative_reference(path: str) -> str:
+    if os.path.isabs(path) or ".." in path.split("/"):
+        return "?"
     return SAFE_PATH.sub("", path)[:80] or "?"
 
 
@@ -575,7 +587,12 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
             stage = found.group(1)
             attempt_path = os.path.join(directory, entry)
             attempt = _read_json(attempt_path) or {}
-            result = _read_json(os.path.join(directory, f"{stage}-result.json")) or {}
+            result_path = os.path.join(directory, f"{stage}-result.json")
+            result = _read_json(result_path) or {}
+            try:
+                result_at = os.path.getmtime(result_path) if result else 0.0
+            except OSError:
+                result_at = 0.0
             code = str(result.get("code") or "")
             code = code if CODE_TEXT.fullmatch(code) else ("?" if result else "")
             cleanup = "" if not result else ("ok" if result.get("cleanup_confirmed") is True else "UNKNOWN")
@@ -587,7 +604,7 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
             except OSError:
                 started = 0.0
             stages.append(Stage(stage, _model_short(str(attempt.get("model") or "")), started,
-                                code, cleanup, steps, tin, tout, idle, tools, live, meta))
+                                code, cleanup, steps, tin, tout, idle, tools, live, meta, result_at))
         stages.sort(key=lambda s: s.started)
         task_id = SAFE_NAME.sub("", str(manifest.get("task_id") or os.path.basename(directory)))[:48]
         branch = SAFE_PATH.sub("", str(manifest.get("branch") or ""))[:60]
@@ -649,11 +666,151 @@ def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
                 lines.append(f"        task metadata {stage.meta}")
             for tool in stage.tools[-6:]:
                 mark = "✓" if tool.status == "completed" else tool.status
-                lines.append(f"        {tool.name:<6} {tool.path}  {mark}")
+                lines.append(f"        {tool.name:<6} {_safe_relative_reference(tool.path)}  {mark}")
             if len(stage.tools) > 6:
                 lines.append(f"        … {len(stage.tools) - 6} earlier tool calls")
         lines.append("")
     return lines
+
+
+@dataclass(frozen=True)
+class ActivityEvent:
+    """A small, typed event made only from sanitized monitor evidence."""
+    occurred_at: float
+    event_type: str
+    task_id: str
+    stage: str
+    status: str
+    reference: str
+    cleanup: str = ""
+
+
+ACTIVITY_TYPES = frozenset({
+    "review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner",
+    "worker_result", "stage_attempt", "stage_live", "stage_unknown",
+})
+ACTIVITY_STATUS = {
+    "review_dispatch": frozenset({"DISPATCHED", "UNKNOWN"}),
+    "review_verdict": frozenset({"PASS", "FAIL", "UNKNOWN"}),
+    "undelivered_reply": frozenset({"NOT_DELIVERED", "UNKNOWN"}),
+    "waiting_owner": frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
+    "worker_result": None,
+    "stage_attempt": frozenset({"OBSERVED"}),
+    "stage_live": frozenset({"RUNNING"}),
+    "stage_unknown": frozenset({"UNKNOWN"}),
+}
+ACTIVITY_RESULT_CODES = frozenset({
+    "OPENCODE_OUTPUT_RETURNED", "OPENCODE_PROVIDER_FAILED", "OPENCODE_CLEANUP_UNKNOWN",
+    "OPENCODE_RUNTIME_UNKNOWN", "OPENCODE_SOURCE_UNKNOWN", "OPENCODE_BUDGET_BLOCKED",
+    "OPENCODE_AUTH_REQUIRED", "OPENCODE_NOT_AUTHORIZED", "OPENCODE_TIMEOUT",
+    "OPENCODE_OUTPUT_INCOMPLETE", "OPENCODE_OUTPUT_INVALID", "OPENCODE_USAGE_UNKNOWN",
+    "RETURNED", "FAILED", "BLOCKED", "UNKNOWN",
+})
+ACTIVITY_RESULT_LABELS = {
+    "OPENCODE_OUTPUT_RETURNED": "工作輸出已返回",
+    "OPENCODE_PROVIDER_FAILED": "工作失敗（Provider 呼叫失敗）",
+    "OPENCODE_CLEANUP_UNKNOWN": "工作狀態未知（清理未確認）",
+    "OPENCODE_RUNTIME_UNKNOWN": "工作狀態未知（執行狀態未確認）",
+    "OPENCODE_SOURCE_UNKNOWN": "工作狀態未知（來源狀態未確認）",
+    "OPENCODE_BUDGET_BLOCKED": "工作遭阻擋（預算限制）",
+    "OPENCODE_AUTH_REQUIRED": "工作遭阻擋（授權條件未滿足）",
+    "OPENCODE_NOT_AUTHORIZED": "工作遭阻擋（未獲授權）",
+    "OPENCODE_TIMEOUT": "工作逾時",
+    "OPENCODE_OUTPUT_INCOMPLETE": "工作輸出不完整",
+    "OPENCODE_OUTPUT_INVALID": "工作輸出無效",
+    "OPENCODE_USAGE_UNKNOWN": "工作狀態未知（用量未確認）",
+    "RETURNED": "工作結果已返回",
+    "FAILED": "工作失敗",
+    "BLOCKED": "工作遭阻擋",
+    "UNKNOWN": "工作結果未知",
+}
+
+
+def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
+    """Build time-ordered Activity from existing local task evidence only.
+
+    The cross-session examples have typed fixture support, but this production
+    source deliberately emits none: no permitted local source proves PM dispatch,
+    Reviewer verdict/reply delivery or Owner disposition.
+    """
+    events = []
+    for task in tasks:
+        task_id = task.task_id if re.fullmatch(r"[A-Za-z0-9_-]{1,48}", task.task_id or "") else "?"
+        for stage in task.stages:
+            stage_name = stage.name if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", stage.name or "") else "?"
+            reference = f"{task_id}/{stage_name}"
+            if stage.started:
+                events.append(ActivityEvent(stage.started, "stage_attempt", task_id,
+                                            stage_name, "OBSERVED", reference))
+            if stage.result and stage.result_at:
+                events.append(ActivityEvent(stage.result_at, "worker_result", task_id,
+                                            stage_name,
+                                            stage.result if stage.result in ACTIVITY_RESULT_CODES else "UNKNOWN",
+                                            reference,
+                                            stage.cleanup if stage.cleanup in ("ok", "UNKNOWN") else "UNKNOWN"))
+            elif not stage.result:
+                kind, status = (("stage_live", "RUNNING") if stage.live else
+                                ("stage_unknown", "UNKNOWN"))
+                events.append(ActivityEvent(stage.started, kind, task_id, stage_name,
+                                            status, reference))
+    events = [event for event in events
+              if event.event_type in ACTIVITY_TYPES
+              and (event.status in ACTIVITY_STATUS[event.event_type]
+                   if ACTIVITY_STATUS[event.event_type] is not None
+                   else bool(CODE_TEXT.fullmatch(event.status)))]
+    return sorted(events, key=lambda event: (event.occurred_at, event.reference,
+                                              event.event_type, event.stage, event.status))
+
+
+def _activity_line(event: ActivityEvent) -> str:
+    actors = {
+        "review_dispatch": ("PM", "Reviewer", {"DISPATCHED": "已記錄派送", "UNKNOWN": "狀態未知"}),
+        "review_verdict": ("Reviewer", "PM", {"PASS": "審查通過", "FAIL": "審查未通過", "UNKNOWN": "審查結果未知"}),
+        "undelivered_reply": ("Reviewer", "PM", {"NOT_DELIVERED": "回覆未送達", "UNKNOWN": "送達狀態未知"}),
+        "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "受阻，等待負責人決定", "WAITING": "等待負責人決定", "UNKNOWN": "狀態未知"}),
+        "worker_result": ("llmtool 主機", f"任務 {event.task_id} · 階段 {event.stage}",
+                          ACTIVITY_RESULT_LABELS),
+        "stage_attempt": ("llmtool harness", f"任務 {event.task_id} · 階段 {event.stage}",
+                          {"OBSERVED": "觀察到嘗試紀錄（不代表已派送）"}),
+        "stage_live": ("本機程序表", f"任務 {event.task_id} · 階段 {event.stage}",
+                       {"RUNNING": "觀察到對應主機程序（執行中，不代表完成）"}),
+        "stage_unknown": ("本機任務證據", f"任務 {event.task_id} · 階段 {event.stage}",
+                          {"UNKNOWN": "狀態未知（沒有結果紀錄或對應程序）"}),
+    }
+    if event.event_type not in ACTIVITY_TYPES:
+        return ""
+    allowed = ACTIVITY_STATUS[event.event_type]
+    if (allowed is not None and event.status not in allowed) or (
+            event.event_type == "worker_result" and event.status not in ACTIVITY_RESULT_CODES):
+        return ""
+    actor, target, outcomes = actors[event.event_type]
+    safe_task = event.task_id if re.fullmatch(r"[A-Za-z0-9_-]{1,48}", event.task_id or "") else "?"
+    if event.event_type in ("worker_result", "stage_attempt", "stage_live", "stage_unknown"):
+        safe_stage = event.stage if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", event.stage or "") else "?"
+        target = f"任務 {safe_task} · 階段 {safe_stage}"
+    when = datetime.fromtimestamp(event.occurred_at).strftime("%H:%M:%S") if event.occurred_at else "--:--:--"
+    ref = event.reference if re.fullmatch(r"[A-Za-z0-9_-]{1,48}(?:/[A-Za-z0-9_-]{1,32})?", event.reference or "") else "本機證據"
+    reference = ref
+    outcome = outcomes[event.status]
+    if event.event_type == "worker_result":
+        cleanup = "已確認" if event.cleanup == "ok" else "未知"
+        outcome += f"；清理狀態{cleanup}"
+    return f"{when}  {actor} → {target}: {outcome}  [{reference}]"
+
+
+def render_activity(events: list[ActivityEvent], limit: int = 30) -> list[str]:
+    events = [event for event in events if type(event) is ActivityEvent]
+    ordered = sorted(events, key=lambda event: (event.occurred_at, event.reference,
+                                                 event.event_type, event.stage, event.status))
+    lines = [line for line in (_activity_line(event) for event in ordered[-max(0, limit):]) if line]
+    if not lines:
+        lines.append("目前沒有可顯示的本機 Activity 事件。")
+    lines.append("PM→Reviewer 派送/判定/回覆、Owner 決定：未顯示（沒有核准的本機來源）。")
+    return lines
+
+
+def activity_lines(tasks: list[Task], limit: int = 30) -> list[str]:
+    return render_activity(activity_events(tasks), limit)
 
 
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
@@ -670,6 +827,8 @@ def run_once() -> int:
     print("\n".join(table_lines(mon.processes)))
     print("\nRECENT LLMTOOL TASKS")
     print("\n".join(task_lines(mon.tasks, 3)))
+    print("\nRECENT ACTIVITY")
+    print("\n".join(activity_lines(mon.tasks)))
     print(f"Note: {FOOTNOTE}.")
     return 0
 
@@ -732,7 +891,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             end = len(entries) - offset
             for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
                 put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
@@ -745,22 +904,29 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
                     attr |= colors.get("!", 0)
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+        elif view == "activity":
+            lines = activity_lines(mon.tasks)
+            offset = max(0, min(offset, len(lines) - body))
+            for row, line in enumerate(lines[offset:offset + body]):
+                attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line else 0
+                put(3 + row, line, attr)
+            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-            hint = "Tab/1/2/3: log·tasks·processes  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
         put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (ord("q"), ord("Q"), 27):
             return
-        views = ("log", "tasks", "table")
-        if key == 9:  # Tab cycles log -> tasks -> processes
-            view, offset = views[(views.index(view) + 1) % 3], 0
-        elif key in (ord("1"), ord("2"), ord("3")):
+        views = ("log", "tasks", "table", "activity")
+        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity
+            view, offset = views[(views.index(view) + 1) % len(views)], 0
+        elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
             view, offset = views[key - ord("1")], 0
         elif key == curses.KEY_UP:
             offset += 1 if view == "log" else -1
@@ -779,7 +945,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
-    parser.add_argument("--once", action="store_true", help="print one process table and exit")
+    parser.add_argument("--once", action="store_true",
+                        help="print one process table, task list and local Activity view, then exit")
     parser.add_argument("--plain", action="store_true",
                         help="append-only event lines instead of the interactive screen")
     parser.add_argument("--no-color", action="store_true", help="disable colors")
