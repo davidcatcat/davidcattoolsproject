@@ -17,7 +17,7 @@ Before creating a worktree:
 2. Use a unique task root and branch based on the approved SHA. Register the exact root/branch/owner; assign one writer.
 3. Isolate runtime/import/build state. Verify root, branch, HEAD and status before work.
 
-Do not create or retire a D6 tree based only on this summary; follow the complete acceptance, inventory, ignored-file and process-release gates in the linked lifecycle reference. Preserve active, dirty, evidence-bearing or uncertain work. Never alter the canonical checkout.
+Do not create or retire a D6 tree based only on this summary; follow the complete acceptance, inventory, ignored-file and process-release gates in the linked lifecycle reference. Preserve active, dirty, evidence-bearing or uncertain work. D6 worktree operations must not alter or retire the canonical checkout; its Integrator remains the sole writer.
 
 <a id="owner-approved-two-agent-developer-worktree-exception-not-activated"></a>
 The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
@@ -49,13 +49,13 @@ Inspect the full diff and preserve unrelated work. Verify the published PR head 
 
 ## Fetch and synchronize
 
-Fetch only when the task requires remote state and the root/branch is verified. Compare local and remote refs; do not infer remote state from stale tracking refs. Fast-forward only when the local tree is clean and strictly behind. Do not use `reset --hard`, `clean`/`clean -fd`, force checkout/switch, `switch -B`, force push, history rewrite, `git worktree prune`, `git gc`/`prune`, shared Git config mutation, unregistered `git worktree move`/`repair`. Never stash unrelated work. On divergence, preserve both sides and resolve in a task branch after reviewing the diff.
+Fetch only when remote state is required and the root/branch is verified. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. On divergence, preserve both sides and resolve in a task branch after reviewing the diff. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits); never stash unrelated work.
 
 ## Commit and publish
 
 Stage only task-named files. Inspect staged names and the full staged diff; run `git diff --cached --check` and task-required validation. Commit only the approved scope. Push normally and verify remote branch SHA, PR head, exact CI and review provenance.
 
-For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence. If the environment cannot write `.git`, do not create another checkout or move to `/tmp`; preserve source changes in the authorized repository and give the exact staging/commit/push commands for that root.
+For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence. Changes to the executable control tip must follow the [controller release and Mac handoff gate](../ai-team-delivery/controller-release.md). If the environment cannot write `.git`, do not create another checkout or move to `/tmp`; preserve source changes in the authorized repository and give the exact staging/commit/push commands for that root.
 
 ## PR review and merge
 
