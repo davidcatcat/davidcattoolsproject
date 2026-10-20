@@ -144,26 +144,31 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
         if code:self.assertEqual(result['code'],code)
     def test_complete_real_adapters_fake_transport(self):
-        # The fake reviewer transport reports no token usage; the retrospective
-        # budget gate must block approval but retain the one consumed call.
+        # The fake reviewer transport reports no token usage. Under the Owner
+        # correction, unknown retrospective usage is recorded telemetry only and
+        # cannot veto the otherwise valid, independently bound APPROVE verdict.
         result=self.h.run()
-        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
-        self.assertEqual(result['status'],'BLOCKED');self.assertFalse(result['authorized'])
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['status'],'APPROVE');self.assertFalse(result['authorized'])
+        self.assertEqual(result['verdict_validation'],'SUCCESS')
+        self.assertEqual((result['security'],result['functional']),('APPROVE','APPROVE'))
         self.assertEqual(result['provider_calls'],1);self.assertTrue(result['test_only'])
         self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
         self.assertEqual(result['invocation_status'],'FAKE_RETURNED')
         self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
-        self.assertIsNone(result['cost']);self.assertNotIn('outstanding_final_criteria',result)
+        self.assertIsNone(result['cost'])
+        self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
         receipt=next(iter(self.h.authority.receipts.values()))
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
     def test_real_advancing_clock_is_admitted_and_reviewed(self):
         # D1: a clock read taken before observe() is older than the observation.
-        # Unknown usage still blocks approval after one admitted/reviewed call.
+        # Unknown usage does not block the one admitted/reviewed verdict.
         ticking(self.h)
         result=self.h.run()
-        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
-        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['status'],'APPROVE')
         self.assertEqual(result['provider_calls'],1);self.assertEqual(result['invocation_status'],'FAKE_RETURNED')
+        self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
         receipt=next(iter(self.h.authority.receipts.values()))
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
 
