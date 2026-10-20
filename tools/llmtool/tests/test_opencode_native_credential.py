@@ -110,11 +110,19 @@ class NativeCredentialTests(unittest.TestCase):
                          self.db_path, timeout_seconds=0.01, connector=slow_connect)
 
     def test_nonfinite_timeouts_are_rejected_before_open(self):
+        self.create_db((self.row(),))
+        opens = []
+
+        def connector(*args, **kwargs):
+            opens.append((args, kwargs))
+            return sqlite3.connect(*args, **kwargs)
+
         for timeout in (float('nan'), float('inf'), float('-inf')):
             with self.subTest(timeout=timeout):
                 self.assert_code('CREDENTIAL_SOURCE_UNKNOWN',
                                  credential.read_active_credential, self.db_path,
-                                 timeout_seconds=timeout)
+                                 timeout_seconds=timeout, connector=connector)
+                self.assertEqual(opens, [])
 
     def test_one_use_source_reads_only_on_first_supported_take(self):
         self.create_db((self.row(),))
