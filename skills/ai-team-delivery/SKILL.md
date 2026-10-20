@@ -16,14 +16,14 @@ Before dispatch, record:
 - intended behavior, writable files and prohibited actions;
 - assigned Developer, model and provider route;
 - deterministic checks, independent review and exact-head CI required;
-- output cap, retry stop, timeout and cleanup requirements;
+- provider output cap, native retry cap of at most one extra request followed by job termination, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
-For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry stop and D6 write scope. A changed file set inside that approved data class does not require a new Owner egress decision. An OpenCode-authored Host/containment change requires independent Security review before that Host version admits another Worker.
+For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry limit (at most one extra request, then kill the job) and D6 write scope. A changed file set inside that approved data class does not require a new Owner egress decision. An OpenCode-authored Host/containment change requires independent Security review before that Host version admits another Worker.
 
 ## Developer convergence and formal review
 
-The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode also completes a qualified actually-free cross-model pre-review when required by the task. If a qualified route is unavailable, report the concrete limitation and let the PM route or pause the affected task. Pre-review is not independent acceptance.
+The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
 
 Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. The Reviewer reports severity, reproducibility, limitations and disposition. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. Never merge on self-review, stale verdict or green CI alone.
 
