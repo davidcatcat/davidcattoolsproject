@@ -24,7 +24,7 @@ The old G1–G7 fixed-root pilot is historical and archived in [policy history](
 
 ## Task binding and evidence
 
-At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence.
+At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence. The existing Owner authorization for Codex `danger-full-access` / `approval_policy=never` is recorded in the [permission-mode decision](../../reports/llmtool_codex_danger_full_access_audit_decision_20261013.md) and [Issue #135](https://github.com/davidcatcat/davidcattoolsproject/issues/135#issuecomment-6152425440); it records authority, not proof of an effective Mac session mode or native audit. Keep those states separate. It does not waive task scope, D6, secret handling, egress or Git restrictions.
 
 For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
 
@@ -49,7 +49,7 @@ Confirm repository, branch, HEAD, upstream and worktree ownership. Bind task-sta
 
 ## Fetch and synchronize
 
-Fetch only when the task requires remote state and the root/branch is verified. Compare local and remote refs; do not infer remote state from stale tracking refs. Fast-forward only when the local tree is clean and strictly behind. Do not use `reset --hard`, `clean`/`clean -fd`, force checkout/switch, `switch -B`, force push or history rewrite. Never stash unrelated work. On divergence, preserve both sides and resolve in a task branch after reviewing the diff.
+Fetch only when the task requires remote state and the root/branch is verified. Compare local and remote refs; do not infer remote state from stale tracking refs. Fast-forward only when the local tree is clean and strictly behind. Do not use `reset --hard`, `clean`/`clean -fd`, force checkout/switch, `switch -B`, force push, history rewrite, `git worktree prune`, `git gc`/`prune`, shared Git config mutation, unregistered `git worktree move`/`repair`. Never stash unrelated work. On divergence, preserve both sides and resolve in a task branch after reviewing the diff.
 
 ## Commit and publish
 
