@@ -46,7 +46,7 @@ Before runtime acceptance, establish the tested checkout, exact HEAD, installed 
 Evidence must not contain credentials or restricted logs. Use redacted identifiers and exact source hashes. Apply [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for G1–G4 milestone checkpoints. GitHub publication is durable evidence, not proof of Session wake or notification delivery.
 
 <a id="mac-operator-handoff-controller-trust-and-privacy"></a>
-<a id="owner-approved-outcome-reporting-2026-10-19"></a>
+
 ## Interim controller changes
 
 Changes to the temporary ai-loop controller and frozen routes follow the [controller release and Mac handoff gate](controller-release.md).
