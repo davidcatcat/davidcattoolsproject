@@ -6,6 +6,8 @@ Before product engineering, review, QA or PR operations, read [ai-team-delivery]
 
 Report exact reviewed SHA, actionable findings, severity, evidence, applicable gates and disposition. Keep review findings distinct from Owner product acceptance and Git execution. Do not claim Mac/runtime/provider work without evidence from the actual tested environment.
 
+When authoring skills, keep each skill focused on one workflow with trigger-oriented frontmatter, clear completion criteria and no duplicated rules. Inspect nearby guidance first and prefer the smallest reversible edit.
+
 Read only the specialist skill for the requested gate: [safe-git](skills/safe-git/SKILL.md), [debug-ci](skills/debug-ci/SKILL.md), [review-change](skills/review-change/SKILL.md), [bug-hunt](skills/bug-hunt/SKILL.md), [security-review](skills/security-review/SKILL.md), [qa-validation](skills/qa-validation/SKILL.md), [validate-runtime](skills/validate-runtime/SKILL.md) or [company-llm-delegation](skills/company-llm-delegation/SKILL.md). These gates are distinct. Keep shared workflows in skills; maintain project status in the [Roadmap](tools/llmtool/ROADMAP.md).
 
 One-off incidents and superseded role decisions are archived under [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md), not current instructions. The prior [CLAUDE guidance snapshot](docs/history/claude-guidance-20261020.md) is retained for audit context.
