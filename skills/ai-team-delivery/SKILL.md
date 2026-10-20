@@ -19,7 +19,7 @@ Before dispatch, record:
 - provider output cap, native retry cap of at most one extra request followed by job termination, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
-For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry limit (at most one extra request, then kill the job) and D6 write scope. A changed file set inside that approved data class does not require a new Owner egress decision. An OpenCode-authored Host/containment change requires independent Security review before that Host version admits another Worker.
+For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, native retry limit (at most one extra request, then kill the job) and D6 write scope. A changed file set inside that approved data class does not require a new Owner egress decision. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
 
 ## Developer convergence and formal review
 
