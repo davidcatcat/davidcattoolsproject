@@ -19,9 +19,10 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -323,6 +324,7 @@ class Monitor:
         self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
         self.tasks: list = []
         self.task_map: dict = {}
+        self.github = None   # opt-in GitHubSource (--github); None means no network at all
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -683,21 +685,29 @@ class ActivityEvent:
     status: str
     reference: str
     cleanup: str = ""
+    actor: str = ""      # optional allowlisted actor/target (GitHub activity markers)
+    target: str = ""
+    summary: str = ""    # sanitized one-line GitHub headline/title, never a body
 
 
 ACTIVITY_TYPES = frozenset({
     "review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner",
     "worker_result", "stage_attempt", "stage_live", "stage_unknown",
+    "github_comment", "pr_opened", "pr_merged", "pr_closed",
 })
 ACTIVITY_STATUS = {
     "review_dispatch": frozenset({"DISPATCHED", "UNKNOWN"}),
-    "review_verdict": frozenset({"PASS", "FAIL", "UNKNOWN"}),
+    "review_verdict": frozenset({"PASS", "FAIL", "FIX", "UNKNOWN"}),
     "undelivered_reply": frozenset({"NOT_DELIVERED", "UNKNOWN"}),
     "waiting_owner": frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
     "worker_result": None,
     "stage_attempt": frozenset({"OBSERVED"}),
     "stage_live": frozenset({"RUNNING"}),
     "stage_unknown": frozenset({"UNKNOWN"}),
+    "github_comment": frozenset({"POSTED"}),
+    "pr_opened": frozenset({"OPENED"}),
+    "pr_merged": frozenset({"MERGED"}),
+    "pr_closed": frozenset({"CLOSED"}),
 }
 ACTIVITY_RESULT_CODES = frozenset({
     "OPENCODE_OUTPUT_RETURNED", "OPENCODE_PROVIDER_FAILED", "OPENCODE_CLEANUP_UNKNOWN",
@@ -707,37 +717,42 @@ ACTIVITY_RESULT_CODES = frozenset({
     "RETURNED", "FAILED", "BLOCKED", "UNKNOWN",
 })
 ACTIVITY_RESULT_LABELS = {
-    "OPENCODE_OUTPUT_RETURNED": "工作輸出已返回",
-    "OPENCODE_PROVIDER_FAILED": "工作失敗（Provider 呼叫失敗）",
-    "OPENCODE_CLEANUP_UNKNOWN": "工作狀態未知（清理未確認）",
-    "OPENCODE_RUNTIME_UNKNOWN": "工作狀態未知（執行狀態未確認）",
-    "OPENCODE_SOURCE_UNKNOWN": "工作狀態未知（來源狀態未確認）",
-    "OPENCODE_BUDGET_BLOCKED": "工作遭阻擋（預算限制）",
-    "OPENCODE_AUTH_REQUIRED": "工作遭阻擋（授權條件未滿足）",
-    "OPENCODE_NOT_AUTHORIZED": "工作遭阻擋（未獲授權）",
-    "OPENCODE_TIMEOUT": "工作逾時",
-    "OPENCODE_OUTPUT_INCOMPLETE": "工作輸出不完整",
-    "OPENCODE_OUTPUT_INVALID": "工作輸出無效",
-    "OPENCODE_USAGE_UNKNOWN": "工作狀態未知（用量未確認）",
-    "RETURNED": "工作結果已返回",
-    "FAILED": "工作失敗",
-    "BLOCKED": "工作遭阻擋",
-    "UNKNOWN": "工作結果未知",
+    "OPENCODE_OUTPUT_RETURNED": "完成，已拿到輸出",
+    "OPENCODE_PROVIDER_FAILED": "失敗：模型呼叫失敗",
+    "OPENCODE_CLEANUP_UNKNOWN": "結果未知：程序清理沒確認",
+    "OPENCODE_RUNTIME_UNKNOWN": "結果未知：執行狀態沒確認",
+    "OPENCODE_SOURCE_UNKNOWN": "結果未知：原始碼狀態沒確認",
+    "OPENCODE_BUDGET_BLOCKED": "被擋下：超出預算",
+    "OPENCODE_AUTH_REQUIRED": "被擋下：缺少登入/授權",
+    "OPENCODE_NOT_AUTHORIZED": "被擋下：沒有授權",
+    "OPENCODE_TIMEOUT": "逾時",
+    "OPENCODE_OUTPUT_INCOMPLETE": "輸出不完整",
+    "OPENCODE_OUTPUT_INVALID": "輸出無效",
+    "OPENCODE_USAGE_UNKNOWN": "結果未知：用量沒確認",
+    "RETURNED": "完成，已拿到結果",
+    "FAILED": "失敗",
+    "BLOCKED": "被擋下",
+    "UNKNOWN": "結果未知",
 }
+# Actors a GitHub activity marker may name. Anything else is rendered as "?".
+ACTIVITY_ACTORS = frozenset({"PM", "Integrator", "Reviewer", "Claude", "Codex", "OpenCode",
+                             "AGY", "Developer", "Owner", "llmtool"})
+TASK_ID = re.compile(r"[A-Za-z0-9_-]{1,48}")
+STAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
+LOCAL_TYPES = frozenset({"worker_result", "stage_attempt", "stage_live", "stage_unknown"})
 
 
 def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
     """Build time-ordered Activity from existing local task evidence only.
 
-    The cross-session examples have typed fixture support, but this production
-    source deliberately emits none: no permitted local source proves PM dispatch,
-    Reviewer verdict/reply delivery or Owner disposition.
+    Cross-session dispatch/verdict/reply events never come from here: no local
+    source proves them. They appear only from the opt-in GitHub source below.
     """
     events = []
     for task in tasks:
-        task_id = task.task_id if re.fullmatch(r"[A-Za-z0-9_-]{1,48}", task.task_id or "") else "?"
+        task_id = task.task_id if TASK_ID.fullmatch(task.task_id or "") else "?"
         for stage in task.stages:
-            stage_name = stage.name if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", stage.name or "") else "?"
+            stage_name = stage.name if STAGE_ID.fullmatch(stage.name or "") else "?"
             reference = f"{task_id}/{stage_name}"
             if stage.started:
                 events.append(ActivityEvent(stage.started, "stage_attempt", task_id,
@@ -762,20 +777,182 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
                                               event.event_type, event.stage, event.status))
 
 
+# ------------------------------------------------------- opt-in GitHub source
+# Enabled only by --github. Read-only `gh api` GETs of recent issue/PR comments
+# and pull requests; nothing is posted, cached on disk or sent anywhere else.
+# Only a sanitized first line (or PR title) is kept, never a comment body.
+# Cross-session events are typed ONLY from an explicit marker an agent writes:
+#   <!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->
+# Unmarked comments are shown as plain "GitHub 留言", with no inferred actor.
+GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
+MARKER = re.compile(r"<!--\s*activity:([^<>]{0,300}?)-->")
+MARKER_FIELD = re.compile(r"([a-z_]{1,16})=([A-Za-z0-9_-]{1,32})")
+MARKER_TYPES = frozenset({"review_dispatch", "review_verdict", "undelivered_reply", "waiting_owner"})
+PRIVATE_PATH = re.compile(r"(?:/Users|/home|/private|/tmp|/var)/\S*")
+URL = re.compile(r"https?://\S+")
+MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+GITHUB_TIMEOUT = 20
+DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
+GITHUB_REFRESH = 120.0
+GITHUB_LIMIT = 4 << 20
+
+
+def _github_time(value) -> float:
+    if type(value) is not str:
+        return 0.0
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _headline(text) -> str:
+    """First meaningful line of untrusted Markdown, reduced to plain short text."""
+    if type(text) is not str:
+        return ""
+    text = MARKER.sub("", text)
+    for line in text.splitlines():
+        line = MD_LINK.sub(r"\1", line)
+        line = PRIVATE_PATH.sub("[路徑]", URL.sub("[連結]", line))
+        line = "".join(char for char in line if char.isprintable())
+        line = re.sub(r"[#*`>_|~]+", " ", line)
+        line = " ".join(line.split())
+        if line:
+            return line[:72] + ("…" if len(line) > 72 else "")
+    return ""
+
+
+def _issue_number(url) -> str:
+    found = re.search(r"/(?:issues|pull)/(\d{1,7})$", url) if type(url) is str else None
+    return found.group(1) if found else ""
+
+
+def _marker_event(body: str, when: float, number: str):
+    found = MARKER.search(body) if type(body) is str else None
+    if not found:
+        return None
+    fields = dict(MARKER_FIELD.findall(found.group(1)))
+    kind, status = fields.get("type", ""), fields.get("status", "UNKNOWN")
+    if kind not in MARKER_TYPES or status not in ACTIVITY_STATUS[kind]:
+        return None
+    actor = fields.get("actor", "")
+    target = fields.get("target", "")
+    return ActivityEvent(when, kind, "", "", status, f"#{number}",
+                         actor=actor if actor in ACTIVITY_ACTORS else "",
+                         target=target if target in ACTIVITY_ACTORS else "",
+                         summary=_headline(body))
+
+
+def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
+    """Turn already-fetched GitHub JSON into typed events (pure; no I/O)."""
+    events = []
+    for comment in comments if type(comments) is list else []:
+        if type(comment) is not dict:
+            continue
+        when = _github_time(comment.get("created_at"))
+        number = _issue_number(comment.get("issue_url"))
+        if when < since or not number:
+            continue
+        body = comment.get("body")
+        event = _marker_event(body, when, number)
+        if event is None:
+            headline = _headline(body)
+            if not headline:
+                continue
+            event = ActivityEvent(when, "github_comment", "", "", "POSTED", f"#{number}",
+                                  summary=headline)
+        events.append(event)
+    for pull in pulls if type(pulls) is list else []:
+        if type(pull) is not dict or type(pull.get("number")) is not int:
+            continue
+        ref, title = f"#{pull['number']}", _headline(pull.get("title"))
+        merged, closed = _github_time(pull.get("merged_at")), _github_time(pull.get("closed_at"))
+        opened = _github_time(pull.get("created_at"))
+        if opened >= since:
+            events.append(ActivityEvent(opened, "pr_opened", "", "", "OPENED", ref, summary=title))
+        if merged >= since:
+            events.append(ActivityEvent(merged, "pr_merged", "", "", "MERGED", ref, summary=title))
+        elif closed >= since:
+            events.append(ActivityEvent(closed, "pr_closed", "", "", "CLOSED", ref, summary=title))
+    return events
+
+
+class GitHubSource:
+    """Opt-in, rate-limited, read-only GitHub activity. Failures become a status line."""
+
+    def __init__(self, repo: str, window_hours: float = 12.0, runner=None, clock=time.time) -> None:
+        if not GITHUB_REPO.fullmatch(repo or ""):
+            raise ValueError("--github expects OWNER/REPO")
+        self.repo, self.window = repo, window_hours * 3600
+        self.runner = runner or subprocess.run
+        self.clock = clock
+        self.events: list[ActivityEvent] = []
+        self.status = "GitHub：尚未讀取"
+        self.fetched = None   # monotonic time of the last attempt
+
+    def _get(self, path: str):
+        gh = shutil.which("gh")
+        if not gh:
+            raise RuntimeError("找不到 gh 指令")
+        done = self.runner([gh, "api", "-X", "GET", path], capture_output=True,
+                           timeout=GITHUB_TIMEOUT, check=False)
+        if done.returncode != 0:
+            raise RuntimeError(f"gh api 失敗（exit {done.returncode}）")
+        if len(done.stdout) > GITHUB_LIMIT:
+            raise RuntimeError("回應過大")
+        return json.loads(done.stdout)
+
+    def refresh(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if not force and self.fetched is not None and now - self.fetched < GITHUB_REFRESH:
+            return
+        self.fetched = now
+        since = self.clock() - self.window
+        stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            comments = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                 "&sort=created&direction=desc&per_page=50")
+            pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
+                              "&direction=desc&per_page=30")
+            self.events = github_events(comments, pulls, since)
+            self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
+                           f"{datetime.now():%H:%M} 更新")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            # Keep the previous events; say plainly that they may be stale.
+            detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
+            self.status = f"GitHub：讀取失敗（{detail}），以下 GitHub 項目可能過時"
+
+
+def _when(seconds: float) -> str:
+    if not seconds:
+        return "--:--:--"
+    moment = datetime.fromtimestamp(seconds)
+    return moment.strftime("%H:%M:%S" if moment.date() == datetime.now().date() else "%m/%d %H:%M")
+
+
 def _activity_line(event: ActivityEvent) -> str:
+    stage_target = None
+    if event.event_type in LOCAL_TYPES:
+        safe_task = event.task_id if TASK_ID.fullmatch(event.task_id or "") else "?"
+        safe_stage = event.stage if STAGE_ID.fullmatch(event.stage or "") else "?"
+        stage_target = f"任務 {safe_task} · 階段 {safe_stage}"
     actors = {
-        "review_dispatch": ("PM", "Reviewer", {"DISPATCHED": "已記錄派送", "UNKNOWN": "狀態未知"}),
-        "review_verdict": ("Reviewer", "PM", {"PASS": "審查通過", "FAIL": "審查未通過", "UNKNOWN": "審查結果未知"}),
-        "undelivered_reply": ("Reviewer", "PM", {"NOT_DELIVERED": "回覆未送達", "UNKNOWN": "送達狀態未知"}),
-        "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "受阻，等待負責人決定", "WAITING": "等待負責人決定", "UNKNOWN": "狀態未知"}),
-        "worker_result": ("llmtool 主機", f"任務 {event.task_id} · 階段 {event.stage}",
-                          ACTIVITY_RESULT_LABELS),
-        "stage_attempt": ("llmtool harness", f"任務 {event.task_id} · 階段 {event.stage}",
-                          {"OBSERVED": "觀察到嘗試紀錄（不代表已派送）"}),
-        "stage_live": ("本機程序表", f"任務 {event.task_id} · 階段 {event.stage}",
-                       {"RUNNING": "觀察到對應主機程序（執行中，不代表完成）"}),
-        "stage_unknown": ("本機任務證據", f"任務 {event.task_id} · 階段 {event.stage}",
-                          {"UNKNOWN": "狀態未知（沒有結果紀錄或對應程序）"}),
+        "review_dispatch": ("PM", "Reviewer", {"DISPATCHED": "派出審查任務", "UNKNOWN": "派送狀態未知"}),
+        "review_verdict": ("Reviewer", "PM", {"PASS": "審查通過", "FIX": "要求修正後再通過",
+                                              "FAIL": "審查未通過", "UNKNOWN": "審查結果未知"}),
+        "undelivered_reply": ("Reviewer", "PM", {"NOT_DELIVERED": "回覆沒送到（改看 GitHub）",
+                                                 "UNKNOWN": "回覆有沒有送到：未知"}),
+        "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "卡住，等你決定", "WAITING": "等你決定",
+                                                  "UNKNOWN": "狀態未知"}),
+        "worker_result": ("llmtool", stage_target, ACTIVITY_RESULT_LABELS),
+        "stage_attempt": ("llmtool", stage_target, {"OBSERVED": "開始一次執行嘗試"}),
+        "stage_live": ("llmtool", stage_target, {"RUNNING": "執行中（看得到對應程序，不代表快完成）"}),
+        "stage_unknown": ("llmtool", stage_target, {"UNKNOWN": "狀態未知（沒有結果，也沒看到程序）"}),
+        "github_comment": ("GitHub", None, {"POSTED": "新留言"}),
+        "pr_opened": ("GitHub", None, {"OPENED": "開了 PR"}),
+        "pr_merged": ("GitHub", None, {"MERGED": "PR 已合併"}),
+        "pr_closed": ("GitHub", None, {"CLOSED": "PR 已關閉（沒合併）"}),
     }
     if event.event_type not in ACTIVITY_TYPES:
         return ""
@@ -784,40 +961,52 @@ def _activity_line(event: ActivityEvent) -> str:
             event.event_type == "worker_result" and event.status not in ACTIVITY_RESULT_CODES):
         return ""
     actor, target, outcomes = actors[event.event_type]
-    safe_task = event.task_id if re.fullmatch(r"[A-Za-z0-9_-]{1,48}", event.task_id or "") else "?"
-    if event.event_type in ("worker_result", "stage_attempt", "stage_live", "stage_unknown"):
-        safe_stage = event.stage if re.fullmatch(r"[A-Za-z0-9_-]{1,32}", event.stage or "") else "?"
-        target = f"任務 {safe_task} · 階段 {safe_stage}"
-    when = datetime.fromtimestamp(event.occurred_at).strftime("%H:%M:%S") if event.occurred_at else "--:--:--"
-    ref = event.reference if re.fullmatch(r"[A-Za-z0-9_-]{1,48}(?:/[A-Za-z0-9_-]{1,32})?", event.reference or "") else "本機證據"
-    reference = ref
+    if event.event_type in MARKER_TYPES:
+        actor = event.actor if event.actor in ACTIVITY_ACTORS else actor
+        target = event.target if event.target in ACTIVITY_ACTORS else target
+    ref = event.reference if re.fullmatch(r"#\d{1,7}", event.reference or "") else ""
     outcome = outcomes[event.status]
     if event.event_type == "worker_result":
-        cleanup = "已確認" if event.cleanup == "ok" else "未知"
-        outcome += f"；清理狀態{cleanup}"
-    return f"{when}  {actor} → {target}: {outcome}  [{reference}]"
+        outcome += "；程序已清乾淨" if event.cleanup == "ok" else "；程序清理沒確認"
+    who = f"{actor} → {target}" if target else actor
+    if ref and target is None:
+        who = f"{actor} {ref}"
+    elif ref:
+        outcome += f"（{ref}）"
+    summary = _headline(event.summary) if event.summary else ""
+    line = f"{_when(event.occurred_at)}  {who}：{outcome}"
+    return f"{line} — {summary}" if summary else line
 
 
-def render_activity(events: list[ActivityEvent], limit: int = 30) -> list[str]:
+def render_activity(events: list[ActivityEvent], limit: int = 30,
+                    github: "GitHubSource | None" = None) -> list[str]:
     events = [event for event in events if type(event) is ActivityEvent]
+    if github is not None:
+        events += [event for event in github.events if type(event) is ActivityEvent]
     ordered = sorted(events, key=lambda event: (event.occurred_at, event.reference,
                                                  event.event_type, event.stage, event.status))
     lines = [line for line in (_activity_line(event) for event in ordered[-max(0, limit):]) if line]
     if not lines:
-        lines.append("目前沒有可顯示的本機 Activity 事件。")
-    lines.append("PM→Reviewer 派送/判定/回覆、Owner 決定：未顯示（沒有核准的本機來源）。")
+        lines.append("目前沒有可顯示的動態。")
+    if github is None:
+        lines.append("PM↔Reviewer 的派送、判定、回覆沒有顯示；加上 --github 可從 GitHub 唯讀讀取。")
+    else:
+        lines.append(github.status + "；派送/判定/未送達只採用代理明確標記的留言。")
     return lines
 
 
-def activity_lines(tasks: list[Task], limit: int = 30) -> list[str]:
-    return render_activity(activity_events(tasks), limit)
+def activity_lines(tasks: list[Task], limit: int = 30,
+                   github: "GitHubSource | None" = None) -> list[str]:
+    if github is not None:
+        github.refresh()
+    return render_activity(activity_events(tasks), limit, github)
 
 
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
 FOOTNOTE = "running != model generating; gone != task done"
 
 
-def run_once() -> int:
+def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
     mon.poll()
     print(f"AI agents · {datetime.now():%Y-%m-%d %H:%M:%S} · {summary(mon.processes, mon.lingering)}")
@@ -828,7 +1017,7 @@ def run_once() -> int:
     print("\nRECENT LLMTOOL TASKS")
     print("\n".join(task_lines(mon.tasks, 3)))
     print("\nRECENT ACTIVITY")
-    print("\n".join(activity_lines(mon.tasks)))
+    print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"Note: {FOOTNOTE}.")
     return 0
 
@@ -906,7 +1095,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 put(3 + row, line, attr)
             hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
         elif view == "activity":
-            lines = activity_lines(mon.tasks)
+            lines = activity_lines(mon.tasks, github=mon.github)
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line else 0
@@ -946,7 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
     parser.add_argument("--once", action="store_true",
-                        help="print one process table, task list and local Activity view, then exit")
+                        help="print one process table, task list and Activity view, then exit")
     parser.add_argument("--plain", action="store_true",
                         help="append-only event lines instead of the interactive screen")
     parser.add_argument("--no-color", action="store_true", help="disable colors")
@@ -954,12 +1143,20 @@ def main(argv: list[str] | None = None) -> int:
                         help="log every helper process immediately (no short-lived filtering)")
     parser.add_argument("--min-age", type=float, default=3.0,
                         help="seconds a helper must live before it is logged (default 3)")
+    parser.add_argument("--github", nargs="?", const=DEFAULT_GITHUB_REPO, metavar="OWNER/REPO",
+                        help="also show recent GitHub comments/PRs in Activity (read-only gh api; "
+                             f"default repo {DEFAULT_GITHUB_REPO}; off unless given)")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
+    try:
+        github = GitHubSource(args.github) if args.github else None
+    except ValueError as exc:
+        parser.error(str(exc))
     if args.once:
-        return run_once()
+        return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
+    mon.github = github
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
     if args.plain or not interactive:
         return run_plain(args.interval, mon)
