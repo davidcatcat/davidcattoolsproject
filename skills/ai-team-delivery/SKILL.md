@@ -84,17 +84,22 @@ the existing GitHub review/merge gates still apply.
 1. The PM gives one bounded Task Contract: objective and acceptance criteria,
    base SHA, allowed writable paths, required checks and review gates, budget
    and provider limits, handoff destination, and stop conditions.
-2. For unclear or failing behavior, the Debug Agent may reproduce, trace and
-   report root cause, evidence and a bounded recommendation; it does not own
-   product source edits. Any Debug Agent executing repository commands must run
-   under a separate Codex CLI parent session in the registered D6 task
-   worktree, launched with `--sandbox read-only`, with mutation-capable app,
-   MCP and Git tools unavailable. Never delegate Debug from a permissive
-   `workspace-write` or `danger-full-access` parent. If the parent session,
-   sandbox, worktree or absence of mutation-capable tools cannot be verified,
-   limit Debug to evidence already captured and do not execute repository
-   commands. The Debug Agent's instructions alone do not enforce this boundary;
-   custom agents inherit their parent session's sandbox and permissions.
+2. The PM routes routine root-cause analysis and debugging to the Debug Agent;
+   the PM does not perform routine RCA. Debug reports reproduction, root cause,
+   evidence and a bounded recommendation, and does not own product source edits.
+   Any Debug Agent executing repository commands must run under a separate
+   Codex CLI parent session in the registered D6 task worktree, launched with
+   `--sandbox read-only`, with no active user-level or project MCP
+   configuration and no mutation-capable app, MCP or Git tools. The repository
+   currently has no project `.codex/config.toml` MCP configuration; verify this
+   remains true for the task. Never delegate Debug from a permissive
+   `workspace-write` or `danger-full-access` parent. If any of these conditions
+   cannot be verified, do not execute repository commands; Debug may analyze
+   only evidence already captured, and only from a parent session that itself
+   meets the isolation gate. If no compliant parent session can be verified,
+   do not invoke Debug; preserve the evidence and report the limitation. These
+   instructions alone do not enforce the boundary: custom agents inherit the
+   parent session's sandbox and permissions.
 3. The Coding Agent owns implementation, relevant tests and developer
    self-review for the whole contract. It returns the exact base/head SHAs,
    diff scope, checks and results, unresolved findings, and a concise evidence
