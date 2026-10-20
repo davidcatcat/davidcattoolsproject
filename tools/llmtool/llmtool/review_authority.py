@@ -20,7 +20,8 @@ from .authorization_policy import (HostIssuer,IssuerClass,Decision,ProviderRevie
 from .authorization_ledger import ReceiptLedger,LedgerError
 from .task_review import (HostServices,PairApproval,ReviewPacket,ReviewCallBinding,Admission,
     ConsumeToken,CallOutcome,LaunchResult,UnavailableReviewAuthority,load_json,canonical,
-    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen,REVIEWER_ROLES)
+    digest,reject,safe_id,make_packet,PACKET_LIMIT,screen,REVIEWER_ROLES,
+    _clocks_agree as clocks_agree)
 from .task_lifecycle import utc_time,inspect_task,Role
 from .task_review_collector import physical_directory,collect_local_facts,Observation
 
@@ -389,7 +390,15 @@ class ProductionReviewIssuer(HostIssuer):
 
     def daily_cap(self,route_digest): return self.policy(route_digest).per_day_cap
 
-    def matches(self,call,observed):
+    def matches(self,call,observed,*,post_call=False):
+        """Recheck host originals, the pinned pre-observation and a fresh observation.
+
+        Pre-launch (admit/consume/launch): the pinned observation itself must be
+        <=5 s fresh. After a provider call, which takes far longer than 5 s, the
+        pinned observation cannot be fresh; instead a fresh (<=5 s) current
+        observation must equal its state digest with agreeing clocks, before the
+        call deadline. The binding still pins the old digest, so nothing renews it.
+        """
         c=self.context;p=self.policy(call.route_digest)
         if (pair_pin(c.approval) != self.pin.pair_digest or
                 hashlib.sha256(c.packet_input).hexdigest() != self.pin.packet_input_digest): return False
@@ -397,9 +406,16 @@ class ProductionReviewIssuer(HostIssuer):
         # pre-observation. New current observations cannot renew its digest.
         before=self.observer.samples.get(call.observation_digest)
         if before is None: return False
+        current=self.observer.observe()   # observe first: it stamps its own time last
         now=datetime_utc(self.clock.utc());mono=self.clock.monotonic()
-        before.validate(c.expect,c.events,now,mono)
-        current=self.observer.observe();current.validate(c.expect,c.events,now,mono)
+        current.validate(c.expect,c.events,now,mono)
+        if post_call:
+            # Equal state digests carry over the identity/guard checks validated on
+            # `current`; only the 5 s freshness of `before` is not required.
+            clocks_agree(before,current)
+            if utc_time(now) > utc_time(call.deadline): return False
+        else:
+            before.validate(c.expect,c.events,now,mono)
         if current.state_digest != before.state_digest: return False
         c.approval.validate(c.ready,c.final,c.expect,now)
         snapshot=inspect_task(c.ready,c.expect,c.events,now)
@@ -563,7 +579,7 @@ class ProductionReviewerLauncher:
                 runtime_pin=p.worker_runtime_digest,forbidden_sessions=forbidden)
             evidence=provider.job_evidence
             if (time.monotonic() >= deadline or
-                    not self.authority.issuer.matches(c,self.authority._observed(c))):
+                    not self.authority.issuer.matches(c,self.authority._observed(c),post_call=True)):
                 reject('REVIEW_SOURCE_DRIFT')
             verify_worker_executable(reg,deadline)
             content=result.pop('content')
@@ -579,7 +595,7 @@ class ProductionReviewerLauncher:
         c=receipt.binding.call
         deadline=self._job_deadlines.get(c.reviewer_launch_nonce)
         if deadline is None or time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
-        if not self.authority.issuer.matches(c,self.authority._observed(c)):
+        if not self.authority.issuer.matches(c,self.authority._observed(c),post_call=True):
             reject('REVIEW_SOURCE_DRIFT')
         if time.monotonic() >= deadline: reject('REVIEW_TIMEOUT')
 
