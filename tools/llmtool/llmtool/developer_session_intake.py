@@ -137,11 +137,13 @@ def prepare_next(*, next_task, registration, observation, previous, now):
         return _blocked('INTAKE_TASK_INVALID')
     if (type(r.agent) is not AgentBinding or type(o.agent) is not AgentBinding or
             r.agent != n.agent or o.agent != n.agent or
+            not _hex(r.source_sha, _HEX40) or not _hex(o.source_sha, _HEX40) or
             r.source_sha != n.source_sha or o.source_sha != n.source_sha or
             type(r.generation) is not int or r.generation < 1 or
             type(o.generation) is not int or o.generation != r.generation):
         return _blocked('INTAKE_SESSION_MISMATCH')
-    if (r.state != 'ACTIVE' or o.active is not True or o.receptive is not True):
+    if (type(r.state) is not str or r.state != 'ACTIVE' or
+            o.active is not True or o.receptive is not True):
         return _blocked('INTAKE_SESSION_UNAVAILABLE')
     if (type(now) is not int or type(o.observed_at) is not int or
             type(r.expires_at) is not int or type(n.expires_at) is not int or
@@ -153,7 +155,8 @@ def prepare_next(*, next_task, registration, observation, previous, now):
             not _paths(n.write_paths, required=False) or
             not set(n.write_paths).issubset(n.read_paths)):
         return _blocked('INTAKE_SCOPE_INVALID')
-    if (r.prior_task_id is None or r.prior_job_digest is None or
+    if (type(r.prior_task_id) is not str or not r.prior_task_id or
+            not _hex(r.prior_job_digest, _HEX64) or
             previous is None):
         return _blocked('INTAKE_PREVIOUS_NOT_TERMINAL')
     if (type(previous) is not PreviousTask or
@@ -165,22 +168,26 @@ def prepare_next(*, next_task, registration, observation, previous, now):
             previous.job_digest == n.job_digest or
             type(previous.status) is not str or previous.status not in _TERMINAL or
             not _hex(previous.receipt_digest, _HEX64) or
+            not _session(previous.integrator_session) or
             previous.integrator_session != n.integrator_session):
         return _blocked('INTAKE_PREVIOUS_NOT_TERMINAL')
-    body = dict(task=n.task.to_dict(), agent=n.agent.to_dict(),
-                source_sha=n.source_sha, job_digest=n.job_digest,
-                read_paths=n.read_paths, write_paths=n.write_paths,
-                budget=n.budget.to_dict(), expires_at=n.expires_at,
-                integrator_session=n.integrator_session,
-                registration=dict(generation=r.generation, expires_at=r.expires_at,
-                                  state=r.state, prior_task_id=r.prior_task_id,
-                                  prior_job_digest=r.prior_job_digest),
-                observation=dict(observed_at=o.observed_at, active=o.active,
-                                 receptive=o.receptive),
-                previous=previous.__dict__)
-    packet = hashlib.sha256(b'llmtool.developer-session-intake.v1\0' +
-                            json.dumps(body, sort_keys=True, separators=(',', ':'),
-                                       ensure_ascii=True).encode('ascii')).hexdigest()
+    try:
+        body = dict(task=n.task.to_dict(), agent=n.agent.to_dict(),
+                    source_sha=n.source_sha, job_digest=n.job_digest,
+                    read_paths=n.read_paths, write_paths=n.write_paths,
+                    budget=n.budget.to_dict(), expires_at=n.expires_at,
+                    integrator_session=n.integrator_session,
+                    registration=dict(generation=r.generation, expires_at=r.expires_at,
+                                      state=r.state, prior_task_id=r.prior_task_id,
+                                      prior_job_digest=r.prior_job_digest),
+                    observation=dict(observed_at=o.observed_at, active=o.active,
+                                     receptive=o.receptive),
+                    previous=previous.__dict__)
+        packet = hashlib.sha256(b'llmtool.developer-session-intake.v1\0' +
+                                json.dumps(body, sort_keys=True, separators=(',', ':'),
+                                           ensure_ascii=True).encode('ascii')).hexdigest()
+    except (TypeError, ValueError, UnicodeError):
+        return _blocked('INTAKE_PACKET_INVALID')
     return IntakeEnvelope('PREPARED', 'INTAKE_BOUNDS_MATCH', n.task.task_id,
                           n.agent.agent_id, n.agent.session_id, n.job_digest,
                           n.source_sha, n.integrator_session, packet)

@@ -8,6 +8,22 @@ from llmtool.task_lifecycle import AgentBinding, Role
 from llmtool import developer_session_intake as intake
 
 
+class Liar(str):
+    def __eq__(self, _other):
+        return True
+
+    def __ne__(self, _other):
+        return False
+
+
+class Explosive:
+    def __eq__(self, _other):
+        raise TypeError('malformed comparison')
+
+    def __ne__(self, _other):
+        raise TypeError('malformed comparison')
+
+
 class IntakeTests(unittest.TestCase):
     def setUp(self):
         self.agent = AgentBinding(
@@ -115,6 +131,35 @@ class IntakeTests(unittest.TestCase):
             self.observation, observed_at=999)).packet_digest, original)
         self.assertNotEqual(self.prepare(registration=replace(
             self.registration, expires_at=1500)).packet_digest, original)
+
+    def test_malformed_registration_and_previous_fields_fail_closed(self):
+        cases = (
+            dict(registration=replace(self.registration, state=Liar('CLOSED'))),
+            dict(registration=replace(self.registration,
+                                      prior_task_id=Liar('other-task'))),
+            dict(registration=replace(self.registration,
+                                      prior_job_digest=Liar('1' * 64))),
+            dict(previous=replace(self.prior,
+                                  integrator_session=Liar('other-integrator'))),
+            dict(registration=replace(self.registration, state=Explosive())),
+            dict(registration=replace(self.registration,
+                                      prior_task_id=Explosive())),
+            dict(registration=replace(self.registration,
+                                      prior_job_digest=Explosive())),
+            dict(previous=replace(self.prior,
+                                  integrator_session=Explosive())),
+            dict(registration=replace(self.registration,
+                                      source_sha=Liar('1' * 40))),
+            dict(observation=replace(self.observation,
+                                     source_sha=Liar('1' * 40))),
+            dict(registration=replace(self.registration,
+                                      source_sha=Explosive())),
+            dict(observation=replace(self.observation,
+                                     source_sha=Explosive())),
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertEqual(self.prepare(**case).status, 'BLOCKED')
 
     def test_caller_objects_do_not_authorize_dispatch(self):
         result = self.prepare()
