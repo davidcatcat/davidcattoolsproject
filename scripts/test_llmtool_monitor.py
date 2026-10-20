@@ -413,6 +413,27 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual([e.reference for e in source.events], ["#3"])
         self.assertIn("讀取失敗", mon.render_activity([], github=source)[-1])
 
+    def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
+        import threading
+        gate = threading.Event()
+        run = FakeRun((0, [comment(6, NOW - 30, "bg")]), (0, []))
+        def slow(argv, **kwargs):
+            gate.wait(5)
+            return run(argv, **kwargs)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=slow, clock=lambda: NOW)
+            source.refresh_in_background()           # returns at once while gh "runs"
+            self.assertEqual(source.events, [])
+            source.refresh_in_background()           # in flight / not due: no second thread
+            gate.set()
+            source._thread.join(5)
+        self.assertEqual(len(run.calls), 2)
+        self.assertEqual([e.reference for e in source.events], ["#6"])
+        self.assertIn("每 30 秒", source.status)
+        lines = mon.activity_lines([], github=source, background=True)   # not due yet
+        self.assertEqual(len(run.calls), 2)
+        self.assertIn("GitHub #6：新留言 — bg", lines[0])
+
     def test_missing_gh_and_bad_repo_fail_closed(self):
         with patch.object(mon.shutil, "which", return_value=None):
             source = mon.GitHubSource("o/r", runner=FakeRun(), clock=lambda: NOW)

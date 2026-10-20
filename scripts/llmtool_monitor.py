@@ -26,6 +26,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 # Intentionally exclude every raw process command line from rendered output.
@@ -796,7 +797,7 @@ URL = re.compile(r"https?://\S+")
 MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
-GITHUB_REFRESH = 120.0
+GITHUB_REFRESH = 30.0
 GITHUB_LIMIT = 4 << 20
 
 
@@ -917,6 +918,18 @@ class GitHubSource:
             raise RuntimeError("回應過大")
         return json.loads(done.stdout)
 
+    def refresh_in_background(self) -> None:
+        """Start one daemon fetch when due, so the screen never waits on the network."""
+        thread = getattr(self, "_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        if self.fetched is not None and time.monotonic() - self.fetched < GITHUB_REFRESH:
+            return
+        self.fetched = time.monotonic()
+        self._thread = threading.Thread(target=self.refresh, kwargs={"force": True},
+                                        name="monitor-github", daemon=True)
+        self._thread.start()
+
     def refresh(self, force: bool = False) -> None:
         now = time.monotonic()
         if not force and self.fetched is not None and now - self.fetched < GITHUB_REFRESH:
@@ -929,9 +942,9 @@ class GitHubSource:
                                  "&sort=created&direction=desc&per_page=50")
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=30")
-            self.events = github_events(comments, pulls, since)
+            self.events = github_events(comments, pulls, since)   # one atomic swap
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
-                           f"{datetime.now():%H:%M} 更新")
+                           f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）")
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
@@ -1010,14 +1023,15 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
 
 
 def activity_lines(tasks: list[Task], limit: int = 60,
-                   github: "GitHubSource | None" = None) -> list[str]:
+                   github: "GitHubSource | None" = None, background: bool = False) -> list[str]:
     if github is not None:
-        github.refresh()
+        github.refresh_in_background() if background else github.refresh()
     return render_activity(activity_events(tasks), limit, github)
 
 
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
 FOOTNOTE = "running != model generating; gone != task done"
+FOLLOW_VIEWS = frozenset({"log", "activity"})   # newest at the bottom; offset counts back
 
 
 def run_once(github: "GitHubSource | None" = None) -> int:
@@ -1077,6 +1091,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
     while True:
         if time.monotonic() >= next_poll:
             mon.poll()
+            if mon.github is not None:
+                mon.github.refresh_in_background()
             next_poll = time.monotonic() + interval
         h, w = stdscr.getmaxyx()
         body = max(1, h - 4)
@@ -1109,12 +1125,15 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 put(3 + row, line, attr)
             hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
         elif view == "activity":
-            lines = activity_lines(mon.tasks, github=mon.github)
+            lines = activity_lines(mon.tasks, github=mon.github, background=True)
             offset = max(0, min(offset, len(lines) - body))
-            for row, line in enumerate(lines[offset:offset + body]):
-                attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line else 0
+            end = len(lines) - offset
+            for row, line in enumerate(lines[max(0, end - body):end]):
+                attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            if offset:
+                hint = f"[scrolled back {offset}]  " + hint
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
@@ -1132,13 +1151,13 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
             view, offset = views[key - ord("1")], 0
         elif key == curses.KEY_UP:
-            offset += 1 if view == "log" else -1
+            offset += 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_DOWN:
-            offset -= 1 if view == "log" else -1
+            offset -= 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_PPAGE:
-            offset += body if view == "log" else -body
+            offset += body if view in FOLLOW_VIEWS else -body
         elif key == curses.KEY_NPAGE:
-            offset -= body if view == "log" else -body
+            offset -= body if view in FOLLOW_VIEWS else -body
         elif key in (curses.KEY_END, ord("G")):
             offset = 0
         offset = max(0, offset)
