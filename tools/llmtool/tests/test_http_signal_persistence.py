@@ -367,7 +367,7 @@ class Client:
         raise LLMToolError('synthetic provider failure')
 
 with patch.object(cli, 'create_client', lambda config, key: Client()):
-    raise SystemExit(cli.main(['ask', 'SYNTHETIC_PRIVATE_PROMPT_181', '--save-diagnostics']))
+    raise SystemExit(cli.main(['ask', 'SYNTHETIC_PRIVATE_PROMPT_181', '--save-diagnostics', '--verbose']))
 '''
         process = subprocess.Popen([sys.executable, '-B', '-c', script],
                                    cwd=str(Path(__file__).resolve().parents[1]), env=self.env,

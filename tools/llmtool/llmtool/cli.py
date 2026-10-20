@@ -291,8 +291,9 @@ def _run_ask(args):
             silence_broken_pipe(exc.stream)
             sys.stderr = None
         observe('finish', 'interrupted')
-        store_warning()
-        observe('display', sys.stderr)
+        if sys.stderr is not None:
+            store_warning()
+            observe('display', sys.stderr)
         return 128 + exc.signum
 
     def setup_persistence(primary_error=False):
