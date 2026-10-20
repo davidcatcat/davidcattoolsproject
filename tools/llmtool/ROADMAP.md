@@ -2,6 +2,9 @@
 
 > **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
 
+
+> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
+
 ## 2026-10-19 Owner D7 (HISTORICAL; see D8) — operative Developer priority
 
 OpenCode CLI/DeepSeek is now the **PRIMARY Developer**. **Codex
