@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from llmtool import opencode_worker as w
@@ -189,7 +190,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch.object(w.subprocess,'Popen',side_effect=capture_spawn):
             result=w.run_worker(job,host)
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
-        self.assertEqual(result.failure_stage,'EVIDENCE')
+        self.assertEqual(result.failure_stage,'UNKNOWN')
         self.assertEqual(result.status,'RETURNED')
         self.assertFalse(result.authorized)
         self.assertEqual(result.evidence_class,'OFFLINE_FIXTURE')
@@ -229,7 +230,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         host=HostWithoutStage()
         result=w.run_worker(self.job(),host)
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
-        self.assertEqual(result.failure_stage,'EVIDENCE')
+        self.assertEqual(result.failure_stage,'UNKNOWN')
         self.assertEqual(host.inner.calls[-1][0],'finalize')
 
     def test_host_denial_and_unknown_prior_usage_never_spawn(self):
@@ -253,6 +254,29 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertNotIn('PRIVATE_ERROR',repr(result))
                 self.assertEqual(result.failure_stage,
                     'CLIENT' if mode == 'auth' else 'EVIDENCE')
+
+    def test_credential_preparation_failure_maps_to_credential_stage(self):
+        class CredentialFailureHost(Host):
+            def prepare_server(self,*args):
+                self.failure_stage='CREDENTIAL'
+                raise w.WorkerError('OPENCODE_CREDENTIAL_INVALID')
+        result=w.run_worker(self.job(),CredentialFailureHost())
+        self.assertEqual(result.code,'OPENCODE_CREDENTIAL_INVALID')
+        self.assertEqual(result.failure_stage,'CREDENTIAL')
+        self.assertTrue(result.cleanup_confirmed)
+
+    def test_successful_credential_stage_transition_is_not_persisted_as_failure(self):
+        class CredentialTransitionHost(Host):
+            def __init__(self):
+                super().__init__();self.failure_stage='READINESS';self.stage_events=[]
+            def prepare_server(self,*args):
+                self.failure_stage='CREDENTIAL';self.stage_events.append(self.failure_stage)
+                self.failure_stage='READINESS';self.stage_events.append(self.failure_stage)
+        host=CredentialTransitionHost()
+        result=w.run_worker(self.job(),host)
+        self.assertEqual(host.stage_events,['CREDENTIAL','READINESS'])
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED')
+        self.assertEqual(result.failure_stage,'UNKNOWN')
 
     def test_omitted_native_stream_terminal_requires_actual_persisted_proof(self):
         result=w.run_worker(self.job('omitted-terminal'),Host())
@@ -476,6 +500,28 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
         self.assertFalse(bad_sha._attempted)
         self.assertEqual(bad_sha.pending,())
+        with self.assertRaises(w.WorkerError) as wrong_type:
+            w.preflight(object())
+        self.assertEqual(wrong_type.exception.worker_code,'OPENCODE_JOB_INVALID')
+        bad_scope=replace(self.job(),read_paths=('PUBLIC.txt','PUBLIC.txt'))
+        with self.assertRaises(w.WorkerError) as scope_error:
+            w.preflight(bad_scope)
+        self.assertEqual(scope_error.exception.worker_code,'OPENCODE_SCOPE_INVALID')
+        self.assertFalse(bad_scope._attempted)
+
+    def test_preflight_uses_runtime_exception_mapping_without_converting_to_pin_failure(self):
+        job=self.job()
+        with patch.object(w,'_validate',side_effect=OSError('synthetic')):
+            with self.assertRaises(w.WorkerError) as caught:
+                w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_UNKNOWN')
+        self.assertFalse(job._attempted)
+        job=self.job()
+        with patch.object(w,'_validate',side_effect=RuntimeError('synthetic')):
+            with self.assertRaises(w.WorkerError) as caught:
+                w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_HOST_UNKNOWN')
+        self.assertFalse(job._attempted)
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
         job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'

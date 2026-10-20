@@ -85,7 +85,8 @@ def _digest(job):
 def _receipt(verdict, reason, job=None, result=None):
     ok = type(job) is WorkerJob and _digest(job) is not None
     res = result if type(result) is WorkerResult else None
-    stage = (res.failure_stage if res and type(res.failure_stage) is str and
+    stage = (res.failure_stage if res and res.code != RETURNED_CODE and
+             type(res.failure_stage) is str and
              res.failure_stage in FAILURE_STAGES else 'UNKNOWN')
     return ResultReceipt(verdict, reason, job.digest if ok else None, job.task if ok else None,
                          job.agent if ok else None, job.source_sha if ok else None,
@@ -509,14 +510,14 @@ def record_preflight_receipt(*, job, result, host_final, observed_head, expect, 
             return _receipt(UNKNOWN, 'RESULT_MISSING', job)
         err = _expect_check(job, expect, result)
         if err is not None:
-            return err
+            return _receipt(UNKNOWN, err.reason, job, result)
 
         def _record(path, data):
             seen = set(data['seen'])
             sid = getattr(job.agent, 'session_id', None)
             if (job.digest in seen or
                     (type(sid) is str and sid and 'session:' + sid in seen)):
-                return _receipt(FAILED, 'DUPLICATE_RESULT', job, result)
+                return _receipt(UNKNOWN, 'DUPLICATE_RESULT', job, result)
             existing = data['receipts'].get(job.digest)
             if existing is not None:
                 if existing.get('verdict') == UNKNOWN:
@@ -524,11 +525,12 @@ def record_preflight_receipt(*, job, result, host_final, observed_head, expect, 
                     return _receipt(UNKNOWN,
                         reason if type(reason) is str and reason else 'LAUNCH_IN_FLIGHT',
                         job, result)
-                return _receipt(FAILED, 'DUPLICATE_RESULT', job, result)
+                return _receipt(UNKNOWN, 'DUPLICATE_RESULT', job, result)
             out = reconcile(job=job, result=result, host_final=host_final,
                             observed_head=observed_head, seen=seen, expect=expect)
             if out.verdict != BLOCKED:
-                return out
+                return _receipt(UNKNOWN, out.reason if type(out.reason) is str else
+                                'PREFLIGHT_EVIDENCE_UNKNOWN', job, result)
             data['seen'] = sorted(seen)
             data['receipts'][job.digest] = out.to_dict()
             _write_store(path, data)

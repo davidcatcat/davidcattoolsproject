@@ -431,7 +431,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-1',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='EVIDENCE')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         calls = []
 
@@ -457,8 +457,10 @@ class CompositionTests(unittest.TestCase):
                                                  expect=exp, receipt_store=store)
         self.assertEqual(len(calls), 1)
         self.assertEqual(final['job_digest'], job.digest)
+        self.assertEqual(final['failure_stage'], 'UNKNOWN')
         self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
         self.assertFalse(rec.accepted)
+        self.assertNotIn('failure_stage', rec.to_dict())
         # Fresh WorkerJob + Admission + Host objects with same pinned task/store after restart:
         # must refuse BEFORE calling fake_worker a second time (len(calls) remains 1, not 2),
         # and must preserve prior SUCCESS in store.
@@ -491,7 +493,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='EVIDENCE')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
         calls = []
 
         def fake_worker(j, host):
@@ -574,7 +576,7 @@ class CompositionTests(unittest.TestCase):
                 True,
                 (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
                  dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True)),
-                'b' * 64, 'HOST_OBSERVED', failure_stage='EVIDENCE')
+                'b' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
             return result
 
         def git_ok(root, *args):
@@ -663,12 +665,17 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID')
         self.assertEqual(result.failure_stage,'PRELAUNCH')
         self.assertFalse(job._attempted)
-        self.assertEqual(final['failure_stage'],'PRELAUNCH')
-        self.assertFalse(final['launched']);self.assertFalse(final['one_use_consumed'])
+        self.assertIsNone(final)
         self.assertEqual((receipt.verdict,receipt.worker_code,receipt.failure_stage),
                          ('BLOCKED','OPENCODE_RUNTIME_INVALID','PRELAUNCH'))
         persisted=json.loads(Path(store).read_text())
         self.assertEqual(persisted['receipts'][job.digest]['failure_stage'],'PRELAUNCH')
+        replay_result,replay_final,replay_receipt=h.run_with_receipt(
+            job,policy,admission,object(),expect=expect,receipt_store=store)
+        self.assertIsNone(replay_final)
+        self.assertEqual((replay_result.failure_stage,replay_receipt.verdict,
+                          replay_receipt.reason),('PRELAUNCH','UNKNOWN','DUPLICATE_RESULT'))
+        self.assertEqual(json.loads(Path(store).read_text())['receipts'][job.digest],persisted['receipts'][job.digest])
 
     def test_invalid_preflight_preserves_existing_launch_reservation(self):
         from llmtool import opencode_result_receipt as receipt_module
@@ -691,6 +698,7 @@ class CompositionTests(unittest.TestCase):
                 expect=expect,receipt_store=store)
         worker.assert_not_called()
         self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
         self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
         after=json.loads(Path(store).read_text())['receipts'][job.digest]
         self.assertEqual(after,before)
@@ -709,6 +717,26 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(result.failure_stage,'PRELAUNCH')
         self.assertIsNone(final)
         self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+
+    def test_unexpected_preflight_io_failure_stays_unknown_and_unreserved(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job,policy,admission,_=self.fixture()
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        with patch.object(h,'git',return_value=(job.source_sha+'\n').encode()), \
+             patch.object(h.w,'_validate',side_effect=OSError('synthetic unavailable')), \
+             patch.object(receipt_module,'reserve_host_launch',side_effect=AssertionError('must not reserve')) as reserve:
+            result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+                expect=expect,receipt_store=store)
+        reserve.assert_not_called()
+        self.assertEqual(result.code,'OPENCODE_RUNTIME_UNKNOWN')
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','OPENCODE_RUNTIME_UNKNOWN'))
+        self.assertFalse(job._attempted)
+        self.assertFalse(Path(store).exists())
 
     def test_delivered_unknown_receipt_is_not_completion_ack(self):
         from llmtool.opencode_result_delivery import (ACK_RETURNED, DELIVERED,
@@ -752,7 +780,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-m1',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='EVIDENCE')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         def git_ok(root, *args):
             if args == ('rev-parse', 'HEAD'):
@@ -884,7 +912,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='EVIDENCE')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         def fake_worker_tampered(j, host):
             host.final = {'code': 'OPENCODE_OUTPUT_RETURNED', 'launched': True,

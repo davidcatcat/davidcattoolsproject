@@ -312,7 +312,7 @@ class Host:
             fail()
         self.credential = None
         if code == 'OPENCODE_OUTPUT_RETURNED':
-            self.failure_stage = 'EVIDENCE'
+            self.failure_stage = 'UNKNOWN'
         self.final = {'code': code, 'launched': launched, 'one_use_consumed': self.consumed,
                       'job_digest': self.job_digest,
                       'failure_stage': self.failure_stage if type(self.failure_stage) is str and
@@ -435,13 +435,9 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
             w.preflight(job)
         except w.WorkerError as error:
             usage = job.usage if type(job.usage) is UsageLedger else UsageLedger((), 0, 0)
-            try: digest = job.digest
-            except Exception: digest = None
             result = w.WorkerResult(error.worker_code, 'BLOCKED', None, None, usage,
                 True, (), None, 'NOT_VERIFIED', failure_stage='PRELAUNCH')
-            final = {'code': error.worker_code, 'launched': False,
-                     'one_use_consumed': False, 'job_digest': digest,
-                     'failure_stage': 'PRELAUNCH'}
+            final = None
             try:
                 observed_head = (git(policy.root, 'rev-parse', 'HEAD').decode().strip()
                                 if type(policy) is HostPolicy else None)

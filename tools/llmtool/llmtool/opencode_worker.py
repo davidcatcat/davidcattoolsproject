@@ -264,8 +264,11 @@ def _validate(job, deadline):
 def preflight(job):
     """Offline, non-consuming validation before a durable launch reservation.
 
-    This checks the same filesystem/job pin enforced again by run_worker. It does
-    not call a Host, inspect credential state, start OpenCode, or mutate the job.
+    This checks the same filesystem/job pin enforced again by run_worker. The
+    executable path is already realpath-pinned; the target bytes must still match
+    the separately admitted SHA. This extra admission hash is outside provider
+    usage accounting; run_worker repeats the hash inside its task deadline. It
+    does not call a Host, inspect credential state, start OpenCode, or mutate job.
     """
     if (type(job) is not WorkerJob or type(job.budget) is not RunBudget or
             type(job.usage) is not UsageLedger):
@@ -277,8 +280,12 @@ def preflight(job):
         _validate(job,work_deadline)
     except WorkerError:
         raise
+    except _Cancelled:
+        raise
+    except (OSError,ValueError,TypeError,KeyError,LLMToolError,subprocess.SubprocessError):
+        reject('OPENCODE_RUNTIME_UNKNOWN')
     except Exception:
-        reject('OPENCODE_RUNTIME_INVALID')
+        reject('OPENCODE_HOST_UNKNOWN')
 
 
 def _environment(job, config, password):
@@ -782,6 +789,7 @@ def run_worker(job, host):
         if len(holders)>1 and ledger is job.usage:
             ledger=UsageLedger(job.usage.calls+(CallUsage(phase,None,None),),
                 job.usage.repair_attempts,job.usage.elapsed_ms+int((time.monotonic()-started)*1000))
+    result_stage=stage if code!='OPENCODE_OUTPUT_RETURNED' else 'UNKNOWN'
     return WorkerResult(code,'RETURNED' if content is not None else 'BLOCKED',content,sid,
         ledger,cleanup,tuple(facts),hashlib.sha256(output).hexdigest() if output else None,evidence,
-        raw_usage=raw_usage,failure_stage=stage)
+        raw_usage=raw_usage,failure_stage=result_stage)
