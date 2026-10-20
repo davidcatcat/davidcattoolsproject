@@ -16,16 +16,16 @@ Before dispatch, record:
 - intended behavior, writable files and prohibited actions;
 - assigned Developer, model and provider route;
 - deterministic checks, independent review and exact-head CI required;
-- provider output cap, native retry cap of at most one extra request followed by job termination, timeout and cleanup requirements;
+- provider output cap, native retry stop, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
-For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the free route, D8-authorized non-sensitive data class, provider cap, retry stop and D6 write scope. The PM admits the task and screens each file set for secrets/restricted data; a file-set change within the authorized class needs no repeated per-file Owner approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
+For OpenCode, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the actually-free, enabled route at admission (never infer current price from a historical `$0.00` record), D8-authorized non-sensitive data class, provider cap, retry stop and D6 write scope. The PM admits the task and screens each file set for secrets/restricted data; a file-set change within the authorized class needs no repeated per-file Owner approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker.
 
 ## Developer convergence and formal review
 
 The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
 
-Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. The Reviewer reports severity, reproducibility, limitations and disposition on the PR or tracking Issue with the exact reviewed SHA; this posting is still not a Worker ACK or Owner notification. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. Never merge on self-review, stale verdict or green CI alone.
+Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. The Reviewer reports severity, reproducibility, limitations and disposition on the PR or tracking Issue with the exact reviewed SHA; this posting is still not a Worker ACK or Owner notification. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. If formal Claude review is unavailable or its quota is exhausted, keep the exact-SHA candidate in a bounded backlog; do not self-approve or substitute a Developer review. Never merge on self-review, stale verdict or green CI alone.
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review. Use company-gw only for a qualified, privacy-authorized, bounded advisory route; it is not a formal Reviewer and cannot make unsupported net-savings claims.
 
@@ -63,13 +63,13 @@ A Developer may use an in-session read-only Reviewer child only when the CLI sup
 <a id="user-impact-first-defect-triage-and-bounded-delivery-owner-decision-issue-92"></a>
 ### User-impact-first triage
 
-Preserve the report, user impact, reproducible evidence and affected scope. Prioritize safety and core workflow impact before polish. Reassess scope after repeated no-progress packages; do not create a new milestone or tool to avoid a concrete repair.
+Use the [normative Issue #92 policy](defect-triage.md); preserve this legacy anchor for existing links.
 
 <a id="owner-d7-2026-10-19-supersession-opencode-primary-developer"></a>
 <a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
 ### Historical D7 pre-review/S3 note
 
-The former one-round S3 stop and paused-role assignments are historical. The current Owner direction keeps the unused one-time D4 Live Smoke as a precondition: after it succeeds, immediately begin the first real OpenCode Developer package. Do not infer Smoke success from offline tests or a resident TUI; see the [D8/D8a sequencing record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
+The former one-round S3 stop and paused-role assignments are historical. Follow the exact D4 Smoke-first sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); offline tests and a resident TUI are not Smoke evidence.
 
 <a id="d8-task-admission-and-no-self-attestation"></a>
 ### D8 task admission and Host review
