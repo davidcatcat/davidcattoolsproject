@@ -2,7 +2,7 @@
 
 > **HISTORICAL — NOT CURRENT AUTHORITY; lightly edited to normalize archive links and label superseded text.** This file preserves dated role decisions, pilot conditions and one-round stop text removed from always-loaded instructions during the D8 cleanup. Current authority is in [AGENTS.md](../../AGENTS.md), [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md), and [safe-git](../../skills/safe-git/SKILL.md). This archive is not an execution gate.
 
-Source snapshot: canonical main at `d41600ff98568770fb918fdf4a3309dd144a0dfe`, immediately after PR #233. Git history retains every source file at that revision.
+Source snapshot: canonical main at `d41600ff98568770fb918fdf4a3309dd144a0dfe`, immediately after PR #233. Git history retains every source file at that revision. This decision archive is not a full copy of the then-current [safe-git skill](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/safe-git/SKILL.md) or [ai-team-delivery skill](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md). Removed C2–C5 turnover, quota-exhaustion, validation-provenance, and detailed P0 wording not copied here remain available only in that immutable Git history snapshot; current normative replacements are linked from AGENTS.md.
 
 ## D1–D7 allocation decision record at the source snapshot
 
