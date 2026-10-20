@@ -2603,37 +2603,33 @@ or benchmark call and no new savings claim is part of S1a.
 
 ## A11b.4 P1 — Offline Patch Safety Preflight (no effects)
 
-`llmtool.patch_safety.preflight()` checks a single existing typed `Action` for
-`FILE_CREATE`, `FILE_WRITE` or `FILE_DELETE`. The caller separately supplies the
-action digest, task binding, authorized literal scope, expected `RepositoryState`
-and current state. These are structural pins, **not authenticated observations**.
-The expected files must exactly match the action's before-state, and current state
-must equal the full expectation, including repository/root/HEAD and any index pin.
-File Actions do not bind an index themselves; an omitted index remains NOT_VERIFIED.
+The parked P1 implementation and its exclusive tests are archived in Git;
+see [the restoration record](#archived-parked-implementations).
 
-CREATE needs matching new bytes and an absent target. WRITE/DELETE need matching
-preimage and recovery-image bytes; WRITE also needs matching new bytes. Images are
-immutable bytes, at most 1 MiB each, including empty bytes. Only modes 0600/0644
-are supported in this conservative P1 subset. Existing typed path/type/link
-validators are reused; scope escapes, case/Unicode aliases and file/ancestor
-collisions are refused. There is no unified-diff parser or CLI.
+## Archived parked implementations
 
-Results are `VERIFIED_STRUCTURE`, `REJECTED` or `NOT_VERIFIED`, with fixed safe
-reason codes. Missing images stop at NOT_VERIFIED; contradictions are rejected.
-Successful results carry the action/before-state digests, affected path, expected
-postimage content/size/mode commitment and recovery evidence committing to the
-before-file state (including metadata) and supplied image digest. **No image bytes
-are retained or serialized; these commitments are not a stored backup.** Failure
-results omit paths, images and plans. All results have `ready_to_execute=False`
-and `rollback_authorized=False`.
+Per [Issue #120's B/C cleanup](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289392046),
+this source tree removes 15 parked modules and their exclusive tests:
 
-Live filesystem identity, clean Git state, host authority, path-race resistance and
-safe rollback remain NOT_VERIFIED even when the supplied structure matches. P1
-does no I/O, Git commands, apply/undo or D1 receipt redemption. Future P2 needs
-separately reviewed native isolated preflight/apply and rollback acceptance;
-authenticated observations, policy, sandbox and recovery storage are still needed.
-**A11b.4 is not complete; F2 real repository mutation remains NOT AUTHORIZED.**
+- F1 Git fixtures: `_git_add_private`, `_git_add_host`, `_git_supervisor`,
+  `_git_containment`, `_git_containment_protocol`, `_git_containment_child`,
+  `_git_process_identity`, `git_mutation`, and `patch_safety`.
+- Dormant Codex pickup/audit: `codex_approval_audit`,
+  `codex_approval_hook_adapter`, `codex_pickup_native`, `rollout_census`,
+  `codex_handoff_transport`, and `task_handoff`, plus the dedicated
+  `scripts/native_step0_census.py` wrapper.
 
+The complete restoration point is commit
+[`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool).
+Restore the related modules, dedicated tests and shared test dependencies together
+in a separately authorized task branch; historical reports remain in Git.
+Restoring source does not authorize native pickup or F2 repository mutation.
+
+The public `codex-cli` provider, read-only Git/task/review commands, active
+OpenCode chain, and shared authorization policy/ledger remain. Their policy and
+ledger tests use a small local notification fixture instead of the archived
+Codex transport harness. Older DONE/merged and source-readiness statements below
+record past evidence, not availability of the archived implementation.
 
 ## A11c.1 S1b Product A — Review preparation (fake-only candidate)
 
@@ -2727,347 +2723,31 @@ See [B1 contract](WORKFLOW.md#b1-authority-adapters-and-fake-first-acceptance).
 
 ## Issue #135 — Codex tool-event audit collector (not an activation)
 
-`llmtool/codex_approval_audit.py` is a cooperative, observe-only collector for Codex
-`PreToolUse`/`PostToolUse` command-hook events. It **does not** install hooks, change
-Codex configuration or enable `danger-full-access`. Activation stays a separate,
-independently reviewed gate (Issue #135 A1–A5).
-
-**CLI**
-- `python -I -B -m llmtool.codex_approval_audit init --store DIR` creates a private
-  0700 store with 0600 files, a random HMAC key and a keyed sequence frontier.
-  - Use a new directory outside every repository and the Git common-dir.
-  - `--forbid ROOT` enforces this.
-- `record --store DIR` reads one hook event (at most 1 MiB) from stdin and prints
-  nothing, so it never returns a hook decision.
-  - The record is appended under a bounded `flock` (5 s) with a per-record HMAC.
-  - `tool_response` is kept only up to 64 KiB; the exit code is always kept.
-  - Malformed or oversized input is stored by size and reason only.
-  - Store limits: 64 MiB and 50,000 records. Past them, a small `STORE_OVERFLOW`
-    marker keeps the loss visible, then appends fail closed.
-- `summarize` reads a coherent locked snapshot. It reports `TAIL_TRUNCATED`,
-  `SEQ_STATE_INVALID`, `SEQ_FRONTIER_BEHIND`, torn, tampered, out-of-sequence and
-  overflow records as gaps.
-
-**Summary contents**
-
-Every exported value must be one of:
-- a fixed reviewed word, such as a rule, status, synopsis (program plus safe git
-  subcommand), pin label, inventory category or role placeholder like `<CODEX_ROOT>`;
-- a keyed HMAC reference (session, turn, tool-use and event refs);
-- a timestamp;
-- the validated `issue-N`/`pr-N` task id and 40-hex source SHA.
-
-Raw argv, environment, paths, identifiers, labels and stdout are never exported. A
-fail-closed self-check rejects anything else, as well as any raw fragment of 8 or more
-characters, with no exemption for identifiers.
-
-**Classification** uses a reviewed static mapping of the old `workspace-write` +
-`on-request` profile:
-- `ROUTINE_NO_PROMPT_INFERRED` and `WOULD_PROMPT_UNDER_OLD_PROFILE` are
-  **inferences**, not owner approvals.
-- `UNAUTHORIZED` covers hard no-go actions, including git `-c`/`--config-env`,
-  `--git-dir`/`--work-tree`-style overrides and `GIT_*` environment assignments.
-- Other environment assignments, pagers, unknown git global options and read
-  subcommands with `--output`, external-diff, textconv or filter options are `UNKNOWN`.
-- Statically recognized writes to pinned config/collector paths (including
-  ancestor targets) are `UNAUTHORIZED`; reads retain the observation-only
-  `SEPARATE_APPROVAL_REQUIRED` inference. This is not blanket rejection of that
-  classification and never grants approval.
-- MCP and unknown tools are `UNKNOWN`.
-
-Enforcement is `BLOCKED` only for a collector deny record with natively verified deny
-enforcement and no post event. Otherwise it is `DETECTED_AFTER_EXECUTION` or `UNKNOWN`.
-
-**Status** is `OBSERVED_EVENTS_CONSISTENT` only when all of these hold:
-- `coverage_verified` and `deny_verified` are real booleans set to true (`"false"` is
-  rejected);
-- complete, successful A2 pins exist for `codex.binary`, `codex.config`, `codex.hooks`
-  and `collector.module`. `MISSING`, unreadable or too-large values are
-  `PINS_NOT_VERIFIED`, never "unchanged";
-- a complete A1 inventory has `pre` and `post` snapshots, each with:
-  - `head`/`branch`/`index`/`status` for the `canonical` and `claude` peer roots, and
-    for any other root it lists;
-  - `common.config`, `common.hooks`, `shared.refs=OK` and at least one ref.
-
-  Every value must have its field's success format (a 64-hex digest, a Git object id,
-  `OK`, or `ABSENT` for a worktree lock). `GIT_EXIT_*`, failure words or arbitrary
-  strings are `INVENTORY_NOT_VERIFIED`. There must be no drift;
-- the expected session ids are supplied from task provenance, and **each** one has its
-  own tool events and a later session end. Another session's events cannot cover an
-  idle one (`SESSION_WITHOUT_TOOL_EVENTS`);
-- there are no unexpected sessions, no store or correlation gaps, and no action needing
-  review.
-
-Otherwise it is `AUDIT_INCOMPLETE`, with the blockers listed.
-
-**A1 git queries** (`run_git`) are read-only, with output capped at 32 MiB and a 10 s
-deadline. On overflow, timeout, read error or cancellation, one cleanup path stops
-only the child that call started: `terminate`, then `kill`, each followed by a 2 s
-wait. Cancellation is re-raised.
-- If the exit cannot be confirmed, the result is `GIT_EXIT_UNKNOWN`.
-- Any failure makes that inventory field unverified.
-
-**Measured** from installed `codex-cli 0.162.1` (static schema/strings only; NOT a native
-smoke):
-- `hooks` is stable and enabled.
-- Hook inputs carry `session_id`/`turn_id`/`tool_use_id`, and PreToolUse can return
-  `permissionDecision`.
-- Hooks require persisted trust.
-
-**NOT_VERIFIED**
-- real tool names;
-- deny enforcement;
-- fail-open behaviour;
-- tools that bypass hooks;
-- the A1 content of files that were already dirty or ignored. Status/index hashes do
-  not reveal edits to them.
-
-**Residual risks**
-- Hooks are cooperative, so a full-access process can bypass them.
-- Same-UID code can tamper with the store and key; the HMACs show which records
-  survived, but not that the store is complete.
-- A post-hoc inventory cannot prevent transient changes.
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### Track 3 native command-hook adapter candidate (not installed)
 
-`llmtool.codex_approval_hook_adapter` reuses the collector and its static rules.
-It installs no hooks, changes no configuration or trust, and executes no tools
-or providers. Native activation is a separate, independently reviewed gate.
-
-A reviewed task-specific command-hook definition must use the fixed absolute
-own-worktree venv interpreter with `-I -B -m llmtool.codex_approval_hook_adapter`
-and these trusted arguments (never populated from the incoming event):
-
-```text
---event PreToolUse --session EXPECTED_SESSION --store PRIVATE_STORE
---policy PRIVATE_POLICY_JSON --policy-sha256 REVIEWED_POLICY_SHA256
-```
-
-Use separate definitions for `PostToolUse` and supported `Stop`, `SessionEnd`,
-`Interrupt` events, with the corresponding fixed `--event`. The policy is the
-existing `AuditPolicy` JSON shape: `codex_root`, `home`, `protected_roots`,
-`allowed_paths`, `pinned_paths`, `deny_verified`, `coverage_verified`. Keep proof
-flags false until independently accepted native evidence exists; the adapter
-never changes them. Policy bytes must match the reviewed SHA256, with a private
-0700 parent and regular nonsymlink single-link owner-only file. Store creation
-uses the existing collector `init` only under a later activation grant, outside
-the task root, protected roots and Git common-dir. No event may select a policy,
-session, executable or store. The task definition must forbid all protected roots.
-
-Malformed trusted Pre definitions with an exact `--event PreToolUse` or
-`--event=PreToolUse` declaration return the same fixed deny before reading input,
-including unknown/missing/conflicting arguments and Pre help flags. Abbreviated
-options are not accepted. Undeclared/non-Pre argument errors retain sanitized
-failure behavior; ordinary module help outside Pre remains informational.
-
-The adapter checks input event/session binding, records to the private store,
-and returns a fixed official `PreToolUse` deny object only for the existing
-`UNAUTHORIZED` class. It returns no `allow` decision: a routine or unknown
-classification grants nothing. MCP/unknown tools remain unknown in summaries.
-Native `apply_patch` input uses `command`; legacy `input`/`patch` fixtures remain
-supported. Late Post events spanning an end marker are correlation gaps.
-Pinned bare/relative paths and normalized parent traversal are recognized for
-known commands. Simple two-operand `cp` distinguishes reading its source from
-writing its destination. Copy options/multiple operands, compound shell,
-inline interpreters and unknown/MCP paths remain uncertain; they are not a
-complete protection boundary and cannot establish audit PASS.
-
-For a known PreToolUse definition, malformed input, policy or store errors emit
-a fixed deny response with exit 0 and a fixed sanitized error message. Post/end
-errors return nonzero without a decision; they cannot undo an action. Invalid
-input/binding errors also append an empty malformed private failure marker when
-the pinned policy and store remain usable. It is not a native event. Policy
-loading or broken-store failures cannot safely record this marker and require
-independent native error/coverage evidence; stderr alone is not a complete store.
-Undeclared adapter arguments, process termination or native hook timeout may still fail
-open. Input EOF has a five-second deadline and 1 MiB cap; the existing store
-lock has a five-second cap. Filesystem operations/shutdown are not a hard OS
-execution bound: configure a separately reviewed native hook timeout and verify
-actual failure behavior. Missing events/errors/overflow are never audit PASS.
-
-Do not install this candidate or bypass hook trust during source review. Later
-activation must establish exact-definition persisted trust and project trust,
-pin binary/config/hooks/trust/adapter/collector, collect real pre/post/end events,
-test denial without executing the synthetic denied effect, and independently
-check the sanitized summary for leaks. `exec_command` may match `Bash`, and a
-later `write_stdin` completion may deliver its Post event. Hosted web tools and
-opted-out paths are coverage gaps; nested tool naming requires native proof.
-Offline fixtures do not set `deny_verified` or `coverage_verified`, establish
-complete coverage, or change Owner's verified Full Access permission choice.
-
-Activation still requires L3-L6 checks: end hooks have a native three-second
-maximum (the current input/store budgets can exceed it); Pre must be synchronous
-with no overlapping rewrite hooks; Stop-per-turn/later `write_stdin` Post gaps
-remain visible; hosted/opted-out/unknown tools remain uncovered. No hooks or
-definition trust are installed by these source changes.
-
-This local-only development needs no company VPN. Before any separately
-authorized real company LLM call, remind the Owner to connect the corporate
-VPN; it may block public documentation, so do not request it for local checks.
-
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### S1b fake-only handoff preparation (Issue #120)
 
-`llmtool.task_handoff._run_fake_handoff` is a private synchronous fixture seam,
-not a CLI command or production queue. It reuses TaskContract event replay,
-S1b paired packet construction and strict Security/Functional verdict parsing.
-Externally pinned fake host observations precede notification and consumption;
-fixture claims precede effects, retain replay state and never resend an unknown
-notification. Only both APPROVE verdicts yield fake PASS. Session generation
-changes require explicit re-arm; changed Session IDs remain BLOCKED. Expired
-review results remain historical/UNKNOWN and cannot notify the author.
-
-Zero model calls require the fixture host's lifecycle counter evidence, not the
-worker's claim. Fake PASS still means runtime NOT_VERIFIED, authorized=false,
-and token usage UNKNOWN. The shipped handoff factory is unavailable. No daemon,
-process, sleep, Git mutation, real queue, provider, Host installation or network
-poller is implemented. Fake callback deadlines are checked after return and do
-not enforce OS isolation. Fixture claim storage is not a production ledger.
-
-Run the deterministic journey and negative tests from the registered root with
-its own venv, preserving bytecode inventories:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_task_handoff.py -v
-```
-
-See [D1–D4 and native gates](WORKFLOW.md#fake-only-source-preparation-d1d4-acceptance).
-True cross-CLI auto-handoff, T1/native measurement and S2/F2 remain unverified or
-unauthorized under their existing contracts; this fixture does not enable them.
-
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### Codex Pickup B1: disabled native boundary
 
-`llmtool.codex_handoff_transport.run_pickup` always returns
-`NATIVE_PICKUP_NOT_AUTHORIZED` without calling supplied Host/transport components.
-The private fixture seam composes externally pinned notification decisions,
-Session/Unix-socket/route identities, existing S1b packets/verdicts and a separate
-NOTIFICATION-kind file in the existing ReceiptLedger. It does not ship a live
-RPC/queue client or native issuer, install a Host/ledger, or alter CLI settings.
-
-Fixture tests distinguish queue acceptance, original-session delivery, actual
-turn, strict review completion and exact author receipt. They exercise idle plus
-empty admission, exact-message withdrawal, exact-turn cancellation, UNKNOWN and
-pending on missing proof, and fresh-grant-only re-arm. BLOCKED and SKIP never mean
-review PASS. The fixture cannot prove native restrictive tools, cancellation,
-real zero model calls, cost caps or cross-CLI pickup. Runtime stays NOT_VERIFIED,
-authorized=false and token usage UNKNOWN. Native Pickup Grant remains absent.
-
-H1–H5, M1 and L1/L3 acceptance and unchanged T1/F2/S2 boundaries are documented in
-[the B1 workflow boundary](WORKFLOW.md#codex-pickup-b1-source-boundary-default-blocked).
-Targeted fixture checks use the own-root venv with bytecode writes disabled:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_codex_handoff_transport.py -v
-```
-
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### Native Delta A1: source readiness, no Native Grant
 
-The public `codex_pickup_native.run_native_pickup` remains BLOCKED with zero
-callbacks. Release-pinned 0.162.1 codecs and private fixtures exercise four
-independent queue/client/item/turn IDs, bounded ASCII JSON echoes, complete
-observed tool classification, scoped counters and asynchronous author receipts.
-Only UserMessage, AgentMessage, Reasoning and Plan are non-tool items; all other
-release/unknown items, subagents and other Thread activity fail closed.
-
-Explicit NOTIFICATION layout 2 uses a new private file. Layout 1 and D1/provider
-files are retained, never migrated. Verified terminal/coverage/client exit can
-record the completed review independently of author receipt: missing receipt
-returns PARTIAL, never review resend. Ambiguous effects stay UNKNOWN/pending.
-Failed/Interrupted are terminal without review completion; InProgress is not
-terminal. Layout 2 allows no rearm/reconciliation/retry, even after known zero
-effect. The fixture origin is not native grant authentication.
-
-AUDIT_ONLY_TRIAL needs external risk/coverage pins and never fabricates no-tools
-capability. Full Access settings stay unchanged. File metadata/receipt records
-are local DATA, not proof of original Session ownership or actual notification.
-Production Host/transport registration, complete original event coverage, author
-waiter ownership, inference/context routing and cost acceptance remain gated.
-Native queue/RPC/inference/T1/F2/S2 are not exercised by these tests.
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p test_codex_pickup_native.py
-```
-
-See [Delta A1 acceptance](WORKFLOW.md#native-delta-a1-source-acceptance).
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### Native Composition A1 — source/fake only
 
-The private composition reuses the task replay, packet/verdict and NOTIFICATION
-v2 runner. One initialized synthetic socketpair stream correlates RPC IDs,
-queue snapshots and original item/turn events. An externally pinned fake Host
-issuer authenticates the whole binding, including topology, routes, context,
-author waiter and all three domain source/owner/run/generation/entrypoint pins.
-These interface tests do not install a production authority or original Session
-waiter. The public native factory/entry remain unavailable/BLOCKED.
-
-`IN_PROCESS_ZERO_CHILD` is the sole composition topology: no spawned child,
-actual stream drain and returned close precede the real coverage seal and ledger
-completion. Python spawn attempts poison coverage; this cooperative guard is
-not OS isolation. EOF alone is insufficient. Worker-provider delta is zero;
-Reviewer/author inference domains are separate and usage/cost remain UNKNOWN.
-Author receipt is a separate bounded seam: missing/rejected receipt is PARTIAL,
-never closed-loop PASS. Contradictions preserve UNKNOWN/pending and prohibit
-resend. Ordinary operations stop before the final 20-second cleanup reserve.
-
-K2 source investigation of Codex 0.162.1 confirms APP_SERVER_EVENTS without
-start/resume subscription is not feasible; there is no `thread/subscribe`.
-`thread/resume` is not read-only and is prohibited. CR-K2-B adds a separate,
-synthetic-only HOST_ROLLOUT mode described below; it does not restore invisible
-item starts, approval waits or transient errors. Native remains BLOCKED even
-when synthetic composition passes. No live endpoint, rollout census, provider
-call or Native Trial is authorized. Full Access stays unchanged;
-AUDIT_ONLY_TRIAL does not enforce no-tools. T1/F2/S2 remain held/ungranted and
-ai-loop remains fallback.
-
-Focused source/fake acceptance, in the assigned venv without writing bytecode:
-
-```sh
-PYTHONDONTWRITEBYTECODE=1 tools/llmtool/.venv/bin/python -B -I -m unittest discover -s tools/llmtool/tests -p 'test_codex_pickup_native.py'
-```
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### CR-K2-B HOST_ROLLOUT — Source/Fake only
 
-The private `ComposedPickup` selects APP_SERVER_EVENTS or HOST_ROLLOUT from
-externally bound pins; RPC notifications cannot substitute for rollout coverage.
-A frozen `RolloutPin` binds the physical plain JSONL path, UID/device/inode,
-Session/thread, Paginated metadata, admitted newline offset/next ordinal and
-limits. It is DATA, not a Host attestation or an execution grant. Only explicitly
-created synthetic files are exercised here; the public factory stays unavailable.
-
-The reader opens read-only/no-follow/nonblocking, checks physical parents and
-file identity before/after reads, and rejects shrink, replacement, hardlinks,
-unsafe permissions, compression, reverted suffixes and forks. Partial lines
-are re-read without advancing the cursor; that I/O counts against the same
-window budget. Admission metadata is also bounded. Upper bounds are 64 KiB per
-LF line, 512 KiB cumulative I/O, 128 records (including metadata), 128 polls;
-operations share the existing five-second/normal deadline, including close.
-
-Codex 0.162.1 writer tags are `task_started`, `task_complete`, `turn_aborted`;
-read aliases are rejected. Successful completion omits `error`; `error:null`
-is rejected. Item tags are PascalCase `UserMessage`/`AgentMessage`; exact
-client/content/item/turn binding preserves the separate RPC submission ID.
-Only one `final_answer` supplies a verdict; commentary is coverage only.
-Missing/partial/duplicate final, image input, wrong identities, ordinal gaps,
-unknown/tool records and post-terminal records poison coverage permanently.
-All records, including allowed benign records, are ordinal checked and digested;
-no item-start evidence is fabricated. Rollout seals use a separate digest domain.
-
-A terminal requires an additional bounded file EOF snapshot with no partial or
-new record, actual descriptor close, and available-data RPC drain/local close
-without waiting for server EOF. Spawn remains zero. EOF proves that snapshot
-boundary only, not absence of future appends; later observed contradictions
-remain fail-closed. Same-UID DATA is not tamper-proof. Evidence retains bounded
-IDs/types/status/digests, not raw rollout, instructions, messages or reasoning.
-
-Failed/Interrupted terminal states are not review PASS. Existing verdict,
-receipt, ledger, pending/UNKNOWN and three-domain counter gates remain required.
-R2–R6 conservative exclusions remain LATER: unlisted release records, missing
-final phase or oversized metadata can block a future Native run. Actual layout,
-phase availability, original Host/waiter and routing still require separate
-census/Native grants and review. AUDIT_ONLY is not OS-enforced no-tools; T1 HOLD,
-F2/S2 ungranted, #153 CLOSED/HOLD and ai-loop fallback are unchanged.
+Archived implementation; see [the restoration record](#archived-parked-implementations).
 
 ### Local Review Bundle (M2 evidence handoff slice)
 

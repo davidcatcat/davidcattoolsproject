@@ -2,6 +2,8 @@
 
 > Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md).
 
+> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
+
 ## D4 live status — 2026-10-21
 
 The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one failed with `OPENCODE_RUNTIME_INVALID` before launch because of a symlink path. Attempt two launched and returned `provider.auth`; neither attempt produced inference. The result does not establish that the login was expired. The authorized Host route is Owner D8a's in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server credential route failed independent configuration-isolation review and remains deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt. D4 Host work is background G3/M2 work and does not gate direct OpenCode Developer sessions.
@@ -10,7 +12,7 @@ The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one fai
 
 D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
 
-目標是 generic, portable LLM CLI and future orchestration foundation。
+
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
 coder、reviewer；目前 A9 AgentStep 是 role + explicit profile + bounded text handoff，沒有工具或環境修改權限。三者分離，不用模型品牌
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
