@@ -45,12 +45,57 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(x.task, self.job.task)
         self.assertEqual(x.agent, self.job.agent)
         self.assertEqual(x.source_sha, self.job.source_sha)
+        self.assertEqual(x.failure_stage, 'UNKNOWN')
+        self.assertNotIn('failure_stage', x.to_dict())  # legacy UNKNOWN receipt digest remains stable
+        successful_with_internal_stage=self.receipt(
+            result=replace(self.good,failure_stage='EVIDENCE'))
+        self.assertEqual(successful_with_internal_stage.verdict,'SUCCESS')
+        self.assertNotIn('failure_stage',successful_with_internal_stage.to_dict())
 
     def test_missing_or_wrong_type_is_unknown(self):
         for kw in (dict(result=None), dict(host_final=None), dict(host_final={}),
                    dict(result='text'), dict(job=None), dict(observed_head=None)):
             with self.subTest(kw=kw):
                 self.assertEqual(self.receipt(**kw).verdict, 'UNKNOWN')
+
+    def test_failure_stage_is_persisted_as_a_sanitized_enum(self):
+        bad = replace(self.good, code='OPENCODE_RUNTIME_INVALID', status='BLOCKED',
+                      content=None, processes=(), failure_stage='SECRET_SENTINEL')
+        out = self.receipt(result=bad, host_final=None)
+        self.assertEqual(out.failure_stage, 'UNKNOWN')
+        self.assertNotIn('SECRET_SENTINEL', repr(out.to_dict()))
+
+    def test_persisted_receipt_rejects_non_enum_failure_stage(self):
+        data={'schema':r.STORE_SCHEMA,'schema_version':1,'seen':[self.job.digest],
+              'receipts':{self.job.digest:{**self.receipt().to_dict(),
+                                           'verdict':'BLOCKED',
+                                           'failure_stage':'SECRET_SENTINEL'}}}
+        with self.assertRaises(ValueError):
+            r._validate_store_payload(data)
+
+    def test_invalid_or_disagreeing_worker_stage_is_unknown(self):
+        invalid=replace(self.good,failure_stage='SECRET_SENTINEL')
+        self.assertEqual(self.receipt(result=invalid).reason,'FAILURE_STAGE_INVALID')
+        failure=replace(self.good,code='OPENCODE_PROVIDER_FAILED',status='BLOCKED',
+                        content=None,failure_stage='CLIENT')
+        host_final={'code':'OPENCODE_PROVIDER_FAILED','launched':True,
+                    'one_use_consumed':True,'failure_stage':'CLEANUP'}
+        disagreement=self.receipt(result=failure,host_final=host_final)
+        self.assertEqual((disagreement.verdict,disagreement.reason),
+                         ('UNKNOWN','FAILURE_STAGE_DISAGREE'))
+
+    def test_preflight_downgrades_unpersisted_source_mismatch(self):
+        import tempfile
+        result=replace(self.good,code='OPENCODE_RUNTIME_INVALID',status='BLOCKED',
+                       content=None,processes=(),failure_stage='PRELAUNCH')
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'receipts.json')
+        exp={'task':self.job.task,'agent':self.job.agent}
+        out=r.record_preflight_receipt(job=self.job,result=result,host_final=None,
+            observed_head='d'*40,expect=exp,store_path=store)
+        self.assertEqual((out.verdict,out.reason),('UNKNOWN','SOURCE_HEAD_MISMATCH'))
+        self.assertFalse(Path(store).exists())
 
     def test_exit_zero_or_model_text_alone_is_not_success(self):
         for bad in (replace(self.good, content=None), replace(self.good, content=''),
@@ -110,6 +155,8 @@ class ReceiptTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertEqual(blocked(code, False), 'BLOCKED')
         self.assertEqual(blocked('OPENCODE_PROVIDER_FAILED', True), 'FAILED')
+        self.assertEqual(blocked('OPENCODE_RUNTIME_INVALID', False), 'BLOCKED')
+        self.assertEqual(blocked('OPENCODE_RUNTIME_INVALID', True), 'FAILED')
         for code in ('OPENCODE_CLEANUP_UNKNOWN', 'OPENCODE_SOURCE_UNKNOWN', 'OPENCODE_USAGE_UNKNOWN',
                      'OPENCODE_RUNTIME_UNKNOWN', 'OPENCODE_HOST_UNKNOWN', 'OPENCODE_FINALIZE_UNKNOWN',
                      'SOMETHING_NEW'):
@@ -415,9 +462,14 @@ class DeliveryRecordValidationTests(unittest.TestCase):
                 'receipts': {'a' * 64: receipt}, 'deliveries': {'a' * 64: delivery}}
 
     def test_legacy_and_new_delivery_records_validate(self):
+        import copy
         base = {'integrator_session': 'session-1', 'state': 'DELIVERED',
                 'reason': 'RECEIPT_DELIVERED', 'receipt_digest': 'd' * 64}
         r._validate_store_payload(self.payload(dict(base)))
+        invalid_stage=copy.deepcopy(self.payload(dict(base)))
+        invalid_stage['receipts']['a'*64]['failure_stage']='SECRET_SENTINEL'
+        with self.assertRaises(ValueError):
+            r._validate_store_payload(invalid_stage)
         for verdict in ('SUCCESS', 'FAILED', 'BLOCKED', 'UNKNOWN'):
             with self.subTest(verdict=verdict):
                 r._validate_store_payload(self.payload(dict(base, receipt_verdict=verdict)))

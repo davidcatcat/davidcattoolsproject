@@ -155,6 +155,7 @@ class Host:
         self.job_digest = None
         self.consumed = False
         self.final = None
+        self.failure_stage = 'PRELAUNCH'
 
     def admit(self, job, config_digest):
         a = self.approval
@@ -217,6 +218,7 @@ class Host:
     def prepare_server(self, token, job, url, password, deadline):
         if token is not self.token or not self.consumed:
             fail()
+        self.failure_stage = 'READINESS'
         root = self.policy.root
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         auth = 'Basic ' + base64.b64encode(('opencode:' + password).encode()).decode()
@@ -284,6 +286,7 @@ class Host:
         # A lazy D8a source avoids credential access on rejected/replayed jobs.
         # The source reads only one active v2.0.32 store row; Host hands it to
         # the isolated worker endpoint and drops every reference immediately.
+        self.failure_stage = 'CREDENTIAL'
         credential = self.credential
         if type(credential) is native_credential.ActiveOpenCodeCredential:
             try:
@@ -302,13 +305,18 @@ class Host:
         finally:
             credential = None
             self.credential = None
+        self.failure_stage = 'READINESS'
 
     def finalize(self, token, code, launched):
         if token is not self.token:
             fail()
         self.credential = None
+        if code == 'OPENCODE_OUTPUT_RETURNED':
+            self.failure_stage = 'UNKNOWN'
         self.final = {'code': code, 'launched': launched, 'one_use_consumed': self.consumed,
-                      'job_digest': self.job_digest}
+                      'job_digest': self.job_digest,
+                      'failure_stage': self.failure_stage if type(self.failure_stage) is str and
+                      self.failure_stage in w.FAILURE_STAGES else 'UNKNOWN'}
 
 
 def provision_runtime(parent):
@@ -371,11 +379,19 @@ def build(*, policy, run_id=None, assignment_session=None, expected_branch, expe
             raise w.WorkerError('legacy args required')
         task = TaskBinding(TASK_ID, run_id, 1, policy.contract)
         agent = AgentBinding(AGENT_ID, assignment_session, Role.DEVELOPER, policy.root, common_dir, expected_branch)
+    if type(executable) is not str or not os.path.isabs(executable):
+        raise w.WorkerError('OPENCODE_RUNTIME_INVALID')
+    try:
+        executable_pin = os.path.realpath(executable)
+    except (OSError, TypeError, ValueError):
+        raise w.WorkerError('OPENCODE_RUNTIME_INVALID') from None
+    if type(executable_pin) is not str or not os.path.isabs(executable_pin):
+        raise w.WorkerError('OPENCODE_RUNTIME_INVALID')
     state = provision_runtime(private_parent)
     job = w.WorkerJob(task=task, agent=agent, source_sha=expected_head, phase=phase,
         model=w.MODELS[phase], prompt=prompt, read_paths=tuple(sorted(policy.files)),
         write_paths=tuple(sorted(write_paths)),
-        runtime=w.RuntimePin(executable, executable_sha256, PINNED_VERSION, str(state)),
+        runtime=w.RuntimePin(executable_pin, executable_sha256, PINNED_VERSION, str(state)),
         budget=budget, usage=usage, max_steps=max_steps)
     admission = Admission(job.digest, current_integrator_session, c2_c3_reference,
         source_route_privacy_reference, runtime_policy_reference, expected_branch,
@@ -412,12 +428,30 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
     ``SUCCESS`` receipt is NOT acceptance or merge authorization
     (``receipt.accepted`` is False).
     """
-    from .opencode_result_receipt import record_host_receipt, reserve_host_launch
+    from .opencode_result_receipt import (record_preflight_receipt,
+                                          record_host_receipt, reserve_host_launch)
+    if type(job) is w.WorkerJob:
+        try:
+            w.preflight(job)
+        except w.WorkerError as error:
+            usage = job.usage if type(job.usage) is UsageLedger else UsageLedger((), 0, 0)
+            result = w.WorkerResult(error.worker_code, 'BLOCKED', None, None, usage,
+                True, (), None, 'NOT_VERIFIED', failure_stage='PRELAUNCH')
+            final = None
+            try:
+                observed_head = (git(policy.root, 'rev-parse', 'HEAD').decode().strip()
+                                if type(policy) is HostPolicy else None)
+            except Exception:
+                observed_head = None
+            receipt = record_preflight_receipt(job=job, result=result, host_final=final,
+                observed_head=observed_head, expect=expect, store_path=receipt_store)
+            return result, final, receipt
     refused = reserve_host_launch(job=job, expect=expect, store_path=receipt_store)
     if refused is not None:
         usage = job.usage if type(getattr(job, 'usage', None)) is UsageLedger else UsageLedger((), 0, 0)
         return (w.WorkerResult('OPENCODE_ATTEMPT_ALREADY_USED', 'BLOCKED', None, None,
-                               usage, False, (), None, 'NOT_VERIFIED'),
+                               usage, False, (), None, 'NOT_VERIFIED',
+                               failure_stage='PRELAUNCH'),
                 None, refused)
     result, final = run(job, policy, admission, one_native_credential)
     try:

@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from llmtool import opencode_worker as w
@@ -189,6 +190,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch.object(w.subprocess,'Popen',side_effect=capture_spawn):
             result=w.run_worker(job,host)
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertEqual(result.failure_stage,'UNKNOWN')
         self.assertEqual(result.status,'RETURNED')
         self.assertFalse(result.authorized)
         self.assertEqual(result.evidence_class,'OFFLINE_FIXTURE')
@@ -214,7 +216,22 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
             second=w.run_worker(job,host)
         self.assertEqual(second.code,'OPENCODE_ATTEMPT_ALREADY_USED')
+        self.assertEqual(second.failure_stage,'PRELAUNCH')
         spawn.assert_not_called()
+
+    def test_stage_assignment_is_optional_for_compatible_host_objects(self):
+        class HostWithoutStage:
+            __slots__ = ('inner',)
+            def __init__(self): object.__setattr__(self,'inner',Host())
+            def __getattr__(self,name): return getattr(self.inner,name)
+            def __setattr__(self,name,value):
+                if name == 'failure_stage': raise AttributeError('stage is not part of this Host')
+                object.__setattr__(self,name,value)
+        host=HostWithoutStage()
+        result=w.run_worker(self.job(),host)
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertEqual(result.failure_stage,'UNKNOWN')
+        self.assertEqual(host.inner.calls[-1][0],'finalize')
 
     def test_host_denial_and_unknown_prior_usage_never_spawn(self):
         for reason in ('deny','unknown'):
@@ -235,6 +252,31 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertIsNone(result.content)
                 self.assertNotIn('PRIVATE_ERROR',repr(result))
+                self.assertEqual(result.failure_stage,
+                    'CLIENT' if mode == 'auth' else 'EVIDENCE')
+
+    def test_credential_preparation_failure_maps_to_credential_stage(self):
+        class CredentialFailureHost(Host):
+            def prepare_server(self,*args):
+                self.failure_stage='CREDENTIAL'
+                raise w.WorkerError('OPENCODE_CREDENTIAL_INVALID')
+        result=w.run_worker(self.job(),CredentialFailureHost())
+        self.assertEqual(result.code,'OPENCODE_CREDENTIAL_INVALID')
+        self.assertEqual(result.failure_stage,'CREDENTIAL')
+        self.assertTrue(result.cleanup_confirmed)
+
+    def test_successful_credential_stage_transition_is_not_persisted_as_failure(self):
+        class CredentialTransitionHost(Host):
+            def __init__(self):
+                super().__init__();self.failure_stage='READINESS';self.stage_events=[]
+            def prepare_server(self,*args):
+                self.failure_stage='CREDENTIAL';self.stage_events.append(self.failure_stage)
+                self.failure_stage='READINESS';self.stage_events.append(self.failure_stage)
+        host=CredentialTransitionHost()
+        result=w.run_worker(self.job(),host)
+        self.assertEqual(host.stage_events,['CREDENTIAL','READINESS'])
+        self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED')
+        self.assertEqual(result.failure_stage,'UNKNOWN')
 
     def test_omitted_native_stream_terminal_requires_actual_persisted_proof(self):
         result=w.run_worker(self.job('omitted-terminal'),Host())
@@ -435,6 +477,51 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
             result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID');spawn.assert_not_called()
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+
+    def test_offline_preflight_validates_without_consuming_attempt_or_following_symlink(self):
+        job=self.job()
+        self.assertIsNone(w.preflight(job))
+        self.assertFalse(job._attempted)
+        self.assertEqual(job.pending,())
+        executable=Path(job.runtime.executable)
+        link=executable.parent/'synthetic-preflight-link'
+        link.symlink_to(executable)
+        object.__setattr__(job.runtime,'executable',str(link))
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+        self.assertFalse(job._attempted)
+        self.assertEqual(job.pending,())
+        bad_sha=self.job()
+        object.__setattr__(bad_sha.runtime,'executable_sha256','0'*64)
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(bad_sha)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+        self.assertFalse(bad_sha._attempted)
+        self.assertEqual(bad_sha.pending,())
+        with self.assertRaises(w.WorkerError) as wrong_type:
+            w.preflight(object())
+        self.assertEqual(wrong_type.exception.worker_code,'OPENCODE_JOB_INVALID')
+        bad_scope=replace(self.job(),read_paths=('PUBLIC.txt','PUBLIC.txt'))
+        with self.assertRaises(w.WorkerError) as scope_error:
+            w.preflight(bad_scope)
+        self.assertEqual(scope_error.exception.worker_code,'OPENCODE_SCOPE_INVALID')
+        self.assertFalse(bad_scope._attempted)
+
+    def test_preflight_uses_runtime_exception_mapping_without_converting_to_pin_failure(self):
+        job=self.job()
+        with patch.object(w,'_validate',side_effect=OSError('synthetic')):
+            with self.assertRaises(w.WorkerError) as caught:
+                w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_UNKNOWN')
+        self.assertFalse(job._attempted)
+        job=self.job()
+        with patch.object(w,'_validate',side_effect=RuntimeError('synthetic')):
+            with self.assertRaises(w.WorkerError) as caught:
+                w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_HOST_UNKNOWN')
+        self.assertFalse(job._attempted)
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
         job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
@@ -548,6 +635,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.providers.cli_lifecycle._group_absent',return_value=False):
             result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN')
+        self.assertEqual(result.failure_stage,'CLEANUP')
         self.assertIsNone(result.content);self.assertTrue(job.pending)
         self.assertTrue(all(x.process.returncode is not None for x in job.pending))
         host=Host();host.fail_final=True
@@ -698,6 +786,16 @@ class OpenCodeWorkerTests(unittest.TestCase):
         finally:
             process.wait(timeout=5)
 
+    def test_failed_observation_is_cleanup_stage_after_successful_lifecycle_teardown(self):
+        host=Host()
+        with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone')):
+            result=w.run_worker(self.job(),host)
+        self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(result.failure_stage,'CLEANUP')
+        self.assertEqual(host.failure_stage,'CLEANUP')
+        self.assertEqual(host.calls[-1],('finalize','OPENCODE_CLEANUP_UNKNOWN',True))
+
     def test_nonreaping_observation_rejects_foreign_identity_and_error_types(self):
         process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.4)'])
         try:
@@ -726,10 +824,12 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 if name==self._missing: raise AttributeError(name)
                 return getattr(os,name)
         job=self.job('cancel')
+        host=Host()
         with patch.object(w,'os',OsWithout('WNOWAIT')):
             with self.assertRaises(KeyboardInterrupt):
-                w.run_worker(job,Host())
+                w.run_worker(job,host)
         self.assertEqual(job.pending,())
+        self.assertEqual(host.failure_stage,'CLEANUP')
 
     def test_earlier_worker_error_wins_over_failed_observation(self):
         # A fail-closed observation must also not replace an earlier non-cancellation
@@ -740,9 +840,12 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 if name==self._missing: raise AttributeError(name)
                 return getattr(os,name)
         with patch.object(w,'os',OsWithout('WNOWAIT')):
-            result=w.run_worker(self.job('auth'),Host())
+            host=Host()
+            result=w.run_worker(self.job('auth'),host)
         self.assertEqual(result.code,'OPENCODE_AUTH_REQUIRED',result)
         self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(result.failure_stage,'CLEANUP')
+        self.assertEqual(host.failure_stage,'CLEANUP')
 
     def test_nonreaping_observation_rejects_missing_constants_and_bad_pid(self):
         class OsWithout:

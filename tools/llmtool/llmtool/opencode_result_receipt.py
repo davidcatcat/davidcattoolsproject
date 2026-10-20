@@ -22,7 +22,7 @@ import secrets
 import stat
 
 from .action_contract import TaskBinding
-from .opencode_worker import WorkerJob, WorkerResult
+from .opencode_worker import FAILURE_STAGES, WorkerJob, WorkerResult
 from .run_budget import BudgetStatus, CallPhase, UsageLedger, assess_budget
 from .task_lifecycle import AgentBinding
 from .task_review_collector import physical_directory
@@ -35,7 +35,8 @@ MAX_STORE_RECORDS = 256
 MAX_DELIVERY_SESSION = 128
 # Refused before any launch (Host/Worker admission). Anything else unlisted is UNKNOWN.
 BLOCKED_CODES = frozenset({'OPENCODE_NOT_AUTHORIZED', 'OPENCODE_BUDGET_BLOCKED',
-                           'OPENCODE_JOB_INVALID', 'OPENCODE_ATTEMPT_ALREADY_USED'})
+                           'OPENCODE_JOB_INVALID', 'OPENCODE_SCOPE_INVALID',
+                           'OPENCODE_RUNTIME_INVALID', 'OPENCODE_ATTEMPT_ALREADY_USED'})
 # Launched and definitively failed with cleanup/source not in doubt.
 FAILED_CODES = frozenset({'OPENCODE_PROVIDER_FAILED', 'OPENCODE_IDENTITY_REUSE',
                           'OPENCODE_RUNTIME_INVALID'})
@@ -53,9 +54,10 @@ class ResultReceipt:
     backend_session_id: object = None
     output_sha256: object = None
     accepted: bool = False
+    failure_stage: str = 'UNKNOWN'
 
     def to_dict(self):
-        return {
+        data = {
             'verdict': self.verdict,
             'reason': self.reason,
             'job_digest': self.job_digest,
@@ -67,6 +69,10 @@ class ResultReceipt:
             'output_sha256': self.output_sha256,
             'accepted': False,
         }
+        if (type(self.failure_stage) is str and self.failure_stage in FAILURE_STAGES and
+                self.failure_stage != 'UNKNOWN'):
+            data['failure_stage'] = self.failure_stage
+        return data
 
 
 def _digest(job):
@@ -79,10 +85,13 @@ def _digest(job):
 def _receipt(verdict, reason, job=None, result=None):
     ok = type(job) is WorkerJob and _digest(job) is not None
     res = result if type(result) is WorkerResult else None
+    stage = (res.failure_stage if res and res.code != RETURNED_CODE and
+             type(res.failure_stage) is str and
+             res.failure_stage in FAILURE_STAGES else 'UNKNOWN')
     return ResultReceipt(verdict, reason, job.digest if ok else None, job.task if ok else None,
                          job.agent if ok else None, job.source_sha if ok else None,
                          res.code if res else None, res.session_id if res else None,
-                         res.output_sha256 if res else None)
+                         res.output_sha256 if res else None, False, stage)
 
 
 def _same(a, b, kind):
@@ -134,6 +143,15 @@ def _reconcile(job, result, host_final, observed_head, seen, expect):
         return _receipt(UNKNOWN, 'JOB_MISSING')
     if type(result) is not WorkerResult:
         return _receipt(UNKNOWN, 'RESULT_MISSING', job)
+    if type(result.failure_stage) is not str or result.failure_stage not in FAILURE_STAGES:
+        return _receipt(UNKNOWN, 'FAILURE_STAGE_INVALID', job, result)
+    if type(host_final) is dict and 'failure_stage' in host_final:
+        # Host echoes the Worker diagnostic; matching values are consistency data,
+        # not a second independent observation of the failure stage.
+        if (type(host_final.get('failure_stage')) is not str or
+                host_final.get('failure_stage') not in FAILURE_STAGES or
+                host_final.get('failure_stage') != result.failure_stage):
+            return _receipt(UNKNOWN, 'FAILURE_STAGE_DISAGREE', job, result)
     if type(seen) is not set:
         return _receipt(UNKNOWN, 'SEEN_SET_INVALID', job, result)
     if type(observed_head) is not str or not observed_head:
@@ -222,7 +240,9 @@ def _validate_store_payload(data):
         if (type(k) is not str or not k or type(rec) is not dict
                 or rec.get('job_digest') != k
                 or rec.get('verdict') not in (SUCCESS, FAILED, BLOCKED, UNKNOWN)
-                or rec.get('accepted') is not False or 'content' in rec):
+                or rec.get('accepted') is not False or 'content' in rec
+                or ('failure_stage' in rec and (type(rec.get('failure_stage')) is not str or
+                    rec.get('failure_stage') not in FAILURE_STAGES))):
             raise ValueError('invalid receipt record')
         if rec.get('verdict') != UNKNOWN:
             if k not in seen_set:
@@ -465,6 +485,52 @@ def record_host_receipt(*, job, result, host_final, observed_head, expect, store
             existing = data['receipts'].get(job.digest)
             if out.reason == 'DUPLICATE_RESULT' or (existing is not None and existing.get('verdict') != UNKNOWN):
                 return out
+            data['seen'] = sorted(seen)
+            data['receipts'][job.digest] = out.to_dict()
+            _write_store(path, data)
+            return out
+
+        return _with_store_lock(job, store_path, _record, result)
+    except Exception:
+        return _receipt(UNKNOWN, 'RECEIPT_STORE_INVALID', job, result)
+
+
+def record_preflight_receipt(*, job, result, host_final, observed_head, expect, store_path):
+    """Persist an offline preflight refusal only if the one-shot job is unreserved.
+
+    A preflight result must never replace an existing UNKNOWN reservation: another
+    invocation may already have launched. The reservation, terminal receipt, and
+    seen digest/session checks all run under the same existing receipt-store lock.
+    The Host's echoed stage is diagnostic metadata, not independent corroboration.
+    """
+    try:
+        if type(job) is not WorkerJob or _digest(job) is None:
+            return _receipt(UNKNOWN, 'JOB_MISSING')
+        if type(result) is not WorkerResult or result.failure_stage != 'PRELAUNCH':
+            return _receipt(UNKNOWN, 'RESULT_MISSING', job)
+        err = _expect_check(job, expect, result)
+        if err is not None:
+            return _receipt(UNKNOWN, err.reason, job, result)
+
+        def _record(path, data):
+            seen = set(data['seen'])
+            sid = getattr(job.agent, 'session_id', None)
+            if (job.digest in seen or
+                    (type(sid) is str and sid and 'session:' + sid in seen)):
+                return _receipt(UNKNOWN, 'DUPLICATE_RESULT', job, result)
+            existing = data['receipts'].get(job.digest)
+            if existing is not None:
+                if existing.get('verdict') == UNKNOWN:
+                    reason = existing.get('reason')
+                    return _receipt(UNKNOWN,
+                        reason if type(reason) is str and reason else 'LAUNCH_IN_FLIGHT',
+                        job, result)
+                return _receipt(UNKNOWN, 'DUPLICATE_RESULT', job, result)
+            out = reconcile(job=job, result=result, host_final=host_final,
+                            observed_head=observed_head, seen=seen, expect=expect)
+            if out.verdict != BLOCKED:
+                return _receipt(UNKNOWN, out.reason if type(out.reason) is str else
+                                'PREFLIGHT_EVIDENCE_UNKNOWN', job, result)
             data['seen'] = sorted(seen)
             data['receipts'][job.digest] = out.to_dict()
             _write_store(path, data)

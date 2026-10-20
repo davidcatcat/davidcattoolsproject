@@ -306,10 +306,16 @@ class CompositionTests(unittest.TestCase):
         job0, policy, a, snap = self.fixture()
         tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(tmp.cleanup)
+        real_executable = Path(tmp.name) / 'opencode.exe'
+        real_executable.write_bytes(b'synthetic executable pin\n')
+        real_executable.chmod(0o700)
+        symlink_executable = Path(tmp.name) / 'opencode'
+        symlink_executable.symlink_to(real_executable)
+        executable_sha256 = h.hashlib.sha256(real_executable.read_bytes()).hexdigest()
         values = dict(policy=policy, run_id='a' * 32,
             assignment_session='synthetic-integrator-session', expected_branch='feat/developer',
-            expected_head=job0.source_sha, executable='/synthetic/opencode.exe',
-            executable_sha256='d' * 64, common_dir=job0.agent.common_dir,
+            expected_head=job0.source_sha, executable=str(symlink_executable),
+            executable_sha256=executable_sha256, common_dir=job0.agent.common_dir,
             private_parent=str(Path(tmp.name).resolve()), prompt='bounded developer prompt',
             phase='DEVELOP', write_paths=('PUBLIC.txt',), usage=UsageLedger((), 0, 0),
             budget=RunBudget(1, 8, 0, 600000, 100000, 10000),
@@ -326,10 +332,11 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(job.write_paths, ('PUBLIC.txt',))
         self.assertEqual(job.model, 'opencode/deepseek-v4.1-flash-free')
         self.assertEqual(job.source_sha, job0.source_sha)
+        self.assertEqual(job.runtime.executable, str(real_executable))
         self.assertEqual(job.task.contract_digest, policy.contract)
         self.assertEqual(admission.job_digest, job.digest)
         self.assertEqual(admission.expected_head, job0.source_sha)
-        self.assertEqual(admission.runtime_hash, 'd' * 64)
+        self.assertEqual(admission.runtime_hash, executable_sha256)
         self.assertTrue((Path(job.runtime.state_root) / 'config/service.json').exists())
         # A stale expected head is refused before any job is constructed.
         bad = dict(values)
@@ -337,6 +344,13 @@ class CompositionTests(unittest.TestCase):
         with patch.object(h, 'git', side_effect=git):
             with self.assertRaises(h.w.WorkerError):
                 h.build(**bad)
+
+        relative = dict(values, executable='opencode')
+        with patch.object(h, 'git', side_effect=git), patch.object(h, 'provision_runtime') as provision:
+            with self.assertRaises(h.w.WorkerError) as caught:
+                h.build(**relative)
+            self.assertEqual(caught.exception.worker_code, 'OPENCODE_RUNTIME_INVALID')
+            provision.assert_not_called()
 
     def test_explicit_bindings_retention_and_validation(self):
         job0, policy, a, snap = self.fixture()
@@ -417,7 +431,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-1',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         calls = []
 
@@ -443,8 +457,10 @@ class CompositionTests(unittest.TestCase):
                                                  expect=exp, receipt_store=store)
         self.assertEqual(len(calls), 1)
         self.assertEqual(final['job_digest'], job.digest)
+        self.assertEqual(final['failure_stage'], 'UNKNOWN')
         self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
         self.assertFalse(rec.accepted)
+        self.assertNotIn('failure_stage', rec.to_dict())
         # Fresh WorkerJob + Admission + Host objects with same pinned task/store after restart:
         # must refuse BEFORE calling fake_worker a second time (len(calls) remains 1, not 2),
         # and must preserve prior SUCCESS in store.
@@ -477,7 +493,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
         calls = []
 
         def fake_worker(j, host):
@@ -560,7 +576,7 @@ class CompositionTests(unittest.TestCase):
                 True,
                 (dict(kind='server', pid=11, host_pid=1, reaped=True, exit=0, group_absent=True),
                  dict(kind='client', pid=12, host_pid=1, reaped=True, exit=0, group_absent=True)),
-                'b' * 64, 'HOST_OBSERVED')
+                'b' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
             return result
 
         def git_ok(root, *args):
@@ -629,6 +645,99 @@ class CompositionTests(unittest.TestCase):
         self.assertFalse(replay.completion_ack)
         self.assertEqual(launches, [job.digest])
 
+    def test_invalid_runtime_preflight_is_durable_before_reservation_and_launch(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job, policy, admission, _ = self.fixture()
+        executable=Path(job.runtime.executable)
+        link=executable.parent/'synthetic-runtime-link'
+        link.symlink_to(executable)
+        job=replace(job,runtime=replace(job.runtime,executable=str(link)))
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        with patch.object(h,'git',return_value=(job.source_sha+'\n').encode()), \
+             patch.object(receipt_module,'reserve_host_launch',side_effect=AssertionError('reservation must not run')) as reserve, \
+             patch.object(h.w,'run_worker',side_effect=AssertionError('worker must not launch')) as worker:
+            result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+                expect=expect,receipt_store=store)
+        reserve.assert_not_called();worker.assert_not_called()
+        self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID')
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertFalse(job._attempted)
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.worker_code,receipt.failure_stage),
+                         ('BLOCKED','OPENCODE_RUNTIME_INVALID','PRELAUNCH'))
+        persisted=json.loads(Path(store).read_text())
+        self.assertEqual(persisted['receipts'][job.digest]['failure_stage'],'PRELAUNCH')
+        replay_result,replay_final,replay_receipt=h.run_with_receipt(
+            job,policy,admission,object(),expect=expect,receipt_store=store)
+        self.assertIsNone(replay_final)
+        self.assertEqual((replay_result.failure_stage,replay_receipt.verdict,
+                          replay_receipt.reason),('PRELAUNCH','UNKNOWN','DUPLICATE_RESULT'))
+        self.assertEqual(json.loads(Path(store).read_text())['receipts'][job.digest],persisted['receipts'][job.digest])
+
+    def test_invalid_preflight_preserves_existing_launch_reservation(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job, policy, admission, _ = self.fixture()
+        executable=Path(job.runtime.executable)
+        link=executable.parent/'synthetic-reserved-runtime-link'
+        link.symlink_to(executable)
+        job=replace(job,runtime=replace(job.runtime,executable=str(link)))
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        self.assertIsNone(receipt_module.reserve_host_launch(
+            job=job,expect=expect,store_path=store))
+        before=json.loads(Path(store).read_text())['receipts'][job.digest]
+        self.assertEqual((before['verdict'],before['reason']),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+        with patch.object(h,'git',return_value=(job.source_sha+'\n').encode()), \
+             patch.object(h.w,'run_worker',side_effect=AssertionError('worker must not launch')) as worker:
+            result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+                expect=expect,receipt_store=store)
+        worker.assert_not_called()
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+        after=json.loads(Path(store).read_text())['receipts'][job.digest]
+        self.assertEqual(after,before)
+
+    def test_already_reserved_run_refusal_has_prelaunch_stage(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job, policy, admission, _ = self.fixture()
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        self.assertIsNone(receipt_module.reserve_host_launch(
+            job=job,expect=expect,store_path=store))
+        result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+            expect=expect,receipt_store=store)
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','LAUNCH_IN_FLIGHT'))
+
+    def test_unexpected_preflight_io_failure_stays_unknown_and_unreserved(self):
+        from llmtool import opencode_result_receipt as receipt_module
+        job,policy,admission,_=self.fixture()
+        temp=tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(temp.cleanup)
+        store=str(Path(temp.name)/'host_receipts.json')
+        expect={'task':job.task,'agent':job.agent}
+        with patch.object(h,'git',return_value=(job.source_sha+'\n').encode()), \
+             patch.object(h.w,'_validate',side_effect=OSError('synthetic unavailable')), \
+             patch.object(receipt_module,'reserve_host_launch',side_effect=AssertionError('must not reserve')) as reserve:
+            result,final,receipt=h.run_with_receipt(job,policy,admission,object(),
+                expect=expect,receipt_store=store)
+        reserve.assert_not_called()
+        self.assertEqual(result.code,'OPENCODE_RUNTIME_UNKNOWN')
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+        self.assertIsNone(final)
+        self.assertEqual((receipt.verdict,receipt.reason),('UNKNOWN','OPENCODE_RUNTIME_UNKNOWN'))
+        self.assertFalse(job._attempted)
+        self.assertFalse(Path(store).exists())
+
     def test_delivered_unknown_receipt_is_not_completion_ack(self):
         from llmtool.opencode_result_delivery import (ACK_RETURNED, DELIVERED,
                                                       DeliveryEnvelope, receipt_digest)
@@ -671,7 +780,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-m1',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         def git_ok(root, *args):
             if args == ('rev-parse', 'HEAD'):
@@ -803,7 +912,7 @@ class CompositionTests(unittest.TestCase):
             'OPENCODE_OUTPUT_RETURNED', 'RETURNED', 'synthetic model text', 'backend-session-host-2',
             UsageLedger(job.usage.calls + (CallUsage(CallPhase.PRIMARY, 10, 5),),
                         job.usage.repair_attempts, 100),
-            True, processes, 'a' * 64, 'HOST_OBSERVED')
+            True, processes, 'a' * 64, 'HOST_OBSERVED', failure_stage='UNKNOWN')
 
         def fake_worker_tampered(j, host):
             host.final = {'code': 'OPENCODE_OUTPUT_RETURNED', 'launched': True,
