@@ -284,29 +284,29 @@ class OpenCodeWorkerTests(unittest.TestCase):
             server.shutdown();server.server_close();thread.join(timeout=.2)
 
     def test_server_json_checks_deadline_after_response_close(self):
-        class Socket:
-            def settimeout(self,value): pass
-        class Raw:
-            _sock=Socket()
-        class File:
-            raw=Raw()
-            def __init__(self): self.read=False
-            def read1(self,size):
-                if self.read: return b''
-                self.read=True
-                return b'{"data":{"ok":true}}'
-        class Response:
-            def __init__(self): self.fp=File()
-            def __enter__(self): return self
-            def __exit__(self,*args): time.sleep(.03)
-            def read1(self,size): return self.fp.read1(size)
-        class Opener:
-            def open(self,*args,**kwargs): return Response()
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=b'{"data":{"ok":true}}'
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Content-Length',str(len(body)))
+                self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),Handler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        create_connection=w.socket.create_connection
+        class SlowClose:
+            def __init__(self,inner): self.inner=inner
+            def __getattr__(self,name): return getattr(self.inner,name)
+            def close(self): time.sleep(.15);self.inner.close()
         started=time.monotonic()
-        with patch.object(w.urllib.request,'build_opener',return_value=Opener()):
-            with self.assertRaises(w.WorkerError) as caught:
-                w._server_json('http://127.0.0.1:45678','/api/session/ses_syntheticWorker',
-                               'SYNTHETIC',started+.01)
+        try:
+            with patch.object(w.socket,'create_connection',side_effect=lambda *a,**kw:
+                              SlowClose(create_connection(*a,**kw))):
+                with self.assertRaises(w.WorkerError) as caught:
+                    w._server_json('http://127.0.0.1:%d'%server.server_port,
+                                   '/api/session/ses_syntheticWorker','SYNTHETIC',started+.1)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
         self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
 
     def test_server_json_decodes_keepalive_and_chunked_http11_responses(self):
@@ -384,6 +384,49 @@ class OpenCodeWorkerTests(unittest.TestCase):
                     '/persistent','SYNTHETIC',started+.1)
             self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
             self.assertLess(time.monotonic()-started,.4)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_deadline_interrupts_slow_chunk_size_line(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        class SlowChunkHandler(BaseHTTPRequestHandler):
+            protocol_version='HTTP/1.1'
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200);self.send_header('Transfer-Encoding','chunked');self.end_headers()
+                try:
+                    for char in b'0000000000000000000000000000001\r\n':
+                        self.wfile.write(bytes([char]));self.wfile.flush();time.sleep(.02)
+                except (BrokenPipeError,ConnectionResetError): pass
+        server=ThreadingHTTPServer(('127.0.0.1',0),SlowChunkHandler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,kwargs={'poll_interval':.005},daemon=True)
+        thread.start();started=time.monotonic()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/slow-chunk-line','SYNTHETIC',started+.1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_TIMEOUT')
+            self.assertLess(time.monotonic()-started,.4)
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=.2)
+
+    def test_server_json_rejects_conflicting_duplicate_content_lengths(self):
+        from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+        body=json.dumps({'data':{'ok':True}}).encode()
+        class DuplicateLengthHandler(BaseHTTPRequestHandler):
+            def log_message(self,*args): pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Length',str(len(body)))
+                self.send_header('Content-Length',str(len(body)+100))
+                self.end_headers();self.wfile.write(body)
+        server=ThreadingHTTPServer(('127.0.0.1',0),DuplicateLengthHandler);server.daemon_threads=True
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        try:
+            with self.assertRaises(w.WorkerError) as caught:
+                w._server_json('http://127.0.0.1:%d'%server.server_port,
+                    '/duplicate-content-length','SYNTHETIC',time.monotonic()+1)
+            self.assertEqual(caught.exception.worker_code,'OPENCODE_COMPLETION_UNKNOWN')
         finally:
             server.shutdown();server.server_close();thread.join(timeout=.2)
 

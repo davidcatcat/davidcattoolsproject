@@ -12,11 +12,11 @@ from pathlib import Path
 import re
 import secrets
 import selectors
+import socket
 import stat
 import subprocess
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote, urlsplit
@@ -337,11 +337,6 @@ def _session(raw):
     return sid
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, request, response, code, message, headers, new_url):
-        return None
-
-
 def _server_json(url, route, password, deadline):
     """Read one bounded response from the owned loopback OpenCode server."""
     _clock(deadline)
@@ -349,56 +344,140 @@ def _server_json(url, route, password, deadline):
     if (parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.username or
             parsed.password or parsed.query or parsed.fragment or parsed.path not in ('','/')):
         reject('OPENCODE_RUNTIME_INVALID')
-    request=urllib.request.Request(url+route,headers={
-        'Authorization':'Basic '+base64.b64encode(('opencode:'+password).encode()).decode(),
-        'Accept':'application/json'})
-    opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
+    if (type(route) is not str or not route.startswith('/') or
+            any(ord(char)<0x20 or ord(char)==0x7f for char in route)):
+        reject('OPENCODE_RUNTIME_INVALID')
+    try: target=route.encode('ascii')
+    except UnicodeEncodeError: reject('OPENCODE_RUNTIME_INVALID')
+    try: port=parsed.port or 80
+    except ValueError: reject('OPENCODE_RUNTIME_INVALID')
+    if not 1<=port<=65535: reject('OPENCODE_RUNTIME_INVALID')
+    authorization=base64.b64encode(('opencode:'+password).encode()).decode('ascii')
+    host='127.0.0.1' if port==80 else '127.0.0.1:%d'%port
+    request=(b'GET '+target+b' HTTP/1.1\r\nHost: '+host.encode('ascii')+
+             b'\r\nAuthorization: Basic '+authorization.encode('ascii')+
+             b'\r\nAccept: application/json\r\nConnection: close\r\n\r\n')
+    sock=None; data=None
     try:
-        with opener.open(request,timeout=min(1,max(.001,deadline-time.monotonic()))) as response:
-            stream=getattr(response,'fp',None)
-            raw=getattr(stream,'raw',None)
-            sock=getattr(raw,'_sock',None)
-            # Read through HTTPResponse so Content-Length and chunked framing are
-            # decoded; the raw socket is used only to refresh its absolute timeout.
-            read_chunk=getattr(response,'read1',None)
-            if sock is None or not callable(getattr(sock,'settimeout',None)) or not callable(read_chunk):
-                reject('OPENCODE_COMPLETION_UNKNOWN')
-            headers=getattr(response,'headers',None)
-            getheader=getattr(headers,'get',None)
-            content_length=getheader('Content-Length') if callable(getheader) else None
-            chunked=bool(getattr(response,'chunked',False))
-            if chunked and content_length is not None:
-                reject('OPENCODE_COMPLETION_UNKNOWN')
-            expected=None
-            if content_length is not None:
-                try: expected=int(content_length)
-                except (TypeError,ValueError): reject('OPENCODE_COMPLETION_UNKNOWN')
-                if expected<0 or expected>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
-            chunks=[];total=0
-            while True:
-                # A declared body is complete exactly at Content-Length. Stop
-                # before HTTPResponse closes its socket, and never mistake an
-                # early EOF for a complete shorter JSON document.
-                if expected is not None and total==expected: break
+        remaining=deadline-time.monotonic()
+        if remaining<=0: reject('OPENCODE_TIMEOUT')
+        sock=socket.create_connection(('127.0.0.1',port),timeout=remaining)
+        _clock(deadline)
+        sock.setblocking(False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(sock,selectors.EVENT_READ)
+            def wait(event):
                 remaining=deadline-time.monotonic()
                 if remaining<=0: reject('OPENCODE_TIMEOUT')
-                sock.settimeout(min(1,remaining))
-                chunk=read_chunk(min(8192,LIMIT+1-total))
-                if not chunk: break
-                chunks.append(chunk);total+=len(chunk)
-                if total>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
-                if expected is not None and total>expected:
-                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                selector.modify(sock,event)
+                if not selector.select(remaining): reject('OPENCODE_TIMEOUT')
                 _clock(deadline)
+            pending=memoryview(request)
+            while pending:
+                wait(selectors.EVENT_WRITE)
+                try: sent=sock.send(pending)
+                except BlockingIOError: continue
+                if sent<=0: reject('OPENCODE_COMPLETION_UNKNOWN')
+                pending=pending[sent:]
+            selector.modify(sock,selectors.EVENT_READ)
+            buffered=bytearray();header_total=0
+            def receive():
+                while True:
+                    _clock(deadline)
+                    if not selector.select(max(0,deadline-time.monotonic())):
+                        reject('OPENCODE_TIMEOUT')
+                    _clock(deadline)
+                    try: chunk=sock.recv(8192)
+                    except BlockingIOError: continue
+                    _clock(deadline)
+                    return chunk
+            def line(cap,count_header=True):
+                nonlocal header_total
+                while True:
+                    end=buffered.find(b'\r\n')
+                    if end>=0:
+                        if end>cap: reject('OPENCODE_COMPLETION_UNKNOWN')
+                        result=bytes(buffered[:end]);del buffered[:end+2]
+                        if count_header:
+                            header_total+=end+2
+                            if header_total>16384: reject('OPENCODE_COMPLETION_UNKNOWN')
+                        return result
+                    if len(buffered)>cap: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    chunk=receive()
+                    if not chunk: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    buffered.extend(chunk)
+            def exact(size):
+                while len(buffered)<size:
+                    chunk=receive()
+                    if not chunk: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    buffered.extend(chunk)
+                result=bytes(buffered[:size]);del buffered[:size]
+                return result
+            status=line(4096).split(b' ',2)
+            if (len(status)<2 or status[0] not in (b'HTTP/1.0',b'HTTP/1.1') or
+                    len(status[1])!=3 or not status[1].isdigit() or status[1]!=b'200'):
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            headers={}
+            while True:
+                header=line(4096)
+                if not header: break
+                if header[:1] in (b' ',b'\t') or b':' not in header:
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                name,value=header.split(b':',1)
+                if not re.fullmatch(rb'[!#$%&\'*+.^_`|~0-9A-Za-z-]+',name):
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                key=name.decode('ascii').lower()
+                headers.setdefault(key,[]).append(value.strip())
+            lengths=headers.get('content-length',[])
+            encodings=headers.get('transfer-encoding',[])
+            if len(lengths)>1 or (lengths and encodings):
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            chunked=False;expected=None
+            if encodings:
+                if len(encodings)!=1 or encodings[0].lower()!=b'chunked':
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                chunked=True
+            elif lengths:
+                if re.fullmatch(rb'[0-9]+',lengths[0]) is None:
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                expected=int(lengths[0])
+                if expected>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+            chunks=[];total=0
+            if expected is not None:
+                data=exact(expected)
+            elif chunked:
+                while True:
+                    size_text=line(128,count_header=False).split(b';',1)[0]
+                    if re.fullmatch(rb'[0-9A-Fa-f]+',size_text) is None:
+                        reject('OPENCODE_COMPLETION_UNKNOWN')
+                    size=int(size_text,16)
+                    if size>LIMIT-total: reject('OPENCODE_OUTPUT_LIMIT')
+                    if size==0:
+                        if line(4096): reject('OPENCODE_COMPLETION_UNKNOWN')
+                        break
+                    chunk=exact(size)
+                    if exact(2)!=b'\r\n': reject('OPENCODE_COMPLETION_UNKNOWN')
+                    chunks.append(chunk);total+=size
+                data=b''.join(chunks)
+            else:
+                while True:
+                    if buffered:
+                        chunk=bytes(buffered);buffered.clear()
+                    else:
+                        chunk=receive()
+                        if not chunk: break
+                    total+=len(chunk)
+                    if total>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+                    chunks.append(chunk)
+                data=b''.join(chunks)
     except WorkerError:
         raise
     except Exception:
         if time.monotonic()>=deadline: reject('OPENCODE_TIMEOUT')
         reject('OPENCODE_COMPLETION_UNKNOWN')
-    _clock(deadline)  # Include response close/context-manager cleanup in the deadline.
-    if expected is not None and total!=expected:
-        reject('OPENCODE_COMPLETION_UNKNOWN')
-    data=b''.join(chunks)
+    finally:
+        if sock is not None: sock.close()
+    _clock(deadline)  # Include socket cleanup in the absolute task deadline.
     try:
         result=load_json(data.decode('utf-8'),LIMIT)
     except (UnicodeError,WorkerError):
