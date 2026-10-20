@@ -48,6 +48,9 @@ before any new provider read or use of updated admission/containment code.
 
 **Always read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) at the
 start of product development, review, QA handoff or Git publication.**
+When the PM selects the Codex task lane, follow the
+[Codex Coding and Debug workflow](skills/ai-team-delivery/SKILL.md#owner-direction-codex-coding-and-debug-workflow-2026-10-21);
+this lane does not replace OpenCode PRIMARY under D7.
 The user is the requirements owner/product acceptor, **not** the day-to-day
 PM, source-code reviewer, prompt courier or Mac test diagnostician. ChatGPT,
 when available as the authorized coordinator, owns technical planning,
