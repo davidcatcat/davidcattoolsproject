@@ -279,6 +279,22 @@ def _run_ask(args):
         else:
             observe('display_store_warning', sys.stderr)
 
+    def interrupted(exc):
+        nonlocal termination_handled
+        if signal_scope is None or exc.owner is not signal_scope:
+            raise exc
+        termination_handled = True
+        if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
+            silence_broken_pipe(exc.stream)
+            sys.stdout = None
+        if exc.stream is sys.stderr and exc.stream is sys.__stderr__:
+            silence_broken_pipe(exc.stream)
+            sys.stderr = None
+        observe('finish', 'interrupted')
+        store_warning()
+        observe('display', sys.stderr)
+        return 128 + exc.signum
+
     def setup_persistence(primary_error=False):
         nonlocal requested_without_observer
         try:
@@ -296,20 +312,25 @@ def _run_ask(args):
         observe('enable_persistence', settings)
 
     def failure(exc):
-        # Preserve the primary safe message even if secondary observation fails.
-        deliver(sys.stderr, lambda: print('llmtool: ' + str(exc), file=sys.stderr))
-        mapped = observe('error', exc, code, component) or code
-        observe('finish', 'incomplete' if mapped is d.ErrorCode.MODEL_OUTPUT_INCOMPLETE else 'error')
         try:
-            line = observe('failure_line', mapped)
-            deliver(sys.stderr, lambda: print(line or ('llmtool: code=' + mapped.value +
-                          ' run_id=unavailable trace=' +
-                          ('unavailable' if requested_without_observer else 'not-saved')), file=sys.stderr))
-        except Exception:
-            observe('drop')
-        store_warning()
-        observe('display', sys.stderr)
-        return 1
+            # Preserve the primary safe message even if secondary observation fails.
+            deliver(sys.stderr, lambda: print('llmtool: ' + str(exc), file=sys.stderr))
+            mapped = observe('error', exc, code, component) or code
+            observe('finish', 'incomplete' if mapped is d.ErrorCode.MODEL_OUTPUT_INCOMPLETE else 'error')
+            try:
+                line = observe('failure_line', mapped)
+                deliver(sys.stderr, lambda: print(line or ('llmtool: code=' + mapped.value +
+                              ' run_id=unavailable trace=' +
+                              ('unavailable' if requested_without_observer else 'not-saved')), file=sys.stderr))
+            except _AskTermination as termination:
+                return interrupted(termination)
+            except Exception:
+                observe('drop')
+            store_warning()
+            observe('display', sys.stderr)
+            return 1
+        except _AskTermination as termination:
+            return interrupted(termination)
 
     try:
         try:
@@ -377,17 +398,7 @@ def _run_ask(args):
         return failure(coded_error('local I/O failed; details omitted',
                                   'LOCAL_IO_ERROR', 'cli.ask'))
     except _AskTermination as exc:
-        if signal_scope is None or exc.owner is not signal_scope:
-            raise
-        termination_handled = True
-        if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
-            sys.stdout = None
-        if exc.stream is sys.stderr and exc.stream is sys.__stderr__:
-            sys.stderr = None
-        observe('finish', 'interrupted')
-        store_warning()
-        observe('display', sys.stderr)
-        return 128 + exc.signum
+        return interrupted(exc)
     except EOFError:
         return failure(coded_error('input ended before configuration was complete',
                                   'USER_INPUT_ERROR', 'input'))

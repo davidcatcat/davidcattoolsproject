@@ -343,6 +343,86 @@ class HttpSignalPersistenceTests(unittest.TestCase):
                 process.kill()
             process.communicate(timeout=3)
 
+    def test_term_during_provider_failure_stderr_delivery_finalizes_without_drain(self):
+        script = '''
+import os
+import fcntl
+import sys
+from unittest.mock import patch
+from llmtool import cli
+from llmtool.errors import LLMToolError
+
+flags = fcntl.fcntl(2, fcntl.F_GETFL)
+fcntl.fcntl(2, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+while True:
+    try:
+        os.write(2, b'x' * 4096)
+    except BlockingIOError:
+        break
+fcntl.fcntl(2, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+class Client:
+    def complete(self, messages):
+        os.write(1, b'READY\\n')
+        raise LLMToolError('synthetic provider failure')
+
+with patch.object(cli, 'create_client', lambda config, key: Client()):
+    raise SystemExit(cli.main(['ask', 'SYNTHETIC_PRIVATE_PROMPT_181', '--save-diagnostics']))
+'''
+        process = subprocess.Popen([sys.executable, '-B', '-c', script],
+                                   cwd=str(Path(__file__).resolve().parents[1]), env=self.env,
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        try:
+            import select
+            readable, _, _ = select.select([process.stdout], [], [], 3)
+            self.assertTrue(readable, 'provider failure did not reach synthetic readiness marker')
+            self.assertEqual(process.stdout.readline(), b'READY\n')
+            time.sleep(.2)
+            process.send_signal(signal.SIGTERM)
+            hung = False
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                hung = True
+            out, err = process.communicate(timeout=3)
+            if hung:
+                runs = list((self.state / 'runs').iterdir())
+                if runs:
+                    files = sorted(path.name for path in runs[0].iterdir())
+                    trace = runs[0] / 'trace.partial.jsonl'
+                    if not trace.exists():
+                        trace = runs[0] / 'trace.jsonl'
+                    types = ([json.loads(line)['type'] for line in trace.read_text().splitlines()]
+                             if trace.exists() else [])
+                else:
+                    files, types = [], []
+                self.fail('TERM left stderr blocked until drained: exit=%r files=%r events=%r' %
+                          (process.returncode, files, types))
+            self.assertEqual(process.returncode, 128 + signal.SIGTERM, err[-500:])
+            self.assertEqual(out, b'')
+            runs = list((self.state / 'runs').iterdir())
+            self.assertEqual(len(runs), 1)
+            run = runs[0]
+            summary = json.loads((run / 'summary.json').read_text())
+            events = [json.loads(line) for line in (run / 'trace.jsonl').read_text().splitlines()]
+            self.assertEqual(summary['status'], 'interrupted')
+            self.assertEqual(events[-1]['type'], 'run.end')
+            self.assertEqual(events[-1]['data']['status'], 'interrupted')
+            self.assertFalse((run / '.reservation').exists())
+            self.assertTrue((run / '.run.lock').exists())
+            self.assertFalse((run / 'trace.partial.jsonl').exists())
+            self.assertNotIn(PROMPT.encode(), (run / 'trace.jsonl').read_bytes())
+            self.release.set()
+            following = self.reader('ask', PROMPT, '--save-diagnostics')
+            self.assertEqual((following.returncode, following.stdout),
+                             (0, (RESPONSE + '\n').encode()), following.stderr)
+        finally:
+            self.release.set()
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=3)
+
 
 if __name__ == '__main__':
     unittest.main()
