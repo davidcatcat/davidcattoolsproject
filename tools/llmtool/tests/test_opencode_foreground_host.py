@@ -164,6 +164,55 @@ class CompositionTests(unittest.TestCase):
                             'activate': True,
                         }])
                         self.assertIsNone(host.credential)
+                        state = Path(job.runtime.state_root)
+                        self.assertFalse((state / 'data/opencode/opencode.db').exists())
+                        self.assertFalse(any(b'SYNTHETIC_ONLY' in p.read_bytes()
+                            for p in state.rglob('*') if p.is_file()))
+
+    def test_credential_transport_failure_clears_memory_without_state_file_leak(self):
+        job, policy, a, snap = self.fixture()
+        host = h.Host(policy, a, h.native_credential.ActiveOpenCodeCredential('/synthetic/no-read.db'))
+        host.token = object()
+        host.consumed = True
+        catalog = [{'providerID': 'opencode', 'id': job.model.split('/', 1)[1],
+                    'enabled': True, 'cost': [{'input': 0, 'output': 0,
+                    'cache': {'read': 0, 'write': 0}}]}]
+        opener = self.native_opener(job, catalog,
+            {'providerID': 'opencode', 'id': job.model.split('/', 1)[1]}, [])
+        credential_bodies = []
+        original_open = opener.open
+        class Response:
+            def __init__(self, data): self.data = data
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self, n): return json.dumps({'data': self.data}).encode()
+        def fail_after_credential_post(req, timeout):
+            route = req.full_url.split('127.0.0.1:12345')[-1]
+            if route == '/api/credential':
+                credential_bodies.append(req.data)
+                raise OSError('synthetic transport failure')
+            if route == '/api/session': return Response({'id': 'ses_syntheticProof'})
+            if route.endswith('/permission'):
+                query = json.loads(req.data)
+                action, resource = query['action'], query['resources'][0]
+                allowed = ((action == 'read' and resource in job.read_paths) or
+                           (action == 'edit' and resource in job.write_paths))
+                return Response({'effect': 'allow' if allowed else 'deny'})
+            return original_open(req, timeout)
+        opener.open = fail_after_credential_post
+        with patch.object(h.urllib.request, 'build_opener', return_value=opener), \
+             patch.object(h.native_credential.ActiveOpenCodeCredential, 'take',
+                          return_value={'type': 'key', 'key': 'SYNTHETIC_ONLY'}):
+            with self.assertRaises(OSError):
+                host.prepare_server(host.token, job, 'http://127.0.0.1:12345', 'SYNTHETIC',
+                                    h.time.monotonic() + 10)
+        self.assertEqual(len(credential_bodies), 1)
+        self.assertIn(b'SYNTHETIC_ONLY', credential_bodies[0])
+        self.assertIsNone(host.credential)
+        state = Path(job.runtime.state_root)
+        self.assertFalse((state / 'data/opencode/opencode.db').exists())
+        self.assertFalse(any(b'SYNTHETIC_ONLY' in p.read_bytes()
+            for p in state.rglob('*') if p.is_file()))
 
     def native_opener(self, job, catalog, agent_model, routes):
         # Offline fake transport only: no provider, socket or credential file.
