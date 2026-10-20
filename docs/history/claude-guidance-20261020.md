@@ -11,7 +11,7 @@ This repository is the user's toolbox and reusable Agent Skills library.
 ## AI team collaboration contract (Claude Code)
 
 **Before product engineering, review, QA or PR operations, read
-[ai-team-delivery](skills/ai-team-delivery/SKILL.md).** The user owns tool
+[ai-team-delivery](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md).** The user owns tool
 requirements, desired outcomes and user acceptance. They delegate technical
 PM, implementation coordination, QA/security assessment and routine safe
 merge decisions to the AI coordinator; they are **not** the everyday PM or
@@ -19,7 +19,7 @@ a Codex/Claude prompt relay. Claude's core role is a distinct, independent
 reviewer/QA role, not a self-authorizing implementation or merge authority.
 
 **Owner D6 (2026-10-19):** The former G7 two-fixed-worktree ceiling is
-superseded by [dynamic task-scoped lifecycle](skills/safe-git/SKILL.md).
+superseded by [dynamic task-scoped lifecycle](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/safe-git/SKILL.md).
 Authorized Developer Agents may create and safely retire registered worktrees
 without Owner micro-approval. The canonical Mac Integrator/F1 root stays
 unchanged; each worktree has one writer, a unique branch and isolated runtime.
@@ -27,11 +27,11 @@ Merged-and-accepted tasks are automatically retired only after published
 source/evidence, zero active Sessions/processes and all tracked/untracked/
 ignored data are checked. Open review/repair, interrupted or ambiguous work
 is retained. No force cleanup, extra clones, F2 grant or auto merge.
-Historical G7/G1-G6 evidence remains valid but is not repeated per worktree. **Developer worktrees must never check out `main`; neither a Developer nor a Reviewer may perform an unclaimed Git fetch in the canonical Integrator checkout.** These explicit G7 safeguards remain operative under D6. Follow the [Owner's recorded D6 decision](docs/decisions/llmtool_dynamic_worktree_20261019.md).
+Historical G7/G1-G6 evidence remains valid but is not repeated per worktree. **Developer worktrees must never check out `main`; neither a Developer nor a Reviewer may perform an unclaimed Git fetch in the canonical Integrator checkout.** These explicit G7 safeguards remain operative under D6. Follow the [Owner's recorded D6 decision](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/docs/decisions/llmtool_dynamic_worktree_20261019.md).
 
-**Owner D8 (2026-10-20) — read first:** OpenCode may receive non-sensitive repo source on free models; the PM admits OpenCode tasks itself without per-call Owner approval; ask the Owner only for wrong feature, root/sudo or Mac core system changes; Codex Developer is resumed. D8 removes per-call Owner approval only; technical Host admission, registered-worktree ownership, task/file scope, privacy and credential protections, independent review, and CI remain required. **D8a:** the Host/Worker may use the single active local OpenCode credential in memory to start isolated OpenCode workers (never print/log/persist/export it). Full text: [D8/D8a](docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
+**Owner D8 (2026-10-20) — read first:** OpenCode may receive non-sensitive repo source on free models; the PM admits OpenCode tasks itself without per-call Owner approval; ask the Owner only for wrong feature, root/sudo or Mac core system changes; Codex Developer is resumed. D8 removes per-call Owner approval only; technical Host admission, registered-worktree ownership, task/file scope, privacy and credential protections, independent review, and CI remain required. **D8a:** the Host/Worker may use the single active local OpenCode credential in memory to start isolated OpenCode workers (never print/log/persist/export it). Full text: [D8/D8a](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/docs/decisions/llmtool_opencode_secondary_developer_20261019.md).
 
-**2026-10-19 current Owner D1–D5 override for Developer ownership:** Claude **Developer is PAUSED**. Claude Code continues as the dedicated independent **Reviewer/QA**, not a default code writer. OpenCode v2 is approved to take over the **same existing** Claude-named fixed root **only after** independently reviewed safe-git policy and actual Mac release/C2/C3 turnover. Read [owner decisions](docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](skills/safe-git/SKILL.md). This supersedes the earlier historical Claude Developer task guidance in this file; do not re-enter an OpenCode-owned root to write, fetch or change refs. Review context must remain separately authorized/read-only; DeepSeek/GLM pre-review does not replace Claude formal verdict. Quota-exhausted work awaits exact-SHA formal review, not automatic paid fallback. D1 did not itself create a worktree or prove native M2; subsequent Owner D6 authorizes additional task worktrees under its separate cleanup/verification rules.
+**2026-10-19 current Owner D1–D5 override for Developer ownership:** Claude **Developer is PAUSED**. Claude Code continues as the dedicated independent **Reviewer/QA**, not a default code writer. OpenCode v2 is approved to take over the **same existing** Claude-named fixed root **only after** independently reviewed safe-git policy and actual Mac release/C2/C3 turnover. Read [owner decisions](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [safe-git](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/safe-git/SKILL.md). This supersedes the earlier historical Claude Developer task guidance in this file; do not re-enter an OpenCode-owned root to write, fetch or change refs. Review context must remain separately authorized/read-only; DeepSeek/GLM pre-review does not replace Claude formal verdict. Quota-exhausted work awaits exact-SHA formal review, not automatic paid fallback. D1 did not itself create a worktree or prove native M2; subsequent Owner D6 authorizes additional task worktrees under its separate cleanup/verification rules.
 
 Give actionable, human-readable findings, reproduction evidence, severity,
 a disposition recommendation and the exact reviewed SHA. Classify required
@@ -53,8 +53,8 @@ Mac evidence must remain exact-revision-bound. No routine owner
 technical signoff. Do not run frozen `--qa-low*` routes. The local
 symlink/run state is user-reported; do not claim Mac proof from a GitHub
 source read. Provider/data egress remains separately authorized.
-See [ai-team-delivery](skills/ai-team-delivery/SKILL.md)
-and [safe-git](skills/safe-git/SKILL.md) for the single release gate.
+See [ai-team-delivery](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md)
+and [safe-git](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/safe-git/SKILL.md) for the single release gate.
 
 When writing audit/retrospective reports, distinguish **proposer,
 reviewer, requirements confirmer, delegated authorizer, technical decision
@@ -65,8 +65,8 @@ conflicting later clarifications with evidence; do not assert the owner
 personally wrote the technical analysis or never consented without resolving
 the conversation records.
 
-**llmtool product direction:** The [single A11 roadmap](tools/llmtool/ROADMAP.md)
-and [ai-team-delivery Skill](skills/ai-team-delivery/SKILL.md) govern
+**llmtool product direction:** The [single A11 roadmap](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool/ROADMAP.md)
+and [ai-team-delivery Skill](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md) govern
 current milestones: C0–C3 are historical A delivery/measurement aliases,
 not a second code path or sequential product gate. **Use the current
 AI-reviewed, latest-control-branch temporary ai-loop** for Codex/Claude
@@ -103,8 +103,8 @@ replace
 formal distinct non-author Security/Functional/QA or required Mac-native
 gates. Cloud publication does not prove local llmtool F2 mutation,
 M2 parity or permission to auto-merge main. Respect
-[ai-team-delivery](skills/ai-team-delivery/SKILL.md) and
-[safe-git](skills/safe-git/SKILL.md).
+[ai-team-delivery](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md) and
+[safe-git](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/safe-git/SKILL.md).
 
 ## Skill design
 
@@ -120,7 +120,7 @@ M2 parity or permission to auto-merge main. Respect
 
 ## CI incident knowledge base
 
-For GitHub Actions failures, unexpected usage or CI-cost decisions, read [CI Knowledge Base](docs/ci/README.md) and the [debug-ci Skill](skills/debug-ci/SKILL.md) before repeating an investigation. After a verified reusable fix, update the existing knowledge entry with SHA-bound evidence; do not append report-only commits to a tested release candidate.
+For GitHub Actions failures, unexpected usage or CI-cost decisions, read [CI Knowledge Base](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/docs/ci/README.md) and the [debug-ci Skill](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/debug-ci/SKILL.md) before repeating an investigation. After a verified reusable fix, update the existing knowledge entry with SHA-bound evidence; do not append report-only commits to a tested release candidate.
 
 ## Engineering behavior
 
@@ -151,7 +151,7 @@ via PR #84 (`46b17b13`) with independent Security/Functional QA.
 **F2 user-repository Git mutation is NOT AUTHORIZED** until separate
 contract, Security review and native acceptance. A11c is NOT STARTED
 and A12 future optional. Refer to the
-[Roadmap](tools/llmtool/ROADMAP.md) for current status.
+[Roadmap](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool/ROADMAP.md) for current status.
 
 On the actual Mac with company VPN, use `company-llm-delegation` for the
 cost-aware dogfood path: deterministic evidence first, bounded permitted company
