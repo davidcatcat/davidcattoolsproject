@@ -511,7 +511,9 @@ def dispatch_with_ack(job, policy, admission, one_native_credential, *, expect,
         state = 'UNKNOWN'
         reason = 'HOST_LAUNCH_UNVERIFIED'
 
-    ack = (type(receipt) is ResultReceipt and receipt.accepted is False and
+    ack = (type(receipt) is ResultReceipt and
+           receipt.verdict in ('SUCCESS', 'FAILED', 'BLOCKED') and
+           receipt.accepted is False and
            receipt.job_digest == digest and receipt.source_sha == source_sha and
            type(receipt.task) is TaskBinding and receipt.task.task_id == task_id and
            type(receipt.agent) is AgentBinding and receipt.agent.agent_id == agent_id and

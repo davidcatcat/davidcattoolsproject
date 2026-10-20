@@ -568,6 +568,35 @@ class CompositionTests(unittest.TestCase):
         self.assertFalse(replay.completion_ack)
         self.assertEqual(launches, [job.digest])
 
+    def test_delivered_unknown_receipt_is_not_completion_ack(self):
+        from llmtool.opencode_result_delivery import (ACK_RETURNED, DELIVERED,
+                                                      DeliveryEnvelope, receipt_digest)
+        from llmtool.opencode_result_receipt import ResultReceipt
+        job, policy, admission, _ = self.fixture()
+        expect = {'task': job.task, 'agent': job.agent}
+        receipt = ResultReceipt('UNKNOWN', 'RECONCILE_ERROR', job.digest, job.task,
+                                job.agent, job.source_sha, 'OPENCODE_HOST_UNKNOWN',
+                                'backend-session-unknown', None, False)
+        digest = receipt_digest(receipt.to_dict())
+        delivery = DeliveryEnvelope(
+            schema='llmtool.opencode.result_delivery.v1', state=DELIVERED,
+            reason='RECEIPT_DELIVERED', task_id=job.task.task_id,
+            agent_id=job.agent.agent_id, job_digest=job.digest,
+            source_sha=job.source_sha, integrator_session=admission.current_session,
+            receipt_verdict='UNKNOWN', receipt_reason='RECONCILE_ERROR',
+            receipt_digest=digest, delivery_digest='a' * 64, ack=ACK_RETURNED)
+        host_final = {'code': 'OPENCODE_HOST_UNKNOWN', 'launched': True,
+                      'one_use_consumed': True, 'job_digest': job.digest}
+        with patch.object(h, 'run_with_delivery',
+                          return_value=(None, host_final, receipt, delivery)):
+            out = h.dispatch_with_ack(job, policy, admission, {'synthetic': 'never real'},
+                                      expect=expect, receipt_store='/unused',
+                                      integrator_session=admission.current_session)
+        self.assertEqual((out.delivery.state, out.delivery.ack), (DELIVERED, ACK_RETURNED))
+        self.assertEqual((out.receipt.verdict, out.receipt.reason), ('UNKNOWN', 'RECONCILE_ERROR'))
+        self.assertEqual(out.state, 'STARTED')
+        self.assertFalse(out.completion_ack)
+
     def test_run_with_receipt_blocks_before_worker_on_invalid_expect_corrupt_store_in_flight_or_concurrency(self):
         import multiprocessing, os
         from llmtool.run_budget import CallPhase, CallUsage
