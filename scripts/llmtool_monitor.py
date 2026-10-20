@@ -325,6 +325,7 @@ class Monitor:
         self.log: deque[tuple[str, str, str]] = deque(maxlen=2000)  # (time, kind, text)
         self.tasks: list = []
         self.task_map: dict = {}
+        self.task_baseline = False   # a successful task scan has adopted the starting point
         self.github = None   # GitHubSource for the Activity view; None means no network at all
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
@@ -385,7 +386,14 @@ class Monitor:
             tasks = scan_tasks(hosts=result.hosts)
         except Exception:  # task evidence is optional; never break process monitoring
             tasks = self.tasks
-        new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks, initial=(self.polls == 1))]
+            initial_tasks = self.polls == 1
+        else:
+            # A failed first scan leaves no baseline, so the next successful scan
+            # must adopt what it sees instead of replaying historical stages.
+            initial_tasks = not self.task_baseline
+            self.task_baseline = True
+        new += [(stamp, k, t) for k, t in task_events(self.task_map, tasks,
+                                                      initial=initial_tasks)]
         if self.polls == 1 and tasks:
             latest = tasks[0]
             last = latest.stages[-1] if latest.stages else None
