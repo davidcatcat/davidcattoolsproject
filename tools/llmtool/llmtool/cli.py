@@ -3,8 +3,10 @@
 import argparse
 import json
 import os
+import signal
 import stat
 import sys
+import threading
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
 from .configure import run_configure
@@ -142,6 +144,79 @@ def parser_for_cli():
     return parser
 
 
+class _AskTermination(BaseException):
+    """Private unwind for a TERM/HUP owned by one persisted HTTP ask."""
+
+    def __init__(self, owner, signum, stream=None):
+        self.owner = owner
+        self.signum = signum
+        self.stream = stream
+
+
+class _AskSignalScope:
+    """Temporarily own only default TERM/HUP dispositions for persisted asks."""
+
+    def __init__(self):
+        self.signum = None
+        self._raised = False
+        self._critical = 0
+        self._delivery = None
+        self._handlers = {}
+        self._installing = True
+        if os.name != 'posix' or threading.current_thread() is not threading.main_thread():
+            self._installing = False
+            return
+        try:
+            for name in ('SIGTERM', 'SIGHUP'):
+                number = getattr(signal, name, None)
+                if number is None or signal.getsignal(number) is not signal.SIG_DFL:
+                    continue
+                def handler(received, frame, owner=self):
+                    owner._receive(received)
+                self._handlers[number] = (signal.SIG_DFL, handler)
+                signal.signal(number, handler)
+        except Exception:
+            self.restore()
+        finally:
+            self._installing = False
+
+    def _receive(self, signum):
+        if self.signum is None:
+            self.signum = signum
+        if self._critical or self._installing or self._raised:
+            return
+        self._raised = True
+        raise _AskTermination(self, self.signum, self._delivery)
+
+    def _raise_pending(self):
+        if self.signum is not None and not self._raised:
+            self._raised = True
+            raise _AskTermination(self, self.signum)
+
+    def begin_critical(self):
+        self._critical += 1
+
+    def end_critical(self):
+        self._critical = max(0, self._critical - 1)
+
+    def deliver(self, stream, operation):
+        previous = self._delivery
+        self._delivery = stream
+        try:
+            return operation()
+        finally:
+            self._delivery = previous
+
+    def restore(self):
+        for number, (previous, installed) in reversed(tuple(self._handlers.items())):
+            try:
+                if signal.getsignal(number) is installed:
+                    signal.signal(number, previous)
+            except Exception:
+                pass
+        self._handlers.clear()
+
+
 def _run_ask(args):
     """Observe ask only. Diagnostics never authorize recovery or execution."""
     from . import diagnostics as d
@@ -158,25 +233,47 @@ def _run_ask(args):
         run = None  # Even an observer initialization failure is secondary.
     code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
     requested_without_observer = False
+    signal_scope = None
+    termination_handled = False
 
-    def observe(method, *values):
+    def deliver(stream, operation):
+        if signal_scope is None:
+            return operation()
+        return signal_scope.deliver(stream, operation)
+
+    def observe(method, *values, check_signal=True):
         if run is None:
             return None
+        critical = method in {'enable_persistence', 'persistence_unavailable', 'request',
+                             'response', 'error', 'finish', 'drop', 'close'}
+        if signal_scope is not None and critical:
+            signal_scope.begin_critical()
         try:
-            return getattr(run, method)(*values)
+            if signal_scope is not None and method in {'display', 'display_store_warning'}:
+                stream = values[0] if values else sys.stderr
+                result = signal_scope.deliver(stream, lambda: getattr(run, method)(*values))
+            else:
+                result = getattr(run, method)(*values)
         except Exception:
             try:
                 run.drop()
             except Exception:
                 pass
-            return None
+            result = None
+        finally:
+            if signal_scope is not None and critical:
+                signal_scope.end_critical()
+        if signal_scope is not None and critical and check_signal:
+            signal_scope._raise_pending()
+        return result
 
     def store_warning():
         if requested_without_observer:
             # Observer construction itself can fail; explicit opt-in stays honest.
             try:
                 from .diagnostics_store import StoreWarning
-                print(StoreWarning(d.ErrorCode.DIAGNOSTICS_STORE_UNAVAILABLE).line(), file=sys.stderr)
+                deliver(sys.stderr, lambda: print(
+                    StoreWarning(d.ErrorCode.DIAGNOSTICS_STORE_UNAVAILABLE).line(), file=sys.stderr))
             except Exception:
                 pass
         else:
@@ -200,14 +297,14 @@ def _run_ask(args):
 
     def failure(exc):
         # Preserve the primary safe message even if secondary observation fails.
-        print('llmtool: ' + str(exc), file=sys.stderr)
+        deliver(sys.stderr, lambda: print('llmtool: ' + str(exc), file=sys.stderr))
         mapped = observe('error', exc, code, component) or code
         observe('finish', 'incomplete' if mapped is d.ErrorCode.MODEL_OUTPUT_INCOMPLETE else 'error')
         try:
             line = observe('failure_line', mapped)
-            print(line or ('llmtool: code=' + mapped.value +
+            deliver(sys.stderr, lambda: print(line or ('llmtool: code=' + mapped.value +
                           ' run_id=unavailable trace=' +
-                          ('unavailable' if requested_without_observer else 'not-saved')), file=sys.stderr)
+                          ('unavailable' if requested_without_observer else 'not-saved')), file=sys.stderr))
         except Exception:
             observe('drop')
         store_warning()
@@ -230,6 +327,15 @@ def _run_ask(args):
         key = api_key(config)
         code, component = d.ErrorCode.PROVIDER_RUNTIME_ERROR, 'provider'
         client = create_client(config, key)
+        provider = {}
+        if isinstance(config, dict):
+            profiles = config.get('providers', {})
+            if isinstance(profiles, dict):
+                provider = profiles.get(config.get('active_provider'), {})
+        if (run is not None and run.persistence_requested
+                and isinstance(provider, dict) and provider.get('type') == 'openai-compatible'):
+            signal_scope = _AskSignalScope()
+            signal_scope._raise_pending()
         code, component = d.ErrorCode.USER_INPUT_ERROR, 'input'
         messages = messages_for('ask', text, selected_skill)
         code, component = d.ErrorCode.PROVIDER_RUNTIME_ERROR, 'provider'
@@ -247,12 +353,14 @@ def _run_ask(args):
             from .log_safety import filter_log_suggestions
             output, suppressed = filter_log_suggestions(output)
             if suppressed:
-                print('llmtool: analyze-log suppressed ' + str(suppressed) +
-                      ' unsafe or unsupported NEXT_COMMANDS suggestion(s)', file=sys.stderr)
+                deliver(sys.stderr, lambda: print('llmtool: analyze-log suppressed ' + str(suppressed) +
+                      ' unsafe or unsupported NEXT_COMMANDS suggestion(s)', file=sys.stderr))
         output = human_output(output, sys.stdout)
-        sys.stdout.write(output + '\n')
-        # Detect a buffered EPIPE before recording successful delivery.
-        sys.stdout.flush()
+        def write_output():
+            sys.stdout.write(output + '\n')
+            # Detect a buffered EPIPE before recording successful delivery.
+            sys.stdout.flush()
+        deliver(sys.stdout, write_output)
         observe('finish', 'success')
         store_warning()
         observe('display', sys.stderr)
@@ -268,6 +376,18 @@ def _run_ask(args):
     except (OSError, UnicodeError):
         return failure(coded_error('local I/O failed; details omitted',
                                   'LOCAL_IO_ERROR', 'cli.ask'))
+    except _AskTermination as exc:
+        if signal_scope is None or exc.owner is not signal_scope:
+            raise
+        termination_handled = True
+        if exc.stream is sys.stdout and exc.stream is sys.__stdout__:
+            sys.stdout = None
+        if exc.stream is sys.stderr and exc.stream is sys.__stderr__:
+            sys.stderr = None
+        observe('finish', 'interrupted')
+        store_warning()
+        observe('display', sys.stderr)
+        return 128 + exc.signum
     except EOFError:
         return failure(coded_error('input ended before configuration was complete',
                                   'USER_INPUT_ERROR', 'input'))
@@ -288,7 +408,17 @@ def _run_ask(args):
         return failure(coded_error('internal error; details omitted',
                                   'INTERNAL_UNEXPECTED', 'cli.ask'))
     finally:
-        observe('close')
+        if signal_scope is not None:
+            signal_scope.begin_critical()
+        try:
+            observe('close', check_signal=False)
+        finally:
+            if signal_scope is not None:
+                signal_scope.restore()
+                signum = signal_scope.signum
+                signal_scope.end_critical()
+                if signum is not None and not termination_handled:
+                    raise SystemExit(128 + signum)
 
 
 def _run_test_excerpts(args):
