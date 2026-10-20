@@ -100,6 +100,7 @@ class FakeHost:
         self.hard_cost_cap=False; self.unknown_cost_permitted=True
         self.consumed=False; self.grant_ok=True; self.calls=0; self.messages=None
         self.response_mutate=lambda v:v
+        self.usage_metadata={'prompt_tokens':1000,'completion_tokens':500,'total_tokens':1500}
         self.during_call=lambda:None
         self.error=None; self.observe_count=0; self.observation_mutate=lambda o,n:o
         self.clock=FakeClock(self);self.observer=FakeObserver(self)
@@ -135,7 +136,7 @@ class FakeHost:
             criterion_evidence=[{'criterion_id':c['criterion_id'],'evidence_refs':['actual-test-artifact','exact-ci']}
                                 for c in p['acceptance_contract']['criteria']])
         self.during_call()
-        return Reply(json.dumps(self.response_mutate(verdict)),{})
+        return Reply(json.dumps(self.response_mutate(verdict)),dict(self.usage_metadata))
 
 
 class ReviewTests(unittest.TestCase):
@@ -160,7 +161,8 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED'); self.assertFalse(result['authorized'])
         self.assertEqual(result['reported_state'],'WAITING_REVIEW')
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
-        self.assertIsNone(result['input_tokens']); self.assertIsNone(result['cost'])
+        self.assertEqual(result['input_tokens'],1000); self.assertEqual(result['output_tokens'],500)
+        self.assertIsNone(result['cost'])
         self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
         self.assertFalse(result['handoff']['triggered'])
     def test_n1_success_nonreview_states_never_trigger(self):
@@ -312,6 +314,38 @@ class ReviewTests(unittest.TestCase):
                             ('budget',RunBudget(1,2,0,180000,10,10))]:
             self.host=FakeHost(self.ready,self.final,self.expect,self.events); setattr(self.host,field,value)
             self.zero(self.run_review(),'REVIEW_BUDGET_BLOCKED')
+
+
+class RetrospectiveUsageBudgetTests(unittest.TestCase):
+    setUp=ReviewTests.setUp
+    run_review=ReviewTests.run_review
+    def blocked_once(self,result):
+        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED')
+        self.assertEqual(result['status'],'BLOCKED');self.assertFalse(result['authorized'])
+        self.assertEqual(result['provider_calls'],1);self.assertEqual(self.host.calls,1)
+        self.assertEqual(len(self.host.authority.finalized),1)
+        self.assertEqual(self.host.authority.finalized[0].status,'EFFECT_DONE')
+    def test_unknown_usage_blocks_approval_without_retry(self):
+        self.host.usage_metadata={}
+        result=self.run_review();self.blocked_once(result)
+        self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
+        self.assertIsNone(result['cost'])
+    def test_input_token_overage_blocks_approval_retaining_usage(self):
+        self.host.usage_metadata={'prompt_tokens':100001,'completion_tokens':1,'total_tokens':100002}
+        result=self.run_review();self.blocked_once(result)
+        self.assertEqual(result['input_tokens'],100001);self.assertEqual(result['output_tokens'],1)
+    def test_output_token_overage_blocks_approval_retaining_usage(self):
+        self.host.usage_metadata={'prompt_tokens':1,'completion_tokens':100001,'total_tokens':100002}
+        result=self.run_review();self.blocked_once(result)
+        self.assertEqual(result['input_tokens'],1);self.assertEqual(result['output_tokens'],100001)
+    def test_within_budget_usage_preserves_approval(self):
+        self.host.usage_metadata={'prompt_tokens':100000,'completion_tokens':100000,'total_tokens':200000}
+        result=self.run_review()
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED');self.assertEqual(result['status'],'APPROVE')
+        self.assertEqual(result['provider_calls'],1);self.assertEqual(self.host.calls,1)
+        self.assertEqual(result['input_tokens'],100000);self.assertEqual(result['output_tokens'],100000)
+        self.assertEqual(len(self.host.authority.finalized),1)
+        self.assertEqual(self.host.authority.finalized[0].status,'EFFECT_DONE')
 
 
 class AdditionalBoundaryTests(unittest.TestCase):

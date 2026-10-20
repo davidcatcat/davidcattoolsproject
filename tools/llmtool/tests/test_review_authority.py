@@ -144,20 +144,28 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
         if code:self.assertEqual(result['code'],code)
     def test_complete_real_adapters_fake_transport(self):
+        # The fake reviewer transport reports no token usage; the retrospective
+        # budget gate must block approval but retain the one consumed call.
         result=self.h.run()
-        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
+        self.assertEqual(result['status'],'BLOCKED');self.assertFalse(result['authorized'])
         self.assertEqual(result['provider_calls'],1);self.assertTrue(result['test_only'])
-        self.assertFalse(result['authorized']);self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
-        self.assertIsNone(result['input_tokens']);self.assertIsNone(result['cost'])
+        self.assertEqual(result['runtime_evidence_status'],'NOT_VERIFIED')
+        self.assertEqual(result['invocation_status'],'FAKE_RETURNED')
+        self.assertIsNone(result['input_tokens']);self.assertIsNone(result['output_tokens'])
+        self.assertIsNone(result['cost']);self.assertNotIn('outstanding_final_criteria',result)
         receipt=next(iter(self.h.authority.receipts.values()))
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
-        self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
     def test_real_advancing_clock_is_admitted_and_reviewed(self):
         # D1: a clock read taken before observe() is older than the observation.
+        # Unknown usage still blocks approval after one admitted/reviewed call.
         ticking(self.h)
         result=self.h.run()
-        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
-        self.assertEqual(result['provider_calls'],1)
+        self.assertEqual(result['code'],'REVIEW_BUDGET_BLOCKED',result)
+        self.assertEqual(result['status'],'BLOCKED')
+        self.assertEqual(result['provider_calls'],1);self.assertEqual(result['invocation_status'],'FAKE_RETURNED')
+        receipt=next(iter(self.h.authority.receipts.values()))
+        self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
 
     def test_default_never_loads_host_or_provider(self):
         with patch.object(a,'read_host_file',side_effect=AssertionError()),patch('subprocess.Popen',side_effect=AssertionError()):
