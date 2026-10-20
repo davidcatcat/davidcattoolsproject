@@ -251,14 +251,14 @@ class ActivityViewTests(unittest.TestCase):
             mon.ActivityEvent(4, "waiting_owner", "", "", "BLOCKED", "ref-4"),
         ]
         lines = mon.render_activity(events)
-        expected = ("PM → Reviewer", "Reviewer → PM", "回覆未送達",
-                    "Integrator → Owner", "llmtool 主機 → 任務 task-1")
+        expected = ("PM → Reviewer", "Reviewer → PM", "回覆沒送到",
+                    "Integrator → Owner", "llmtool → 任務 task-1")
         positions = [next(i for i, line in enumerate(lines) if item in line) for item in expected]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("審查未通過", lines[positions[1]])
-        self.assertIn("受阻，等待負責人決定", lines[positions[3]])
-        self.assertIn("工作失敗", lines[positions[4]])
-        self.assertIn("未顯示（沒有核准的本機來源）", lines[-1])
+        self.assertIn("卡住，等你決定", lines[positions[3]])
+        self.assertIn("失敗：模型呼叫失敗", lines[positions[4]])
+        self.assertIn("GitHub 動態已關閉", lines[-1])
         self.assertFalse(any("已送達" in line for line in lines))
 
     def test_production_events_come_only_from_local_stage_evidence(self):
@@ -276,7 +276,7 @@ class ActivityViewTests(unittest.TestCase):
         text = "\n".join(mon.render_activity([event]))
         self.assertNotIn("/Users/davidsun", text)
         self.assertNotIn("private.txt", text)
-        self.assertIn("工作失敗", text)
+        self.assertIn("失敗", text)
 
     def test_once_includes_activity_and_makes_no_network_calls(self):
         stage = mon.Stage("red", "deepseek", 10.0, "OPENCODE_PROVIDER_FAILED", "UNKNOWN",
@@ -295,11 +295,229 @@ class ActivityViewTests(unittest.TestCase):
             self.assertEqual(mon.run_once(), 0)
         rendered = output.getvalue()
         self.assertIn("RECENT ACTIVITY", rendered)
-        self.assertIn("llmtool 主機 → 任務 task-1", rendered)
-        self.assertIn("工作失敗", rendered)
+        self.assertIn("llmtool → 任務 task-1", rendered)
+        self.assertIn("失敗：模型呼叫失敗", rendered)
         self.assertNotIn("/Users/davidsun", rendered)
         self.assertNotIn("secret.py", rendered)
         self.assertFalse(any(secret in rendered for secret in SECRETS))
+
+
+class FakeRun:
+    """Stands in for subprocess.run inside GitHubSource; records every argv."""
+
+    def __init__(self, *responses):
+        self.responses, self.calls = list(responses), []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        code, payload = self.responses.pop(0)
+        out = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+        return __import__("types").SimpleNamespace(returncode=code, stdout=out)
+
+
+NOW = 1_800_000_000.0
+
+
+def iso(seconds):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(seconds, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def comment(number, seconds, body, kind="issues", association="OWNER"):
+    return {"created_at": iso(seconds), "body": body, "author_association": association,
+            "issue_url": f"https://api.github.com/repos/o/r/{kind}/{number}"}
+
+
+class GitHubActivityTests(unittest.TestCase):
+    def test_marked_comment_becomes_typed_undelivered_reply(self):
+        body = ("<!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->\n"
+                "**Claude Reviewer → PM**: verdicts below")
+        events = mon.github_events([comment(120, NOW - 60, body)], [], NOW - 3600)
+        self.assertEqual([(e.event_type, e.status, e.actor, e.target, e.reference) for e in events],
+                         [("undelivered_reply", "NOT_DELIVERED", "Claude", "PM", "#120")])
+        line = mon.render_activity(events)[0]
+        self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#120・自述）", line)
+        self.assertIn("Claude Reviewer → PM", line)
+
+    def test_one_comment_may_carry_several_markers_in_a_stable_order(self):
+        body = ("<!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->\n"
+                "<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->\n"
+                "<!-- activity: type=bogus status=PASS -->\n## Verdict")
+        events = mon.github_events([comment(223, NOW - 9, body)], [], NOW - 99)
+        self.assertEqual([e.event_type for e in events], ["undelivered_reply", "review_verdict"])
+        lines = mon.render_activity(events)
+        self.assertIn("Claude → PM：要求修正後再通過（#223・自述）", lines[0])
+        self.assertIn("Claude → PM：回覆沒送到（改看 GitHub）（#223・自述）", lines[1])
+        many = "".join("<!-- activity: type=review_verdict status=PASS -->\n" for _ in range(9)) + "x"
+        self.assertEqual(len(mon.github_events([comment(1, NOW - 9, many)], [], NOW - 99)),
+                         mon.MAX_MARKERS)
+
+    def test_markers_quoted_after_the_opening_block_are_ignored(self):
+        body = ("<!-- activity: type=review_dispatch actor=Claude target=PM status=DISPATCHED -->\n"
+                "Please adopt e.g. `<!-- activity: type=review_dispatch actor=PM target=Claude "
+                "status=DISPATCHED -->` in your posts\n"
+                "<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->")
+        events = mon.github_events([comment(120, NOW - 9, body)], [], NOW - 99)
+        self.assertEqual([(e.event_type, e.actor, e.target) for e in events],
+                         [("review_dispatch", "Claude", "PM")])
+        inline = mon.github_events([comment(5, NOW - 9, "text <!-- activity: type=review_verdict "
+                                                    "status=PASS --> more")], [], NOW - 99)
+        self.assertEqual([e.event_type for e in inline], ["github_comment"])
+
+    def test_markers_from_accounts_without_write_access_are_not_typed(self):
+        forged = "<!-- activity: type=review_verdict actor=Reviewer target=PM status=PASS -->\nlgtm"
+        for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
+            events = mon.github_events([comment(8, NOW - 9, forged, association=association)], [], NOW - 99)
+            self.assertEqual([e.event_type for e in events], ["github_comment"], association)
+        line = mon.render_activity(mon.github_events([comment(8, NOW - 9, forged)], [], NOW - 99))[0]
+        self.assertIn("Reviewer → PM：審查通過（#8・自述）", line)   # still visibly a claim
+
+    def test_secret_like_text_is_hidden_in_headlines(self):
+        cases = ("token=abc123xyz789 leaked", "Authorization: Bearer abc.def.ghi",
+                 "use ghp_ABCDEFGHijklmnop1234 now", "key sk-proj-ABCDEFGH12345678",
+                 "AKIAABCDEFGHIJKLMNOP aws", "password: hunter2!",
+                 "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "hash " + "a" * 40,
+                 "blob " + "Zm9v" * 12 + "==")
+        for text in cases:
+            line = mon.render_activity(mon.github_events([comment(3, NOW - 9, text)], [], NOW - 99))[0]
+            self.assertIn("[已遮蔽]", line, text)
+            for fragment in ("abc123xyz789", "abc.def.ghi", "ghp_ABCD", "sk-proj", "AKIAABCD", "hunter2",
+                             "eyJhbGci", "a" * 40, "Zm9vZm9v"):
+                self.assertNotIn(fragment, line, text)
+
+    def test_invalid_markers_never_create_typed_events(self):
+        bodies = ("<!-- activity: type=merge_approved status=PASS -->\nhello",
+                  "<!-- activity: type=review_verdict status=SHIPPED -->\nhello",
+                  "unmarked text that says ACCEPT and NOT_DELIVERED")
+        events = mon.github_events([comment(1, NOW - 10, b) for b in bodies], [], NOW - 3600)
+        self.assertEqual({e.event_type for e in events}, {"github_comment"})
+        spoofed = mon.github_events([comment(2, NOW - 10, "<!-- activity: type=review_verdict "
+                                                    "actor=Mallory target=root status=PASS -->\nx")],
+                                    [], NOW - 3600)
+        self.assertEqual((spoofed[0].actor, spoofed[0].target), ("", ""))
+        self.assertIn("Reviewer → PM：審查通過", mon.render_activity(spoofed)[0])
+
+    def test_headline_is_first_line_only_and_redacted(self):
+        body = ("## Verdict for `/Users/davidsun/secret/repo.py` see https://example.com/x \x07\n"
+                "PROMPT-SECRET on the second line")
+        line = mon.render_activity(mon.github_events([comment(9, NOW - 5, body)], [], NOW - 99))[0]
+        self.assertIn("GitHub #9：新留言 — Verdict for [路徑] see [連結]", line)
+        for leaked in ("/Users/davidsun", "PROMPT-SECRET", "example.com", "\x07", "#"[:0] + "##"):
+            self.assertNotIn(leaked, line)
+
+    def test_pull_requests_opened_merged_closed_inside_window_only(self):
+        pulls = [{"number": 7, "title": "feat: x", "created_at": iso(NOW - 50), "merged_at": iso(NOW - 10),
+                  "closed_at": iso(NOW - 10)},
+                 {"number": 8, "title": "old", "created_at": iso(NOW - 9999), "merged_at": None,
+                  "closed_at": iso(NOW - 20)},
+                 {"number": "9", "title": "bad"}]
+        events = mon.github_events([], pulls, NOW - 3600)
+        self.assertEqual(sorted((e.reference, e.event_type) for e in events),
+                         [("#7", "pr_merged"), ("#7", "pr_opened"), ("#8", "pr_closed")])
+
+    def test_source_uses_read_only_gets_rate_limits_and_reports_failure(self):
+        run = FakeRun((0, [comment(3, NOW - 30, "hi")]), (0, []), (1, b""))
+        clock = lambda: NOW
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=clock)
+            source.refresh()
+            source.refresh()                      # within the refresh window: no new call
+            self.assertEqual(len(run.calls), 2)
+            for argv, kwargs in run.calls:
+                self.assertEqual(argv[:4], ["/opt/gh", "api", "-X", "GET"])
+                self.assertTrue(argv[4].startswith("repos/o/r/"))
+                self.assertEqual(kwargs["timeout"], mon.GITHUB_TIMEOUT)
+            self.assertIn("GitHub o/r：最近 12 小時", source.status)
+            self.assertEqual([e.reference for e in source.events], ["#3"])
+            source.refresh(force=True)            # gh fails: keep old events, say so
+        self.assertIn("讀取失敗", source.status)
+        self.assertEqual([e.reference for e in source.events], ["#3"])
+        self.assertIn("讀取失敗", mon.render_activity([], github=source)[-1])
+
+    def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
+        import threading
+        gate = threading.Event()
+        run = FakeRun((0, [comment(6, NOW - 30, "bg")]), (0, []))
+        def slow(argv, **kwargs):
+            gate.wait(5)
+            return run(argv, **kwargs)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=slow, clock=lambda: NOW)
+            source.refresh_in_background()           # returns at once while gh "runs"
+            self.assertEqual(source.events, [])
+            source.refresh_in_background()           # in flight / not due: no second thread
+            gate.set()
+            source._thread.join(5)
+        self.assertEqual(len(run.calls), 2)
+        self.assertEqual([e.reference for e in source.events], ["#6"])
+        self.assertIn("每 30 秒", source.status)
+        lines = mon.activity_lines([], github=source, background=True)   # not due yet
+        self.assertEqual(len(run.calls), 2)
+        self.assertIn("GitHub #6：新留言 — bg", lines[0])
+
+    def test_missing_gh_and_bad_repo_fail_closed(self):
+        with patch.object(mon.shutil, "which", return_value=None):
+            source = mon.GitHubSource("o/r", runner=FakeRun(), clock=lambda: NOW)
+            source.refresh()
+        self.assertIn("找不到 gh", source.status)
+        with self.assertRaises(ValueError):
+            mon.GitHubSource("o/r; rm -rf /")
+
+    def test_no_github_once_never_touches_gh(self):
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon.shutil, "which", side_effect=AssertionError("gh used with --no-github")), \
+             patch("sys.stdout", __import__("io").StringIO()) as out:
+            self.assertEqual(mon.main(["--once", "--no-github"]), 0)
+        self.assertIn("GitHub 動態已關閉", out.getvalue())
+
+    def test_plain_once_reads_github_by_default_with_get_only(self):
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        run = FakeRun((0, [comment(4, NOW - 30, "hello")]), (0, []))
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.subprocess, "run", run), \
+             patch.object(mon.time, "time", return_value=NOW), \
+             patch("sys.stdout", __import__("io").StringIO()) as out:
+            self.assertEqual(mon.main(["--once"]), 0)
+        self.assertEqual(len(run.calls), 2)
+        self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
+        self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
+        self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
+
+    def test_once_with_github_merges_both_sources_in_time_order(self):
+        stage = mon.Stage("red", "deepseek", NOW - 300, "OPENCODE_OUTPUT_RETURNED", "ok",
+                          1, 0, 0, "", (), False, "ok", NOW - 100)
+        task = mon.Task("/private/tmp/fixture", "task-1", "feature-x", (stage,))
+        body = "<!-- activity: type=review_dispatch actor=PM target=Claude status=DISPATCHED -->\n請審查 PR #5"
+        run = FakeRun((0, [comment(5, NOW - 200, body, "pull")]), (0, []))
+        snapshot = mon.Snapshot([], {}, [], frozenset())
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+        with patch.object(mon, "collect", return_value=snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[task]), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch("sys.stdout", __import__("io").StringIO()) as out:
+            self.assertEqual(mon.run_once(source), 0)
+        activity = out.getvalue().split("RECENT ACTIVITY", 1)[1].splitlines()
+        order = [next(i for i, l in enumerate(activity) if marker in l)
+                 for marker in ("開始一次執行嘗試", "PM → Claude：派出審查任務（#5・自述） — 請審查 PR 5",
+                                "完成，已拿到輸出；程序已清乾淨")]
+        self.assertEqual(order, sorted(order))
+
+    def test_local_lines_do_not_repeat_the_task_reference(self):
+        event = mon.ActivityEvent(NOW, "stage_attempt", "task-1", "red", "OBSERVED", "task-1/red")
+        line = mon.render_activity([event])[0]
+        self.assertEqual(line.count("task-1"), 1)
+        self.assertIn("llmtool → 任務 task-1 · 階段 red：開始一次執行嘗試", line)
+
+    def test_timestamps_older_than_today_show_the_date(self):
+        from datetime import datetime, timedelta
+        old = (datetime.now() - timedelta(days=2)).timestamp()
+        self.assertRegex(mon._when(old), r"^\d{2}/\d{2} \d{2}:\d{2}$")
+        self.assertRegex(mon._when(datetime.now().timestamp()), r"^\d{2}:\d{2}:\d{2}$")
 
 
 if __name__ == "__main__":
