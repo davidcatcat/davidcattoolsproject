@@ -6,19 +6,20 @@ of those claims. No CLI/environment/file grants, automatic retry, shared service
 Git mutation or durable queue are installed here. Returned text is untrusted DATA.
 """
 import hashlib
+import base64
 import os
 from pathlib import Path
 import re
 import secrets
 import selectors
-import sqlite3
+import socket
 import stat
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .action_contract import TaskBinding, _hex, _path
 from .errors import LLMToolError
@@ -265,6 +266,7 @@ def _environment(job, config, password):
         XDG_DATA_HOME=str(state/'data'),XDG_CACHE_HOME=str(state/'cache'),
         XDG_STATE_HOME=str(state/'state'),TMPDIR=str(state/'tmp')+'/',
         OPENCODE_CONFIG_DIR=str(state/'config'),OPENCODE_CONFIG_CONTENT=config.decode(),
+        OPENCODE_DB=':memory:',
         OPENCODE_CONFIG_PROJECT_DISABLE='1',OPENCODE_DISABLE_CLAUDE_CODE='1',
         OPENCODE_DISABLE_FFF='1',OPENCODE_FILEWATCHER_DISABLE='1',
         OPENCODE_PASSWORD=password,NO_COLOR='1',TERM='dumb')
@@ -335,85 +337,240 @@ def _session(raw):
     return sid
 
 
-def _persisted(job, sid, title, started_ms, deadline):
-    """Read only this invocation's native session, never credential/history rows.
-
-    V2.0.32 can omit the final step_finish. CLI exit/EOF is insufficient: the
-    actual private database must show a new matching succeeded session and final
-    completed assistant message, with the exact pinned model/agent/directory.
-    """
+def _server_json(url, route, password, deadline):
+    """Read one bounded response from the owned loopback OpenCode server."""
     _clock(deadline)
-    path=Path(job.runtime.state_root)/'data/opencode/opencode.db'
-    physical_directory(path.parent)
-    info=path.lstat()
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or
-            stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1 or info.st_size>16*LIMIT):
-        reject('OPENCODE_COMPLETION_UNKNOWN')
-    db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,timeout=min(.1,max(0,deadline-time.monotonic())))
+    parsed=urlsplit(url)
+    if (parsed.scheme!='http' or parsed.hostname!='127.0.0.1' or parsed.username or
+            parsed.password or parsed.query or parsed.fragment or parsed.path not in ('','/')):
+        reject('OPENCODE_RUNTIME_INVALID')
+    if (type(route) is not str or not route.startswith('/') or
+            any(ord(char)<0x20 or ord(char)==0x7f for char in route)):
+        reject('OPENCODE_RUNTIME_INVALID')
+    try: target=route.encode('ascii')
+    except UnicodeEncodeError: reject('OPENCODE_RUNTIME_INVALID')
+    try: port=parsed.port or 80
+    except ValueError: reject('OPENCODE_RUNTIME_INVALID')
+    if not 1<=port<=65535: reject('OPENCODE_RUNTIME_INVALID')
+    authorization=base64.b64encode(('opencode:'+password).encode()).decode('ascii')
+    host='127.0.0.1' if port==80 else '127.0.0.1:%d'%port
+    request=(b'GET '+target+b' HTTP/1.1\r\nHost: '+host.encode('ascii')+
+             b'\r\nAuthorization: Basic '+authorization.encode('ascii')+
+             b'\r\nAccept: application/json\r\nConnection: close\r\n\r\n')
+    sock=None; data=None
     try:
-        db.set_progress_handler(lambda: int(time.monotonic()>=deadline),1000)
-        db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
-        row=db.execute('SELECT directory,version,agent,model,title,time_created,time_idle,'
-            'idle_outcome,tokens_input,tokens_output,cost,tokens_reasoning,tokens_cache_read,'
-            'tokens_cache_write FROM session_v2 WHERE id=?',(sid,)).fetchone()
-        if (row is None or row[0]!=job.agent.root or row[1]!=job.runtime.version or
-                row[2]!=AGENT or row[4]!=title or type(row[5]) is not int or row[5]<started_ms or
-                type(row[6]) is not int or row[6]<row[5] or row[7]!='succeeded'):
-            reject('OPENCODE_OUTPUT_INCOMPLETE')
-        model=load_json(row[3],1024)
-        if model.get('providerID')+'/'+model.get('id')!=job.model:
-            reject('OPENCODE_MODEL_DRIFT')
-        if type(row[10]) not in (int,float) or row[10]!=0:
-            reject('OPENCODE_COST_UNKNOWN')
-        rows=db.execute('SELECT id,type,CASE WHEN length(data)<=? THEN data END FROM session_message '
-            'WHERE session_id=? ORDER BY seq LIMIT ?',
-            (TEXT_LIMIT,sid,job.max_steps+9)).fetchall()
-        if len(rows)>job.max_steps+8: reject('OPENCODE_OUTPUT_LIMIT')
-        assistants=[]; idle=False
-        for message_id,kind,data in rows:
-            if data is None: reject('OPENCODE_OUTPUT_LIMIT')
-            item=load_json(data,TEXT_LIMIT)
-            if kind=='idle': idle=item.get('outcome')=='succeeded'
-            if kind!='assistant': continue
-            if (item.get('agent')!=AGENT or type(item.get('model')) is not dict or
-                    item['model'].get('providerID')+'/'+item['model'].get('id')!=job.model):
-                reject('OPENCODE_MODEL_DRIFT')
-            if (type(item.get('time',{}).get('completed')) is not int or
-                    item['time']['completed']<row[5]): reject('OPENCODE_OUTPUT_INCOMPLETE')
-            if type(item.get('cost')) not in (int,float) or item['cost']!=0:
-                reject('OPENCODE_COST_UNKNOWN')
-            assistants.append(item)
-        if (not idle or not assistants or len(assistants)>job.max_steps or
-                assistants[-1].get('finish')!='stop'):
-            reject('OPENCODE_OUTPUT_INCOMPLETE')
-        calls=[]; raw_usage=[]
-        for item in assistants:
-            tokens=item.get('tokens',{})
-            cache=tokens.get('cache',{}) if type(tokens) is dict else {}
-            counts=([tokens.get('input'),tokens.get('output'),tokens.get('reasoning'),
-                     cache.get('read'),cache.get('write')]
-                    if type(tokens) is dict and type(cache) is dict else [])
-            # Native components are disjoint. Missing/zero-filled provider usage
-            # is not evidence of a completed paid step: require a positive total.
-            known=(len(counts)==5 and all(type(x) is int and 0<=x<=10**9 for x in counts)
-                   and sum(counts)>0)
-            raw_usage.append(tuple(counts) if known else None)
-            calls.append(CallUsage(CallPhase.PRIMARY if job.phase=='DEVELOP' else CallPhase.REVIEW,
-                counts[0]+counts[3]+counts[4] if known else None,
-                counts[1]+counts[2] if known else None))
-        if all(x.known for x in calls) and tuple(sum(c[i] for c in raw_usage) for i in range(5))!=(
-                row[8],row[9],row[11],row[12],row[13]):
-            reject('OPENCODE_USAGE_UNKNOWN')
-        text=''.join(x.get('text','') for x in assistants[-1].get('content',())
-                     if type(x) is dict and x.get('type')=='text')
-        if not text or len(text.encode('utf-8'))>TEXT_LIMIT: reject('OPENCODE_OUTPUT_INCOMPLETE')
+        remaining=deadline-time.monotonic()
+        if remaining<=0: reject('OPENCODE_TIMEOUT')
+        sock=socket.create_connection(('127.0.0.1',port),timeout=remaining)
         _clock(deadline)
-        after=path.lstat()
-        if (info.st_dev,info.st_ino,info.st_mode,info.st_uid)!=(
-                after.st_dev,after.st_ino,after.st_mode,after.st_uid):
+        sock.setblocking(False)
+        with selectors.DefaultSelector() as selector:
+            selector.register(sock,selectors.EVENT_READ)
+            def wait(event):
+                remaining=deadline-time.monotonic()
+                if remaining<=0: reject('OPENCODE_TIMEOUT')
+                selector.modify(sock,event)
+                if not selector.select(remaining): reject('OPENCODE_TIMEOUT')
+                _clock(deadline)
+            pending=memoryview(request)
+            while pending:
+                wait(selectors.EVENT_WRITE)
+                try: sent=sock.send(pending)
+                except BlockingIOError: continue
+                if sent<=0: reject('OPENCODE_COMPLETION_UNKNOWN')
+                pending=pending[sent:]
+            selector.modify(sock,selectors.EVENT_READ)
+            buffered=bytearray();header_total=0
+            def receive():
+                while True:
+                    _clock(deadline)
+                    if not selector.select(max(0,deadline-time.monotonic())):
+                        reject('OPENCODE_TIMEOUT')
+                    _clock(deadline)
+                    try: chunk=sock.recv(8192)
+                    except BlockingIOError: continue
+                    _clock(deadline)
+                    return chunk
+            def line(cap,count_header=True):
+                nonlocal header_total
+                while True:
+                    end=buffered.find(b'\r\n')
+                    if end>=0:
+                        if end>cap: reject('OPENCODE_COMPLETION_UNKNOWN')
+                        result=bytes(buffered[:end]);del buffered[:end+2]
+                        if count_header:
+                            header_total+=end+2
+                            if header_total>16384: reject('OPENCODE_COMPLETION_UNKNOWN')
+                        return result
+                    if len(buffered)>cap: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    chunk=receive()
+                    if not chunk: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    buffered.extend(chunk)
+            def exact(size):
+                while len(buffered)<size:
+                    chunk=receive()
+                    if not chunk: reject('OPENCODE_COMPLETION_UNKNOWN')
+                    buffered.extend(chunk)
+                result=bytes(buffered[:size]);del buffered[:size]
+                return result
+            status=line(4096).split(b' ',2)
+            if (len(status)<2 or status[0] not in (b'HTTP/1.0',b'HTTP/1.1') or
+                    len(status[1])!=3 or not status[1].isdigit() or status[1]!=b'200'):
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            headers={}
+            while True:
+                header=line(4096)
+                if not header: break
+                if header[:1] in (b' ',b'\t') or b':' not in header:
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                name,value=header.split(b':',1)
+                if not re.fullmatch(rb'[!#$%&\'*+.^_`|~0-9A-Za-z-]+',name):
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                key=name.decode('ascii').lower()
+                headers.setdefault(key,[]).append(value.strip())
+            lengths=headers.get('content-length',[])
+            encodings=headers.get('transfer-encoding',[])
+            if len(lengths)>1 or (lengths and encodings):
+                reject('OPENCODE_COMPLETION_UNKNOWN')
+            chunked=False;expected=None
+            if encodings:
+                if len(encodings)!=1 or encodings[0].lower()!=b'chunked':
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                chunked=True
+            elif lengths:
+                if re.fullmatch(rb'[0-9]+',lengths[0]) is None:
+                    reject('OPENCODE_COMPLETION_UNKNOWN')
+                expected=int(lengths[0])
+                if expected>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+            chunks=[];total=0
+            if expected is not None:
+                data=exact(expected)
+            elif chunked:
+                while True:
+                    size_text=line(128,count_header=False).split(b';',1)[0]
+                    if re.fullmatch(rb'[0-9A-Fa-f]+',size_text) is None:
+                        reject('OPENCODE_COMPLETION_UNKNOWN')
+                    size=int(size_text,16)
+                    if size>LIMIT-total: reject('OPENCODE_OUTPUT_LIMIT')
+                    if size==0:
+                        if line(4096): reject('OPENCODE_COMPLETION_UNKNOWN')
+                        break
+                    chunk=exact(size)
+                    if exact(2)!=b'\r\n': reject('OPENCODE_COMPLETION_UNKNOWN')
+                    chunks.append(chunk);total+=size
+                data=b''.join(chunks)
+            else:
+                while True:
+                    if buffered:
+                        chunk=bytes(buffered);buffered.clear()
+                    else:
+                        chunk=receive()
+                        if not chunk: break
+                    total+=len(chunk)
+                    if total>LIMIT: reject('OPENCODE_OUTPUT_LIMIT')
+                    chunks.append(chunk)
+                data=b''.join(chunks)
+    except WorkerError:
+        raise
+    except Exception:
+        if time.monotonic()>=deadline: reject('OPENCODE_TIMEOUT')
+        reject('OPENCODE_COMPLETION_UNKNOWN')
+    finally:
+        if sock is not None: sock.close()
+    _clock(deadline)  # Include socket cleanup in the absolute task deadline.
+    try:
+        result=load_json(data.decode('utf-8'),LIMIT)
+    except (UnicodeError,WorkerError):
+        reject('OPENCODE_COMPLETION_UNKNOWN')
+    if type(result) is not dict or type(result.get('data')) not in (dict,list):
+        reject('OPENCODE_COMPLETION_UNKNOWN')
+    return result['data']
+
+
+def _completed_session(job, sid, title, started_ms, url, password, deadline):
+    """Verify one fresh completed session and its usage through the private API.
+
+    OpenCode 2.0.32 supports an in-memory ``:memory:`` DB selected by
+    ``OPENCODE_DB``. The session and message endpoints keep receipt evidence in
+    the owning server process, so this check runs before that process is stopped.
+    """
+    encoded=quote(sid,safe='')
+    info=_server_json(url,'/api/session/'+encoded,password,deadline)
+    if type(info) is not dict: reject('OPENCODE_COMPLETION_UNKNOWN')
+    timeinfo=info.get('time',{})
+    location=info.get('location',{})
+    model=info.get('model')
+    def model_identity(value):
+        if (type(value) is not dict or type(value.get('providerID')) is not str or
+                type(value.get('id')) is not str):
+            return None
+        return value['providerID']+'/'+value['id']
+    if (info.get('id')!=sid or location.get('directory')!=job.agent.root or
+            info.get('agent')!=AGENT or info.get('title')!=title or
+            model_identity(model)!=job.model):
+        reject('OPENCODE_MODEL_DRIFT')
+    created=timeinfo.get('created') if type(timeinfo) is dict else None
+    idle=timeinfo.get('idle') if type(timeinfo) is dict else None
+    if (type(created) is not int or created<started_ms or type(idle) is not int or
+            idle<created or info.get('outcome')!='succeeded'):
+        reject('OPENCODE_OUTPUT_INCOMPLETE')
+    if type(info.get('cost')) not in (int,float) or info['cost']!=0:
+        reject('OPENCODE_COST_UNKNOWN')
+
+    limit=job.max_steps+9
+    messages=_server_json(url,f'/api/session/{encoded}/message?order=asc&limit={limit}',
+                          password,deadline)
+    if type(messages) is not list or len(messages)>job.max_steps+8:
+        reject('OPENCODE_OUTPUT_LIMIT')
+    assistants=[]; message_ids=set()
+    for item in messages:
+        # The authenticated endpoint URL scopes these projected records to ``sid``;
+        # v2.0.32 PublicSessionMessage has no sessionID field.
+        if (type(item) is not dict or type(item.get('id')) is not str or
+                not item['id'].startswith('msg_') or item['id'] in message_ids):
             reject('OPENCODE_COMPLETION_UNKNOWN')
-        return text,tuple(calls),tuple(raw_usage)
-    finally: db.close()
+        message_ids.add(item['id'])
+        if item.get('type')!='assistant': continue
+        if (item.get('agent')!=AGENT or model_identity(item.get('model'))!=job.model):
+            reject('OPENCODE_MODEL_DRIFT')
+        msgtime=item.get('time',{})
+        if (type(msgtime) is not dict or type(msgtime.get('created')) is not int or
+                type(msgtime.get('completed')) is not int or msgtime['completed']<created):
+            reject('OPENCODE_OUTPUT_INCOMPLETE')
+        if type(item.get('cost')) not in (int,float) or item['cost']!=0:
+            reject('OPENCODE_COST_UNKNOWN')
+        assistants.append(item)
+    if (not assistants or len(assistants)>job.max_steps or
+            assistants[-1].get('finish')!='stop'):
+        reject('OPENCODE_OUTPUT_INCOMPLETE')
+
+    def counts_for(value):
+        tokens=value.get('tokens',{}) if type(value) is dict else {}
+        cache=tokens.get('cache',{}) if type(tokens) is dict else {}
+        return ([tokens.get('input'),tokens.get('output'),tokens.get('reasoning'),
+                 cache.get('read'),cache.get('write')]
+                if type(tokens) is dict and type(cache) is dict else [])
+
+    calls=[]; raw_usage=[]
+    for item in assistants:
+        counts=counts_for(item)
+        known=(len(counts)==5 and all(type(x) is int and 0<=x<=10**9 for x in counts)
+               and sum(counts)>0)
+        raw_usage.append(tuple(counts) if known else None)
+        calls.append(CallUsage(CallPhase.PRIMARY if job.phase=='DEVELOP' else CallPhase.REVIEW,
+            counts[0]+counts[3]+counts[4] if known else None,
+            counts[1]+counts[2] if known else None))
+    if all(call.known for call in calls):
+        session_counts=counts_for(info)
+        if (len(session_counts)!=5 or not all(type(x) is int and 0<=x<=10**9 for x in session_counts) or
+                tuple(sum(counts[i] for counts in raw_usage) for i in range(5))!=tuple(session_counts)):
+            reject('OPENCODE_USAGE_UNKNOWN')
+    text=''.join(x.get('text','') for x in assistants[-1].get('content',())
+                 if type(x) is dict and x.get('type')=='text')
+    if not text or len(text.encode('utf-8'))>TEXT_LIMIT:
+        reject('OPENCODE_OUTPUT_INCOMPLETE')
+    _clock(deadline)
+    return text,tuple(calls),tuple(raw_usage)
 
 
 def run_worker(job, host):
@@ -442,6 +599,7 @@ def run_worker(job, host):
     deadline=started+min(600,max(0,(job.budget.wall_clock_ms-(job.usage.elapsed_ms or 0))/1000))
     work_deadline=deadline-min(5,(deadline-started)*.2)
     token=None; launched=False; code='OPENCODE_HOST_UNKNOWN'; content=None;sid=None
+    completion=None
     ledger=job.usage; pipes=None; holders=[]; output=b''; facts=[]; raw_usage=()
     observation_failed=False
     evidence='OFFLINE_FIXTURE' if getattr(host,'test_only',None) is True else 'HOST_OBSERVED'
@@ -476,6 +634,8 @@ def run_worker(job, host):
                         parsed.username or parsed.password or not parsed.port or parsed.query or
                         parsed.fragment or parsed.path not in ('','/')):
                     reject('OPENCODE_RUNTIME_INVALID')
+                if env.get('OPENCODE_DB') != ':memory:':
+                    reject('OPENCODE_RUNTIME_INVALID')
                 host.prepare_server(token,job,url,env['OPENCODE_PASSWORD'],work_deadline)
                 host.check(token,job,'before-client');_clock(work_deadline)
                 client=CLIProcessLifecycle('opencode-cli',deadline=deadline)
@@ -507,6 +667,8 @@ def run_worker(job, host):
                     sid=_session(output)
                     if sid==job.agent.session_id: reject('OPENCODE_IDENTITY_REUSE')
                     if child.returncode!=0: reject('OPENCODE_PROVIDER_FAILED')
+                    completion=_completed_session(job,sid,title,started_ms,url,
+                                                  env['OPENCODE_PASSWORD'],work_deadline)
             finally:
                 if server.process is not None and server.process.stdin is not None:
                     server.process.stdin.close()  # Release only this private server's lease.
@@ -526,7 +688,8 @@ def run_worker(job, host):
         if observation_failed: reject('OPENCODE_CLEANUP_UNKNOWN')
         if any(not x.cleanup_confirmed for x in holders): reject('OPENCODE_CLEANUP_UNKNOWN')
         if server.process.returncode!=0: reject('OPENCODE_RUNTIME_UNKNOWN')
-        content,calls,raw_usage=_persisted(job,sid,title,started_ms,deadline)
+        if completion is None: reject('OPENCODE_COMPLETION_UNKNOWN')
+        content,calls,raw_usage=completion
         ledger=UsageLedger(job.usage.calls+calls,job.usage.repair_attempts,
                            (job.usage.elapsed_ms or 0)+int((time.monotonic()-started)*1000))
         assessment=assess_budget(job.budget,ledger)
@@ -535,7 +698,7 @@ def run_worker(job, host):
         code='OPENCODE_OUTPUT_RETURNED'
     except WorkerError as error: code=error.worker_code
     except _Cancelled: raise
-    except (OSError,ValueError,TypeError,KeyError,LLMToolError,sqlite3.Error,subprocess.SubprocessError):
+    except (OSError,ValueError,TypeError,KeyError,LLMToolError,subprocess.SubprocessError):
         code='OPENCODE_RUNTIME_UNKNOWN'
     except Exception:
         code='OPENCODE_HOST_UNKNOWN'
