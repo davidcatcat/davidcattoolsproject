@@ -10,14 +10,14 @@ Use for Git synchronization and publication. [AGENTS.md](../../AGENTS.md) owns r
 ## Owner D6 — dynamic task-scoped worktrees
 
 <a id="owner-d6-2026-10-19-dynamic-task-scoped-worktree-lifecycle--new-normative-policy"></a>
-D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. New task roots use the host-owned registration contract in the [D6 worktree reference](worktree-lifecycle.md), which defines the physical parent, registry path/schema, owner-only modes and fail-closed retention. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree must not check out `main`; Developers and Reviewers do not fetch unclaimed refs in the canonical Integrator checkout.
+D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. Follow the normative [D6 lifecycle and registry reference](worktree-lifecycle.md) for all create, canonical-root handoff, retain and retire decisions. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree must not check out `main`; Developers and Reviewers do not fetch unclaimed refs in the canonical Integrator checkout.
 
 Before creating a worktree:
 1. Verify repository identity, common Git directory, workspace parent, task owner and clean source state.
 2. Use a unique task root and branch based on the approved SHA. Register the exact root/branch/owner; assign one writer.
 3. Isolate runtime/import/build state. Verify root, branch, HEAD and status before work.
 
-Retire only after merge and task acceptance, published source/evidence and final source/inventory binding, and verified absence of active sessions, owners, children or processes. Classify tracked, untracked and ignored files; check locks and repository/worktree state. Use ordinary non-forced removal only when clean and unambiguous. Preserve active, dirty, evidence-bearing or uncertain work. Never alter the canonical checkout.
+Do not create or retire a D6 tree based only on this summary; follow the complete acceptance, inventory, ignored-file and process-release gates in the linked lifecycle reference. Preserve active, dirty, evidence-bearing or uncertain work. Never alter the canonical checkout.
 
 <a id="owner-approved-two-agent-developer-worktree-exception-not-activated"></a>
 The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
@@ -26,7 +26,7 @@ The old G1–G7 fixed-root pilot is historical and archived in [policy history](
 
 At task start and completion, bind source, owner, root, branch, HEAD and the permitted file/inventory set. Verify task-base originals and current source; candidate code or a reviewer packet is not itself an acceptance baseline. Do not repin after drift without recording the change and rechecking affected evidence.
 
-For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. D6 retirement also requires no active owner/children and the accepted task's final source/inventory evidence. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
+For runtime-bound tasks, preserve exact interpreter/import provenance, effective permissions and hook evidence separately from user-granted settings. Unknown ownership, source drift, crash, unreleased process/session or ambiguous ignored/untracked data means STOP and preserve the worktree. Published PR-head evidence must match the actual local candidate; do not infer it from a commit claim.
 
 ## Before any Git mutation
 
@@ -48,13 +48,13 @@ Confirm repository, branch, HEAD, upstream and worktree ownership. Bind task-sta
 
 ## Fetch and synchronize
 
-Fetch only when the task requires remote state and the root/branch is verified. Compare local and remote refs; do not infer remote state from stale tracking refs. Fast-forward only when the local tree is clean and strictly behind. Do not reset, rewrite published history, force push or clean. On divergence, preserve both sides and resolve in a task branch after reviewing the diff.
+Fetch only when the task requires remote state and the root/branch is verified. Compare local and remote refs; do not infer remote state from stale tracking refs. Fast-forward only when the local tree is clean and strictly behind. Do not use `reset --hard`, `clean`/`clean -fd`, force checkout/switch, `switch -B`, force push or history rewrite. Never stash unrelated work. On divergence, preserve both sides and resolve in a task branch after reviewing the diff.
 
 ## Commit and publish
 
 Stage only task-named files. Inspect staged names and the full staged diff; run `git diff --cached --check` and task-required validation. Commit only the approved scope. Push normally and verify remote branch SHA, PR head, exact CI and review provenance.
 
-For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence.
+For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence. If the environment cannot write `.git`, do not create another checkout or move to `/tmp`; preserve source changes in the authorized repository and give the exact staging/commit/push commands for that root.
 
 ## PR review and merge
 
@@ -62,4 +62,4 @@ Before merge, verify current base/head, exact-head CI, formal non-author review 
 
 ## Cloud and evidence
 
-Cloud uses only its task-configured checkout; verify repository, branch, HEAD and remote before mutation. Do not claim Cloud publication proves Mac execution. Record exact source SHA and results; distinguish PR/issue publication from live Session delivery.
+Cloud uses only its task-configured checkout. Verify it is `davidcatcat/davidcattoolsproject` and record branch, HEAD and remote before mutation; if identity/root cannot be established, STOP. Never assume `/workspace`. Do not claim Cloud publication proves Mac execution. Record exact source SHA and results; distinguish PR/issue publication from live Session delivery.
