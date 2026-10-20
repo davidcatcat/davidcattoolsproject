@@ -111,7 +111,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent Claude Reviewer → Integrator path in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). The one-time D4 Live Smoke must succeed before the first real OpenCode Developer package; proceed immediately after success. The old one-round S3 stop is historical, not a replacement for this Smoke condition.
+Follow the bounded Developer → independent Claude Reviewer → Integrator path in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Follow the D4 sequence in the [D8/D8a decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md); earlier D7/S3 wording is historical.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
