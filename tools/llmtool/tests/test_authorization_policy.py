@@ -414,17 +414,12 @@ class NoProductionAuthorityTests(unittest.TestCase):
                 self.assertEqual([ast.dump(n) for n in body],
                                  [ast.dump(ast.parse('return UnavailableReviewAuthority()').body[0])])
         # R-A/R-B: exact reviewed additions, no filename-wide exemption.
-        self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer'),
-            ('codex_pickup_native.py','NativePickupIssuer','HostIssuer')})
+        self.assertEqual(issuers, {('review_authority.py', 'ProductionReviewIssuer', 'HostIssuer')})
         self.assertEqual(imports, {
             ('review_authority.py', 'authorization_policy', frozenset({
                 'HostIssuer', 'IssuerClass', 'Decision', 'ProviderReviewBinding',
                 'ProviderObservedState', 'decide_provider_review'})),
             ('review_authority.py', 'authorization_ledger', frozenset({'ReceiptLedger', 'LedgerError'})),
-            ('codex_handoff_transport.py','authorization_policy',frozenset({
-                'NotificationBinding','NotificationObserved','NotificationDecision','Decision','decide_notification'})),
-            ('codex_handoff_transport.py','authorization_ledger',frozenset({'ReceiptLedger'})),
-            ('codex_pickup_native.py','authorization_policy',frozenset({'HostIssuer','IssuerClass','NotificationBinding'})),
             ('review_handoff.py','authorization_ledger',frozenset({'ReceiptLedger'})),
         })
         # R-C: base relative dependencies plus only the accepted lazy increments.
@@ -498,8 +493,8 @@ if __name__ == '__main__':
 
 class NotificationPolicyTests(unittest.TestCase):
     def setUp(self):
-        from test_codex_handoff_transport import Trial
-        self.t=Trial();self.addCleanup(self.t.close)
+        from notification_fixture import NotificationFixture
+        self.t=NotificationFixture();self.addCleanup(self.t.close)
     def observed(self,**changes):
         return p.NotificationObserved(self.t.binding.digest,self.t.binding.host_pin,**dict(
             attested=True,idle=True,queue_empty=True,exclusive=True,no_tools=True,
@@ -538,8 +533,8 @@ class NotificationPolicyTests(unittest.TestCase):
 
 class NativeDeltaPolicyTests(unittest.TestCase):
     def test_audit_only_is_separate_and_requires_whole_binding_acceptance(self):
-        from test_codex_handoff_transport import DeltaTrial
-        t=DeltaTrial();self.addCleanup(t.close)
+        from notification_fixture import NotificationFixture
+        t=NotificationFixture(audit_only=True);self.addCleanup(t.close)
         o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
         self.assertIs(p.decide_notification(t.binding,issuer=t.issuer,observed=o).decision,p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
         for changes in ({'audit_coverage':False},{'risk_acceptance_digest':'f'*64}):
@@ -547,22 +542,12 @@ class NativeDeltaPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, '^notification audit acceptance missing; details omitted$'):dataclasses.replace(t.binding,risk_acceptance_digest='0'*64)
         enforced=dataclasses.replace(t.binding,tool_mode='ENFORCED_NO_TOOLS');t.issuer.binding=enforced
         self.assertIs(p.decide_notification(enforced,issuer=t.issuer,observed=dataclasses.replace(o,binding_digest=enforced.digest)).decision,p.Decision.DENY)
-    def test_native_issuer_requires_sealed_acceptance_and_cannot_authorize_d1(self):
-        from test_codex_handoff_transport import DeltaTrial
-        from llmtool import codex_pickup_native as n
-        t=DeltaTrial();self.addCleanup(t.close)
-        grant=n.NativeGrant(t.binding,'f'*64,n.PROTOCOL_SHA,n.CLI_VERSION,'reviewer-route','author-route','a'*64,'b'*64,True,'STOP_PRESERVE_CONTEXT',True,'c'*64)
-        with self.assertRaisesRegex(LLMToolError, '^review rejected; details omitted$') as refused:n.NativePickupIssuer(grant,{'accepted':True})
-        self.assertEqual(refused.exception.review_code, 'PICKUP_NOT_AUTHORIZED')
-        issuer=n._fixture_issuer(grant)
-        self.assertTrue(issuer.vouches_for(t.binding.digest));self.assertFalse(issuer.vouches_for(t.binding.grant_digest))
-        self.assertIs(allow(make_create(),make_policy(),issuer=issuer).decision,p.Decision.DENY)
 
 
 class CompositionPolicyTests(unittest.TestCase):
     def test_zero_child_topology_requires_complete_binding_and_observed_pins(self):
-        from test_codex_handoff_transport import DeltaTrial
-        t=DeltaTrial();self.addCleanup(t.close)
+        from notification_fixture import NotificationFixture
+        t=NotificationFixture(audit_only=True);self.addCleanup(t.close)
         for changes in ({'topology':'IN_PROCESS_ZERO_CHILD'},{'composition_digest':'f'*64},{'topology':'OWNED_CHILD'}):
             with self.assertRaisesRegex(LLMToolError, '^notification topology invalid; details omitted$'):dataclasses.replace(t.binding,**changes)
         b=dataclasses.replace(t.binding,topology='IN_PROCESS_ZERO_CHILD',composition_digest='f'*64)
@@ -587,8 +572,6 @@ class ExceptionSpecificityTests(unittest.TestCase):
              'provider decision invalid; details omitted'),
             (NativeDeltaPolicyTests, 'test_audit_only_is_separate_and_requires_whole_binding_acceptance',
              'notification audit acceptance missing; details omitted'),
-            (NativeDeltaPolicyTests, 'test_native_issuer_requires_sealed_acceptance_and_cannot_authorize_d1',
-             'review rejected; details omitted'),
             (CompositionPolicyTests, 'test_zero_child_topology_requires_complete_binding_and_observed_pins',
              'notification topology invalid; details omitted'),
         )
