@@ -607,14 +607,16 @@ def run_review(ready, final, expect, events, fixture):
             reject('REVIEW_PAIR_NOT_APPROVED')
         approval = fixture.approval
         approval.validate(ready, final, expect, now)
+        # Sample the clock only AFTER observe(): an observation stamps its own time
+        # last, so a clock read taken earlier is older than it and looks negative.
         before = fixture.observer.observe()
-        before.validate(expect, events, now, fixture.clock.monotonic())
+        before.validate(expect, events, clock_utc(fixture.clock), fixture.clock.monotonic())
         packet = make_packet(ready, final, expect, snapshot, approval, before, load_json(fixture.packet_input.decode(),1024*1024),
                              expected_route='FAKE_TEST_ONLY' if fake and type(fixture) is not HostServices else fixture.route['id'])
         # Packet construction must not leave time/state unchecked before effect.
+        submit = fixture.observer.observe()
         submit_now = clock_utc(fixture.clock)
         submit_mono = fixture.clock.monotonic()
-        submit = fixture.observer.observe()
         submit.validate(expect, events, submit_now, submit_mono)
         # The exact observation pinned into the packet/binding must remain fresh
         # too; a new equivalent sample cannot renew an old observation digest.
@@ -683,8 +685,8 @@ def run_review(ready, final, expect, events, fixture):
         if end < call_start or end-call_start > 120 or end-start > min(180,budget.wall_clock_ms/1000):
             reject('REVIEW_TIMEOUT')
         invocation = 'FAKE_RETURNED' if fake else 'HOST_RETURNED'
-        after_now = clock_utc(fixture.clock)
         after = fixture.observer.observe()
+        after_now = clock_utc(fixture.clock)
         after.validate(expect, events, after_now, fixture.clock.monotonic())
         _clocks_agree(submit, after)
         if fixture.approval != approval:

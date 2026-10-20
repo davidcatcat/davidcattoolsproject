@@ -29,6 +29,20 @@ print(json.dumps(out))
 '''
 
 
+def ticking(h, step=0.2):
+    """Make the synthetic Host clock advance on every monotonic read, like a real one."""
+    from datetime import datetime, timezone
+    from llmtool.task_lifecycle import utc_time
+    base=utc_time(h.fake.utc).timestamp(); mono0=h.fake.mono
+    def advance(seconds):
+        h.fake.mono+=seconds
+        h.fake.utc=datetime.fromtimestamp(int(base+(h.fake.mono-mono0)),timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    def monotonic():
+        advance(step);return h.fake.mono
+    h.clock.monotonic=monotonic
+    return advance
+
+
 class FixtureObserver(a.HostAuthorshipObserver):
     """Synthetic local facts ONLY; actual Host loader/pair/policy still exercised."""
     def _facts(self,root):
@@ -138,6 +152,13 @@ class AuthorityTests(unittest.TestCase):
         receipt=next(iter(self.h.authority.receipts.values()))
         self.assertEqual(self.h.ledger.status(receipt.nonce),'EFFECT_DONE')
         self.assertEqual(set(result['outstanding_final_criteria']),{'security','functional'})
+    def test_real_advancing_clock_is_admitted_and_reviewed(self):
+        # D1: a clock read taken before observe() is older than the observation.
+        ticking(self.h)
+        result=self.h.run()
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['provider_calls'],1)
+
     def test_default_never_loads_host_or_provider(self):
         with patch.object(a,'read_host_file',side_effect=AssertionError()),patch('subprocess.Popen',side_effect=AssertionError()):
             self.assertIsInstance(a.review_authority_factory(),r.UnavailableReviewAuthority)
@@ -553,6 +574,35 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         with patch('subprocess.Popen',side_effect=AssertionError('spawn')):
             self.assertFalse(h.authority.admit(forged).admitted)
 
+
+    def run_with_long_call(self, h, seconds, after=None):
+        from llmtool.providers import claude_cli
+        advance=ticking(h)
+        real=claude_cli.ClaudeCLIProvider._invoke_review_job
+        def slow(provider,*args,**kwargs):
+            out=real(provider,*args,**kwargs)
+            advance(seconds)          # the review took `seconds` of real time
+            if after: after()
+            return out
+        with patch.object(claude_cli.ClaudeCLIProvider,'_invoke_review_job',slow):
+            return h.run()
+
+    def test_post_call_check_survives_a_review_longer_than_five_seconds(self):
+        # D2: the pinned pre-observation is necessarily >5 s old after a real call.
+        h=self.harness()
+        result=self.run_with_long_call(h,30)
+        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+        self.assertEqual(result['provider_calls'],1)
+
+    def test_post_call_still_rejects_drift_and_calls_past_the_deadline(self):
+        h=self.harness()
+        drift=self.run_with_long_call(h,30,after=lambda:setattr(h.observer,'baseline_check',None))
+        self.assertEqual(drift['status'],'BLOCKED',drift)
+        self.assertFalse(drift['authorized'])
+        h=self.harness()
+        late=self.run_with_long_call(h,400)       # beyond the 00:05:00 pair/call deadline
+        self.assertEqual(late['status'],'BLOCKED',late)
+        self.assertNotEqual(late['code'],'REVIEW_FAKE_APPROVED')
 
     def test_deadline_and_route_rechecked_after_verdict_and_finalize(self):
         import time
