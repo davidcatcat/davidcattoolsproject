@@ -30,6 +30,7 @@ For runtime-bound tasks, preserve exact interpreter/import provenance, effective
 
 ## Before any Git mutation
 
+<a id="required-daily-executable-preflight-b-min"></a>
 For source/Git mutations in a claimed Mac workspace, run the required [read-only executable preflight](preflight-reference.md) with explicit, independently established expectations. Any nonzero result means preserve the state and stop; it does not authorize the workspace or replace D6 registration. GitHub API documentation edits follow their pinned-base procedure below and do not require a local Mac CLI preflight.
 
 At the actual task root, record:
@@ -62,4 +63,5 @@ Before merge, verify current base/head, exact-head CI, formal non-author review 
 
 ## Cloud and evidence
 
+<a id="d-007-codex-cloud--github-branch-separation-owner-decision-2026-10-17"></a>
 Cloud uses only its task-configured checkout. Verify it is `davidcatcat/davidcattoolsproject` and record branch, HEAD and remote before mutation; if identity/root cannot be established, STOP. Never assume `/workspace`. Do not claim Cloud publication proves Mac execution. Record exact source SHA and results; distinguish PR/issue publication from live Session delivery.
