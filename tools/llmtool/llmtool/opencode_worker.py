@@ -123,12 +123,20 @@ class WorkerResult:
 
 
 def configuration(job):
-    """V2 ordered permissions: no implicit shell/search/subagent/MCP access."""
+    """V2 ordered permissions: no implicit shell/search/subagent/MCP access.
+
+    The pinned model's ``limit.output`` is overridden with the job budget, so every
+    native provider request carries that completion cap (OpenCode 2.0.32 sends it as
+    ``max_completion_tokens``) before any token is generated.
+    """
+    provider, model = job.model.split('/', 1)
     rules = [dict(action='*',resource='*',effect='deny')]
     rules += [dict(action='read',resource=p,effect='allow') for p in job.read_paths]
     if job.phase == 'DEVELOP':
         rules += [dict(action='edit',resource=p,effect='allow') for p in job.write_paths]
     return dict(model=job.model,default_agent=AGENT,share='disabled',snapshots=False,
+        providers={provider: dict(models={model: dict(limit=dict(
+            context=job.budget.max_input_tokens,output=job.budget.max_output_tokens))})},
         formatter=False,lsp=False,warming=False,compaction=dict(auto=False),
         skills=[],instructions=[],mcp=dict(servers={}),permissions=rules,
         policies=[dict(action='provider.use',resource='*',effect='deny'),
@@ -292,6 +300,21 @@ class _Pipes:
             self.buffers[name].extend(data)
 
 
+def _request_starts(raw):
+    """Count native step_start events: OpenCode emits one as each provider request starts."""
+    count=0
+    for line in raw.split(b'\n'):
+        try: event=load_json(line.decode('utf-8'),LIMIT)
+        except Exception: continue   # malformed lines are rejected later by _session
+        if type(event) is dict and event.get('type')=='step_start': count+=1
+    return count
+
+
+def _allowed_requests(job):
+    remaining=job.budget.max_provider_calls-len(job.usage.calls)
+    return max(0,min(job.max_steps,remaining))
+
+
 def _session(raw):
     """Native JSON events identify DATA, never execution or completion authority."""
     sid=None
@@ -399,8 +422,12 @@ def run_worker(job, host):
     Private serve--stdio and run--server are BOTH direct owned children. Closing
     the server's stdin is its lease release. No sampled/escaped PID is signalled.
     One CLI job is atomic for token admission: several native model steps may
-    run before usage can be assessed. Step count is bounded; per-step token/HTTP
-    retry enforcement is NOT provided. Dependent jobs must stop on UNKNOWN/excess.
+    run before usage can be assessed. Each request is capped at
+    budget.max_output_tokens by the native config; total usage is still assessed
+    afterwards. Native provider retries cannot be disabled in OpenCode 2.0.32: the
+    job is stopped as soon as more requests start than min(max_steps, remaining
+    provider calls), so at most ONE extra request can begin before termination.
+    Dependent jobs must stop on UNKNOWN/excess.
     A caller must keep job.pending on uncertainty and never resend this attempt.
     """
     if type(job) is not WorkerJob: reject('OPENCODE_JOB_INVALID')
@@ -463,9 +490,18 @@ def run_worker(job, host):
                     os.set_blocking(child.stdin.fileno(),False)
                     pipes.input=job.prompt.encode('utf-8')
                     pipes.selector.register(child.stdin,selectors.EVENT_WRITE,'input')
+                    # OpenCode retries failed provider requests itself (2.0.32: up to ~10
+                    # times with backoff) and has no setting to disable it. Each request
+                    # starts with a step_start event, so stop the job the moment more
+                    # requests start than this job may make; the attempt stays UNKNOWN.
+                    allowed=_allowed_requests(job);starts=0;scanned=0
                     while any(k.data in ('client_out','client_err','input')
                               for k in pipes.selector.get_map().values()):
                         pipes.pump(holders)
+                        stream=pipes.buffers['client_out'];end=stream.rfind(b'\n')+1
+                        if end>scanned:
+                            starts+=_request_starts(bytes(stream[scanned:end]));scanned=end
+                            if starts>allowed: reject('OPENCODE_PROVIDER_RETRY_BLOCKED')
                     child.wait(timeout=max(0,work_deadline-time.monotonic()))
                     output=bytes(pipes.buffers['client_out'])
                     sid=_session(output)
