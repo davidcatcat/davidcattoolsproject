@@ -2,7 +2,7 @@
 
 This repository contains the user's toolbox and reusable Agent Skills.
 
-Before product engineering, review, QA or PR operations, read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) and follow [AGENTS.md](AGENTS.md) for current D6/D8/D8a authority. Claude Code's role is independent formal Reviewer/QA; Claude Monitor owns its assigned monitoring tool. A Reviewer must not approve its own implementation.
+Before product engineering, review, QA or PR operations, read [ai-team-delivery](skills/ai-team-delivery/SKILL.md) and follow [AGENTS.md](AGENTS.md) for current D6/D8/D8a authority. The authorized ChatGPT Coordinator owns technical planning and agent orchestration; the Codex Integrator handles repository PM and integration. Claude Code is the independent formal Reviewer/QA; its monitoring tool remains separately owned by Claude. Reviewer context is read-only and must not write, fetch or change refs/tests in an OpenCode-owned root. A Reviewer must not approve its own implementation.
 
 Report exact reviewed SHA, actionable findings, severity, evidence, applicable gates and disposition. Keep review findings distinct from Owner product acceptance and Git execution. Do not claim Mac/runtime/provider work without evidence from the actual tested environment.
 
