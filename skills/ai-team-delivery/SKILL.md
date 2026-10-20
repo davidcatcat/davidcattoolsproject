@@ -30,7 +30,7 @@ Submit one consolidated exact-SHA candidate to the non-author Reviewer with cont
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review. Use company-gw only for a qualified, privacy-authorized, bounded advisory route; it is not a formal Reviewer and cannot make unsupported net-savings claims.
 
 <a id="p0--sole-owner-escalation-rule-owner-decision-2026-10-10"></a>
-### Historical P0 owner-escalation anchor
+### P0 owner escalation pointer (current in AGENTS)
 
 Current Owner escalation is defined in [AGENTS.md](../../AGENTS.md); see the [normative defect triage reference](defect-triage.md) for issue disposition.
 
@@ -38,11 +38,11 @@ Current Owner escalation is defined in [AGENTS.md](../../AGENTS.md); see the [no
 
 Fix reproducible user-impacting defects under the [normative Issue #92 triage policy](defect-triage.md), in priority order: safety/data loss, blocked core workflows, degraded user-visible behavior, then maintainability. Preserve the root cause and reproducer. Use the smallest repair that addresses it; never weaken tests to clear a finding. A blocking gate stops the affected task, not unrelated authorized work.
 
-<a id="mac-operator-handoff-controller-trust-and-privacy"></a>
 ## Mac and live evidence
 
 Before runtime acceptance, establish the tested checkout, exact HEAD, installed executable path/version and required feature ancestry. Run Mac-only checks only on the actual Mac. Record commands, exits, expected markers, usage/receipt/ACK and cleanup as applicable. A resident TUI PID, model assertion, fake fixture or GitHub event alone does not prove a Host-owned Worker launch. Keep source completion, CI, formal review and live acceptance separate.
 
+<a id="owner-approved-outcome-reporting-2026-10-19"></a>
 Evidence must not contain credentials or restricted logs. Use redacted identifiers and exact source hashes. Apply [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for G1–G4 milestone checkpoints. GitHub publication is durable evidence, not proof of Session wake or notification delivery.
 
 <a id="mac-operator-handoff-controller-trust-and-privacy"></a>
