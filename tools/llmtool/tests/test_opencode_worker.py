@@ -786,6 +786,16 @@ class OpenCodeWorkerTests(unittest.TestCase):
         finally:
             process.wait(timeout=5)
 
+    def test_failed_observation_is_cleanup_stage_after_successful_lifecycle_teardown(self):
+        host=Host()
+        with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone')):
+            result=w.run_worker(self.job(),host)
+        self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
+        self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(result.failure_stage,'CLEANUP')
+        self.assertEqual(host.failure_stage,'CLEANUP')
+        self.assertEqual(host.calls[-1],('finalize','OPENCODE_CLEANUP_UNKNOWN',True))
+
     def test_nonreaping_observation_rejects_foreign_identity_and_error_types(self):
         process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.4)'])
         try:
@@ -814,10 +824,12 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 if name==self._missing: raise AttributeError(name)
                 return getattr(os,name)
         job=self.job('cancel')
+        host=Host()
         with patch.object(w,'os',OsWithout('WNOWAIT')):
             with self.assertRaises(KeyboardInterrupt):
-                w.run_worker(job,Host())
+                w.run_worker(job,host)
         self.assertEqual(job.pending,())
+        self.assertEqual(host.failure_stage,'CLEANUP')
 
     def test_earlier_worker_error_wins_over_failed_observation(self):
         # A fail-closed observation must also not replace an earlier non-cancellation
@@ -828,9 +840,12 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 if name==self._missing: raise AttributeError(name)
                 return getattr(os,name)
         with patch.object(w,'os',OsWithout('WNOWAIT')):
-            result=w.run_worker(self.job('auth'),Host())
+            host=Host()
+            result=w.run_worker(self.job('auth'),host)
         self.assertEqual(result.code,'OPENCODE_AUTH_REQUIRED',result)
         self.assertTrue(result.cleanup_confirmed)
+        self.assertEqual(result.failure_stage,'CLEANUP')
+        self.assertEqual(host.failure_stage,'CLEANUP')
 
     def test_nonreaping_observation_rejects_missing_constants_and_bad_pid(self):
         class OsWithout:

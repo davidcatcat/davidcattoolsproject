@@ -765,7 +765,9 @@ def run_worker(job, host):
         if not cleanup:
             code='OPENCODE_CLEANUP_UNKNOWN'
             mark_stage('CLEANUP')
-        else: object.__setattr__(job,'pending',())
+        else:
+            if observation_failed: mark_stage('CLEANUP')
+            object.__setattr__(job,'pending',())
         if token is not None:
             # Always reconcile after a client could have edited, including auth,
             # budget, timeout and cancellation failures. Cleanup is not a source
