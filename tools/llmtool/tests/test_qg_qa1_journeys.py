@@ -167,7 +167,7 @@ class TargetedJourneyTests(unittest.TestCase):
                 process.communicate(timeout=5)
 
     @unittest.skipUnless(os.name == 'posix', 'requires POSIX default signals')
-    def test_http_term_keeps_default_disposition_and_incomplete_record(self):
+    def test_http_term_returns_signal_status_and_finalizes_interrupted_record(self):
         import signal
         self.server.hold = True
         process = subprocess.Popen([sys.executable, '-m', 'llmtool', *self.ask, '--save-diagnostics'],
@@ -176,9 +176,15 @@ class TargetedJourneyTests(unittest.TestCase):
             self.assertTrue(self.server.received.wait(5))
             process.send_signal(signal.SIGTERM)
             out, err = process.communicate(timeout=5)
-            self.assertEqual((process.returncode, out, err), (-signal.SIGTERM, b'', b''))
+            self.assertEqual((process.returncode, out, err), (128 + signal.SIGTERM, b'', b''))
             run = next((self.state / 'runs').iterdir())
-            self.assertFalse((run / 'summary.json').exists())
+            summary = json.loads((run / 'summary.json').read_text())
+            events = [json.loads(line) for line in (run / 'trace.jsonl').read_text().splitlines()]
+            self.assertEqual(summary['status'], 'interrupted')
+            self.assertEqual(events[-1]['type'], 'run.end')
+            self.assertEqual(events[-1]['data']['status'], 'interrupted')
+            self.assertFalse((run / '.reservation').exists())
+            self.assertFalse((run / 'trace.partial.jsonl').exists())
             self.assertEqual(self.server.calls, 1)
         finally:
             self.server.release.set()

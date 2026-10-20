@@ -10,10 +10,14 @@ on:
       - main
     paths:
       - 'tools/llmtool/**'
+      - 'scripts/llmtool_monitor.py'
+      - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-ci.yml'
   pull_request:
     paths:
       - 'tools/llmtool/**'
+      - 'scripts/llmtool_monitor.py'
+      - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-ci.yml'
   workflow_dispatch:
 
@@ -178,6 +182,9 @@ jobs:
           PY
       - name: Offline canonical checks
         run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+      - name: Monitor script checks
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean
         run: |
           status=$(git status --porcelain)

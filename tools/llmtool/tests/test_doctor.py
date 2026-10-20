@@ -10,9 +10,11 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from llmtool import cli, config, doctor, diagnostics_reader as r
+from llmtool import cli, config, doctor, diagnostics as d
+from llmtool import diagnostics_reader as r
 from llmtool.diagnostics_settings import DiagnosticsSettings
 from llmtool.diagnostics_store import DiagnosticsStore, persistence_supported
+from llmtool.diagnostics_summary import RunSummary
 
 PRIVATE = 'PRIVATE_DOCTOR_PATH_MODEL_PROFILE_ORIGIN'
 SECRET = 'sk-' + 'a' * 40
@@ -143,6 +145,7 @@ class DoctorTests(DoctorFixture):
         self.assertIn('persist_metadata=false\n', result[1])
         self.assertIn('readiness=not-configured executable=not-applicable credential=not-configured', result[1])
         self.assertIn('store=absent ', result[1])
+        self.assertIn('metadata=ok damaged_count=0', result[1])
         self.assertIn('authentication and inference unverified', result[1])
         self.assertEqual(snapshot(self.base), before)
         self.assert_safe(result)
@@ -330,6 +333,7 @@ class DoctorTests(DoctorFixture):
         self.assertEqual(result[0], 0)
         self.assertIn('persistence_supported=false', result[1])
         self.assertIn('store=unsupported', result[1])
+        self.assertIn('metadata=unsupported damaged_count=0', result[1])
         self.assert_safe(result)
 
     def test_bad_home_and_unrequested_options_keep_safe_error_contract(self):
@@ -358,7 +362,88 @@ class DoctorStoreTests(DoctorFixture):
         self.addCleanup(writer.close)
         return writer
 
-    def test_existing_store_never_reads_artifact_bodies_or_writes(self):
+    def completed(self):
+        """Publish one consistent v1 run so doctor sees healthy metadata."""
+        writer = self.start()
+        started = '2026-10-04T00:00:00.000Z'
+        events = [d.DiagnosticEvent(run_id=RUN_ID, event_id=1, timestamp=started,
+                                    type=d.EventType.RUN_START, component='cli.ask',
+                                    severity=d.DiagnosticSeverity('info'),
+                                    data={'command': 'ask', 'mode': 'normal'}),
+                  d.DiagnosticEvent(run_id=RUN_ID, event_id=2, timestamp=started,
+                                    type=d.EventType.RUN_END, component='cli.ask',
+                                    severity=d.DiagnosticSeverity('error'),
+                                    data={'status': 'error', 'duration_ms': 5})]
+        for item in events:
+            self.assertTrue(writer.append(item))
+        summary = RunSummary(run_id=RUN_ID, mode=d.DiagnosticMode.NORMAL, status='error',
+                             started_at=started, ended_at=started, duration_ms=5,
+                             event_count=len(events), dropped_event_count=0,
+                             trace_bytes=writer.trace_bytes)
+        self.assertTrue(writer.finish(summary))
+        return self.state / 'runs' / RUN_ID
+
+    def test_healthy_metadata_reports_ok_and_zero(self):
+        self.completed()
+        before = snapshot(self.base)
+        result = self.invoke()
+        self.assertEqual((result[0], result[2]), (0, ''))
+        self.assertIn('store=present run_count=1 active_count=0 unknown_count=0', result[1])
+        self.assertIn('metadata=ok damaged_count=0', result[1])
+        self.assertIn('Metadata validated read-only; trace evidence and write access unverified.', result[1])
+        self.assertEqual(snapshot(self.base), before)
+        self.assert_safe(result)
+
+    def test_damaged_metadata_is_degraded_nonzero_sanitized_and_unrepaired(self):
+        directory = self.completed()
+        summary_path, trace_path = directory / 'summary.json', directory / 'trace.jsonl'
+        original = summary_path.read_bytes()
+        cases = (('invalid-json', b'damaged ' + PRIVATE.encode() + b'\n'),
+                 ('duplicate-keys', b'{"schema":1,"schema":1}\n'),
+                 ('non-finite', b'{"x":NaN}\n'),
+                 ('invalid-utf8', b'\xff\n'),
+                 ('empty', b''))
+        for name, raw in cases:
+            with self.subTest(case=name):
+                summary_path.write_bytes(raw)
+                summary_path.chmod(0o600)
+                before = snapshot(self.base)
+                result = self.invoke()
+                self.assertEqual(result[0], 1)  # Degraded is never a silent success.
+                self.assertEqual(result[2], '')
+                self.assertIn('store=present run_count=1 active_count=0 unknown_count=0', result[1])
+                self.assertIn('metadata=degraded damaged_count=1', result[1])
+                self.assertIn('Damaged diagnostics metadata reported; nothing repaired, '
+                              'displayed or traced.', result[1])
+                self.assertEqual(snapshot(self.base), before)
+                self.assert_safe(result)
+        summary_path.write_bytes(original)
+        summary_path.chmod(0o600)
+        self.assertEqual(self.invoke()[0], 0)
+        # A completed run without its published trace is damaged metadata too.
+        trace_path.unlink()
+        before = snapshot(self.base)
+        result = self.invoke()
+        self.assertEqual(result[0], 1)
+        self.assertIn('metadata=degraded damaged_count=1', result[1])
+        self.assertEqual(snapshot(self.base), before)
+        self.assert_safe(result)
+
+    def test_damaged_summary_never_reads_trace_artifact(self):
+        directory = self.completed()
+        (directory / 'summary.json').write_text(PRIVATE + SECRET)
+        (directory / 'summary.json').chmod(0o600)
+        original_read = r._read
+        def summary_only(parent, name, limit):
+            self.assertEqual(name, 'summary.json')
+            return original_read(parent, name, limit)
+        with patch.object(r, '_read', side_effect=summary_only):
+            result = self.invoke()
+        self.assertEqual(result[0], 1)
+        self.assertIn('metadata=degraded damaged_count=1', result[1])
+        self.assert_safe(result)
+
+    def test_existing_store_reads_only_summary_metadata_and_never_writes(self):
         writer = self.start()
         writer.close()
         directory = self.state / 'runs' / RUN_ID
@@ -369,18 +454,18 @@ class DoctorStoreTests(DoctorFixture):
         original_open = os.open
         def readonly(name, flags, *args, **kwargs):
             self.assertFalse(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-            self.assertNotIn(str(name), ('summary.json', 'trace.jsonl', 'trace.partial.jsonl', '.reservation'))
+            self.assertNotIn(str(name), ('trace.jsonl', 'trace.partial.jsonl', '.reservation'))
             return original_open(name, flags, *args, **kwargs)
         with ExitStack() as stack:
             stack.enter_context(patch('llmtool.diagnostics_reader.os.open', side_effect=readonly))
-            stack.enter_context(patch('llmtool.diagnostics_reader.os.read', side_effect=AssertionError('body read')))
             for target in ('os.mkdir', 'os.chmod', 'os.unlink', 'os.rename', 'os.replace', 'os.link', 'os.write',
                            'llmtool.diagnostics_store.DiagnosticsStore.start'):
                 stack.enter_context(patch(target, side_effect=AssertionError(target)))
             result = self.invoke()
-        self.assertEqual(result[0], 0)
+        self.assertEqual(result[0], 1)
         self.assertIn('store=present run_count=1 active_count=0 unknown_count=1', result[1])
-        self.assertIn('metadata completion and write access unverified', result[1])
+        self.assertIn('metadata=degraded damaged_count=1', result[1])
+        self.assertEqual(result[2], '')
         self.assertEqual(snapshot(self.base), before)
         self.assert_safe(result)
 
@@ -397,6 +482,7 @@ class DoctorStoreTests(DoctorFixture):
             result = self.invoke()
         self.assertEqual(result[0], 0)
         self.assertIn('active_count=1', result[1])
+        self.assertIn('metadata=ok damaged_count=0', result[1])  # Busy runs are unverified, not damaged.
         self.assertEqual(snapshot(self.base), before)
         self.assertFalse(writer.closed)
 

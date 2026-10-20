@@ -1,38 +1,18 @@
 # LLMTool Roadmap
 
-> **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
+> Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md).
 
-## 2026-10-19 Owner D7 (HISTORICAL; see D8) — operative Developer priority
+> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
 
-OpenCode CLI/DeepSeek is now the **PRIMARY Developer**. **Codex
-Developer is PAUSED** after source review of frozen
-[PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
-at `c421c3a`; no further costly Codex Developer source/repair/reviewer
-calls. The existing Codex Integrator remains semantic PM/actual
-OpenCode launcher/receipt owner/final merger when available.
-Reuse merged PR #202 Worker and merged PR #204 reviewed Host/F2 source;
-these remain **NOT LIVE VERIFIED** as a genuine llmtool-owned dispatch.
-Do not reuse an Owner-active manual TUI root as a Host-owned Worker
-without independent liveness, attribution and clean ownership checks.
-Next prove one real
-source-change/tests/DeepSeek self-review/qualified free different-model
-pre-review/independent Claude formal PASS/Integrator receipt cycle.
-Older D1–D5 Codex-first language below is HISTORICAL under D7.
-D6 auto-retirement is not yet Mac-live verified; it is not a blocker
-for a safely registered new task. No new A milestone, extra daemon,
-provider-export/F2 waiver or auto paid fallback. Stop at actual S3
-PASS with evidence; do not infer live proof from docs or fake CI.
+## D4 live status — 2026-10-21
 
-**D4/Host launch condition:** exact-file re-admit any new source read/write
-set **before** OpenCode provider inference. No OpenCode-authored Host/
-containment patch may authorize itself: require independent Claude
-Security ACCEPT before its changed permission, diff, negative-probe
-or price guards admit any subsequent invocation. The reviewed PR #204
-Host is the first allowed S3 host candidate; its code merge is not
-proof that `run()` or same-Integrator ACK happened.
+The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one failed with `OPENCODE_RUNTIME_INVALID` before launch because of a symlink path. Attempt two launched and returned `provider.auth`; neither attempt produced inference. The result does not establish that the login was expired. The authorized Host route is Owner D8a's in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server credential route failed independent configuration-isolation review and remains deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt. D4 Host work is background G3/M2 work and does not gate direct OpenCode Developer sessions.
+
+## Historical role decisions
+
+D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
 
 
-目標是 generic, portable LLM CLI and future orchestration foundation。
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
 coder、reviewer；目前 A9 AgentStep 是 role + explicit profile + bounded text handoff，沒有工具或環境修改權限。三者分離，不用模型品牌
 決定產品能力。A2 只擴充 Provider，不做 Role engine 或 Agent orchestration。
@@ -48,7 +28,7 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 **Authoritative priority and numbering:** A0–A12 are the product milestones.
 The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcatcat/davidcattoolsproject/pull/50) are **historical release/measurement aliases**, not separate tracks, duplicate executors or new sequential blockers. Keep the labels when citing old issues, tests and reports, but **all new plans, status and work contracts must name their owning A milestone**. Preserve PR #50 and subsequent historical evidence unchanged. The [Claude review](https://github.com/davidcatcat/davidcattoolsproject/pull/69) documents why much of C was already planned under A; the owner confirmed this consolidation and the temporary-runner transition after that review.
 
-**Product goal:** `llmtool` coordinates scoped Codex CLI implementation, independent Claude CLI review, deterministic tests, bounded repair, permitted Git/PR publication and optional permitted company-LLM triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
+**Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review (Claude, or the temporarily authorized Codex Reviewer while Claude quota is unavailable), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
 ### Owner outcome acceptance and reporting — approved 2026-10-19
 
@@ -64,7 +44,7 @@ not IMPLEMENTED or LIVE_VERIFIED product capabilities.
 - **Product and PM:** the owner discusses goals and decisions with ChatGPT Coordinator. For complex approved work, the owner provides **one initial prompt** to the **existing canonical Codex Integrator**, serving simultaneously as **PM Agent + Integration Manager**. The Integrator decides decomposition, dependency, provider/Worker selection, number of agents and independent review; no permanently separate PM CLI.
 - **llmtool runtime:** receives an approved plan and handles authorized Provider calls, bounded Worker lifecycle, policy, Git/action gates, Task/Session/run state, evidence, events, usage and handoff. **llmtool must not become a model-based PM/semantic router.** The desired Worker completion -> llmtool verified event -> same Integrator resume is **TARGET / NOT_LIVE_VERIFIED**. Do not add another controller or assert GitHub comments wake a Mac CLI.
 - **Simple work:** clear, independently authorized and objectively verifiable L0/L1/L2 work may eventually go through llmtool chat without PM; mechanical Git state/status can use deterministic tools with no LLM. This does **not** activate real Repo write, Commit, Push or PR in llmtool; F2/A11b gates remain.
-- **Company LLM:** company gw is API-only advisory behind llmtool, not a direct Shell/Git executor. Quality-first, task-class-specific route evidence and data-egress permission precede use; verify serious errors, independent tests/reviews and **net** premium-Token saving including PM, retries and repairs. Unknown usage/cost is UNKNOWN; no blanket company-first.
+- **Company LLM:** company `gw` is a third Developer route through llmtool for PM-selected small, low-risk tasks with clear deterministic acceptance. It may propose code but has no direct file, Shell or Git authority; an authorized execution environment applies changes and tests. Task-specific non-sensitive data permission, independent review and exact-head CI remain required. Record usage/retries/repairs or UNKNOWN; do not claim quality or net savings from a single trial. It is optional, not blanket company-first.
 - **D-007 parallel mobile Codex Cloud:** Coordinator or Integrator may identify a bounded, **nonoverlapping** package for Codex Cloud. The owner can launch it on ChatGPT mobile in a previously published Cloud environment, with no local Mac/llmtool/VPN dependency. Cloud independently develops, tests, self-pre-reviews and, when GitHub-authorized, publishes a unique feature branch/Draft PR. The 2026-10-17 mobile lane specified an owner completion handoff. **Under the 2026-10-18 disposition, the existing Integrator picks up the completed PR through actually available, authorized CLI/GitHub workflows** for final integration review, necessary distinct non-author Security/Functional/QA and Mac-native checks. Owner link sharing is an optional fallback, not a required completion relay. If remote launch is unavailable, record the concrete task and limitation; a GitHub comment does not prove that Cloud has started. Cloud self-review alone is not independent acceptance.
 - **Separate machines, shared GitHub:** Cloud cannot presume Mac local data/Keychain/VPN or unpushed changes, but Cloud GitHub writes still affect common remote refs; verify branch ownership, base/head SHA, nonoverlapping files and push rights. No Cloud automatic main merge, original Mac Session auto-wake, F2 authority or A11c M2 PASS is implied. Environment is created/published on web/desktop before supported mobile use: [Codex Cloud guide](https://help.openai.com/en/articles/20001545-using-codex-cloud).
 
@@ -72,11 +52,7 @@ This is a **parallel delivery lane, not a new A milestone**. Continue the single
 A11b/A11c Roadmap and existing M1a/M1b/M2 gates. Cloud production/CI progress
 cannot replace required canonical Mac Live acceptance for native llmtool cutover.
 
-### HISTORICAL 2026-10-19 D1–D5 developer priorities (superseded by D7)
-
-[Single owner decision record](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) previously added **OpenCode v2 / DeepSeek** as second-line Developer alongside first-line **Codex Developer**; subsequent D7 makes OpenCode PRIMARY and Codex Developer PAUSED, both assigned by the **existing Codex Integrator/PM**. OpenCode's same-model DeepSeek reviewer and fresh-context GLM cross-model Reviewer are internal pre-review; **Claude Code remains formal independent code/test/security/QA Reviewer**, while **Claude Developer is PAUSED** for quota. Company-gw continues task-qualified, authorized cost-aware advisory work; AGY is backup. Codex Cloud and Claude Cloud VM remain independent environments, with no new Mac automatic Cloud integration.
-
-D1 reuses the existing physical `/claude` root **only after** verified [safe-git](../../skills/safe-git/SKILL.md) ownership transfer and Mac evidence. The subsequent [Owner D6 decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) **supersedes the earlier no-third-worktree limit** for separately registered task worktrees; it does not automatically transfer or delete that historical root. D4 permits non-sensitive whole-repo browsing by OpenCode, not automatic external-model export, secret access, wider code edits or Git/F2 rights. D5 forbids automatic paid API fallback. Under D3 Developer work may continue when Claude quota is exhausted with exact-SHA **pending formal review** and bounded queue, not self-approval. Under D2 **an active/foreground Integrator waiting for verified Worker results** is the first useful delivery slice; reliable original-session wake/ACK/recovery remains a **separate mandatory G3 acceptance**. Existing G1–G4 and F2/A11b parallel track stay unchanged. Historical OpenCode Lab success is not live llmtool integration evidence.
+Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
 ### 2026-10-17 revised delivery order and dependency graph
 
@@ -444,7 +420,7 @@ External ChatGPT review PASS; A4 status is documented below.
 | --- | --- | --- |
 | **UX-1 — Usable TUI foundation** | Preserve `llmtool chat` entry; add scrollable conversation, persistent input, multiline edit, keyboard help, resize behavior, Unicode and clean exit. Legacy line-mode/fallback remains available, including non-TTY/piped use. Automated input/state tests and Mac terminal smoke. | **First**; prefer small optional terminal/UI dependency rather than a new daemon/controller. |
 | **UX-2 — Truthful runtime status** | Show selected Provider/model, local connectivity result only when actually probed, working/idle/error/429, measured elapsed and Provider-reported tokens or UNKNOWN; no fake progress or implied VPN/API readiness. Sanitize errors and never expose credentials, prompts or model internals in diagnostics. | **Second**, may follow UX-1 immediately; reuse A11a/task evidence. |
-| **UX-3 — Development evidence UI** | Render Markdown and fenced code, bounded diff/test output, task/worktree references, self-review vs non-author Claude review status, explicit BLOCKED/NEEDS_DECISION and provenance. READ-ONLY display; do not add executor permissions. | **After existing evidence interfaces are usable**; never gate G3/G4/M2 on a richer UI. |
+| **UX-3 — Development evidence UI** | Render Markdown and fenced code, bounded diff/test output, task/worktree references, self-review vs non-author Claude/Codex review status, explicit BLOCKED/NEEDS_DECISION and provenance. READ-ONLY display; do not add executor permissions. | **After existing evidence interfaces are usable**; never gate G3/G4/M2 on a richer UI. |
 | **UX-4 — Default UX acceptance** | Mac native PTY/resize/Ctrl-C/EOF, long output and history, Python 3.9/3.14 supported-path CI, offline fake-Provider tests, VPN/API failure recovery, no secret rendering, independent Security/Functional/QA review. Only make TUI default after fallback parity and review. | **Last**, optional release acceptance, separate from M2. |
 
 **Delivery rules:** Prioritize UX-1 and UX-2 before polish, avoid duplicate Status/Monitor subsystems (reuse Issue #209/PR #210 read-only evidence when appropriate), do not touch canonical Owner-active worktrees without safe-git ownership checks, and keep UX tasks disjoint from the active G3 Worker path. PM/Integrator may assign a small independently owned worktree and reviewer through existing authorized workflows. Report demonstrable usage, regressions, and exact-head acceptance; documentation is not deployment proof.

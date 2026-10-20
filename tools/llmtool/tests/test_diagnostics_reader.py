@@ -615,6 +615,93 @@ class ReaderTests(unittest.TestCase):
             rows = self.reader.runs()['runs']
         self.assertEqual([row['run_id'] for row in rows], ['c' * 32, 'b' * 32, 'a' * 32])
 
+    def test_inspect_store_reports_malformed_summary_metadata_as_degraded(self):
+        directory = self.completed()
+        healthy = self.reader.inspect_store()
+        self.assertEqual((healthy['state'], healthy['metadata'], healthy['damaged_count'],
+                          healthy['run_count'], healthy['active_count'], healthy['unknown_count']),
+                         ('present', 'ok', 0, 1, 0, 0))
+        summary_path = directory / 'summary.json'
+        original = summary_path.read_bytes()
+        raw_cases = (b'damaged\n', b'{"schema":1,"schema":1}\n', b'{"x":NaN}\n', b'\xff\n', b'')
+        for raw in raw_cases:
+            with self.subTest(raw=raw[:12]):
+                summary_path.write_bytes(raw)
+                summary_path.chmod(0o600)
+                before = snapshot(self.home)
+                value = self.reader.inspect_store()
+                self.assertEqual((value['state'], value['metadata'], value['damaged_count']),
+                                 ('present', 'degraded', 1))
+                self.assertEqual(snapshot(self.home), before)
+        original_value = json.loads(original)
+        for key, value in (('schema_version', 2), ('schema_version', True),
+                           ('run_id', 'b' * 32), ('event_count', d.MAX_RUN_EVENTS + 1),
+                           ('status', 'unknown')):
+            with self.subTest(key=key, value=value):
+                summary_path.write_text(json.dumps({**original_value, key: value}))
+                summary_path.chmod(0o600)
+                self.assertEqual(self.reader.inspect_store()['metadata'], 'degraded')
+        summary_path.write_bytes(original)
+        summary_path.chmod(0o600)
+        self.assertEqual(self.reader.inspect_store()['metadata'], 'ok')
+
+    def test_inspect_store_never_reads_trace_and_flags_missing_trace(self):
+        directory = self.completed()
+        original_read = r._read
+        read_names = []
+        def summary_only(parent, name, limit):
+            read_names.append(name)
+            self.assertEqual(name, 'summary.json')
+            return original_read(parent, name, limit)
+        with patch.object(r, '_read', side_effect=summary_only):
+            value = self.reader.inspect_store()
+        self.assertEqual((value['metadata'], value['damaged_count'], read_names),
+                         ('ok', 0, ['summary.json']))
+        (directory / 'trace.jsonl').unlink()
+        with patch.object(r, '_read', side_effect=AssertionError('trace or summary read')):
+            value = self.reader.inspect_store()
+        self.assertEqual((value['metadata'], value['damaged_count']), ('degraded', 1))
+        (directory / 'summary.json').unlink()
+        self.assertEqual(self.reader.inspect_store()['metadata'], 'ok')  # Incomplete, not damaged.
+
+    def test_inspect_store_active_and_unknown_entries_stay_ok(self):
+        writer = DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID)
+        self.assertIsNotNone(writer)
+        self.addCleanup(writer.close)
+        (self.home / 'runs' / 'unknown-entry').write_text('KEEP')
+        with patch.object(r, '_read', side_effect=AssertionError('busy bytes')):
+            value = self.reader.inspect_store()
+        self.assertEqual((value['state'], value['run_count'], value['active_count'],
+                          value['unknown_count'], value['damaged_count'], value['metadata']),
+                         ('present', 1, 1, 1, 0, 'ok'))
+
+    def test_inspect_store_absent_and_unsupported_metadata_states(self):
+        value = self.reader.inspect_store()
+        self.assertEqual((value['state'], value['metadata'], value['damaged_count'],
+                          value['run_count'], value['active_count'], value['unknown_count']),
+                         ('absent', 'ok', 0, 0, 0, 0))
+        value = r.DiagnosticsReader(home=self.home, platform='win32').inspect_store()
+        self.assertEqual((value['state'], value['metadata'], value['damaged_count']),
+                         ('unsupported', 'unsupported', 0))
+
+    def test_inspect_store_is_read_only_and_never_repairs_damage(self):
+        directory = self.completed()
+        (directory / 'summary.json').write_text(PROMPT)
+        (directory / 'summary.json').chmod(0o600)
+        before = snapshot(self.home)
+        original_open = os.open
+        def read_only(name, flags, *args, **kwargs):
+            self.assertEqual(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND), 0)
+            return original_open(name, flags, *args, **kwargs)
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(r.os, 'open', side_effect=read_only))
+            for name in ('mkdir', 'makedirs', 'write', 'unlink', 'rmdir', 'chmod', 'fchmod',
+                         'rename', 'replace', 'link'):
+                stack.enter_context(patch.object(os, name, side_effect=AssertionError('mutation')))
+            value = self.reader.inspect_store()
+        self.assertEqual((value['metadata'], value['damaged_count']), ('degraded', 1))
+        self.assertEqual(snapshot(self.home), before)
+
     def test_runs_recorded_success_never_verifies_missing_completion_evidence(self):
         directory = self.completed()
         summary_path = directory / 'summary.json'

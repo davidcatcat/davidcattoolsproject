@@ -21,8 +21,8 @@ from .diagnostics import (safe_diagnostic_text, _contains_credential_value,
 from .errors import coded_error, LLMToolError
 from .task_lifecycle import inspect_task, State, utc_time
 from .task_verification import CriterionKind, EvidenceSource, EvidenceOutcome, parse_evidence_record
-from .run_budget import (RunBudget, UsageLedger, CallPhase, BudgetCode, admit_next,
-                         usage_from_provider)
+from .run_budget import (RunBudget, UsageLedger, CallPhase, BudgetCode,
+                         admit_next, usage_from_provider)
 
 PACKET_LIMIT = 256 * 1024
 SOURCE_LIMIT = 128 * 1024
@@ -718,6 +718,9 @@ def run_review(ready, final, expect, events, fixture):
                         ('reaped','pipes_drained','pipes_closed','runtime_closed')) or
                     time.monotonic() >= real_deadline):
                 reject('REVIEW_LAUNCH_NOT_ATTESTED')
+        # Post-call usage is recorded telemetry only: it is reported as KNOWN or
+        # UNKNOWN and never re-decides an otherwise valid, already-authorized
+        # verdict. Pre-call admission above remains the only budget gate.
         approve = verdict['security'] == verdict['functional'] == 'APPROVE'
         return envelope(('REVIEW_FAKE_APPROVED' if fake else 'REVIEW_APPROVED') if approve else 'REVIEW_CHANGES_REQUIRED' if
             'CHANGES_REQUIRED' in (verdict['security'],verdict['functional']) else 'REVIEW_BLOCKED',

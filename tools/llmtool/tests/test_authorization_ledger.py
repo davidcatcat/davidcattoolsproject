@@ -851,8 +851,8 @@ if __name__ == '__main__':
 
 class NotificationLedgerTests(unittest.TestCase):
     def setUp(self):
-        from test_codex_handoff_transport import Trial
-        self.t=Trial();self.addCleanup(self.t.close)
+        from notification_fixture import NotificationFixture
+        self.t=NotificationFixture();self.addCleanup(self.t.close)
     def observed(self):
         return p.NotificationObserved(self.t.binding.digest,self.t.binding.host_pin,True,True,True,True,True,True,True)
     def issue(self):
@@ -866,13 +866,13 @@ class NotificationLedgerTests(unittest.TestCase):
         self.assertEqual(notification._db.execute('SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall(),
                          [('NOTIFICATION',l.NOTIFICATION_SCHEMA_VERSION,notification.creation_nonce)])
         for wrong in ('D1','PROVIDER_REVIEW'):
-            with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(self.t.path,clock=self.t.j.clock.utc,
+            with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(self.t.path,clock=self.t.clock,
                 kind=wrong,creation_nonce=notification.creation_nonce)
         for kind in ('D1','PROVIDER_REVIEW'):
             path=str(Path(self.t.tmp.name)/('other-'+kind))
-            with l.ReceiptLedger.create(path,clock=self.t.j.clock.utc,kind=kind) as other:
+            with l.ReceiptLedger.create(path,clock=self.t.clock,kind=kind) as other:
                 before=other._db.execute('SELECT sql FROM sqlite_master ORDER BY name').fetchall()
-                with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(path,clock=self.t.j.clock.utc,
+                with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(path,clock=self.t.clock,
                     kind='NOTIFICATION',creation_nonce=notification.creation_nonce)
                 self.assertEqual(other._db.execute('SELECT sql FROM sqlite_master ORDER BY name').fetchall(),before)
                 self.assertEqual(other._db.execute('SELECT count(*) FROM receipts').fetchone()[0],0)
@@ -882,7 +882,7 @@ class NotificationLedgerTests(unittest.TestCase):
         receipt=self.issue();self.assertTrue(self.consume(receipt));self.assertFalse(self.consume(receipt))
         self.assertTrue(self.t.ledger.notification_pending(self.t.binding.reviewer_session))
         self.t.ledger.close()
-        self.t.ledger=l.ReceiptLedger.open(self.t.path,clock=self.t.j.clock.utc,kind='NOTIFICATION',
+        self.t.ledger=l.ReceiptLedger.open(self.t.path,clock=self.t.clock,kind='NOTIFICATION',
                                         creation_nonce=self.t.binding.ledger_nonce)
         self.assertEqual(self.t.ledger.recover(),1)
         self.assertEqual(self.t.ledger.status(receipt.nonce),'EFFECT_UNKNOWN')
@@ -902,7 +902,7 @@ class NotificationLedgerTests(unittest.TestCase):
         with self.assertRaises(l.LedgerError):self.issue()
     def test_cross_file_nonce_and_provider_d1_methods_reject_notification(self):
         receipt=self.issue()
-        with l.ReceiptLedger.create(str(Path(self.t.tmp.name)/'another-notification'),clock=self.t.j.clock.utc,
+        with l.ReceiptLedger.create(str(Path(self.t.tmp.name)/'another-notification'),clock=self.t.clock,
                                     kind='NOTIFICATION') as other:
             with self.assertRaises(l.LedgerError):other.consume_notification(receipt,issuer=self.t.issuer,observed=self.observed())
         with self.assertRaises(l.LedgerError):self.t.ledger.issue(p.decide_notification(self.t.binding,
@@ -927,8 +927,8 @@ class NotificationLedgerTests(unittest.TestCase):
 
 class NativeDeltaLedgerTests(unittest.TestCase):
     def setUp(self):
-        from test_codex_handoff_transport import DeltaTrial
-        self.t=DeltaTrial()
+        from notification_fixture import NotificationFixture
+        self.t=NotificationFixture(audit_only=True)
     def tearDown(self):self.t.close()
     def consumed(self):
         t=self.t;o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
@@ -936,7 +936,7 @@ class NativeDeltaLedgerTests(unittest.TestCase):
         self.assertTrue(t.ledger.consume_notification(receipt,issuer=t.issuer,observed=o));self.assertTrue(t.ledger.begin_notification(receipt));t.ledger.record_notification_ids(receipt,'m','t');return receipt
     def test_layout_v2_never_migrates_v1_and_cross_kind_rejects(self):
         t=self.t;before=Path(t.path).read_bytes()
-        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(t.path,clock=t.j.clock.utc,kind='NOTIFICATION',creation_nonce=t.binding.ledger_nonce)
+        with self.assertRaises(l.LedgerError):l.ReceiptLedger.open(t.path,clock=t.clock,kind='NOTIFICATION',creation_nonce=t.binding.ledger_nonce)
         self.assertEqual(Path(t.path).read_bytes(),before)
         self.assertEqual(t.ledger._db.execute('SELECT layout_version FROM ledger_meta').fetchone()[0],2)
         self.assertEqual(t.ledger._db.execute('PRAGMA user_version').fetchone()[0],l.SCHEMA_VERSION)

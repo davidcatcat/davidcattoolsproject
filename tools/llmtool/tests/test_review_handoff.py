@@ -219,10 +219,27 @@ class ReviewHandoffTests(unittest.TestCase):
         h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
 
         receipt, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
+        # Missing usage is UNKNOWN, never zero, and is recorded telemetry only:
+        # it cannot veto the otherwise valid, independently bound APPROVE verdict.
+        self.assertEqual(receipt.code, 'REVIEW_APPROVED')
         self.assertEqual(receipt.verdict, 'PASS')
+        self.assertEqual(receipt.execution_status, 'SUCCEEDED')
+        self.assertEqual(receipt.provider_calls, 1)
+        self.assertEqual(receipt.ledger_status, 'EFFECT_DONE')
         self.assertEqual(receipt.usage_status, 'UNKNOWN')
         self.assertIsNone(receipt.input_tokens)
         self.assertIsNone(receipt.output_tokens)
+        self.assertFalse(receipt.authorized)
+
+    def test_usage_over_self_imposed_token_target_still_passes_with_known_telemetry(self):
+        h = self.harness(mode='success')
+        budget = replace(h.fake.budget, max_input_tokens=1, max_output_tokens=1)
+        receipt, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=budget)
+        self.assertEqual(receipt.verdict, 'PASS')
+        self.assertEqual(receipt.execution_status, 'SUCCEEDED')
+        self.assertEqual(receipt.usage_status, 'KNOWN')
+        self.assertEqual((receipt.input_tokens, receipt.output_tokens), (12, 8))
+        self.assertFalse(receipt.authorized)
 
     def test_replay_denied_across_same_issuer_fresh_issuer_and_reopened_ledger(self):
         h = self.harness(mode='success')
