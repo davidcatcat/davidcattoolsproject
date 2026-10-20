@@ -1,39 +1,12 @@
 # llmtool development workflow — Codex Cloud and local Mac
 
-> **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
+> Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file is used for Cloud handoff and Mac/Cloud verification.
+
+## Historical role and stop decisions
+
+Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](ROADMAP.md#historical-role-decisions) and [README](README.md#archived-parked-implementations).
 
 
-> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
-
-## Owner D7 — OpenCode PRIMARY; Codex Developer PAUSED (HISTORICAL; see D8)
-
-[PR #202](https://github.com/davidcatcat/davidcattoolsproject/pull/202)
-delivered a source/offline-reviewed Worker adapter `c421c3a` and is
-**merged**, while PR #204 has since merged the independently reviewed
-foreground Host and #193 F2 fix into source. **No host-owned live S3
-invocation has yet been verified.** OpenCode remains primary Developer
-for the remaining real S3 execution package
-on the registered D6 `tasks/a11c-opencode-193-s3` root. Pause all
-Codex Developer author/subagent work; do not rewrite source already
-independently accepted. Codex Integrator stays PM/launcher/merge owner.
-
-OpenCode develop/test → DeepSeek separate-context self-review →
-authorized actually free different-model pre-review → independent
-Claude formal source/security/native review → Claude FAIL back to
-OpenCode repair, PASS to Integrator with exact-SHA CI and Mac evidence.
-No implicit F2, privacy-export, paid-model, historical root takeover
-or Session wake grant. Stop after one actual S3 PASS and report.
-
-**Bootstrapping boundary:** apply the normative D4 exact-file
-re-admission and independent formal Claude Security review of any
-OpenCode-authored Host/containment code **before** using that code to
-admit a new OpenCode invocation. PR #204 code is reviewed/merged, but
-the Owner's manual TUI authored the candidate, so its activity is not
-host-contained S3. The first trusted Host run retains the exact two-file
-D4 admission and has no concurrent manual writer.
-
-
-## Single A-roadmap and interim controller (owner decision 2026-10-09)
 
 **A11b and A11c are the only active native delivery milestones.**
 The C0–C3 names in older plans are historical outcome/measurement
@@ -136,21 +109,11 @@ are the owner-approved architecture source; they do not implement new runtime ri
    error gates; include independent QA, retries/repairs and PM token overhead
    in any net saving claim. Mark missing usage or price UNKNOWN.
 
-### 2026-10-19 Owner token-efficiency correction — Developer pre-review and S3 stop
+### Current handoff
 
-The normative rules for **one meaningful dispatch → Developer's own isolated-context pre-review/fix/test → one formal Claude review → Integrator acceptance** and **the mandatory end-of-round S3 STOP** are in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md#2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop). They apply **now** to all already-authorized A11c work, with OpenCode PRIMARY and Codex Developer PAUSED under Owner D7, and are not conditional on a new llmtool feature.
+Follow the bounded Developer → independent Claude Reviewer → Integrator path and 2026-10-21 routing in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
 
-**Integrator must not become a second routine Developer/Reviewer** and must not bounce every failing test or minor review comment between expensive Codex sessions. A Developer may conduct its own separate-context Reviewer subagent pre-check and bounded fixes, while Claude remains a distinct **formal** reviewer. The company `gw` route remains an explicitly qualified, bounded **low-cost advisory** for appropriate test/log triage and summaries, **not** a new mandatory model layer or independent formal QA. Capture actual work-package-level total usage, relay count, correction/overhead and missing values as `UNKNOWN`; do not make unsupported saving claims or add a new telemetry service.
-
-**S1** architecture PR #198 review/merge; **S2** reviewed registered D6 OpenCode task-root and real Worker launch/permissions (without compulsory historical `/claude` takeover); **S3** one real OpenCode source/test/pre-review → Claude formal review → original **active foreground** Codex Integrator return and integration, with no Owner relay. **After S3 verified, stop dispatching new tasks and report.** Inactive original-Session wake and G4 remain future rounds, despite the previously approved full G3/M2 outcome target. A documentation merge, fake fixture, self-review or GitHub comment does not prove the S3 Live acceptance. The previous generic guidance to keep progressing does not override this explicit current-round stop point.
-
-### HISTORICAL Owner D1–D5: Codex-primary role order (superseded by D7)
-
-Follow [owner OpenCode decision](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md) and [the single safe-git policy](../../skills/safe-git/SKILL.md); do **not** create another PM, controller, notification system or milestone. Owner D6 independently authorizes registered task-scoped worktrees; D1's historical two-root limit is superseded. The existing Codex Integrator/PM assigns the active Developer role to **OpenCode v2/DeepSeek**, with **Codex Developer PAUSED** after reviewed PR #202; no Codex Developer fallback absent renewed Owner direction. OpenCode does Developer tests + DeepSeek self-review + fresh-context GLM cross-model pre-review; **Claude Code retains formal non-author code/security/functional review, tests and QA**, **Claude Developer is PAUSED**. Company-gw's already approved quality-/egress-gated work remains; AGY is quota backup; Cloud integrations remain outside this Mac work package.
-
-**Target path, not yet live:** Integrator Task Contract → llmtool authorized Worker lifecycle → task-owned Developer changes/tests/pre-review → host-reconstructed original-contract/exact-SHA Diff/CI packet → formal Claude verdict → bounded repair or return to **same active foreground Integrator**. `WAITING_CLAUDE_REVIEW` is a **logical pending disposition**, not a newly proven persisted enum: on Claude quota exhaustion keep reviewed candidate SHA, test evidence and bounded pending work; no false PASS or new paid provider. Later prove native original-session wake/ACK/replay/recovery before G3. GitHub comments do not awaken Mac sessions.
-
-**D1 historical-root handoff:** Existing `/claude` ownership must still be released and verified before reuse by OpenCode. Under subsequent Owner D6, other new task-owned worktrees may be created separately; no simultaneous writers in one root. D4 permits non-sensitive whole-repo reading, but must validate real OpenCode v2 read/search/shell/subagent/external-directory permissions and provider-specific egress/redaction controls before model transfer. Source writes/Git still task-bound. D5 chooses a qualified free substitute or BLOCKED, **not the paused Codex Developer**, never unapproved paid API. Keep the original G1–G4, A11b/F2 and independent gates.
+Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
 ### D-007 independent mobile Codex Cloud delivery
 
@@ -197,7 +160,7 @@ https://help.openai.com/en/articles/20001545-using-codex-cloud.
 
 Apply the [normative work-package policy](../../skills/ai-team-delivery/SKILL.md#work-package-delivery-and-in-session-reviewer-subagents-owner-decision-2026-10-14) and [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155769235). One already-authorized Developer CLI owns a complete deliverable: plan and safe-git preflight, scoped implementation, targeted tests, a **read-only in-session Reviewer child** if supported, bounded repair/recheck and one consolidated Draft PR/evidence packet. Avoid separately asking the owner to advance each microstep.
 
-**HISTORICAL (superseded by D7):** Codex Developer formerly used a distinct local Codex Reviewer child; Claude Developer formerly used a distinct local Claude Reviewer child. Neither paused Developer is to be started under this old rule. Verify child identity, actual root and *effective* restrictive tools; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
+**HISTORICAL local-reviewer rule:** The former same-provider Reviewer-child assignments for Codex Developer and Claude Developer sessions are historical. Any current Developer may use a distinct read-only child only when its CLI supports one and effective restrictive permissions are verified; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
 
 Batch deterministic worktree/branch/baseline state checks where permitted, but do not skip real independently accepted C3 old-final/new-start baselines, Git shared-ref serialization, matching release, TaskContract allowlists or meaningful STOP. Preserve the task-final candidate at published HEAD so the next handoff does not mistakenly compare post-commit source to task-start baseline. No current proof exists that GitHub messages awaken Mac CLIs or that a cross-provider listener is installed. If a physical operator action is unavoidable, give one action for a work package; report an A11c capability gap rather than claim impossible unattended progress. Use the reviewed ai-loop only within its actual accepted scope until llmtool provides the full native Codex/Claude/test/repair route.
 
@@ -407,9 +370,7 @@ family gets at most two failed repair attempts before coordinator
 reassessment; overall review/token/time escalation does not waive a
 failing mandatory gate. Place independent QA in the feature PR or
 tracking Issue instead of opening a new report-only PR for every round.
-Only the requirements owner's three P0 cases in the Skill require
-direct owner yes/no escalation; provider egress and spending still
-require distinct pre-existing authorization.
+Only the three cases in the [Owner escalation reference](../../skills/ai-team-delivery/owner-escalation.md)—a wrong product requirement, root/sudo, or a macOS core/system change—require direct Owner escalation. Provider egress and spending still require distinct pre-existing authorization.
 
 ## Execution environment
 
