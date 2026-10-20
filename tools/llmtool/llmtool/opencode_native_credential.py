@@ -12,6 +12,7 @@ The default path assumes the official ``latest`` release channel
 channels must set ``OPENCODE_DB`` explicitly; channel guessing is unsafe.
 """
 import json
+import math
 import os
 from pathlib import Path
 import sqlite3
@@ -129,11 +130,12 @@ def read_active_credential(path, *, timeout_seconds=1.0, connector=None):
     rows with no active marker and multiple active rows are ambiguous and refused.
     """
     if (type(timeout_seconds) not in (int, float) or timeout_seconds <= 0 or
-            timeout_seconds > 5):
+            timeout_seconds > 5 or not math.isfinite(timeout_seconds)):
         _error('CREDENTIAL_SOURCE_UNKNOWN')
     db = None
     value = None
     code = None
+    deadline = None
     try:
         physical, before = _physical_file(path)
         before_sidecars = _wal_mode_and_sidecars(physical)
@@ -203,6 +205,10 @@ def read_active_credential(path, *, timeout_seconds=1.0, connector=None):
             except Exception:
                 value = None
                 code = 'CREDENTIAL_CLEANUP_UNKNOWN'
+        if deadline is not None and time.monotonic() >= deadline:
+            value = None
+            if code is None:
+                code = 'CREDENTIAL_SOURCE_TIMEOUT'
     if code is not None:
         _error(code)
     return value

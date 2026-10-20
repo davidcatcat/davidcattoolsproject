@@ -13,6 +13,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 PACKAGE = HERE.parent
@@ -108,6 +109,13 @@ class NativeCredentialTests(unittest.TestCase):
         self.assert_code('CREDENTIAL_SOURCE_TIMEOUT', credential.read_active_credential,
                          self.db_path, timeout_seconds=0.01, connector=slow_connect)
 
+    def test_nonfinite_timeouts_are_rejected_before_open(self):
+        for timeout in (float('nan'), float('inf'), float('-inf')):
+            with self.subTest(timeout=timeout):
+                self.assert_code('CREDENTIAL_SOURCE_UNKNOWN',
+                                 credential.read_active_credential, self.db_path,
+                                 timeout_seconds=timeout)
+
     def test_one_use_source_reads_only_on_first_supported_take(self):
         self.create_db((self.row(),))
         source = credential.ActiveOpenCodeCredential(self.db_path)
@@ -147,6 +155,28 @@ class NativeCredentialTests(unittest.TestCase):
 
         self.assert_code('CREDENTIAL_CLEANUP_UNKNOWN', credential.read_active_credential,
                          self.db_path, connector=connector)
+
+    def test_deadline_crossed_during_close_discards_value(self):
+        self.create_db((self.row(),))
+        clock = [0.0]
+
+        class SlowClose:
+            def __init__(self, wrapped):
+                self.wrapped = wrapped
+
+            def __getattr__(self, name):
+                return getattr(self.wrapped, name)
+
+            def close(self):
+                self.wrapped.close()
+                clock[0] = 2.0
+
+        def connector(*args, **kwargs):
+            return SlowClose(sqlite3.connect(*args, **kwargs))
+
+        with patch.object(credential.time, 'monotonic', side_effect=lambda: clock[0]):
+            self.assert_code('CREDENTIAL_SOURCE_TIMEOUT', credential.read_active_credential,
+                             self.db_path, timeout_seconds=1.0, connector=connector)
 
     def test_unsafe_wal_without_preexisting_sidecars_creates_no_files(self):
         self.create_db((self.row(),))
