@@ -324,6 +324,21 @@ def _events(raw, run_id, completed):
     return result, omitted
 
 
+def _metadata_sound(directory, files, run_id):
+    """Validate one completed run's bounded summary; never read trace evidence."""
+    if 'trace.jsonl' not in files or 'trace.partial.jsonl' in files:
+        return False
+    try:
+        _summary(_read(directory, 'summary.json', SUMMARY_MAX_BYTES), run_id)
+    except ReaderError as exc:
+        if exc.code in ('FORMAT_INVALID', 'FORMAT_UNSUPPORTED'):
+            return False
+        raise
+    except (ValueError, TypeError, KeyError):
+        return False
+    return True
+
+
 def _consistent(summary, raw, events):
     if (not events or events[-1]['type'] != 'run.end'
             or summary.event_count != len(events) or summary.trace_bytes != len(raw)
@@ -439,15 +454,19 @@ class DiagnosticsReader:
         return result
 
     def inspect_store(self):
-        """Check existing structure/permissions only, never metadata contents.
+        """Read-only structure, permissions and bounded summary-metadata check.
 
         A busy run's artifacts are deliberately not inspected. Unknown names
-        are counted without displaying, following or repairing them. This is
-        neither a completion check nor proof that persistence can be written.
+        are counted without displaying, following or repairing them. Completed
+        runs are validated from their summary metadata only; trace evidence is
+        never read, so this stays neither a completion check nor proof that
+        persistence can be written. Malformed metadata is reported as degraded
+        instead of healthy.
         """
-        result = {'state': 'absent', 'run_count': 0, 'active_count': 0, 'unknown_count': 0}
+        result = {'state': 'absent', 'run_count': 0, 'active_count': 0,
+                  'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok'}
         if not persistence_supported(self.platform):
-            result['state'] = 'unsupported'
+            result.update(state='unsupported', metadata='unsupported')
             return result
         try:
             with self._store() as runs:
@@ -472,6 +491,8 @@ class DiagnosticsReader:
                                      else 0)
                             if info.st_size > limit:
                                 raise ReaderError('LIMIT_EXCEEDED')
+                        if 'summary.json' in files and not _metadata_sound(directory, files, name):
+                            result['damaged_count'] += 1
                 if set(_names(runs, RUN_SCAN_LIMIT)) != set(names):
                     raise ReaderError('STORE_UNAVAILABLE')
         except _AbsentStore:
@@ -480,6 +501,7 @@ class DiagnosticsReader:
             raise
         except (OSError, ValueError, TypeError, KeyError):
             raise ReaderError('STORE_UNAVAILABLE') from None
+        result['metadata'] = 'degraded' if result['damaged_count'] else 'ok'
         return result
 
     def trace(self, run_id, *, errors=False):
