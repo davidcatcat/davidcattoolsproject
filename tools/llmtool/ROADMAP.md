@@ -1,6 +1,8 @@
 # LLMTool Roadmap
 
-## 2026-10-19 Owner D7 — operative Developer priority
+> **Current authority (2026-10-20): Owner D8/D8a supersede the D7 role text below.** Codex Developer is resumed; the PM admits OpenCode tasks without per-call Owner approval; the Host may use the local OpenCode credential in memory. See [D8/D8a](../../docs/decisions/llmtool_opencode_secondary_developer_20261019.md). D7 remains historical.
+
+## 2026-10-19 Owner D7 (HISTORICAL; see D8) — operative Developer priority
 
 OpenCode CLI/DeepSeek is now the **PRIMARY Developer**. **Codex
 Developer is PAUSED** after source review of frozen

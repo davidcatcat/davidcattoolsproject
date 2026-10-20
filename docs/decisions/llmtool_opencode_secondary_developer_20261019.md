@@ -11,6 +11,12 @@
 
 Unchanged: formal independent review before merge, exact-head CI, no paid fallback, no F2 llmtool-owned Git mutation, no force operations.
 
+### Owner D8a — local OpenCode credential use (2026-10-20)
+
+**Owner decision: ACCEPTED** (「同意補充 a」, 2026-10-20, recorded by Claude). llmtool's Host/Worker **may read the single active OpenCode credential** (integration `opencode`) from the local OpenCode store **in memory**, and pass it to the isolated OpenCode worker it starts (e.g. via that worker's private localhost credential endpoint). The Owner identifies this as the TaskA native-runner credential path. The cited [Claude review](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6280821579) accepted only a runner helper delta; it records zero credential reads, did not execute the runner, and did not rereview unchanged product source or tests. It is not evidence of a live credential handoff or inference.
+
+Still required: never print, log, persist, export or copy the credential into receipts, evidence, GitHub or any file; read only that one active row (no `auth export`, no all-credentials list); drop the reference after handing it to the worker. Config isolation through the Worker's isolated HOME/XDG state is accepted. The Owner reported that this Mac had no system-level or managed (MDM/profile) OpenCode configuration as of 2026-10-20; a launch preflight that fails closed if such sources appear is recommended, not a precondition.
+
 
 > **Owner decision:** ACCEPTED, 2026-10-19. **Execution evidence:** NOT IMPLEMENTED / NOT LIVE VERIFIED. The Owner separately authorized starting Git/document updates; this document is not evidence of a physical Mac worktree reassignment, model/data egress authorization, executable Adapter or A11c milestone completion.
 >
