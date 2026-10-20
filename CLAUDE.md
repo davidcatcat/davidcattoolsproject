@@ -8,4 +8,4 @@ Report exact reviewed SHA, actionable findings, severity, evidence, applicable g
 
 Read only the specialist skill for the requested gate: [safe-git](skills/safe-git/SKILL.md), [debug-ci](skills/debug-ci/SKILL.md), [review-change](skills/review-change/SKILL.md), [security-review](skills/security-review/SKILL.md), [qa-validation](skills/qa-validation/SKILL.md) or [validate-runtime](skills/validate-runtime/SKILL.md). Keep shared workflows in skills; maintain project status in the [Roadmap](tools/llmtool/ROADMAP.md).
 
-One-off incidents and superseded role decisions are archived under [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md), not current instructions.
+One-off incidents and superseded role decisions are archived under [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md), not current instructions. The prior [CLAUDE guidance snapshot](docs/history/claude-guidance-20261020.md) is retained for audit context.
