@@ -159,7 +159,7 @@ which is **not** accepted as a Host-owned S3 invocation. No new controller, auto
 fallback, F2/egress waiver or historical `/claude` root takeover.
 GitHub dispatch is not a Mac CLI launch; stop and report after actual S3 PASS.
 **OpenCode must not self-authorize its Host.** Follow the normative
-[exact-source D4 and independent Host review gate](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md#owner-d7-2026-10-19-supersession-opencode-primary-developer)
+[exact-source D4 and independent Host review gate](https://github.com/davidcatcat/davidcattoolsproject/blob/d41600ff98568770fb918fdf4a3309dd144a0dfe/skills/ai-team-delivery/SKILL.md#owner-d7-2026-10-19-historical-see-d8d8a--opencode-primary-developer)
 before any new provider read or use of updated admission/containment code.
 
 
