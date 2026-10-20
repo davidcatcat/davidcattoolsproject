@@ -35,6 +35,7 @@ TEXT_LIMIT = 128 * 1024
 MODELS = {'DEVELOP': 'opencode/deepseek-v4.1-flash-free',
           'PREREVIEW': 'opencode/glm-5.3-flash-free'}
 AGENT = 'llmtool-worker'
+FAILURE_STAGES = frozenset({'PRELAUNCH','READINESS','CREDENTIAL','CLIENT','EVIDENCE','CLEANUP','UNKNOWN'})
 
 
 class WorkerError(LLMToolError):
@@ -121,6 +122,7 @@ class WorkerResult:
     runtime_evidence_status: str = 'NOT_VERIFIED'
     provider_requests: str = 'UNKNOWN'
     raw_usage: tuple = ()
+    failure_stage: str = 'UNKNOWN'
 
 
 def configuration(job):
@@ -257,6 +259,26 @@ def _validate(job, deadline):
         physical_directory(path)
         if stat.S_IMODE(path.stat().st_mode)!=0o700 or root==path or root in path.parents:
             reject('OPENCODE_RUNTIME_INVALID')
+
+
+def preflight(job):
+    """Offline, non-consuming validation before a durable launch reservation.
+
+    This checks the same filesystem/job pin enforced again by run_worker. It does
+    not call a Host, inspect credential state, start OpenCode, or mutate the job.
+    """
+    if (type(job) is not WorkerJob or type(job.budget) is not RunBudget or
+            type(job.usage) is not UsageLedger):
+        reject('OPENCODE_JOB_INVALID')
+    try:
+        started=time.monotonic()
+        deadline=started+min(600,max(0,(job.budget.wall_clock_ms-(job.usage.elapsed_ms or 0))/1000))
+        work_deadline=deadline-min(5,(deadline-started)*.2)
+        _validate(job,work_deadline)
+    except WorkerError:
+        raise
+    except Exception:
+        reject('OPENCODE_RUNTIME_INVALID')
 
 
 def _environment(job, config, password):
@@ -593,7 +615,7 @@ def run_worker(job, host):
     with job._lock:
         if job._attempted:
             return WorkerResult('OPENCODE_ATTEMPT_ALREADY_USED','BLOCKED',None,None,
-                job.usage,False,(),None,'NOT_VERIFIED')
+                job.usage,False,(),None,'NOT_VERIFIED',failure_stage='PRELAUNCH')
         object.__setattr__(job,'_attempted',True)
     started=time.monotonic(); started_ms=int(time.time()*1000)
     deadline=started+min(600,max(0,(job.budget.wall_clock_ms-(job.usage.elapsed_ms or 0))/1000))
@@ -603,6 +625,12 @@ def run_worker(job, host):
     ledger=job.usage; pipes=None; holders=[]; output=b''; facts=[]; raw_usage=()
     observation_failed=False
     evidence='OFFLINE_FIXTURE' if getattr(host,'test_only',None) is True else 'HOST_OBSERVED'
+    stage='PRELAUNCH'
+    def mark_stage(value):
+        nonlocal stage
+        stage=value
+        try: host.failure_stage=value
+        except Exception: pass
     try:
         _validate(job,work_deadline)
         phase=CallPhase.PRIMARY if job.phase=='DEVELOP' else CallPhase.REVIEW
@@ -614,6 +642,7 @@ def run_worker(job, host):
         if token is None: reject('OPENCODE_NOT_AUTHORIZED')
         host.check(token,job,'before');host.consume(token,job)
         _clock(work_deadline)
+        mark_stage('READINESS')
         env=_environment(job,config,secrets.token_hex(24))
         title='llmtool-'+secrets.token_hex(16)
         pipes=_Pipes(work_deadline)
@@ -637,7 +666,12 @@ def run_worker(job, host):
                 if env.get('OPENCODE_DB') != ':memory:':
                     reject('OPENCODE_RUNTIME_INVALID')
                 host.prepare_server(token,job,url,env['OPENCODE_PASSWORD'],work_deadline)
+                if getattr(host,'failure_stage',None) == 'CREDENTIAL':
+                    mark_stage('CREDENTIAL')
+                else:
+                    mark_stage('READINESS')
                 host.check(token,job,'before-client');_clock(work_deadline)
+                mark_stage('CLIENT')
                 client=CLIProcessLifecycle('opencode-cli',deadline=deadline)
                 holders.append(client);object.__setattr__(job,'pending',tuple(holders))
                 with client:
@@ -663,6 +697,7 @@ def run_worker(job, host):
                             starts+=_request_starts(bytes(stream[scanned:end]));scanned=end
                             if starts>allowed: reject('OPENCODE_PROVIDER_RETRY_BLOCKED')
                     child.wait(timeout=max(0,work_deadline-time.monotonic()))
+                    mark_stage('EVIDENCE')
                     output=bytes(pipes.buffers['client_out'])
                     sid=_session(output)
                     if sid==job.agent.session_id: reject('OPENCODE_IDENTITY_REUSE')
@@ -696,12 +731,19 @@ def run_worker(job, host):
         if assessment.status is BudgetStatus.UNKNOWN: reject('OPENCODE_USAGE_UNKNOWN')
         if assessment.status is not BudgetStatus.WITHIN: reject('OPENCODE_BUDGET_BLOCKED')
         code='OPENCODE_OUTPUT_RETURNED'
-    except WorkerError as error: code=error.worker_code
+    except WorkerError as error:
+        code=error.worker_code
+        host_stage=getattr(host,'failure_stage',None)
+        if stage=='READINESS' and host_stage=='CREDENTIAL': mark_stage('CREDENTIAL')
     except _Cancelled: raise
     except (OSError,ValueError,TypeError,KeyError,LLMToolError,subprocess.SubprocessError):
         code='OPENCODE_RUNTIME_UNKNOWN'
+        host_stage=getattr(host,'failure_stage',None)
+        if stage=='READINESS' and host_stage=='CREDENTIAL': mark_stage('CREDENTIAL')
     except Exception:
         code='OPENCODE_HOST_UNKNOWN'
+        host_stage=getattr(host,'failure_stage',None)
+        if stage=='READINESS' and host_stage=='CREDENTIAL': mark_stage('CREDENTIAL')
     finally:
         if pipes is not None: pipes.selector.close()
         for lifecycle in holders:
@@ -713,7 +755,9 @@ def run_worker(job, host):
                     pid=process.pid,host_pid=os.getpid(),reaped=process.returncode is not None,
                     exit=process.returncode,group_absent=lifecycle.cleanup_confirmed))
         cleanup=all(x.process is None or x.cleanup_confirmed for x in holders)
-        if not cleanup: code='OPENCODE_CLEANUP_UNKNOWN'
+        if not cleanup:
+            code='OPENCODE_CLEANUP_UNKNOWN'
+            mark_stage('CLEANUP')
         else: object.__setattr__(job,'pending',())
         if token is not None:
             # Always reconcile after a client could have edited, including auth,
@@ -721,9 +765,15 @@ def run_worker(job, host):
             # scope verdict; preserve the original BaseException on cancellation.
             if len(holders)>1:
                 try: host.check(token,job,'after')
-                except Exception: code='OPENCODE_SOURCE_UNKNOWN'
-            try: host.finalize(token,code,launched)
-            except Exception: code='OPENCODE_FINALIZE_UNKNOWN'
+                except Exception:
+                    code='OPENCODE_SOURCE_UNKNOWN'
+                    if stage!='CLEANUP': mark_stage('EVIDENCE')
+            try:
+                host.failure_stage=stage
+                host.finalize(token,code,launched)
+            except Exception:
+                code='OPENCODE_FINALIZE_UNKNOWN'
+                mark_stage('CLEANUP')
     if code!='OPENCODE_OUTPUT_RETURNED':
         content=None
         # A launched client with unavailable completion/usage must poison later
@@ -732,4 +782,5 @@ def run_worker(job, host):
             ledger=UsageLedger(job.usage.calls+(CallUsage(phase,None,None),),
                 job.usage.repair_attempts,job.usage.elapsed_ms+int((time.monotonic()-started)*1000))
     return WorkerResult(code,'RETURNED' if content is not None else 'BLOCKED',content,sid,
-        ledger,cleanup,tuple(facts),hashlib.sha256(output).hexdigest() if output else None,evidence,raw_usage=raw_usage)
+        ledger,cleanup,tuple(facts),hashlib.sha256(output).hexdigest() if output else None,evidence,
+        raw_usage=raw_usage,failure_stage=stage)

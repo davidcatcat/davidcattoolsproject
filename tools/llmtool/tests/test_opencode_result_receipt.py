@@ -45,12 +45,20 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(x.task, self.job.task)
         self.assertEqual(x.agent, self.job.agent)
         self.assertEqual(x.source_sha, self.job.source_sha)
+        self.assertNotIn('failure_stage', x.to_dict())  # legacy UNKNOWN receipt digest remains stable
 
     def test_missing_or_wrong_type_is_unknown(self):
         for kw in (dict(result=None), dict(host_final=None), dict(host_final={}),
                    dict(result='text'), dict(job=None), dict(observed_head=None)):
             with self.subTest(kw=kw):
                 self.assertEqual(self.receipt(**kw).verdict, 'UNKNOWN')
+
+    def test_failure_stage_is_persisted_as_a_sanitized_enum(self):
+        bad = replace(self.good, code='OPENCODE_RUNTIME_INVALID', status='BLOCKED',
+                      content=None, processes=(), failure_stage='SECRET_SENTINEL')
+        out = self.receipt(result=bad, host_final=None)
+        self.assertEqual(out.failure_stage, 'UNKNOWN')
+        self.assertNotIn('SECRET_SENTINEL', repr(out.to_dict()))
 
     def test_exit_zero_or_model_text_alone_is_not_success(self):
         for bad in (replace(self.good, content=None), replace(self.good, content=''),

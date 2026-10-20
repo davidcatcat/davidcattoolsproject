@@ -189,6 +189,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch.object(w.subprocess,'Popen',side_effect=capture_spawn):
             result=w.run_worker(job,host)
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
+        self.assertEqual(result.failure_stage,'EVIDENCE')
         self.assertEqual(result.status,'RETURNED')
         self.assertFalse(result.authorized)
         self.assertEqual(result.evidence_class,'OFFLINE_FIXTURE')
@@ -435,6 +436,22 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with patch('llmtool.opencode_worker.subprocess.Popen') as spawn:
             result=w.run_worker(job,Host())
         self.assertEqual(result.code,'OPENCODE_RUNTIME_INVALID');spawn.assert_not_called()
+        self.assertEqual(result.failure_stage,'PRELAUNCH')
+
+    def test_offline_preflight_validates_without_consuming_attempt_or_following_symlink(self):
+        job=self.job()
+        self.assertIsNone(w.preflight(job))
+        self.assertFalse(job._attempted)
+        self.assertEqual(job.pending,())
+        executable=Path(job.runtime.executable)
+        link=executable.parent/'synthetic-preflight-link'
+        link.symlink_to(executable)
+        object.__setattr__(job.runtime,'executable',str(link))
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(job)
+        self.assertEqual(caught.exception.worker_code,'OPENCODE_RUNTIME_INVALID')
+        self.assertFalse(job._attempted)
+        self.assertEqual(job.pending,())
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
         job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
