@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -15,6 +16,7 @@ from llmtool.configure import run_configure
 from llmtool.errors import LLMToolError
 from llmtool.providers import PROVIDER_REGISTRY, create_client, get_provider_capabilities
 from llmtool.providers.codex_cli import CodexCLIProvider
+from llmtool.providers.cli_lifecycle import background_cli_invocation, tui_cli_signal_scope
 
 
 CAPABILITIES = {
@@ -46,7 +48,7 @@ class CodexCLIProviderTests(unittest.TestCase):
 import json, os, subprocess, sys, time
 from pathlib import Path
 prompt = sys.stdin.read()
-capture = {"argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd(),
+capture = {"pid": os.getpid(), "argv": sys.argv[1:], "prompt": prompt, "cwd": os.getcwd(),
            "contents": sorted(os.listdir(".")), "env": dict(os.environ)}
 mode = %r
 if mode == "mutation":
@@ -118,6 +120,53 @@ else:
         client = create_client({"providers": {"local": self.provider},
                                 "active_provider": "local", "generation": {}})
         self.assertIsInstance(client, CodexCLIProvider)
+
+    def test_tui_background_invocation_uses_bounded_cli_process(self):
+        outcome = []
+
+        def invoke():
+            try:
+                with background_cli_invocation():
+                    outcome.append(self.complete().content)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        with tui_cli_signal_scope(lambda signum: None):
+            worker.start()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "Codex CLI request thread did not finish")
+        self.assertEqual(outcome, ["CODEX_FINAL"])
+        self.assertTrue(self.capture.exists())
+
+    def test_tui_background_timeout_reaps_owned_cli_process(self):
+        self.fake("timeout")
+        outcome = []
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        def invoke():
+            try:
+                with background_cli_invocation():
+                    self.complete(timeout_seconds=1.0)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        with patch("llmtool.providers.codex_cli.subprocess.Popen", side_effect=spawn), \
+                tui_cli_signal_scope(lambda signum: None):
+            worker.start()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "timed-out Codex CLI request thread did not finish")
+        self.assertEqual(len(outcome), 1)
+        self.assertEqual(outcome[0].diagnostic.code.value, "PROVIDER_TIMEOUT")
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNotNone(spawned[0].returncode)
 
     def test_successful_response_contains_only_final_text(self):
         reply = self.complete()

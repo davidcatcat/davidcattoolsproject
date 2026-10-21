@@ -9,9 +9,16 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
+
+from llmtool.providers.cli_lifecycle import (
+    CLIProcessLifecycle,
+    background_cli_invocation,
+    tui_cli_signal_scope,
+)
 
 import yaml
 
@@ -24,6 +31,95 @@ SECRET = 'DG1_SYNTHETIC_SECRET'
 # for scheduling margin. Existing product assertions expire BEFORE this guard;
 # the guard cannot make a failed 5s termination assertion pass.
 FIXTURE_LIFETIME = 2 * (10 + 20 + 5 + 5)
+
+
+class TUISignalOwnershipTests(unittest.TestCase):
+    def test_reentrant_signal_handler_does_not_deadlock(self):
+        script = r'''
+import signal
+from llmtool.providers import cli_lifecycle as lifecycle
+
+callbacks = []
+class Probe:
+    _tui_scope = None
+    def __init__(self):
+        self.calls = 0
+        self.handler = None
+    def _record(self, signum, frame):
+        self.calls += 1
+        if self.calls == 1:
+            self.handler(signum, frame)
+
+probe = Probe()
+lifecycle._background_lifecycles.append(probe)
+try:
+    with lifecycle.tui_cli_signal_scope(callbacks.append):
+        probe.handler = signal.getsignal(signal.SIGTERM)
+        probe.handler(signal.SIGTERM, None)
+    assert probe.calls == 2
+    assert callbacks == [signal.SIGTERM, signal.SIGTERM]
+finally:
+    lifecycle._background_lifecycles.remove(probe)
+'''
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=2,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_late_worker_cannot_register_after_scope_close(self):
+        scope = tui_cli_signal_scope(lambda _signum: None)
+        scope.__enter__()
+        scope.__exit__(None, None, None)
+        started = threading.Event()
+        result = []
+
+        def worker():
+            started.set()
+            with background_cli_invocation():
+                try:
+                    CLIProcessLifecycle("codex-cli").__enter__()
+                except Exception as error:
+                    result.append(error)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        self.assertTrue(started.wait(1))
+        thread.join(2)
+        self.assertFalse(thread.is_alive(), "late worker did not fail closed")
+        self.assertEqual(len(result), 1)
+        self.assertIn("no active TUI signal owner", str(result[0]))
+
+    def test_scope_waits_without_holding_lock_for_registered_cleanup(self):
+        entered = threading.Event()
+        release = threading.Event()
+        failures = []
+        scope = tui_cli_signal_scope(lambda _signum: None)
+        scope.__enter__()
+
+        def worker():
+            try:
+                with background_cli_invocation():
+                    with CLIProcessLifecycle("codex-cli"):
+                        entered.set()
+                        if not release.wait(2):
+                            raise AssertionError("test did not release registered lifecycle")
+            except BaseException as error:
+                failures.append(error)
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        self.assertTrue(entered.wait(1), "lifecycle did not register")
+        timer = threading.Timer(0.1, release.set)
+        timer.start()
+        started = time.monotonic()
+        scope.__exit__(None, None, None)
+        elapsed = time.monotonic() - started
+        timer.join(1)
+        thread.join(1)
+        self.assertFalse(thread.is_alive(), "registered lifecycle remained after scope close")
+        self.assertEqual(failures, [])
+        self.assertGreaterEqual(elapsed, 0.08)
 
 
 class _FakeTemplate(str):
@@ -328,6 +424,24 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         self.evidence = None
         self._fixture_started = None
         self.addCleanup(self.cleanup_owned_fixture)
+
+    def test_unapproved_background_lifecycle_still_rejects(self):
+        outcome = []
+
+        def enter():
+            try:
+                with CLIProcessLifecycle('codex-cli'):
+                    pass
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=enter)
+        worker.start()
+        worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(outcome), 1)
+        self.assertEqual(outcome[0].diagnostic.code.value, 'PROVIDER_RUNTIME_ERROR')
+        self.assertEqual(str(outcome[0]), 'CLI provider invocation requires the main thread')
 
     @staticmethod
     def states(pids):
