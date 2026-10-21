@@ -2,6 +2,16 @@
 
 > Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file is used for Cloud handoff and Mac/Cloud verification.
 
+
+## ChatGPT ↔ GitHub intake boundary (Owner decision 2026-10-22; future A12, NOT IMPLEMENTED)
+
+[Meeting decision with diagrams](../../docs/meetings/2026-10-21-llmtool-product-requirements.md) and [A12 GitHubSync roadmap](ROADMAP.md#a12--remote-frontends--telegram-agent) govern the future GitHub intake integration. CLI/TUI/Web UI are frontends to one Core, not separate supervisors. A Core-owned incremental Poller starts only upon explicit llmtool Core activation/configuration, stops when idle, and leaves no boot/login `launchd` service, long-running Runner, webhook/tunnel or unowned process. UI closure does not cancel already authorized Worker tasks; Core shutdown means remote GitHub Issues await the next explicit Core startup/catch-up, not instant delivery.
+
+**Authorization must be verified twice:** Owner `DISCUSS` is read-only (including "review repo", "agree", "plan"); `RECORD` permits only explicitly scoped GitHub records without dispatch; only authenticated, explicitly scoped Owner `EXECUTE` grants may be mapped to intake, after bound Issue-version verification; `STOP` blocks new dispatch. A label, GitHub comment, ChatGPT inference, issue-body text or bot claim is **not** a trusted grant. With no credible authorization mapping, refuse intake. Task state/provenance and existing D6/D8/F2/independent Review/CI gates remain authoritative.
+
+**No duplicate runner:** GitHubSync only ingests/records/reconciles tasks, pins repository/Issue/authorization version and calls existing llmtool task facilities. PM AI alone decides worker choice and task decomposition; the Poller makes no model calls. `task submit` currently records a PM intake; it does not prove auto-started Developer, wake, Mac execution or GitHub synchronization. Fail unknown; do not claim live product, and do not change existing A11c G3/M2 acceptance meaning. This is a docs-only product decision, not an execution or implementation assignment.
+
+
 ## Current Developer and Reviewer routing (Owner decision 2026-10-21)
 
 Codex and OpenCode are normal Developer routes assigned by the existing PM; direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
