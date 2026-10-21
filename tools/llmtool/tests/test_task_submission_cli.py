@@ -18,6 +18,7 @@ from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
                                          run_task_show, run_task_submit)
+from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
 
 
 def config(provider_type='codex-cli', model='gpt-6-luna'):
@@ -298,6 +299,129 @@ class TaskSubmissionCLITests(unittest.TestCase):
         })))
         self.assertEqual(code, 0)
         return task
+
+    def _pm_task_with_opencode_assignment(self):
+        acceptance = ['focused change is present']
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded low-risk task.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW', 'goal': 'Update one fixture value.',
+                'acceptance': acceptance,
+            },
+        })
+        code, task, _, _ = self.invoke(client=FakeClient(Reply(response, {
+            'prompt_tokens': 12, 'completion_tokens': 18, 'total_tokens': 30,
+        })))
+        self.assertEqual(code, 0)
+        return task
+
+    def _opencode_delegate_args(self, task, **changes):
+        values = dict(task_id=task['task_id'], provider='opencode',
+                      selection_source='PM', executor_task='executor-task-1',
+                      read_path=['sample.py'], write_path=['sample.py'],
+                      acceptance=['focused change is present'],
+                      egress_basis='Owner approved non-sensitive source files')
+        values.update(changes)
+        return Namespace(**values)
+
+    def test_opencode_direct_route_records_scoped_diff_and_cli_evidence(self):
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            self.assertEqual(kwargs['root'], str(self.executor_root))
+            self.assertEqual(kwargs['read_paths'], ['sample.py'])
+            self.assertEqual(kwargs['write_paths'], ['sample.py'])
+            self.assertIn(task['task_id'], kwargs['prompt'])
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return DirectResult(0, 'ses_Abc123', 'Updated fixture.',
+                {'prompt_tokens': 18, 'completion_tokens': 9, 'total_tokens': 27},
+                'CLI_REPORTED', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.0.32',
+                10, 1, 'b' * 64)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute) as invoke, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(code, 0, output.getvalue())
+        result = json.loads(output.getvalue())
+        developer = result['developer']
+        self.assertEqual(developer['provider_profile'], 'opencode')
+        self.assertEqual(developer['provider_type'], 'opencode-cli')
+        self.assertEqual(developer['model'], 'opencode/deepseek-v4.1-flash-free')
+        self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
+        self.assertEqual(developer['execution']['process_exit_code'], 0)
+        self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
+        self.assertEqual(developer['execution']['source_bytes'], 10)
+        self.assertEqual(developer['execution']['source_file_count'], 1)
+        self.assertEqual(developer['execution']['source_manifest_sha256'], 'b' * 64)
+        self.assertEqual(developer['usage']['total_tokens'], 27)
+        self.assertIn('+VALUE = 2', developer['artifact'])
+        self.assertEqual(result['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertEqual(developer['execution_result']['status'], 'UNVERIFIED')
+        self.assertEqual(invoke.call_count, 1)
+        stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(stored['developer']['artifact'], developer['artifact'])
+
+    def test_opencode_d6_head_drift_blocks_dispatch_before_provider_process(self):
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+        provider_process_started = False
+
+        def simulate_prelaunch(**kwargs):
+            subprocess.run(['/usr/bin/git', 'commit', '--allow-empty', '-m', 'synthetic drift'],
+                           cwd=self.executor_root, check=True, capture_output=True)
+            try:
+                kwargs['prelaunch_validate']()
+            except Exception:
+                raise DirectOpenCodeError('OPENCODE_D6_BINDING_CHANGED') from None
+            nonlocal provider_process_started
+            provider_process_started = True
+            self.fail('Provider process must not start after D6/Git drift')
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=simulate_prelaunch) as invoke, redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'OPENCODE_D6_BINDING_CHANGED')
+        self.assertFalse(provider_process_started)
+        self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_failed_call_is_unknown_and_never_replayed(self):
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+        from llmtool.opencode_direct_developer import DirectOpenCodeError
+        error = DirectOpenCodeError('OPENCODE_TIMEOUT', attempted=True,
+                                    cleanup_status='CONFIRMED', process_exit_code=None,
+                                    stdout_sha256='a' * 64, elapsed_ms=1200,
+                                    source_bytes=10, source_file_count=1,
+                                    source_manifest_sha256='b' * 64)
+        args = self._opencode_delegate_args(task)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=error) as invoke, redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(result['developer']['error_code'], 'OPENCODE_TIMEOUT')
+        self.assertEqual(result['developer']['usage'], None)
+        self.assertEqual(result['developer']['execution']['process_exit_code'], None)
+        self.assertEqual(result['developer']['execution']['stdout_sha256'], 'a' * 64)
+        self.assertEqual(result['developer']['execution']['elapsed_ms'], 1200)
+        self.assertEqual(result['developer']['execution']['source_bytes'], 10)
+        self.assertEqual(result['developer']['execution']['source_file_count'], 1)
+        self.assertEqual(result['developer']['execution']['source_manifest_sha256'], 'b' * 64)
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as second, \
+                self.assertRaises(LLMToolError):
+            run_task_delegate(args)
+        second.assert_not_called()
+        self.assertEqual(invoke.call_count, 1)
 
     def _delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='company-gw',

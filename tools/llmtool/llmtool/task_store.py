@@ -43,13 +43,19 @@ _FIELDS_V2_COMPLETION = _FIELDS_V2 | frozenset(('completion',))
 _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_DEVELOPER_FIELDS = frozenset((
+_LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
     'source_sha', 'source_sha_binding', 'read_paths', 'write_paths', 'acceptance', 'context_sha256',
     'egress_basis', 'input_bytes', 'max_tokens',
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
+))
+_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DIRECT_EXECUTION_FIELDS = frozenset((
+    'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
+    'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
+    'source_file_count', 'source_manifest_sha256',
 ))
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
@@ -232,7 +238,8 @@ def _validate(record):
                 _fail()
         developer = record['developer']
         if developer is not None:
-            if type(developer) is not dict or set(developer) != _DEVELOPER_FIELDS:
+            if type(developer) is not dict or set(developer) not in (
+                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -240,9 +247,10 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] != 'company-gw' or
-                    developer['provider_type'] not in (None, 'openai-compatible') or
-                    developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                    developer['provider_profile'] not in ('company-gw', 'opencode') or
+                    developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
+                    developer['backend_session_semantics'] not in (
+                        'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
                     type(developer['source_sha']) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', developer['source_sha']) is None or
@@ -260,6 +268,65 @@ def _validate(record):
                       not 1 <= developer['max_tokens'] <= 1_000_000)) or
                     developer['artifact_format'] != 'unified_diff' or
                     type(developer['created_at']) is not str):
+                _fail()
+            if (developer['provider_profile'] == 'company-gw' and
+                    (developer['provider_type'] not in (None, 'openai-compatible') or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED')):
+                _fail()
+            if (developer['provider_profile'] == 'opencode' and
+                    (developer['provider_type'] not in (None, 'opencode-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if 'execution' in developer:
+                execution = developer['execution']
+                if execution is not None:
+                    if (developer['provider_profile'] != 'opencode' or
+                            type(execution) is not dict or
+                            set(execution) != _DIRECT_EXECUTION_FIELDS or
+                            execution['status'] not in ('SUCCEEDED', 'FAILED', 'UNKNOWN') or
+                            (execution['native_session_id'] is not None and
+                             (type(execution['native_session_id']) is not str or
+                              re.fullmatch(r'ses_[A-Za-z0-9]{1,100}',
+                                           execution['native_session_id']) is None)) or
+                            (execution['process_exit_code'] is not None and
+                             (type(execution['process_exit_code']) is not int or
+                              not -127 <= execution['process_exit_code'] <= 255)) or
+                            (execution['stdout_sha256'] is not None and
+                             (type(execution['stdout_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}', execution['stdout_sha256']) is None)) or
+                            (execution['elapsed_ms'] is not None and
+                             (type(execution['elapsed_ms']) is not int or
+                              not 0 <= execution['elapsed_ms'] <= 86_400_000)) or
+                            (execution['source_bytes'] is not None and
+                             (type(execution['source_bytes']) is not int or
+                              not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
+                            (execution['source_file_count'] is not None and
+                             (type(execution['source_file_count']) is not int or
+                              not 1 <= execution['source_file_count'] <= 32)) or
+                            (execution['source_manifest_sha256'] is not None and
+                             (type(execution['source_manifest_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}',
+                                           execution['source_manifest_sha256']) is None)) or
+                            execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
+                            execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+                        _fail()
+                    if execution['status'] == 'SUCCEEDED' and (
+                            execution['native_session_id'] is None or
+                            execution['process_exit_code'] != 0 or
+                            execution['stdout_sha256'] is None or
+                            execution['source_bytes'] is None or
+                            execution['source_file_count'] is None or
+                            execution['source_manifest_sha256'] is None or
+                            execution['cleanup_status'] != 'CONFIRMED'):
+                        _fail()
+                    source_observation = (execution['source_bytes'],
+                                         execution['source_file_count'],
+                                         execution['source_manifest_sha256'])
+                    if any(value is None for value in source_observation) and not all(
+                            value is None for value in source_observation):
+                        _fail()
+            elif developer['provider_profile'] == 'opencode':
                 _fail()
             try:
                 stamp = datetime.strptime(developer['created_at'], '%Y-%m-%dT%H:%M:%SZ')
@@ -309,12 +376,15 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            expected_provider = ('openai-compatible' if
+                                 developer['provider_profile'] == 'company-gw' else
+                                 'opencode-cli')
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
             if dev_state == 'DEVELOPER_DISPATCHING' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
                     developer['max_tokens'] is None):
                 _fail()
@@ -323,13 +393,21 @@ def _validate(record):
                     developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or developer['max_tokens'] is None):
                 _fail()
+            if developer['provider_profile'] == 'opencode':
+                execution = developer.get('execution')
+                if dev_state == 'DEVELOPER_RESPONDED' and (
+                        type(execution) is not dict or execution['status'] != 'SUCCEEDED' or
+                        execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
+                    _fail()
+                if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
+                    _fail()
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
                     developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
