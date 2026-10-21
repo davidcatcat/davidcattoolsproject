@@ -138,6 +138,53 @@ def _pm_assignment(response):
         return None
 
 
+def _strict_json_object(raw):
+    """Parse bounded JSON while rejecting duplicate keys and non-standard constants."""
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('duplicate JSON key')
+            value[key] = item
+        return value
+
+    value = json.loads(raw, object_pairs_hook=unique_pairs,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    if type(value) is not dict:
+        raise ValueError('JSON object required')
+    return value
+
+
+def _read_pm_record_input(stream=None):
+    stream = sys.stdin if stream is None else stream
+    source = getattr(stream, 'buffer', stream)
+    raw = source.read(REQUEST_LIMIT + RESPONSE_LIMIT + 1024 + 1)
+    if type(raw) is str:
+        try:
+            raw = raw.encode('utf-8')
+        except UnicodeError:
+            raise LLMToolError('PM record input must be valid UTF-8 JSON') from None
+    if type(raw) is not bytes or len(raw) > REQUEST_LIMIT + RESPONSE_LIMIT + 1024:
+        raise LLMToolError('PM record input exceeds the supported size')
+    try:
+        envelope = _strict_json_object(raw.decode('utf-8', 'strict'))
+    except (UnicodeError, ValueError, TypeError):
+        raise LLMToolError('PM record input must be one strict JSON object') from None
+    if set(envelope) != {'request', 'response'}:
+        raise LLMToolError('PM record input must contain only request and response')
+    request = _screen_text(envelope['request'], REQUEST_LIMIT)
+    response = _screen_text(envelope['response'], RESPONSE_LIMIT)
+    try:
+        _strict_json_object(response)
+    except (ValueError, TypeError):
+        raise LLMToolError('PM response must be one strict JSON object') from None
+    assignment = _pm_assignment(response)
+    if (assignment is None or assignment['route'] != 'opencode' or
+            assignment['risk'] != 'LOW'):
+        raise LLMToolError('PM response must recommend one low-risk OpenCode assignment')
+    return request, response, assignment
+
+
 def _pm_recommendation(response):
     try:
         value = json.loads(response)
@@ -224,6 +271,8 @@ def _task_view(record):
     view = {key: record[key] for key in fields}
     if 'pm_route_binding' in record:
         view['pm_route_binding'] = record['pm_route_binding']
+    if 'pm_provenance' in record:
+        view['pm_provenance'] = record['pm_provenance']
     if record['schema_version'] == 2:
         if 'completion' in record:
             view['completion'] = record['completion']
@@ -247,6 +296,10 @@ def add_task_submission_parsers(actions):
     submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
     submit.add_argument('request', nargs='+', help='development request text')
+    record_pm = actions.add_parser(
+        'record-pm', help='Record an active PM runtime decision without invoking a provider')
+    record_pm.add_argument('--stdin-json', action='store_true', required=True,
+                           help='read one bounded JSON object with request and response from stdin')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
@@ -838,6 +891,41 @@ def run_task_submit(args, *, store=None):
         # Do not print an unpersisted provider response as a completed Task.
         raise LLMToolError('task outcome could not be saved; details omitted') from None
     _print(_task_view(completed))
+    return 0
+
+
+def run_task_record_pm(args, *, store=None, input_stream=None):
+    """Persist a real active-PM decision; this path never resolves or calls a provider."""
+    del args  # The required flag is enforced by argparse; no caller text is trusted from argv.
+    store = TaskStore() if store is None else store
+    prompt, response, assignment = _read_pm_record_input(input_stream)
+    task_id, run_id = new_id(), new_id()
+    digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
+    contract = _contract(task_id, digest)
+    record = _record(
+        task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
+        state='PM_RESPONDED', provider_type='codex-cli', model=None,
+        backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
+        contract=contract,
+    )
+    record.update(
+        pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+        response=response, usage=None, error_code=None, pm_assignment=assignment,
+        pm_provenance={
+            'source': 'ACTIVE_PM_RUNTIME',
+            'provider_invoked': False,
+            'native_session_id_status': 'UNAVAILABLE',
+            'usage_status': 'UNKNOWN',
+            'session_restored': False,
+            'automatic_callback': False,
+        },
+    )
+    try:
+        store.create(record)
+        saved = store.get(task_id)
+    except Exception:
+        raise LLMToolError('active PM outcome could not be saved; details omitted') from None
+    _print(_task_view(saved))
     return 0
 
 

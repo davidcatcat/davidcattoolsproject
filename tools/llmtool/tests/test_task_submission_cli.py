@@ -1,4 +1,5 @@
 import io
+import hashlib
 import json
 import os
 import subprocess
@@ -17,7 +18,8 @@ from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
-                                         run_task_show, run_task_submit)
+                                         run_task_record_pm, run_task_show,
+                                         run_task_submit)
 from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
 
 
@@ -284,6 +286,95 @@ class TaskSubmissionCLITests(unittest.TestCase):
                    for option in action.option_strings]
         self.assertIn('--executor-task', options)
         self.assertNotIn('--source-sha', options)
+
+    def test_record_pm_is_strict_offline_and_persists_truthful_provenance(self):
+        request = 'Implement a small, isolated OpenCode adapter test.'
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'A bounded low-risk test task.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW',
+                'goal': 'Add one focused offline regression test.',
+                'acceptance': ['The focused test passes.'],
+            },
+        })
+        envelope = json.dumps({'request': request, 'response': response})
+        output = io.StringIO()
+        store = TaskStore(self.home / '.local/state/llmtool/tasks')
+        with patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=AssertionError('provider resolution must not run')), \
+                patch('llmtool.task_submission_cli.api_key',
+                      side_effect=AssertionError('credentials must not be read')), \
+                patch('llmtool.task_submission_cli.create_client',
+                      side_effect=AssertionError('provider client must not be created')), \
+                patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('sys.stdin', io.StringIO(envelope)), \
+                redirect_stdout(output):
+            code = main(['task', 'record-pm', '--stdin-json'])
+        result = json.loads(output.getvalue())
+        saved = store.get(result['task_id'])
+        self.assertEqual(code, 0)
+        self.assertEqual(result, saved | {'usage_status': 'UNKNOWN'})
+        self.assertEqual(saved['state'], 'PM_RESPONDED')
+        self.assertNotEqual(saved['task_id'], saved['run_id'])
+        self.assertEqual(saved['task_binding']['task_id'], saved['task_id'])
+        self.assertEqual(saved['task_binding']['run_id'], saved['run_id'])
+        self.assertEqual(saved['request'], request)
+        self.assertEqual(saved['request_sha256'], hashlib.sha256(request.encode()).hexdigest())
+        self.assertEqual(saved['response'], response)
+        self.assertEqual(saved['pm_assignment']['route'], 'opencode')
+        self.assertEqual(saved['pm_assignment']['risk'], 'LOW')
+        self.assertEqual(saved['pm_provider_profile'], 'active-pm-runtime')
+        self.assertEqual(saved['pm_provider_type'], 'codex-cli')
+        self.assertIsNone(saved['pm_model'])
+        self.assertEqual(saved['pm_route_binding'], {
+            'type': 'codex-cli', 'model': None, 'base_url': None})
+        self.assertEqual(saved['backend_session_semantics'],
+                         'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
+        self.assertIsNone(saved['native_session_id'])
+        self.assertIsNone(saved['usage'])
+        self.assertEqual(saved['pm_provenance'], {
+            'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False,
+            'native_session_id_status': 'UNAVAILABLE', 'usage_status': 'UNKNOWN',
+            'session_restored': False, 'automatic_callback': False,
+        })
+        parsed = parser_for_cli().parse_args(['task', 'record-pm', '--stdin-json'])
+        self.assertEqual(parsed.action, 'record-pm')
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), redirect_stdout(output):
+            self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
+        self.assertEqual(json.loads(output.getvalue())['pm_provenance'], saved['pm_provenance'])
+
+    def test_record_pm_rejects_malformed_or_sensitive_input_without_task(self):
+        good_response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW', 'goal': 'Do one task.',
+                'acceptance': ['A test passes.'],
+            },
+        })
+        cases = (
+            json.dumps({'request': 'Build feature', 'response': '{bad json'}),
+            ('{"request":"Build feature","response":' + json.dumps(good_response) +
+             ',"request":"Duplicate"}'),
+            json.dumps({'request': 'api_key=sk-abcdefghijklmnopqrstuvwxyz',
+                        'response': good_response}),
+            json.dumps({'request': 'Build feature',
+                        'response': 'Bearer abcdefghijklmnop'}),
+            json.dumps({'request': 'Build feature', 'response': json.dumps({
+                'schema_version': 1, 'summary': 'Duplicate fields.',
+                'developer_assignment': {'route': 'opencode', 'route': 'codex',
+                    'risk': 'LOW', 'goal': 'Do one task.',
+                    'acceptance': ['A test passes.']},
+            })}),
+        )
+        for raw in cases:
+            with self.subTest(raw=raw[:40]):
+                store = TaskStore(Path(self.temp.name).resolve() /
+                                  ('rejected-' + str(cases.index(raw))))
+                with self.assertRaises(LLMToolError):
+                    run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                       input_stream=io.StringIO(raw))
+                self.assertFalse(store.root.exists())
 
     def _pm_task_with_assignment(self):
         acceptance = ['new test passes']

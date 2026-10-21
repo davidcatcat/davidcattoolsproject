@@ -41,6 +41,9 @@ _FIELDS_V2 = _FIELDS_V1 | frozenset(('developer', 'pm_assignment'))
 _FIELDS_V2_ROUTE = _FIELDS_V2 | frozenset(('pm_route_binding',))
 _FIELDS_V2_COMPLETION = _FIELDS_V2 | frozenset(('completion',))
 _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
+_V2_FIELD_SHAPES = (_FIELDS_V2_ROUTE, _FIELDS_V2_ROUTE_COMPLETION)
+_FIELDS_V2_WITH_PROVENANCE = tuple(shape | frozenset(('pm_provenance',))
+                                   for shape in _V2_FIELD_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _LEGACY_DEVELOPER_FIELDS = frozenset((
@@ -64,6 +67,10 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_TOO_LARGE',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
+_PM_PROVENANCE_FIELDS = frozenset((
+    'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
+    'session_restored', 'automatic_callback',
+))
 
 
 def _fail(code='TASK_STORE_INVALID'):
@@ -101,7 +108,7 @@ def _validate(record):
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION)) or
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -169,7 +176,8 @@ def _validate(record):
     if record['native_session_id'] is not None:
         _fail()
     if record['backend_session_semantics'] not in (
-            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED'):
+            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED',
+            'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL'):
         _fail()
     contract_raw = record['task_contract']
     if type(contract_raw) is not dict:
@@ -236,6 +244,55 @@ def _validate(record):
                     any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
+        if 'pm_provenance' in record:
+            provenance = record['pm_provenance']
+            def unique_response_pairs(pairs):
+                response_object = {}
+                for key, value in pairs:
+                    if key in response_object:
+                        raise ValueError('duplicate JSON key')
+                    response_object[key] = value
+                return response_object
+
+            try:
+                response_object = json.loads(
+                    record['response'], object_pairs_hook=unique_response_pairs,
+                    parse_constant=lambda _: _fail())
+                response_assignment = response_object.get('developer_assignment')
+            except Exception:
+                _fail()
+            if (type(provenance) is not dict or set(provenance) != _PM_PROVENANCE_FIELDS or
+                    provenance['source'] != 'ACTIVE_PM_RUNTIME' or
+                    provenance['provider_invoked'] is not False or
+                    provenance['native_session_id_status'] != 'UNAVAILABLE' or
+                    provenance['usage_status'] != 'UNKNOWN' or
+                    provenance['session_restored'] is not False or
+                    provenance['automatic_callback'] is not False or
+                    record['pm_provider_profile'] != 'active-pm-runtime' or
+                    record['pm_provider_type'] != 'codex-cli' or
+                    record['pm_model'] is not None or
+                    record['pm_route_binding'] != {
+                        'type': 'codex-cli', 'model': None, 'base_url': None} or
+                    record['backend_session_semantics'] != 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL' or
+                    record['native_session_id'] is not None or
+                    record['state'] != 'PM_RESPONDED' or
+                    record['request'] is None or not record['response'] or
+                    record['request_sha256'] is None or record['usage'] is not None or
+                    record['error_code'] is not None or
+                    type(assignment) is not dict or assignment.get('route') != 'opencode' or
+                    assignment.get('risk') != 'LOW' or
+                    type(response_object) is not dict or
+                    set(response_object) != {
+                        'schema_version', 'summary', 'developer_assignment'} or
+                    type(response_object['schema_version']) is not int or
+                    response_object['schema_version'] != 1 or
+                    type(response_object['summary']) is not str or
+                    _emitted_sensitive(response_object['summary']) or
+                    type(response_assignment) is not dict or
+                    assignment != {'schema_version': 1, **response_assignment}):
+                _fail()
+        elif record['backend_session_semantics'] == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL':
+            _fail()
         developer = record['developer']
         if developer is not None:
             if type(developer) is not dict or set(developer) not in (
