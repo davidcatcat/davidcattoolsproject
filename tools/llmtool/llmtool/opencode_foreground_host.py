@@ -556,27 +556,40 @@ def _persist_task_worker_delivery(job, receipt, delivery, task_store=None):
     prior_packet = evidence.get('host_worker_receipt')
     if prior_packet is not None:
         if packet == prior_packet:
-            return True
-        if packet is None:
+            # An identical durable receipt may be the first event after a prior
+            # pre-provider failure. Re-enter only the TaskStore's one-shot callback
+            # path; its persisted PM claim prevents duplicate side effects.
+            pass
+        elif packet is None:
             # A replay refusal or an unavailable duplicate delivery must not erase
             # an already persisted good receipt/ACK pair.
             return False
-        raise w.WorkerError('LLMTOOL_HOST_RECEIPT_DRIFT')
-    linked_evidence = dict(evidence)
-    linked_evidence['execution_mode'] = 'HOST_WORKER'
-    linked_evidence['host_worker_receipt'] = packet
-    missing = set(completion['missing_gates'])
-    if packet is None:
-        missing.add('HOST_WORKER_RECEIPT_UNAVAILABLE')
+        else:
+            raise w.WorkerError('LLMTOOL_HOST_RECEIPT_DRIFT')
     else:
-        missing.discard('HOST_WORKER_RECEIPT_UNAVAILABLE')
-    linked = {**completion, 'evidence': linked_evidence,
-              'missing_gates': sorted(missing)}
-    store.compare_and_update(task['task_id'], expected={
-                                 'completion': completion,
-                                 'task_binding': job.task.to_dict(),
-                                 'run_id': job.task.run_id},
-                             completion=linked)
+        linked_evidence = dict(evidence)
+        linked_evidence['execution_mode'] = 'HOST_WORKER'
+        linked_evidence['host_worker_receipt'] = packet
+        missing = set(completion['missing_gates'])
+        if packet is None:
+            missing.add('HOST_WORKER_RECEIPT_UNAVAILABLE')
+        else:
+            missing.discard('HOST_WORKER_RECEIPT_UNAVAILABLE')
+        linked = {**completion, 'evidence': linked_evidence,
+                  'missing_gates': sorted(missing)}
+        store.compare_and_update(task['task_id'], expected={
+                                     'completion': completion,
+                                     'task_binding': job.task.to_dict(),
+                                     'run_id': job.task.run_id},
+                                 completion=linked)
+    current = store.get(task['task_id'])
+    current_completion = current.get('completion')
+    if (packet is not None and receipt.verdict == 'SUCCESS' and
+            current.get('developer') is not None and
+            type(current_completion) is dict and
+            current_completion.get('pm_dispatch') == 'NOT_STARTED'):
+        from .task_submission_cli import run_task_executor_event
+        run_task_executor_event(task['task_id'], current_completion['executor_task_id'], store=store)
     return packet is not None
 
 

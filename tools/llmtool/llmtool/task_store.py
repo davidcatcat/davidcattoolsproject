@@ -412,29 +412,42 @@ def _validate(record):
                     _fail()
                 result_head = evidence['result'].get('result_head')
                 review_ci = evidence['review_pr_ci']
-                checks = review_ci.get('successful_checks')
-                required = review_ci.get('required_checks')
-                if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
-                        review_ci.get('formal_review_state') != 'ACCEPTED' or
-                        review_ci.get('head_sha') != result_head or
-                        review_ci.get('review_commit_sha') != result_head or
-                        review_ci.get('ci_head_sha') != result_head or
-                        review_ci.get('review_task_id') != record['task_id'] or
-                        review_ci.get('review_run_id') != record['run_id'] or
-                        review_ci.get('review_contract_digest') != record['task_binding']['contract_digest'] or
-                        review_ci.get('review_binding_verified') is not True or
-                        review_ci.get('reviewer_task_id') != completion['reviewer_task_id'] or
-                        review_ci.get('review_actor') != review_ci.get('reviewer_github_login') or
-                        type(review_ci.get('reviewer_d6_identity')) is not str or
-                        not review_ci['reviewer_d6_identity'] or
-                        review_ci.get('review_session_identity') != 'D6_NATIVE_SESSION_VERIFIED' or
-                        type(checks) is not list or type(required) is not list or
-                        not required or any(type(item) is not str for item in checks + required) or
-                        not set(required).issubset(set(checks)) or
+                if (type(result_head) is not str or
+                        re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
+                        evidence['result'].get('task_id') != record['task_id'] or
+                        evidence['result'].get('run_id') != record['run_id'] or
                         any(type(test) is not dict or test.get('source_sha') != result_head or
                             type(test.get('exit_code')) is not int or test.get('exit_code') != 0
                             for test in evidence['tests'])):
                     _fail()
+                if review_ci.get('stage') == 'EXECUTOR_RESULT':
+                    if (set(review_ci) != {'stage', 'formal_review_state', 'ci_state'} or
+                            review_ci.get('formal_review_state') != 'NOT_STARTED' or
+                            review_ci.get('ci_state') != 'NOT_STARTED' or
+                            completion['reviewer_task_id'] is not None or
+                            (completion['pm_recommendation'] is not None and
+                             completion['pm_recommendation']['decision'] == 'ACCEPT')):
+                        _fail()
+                else:
+                    checks = review_ci.get('successful_checks')
+                    required = review_ci.get('required_checks')
+                    if (review_ci.get('formal_review_state') != 'ACCEPTED' or
+                            review_ci.get('head_sha') != result_head or
+                            review_ci.get('review_commit_sha') != result_head or
+                            review_ci.get('ci_head_sha') != result_head or
+                            review_ci.get('review_task_id') != record['task_id'] or
+                            review_ci.get('review_run_id') != record['run_id'] or
+                            review_ci.get('review_contract_digest') != record['task_binding']['contract_digest'] or
+                            review_ci.get('review_binding_verified') is not True or
+                            review_ci.get('reviewer_task_id') != completion['reviewer_task_id'] or
+                            review_ci.get('review_actor') != review_ci.get('reviewer_github_login') or
+                            type(review_ci.get('reviewer_d6_identity')) is not str or
+                            not review_ci['reviewer_d6_identity'] or
+                            review_ci.get('review_session_identity') != 'D6_NATIVE_SESSION_VERIFIED' or
+                            type(checks) is not list or type(required) is not list or
+                            not required or any(type(item) is not str for item in checks + required) or
+                            not set(required).issubset(set(checks))):
+                        _fail()
                 if (evidence.get('execution_mode') == 'HOST_WORKER' and
                         not validate_host_worker_receipt(
                             evidence.get('host_worker_receipt'),
@@ -452,7 +465,7 @@ def _validate(record):
             if completion_recommendation is not None and (
                     type(completion_recommendation) is not dict or set(completion_recommendation) !=
                     {'decision', 'summary'} or completion_recommendation['decision'] not in
-                    ('ACCEPT', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
+                    ('ACCEPT', 'SEND_TO_REVIEW', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
                      'WAIT_FOR_AUTHORIZATION', 'STOP') or
                     type(completion_recommendation['summary']) is not str or
                     not completion_recommendation['summary'] or
