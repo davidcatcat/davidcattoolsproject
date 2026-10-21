@@ -1375,6 +1375,34 @@ Provider != Role != Agent != Skill；遠端入口不因 transport 或 provider c
 Frontend 擴充方向：CLI / Interactive Chat、Telegram、Web UI。各入口共用 runtime
 與相同的 task lifecycle、事件及 approval 語意，不另建獨立的 orchestration。
 
+
+### A12 future extension — ChatGPT ↔ GitHub ↔ llmtool GitHubSync (Owner decision 2026-10-22; PLANNED)
+
+**Goal:** Owner can discuss, explicitly authorize, and hand off llmtool work from ChatGPT Web/App through GitHub without copying prompts into a CLI/TUI. Authorized Mac llmtool Core receives the GitHub task, delegates to its **selected PM/Integrator AI** (which selects workers), and publishes traceable outcomes to GitHub; the owner can ask ChatGPT to read those outcomes. This does **not** grant ChatGPT direct ChatGPT-chat-quota provider access, automatic ChatGPT wake, or any new model execution authority.
+
+**Decision:** Use incremental REST **Polling inside llmtool Core**, adopting Claude-like **task/session lifecycle management**, not Claude model-powered polling or Claude GitHub Actions. **Do not** install a new permanent Agent, GitHub Self-hosted Runner, webhook/tunnel, independent macOS `launchd` daemon or second Supervisor/PM/Task Store. No boot/login autostart. Core starts GitHubSync when explicitly launched/configured; stops idle polling and eventually releases Core when no authorized work remains. UI closure must not kill authorized running Workers. When Core is stopped, GitHub queues tasks until the next Core startup/catch-up—no real-time remote wake guarantee.
+
+**Dependency / delivery order:** Reuse A11c accepted Core background lifecycle, PM/Worker handoff, Task/Run/Event/Approval and release gates. **Begin implementation only after those A11c Core prerequisites are verified; GitHubSync does not gate Mac CLI/A11c delivery.** Keep the Owner-confirmed order **A11c Mac CLI → A12.1 Telegram → A12.2 local Web UI → other-platform installation**. GitHubSync is an A12 remote-entry extension; its relative implementation slot against A12.1/A12.2 is still to be scheduled, **not an extra A milestone and not a silent reorder**. Telegram's earlier specifics in this file are proposals pending separate A12.1 scope decision, not new Owner acceptance.
+
+**Strict separation of authority (mandatory for design and future acceptance):**
+- `DISCUSS` / Review Repo / exploration / "sounds good": read-only; never create/edit GitHub work or auto-dispatch.
+- `RECORD`: owner-authorized documentation or meeting record only; no executable intake.
+- `EXECUTE`: only explicit Owner instruction with bounded scope, tracked authenticated authorization and approved task version can become an intake candidate. Issue/PR comments, inferred intent, `llmtool:ready` label and model-generated text alone are **not** authorization. Unknown grant = reject/STOP.
+- `STOP`: no new dispatch; running tasks follow existing bounded cancellation/cleanup and provenance rules. No model-route/payment/data-egress authority is introduced.
+
+**Minimum implementation slice (future, not authorized now):**
+1. GitHubSync lightweight inbound/outbound adapter; no model calls during polling; only authorized GitHub repo(s), least-privilege token, sensible backoff/rate-limit and privacy screening.
+2. Durable `repository_id + issue_id + authorized-version-digest ↔ task_id` mapping, crash-safe claim and replay/dedup. Labels are projections, not source of truth. `updated_at` is for discovery, never proof of a new execution request.
+3. First-sync and restart catch-up, `since` checkpoint after successful durable processing, overlap, pagination and reconciliation to avoid missing old Issues. Close/reopen/comment/edit never implicitly relaunches.
+4. Core-owned enable/idle auto-stop; no boot daemon. PM unavailable -> WAITING_PM/BLOCKED, not invented fallback. Owner configurable intervals/idle policy (previously discussed 60 s/5 min are illustrative, not approved constants).
+5. True PM/Worker/review/CI/PR-or-STOP evidence synced back into GitHub. ChatGPT fetches status on demand; updates do not automatically push into the ChatGPT conversation.
+6. Test DISCUSS vs RECORD vs EXECUTE; auth forgery/edited Issue; duplicate and crash recovery; month-offline catch-up; Mac sleep and session/UI closure; budget/unavailable PM; no orphan background services; no F2 bypass. Do not claim production readiness before independent review, exact-head CI and required real Mac acceptance.
+
+Full Owner decision, **Mermaid architecture, authorization, intake and lifecycle diagrams**, and acceptance criteria: [2026-10-21 meeting record `9 (2026-10-22 follow-up)](../../docs/meetings/2026-10-21-llmtool-product-requirements.md#九2026-10-22-chatgpt--github--llmtool-自動交接owner-決策與架構).
+
+**Status:** DOCUMENTED / PLANNED / NOT IMPLEMENTED. No GitHubSync, launchd, Runner, polling service, PM dispatch or runtime activation is granted by this roadmap text.
+
+
 ## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
 ```yaml
