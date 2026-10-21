@@ -9,6 +9,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 """
 
 import asyncio
+import signal
 import sys
 import threading
 import time
@@ -16,6 +17,7 @@ import time
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
+from .providers.cli_lifecycle import CLIHostTermination, background_cli_invocation, tui_cli_signal_scope
 from .terminal import terminal_safe_text
 
 KEY_HELP = """Keys
@@ -33,7 +35,7 @@ _TOOLKIT_MODULES = (
     "prompt_toolkit.application", "prompt_toolkit.document", "prompt_toolkit.filters",
     "prompt_toolkit.history", "prompt_toolkit.key_binding", "prompt_toolkit.layout",
     "prompt_toolkit.layout.controls", "prompt_toolkit.layout.dimension",
-    "prompt_toolkit.styles", "prompt_toolkit.widgets",
+    "prompt_toolkit.styles", "prompt_toolkit.utils", "prompt_toolkit.widgets",
 )
 
 
@@ -112,31 +114,40 @@ class ChatTUI:
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
         from prompt_toolkit.styles import Style
+        from prompt_toolkit.utils import get_cwidth
         from prompt_toolkit.widgets import TextArea
 
         self._Document = Document
+        self._get_cwidth = get_cwidth
         self.session = session
         self.busy = False
         self.quit_pending = False
         self.show_help = False
         self.worker = None
         self._loop = None
+        self._received_signal = None
         self.conversation = TextArea(
             text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
                                     + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."),
-            read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True)
+            read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True,
+            height=Dimension(min=1, weight=1))
         self.conversation.buffer.cursor_position = len(self.conversation.text)
         self.input = TextArea(multiline=True, wrap_lines=True, prompt="> ", focus_on_click=True,
-                              height=Dimension(min=1, max=10), history=InMemoryHistory())
+                              height=lambda: Dimension(
+                                  min=min(4, max(1, self.input.buffer.document.line_count)),
+                                  max=min(4, max(1, self.input.buffer.document.line_count))),
+                              history=InMemoryHistory())
         self.help = TextArea(text=KEY_HELP + "\n\n" + HELP, read_only=True, scrollbar=True,
-                             wrap_lines=True, style="class:help")
+                             wrap_lines=True, style="class:help",
+                             height=Dimension(min=1, weight=1))
         showing_help = Condition(lambda: self.show_help)
-        status_window = Window(FormattedTextControl(self.status_text), style="class:status",
-                               height=Dimension(min=1, max=3), wrap_lines=True)
+        self.rule_window = Window(height=1, char="-", style="class:rule")
+        self.status_window = Window(FormattedTextControl(self.status_text), style="class:status",
+                                   height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation, filter=~showing_help),
                        ConditionalContainer(self.help, filter=showing_help),
-                       Window(height=1, char="-", style="class:rule"),
-                       self.input, status_window])
+                       self.rule_window, self.input, self.status_window],
+                      height=Dimension(min=1, weight=1))
 
         keys = KeyBindings()
         input_focused = has_focus(self.input)
@@ -194,20 +205,36 @@ class ChatTUI:
                 state = "working %.1fs" % max(0.0, time.monotonic() - started)
         elif state == "error":
             state = "error (" + (session.last_error_code or "unclassified") + ")"
-        if session.last_elapsed is not None and not self.busy:
-            state += " | last %.3fs" % session.last_elapsed
-        parts = [
-            "profile " + session.provider,
-            "model " + (model + " (configured)" if model else "provider default"),
-            "reported " + (reported or "UNKNOWN"),
-            "skill " + (session.skill.name if session.skill else "none"),
-            state,
-            "tokens " + _tokens(session.last_usage),
-        ]
         if self.quit_pending:
-            parts.append("EXIT PENDING")
-        parts.append("F1 help")
-        return terminal_safe_text(" | ".join(parts)).replace("\n", " ").replace("\t", " ")
+            state = "exit pending"
+        elif session.last_elapsed is not None and not self.busy and state == "idle":
+            state = "ready %.1fs" % session.last_elapsed
+
+        def compact(value, width):
+            value = terminal_safe_text(str(value)).replace("\n", " ").replace("\t", " ")
+            if self._get_cwidth(value) <= width:
+                return value
+            result = []
+            used = 0
+            for char in value:
+                char_width = self._get_cwidth(char)
+                if used + char_width > width - 1:
+                    break
+                result.append(char)
+                used += char_width
+            return "".join(result) + "…"
+
+        # Keep a single status row at common terminal widths. Prefer the actual
+        # reported model when available; keep the profile, current state and
+        # usage visible without allowing long names to expand the footer.
+        parts = [
+            "p:" + compact(session.provider, 10),
+            "m:" + compact(reported or model or "default", 14),
+            compact(state, 14),
+            "t:" + compact(_tokens(session.last_usage), 14),
+            "F1",
+        ]
+        return " | ".join(parts)
 
     def append(self, text):
         """Add untrusted text; follow new output only if the caret was at the end."""
@@ -283,7 +310,8 @@ class ChatTUI:
     def _request(self, text, loop):
         """Worker thread: one immutable captured input; ChatSession owns rollback."""
         try:
-            outcome = (True, self.session.send(text))
+            with background_cli_invocation():
+                outcome = (True, self.session.send(text))
         except LLMToolError as exc:
             outcome = (False, str(exc))
         except BaseException:
@@ -298,6 +326,9 @@ class ChatTUI:
         ok, text = outcome
         self.busy = False
         self.worker = None
+        if self._received_signal is not None:
+            self.app.exit(result=0)
+            return
         try:
             self.append(("assistant:\n" if ok else "llmtool: ") + (text or ""))
         except Exception:
@@ -315,6 +346,23 @@ class ChatTUI:
             return
         self.app.exit(result=0)
 
+    def _handle_signal(self, signum):
+        """Defer process-signal exit until any owned CLI child is cleaned up."""
+        if self._received_signal is None:
+            self._received_signal = signum
+        if self.busy:
+            self.quit_pending = True
+            self.app.invalidate()
+        else:
+            self.app.exit(result=0)
+
     def run(self):
-        result = self.app.run()
+        with tui_cli_signal_scope(self._handle_signal):
+            # The scope above owns signal routing so background CLI children
+            # can be stopped before the process exits.
+            result = self.app.run(handle_sigint=False)
+        if self._received_signal == signal.SIGINT:
+            raise KeyboardInterrupt() from None
+        if self._received_signal is not None:
+            raise CLIHostTermination(128 + self._received_signal) from None
         return 0 if result is None else result
