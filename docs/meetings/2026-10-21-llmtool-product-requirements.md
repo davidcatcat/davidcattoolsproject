@@ -4,7 +4,7 @@
 - **性質：** Owner 與 ChatGPT 的需求討論／決策紀錄，供後續正式規劃參考。
 - **效力：** 下文「Owner 已確認」才是本次產品需求；「建議、待定」不等於 Owner 已接受。
 - **本次工作範圍：** 只保存會議紀錄；不代表 Roadmap 已更新、功能已實作、任務已派送、預算／執行／資料外送權限已核准。
-- **管理要求：** 目前仍在定義產品階段。Owner 已要求暫時**不要建立 PR、Issue、派發開發工作或修改 Roadmap**；本檔為 Owner 另行明確要求的單一會議紀錄例外。
+- **管理要求與後續授權：** 目前仍在定義產品階段，不得自行派工或修改 Roadmap。原本只授權建立會議紀錄；後來 Owner **另行要求** PM 將整體討論報告上傳 Git 供 ChatGPT review，因此產生僅含報告的 Draft PR #255；這不等於產品開發或合併授權。現在 Owner 明確要求**更新本既有會議紀錄**，本次直接更新此檔，不新增 PR／Issue、不派工。
 
 ## 一、產品定位（Owner 已確認）
 
@@ -60,6 +60,8 @@ Owner 要求的是：**透過 llmtool 讓公司 LLM 承擔適合的實際開發�
 
 ### Web UI（Owner 已提出並再次確認的產品功能）
 
+**最新排序更新：本機 Web UI 已定為 A12.2，排在 Mac CLI 與 A12.1 Telegram 之後。**
+
 Owner 在 2026-10-19 已討論透過 Web 觀看 llmtool 的 Agent 工作流、資料流、狀態與監控數據，並希望有更有未來科技感的動態視覺化。本次進一步確認 **Web 不只看監控，也必須可以輸入提示／需求、提交和追蹤工作、查看結果與必要的操作／授權**。
 
 - 觀察需求：使用者需求 → PM 分工 → Developer（Codex／OpenCode／公司 LLM 等）→ 測試 → 獨立 Reviewer → 修復 → PR/CI；真實顯示等待、進行、阻塞、完成、交接結果與相關證據。
@@ -72,17 +74,88 @@ Owner 在 2026-10-19 已討論透過 Web 觀看 llmtool 的 Agent 工作流、�
 llmtool 將來應可分享給其他使用者安裝在**自己的電腦**，使用自己的 Provider／CLI 帳號與 Git Repo；不能要求拿 Owner 的 Mac 路徑、公司 VPN、帳號或憑證才能運作。這是**每個人獨立安裝的工具**，不等同於共用一台多人租戶 SaaS。
 
 - 既有 [PR #237 移植性評估](https://github.com/davidcatcat/davidcattoolsproject/pull/237) 記錄了硬編碼路徑、固定 Repo、CLI 版本、Host 登錄及 Windows 限制。其「先保持個人 Mac 工具」是作者建議，**不是 Owner 最終產品定位決策**。
-- 暫時的**規劃建議**是先完成自己 Mac 的真正可用版，再驗證其他人的 macOS／Linux 基本安裝和完整 Agent 協作；Windows 另行評估。這個相依排序與版本編號尚未完成 Owner 正式確認，不得變成新的上線強制門檻。
+- **Owner 後續已正式決定優先順序：** 先完成自己的 Mac CLI，再做 A12.1 Telegram（需求尚待討論）、A12.2 本機 Web UI，最後才安排其他人的電腦和 macOS／Linux／Windows 支援；各平台的內部先後及發佈方式仍未決定。不得再將「其他人的 macOS 安裝先於 Web」記為最新 Owner 順序。
 
 ## 五、A11c 與後續階段：本次釐清的界線
 
 - **A11c 核心協作目標：** 透過至少一個指定 PM AI 完成真實任務 → PM 分派 → 已授權 Developer 工作 → 測試、獨立 Reviewer 與必要修復 → PR-or-STOP／合併決策的可信閉環，且不需要 Owner 人工傳話。
 - **A11c 的使用者入口需求：** Owner 已確認 llmtool 原生 CLI 必須直接接收需求，並在使用者關閉介面後繼續管理本機背景工作。只有「從 Codex CLI 手動啟動」不符合完整使用者入口的驗收。
-- **Web 是已提出的正式產品需求，但「放在 A12」「V1.0 或下一版交付」等精確里程碑與版本切點，仍屬討論中的安排**；不可把 ChatGPT 提出的版本號或階段順序記為 Owner 已接受。
-- **其他人獨立安裝**也是確定的產品方向，具體版本與優先順序待正式 Roadmap 規劃。
+- **Owner 後續確認 A12 的分項：** **A12.1 — Telegram**（需求範圍、操作／通知／授權及驗收待討論）、**A12.2 — 本機 Web UI**（監控整個工作流，也能下提示／提交任務、追蹤及必要操作）。目前優先交付 Mac CLI，A12.1 再於其後、A12.2 再後；不能把過去提出的 Web-first 排序當作最新決策。**「V1.0」等版號及詳細 DoD 仍未正式決定。**
+- **其他人獨立安裝**仍是確定的產品方向，但 Owner 已決定排在 Mac CLI、Telegram、本機 Web UI 之後。具體版本與各平台順序待後續規劃。
 - 保持既有 A-roadmap／安全驗收的可追溯性，避免為同一需求新建重複 PM、Controller、審查系統或臨時管理階段。
 
-## 六、尚未定案／下一次討論可處理
+## 六、2026-10-21 後續決議與規劃審查
+
+> 以下為首次會議紀錄之後，Owner 與 Codex Integrator／PM 持續討論，再由 ChatGPT 唯讀審查後補記的內容。**明確標示「Owner 已確認」與「PM 建議／尚待修正」；不得將兩者混為一談。** 參考 [PR #255 的彙整報告（Draft）](https://github.com/davidcatcat/davidcattoolsproject/pull/255)。該報告目前不是已合併的現行規則。
+
+### 6.1 最新交付順序（Owner 已確認）
+
+| 順位 | 階段／產品 | 決議及界線 |
+| --- | --- | --- |
+| 1 | **A11c — Owner Mac 原生 llmtool CLI** | **首先交付。** 使用者直接輸入真實開發需求、指定至少一個 PM AI；PM 或人決定角色／模型；llmtool 管理多任務、授權內的開發交接與背景生命週期。關閉介面後工作繼續，重開可接回。 |
+| 2 | **A12.1 — Telegram** | Owner 指定優先於 Web，**實際需求尚未討論定案**。是否僅通知，或還要與 PM 對話、提交需求、操作／授權、顯示詳細結果，均不可預先當成 Owner 已接受。 |
+| 3 | **A12.2 — 本機 Web UI** | 完整 AI 工作流的監控、視覺化資料流，並可輸入提示、追蹤／提交任務及必要操作；與 CLI／Telegram **共用同一 llmtool 核心與權限語意**，不另建 PM／Controller。細部界面、驗收與部署設計待後續討論。 |
+| 4 | **其他使用者／其他電腦及平台** | 產品長期仍應可供他人以自己的帳號、憑證、Repo 獨立安裝；macOS／Linux／Windows 等細部排序及發佈方式留待後續，不阻擋第 1 階段。 |
+
+**這是 Owner 最新確認的排序，取代之前「Web 先於 Telegram」以及「先讓其他人的 Mac 安裝」等 PM 初步建議。** 不擅自建立額外 A 系列 Milestone。
+
+### 6.2 公司 gw 暫時無法連線（Owner 已確認）
+
+Owner 同意：**公司 `gw` 暫時不可用時，可以先交付清楚標明限制的 Mac CLI 預覽版**。這是避免單一路線拖住其他已具備條件的功能，不代表公司 LLM 的開發與節流目標被取消。
+
+- CLI 核心必要功能與各適用安全／品質驗收仍須具備；只有公司 `gw` 這條路線的實際開發／可用性可以標明 **UNAVAILABLE／NOT_VERIFIED**。
+- 不得宣稱六項產品需求全部驗收、公司 LLM 已穩定自動寫程式，或已證明整體 Token 節省。
+- 曾有經測試／獨立審查並被採用的公司模型程式碼案例，例如 [PR #213](https://github.com/davidcatcat/davidcattoolsproject/pull/213)；也有後續逾時、無 Patch 的試行。兩類紀錄都應保留，**有限成功 ≠ 完整自動閉環 PASS**。
+
+### 6.3 指定 Integrator／PM AI 失聯時（Owner 已確認）
+
+Owner 原話：「**原本指定的integrator/pm無法使用的時候,其他ai正在進行的工作就先繼續做,做到需要pm在停止,新的派工項目也先暫停**」。
+
+- 已開始且**已獲授權、不需新 PM 判斷**的 Developer／Reviewer 工作可以繼續到其現有範圍的適當邊界，保存輸出、測試與證據。
+- 遇到需要 PM 拆分、追加授權、跨 Agent 協調、合併、修正方向的節點時，該工作進入 **WAITING_PM／BLOCKED** 等真實等待狀態；**新派工暫停**。
+- 不會自行換 PM、擴張存取範圍、使用未授權付費模型、跳過審查或冒稱已完成；PM 恢復時核對實際 Task／Agent／Revision 狀態，避免重送任務、產生第二個 Writer。
+- 此條與「關閉 llmtool CLI 介面後工作繼續」相容；**關閉介面不等於 PM 失聯**，應以執行與連線實際證據判斷。技術實作與完整驗收尚未完成。
+
+### 6.4 A11c、G3、M2、A11c.2 的界線（審查修正方向，Owner 已同意）
+
+PM 在 [PR #255](https://github.com/davidcatcat/davidcattoolsproject/pull/255) 提出 A11c 交付條件：指定 PM 的原生 CLI 入口、Task／Run／Session 持久化、真實多任務並行、背景執行與重接、可信 Developer → Reviewer → PM 交接、自動退修與合併／STOP。**方向已由 Owner 同意；實際完成與驗收仍待實作證據。**
+
+ChatGPT 唯讀審查指出：**不宜重新擴張既有 G3 的完成定義**，否則會把已安排的「三 Agent 真實閉環交接」驗收重做或變成更多新關卡。Owner 表示同意這項修正：
+
+- **G3：** 保留現行 Owner outcome reporting 已核准的 **Integrator → Developer → 獨立 Reviewer → 必要修復／測試 → Integrator PR-or-STOP** 真實交接、ACK、喚醒與結果接收證據，不以新產品入口要求改寫 G3 原義。
+- **M2：** 仍是原生 AI Agent 協作閉環的核心成果；不得以人工轉貼提示、假事件、外部 CLI 人工操作或 CI 綠燈單獨宣稱 M2 PASS。
+- **A11c／A11c.2 Mac CLI 交付驗收：** 另外檢查**使用者直接操作 llmtool CLI、指定 PM、至少兩個適當隔離的真實並行任務、關閉 CLI 後仍背景執行、再次開啟接回、PM 失聯的有界等待**等最新產品需求，並搭配原有真實交接和獨立品質 Gate。
+- G1–G4 仍是**成果回報檢查點，不是新產品 Milestone**；詳細 DoD、技術方案與正式 Roadmap 描述需在原有架構下整理，無須為此增建另一套管理系統。
+
+### 6.5 開發規則整合與避免過度停工（方向獲 Owner 同意；規則尚未修改）
+
+Owner 指出過往經常被分散在不同文件的規則擋住開發。PM 唯讀盤點發現 `AGENTS.md`／`CLAUDE.md` 已精簡，但 `ROADMAP.md`、`WORKFLOW.md`、`README.md` 仍混合現行指令、歷史契約和路線專屬的限制，容易互相誤用。
+
+**Owner 已同意的原則：** 先把必要功能完成；遇到問題持續分析、修復與驗收；只阻擋**真正受影響的工作或危險動作**，不因無關 Bug、個別模型／VPN 不可用而停止整個專案。例行實作和技術修正由 PM／Integrator 在既有授權內處理，重大產品／權限／必要 Owner 決策才升級。此原則**不是**免除安全、資料保護、獨立審查、CI 或真實 Mac 驗收。
+
+建議沿用現有文件而不另建治理系統：`AGENTS.md` 管現行共通授權，`ai-team-delivery` 管派工／品質流程，`safe-git` 管 Git／Worktree；`WORKFLOW` 管必要工程交接，`ROADMAP` 管產品路線與 DoD，`README` 管使用說明，舊版本移入決策／歷史文件。這是**整合提案，尚未實施**。
+
+具體清理方向（不是今天的授權刪改）：
+
+1. 公司 `gw` 已可被選為**提出真實程式碼／測試的 Developer 路線**；舊的 triage-only 文字不得擋住新決策，但公司模型仍不擁有檔案、Shell、Git、Review 或 Merge 權限。
+2. OpenCode 一般直接 Developer Session 與特殊 D8 Host／Worker、C1B 試行路線的 cap、Grant、Retry、Host admission 不可混用；各路線保留各自實際授權。
+3. Token UNKNOWN 僅表示統計未知，不得用自行設定的節流目標否決有效 Code Review；真正有獨立授權來源的費用上限、資料外送與 Provider 安全控制仍保持。
+4. Worktree/單一 Writer、敏感資料、合法操作、獨立 Security／Functional／QA、適用 exact-head CI、Mac Live 證據與防重播等**必要保護繼續有效**；合理精簡重複前置檢查，不得直接跳過來源／檔案身分驗證。
+5. 每條具阻擋性的規則應標明**授權來源、適用模式、真正阻擋的操作、由誰處理、何時可恢復**；已封存的 F1/Pickup 不能記成目前還有執行中的產品能力。
+
+**ChatGPT 審查發現的第一項待修正處，Owner 已同意：** `AGENTS.md`、`WORKFLOW.md` 和 [Owner Outcome Reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) 對 Owner 升級／授權界線的說法不完全一致。後續整合時應**逐條比對原始授權與適用範圍、建立單一現行入口**；不能僅憑 `AGENTS.md` 的三項問答條件便一概取消其他實質資料外送、危險權限、支出或正式 GO／NO-GO 所需的決策／授權。
+
+Owner 同意以上報告方向和兩個審查修正點，也說明「**之後有問題我們再來修正，維持目前持續改善的做法**」。這不是放棄既定安全 Gate，也**不是**宣告 PR #255 已修好、已核准合併或正式修改規則。
+
+### 6.6 GitHub 狀態與本次明確工作範圍
+
+- [PR #249](https://github.com/davidcatcat/davidcattoolsproject/pull/249)：Owner 要求關閉，**CLOSED／NOT MERGED**。先前的 Web-first Roadmap 草案不具現行授權。
+- [PR #255](https://github.com/davidcatcat/davidcattoolsproject/pull/255)：Owner 另外要求「整段討論做成報告上傳 Git」而建立的**文件 Draft**。ChatGPT 已完成**唯讀分析並提出 2 點 REVISE**（Owner 權限規則來源；G3 邊界），Owner 表示同意；**修訂 PR 內容與是否合併仍是另一個實際 Git 步驟，不由本會議紀錄直接執行或冒稱完成**。
+- 目前只核准將上述追加決議寫入**這份既有會議紀錄**，不修改 `ROADMAP.md`、`WORKFLOW.md`、`AGENTS.md`、Skills、產品程式碼，不新增 PR／Issue 或派 Developer。
+
+---
+
+## 七、仍待討論／技術調查事項
 
 這些是**待討論問題，不是已核准開發工作**：
 
@@ -91,10 +164,10 @@ llmtool 將來應可分享給其他使用者安裝在**自己的電腦**，使�
 3. 背景 Task Manager、程序生命週期、睡眠／重啟後的恢復證據與使用者停止操作的詳細設計。
 4. 多任務／多 Worktree 的最大併發、排程、衝突解決與工作狀態介面。
 5. Web UI 的第一批驗收功能、登入／本機存取安全、圖表／動畫設計及部署方案。
-6. CLI 完成、A11c 核心驗收、Web UI、其他使用者安裝各自如何定義產品版本與里程碑。
+6. 已決定的交付順序如何落實在現有 A11c、A12.1、A12.2 的正式 Roadmap；確切版本命名、交付切片及逐項 Definition of Done 尚待定稿。
 7. 「已驗證節流」需要的品質等價及模型消耗數據，與安全限制的獨立授權來源，須維持分離。
 
-## 七、相關 GitHub 來源與本次限制
+## 八、相關 GitHub 來源與本次限制
 
 - [A11c 原有協調規劃：Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)
 - [llmtool Roadmap（目前仍以 main 為正式文件）](../../tools/llmtool/ROADMAP.md)
@@ -103,4 +176,4 @@ llmtool 將來應可分享給其他使用者安裝在**自己的電腦**，使�
 - [現有 Activity 監控需求：Issue #225](https://github.com/davidcatcat/davidcattoolsproject/issues/225)
 - [先前 Roadmap 草案：PR #249 — CLOSED / NOT MERGED](https://github.com/davidcatcat/davidcattoolsproject/pull/249)
 
-**本次紀錄只是存檔。** 不把建議自動轉成 Owner ACCEPTED，不藉此建立或重開 PR／Issue、不指派 Codex/OpenCode/公司 LLM 開發、不修改 Roadmap、不宣稱功能已實作或驗收通過。未來要正式修改 Roadmap 或啟動開發，等待 Owner 另行確認。
+**紀錄更新不等於工作授權。** 保留 Owner 決定與 PM 建議的區別，不因本檔而建立或重開 PR／Issue、派發 Developer、修改 Roadmap／現行規則、合併 PR #255，或聲稱產品功能已驗收通過。後續規劃正式修訂及開發仍須相應授權。
