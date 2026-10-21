@@ -284,6 +284,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          'Owner approved non-sensitive source and test context')
         self.assertEqual(result['pm_session_id'], task['pm_session_id'])
         self.assertNotIn('not-persisted', output.getvalue())
+        system_prompt = client.calls[0][0]['content']
+        self.assertIn('Do not use Markdown fences', system_prompt)
+        self.assertIn('diff --git a/example.py b/example.py', system_prompt)
+        self.assertIn('@@ -1 +1 @@\n-old\n+new', system_prompt)
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['artifact'], patch_text)
         self.assertEqual(len(client.calls), 1)
@@ -311,10 +315,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                      fromlist=['_pm_assignment'])._pm_assignment(malformed))
 
     def test_fake_ack_and_sensitive_patch_are_not_persisted(self):
-        for response in ('Developer started and completed the work.',
-                         'diff --git a/tools/llmtool/tests/test_task_submission_cli.py '
-                         'b/tools/llmtool/tests/test_task_submission_cli.py\n'
-                         '+Bearer abcdefghijklmnop\n'):
+        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        rejected = (
+            ('Developer started and completed the work.',
+             'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            (f'diff --git a/{target} b/{target}\n'
+             f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n'
+             '-old\n+Bearer abcdefghijklmnop\n', 'DEVELOPER_OUTPUT_SENSITIVE'),
+        )
+        for response, error_code in rejected:
             task = self._pm_task_with_assignment()
             args = self._delegate_args(task)
             client = FakeClient(Reply(response, {}))
@@ -329,10 +338,51 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(code, 1)
             result = json.loads(output.getvalue())
             self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+            self.assertEqual(result['developer']['error_code'], error_code)
             self.assertIsNone(result['developer']['artifact'])
             self.assertNotIn('abcdefghijklmnop', output.getvalue())
             saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
             self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
+
+    def test_rejection_categories_are_durable_without_provider_content(self):
+        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        cases = (
+            ('DEVELOPER_OUTPUT_INVALID_DIFF',
+             f'diff --git a/{target} b/{target}\n--- a/other.py\n'
+             f'+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n', 'other.py'),
+            ('DEVELOPER_OUTPUT_OUT_OF_SCOPE',
+             'diff --git a/tools/llmtool/tests/outside.py b/tools/llmtool/tests/outside.py\n'
+             '--- a/tools/llmtool/tests/outside.py\n'
+             '+++ b/tools/llmtool/tests/outside.py\n@@ -1 +1 @@\n-old\n+new\n', 'outside.py'),
+            ('DEVELOPER_OUTPUT_INVALID_TEXT',
+             f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
+             '@@ -1 +1 @@\n-old\n+new\x01marker\n', 'marker'),
+            ('DEVELOPER_OUTPUT_TOO_LARGE',
+             f'diff --git a/{target} b/{target}\n' + ('x' * (RESPONSE_LIMIT + 1)), 'x' * 64),
+        )
+        for error_code, response, marker in cases:
+            with self.subTest(error_code=error_code):
+                task = self._pm_task_with_assignment()
+                client = FakeClient(Reply(response, {
+                    'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
+                }))
+                output = io.StringIO()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.resolve_profile_config',
+                              return_value=config('openai-compatible', 'gw')), \
+                        patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                        patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                        redirect_stdout(output):
+                    code = run_task_delegate(self._delegate_args(task))
+                self.assertEqual(code, 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+                self.assertEqual(result['developer']['error_code'], error_code)
+                self.assertEqual(result['developer']['usage']['total_tokens'], 45)
+                self.assertIsNone(result['developer']['artifact'])
+                self.assertNotIn(marker, output.getvalue())
+                saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+                self.assertNotIn(marker, json.dumps(saved))
 
     def test_provider_unavailable_is_durable_and_not_fallen_back(self):
         task = self._pm_task_with_assignment()
@@ -359,7 +409,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertRaises(LLMToolError):
             run_task_delegate(args)
         target = 'tools/llmtool/tests/outside.py'
-        client = FakeClient(Reply(f'diff --git a/{target} b/{target}\n', {}))
+        client = FakeClient(Reply(
+            f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-old\n+new\n', {}))
         args = self._delegate_args(task)
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
@@ -372,6 +424,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(code, 1)
         rejected = json.loads(output.getvalue())['developer']
         self.assertEqual(rejected['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(rejected['error_code'], 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
         self.assertIsNone(rejected['artifact'])
 
     def test_ambiguous_provider_outcome_is_persisted_and_never_replayed(self):
@@ -469,6 +522,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(code, 1)
                 result = json.loads(output.getvalue())
                 self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+                self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
                 self.assertIsNone(result['developer']['artifact'])
 
 

@@ -277,6 +277,33 @@ def _patch_paths(patch):
     return paths
 
 
+def _developer_output_rejection(value, write_paths):
+    """Classify rejected output using local checks only; never return provider text."""
+    if type(value) is not str or not value.strip():
+        return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
+    try:
+        raw = value.encode('utf-8')
+    except UnicodeError:
+        return 'DEVELOPER_OUTPUT_INVALID_TEXT'
+    if len(raw) > RESPONSE_LIMIT:
+        return 'DEVELOPER_OUTPUT_TOO_LARGE'
+    if any((ord(char) < 32 and char not in '\t\n\r') or
+           127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cf'
+           for char in value):
+        return 'DEVELOPER_OUTPUT_INVALID_TEXT'
+    if _emitted_sensitive(value):
+        return 'DEVELOPER_OUTPUT_SENSITIVE'
+    if not value.startswith('diff --git '):
+        return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
+    try:
+        paths = _patch_paths(value)
+    except ValueError:
+        return 'DEVELOPER_OUTPUT_INVALID_DIFF'
+    if not paths.issubset(set(write_paths)):
+        return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
+    return None
+
+
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context, pm_goal):
     packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -287,10 +314,18 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'pm_selected_goal': pm_goal,
     }
     system = (
-        'You are a company-gw code Developer. Return only one unified diff that '
-        'changes files within write_paths. Do not claim to run tests, execute tools, '
-        'commit, dispatch another agent, approve work, or modify files. Do not include '
-        'credentials, secrets, private data, or prose outside the diff.'
+        'You are a company-gw code Developer. Return only a plain-text unified diff '
+        'that changes files within write_paths. Do not use Markdown fences and do not '
+        'include prose before or after the diff. Exact minimal format example:\n'
+        'diff --git a/example.py b/example.py\n'
+        '--- a/example.py\n'
+        '+++ b/example.py\n'
+        '@@ -1 +1 @@\n'
+        '-old\n'
+        '+new\n'
+        'Use actual paths from write_paths and real changed lines. Do not claim to run '
+        'tests, execute tools, commit, dispatch another agent, approve work, or modify '
+        'files. Do not include credentials, secrets, private data, or prose outside the diff.'
     )
     return [{'role': 'system', 'content': system},
             {'role': 'user', 'content': json.dumps(packet, ensure_ascii=True,
@@ -389,17 +424,15 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    try:
-        artifact = _screen_text(result.content, RESPONSE_LIMIT)
-        if not _patch_paths(artifact).issubset(set(write_paths)):
-            raise ValueError
-    except (LLMToolError, ValueError):
+    rejection_code = _developer_output_rejection(result.content, write_paths)
+    if rejection_code is not None:
         developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                         error_code='DEVELOPER_OUTPUT_REJECTED',
+                         error_code=rejection_code,
                          usage=None if usage is None else dict(usage))
         saved = store.update(task['task_id'], developer=developer)
         _print(_task_view(saved))
         return 1
+    artifact = result.content
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                       artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                       usage=None if usage is None else dict(usage), error_code=None)

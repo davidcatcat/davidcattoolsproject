@@ -46,6 +46,12 @@ _DEVELOPER_FIELDS = frozenset((
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
 ))
+_DEVELOPER_REJECTION_CODES = frozenset((
+    'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
+    'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
+    'DEVELOPER_OUTPUT_SENSITIVE', 'DEVELOPER_OUTPUT_INVALID_TEXT',
+    'DEVELOPER_OUTPUT_TOO_LARGE',
+))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
 
 
@@ -284,7 +290,7 @@ def _validate(record):
                 _fail()
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
-                    developer['error_code'] != 'DEVELOPER_OUTPUT_REJECTED'):
+                    developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
                 _fail()
     if state == 'PM_PENDING' and (request is None or response is not None or
                                   record['error_code'] is not None or record['usage'] is not None):
