@@ -1470,9 +1470,10 @@ Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains i
 subcommand-required behavior; automatic interactive entry is a future UX option.
 History grows in memory without token budgeting or automatic truncation; provider
 context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+
 ### TUI UI/UX decision and planned polish (Owner accepted 2026-10-22)
 
-See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20-ui-only-decision-2026-10-22).
+See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
 
 **TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Its conversation history remains memory-only; closing the chat does **not** establish persistent Task resume or detached background work.
 
