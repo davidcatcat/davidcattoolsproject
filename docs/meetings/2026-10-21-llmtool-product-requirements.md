@@ -229,3 +229,27 @@ Owner 同意以上報告方向和兩個審查修正點，也說明「**之後有
 - Owner 本次明確要求 **排定 Desktop GUI Roadmap 並記入既有會議紀錄**。這是規劃和文件工作授權，不是直接實作 GUI、修改其他規範、派 Agent 或合併未審核 PR 的授權。
 - 原有 [2026-10-22 TUI UI/UX 決議](2026-10-22-llmtool-tui-ui-ux-decision.md) 仍只規範 Terminal UI；本節 Desktop GUI 另屬桌面前端，不重寫 TUI 既有決議。
 - 尚未設定發布日、工期、人工數或成本承諾；由既有 Integrator/PM 按 A11c 的實際驗收結果再細化依賴。正式 ROADMAP.md 的文字與編號同步是**後續工作**，不是本次已完成事項。
+
+### 9.6 統一 UI Agent — CLI／TUI／Desktop GUI／Web UI（Owner 2026-10-22 追加要求）
+
+**Owner 最新要求：「需要 UI Agent，包含 TUI、GUI、CLI、Web。」** 因此新增的不是「GUI 專屬設計師」，而是**一個跨介面的 UI/UX 專業 Agent 角色**。CLI 包含非互動指令的人機介面，TUI 是 Terminal 互動畫面，Desktop GUI 是 macOS 桌面視窗，Web UI 是瀏覽器介面；四者各有媒介限制，但共用一致的產品術語、狀態語意及操作原則。
+
+| 介面 | UI Agent 專責範圍 | 不得誤當成 UI 工作的內容 |
+| --- | --- | --- |
+| **CLI** | 命令探索／Help、旗標與參數提示、可讀錯誤和修復指引、輸出格式、非互動腳本相容性、初次設定體驗、成功／等待／阻塞狀態的清楚傳達 | 不自行增加底層命令權限、修改 Core 工作結果、改變 exit code／機器輸出契約而沒有正式相容性評估 |
+| **TUI** | Chat-first 佈局、輸入／貼上／多行編輯、slash 選單、快捷鍵、狀態列、ANSI/Unicode、縮放和鍵盤無障礙體驗 | 不另建 Task/Session、Provider、背景 Worker、Token 查詢、Approval 等 Core 能力 |
+| **Desktop GUI** | 視窗資訊架構、Chat、Task／Agent 列表、詳情、授權確認、設定、表格與狀態、桌面原生導覽／回饋、一致化視覺語言 | 不建立 GUI 專用 PM、資料庫、工作派送、第二套後端或私有 Supervisor |
+| **Web UI** | 響應式資訊架構、互動工作流／任務圖、對話和操作、可用性、存取性、視覺化狀態、必要確認、瀏覽器錯誤／斷線體驗 | 不創造 Web 專用執行器、審核政策、偽造「即時」資料或複製 Desktop GUI 的後端 |
+
+**組織與派工：**
+
+1. **現有 Integrator／PM 繼續負責需求拆分、優先級、模型／Agent 選用與交付決策。** UI Agent 是 PM 按任務需要啟用的專門角色，不是第二個 PM，不是 llmtool 自帶的 AI 智能，不必 24 小時常駐，也不需要為四個介面各設一個永久 Agent。
+2. **UI Agent 的主要交付物** 是共用 UX 規範、資訊架構、操作流程／線框圖、畫面與元件規格、關鍵狀態（Loading／WAITING／BLOCKED／UNKNOWN／FAIL 等）、錯誤文案、鍵位／可用性／存取性規則、可重現 UI 驗收案例。原型與示意資料必須標為 Mock，不得冒稱 Core 實際能力。
+3. **UI 設計與程式實作分開授權。** UI Agent 可提出設計並檢查 UI 實作；若 PM 另行把某個 UI 工作包指派其擔任 Developer，才依一般 Developer 的 worktree、寫入權限、測試、PR 與資料邊界執行程式修改。未取得執行授權的 UI Agent 不直接寫入 Repo、執行 Git 或合併 PR。
+4. **正式獨立審查仍由既有 Reviewer/QA 機制負責。** UI Agent 的自評或設計確認不能替代 Security／Functional／QA、CI、Mac Native 等必要 Gate；視變更風險可安排 UI 專項審查，但不要讓每個 Help 文案微調都額外通過一套重複審批。
+5. **同一個狀態語意、一套操作與授權契約；呈現形式因媒介調整。** 例如 Task ID、來源、最後更新、Core 的 UNKNOWN 與是否需要 Approval 四處一致；CLI 以標準輸出，TUI 以快捷鍵選單，GUI/Web 以圖形元件呈現。UI Agent 不自行判定 Task 成功、不補造 Token 額度、不覆蓋 PM 決策。
+6. **工作接入時機：** 自目前進行中的 CLI/TUI 可用性工作即可按 PM 分配開始；Desktop GUI 在規劃的 GUI-P0～P4 切片配合設計；Web UI 到 A12.2 時沿用相同 UX 規範。此角色**不改變**既有 A11c → Telegram → Desktop GUI → Web UI → 跨平台的交付順序，不使 GUI/Web 提前變成 Core 主線的阻擋條件。
+
+**統一 UI Agent 首份推薦工作包（規劃、非即刻派工）：** 以目前 llmtool chat／llmtool chat --tui 和命令 Help 為實物基準，產出四介面共用的「UI/UX Contract v0.1」：導航／命名規則、真實 Task/Run/Agent 狀態矩陣、等待／錯誤／授權顯示、基本鍵盤／無障礙要求、CLI 機器輸出相容性、桌面／Web 視覺範例，以及哪些欄位尚依賴 Core。任何新增可執行能力留給 Core 及其原有安全／產品 Roadmap。
+
+**文件與實作狀態：** 本節只記錄 Owner 指定的統一 UI Agent 角色及建議分工；目前尚未建立或啟動該 Agent、沒有選定實際 Provider/Model、沒有修改 Agent Registry/Skills，也沒有宣稱 UI Contract 已交付。正式落地時由既有 PM 按已核准的 Git/Agent 流程整合，避免重複建置管理機制。
