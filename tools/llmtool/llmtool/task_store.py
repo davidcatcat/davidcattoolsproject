@@ -50,8 +50,8 @@ def default_root():
 
 
 def _json_bytes(value):
-    return json.dumps(value, ensure_ascii=True, sort_keys=True,
-                      separators=(',', ':'), allow_nan=False).encode('ascii') + b'\n'
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(',', ':'), allow_nan=False).encode('utf-8') + b'\n'
 
 
 def _digest(record):
@@ -253,7 +253,7 @@ class TaskStore:
             current = os.stat(name, dir_fd=directory, follow_symlinks=False)
             if len(raw) > MAX_RECORD_BYTES or raw != repeated or _identity(before) != _identity(after) or _identity(before) != _identity(current):
                 _fail()
-            value = json.loads(raw.decode('ascii'), object_pairs_hook=self._unique_pairs,
+            value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
                                parse_constant=lambda _: _fail())
             if value.get('task_id') != task_id:
                 _fail()

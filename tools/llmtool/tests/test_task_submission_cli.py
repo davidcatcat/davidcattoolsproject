@@ -13,7 +13,7 @@ from unittest.mock import patch
 from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
 from llmtool.providers.base import Reply
-from llmtool.task_store import TaskStore
+from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import run_task_show, run_task_submit
 
 
@@ -86,6 +86,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['state'], 'PM_RESPONDED')
         self.assertIsNone(result['usage'])
         self.assertEqual(result['usage_status'], 'UNKNOWN')
+
+    def test_large_unicode_request_and_reply_fit_the_bounded_record(self):
+        large_text = '🙂' * 16000
+        self.args.request = [large_text]
+        client = FakeClient(Reply(large_text, {}))
+        code, result, _, _ = self.invoke(client=client)
+        self.assertEqual(code, 0)
+        self.assertEqual(result['state'], 'PM_RESPONDED')
+        path = Path(self.home) / '.local/state/llmtool/tasks' / (result['task_id'] + '.json')
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), MAX_RECORD_BYTES)
+        self.assertIn(large_text.encode('utf-8')[:4], raw)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(result['task_id'])
+        self.assertEqual(saved['request'], large_text)
+        self.assertEqual(saved['response'], large_text)
 
     def test_later_cli_process_retrieves_original_task_and_response(self):
         with patch.dict(os.environ, {'HOME': str(self.home)}):
