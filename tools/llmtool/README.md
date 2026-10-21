@@ -673,6 +673,27 @@ llmtool context-pack --file incident.txt --verbose
 llmtool context-pack --json --file incident.txt
 ```
 
+### Submit a development request to a selected PM
+
+```sh
+llmtool task submit --provider my-pm "Add a health-check command to the service CLI"
+llmtool task show 0123456789abcdef0123456789abcdef
+```
+
+`task submit` requires an explicitly configured provider profile; it never picks a
+default or falls back to another provider. It creates a local Task, Run and logical
+PM Session record before calling the provider. The returned Task ID can be used
+with `task show` in a later CLI process. Records live under
+`~/.local/state/llmtool/tasks` with owner-only directory/file permissions. Request
+and reply text with recognizable credential material is rejected before it can be
+sent or persisted. A failed or unconfigured provider leaves a `PM_UNAVAILABLE`
+record with a fixed error code and no secret-bearing diagnostics.
+
+The PM Session ID is llmtool's logical binding for this intake. The current Codex
+Provider uses one ephemeral CLI call and has no native resumable Session ID;
+`task show` retrieves the recorded Task and response but does not resume a model
+conversation, dispatch a Developer, run tests, or continue work in the background.
+
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
 同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。
