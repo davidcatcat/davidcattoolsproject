@@ -403,8 +403,7 @@ is ignored; one line is one message. Existing ask and bare CLI behavior remain.
 
 Provider != Role != Agent != Skill. No automatic routing, roles, agents, tools,
 shell/Git/output execution, filesystem mutation, retrieval, or orchestration.
-Bare `llmtool` interactive entry remains a future UX option. No token budgeting,
-multiline editor, or persisted history. Live smoke NOT-TESTED.
+Bare `llmtool` interactive entry remains a future UX option. The original line-mode has no multiline editor; the later opt-in `chat --tui` source does. Neither mode provides persisted chat history or token budgeting. Historical A3.5 live smoke is NOT-TESTED.
 
 30 targeted tests PASS; canonical syntax check and 237 tests PASS.
 Merged to main in `021456b`; external review PASS. Validation counts,
@@ -412,18 +411,28 @@ manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
 External ChatGPT review PASS; A4 status is documented below.
 
-### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20)
+### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20; UI-only decision 2026-10-22)
 
-**Status: PLANNED / NOT IMPLEMENTED.** This is a staged UX enhancement owned by existing A3.5, **not** a new A-series product milestone or a prerequisite for A11c G3/G4/M2. The accepted A3.5 line-based chat, Provider/Skill commands, safe error handling and non-interactive CLI remain functional. No new Shell/Git/File-write/model tool authority is implied. Deliver each slice independently with review and regression evidence.
+**Owner-accepted UI boundary:** TUI is strictly a view/input frontend over existing llmtool Core. It renders trustworthy Core-provided content and forwards existing authorized UI actions; it MUST NOT build PM reasoning, task scheduling, provider integration, background execution/recovery, Git/PR logic, persistence, access-policy decisions, billing or a second controller. A desired screen without a Core source stays `UI_DEPENDENCY_NOT_AVAILABLE`, disabled or clearly UNKNOWN. Full decision and priority list: [2026-10-22 TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md).
 
-| Delivery checkpoint | Scope and acceptance | Dependencies / priority |
+**Current source status:** UX-1 and UX-2 **have implementation in main** (`chat_tui.py`, `chat.py`, `README.md`; see [PR #218](https://github.com/davidcatcat/davidcattoolsproject/pull/218)). Full native acceptance for later UX items is not inferred from source presence; the opt-in `llmtool chat --tui` remains distinct from a production A11c Task interface. It has a scrollable conversation, multiline input, F1 help and truthful last-call Provider/model/usage/elapsed status; history is memory-only. This corrects the previous blanket `PLANNED / NOT IMPLEMENTED` statement; no full multi-Agent TUI delivery is claimed.
+
+| Existing checkpoint | Verified source status / scope | Remaining UI work / sequencing |
 | --- | --- | --- |
-| **UX-1 — Usable TUI foundation** | Preserve `llmtool chat` entry; add scrollable conversation, persistent input, multiline edit, keyboard help, resize behavior, Unicode and clean exit. Legacy line-mode/fallback remains available, including non-TTY/piped use. Automated input/state tests and Mac terminal smoke. | **First**; prefer small optional terminal/UI dependency rather than a new daemon/controller. |
-| **UX-2 — Truthful runtime status** | Show selected Provider/model, local connectivity result only when actually probed, working/idle/error/429, measured elapsed and Provider-reported tokens or UNKNOWN; no fake progress or implied VPN/API readiness. Sanitize errors and never expose credentials, prompts or model internals in diagnostics. | **Second**, may follow UX-1 immediately; reuse A11a/task evidence. |
-| **UX-3 — Development evidence UI** | Render Markdown and fenced code, bounded diff/test output, task/worktree references, self-review vs non-author Claude/Codex review status, explicit BLOCKED/NEEDS_DECISION and provenance. READ-ONLY display; do not add executor permissions. | **After existing evidence interfaces are usable**; never gate G3/G4/M2 on a richer UI. |
-| **UX-4 — Default UX acceptance** | Mac native PTY/resize/Ctrl-C/EOF, long output and history, Python 3.9/3.14 supported-path CI, offline fake-Provider tests, VPN/API failure recovery, no secret rendering, independent Security/Functional/QA review. Only make TUI default after fallback parity and review. | **Last**, optional release acceptance, separate from M2. |
+| **UX-1 — Usable TUI foundation** | **SOURCE PRESENT** — scrollback, input editor, multiline, keyboard help, Unicode/resize and non-TTY line-chat fallback. | Preserve regression behavior; no new chat/session engine. |
+| **UX-2 — Truthful runtime status** | **SOURCE PRESENT** — selected Provider/model, measured elapsed, last provider-reported tokens or UNKNOWN and typed error status. Connectivity is not probed. | Improve compact/configurable presentation only. Do not infer subscription quotas or readiness. |
+| **UX-3 — Development evidence UI** | **PLANNED** — read-only Markdown/code/diff and source-bound Task/Agent/Review/CI/PR views, expandable details. | Only consume already exposed Core data; unsupported views remain disabled/UNKNOWN; no executor or Git additions. |
+| **UX-4 — Default UX acceptance** | **PLANNED** — native PTY/resize/exit, input/history/Unicode, fake-data UI fixtures, safety escaping, non-TTY fallback, exact-head review/CI and relevant Mac acceptance. | Last; TUI polish does not gate A11c G3/G4/M2 and does not authorize default switch by itself. |
 
-**Delivery rules:** Prioritize UX-1 and UX-2 before polish, avoid duplicate Status/Monitor subsystems (reuse Issue #209/PR #210 read-only evidence when appropriate), do not touch canonical Owner-active worktrees without safe-git ownership checks, and keep UX tasks disjoint from the active G3 Worker path. PM/Integrator may assign a small independently owned worktree and reviewer through existing authorized workflows. Report demonstrable usage, regressions, and exact-head acceptance; documentation is not deployment proof.
+**UI delivery queue (priority within A3.5, not new A milestones):**
+
+| Priority | Agreed UI-only scope | Acceptance and dependencies |
+| --- | --- | --- |
+| **P0 — Everyday interaction** | Slash-command picker/search restricted to existing commands, consistent multiline/paste, input history search, draft-safe editing and optional external editor, keyboard help, responsive chat-first layout, concise selectable status-bar fields. | Offline fake/chat-UI tests plus relevant Mac key/PTY checks; leave existing line-mode intact. |
+| **P1 — On-demand information** | Markdown/fenced code/diff styles, long-log detail fold/expand, copy behavior, read-only Core-backed Tasks/Agents/GitHub/Usage/Approvals navigation, truthful error/unknown/provenance labels. | No fabricated state; if Core does not expose data/action, mark dependency rather than silently building a backend. |
+| **P2 — Optional polish** | Theme selection, syntax highlighting, optional keyboard/editor profiles and split-pane layout where terminal width allows. | Do not displace P0/P1 or regress macOS terminals/non-TTY use. |
+
+**UI-only delivery rules:** Chat-first default (header, scrollable conversation, fixed composer, compact footer); details open on demand, not a permanently cluttered dashboard. Proposed future `/tasks`/`/agents`/`/model`/`/github`/`/usage` names are not executable functionality unless Core supports them. Shortcut mappings are proposals and must not override existing terminal semantics; keep fallbacks (`Ctrl-J` / `Esc Enter` for newline if Shift+Enter is unavailable). Existing status/activity evidence is reused rather than recreated. Review UI work independently and record exact HEAD/tests; documentation is not deployment evidence.
 
 ## A4 — Evidence-first Context Packet ✅ DONE and merged to main
 
