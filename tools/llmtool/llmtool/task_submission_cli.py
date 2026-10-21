@@ -27,7 +27,8 @@ _SYSTEM = (
     'with schema_version=1, summary (string), and developer_assignment (null or an '
     'object containing route (company-gw/codex/opencode/none), risk (LOW/OTHER), '
     'goal (string), and acceptance (array of strings). A route is only a PM '
-    'recommendation; it does not authorize or prove dispatch.'
+    'recommendation; it does not authorize or prove dispatch. Return exactly one raw '
+    'JSON object with no Markdown fences and no prose before or after it.'
 )
 
 
