@@ -186,6 +186,29 @@ class TaskCompletionTests(unittest.TestCase):
                 expected_native_session_id='native-executor', write_paths=[self.source_path],
                 artifact='fake patch', artifact_sha256=hashlib.sha256(b'fake patch').hexdigest())
 
+    def test_registered_branch_head_may_advance_from_its_approved_base(self):
+        result_sha, _ = self._make_result()
+        registration, snapshot = task_completion.bind_executor_task(
+            self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(registration.source_sha, self.source_sha)
+        self.assertNotEqual(registration.source_sha, snapshot.head)
+        self.assertEqual(snapshot.head, result_sha)
+        self.assertEqual(registration.result_sha, snapshot.head)
+
+    def test_registered_branch_head_must_descend_from_its_approved_base(self):
+        self._make_result()
+        foreign = self._git('commit-tree', self._git('rev-parse', 'HEAD^{tree}'),
+                            '-m', 'unrelated base')
+        path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(path.read_text())
+        record['base_sha'] = foreign
+        path.write_text(json.dumps(record))
+        path.chmod(0o600)
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.bind_executor_task(
+                self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(rejected.exception.completion_code, 'D6_SOURCE_BINDING_MISMATCH')
+
     def test_review_pending_executor_registration_remains_valid_for_completion_evidence(self):
         result_sha, artifact = self._make_result()
         path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')

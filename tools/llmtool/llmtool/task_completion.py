@@ -237,15 +237,18 @@ def collect_git_snapshot(root):
 
 
 def bind_executor_task(task_id, *, expected_common_dir, root=None):
-    """Bind a company proposal to the current exact D6 task root and source HEAD."""
+    """Bind a proposal to the current D6 root and its registered branch HEAD."""
     root = os.getcwd() if root is None else root
     registration = read_d6_registration(task_id, expected_common_dir)
     snapshot = collect_git_snapshot(root)
     if (snapshot.root != registration.root or snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
-            registration.source_sha != snapshot.head or
-            registration.result_sha != registration.source_sha or
             not snapshot.clean):
+        _stop('D6_SOURCE_BINDING_MISMATCH')
+    try:
+        _git(root, ('merge-base', '--is-ancestor', registration.source_sha, snapshot.head),
+             limit=4096)
+    except LLMToolError:
         _stop('D6_SOURCE_BINDING_MISMATCH')
     return registration, snapshot
 
