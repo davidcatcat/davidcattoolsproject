@@ -359,6 +359,44 @@ class TaskSubmissionCLITests(unittest.TestCase):
             saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
             self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
 
+    def test_markdown_fenced_company_patch_is_rejected_without_persistence(self):
+        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        fenced_patch = (
+            '```diff\n'
+            f'diff --git a/{target} b/{target}\n'
+            f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n'
+            '-old\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
+            '```\n'
+        )
+        task = self._pm_task_with_assignment()
+        client = FakeClient(Reply(fenced_patch, {
+            'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
+        }))
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._delegate_args(task))
+
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        self.assertIsNone(result['developer']['artifact'])
+        self.assertEqual(result['developer']['usage']['total_tokens'], 45)
+        self.assertNotIn(fenced_patch, output.getvalue())
+        self.assertNotIn('FENCED_PROVIDER_PATCH_SENTINEL', output.getvalue())
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        self.assertIsNone(saved['developer']['artifact'])
+        serialized = json.dumps(saved)
+        self.assertNotIn(fenced_patch, serialized)
+        self.assertNotIn('FENCED_PROVIDER_PATCH_SENTINEL', serialized)
+
     def test_rejection_categories_are_durable_without_provider_content(self):
         target = 'tools/llmtool/tests/test_task_submission_cli.py'
         cases = (
