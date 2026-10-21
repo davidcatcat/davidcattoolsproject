@@ -4,6 +4,8 @@ This module never applies a patch or writes Git state. A D6 registry record is a
 cooperative local provenance source; it is not a same-UID security boundary.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 import hashlib
 import json
