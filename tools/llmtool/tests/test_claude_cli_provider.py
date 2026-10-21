@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from llmtool.config import resolve_config
 from llmtool.errors import LLMToolError
 from llmtool.providers import PROVIDER_REGISTRY, get_provider_capabilities
 from llmtool.providers.claude_cli import ClaudeCLIProvider
+from llmtool.providers.cli_lifecycle import background_cli_invocation, tui_cli_signal_scope
 
 
 CAPABILITIES = {
@@ -120,6 +122,53 @@ else:
                          "SYSTEM:\nFollow instruction.\n\nUSER:\nReply with marker.")
         self.assertEqual(reply.content, "CLAUDE_FINAL")
         self.assertNotIn("PRIVATE_CLI_DIAGNOSTIC", repr(reply))
+
+    def test_tui_background_invocation_uses_bounded_cli_process(self):
+        outcome = []
+
+        def invoke():
+            try:
+                with background_cli_invocation():
+                    outcome.append(self.client().complete(
+                        [{"role": "user", "content": "hello"}]).content)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        with tui_cli_signal_scope(lambda signum: None):
+            worker.start()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "Claude CLI request thread did not finish")
+        self.assertEqual(outcome, ["CLAUDE_FINAL"])
+        self.assertTrue(self.args_file.exists())
+
+    def test_tui_background_timeout_reaps_owned_cli_process(self):
+        outcome = []
+        spawned = []
+        real_popen = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        def invoke():
+            try:
+                with background_cli_invocation():
+                    self.complete_mode("timeout", timeout=0.2)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        with patch("llmtool.providers.claude_cli.subprocess.Popen", side_effect=spawn), \
+                tui_cli_signal_scope(lambda signum: None):
+            worker.start()
+            worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "timed-out Claude CLI request thread did not finish")
+        self.assertEqual(len(outcome), 1)
+        self.assertEqual(outcome[0].diagnostic.code.value, "PROVIDER_TIMEOUT")
+        self.assertEqual(len(spawned), 1)
+        self.assertIsNotNone(spawned[0].returncode)
 
     def test_process_uses_argv_without_shell(self):
         real_popen = subprocess.Popen

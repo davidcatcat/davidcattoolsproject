@@ -9,6 +9,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 """
 
 import asyncio
+import signal
 import sys
 import threading
 import time
@@ -16,6 +17,7 @@ import time
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
+from .providers.cli_lifecycle import CLIHostTermination, background_cli_invocation, tui_cli_signal_scope
 from .terminal import terminal_safe_text
 
 KEY_HELP = """Keys
@@ -121,6 +123,7 @@ class ChatTUI:
         self.show_help = False
         self.worker = None
         self._loop = None
+        self._received_signal = None
         self.conversation = TextArea(
             text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
                                     + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."),
@@ -283,7 +286,8 @@ class ChatTUI:
     def _request(self, text, loop):
         """Worker thread: one immutable captured input; ChatSession owns rollback."""
         try:
-            outcome = (True, self.session.send(text))
+            with background_cli_invocation():
+                outcome = (True, self.session.send(text))
         except LLMToolError as exc:
             outcome = (False, str(exc))
         except BaseException:
@@ -298,6 +302,9 @@ class ChatTUI:
         ok, text = outcome
         self.busy = False
         self.worker = None
+        if self._received_signal is not None:
+            self.app.exit(result=0)
+            return
         try:
             self.append(("assistant:\n" if ok else "llmtool: ") + (text or ""))
         except Exception:
@@ -315,6 +322,23 @@ class ChatTUI:
             return
         self.app.exit(result=0)
 
+    def _handle_signal(self, signum):
+        """Defer process-signal exit until any owned CLI child is cleaned up."""
+        if self._received_signal is None:
+            self._received_signal = signum
+        if self.busy:
+            self.quit_pending = True
+            self.app.invalidate()
+        else:
+            self.app.exit(result=0)
+
     def run(self):
-        result = self.app.run()
+        with tui_cli_signal_scope(self._handle_signal):
+            # The scope above owns signal routing so background CLI children
+            # can be stopped before the process exits.
+            result = self.app.run(handle_sigint=False)
+        if self._received_signal == signal.SIGINT:
+            raise KeyboardInterrupt() from None
+        if self._received_signal is not None:
+            raise CLIHostTermination(128 + self._received_signal) from None
         return 0 if result is None else result

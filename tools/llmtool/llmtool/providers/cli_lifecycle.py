@@ -5,8 +5,90 @@ import threading
 import subprocess
 import time
 import math
+from contextlib import contextmanager
 
 from ..errors import coded_error
+
+
+_thread_policy = threading.local()
+_background_lifecycles = []
+_tui_signal_scopes = []
+_signal_lock = threading.RLock()
+_signal_condition = threading.Condition(_signal_lock)
+
+
+@contextmanager
+def background_cli_invocation():
+    """Permit a TUI-owned request thread to run the bounded CLI providers.
+
+    Signal handlers are process-global and Python only lets the main thread
+    install them. The TUI handles Ctrl-C as an input event and waits for the
+    in-flight request to finish or reach the provider timeout; the provider
+    still owns and tears down its child process group in either case.
+    """
+    depth = getattr(_thread_policy, "background_cli", 0)
+    _thread_policy.background_cli = depth + 1
+    try:
+        yield
+    finally:
+        _thread_policy.background_cli = depth
+
+
+@contextmanager
+def tui_cli_signal_scope(callback):
+    """Route process signals to TUI-owned CLI requests while the UI is active."""
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("TUI signal scope requires the main thread")
+    previous = {}
+
+    def record(signum, frame):
+        with _signal_condition:
+            if record.signum is None:
+                record.signum = signum
+            for lifecycle in tuple(_background_lifecycles):
+                lifecycle._record(signum, frame)
+        try:
+            callback(signum)
+        except BaseException:
+            # A Python signal handler must only record/route; provider cleanup
+            # and UI exit occur in their normal control flow.
+            pass
+
+    record.signum = None
+
+    try:
+        if os.name == "posix":
+            child_handler = signal.getsignal(signal.SIGCHLD)
+            if child_handler is signal.SIG_IGN:
+                # The background provider thread cannot change SIGCHLD itself.
+                # Keep the child's wait/ownership semantics by temporarily
+                # disabling auto-reap in this main-thread-owned TUI scope.
+                previous[signal.SIGCHLD] = child_handler
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                number = getattr(signal, name)
+                old_handler = signal.getsignal(number)
+                previous[number] = old_handler
+                if old_handler is not signal.SIG_IGN:
+                    signal.signal(number, record)
+        with _signal_condition:
+            record.active = True
+            _tui_signal_scopes.append(record)
+        yield
+    finally:
+        with _signal_condition:
+            record.active = False
+            # Keep the main-thread signal and SIGCHLD ownership in place until
+            # every worker already enrolled under this scope has stopped and
+            # reaped its child. New workers see inactive and fail closed.
+            while any(lifecycle._tui_scope is record
+                      for lifecycle in _background_lifecycles):
+                _signal_condition.wait()
+            if record in _tui_signal_scopes:
+                _tui_signal_scopes.remove(record)
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 class _Cancelled(BaseException):
@@ -148,6 +230,7 @@ class CLIProcessLifecycle:
         self.process = None
         self.signum = None
         self.previous = {}
+        self._tui_scope = None
 
     def _record(self, signum, frame):
         # No raising, killing, waiting, I/O or cleanup in a handler. In particular,
@@ -161,31 +244,61 @@ class CLIProcessLifecycle:
         self.previous.clear()
 
     def __enter__(self):
-        if threading.current_thread() is not threading.main_thread():
+        background = threading.current_thread() is not threading.main_thread()
+        if background and not getattr(_thread_policy, "background_cli", 0):
             raise coded_error('CLI provider invocation requires the main thread',
                               'PROVIDER_RUNTIME_ERROR', self.component)
-        child_handler = signal.getsignal(signal.SIGCHLD) if os.name == 'posix' else None
-        if os.name == 'posix' and child_handler not in (signal.SIG_DFL, signal.SIG_IGN):
-            # A foreign reaper invalidates the unreaped-child identity pin.
-            raise coded_error('CLI provider cannot use a custom child reaper',
-                              'PROVIDER_RUNTIME_ERROR', self.component)
+        child_handler = None
+        if not background:
+            child_handler = signal.getsignal(signal.SIGCHLD) if os.name == 'posix' else None
+            if os.name == 'posix' and child_handler not in (signal.SIG_DFL, signal.SIG_IGN):
+                # A foreign reaper invalidates the unreaped-child identity pin.
+                raise coded_error('CLI provider cannot use a custom child reaper',
+                                  'PROVIDER_RUNTIME_ERROR', self.component)
         try:
-            if child_handler is signal.SIG_IGN:
+            if not background and child_handler is signal.SIG_IGN:
                 # Prevent automatic reaping until the owned child is stopped and
                 # waited. Record before installation so setup failures restore it.
                 self.previous[signal.SIGCHLD] = child_handler
                 signal.signal(signal.SIGCHLD, signal.SIG_DFL)
-            for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
-                if hasattr(signal, name):
-                    number = getattr(signal, name)
-                    previous = signal.getsignal(number)
-                    self.previous[number] = previous
-                    if previous is not signal.SIG_IGN:
-                        signal.signal(number, self._record)
+            if not background:
+                for name in ('SIGINT', 'SIGTERM', 'SIGHUP'):
+                    if hasattr(signal, name):
+                        number = getattr(signal, name)
+                        previous = signal.getsignal(number)
+                        self.previous[number] = previous
+                        if previous is not signal.SIG_IGN:
+                            signal.signal(number, self._record)
         except (OSError, ValueError):
             self._restore()
             raise coded_error('CLI provider signal lifecycle is not available',
                               'PROVIDER_RUNTIME_ERROR', self.component) from None
+        if background:
+            invalid_owner = False
+            custom_reaper = False
+            with _signal_condition:
+                owner = _tui_signal_scopes[-1] if _tui_signal_scopes else None
+                if owner is None or not owner.active:
+                    invalid_owner = True
+                    pending = None
+                else:
+                    child_handler = (signal.getsignal(signal.SIGCHLD)
+                                     if os.name == 'posix' else None)
+                    custom_reaper = (os.name == 'posix' and
+                                     child_handler not in (signal.SIG_DFL, signal.SIG_IGN))
+                    pending = owner.signum
+                if not invalid_owner and not custom_reaper and pending is None:
+                    self._tui_scope = owner
+                    _background_lifecycles.append(self)
+            if invalid_owner:
+                raise coded_error('CLI provider background invocation has no active TUI signal owner',
+                                  'PROVIDER_RUNTIME_ERROR', self.component)
+            if custom_reaper:
+                raise coded_error('CLI provider cannot use a custom child reaper',
+                                  'PROVIDER_RUNTIME_ERROR', self.component)
+            if pending is not None:
+                self.signum = pending
+                raise _Cancelled()
         return self
 
     def own(self, process):
@@ -234,6 +347,11 @@ class CLIProcessLifecycle:
             try:
                 self._restore()
             finally:
+                with _signal_condition:
+                    if self in _background_lifecycles:
+                        _background_lifecycles.remove(self)
+                    self._tui_scope = None
+                    _signal_condition.notify_all()
                 # Adapters stop the process before their runtime context exits.
                 # Only after both cleanups do we apply the host exit semantics.
                 if self.signum == signal.SIGINT:

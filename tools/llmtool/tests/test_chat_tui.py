@@ -2,6 +2,8 @@
 import asyncio
 import copy
 import io
+import os
+import signal
 import sys
 import tempfile
 import threading
@@ -14,6 +16,7 @@ from llmtool import chat_tui
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import Reply
+from llmtool.providers.cli_lifecycle import tui_cli_signal_scope
 
 try:
     from prompt_toolkit.data_structures import Size
@@ -44,6 +47,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
+        self.temp_root = Path(temp.name)
         home = Path(temp.name)
         path = home / '.config/llmtool/config.yaml'
         path.parent.mkdir(parents=True)
@@ -123,7 +127,7 @@ class WidgetTests(Base):
             self.ui = ui
 
             async def main():
-                task = asyncio.ensure_future(ui.app.run_async())
+                task = asyncio.ensure_future(ui.app.run_async(handle_sigint=False))
                 await asyncio.sleep(0.05)
                 for step in steps:
                     if isinstance(step, str):
@@ -137,7 +141,8 @@ class WidgetTests(Base):
                     pipe.send_text('\x03')
                 return await asyncio.wait_for(task, 5)
 
-            return ui, asyncio.run(main())
+            with tui_cli_signal_scope(ui._handle_signal):
+                return ui, asyncio.run(main())
 
     @staticmethod
     async def idle(ui):
@@ -170,6 +175,184 @@ class WidgetTests(Base):
         self.assertEqual(self.session.history[0]['content'], '問題 \U0001f642')
         self.assertIn('assistant:\nhello 測試 \U0001f642', ui.conversation.text)
         self.assertEqual(ui.input.text, '')
+
+    def test_codex_cli_provider_runs_from_tui_request_thread(self):
+        from llmtool.providers.codex_cli import CodexCLIProvider
+
+        executable = self.temp_root / "fake-codex"
+        executable.write_text(
+            "#!%s\nimport os, sys, time\nsys.stdin.read()\n"
+            "open(%r, 'w').write(str(os.getpid()))\ntime.sleep(0.1)\nprint('中文回覆')\n"
+            % (sys.executable, str(self.temp_root / "codex.pid")))
+        executable.chmod(0o700)
+        provider = {
+            "type": "codex-cli", "model": "test-model", "timeout_seconds": 3,
+            "base_url": None, "api_key": None, "api_key_env": None,
+            "provider_options": {},
+        }
+        self.session.config = {
+            "active_provider": "codex-pm", "providers": {"codex-pm": provider},
+            "generation": {"temperature": 0, "max_tokens": 100},
+        }
+        self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
+            ui, result = self.drive(["問題\r", "\x03", self.idle])
+        self.assertEqual(result, 0)
+        self.assertTrue(ui.quit_pending)
+        self.assertIn("assistant:\n中文回覆", ui.conversation.text)
+        self.assertEqual([turn["content"] for turn in self.session.history], ["問題", "中文回覆"])
+        self.assertEqual(self.session.state, "idle")
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.temp_root / "codex.pid").read_text()), 0)
+
+    @unittest.skipUnless(os.name == "posix", "SIGCHLD is POSIX-only")
+    def test_tui_cli_temporarily_disables_and_restores_ignored_sigchld(self):
+        from llmtool.providers.codex_cli import CodexCLIProvider
+
+        executable = self.temp_root / "fake-codex"
+        executable.write_text(
+            "#!%s\nimport os, sys\nsys.stdin.read()\n"
+            "open(%r, 'w').write(str(os.getpid()))\nprint('中文回覆')\n"
+            % (sys.executable, str(self.temp_root / "codex.pid")))
+        executable.chmod(0o700)
+        provider = {
+            "type": "codex-cli", "model": "test-model", "timeout_seconds": 3,
+            "base_url": None, "api_key": None, "api_key_env": None,
+            "provider_options": {},
+        }
+        self.session.config = {
+            "active_provider": "codex-pm", "providers": {"codex-pm": provider},
+            "generation": {"temperature": 0, "max_tokens": 100},
+        }
+        self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
+        previous = signal.getsignal(signal.SIGCHLD)
+        signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+        try:
+            with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
+                ui, result = self.drive(["問題\r", self.idle])
+            self.assertEqual(result, 0)
+            self.assertIn("assistant:\n中文回覆", ui.conversation.text)
+            self.assertIs(signal.getsignal(signal.SIGCHLD), signal.SIG_IGN)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int((self.temp_root / "codex.pid").read_text()), 0)
+        finally:
+            signal.signal(signal.SIGCHLD, previous)
+
+    def test_codex_cli_error_can_be_retried_from_tui(self):
+        from llmtool.providers.codex_cli import CodexCLIProvider
+
+        count_file = self.temp_root / "calls"
+        executable = self.temp_root / "fake-codex"
+        executable.write_text(
+            "#!%s\nimport os, sys\nsys.stdin.read()\n"
+            "count = int(open(%r).read()) if os.path.exists(%r) else 0\n"
+            "open(%r, 'w').write(str(count + 1))\n"
+            "if count == 0:\n sys.stderr.write('PRIVATE')\n sys.exit(7)\n"
+            "print('修復後回覆')\n"
+            % (sys.executable, str(count_file), str(count_file), str(count_file)))
+        executable.chmod(0o700)
+        provider = {
+            "type": "codex-cli", "model": "test-model", "timeout_seconds": 3,
+            "base_url": None, "api_key": None, "api_key_env": None,
+            "provider_options": {},
+        }
+        self.session.config = {
+            "active_provider": "codex-pm", "providers": {"codex-pm": provider},
+            "generation": {"temperature": 0, "max_tokens": 100},
+        }
+        self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
+            ui, result = self.drive(["失敗的問題\r", self.idle, "再次送出\r", self.idle])
+        self.assertEqual(result, 0)
+        self.assertIn("Codex CLI exited with status 7", ui.conversation.text)
+        self.assertNotIn("PRIVATE", ui.conversation.text)
+        self.assertIn("assistant:\n修復後回覆", ui.conversation.text)
+        self.assertEqual(count_file.read_text(), "2")
+        self.assertEqual([turn["content"] for turn in self.session.history], ["再次送出", "修復後回覆"])
+        self.assertEqual(self.session.state, "idle")
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process signal routing")
+    def test_sigterm_and_sighup_clean_tui_owned_cli_child_before_exit(self):
+        from llmtool.providers.codex_cli import CodexCLIProvider
+
+        pid_file = self.temp_root / "codex.pid"
+        executable = self.temp_root / "fake-codex"
+        executable.write_text(
+            "#!%s\nimport os, sys, time\nsys.stdin.read()\n"
+            "open(%r, 'w').write(str(os.getpid()))\ntime.sleep(10)\nprint('late')\n"
+            % (sys.executable, str(pid_file)))
+        executable.chmod(0o700)
+        provider = {
+            "type": "codex-cli", "model": "test-model", "timeout_seconds": 20,
+            "base_url": None, "api_key": None, "api_key_env": None,
+            "provider_options": {},
+        }
+        self.session.config = {
+            "active_provider": "codex-pm", "providers": {"codex-pm": provider},
+            "generation": {"temperature": 0, "max_tokens": 100},
+        }
+        self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
+
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
+            for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+                with self.subTest(signal=signal.Signals(signum).name):
+                    pid_file.unlink(missing_ok=True)
+
+                    async def send_signal_when_started(ui):
+                        for _ in range(200):
+                            if pid_file.exists():
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertTrue(pid_file.exists(), "Codex child did not start")
+                        os.kill(os.getpid(), signum)
+
+                    ui, result = self.drive(["問題\r", send_signal_when_started, self.idle])
+                    self.assertEqual(result, 0)
+                    self.assertTrue(ui.quit_pending)
+                    self.assertEqual(self.session.state, "error")
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(pid_file.read_text()), 0)
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process signal routing")
+    def test_signal_before_cli_lifecycle_registration_prevents_spawn(self):
+        from llmtool.providers.codex_cli import CodexCLIProvider
+
+        entered = threading.Event()
+        release = threading.Event()
+        executable = self.temp_root / "fake-codex"
+        executable.write_text("#!%s\nimport sys\nsys.stdin.read()\nprint('should not run')\n" % sys.executable)
+        executable.chmod(0o700)
+        provider = {
+            "type": "codex-cli", "model": "test-model", "timeout_seconds": 3,
+            "base_url": None, "api_key": None, "api_key_env": None,
+            "provider_options": {},
+        }
+        self.session.config = {
+            "active_provider": "codex-pm", "providers": {"codex-pm": provider},
+            "generation": {"temperature": 0, "max_tokens": 100},
+        }
+        self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
+
+        def pause_before_lifecycle(_provider):
+            entered.set()
+            self.assertTrue(release.wait(3), "test did not release provider validation")
+
+        async def signal_before_registration(ui):
+            for _ in range(200):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(entered.is_set(), "provider did not reach pre-lifecycle seam")
+            os.kill(os.getpid(), signal.SIGTERM)
+            release.set()
+
+        with patch.object(CodexCLIProvider, "validate_ready", side_effect=pause_before_lifecycle), \
+                patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)), \
+                patch("llmtool.providers.codex_cli.subprocess.Popen") as spawn:
+            ui, result = self.drive(["問題\r", signal_before_registration, self.idle])
+        self.assertEqual(result, 0)
+        self.assertTrue(ui.quit_pending)
+        spawn.assert_not_called()
 
     def test_multiline_ctrl_j_and_bracketed_paste(self):
         ui, _ = self.drive(['line one\nline two\r', self.idle,
