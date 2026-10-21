@@ -74,6 +74,29 @@ class TaskCompletionTests(unittest.TestCase):
         kwargs.update(overrides)
         return kwargs
 
+    def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
+                                  workflow=None, runs=None, jobs=None):
+        workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-ci.yml',
+                                'name': 'llmtool CI', 'state': 'active'}
+        check_runs = checks['check_runs']
+        for check in check_runs:
+            check.setdefault('app', {'id': 15368, 'slug': 'github-actions',
+                                     'name': 'GitHub Actions'})
+        by_name = {check['name']: check for check in check_runs}
+        jobs = jobs or {'total_count': 2, 'jobs': [
+            {'id': index + 10, 'run_id': 100, 'name': name,
+             'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
+                               'check-runs/' + str(by_name.get(name, {}).get('id', 1000 + index))),
+             'status': by_name.get(name, {}).get('status', 'completed'),
+             'conclusion': by_name.get(name, {}).get('conclusion', 'success')}
+            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+        runs = runs or {'total_count': 1, 'workflow_runs': [{
+            'id': 100, 'run_number': 5, 'run_attempt': 1, 'workflow_id': workflow['id'],
+            'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+            'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
+            'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
+        return [pr, reviews, workflow, runs, jobs, checks]
+
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', *args], cwd=self.root,
                                        stderr=subprocess.DEVNULL, text=True).strip()
@@ -163,6 +186,29 @@ class TaskCompletionTests(unittest.TestCase):
                 expected_native_session_id='native-executor', write_paths=[self.source_path],
                 artifact='fake patch', artifact_sha256=hashlib.sha256(b'fake patch').hexdigest())
 
+    def test_review_pending_executor_registration_remains_valid_for_completion_evidence(self):
+        result_sha, artifact = self._make_result()
+        path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        registration = json.loads(path.read_text())
+        registration['state'] = 'REVIEW_PENDING'
+        path.write_text(json.dumps(registration))
+        path.chmod(0o600)
+        result = task_completion.collect_executor_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=[self.source_path],
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(result['result_head'], result_sha)
+        self.assertEqual(result['executor_task_id'], self.task_id)
+        with self.assertRaises(LLMToolError):
+            task_completion.bind_executor_task(
+                self.task_id, expected_common_dir=self.common, root=str(self.root))
+
     def test_artifact_must_forward_apply_to_the_exact_result_tree(self):
         result_sha, _ = self._make_result()
         wrong_patch = ('diff --git a/' + self.source_path + ' b/' + self.source_path +
@@ -222,7 +268,8 @@ class TaskCompletionTests(unittest.TestCase):
         reviewer_head = result_sha
         self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
             reviewer_root, 'review/branch', reviewer_head, reviewer_head,
-            native_session_id='native-reviewer', github_login='reviewer-user')
+            native_session_id='native-reviewer', github_login='reviewer-user',
+            state='REVIEW_PENDING')
         pr = {'state': 'open', 'merged': False,
               'head': {'sha': result_sha}, 'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
               'user': {'login': 'author-user'}}
@@ -234,13 +281,15 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 2, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
             for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
-        with patch('llmtool.task_completion._github_get', side_effect=[pr, review, checks]):
+        api = self._github_response_sequence(result_sha, pr, review, checks)
+        with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
         self.assertEqual(evidence['evidence']['review_task_id'], '1' * 32)
         self.assertTrue(evidence['evidence']['review_binding_verified'])
         self.assertEqual(evidence['missing_gates'], [])
-        with patch('llmtool.task_completion._github_get', side_effect=[pr, review, checks]):
+        with patch('llmtool.task_completion._github_get',
+                   side_effect=self._github_response_sequence(result_sha, pr, review, checks)):
             unknown_executor_native = task_completion.collect_github_evidence(
                 **self._github_kwargs(result_sha, executor_native_session_id=None))
         self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', unknown_executor_native['missing_gates'])
@@ -248,8 +297,8 @@ class TaskCompletionTests(unittest.TestCase):
             'commit_id': result_sha, 'user': {'login': 'reviewer-user'},
             'submitted_at': '2026-10-21T11:00:00Z',
             'body': 'Changes requested'}]
-        with patch('llmtool.task_completion._github_get',
-                   side_effect=[pr, superseded_review, checks]):
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, superseded_review, checks)):
             rejected = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertEqual(rejected['evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', rejected['missing_gates'])
@@ -273,7 +322,8 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': i, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}
             for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
-        with patch('llmtool.task_completion._github_get', side_effect=[pr, reviews, checks]):
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, reviews, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertIn('FORMAL_REVIEW_BINDING_MISMATCH', result['missing_gates'])
         self.assertNotEqual(result['evidence']['formal_review_state'], 'ACCEPTED')
@@ -310,7 +360,8 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 2, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
             for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
-        with patch('llmtool.task_completion._github_get', side_effect=[pr, review, checks]):
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, review, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(
                 result_sha, executor_native_session_id=None))
         self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
@@ -339,7 +390,8 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 1, 'check_runs': [
             {'id': 1, 'name': 'check (3.9)', 'head_sha': '8' * 40,
              'status': 'completed', 'conclusion': 'success'}]}
-        with patch('llmtool.task_completion._github_get', side_effect=[pr, reviews, checks]):
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, reviews, checks)):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertIn('REQUIRED_CI_MISSING', evidence['missing_gates'])
 
@@ -367,11 +419,136 @@ class TaskCompletionTests(unittest.TestCase):
                 {'id': 2, 'name': 'check (3.14)', 'head_sha': result_sha,
                  'status': 'completed', 'conclusion': 'success'}]}
             with self.subTest(newer_status=status), \
-                 patch('llmtool.task_completion._github_get',
-                       side_effect=[pr, reviews, checks]):
+                 patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                       result_sha, pr, reviews, checks)):
                 result = task_completion.collect_github_evidence(
                     **self._github_kwargs(result_sha))
             self.assertIn('REQUIRED_CI_MISSING', result['missing_gates'])
+
+    def test_ci_requires_authoritative_workflow_and_github_actions_publisher(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
+        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+            reviewer_root, 'review/branch', result_sha, result_sha,
+            native_session_id='native-reviewer', github_login='reviewer-user')
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        reviews = [{'state': 'APPROVED', 'commit_id': result_sha,
+                    'user': {'login': 'reviewer-user'},
+                    'submitted_at': '2026-10-21T10:00:00Z',
+                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                            self._review_binding(head=result_sha)}]
+        checks = {'total_count': 2, 'check_runs': [
+            {'id': i, 'name': name, 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}
+            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+        wrong_workflow = {'id': 42, 'path': '.github/workflows/other.yml',
+                          'name': 'llmtool CI', 'state': 'active'}
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, reviews, checks, workflow=wrong_workflow)):
+            with self.assertRaises(LLMToolError) as rejected:
+                task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_MISMATCH')
+
+        for check in checks['check_runs']:
+            check['app'] = {'id': 999, 'slug': 'unrelated-app', 'name': 'Unrelated App'}
+        with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
+                result_sha, pr, reviews, checks)):
+            evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertIn('REQUIRED_CI_MISSING', evidence['missing_gates'])
+        self.assertEqual(evidence['evidence']['successful_checks'], [])
+
+    def test_ci_selects_latest_exact_pull_request_workflow_run_and_attempt(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
+        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+            reviewer_root, 'review/branch', result_sha, result_sha,
+            native_session_id='native-reviewer', github_login='reviewer-user')
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        reviews = [{'state': 'APPROVED', 'commit_id': result_sha,
+                    'user': {'login': 'reviewer-user'},
+                    'submitted_at': '2026-10-21T10:00:00Z',
+                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                            self._review_binding(head=result_sha)}]
+        runs = {'total_count': 2, 'workflow_runs': [
+            {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
+             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
+             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
+            {'id': 101, 'run_number': 5, 'run_attempt': 2, 'workflow_id': 42,
+             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
+             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
+        jobs = {'total_count': 2, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name,
+             'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
+                               f'check-runs/{21 + index}'),
+             'status': 'completed', 'conclusion': 'success'}
+            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+        checks = {'total_count': 2, 'check_runs': [
+            {'id': 21 + index, 'name': name, 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success',
+             'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
+            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+        api = self._github_response_sequence(result_sha, pr, reviews, checks,
+                                             runs=runs, jobs=jobs)
+        with patch('llmtool.task_completion._github_get', side_effect=api) as github_get:
+            evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertEqual(evidence['evidence']['ci_run_id'], 101)
+        self.assertEqual(evidence['evidence']['ci_run_attempt'], 2)
+        self.assertEqual(evidence['evidence']['ci_check_ids'],
+                         {'check (3.9)': 21, 'check (3.14)': 22})
+        self.assertEqual(evidence['missing_gates'], [])
+        self.assertIn('actions/runs/101/attempts/2/jobs?per_page=100',
+                      github_get.call_args_list[4].args[0])
+
+    def test_newer_failed_workflow_run_defeats_older_success(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
+        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+            reviewer_root, 'review/branch', result_sha, result_sha,
+            native_session_id='native-reviewer', github_login='reviewer-user')
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        reviews = [{'state': 'APPROVED', 'commit_id': result_sha,
+                    'user': {'login': 'reviewer-user'},
+                    'submitted_at': '2026-10-21T10:00:00Z',
+                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                            self._review_binding(head=result_sha)}]
+        runs = {'total_count': 2, 'workflow_runs': [
+            {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
+             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
+             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
+            {'id': 101, 'run_number': 5, 'run_attempt': 1, 'workflow_id': 42,
+             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'failure',
+             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
+        jobs = {'total_count': 2, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name,
+             'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
+                               f'check-runs/{21 + index}'),
+             'status': 'completed', 'conclusion': 'failure'}
+            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+        checks = {'total_count': 2, 'check_runs': [
+            {'id': 21 + index, 'name': name, 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'failure',
+             'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
+            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+        api = self._github_response_sequence(result_sha, pr, reviews, checks,
+                                             runs=runs, jobs=jobs)
+        with patch('llmtool.task_completion._github_get', side_effect=api):
+            evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertEqual(evidence['evidence']['ci_run_id'], 101)
+        self.assertIn('REQUIRED_CI_MISSING', evidence['missing_gates'])
+        self.assertEqual(evidence['evidence']['successful_checks'], [])
 
     def _task(self, state='WAITING_EXECUTOR', missing=None):
         task_id, run_id = new_id(), new_id()

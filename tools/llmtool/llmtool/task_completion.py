@@ -32,6 +32,10 @@ _TIMEOUT = 10
 _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
 _REQUIRED_CHECKS = frozenset(('check (3.9)', 'check (3.14)'))
+_D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
+_CI_WORKFLOW_PATH = '.github/workflows/llmtool-ci.yml'
+_CI_WORKFLOW_NAME = 'llmtool CI'
+_GITHUB_ACTIONS_APP_ID = 15368
 _TEST_PATH = re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z')
 
 
@@ -69,7 +73,7 @@ class D6Registration:
     github_login: str | None
 
 
-def read_d6_registration(task_id, common_dir):
+def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     """Read one bounded owner-only D6 record without following links."""
     if (type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None or
             type(common_dir) is not str or not os.path.isabs(common_dir) or
@@ -104,7 +108,7 @@ def read_d6_registration(task_id, common_dir):
     except Exception:
         _stop('D6_REGISTRY_UNAVAILABLE')
     if (type(value) is not dict or value.get('schema_version') != 1 or
-            value.get('task_id') != task_id or value.get('state') != 'ACTIVE' or
+            value.get('task_id') != task_id or value.get('state') not in allowed_states or
             value.get('lock_state') != 'LOCKED' or
             value.get('git_common_dir') != common_dir or
             type(value.get('trusted_agent_id')) is not str or not value['trusted_agent_id'] or
@@ -306,7 +310,8 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                            expected_agent, expected_session_ref,
                            expected_native_session_id, write_paths, artifact, artifact_sha256):
     """Compare the current registered Executor HEAD and actual source-to-result diff."""
-    registration = read_d6_registration(task_id, expected_common_dir)
+    registration = read_d6_registration(task_id, expected_common_dir,
+                                        allowed_states=_D6_EVIDENCE_STATES)
     if (registration.root != expected_root or registration.branch != expected_branch or
             registration.source_sha != source_sha or
             registration.trusted_agent_id != expected_agent or
@@ -588,6 +593,102 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
             f'contract={contract_digest} head={result_sha}')
 
 
+def _collect_ci_evidence(*, pr_number, result_sha):
+    workflow = _github_get('actions/workflows/llmtool-ci.yml')
+    if (type(workflow) is not dict or type(workflow.get('id')) is not int or
+            workflow['id'] <= 0 or workflow.get('path') != _CI_WORKFLOW_PATH or
+            workflow.get('name') != _CI_WORKFLOW_NAME or workflow.get('state') != 'active'):
+        _stop('CI_WORKFLOW_MISMATCH')
+    workflow_id = workflow['id']
+    runs = _github_get(
+        f'actions/workflows/{workflow_id}/runs?head_sha={result_sha}&event=pull_request&per_page=100')
+    if (type(runs) is not dict or type(runs.get('workflow_runs')) is not list or
+            type(runs.get('total_count')) is not int or
+            runs['total_count'] != len(runs['workflow_runs']) or
+            len(runs['workflow_runs']) > 100):
+        _stop('CI_WORKFLOW_RUNS_INVALID')
+    candidates = []
+    for run in runs['workflow_runs']:
+        if type(run) is not dict:
+            _stop('CI_WORKFLOW_RUNS_INVALID')
+        pull_requests = run.get('pull_requests')
+        if (run.get('workflow_id') != workflow_id or run.get('path') != _CI_WORKFLOW_PATH or
+                run.get('event') != 'pull_request' or run.get('head_sha') != result_sha or
+                type(pull_requests) is not list or
+                not any(type(item) is dict and item.get('number') == pr_number and
+                        type(item.get('head')) is dict and
+                        item['head'].get('sha') == result_sha for item in pull_requests)):
+            _stop('CI_WORKFLOW_RUN_MISMATCH')
+        if (type(run.get('id')) is not int or run['id'] <= 0 or
+                type(run.get('run_number')) is not int or run['run_number'] <= 0 or
+                type(run.get('run_attempt')) is not int or run['run_attempt'] <= 0):
+            _stop('CI_WORKFLOW_RUNS_INVALID')
+        candidates.append(run)
+    if not candidates:
+        return {'workflow_id': workflow_id, 'run_id': None, 'run_attempt': None,
+                'run_number': None, 'successful_checks': [], 'check_ids': []}
+    run = max(candidates, key=lambda item: (item['run_number'], item['run_attempt'], item['id']))
+    run_id, attempt = run['id'], run['run_attempt']
+    jobs = _github_get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
+    if (type(jobs) is not dict or type(jobs.get('jobs')) is not list or
+            type(jobs.get('total_count')) is not int or
+            jobs['total_count'] != len(jobs['jobs']) or len(jobs['jobs']) > 100):
+        _stop('CI_WORKFLOW_JOBS_INVALID')
+    required_jobs = {}
+    for job in jobs['jobs']:
+        if type(job) is not dict:
+            _stop('CI_WORKFLOW_JOBS_INVALID')
+        name = job.get('name')
+        if name not in _REQUIRED_CHECKS:
+            continue
+        check_url = job.get('check_run_url')
+        check_id_match = (None if type(check_url) is not str else re.fullmatch(
+            r'https://api\.github\.com/repos/davidcatcat/davidcattoolsproject/'
+            r'check-runs/([1-9][0-9]{0,18})', check_url))
+        if (name in required_jobs or job.get('run_id') != run_id or
+                type(job.get('id')) is not int or job['id'] <= 0 or
+                check_id_match is None):
+            _stop('CI_WORKFLOW_JOBS_INVALID')
+        required_jobs[name] = (job, int(check_id_match.group(1)))
+    if set(required_jobs) != set(_REQUIRED_CHECKS):
+        return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
+                'run_number': run['run_number'], 'successful_checks': [], 'check_ids': []}
+
+    checks = _github_get(f'commits/{result_sha}/check-runs?per_page=100')
+    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+            type(checks.get('total_count')) is not int or
+            checks['total_count'] != len(checks['check_runs']) or
+            len(checks['check_runs']) > 100):
+        _stop('CI_EVIDENCE_INVALID')
+    by_id = {}
+    for check in checks['check_runs']:
+        if type(check) is not dict or type(check.get('id')) is not int:
+            _stop('CI_EVIDENCE_INVALID')
+        if check['id'] in by_id and by_id[check['id']] != check:
+            _stop('CI_EVIDENCE_INVALID')
+        by_id[check['id']] = check
+    successful = set()
+    check_ids = {}
+    for name, (job, check_id) in required_jobs.items():
+        check = by_id.get(check_id)
+        app = None if check is None else check.get('app')
+        if (check is None or check.get('name') != name or
+                check.get('head_sha') != result_sha or
+                type(app) is not dict or app.get('id') != _GITHUB_ACTIONS_APP_ID or
+                app.get('slug') != 'github-actions' or app.get('name') != 'GitHub Actions'):
+            continue
+        if (job.get('status') == 'completed' and job.get('conclusion') == 'success' and
+                check.get('status') == 'completed' and check.get('conclusion') == 'success'):
+            successful.add(name)
+            check_ids[name] = check['id']
+    run_success = run.get('status') == 'completed' and run.get('conclusion') == 'success'
+    if not run_success:
+        successful.clear()
+    return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
+            'run_number': run['run_number'], 'successful_checks': sorted(successful),
+            'check_ids': check_ids}
+
+
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                             contract_digest, executor_identity,
                             executor_session_ref, executor_native_session_id,
@@ -612,7 +713,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             type(review) is not dict for review in reviews):
         _stop('REVIEW_EVIDENCE_INVALID')
     try:
-        reviewer = read_d6_registration(reviewer_task_id, common_dir)
+        reviewer = read_d6_registration(reviewer_task_id, common_dir,
+                                        allowed_states=_D6_EVIDENCE_STATES)
     except LLMToolError:
         _stop('REVIEWER_D6_REGISTRY_UNAVAILABLE')
     latest = {}
@@ -685,30 +787,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     reviewer_bound = (review is not None and review.get('state') == 'APPROVED' and
                       bool(formal_marker.search(review_body)) and review_binding_verified and
                       not reviewer_gates.intersection(missing))
-    checks = _github_get(f'commits/{result_sha}/check-runs?per_page=100')
-    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
-            type(checks.get('total_count')) is not int or
-            checks['total_count'] != len(checks['check_runs']) or
-            len(checks['check_runs']) > 100):
-        _stop('CI_EVIDENCE_INVALID')
-    latest_checks = {}
-    for check in checks['check_runs']:
-        if type(check) is not dict:
-            _stop('CI_EVIDENCE_INVALID')
-        if check.get('head_sha') != result_sha or check.get('name') not in _REQUIRED_CHECKS:
-            continue
-        check_id = check.get('id')
-        if type(check_id) is not int or check_id <= 0:
-            _stop('CI_EVIDENCE_INVALID')
-        old = latest_checks.get(check['name'])
-        if old is None or check_id > old['id']:
-            latest_checks[check['name']] = check
-        elif check_id == old['id'] and check != old:
-            _stop('CI_EVIDENCE_INVALID')
-    successful = {name for name in _REQUIRED_CHECKS
-                  if (type(latest_checks.get(name)) is dict and
-                      latest_checks[name].get('status') == 'completed' and
-                      latest_checks[name].get('conclusion') == 'success')}
+    ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+    successful = set(ci['successful_checks'])
     if not _REQUIRED_CHECKS.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
@@ -725,5 +805,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'review_contract_digest': contract_digest,
             'review_binding_verified': review_binding_verified,
             'required_checks': sorted(_REQUIRED_CHECKS),
-            'successful_checks': sorted(successful), 'ci_head_sha': result_sha},
+            'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
+            'ci_workflow_path': _CI_WORKFLOW_PATH,
+            'ci_workflow_name': _CI_WORKFLOW_NAME,
+            'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],
+            'ci_run_attempt': ci['run_attempt'], 'ci_run_number': ci['run_number'],
+            'ci_check_ids': ci['check_ids']},
             'missing_gates': sorted(set(missing))}
