@@ -672,6 +672,59 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(saved['completion']['pm_dispatch'], 'NOT_STARTED')
         resolve.assert_not_called()
 
+    def test_executor_event_returns_bound_result_to_original_pm_before_review(self):
+        from llmtool.task_submission_cli import run_task_executor_event
+
+        store = TaskStore(self.base / 'executor-event-tasks')
+        task = self._task()
+        store.create(task)
+        result_sha = '8' * 40
+        git = {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'executor_task_id': self.task_id, 'executor_identity': 'executor-agent',
+            'executor_session_ref': 'Executor D6 session', 'root': str(self.root),
+            'common_dir': self.common, 'branch': 'feat/executor',
+            'source_sha': self.source_sha, 'result_head': result_sha,
+            'changed_paths': [self.source_path], 'diff_sha256': '5' * 64}
+        tests = [{'path': self.source_path, 'source_sha': result_sha,
+                  'exit_code': 0, 'output_sha256': '6' * 64}]
+        client = FakeClient(Reply(json.dumps({'schema_version': 1,
+            'decision': 'SEND_TO_REVIEW', 'summary': 'Executor result is ready for independent review.'}),
+            {'prompt_tokens': 11, 'completion_tokens': 7, 'total_tokens': 18}))
+        out = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                   return_value=git), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.task_completion.collect_github_evidence') as github, \
+             patch('llmtool.task_submission_cli.resolve_profile_config', return_value=pm_config('original-pm')) as resolve, \
+             patch('llmtool.task_submission_cli.api_key', return_value='key-not-recorded'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             redirect_stdout(out):
+            self.assertEqual(run_task_executor_event(task['task_id'], self.task_id,
+                             store=store), 0)
+        saved = store.get(task['task_id'])
+        completion = saved['completion']
+        self.assertEqual(completion['state'], 'PM_RETURNED')
+        self.assertEqual(completion['pm_recommendation']['decision'], 'SEND_TO_REVIEW')
+        self.assertEqual(completion['evidence']['result']['result_head'], result_sha)
+        self.assertEqual(completion['evidence']['tests'], tests)
+        self.assertEqual(completion['evidence']['review_pr_ci'], {
+            'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+            'ci_state': 'NOT_STARTED'})
+        self.assertIsNone(completion['reviewer_task_id'])
+        resolve.assert_called_once_with('original-pm', require_configured=True)
+        github.assert_not_called()
+        packet = json.loads(client.calls[0][1]['content'])
+        self.assertEqual(packet['task_id'], task['task_id'])
+        self.assertEqual(packet['run_id'], task['run_id'])
+        self.assertEqual(packet['result_head'], result_sha)
+        self.assertNotIn('artifact', packet)
+        with self.assertRaises(LLMToolError):
+            run_task_executor_event(task['task_id'], self.task_id, store=store)
+        self.assertEqual(len(client.calls), 1)
+
     def test_waiting_retry_preserves_immutable_d6_admission_binding(self):
         store = TaskStore(self.base / 'tasks')
         task = self._task()

@@ -28,7 +28,7 @@ class CompositionTests(unittest.TestCase):
         snap = (job.source_sha, 'feat/developer', b'INDEX', b'', {'PUBLIC.txt': (0o644, 'before')})
         return job, policy, a, snap
 
-    def _task_store_for_worker_job(self, job):
+    def _task_store_for_worker_job(self, job, *, with_developer=False):
         import hashlib
         from llmtool.action_contract import TaskBinding
         from llmtool.task_store import TaskStore
@@ -46,6 +46,24 @@ class CompositionTests(unittest.TestCase):
             'base_url': 'https://api.example.invalid'}
         binding = TaskBinding(**record['task_binding'])
         linked_job = replace(job, task=binding)
+        if with_developer:
+            assignment = '3' * 32
+            artifact = 'bounded proposal'
+            record['developer'] = {
+                'assignment_id': assignment, 'selection_source': 'PM',
+                'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'company-gw',
+                'provider_type': 'openai-compatible', 'model': 'gw-model',
+                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                'session_id': 'dev-' + assignment, 'source_sha': job.source_sha,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['PUBLIC.txt'], 'write_paths': ['PUBLIC.txt'],
+                'acceptance': ['bounded change passes tests'], 'context_sha256': '4' * 64,
+                'egress_basis': 'Public non-sensitive source only', 'input_bytes': 12,
+                'max_tokens': 64, 'artifact_format': 'unified_diff',
+                'artifact': artifact,
+                'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                'usage': None, 'error_code': None, 'created_at': record['created_at'],
+            }
         record['completion'] = {
             'state': 'WAITING_EXECUTOR', 'executor_task_id': job.task.task_id,
             'reviewer_task_id': None,
@@ -107,6 +125,14 @@ class CompositionTests(unittest.TestCase):
             source_sha=job.source_sha))
         self.assertNotIn('synthetic model text', json.dumps(evidence))
         self.assertEqual(saved['completion']['pm_dispatch'], 'NOT_STARTED')
+
+    def test_successful_host_event_invokes_only_the_bound_task_callback(self):
+        job, store, record = self._task_store_for_worker_job(self.fixture()[0],
+                                                              with_developer=True)
+        receipt, delivery = self._worker_delivery(job)
+        with patch('llmtool.task_submission_cli.run_task_executor_event', return_value=1) as callback:
+            self.assertTrue(h._persist_task_worker_delivery(job, receipt, delivery, store))
+        callback.assert_called_once_with(record['task_id'], 'worker-task', store=store)
 
     def test_missing_delivery_ack_persists_blocked_host_mode_without_receipt_claim(self):
         job, store, record = self._task_store_for_worker_job(self.fixture()[0])
