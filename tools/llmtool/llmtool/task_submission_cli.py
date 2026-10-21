@@ -657,7 +657,14 @@ def run_task_complete(args, *, store=None):
             expected={'completion': completion}, completion=waiting)
         _print(_task_view(saved))
         return 1
-    evidence = {'task_id': task['task_id'], 'run_id': task['run_id'],
+    # Preserve the immutable D6 admission binding across WAITING retries, but do
+    # not carry forward result/test/review facts from a prior incomplete attempt.
+    admission_fields = ('executor_identity', 'executor_session_ref',
+        'executor_native_session_id', 'executor_native_session', 'root',
+        'common_dir', 'branch', 'source_sha', 'execution_mode',
+        'host_worker_receipt')
+    evidence = {key: initial[key] for key in admission_fields if key in initial}
+    evidence.update({'task_id': task['task_id'], 'run_id': task['run_id'],
                 'contract_digest': task['task_binding']['contract_digest'],
                 'execution_mode': initial.get('execution_mode', 'DIRECT_D6'),
                 'developer': {'provider': developer['provider_profile'],
@@ -667,11 +674,13 @@ def run_task_complete(args, *, store=None):
                     'identity': initial.get('executor_identity'),
                     'session_ref': initial.get('executor_session_ref'),
                     'native_session': initial.get('executor_native_session')},
-                'source_sha': developer['source_sha']}
-    if initial.get('host_worker_receipt') is not None:
-        evidence['host_worker_receipt'] = initial['host_worker_receipt']
+                'source_sha': initial.get('source_sha', developer['source_sha'])})
     missing = []
     try:
+        if evidence['source_sha'] != developer['source_sha']:
+            error = LLMToolError('Executor admission source does not match Developer source')
+            error.completion_code = 'D6_ADMISSION_SOURCE_MISMATCH'
+            raise error
         git_evidence = task_completion.collect_executor_result(
             task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
             expected_root=initial.get('root'), expected_branch=initial.get('branch'),
@@ -699,6 +708,8 @@ def run_task_complete(args, *, store=None):
         else:
             github = task_completion.collect_github_evidence(
                 pr_number=args.pr, result_sha=git_evidence['result_head'],
+                task_id=task['task_id'], run_id=task['run_id'],
+                contract_digest=task['task_binding']['contract_digest'],
                 executor_identity=git_evidence['executor_identity'],
                 executor_session_ref=initial.get('executor_session_ref'),
                 executor_native_session_id=initial.get('executor_native_session_id'),

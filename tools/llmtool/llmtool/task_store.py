@@ -419,6 +419,15 @@ def _validate(record):
                         review_ci.get('head_sha') != result_head or
                         review_ci.get('review_commit_sha') != result_head or
                         review_ci.get('ci_head_sha') != result_head or
+                        review_ci.get('review_task_id') != record['task_id'] or
+                        review_ci.get('review_run_id') != record['run_id'] or
+                        review_ci.get('review_contract_digest') != record['task_binding']['contract_digest'] or
+                        review_ci.get('review_binding_verified') is not True or
+                        review_ci.get('reviewer_task_id') != completion['reviewer_task_id'] or
+                        review_ci.get('review_actor') != review_ci.get('reviewer_github_login') or
+                        type(review_ci.get('reviewer_d6_identity')) is not str or
+                        not review_ci['reviewer_d6_identity'] or
+                        review_ci.get('review_session_identity') != 'D6_NATIVE_SESSION_VERIFIED' or
                         type(checks) is not list or type(required) is not list or
                         not required or any(type(item) is not str for item in checks + required) or
                         not set(required).issubset(set(checks)) or

@@ -706,8 +706,12 @@ Afterward, an operator must explicitly run
 `llmtool task complete TASK_ID --executor-task D6_TASK_ID --reviewer-task D6_REVIEW_TASK_ID --pr PR_NUMBER`.
 This manually invoked command checks the real D6 registration, current Git result,
 the persisted proposal against the applied diff, bounded tests, public exact-head
-PR/check data, and a formal review marker bound to a distinct D6 reviewer actor
-and session. Missing gates are retained as WAITING_EXECUTOR, WAITING_REVIEW or
+PR/check data, and a formal review marker plus a binding line containing the
+exact Task ID, Run ID, contract digest and result HEAD. The review actor must
+match the registered D6 reviewer login, and the reviewer D6 agent/session and
+native session evidence must be distinct from the Executor. The public review
+and check APIs are read-only; later review dispositions and newer check runs
+override older approvals or successes. Missing gates are retained as WAITING_EXECUTOR, WAITING_REVIEW or
 WAITING_CI. Only a complete evidence packet is sent to the original PM profile;
 the PM response is persisted as a recommendation and grants no execution or Git
 permission. If the original PM is unavailable, complete evidence remains in

@@ -17,13 +17,17 @@ import sys
 import tempfile
 import time
 import urllib.request
+from datetime import datetime, timezone
 
 from .errors import LLMToolError
 
 _TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
+_HEX64 = re.compile(r'[0-9a-f]{64}\Z')
 _REGISTRY_LIMIT = 64 * 1024
 _GIT_LIMIT = 2 * 1024 * 1024
+_PROPOSAL_FILE_LIMIT = 128
+_PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
 _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
@@ -338,7 +342,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
                 '--no-renames', source_sha, snapshot.head, '--'), limit=_GIT_LIMIT)
     verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                            paths, write_paths)
+                            source_sha, snapshot.head, paths, write_paths)
     return {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
         'executor_task_id': registration.task_id,
@@ -354,11 +358,51 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     }
 
 
-def verify_artifact_applied(root, artifact, artifact_sha256, changed_paths, write_paths):
-    """Prove the stored proposal applies in reverse to the actual result tree."""
+def _tree_entry(root, tree_sha, path):
+    raw = _git(root, ('ls-tree', '-z', tree_sha, '--', path), limit=4096)
+    if not raw:
+        return None
+    if not raw.endswith(b'\0') or raw.count(b'\0') != 1:
+        _stop('DEVELOPER_ARTIFACT_CHECK_UNKNOWN')
+    metadata, entry_path = raw[:-1].split(b'\t', 1)
+    fields = metadata.split(b' ')
+    if (len(fields) != 3 or entry_path != path.encode('utf-8') or
+            fields[1] != b'blob' or fields[0] not in (b'100644', b'100755') or
+            re.fullmatch(rb'[0-9a-f]{40}', fields[2]) is None):
+        _stop('DEVELOPER_ARTIFACT_TREE_ENTRY_UNSUPPORTED')
+    return fields[0].decode('ascii'), fields[2].decode('ascii')
+
+
+def _tree_blob(root, tree_sha, path):
+    entry = _tree_entry(root, tree_sha, path)
+    if entry is None:
+        return None
+    mode, blob_sha = entry
+    return mode, _git(root, ('cat-file', 'blob', blob_sha))
+
+
+def _proposal_blob_size(root, tree_sha, path):
+    entry = _tree_entry(root, tree_sha, path)
+    if entry is None:
+        return 0
+    raw_size = _git(root, ('cat-file', '-s', entry[1]), limit=32).strip()
+    if not re.fullmatch(rb'(0|[1-9][0-9]{0,12})', raw_size):
+        _stop('DEVELOPER_ARTIFACT_CHECK_UNKNOWN')
+    size = int(raw_size)
+    if size > _GIT_LIMIT:
+        _stop('DEVELOPER_ARTIFACT_BLOB_TOO_LARGE')
+    return size
+
+
+def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_sha,
+                            changed_paths, write_paths):
+    """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
     if (type(artifact) is not str or not artifact or
+            len(artifact.encode('utf-8')) > _GIT_LIMIT or
             type(artifact_sha256) is not str or
-            hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256):
+            hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
+            type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None or
+            type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None):
         _stop('DEVELOPER_ARTIFACT_BINDING_INVALID')
     patch_paths = []
     for line in artifact.splitlines():
@@ -367,23 +411,68 @@ def verify_artifact_applied(root, artifact, artifact_sha256, changed_paths, writ
             if match is None or match.group(1) != match.group(2):
                 _stop('DEVELOPER_ARTIFACT_INVALID')
             patch_paths.append(match.group(1))
-    if (not patch_paths or len(patch_paths) != len(set(patch_paths)) or
+    if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or
+            len(patch_paths) != len(set(patch_paths)) or
             set(patch_paths) != set(changed_paths) or
             not set(patch_paths).issubset(set(write_paths))):
         _stop('DEVELOPER_ARTIFACT_RESULT_MISMATCH')
+    for path in patch_paths:
+        parts = Path(path).parts
+        if (Path(path).is_absolute() or not parts or
+                any(part in ('', '.', '..') for part in parts) or '\\' in path or
+                '\x00' in path):
+            _stop('DEVELOPER_ARTIFACT_INVALID')
+    total_blob_bytes = 0
+    for path in patch_paths:
+        total_blob_bytes += _proposal_blob_size(root, source_sha, path)
+        total_blob_bytes += _proposal_blob_size(root, result_sha, path)
+        if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
+            _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
-           'GIT_OPTIONAL_LOCKS': '0', 'GIT_TERMINAL_PROMPT': '0'}
+           'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
+           'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_LAZY_FETCH': '1'}
     try:
-        proc = subprocess.run(['/usr/bin/git', '-C', root, '-c', 'core.hooksPath=/dev/null',
-            'apply', '--check', '--reverse', '--whitespace=nowarn', '-'],
-            input=artifact.encode('utf-8'), stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=_TIMEOUT, env=env,
-            shell=False, check=False)
+        with tempfile.TemporaryDirectory(prefix='llmtool-proposal-tree-') as temporary:
+            temp_root = Path(temporary)
+            for path in patch_paths:
+                source = _tree_blob(root, source_sha, path)
+                if source is None:
+                    continue
+                mode, content = source
+                target = temp_root.joinpath(*Path(path).parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open('xb') as stream:
+                    stream.write(content)
+                target.chmod(0o755 if mode == '100755' else 0o644)
+            proc = subprocess.run(
+                ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', 'apply',
+                 '--binary', '--whitespace=nowarn', '-'],
+                cwd=temp_root, input=artifact.encode('utf-8'),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=_TIMEOUT, env=env, shell=False, check=False)
+            if proc.returncode != 0:
+                _stop('DEVELOPER_ARTIFACT_NOT_APPLIED')
+            for path in patch_paths:
+                expected = _tree_blob(root, result_sha, path)
+                target = temp_root.joinpath(*Path(path).parts)
+                try:
+                    actual_stat = target.lstat()
+                except FileNotFoundError:
+                    actual_stat = None
+                if expected is None:
+                    if actual_stat is not None:
+                        _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+                    continue
+                mode, content = expected
+                if (actual_stat is None or not stat.S_ISREG(actual_stat.st_mode) or
+                        target.read_bytes() != content or
+                        bool(actual_stat.st_mode & 0o111) != (mode == '100755')):
+                    _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+    except LLMToolError:
+        raise
     except Exception:
         _stop('DEVELOPER_ARTIFACT_CHECK_UNKNOWN')
-    if proc.returncode != 0:
-        _stop('DEVELOPER_ARTIFACT_NOT_APPLIED')
 
 
 def run_bounded_tests(*, root, result_sha, read_paths, write_paths):
@@ -481,11 +570,34 @@ def _github_get(path):
         _stop('GITHUB_EVIDENCE_INVALID')
 
 
-def collect_github_evidence(*, pr_number, result_sha, executor_identity,
+def _review_time(review):
+    submitted = review.get('submitted_at')
+    if type(submitted) is not str:
+        _stop('REVIEW_EVIDENCE_INVALID')
+    try:
+        parsed = datetime.fromisoformat(submitted.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            _stop('REVIEW_EVIDENCE_INVALID')
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        _stop('REVIEW_EVIDENCE_INVALID')
+
+
+def _review_binding_line(task_id, run_id, contract_digest, result_sha):
+    return (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+            f'contract={contract_digest} head={result_sha}')
+
+
+def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
+                            contract_digest, executor_identity,
                             executor_session_ref, executor_native_session_id,
                             reviewer_task_id, common_dir):
     """Read a public PR, formal review marker and exact-head required check runs."""
-    if type(pr_number) is not int or not 1 <= pr_number <= 9999999:
+    if (type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
+            type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None or
+            type(task_id) is not str or re.fullmatch(r'[0-9a-f]{32}', task_id) is None or
+            type(run_id) is not str or re.fullmatch(r'[0-9a-f]{32}', run_id) is None or
+            type(contract_digest) is not str or _HEX64.fullmatch(contract_digest) is None):
         _stop('PR_NUMBER_INVALID')
     pr = _github_get(f'pulls/{pr_number}')
     if (type(pr) is not dict or pr.get('state') != 'open' or pr.get('merged') is not False or
@@ -496,27 +608,45 @@ def collect_github_evidence(*, pr_number, result_sha, executor_identity,
             type((pr.get('user') or {}).get('login')) is not str):
         _stop('PR_HEAD_MISMATCH')
     reviews = _github_get(f'pulls/{pr_number}/reviews?per_page=100')
-    if type(reviews) is not list or len(reviews) >= 100:
+    if type(reviews) is not list or len(reviews) >= 100 or any(
+            type(review) is not dict for review in reviews):
         _stop('REVIEW_EVIDENCE_INVALID')
-    formal = []
-    marker = re.compile(r'(?im)^\s*FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\s*$')
-    for review in reviews:
-        if (type(review) is dict and
-                review.get('commit_id') == result_sha and
-                type((review.get('user') or {}).get('login')) is str and
-                marker.search(review.get('body') if type(review.get('body')) is str else '')):
-            formal.append(review)
-    review = formal[-1] if formal else None
-    reviewer_login = None if review is None else review['user']['login']
-    author_login = pr['user']['login']
     try:
         reviewer = read_d6_registration(reviewer_task_id, common_dir)
     except LLMToolError:
         _stop('REVIEWER_D6_REGISTRY_UNAVAILABLE')
+    latest = {}
+    disposition_states = {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}
+    for candidate in reviews:
+        if candidate.get('commit_id') != result_sha or candidate.get('state') not in disposition_states:
+            continue
+        login = (candidate.get('user') or {}).get('login')
+        if type(login) is not str or not login:
+            _stop('REVIEW_EVIDENCE_INVALID')
+        submitted_at = _review_time(candidate)
+        key = login.casefold()
+        previous = latest.get(key)
+        if previous is not None and submitted_at == previous[0]:
+            if candidate != previous[1]:
+                _stop('REVIEW_EVIDENCE_INVALID')
+            continue
+        if previous is None or submitted_at > previous[0]:
+            latest[key] = (submitted_at, candidate)
+    reviewer_login = reviewer.github_login
+    review = None if reviewer_login is None else latest.get(reviewer_login.casefold(), (None, None))[1]
+    formal_marker = re.compile(r'(?im)^\s*FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\s*$')
+    review_body = '' if review is None or type(review.get('body')) is not str else review['body']
+    body_lines = {line.strip() for line in review_body.splitlines()}
+    review_binding_verified = _review_binding_line(
+        task_id, run_id, contract_digest, result_sha) in body_lines
     missing = []
     if review is None:
         missing.append('FORMAL_REVIEW_MISSING')
-    elif review.get('state') != 'APPROVED':
+    elif review.get('state') != 'APPROVED' or not formal_marker.search(review_body):
+        missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
+    if review is not None and not review_binding_verified:
+        missing.append('FORMAL_REVIEW_BINDING_MISMATCH')
+    if any(item[1].get('state') == 'CHANGES_REQUESTED' for item in latest.values()):
         missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
     if (reviewer.trusted_agent_id == executor_identity or
             reviewer.session_ref == 'UNKNOWN' or reviewer.session_ref == '' or
@@ -524,9 +654,11 @@ def collect_github_evidence(*, pr_number, result_sha, executor_identity,
         missing.append('REVIEWER_D6_SESSION_NOT_INDEPENDENT')
     # Public GitHub review proves actor/body/head, but cannot bind that actor to
     # a native Reviewer session unless the Integrator D6 record pins the login.
-    if (reviewer.native_session_id not in (None, 'UNKNOWN') and
-            executor_native_session_id is not None and
-          reviewer.native_session_id == executor_native_session_id):
+    if reviewer.native_session_id in (None, 'UNKNOWN'):
+        missing.append('REVIEWER_NATIVE_SESSION_UNVERIFIED')
+    elif executor_native_session_id in (None, 'UNKNOWN'):
+        missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
+    elif reviewer.native_session_id == executor_native_session_id:
         missing.append('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT')
     if reviewer.github_login is None:
         missing.append('REVIEWER_ACTOR_D6_BINDING_MISSING')
@@ -544,29 +676,54 @@ def collect_github_evidence(*, pr_number, result_sha, executor_identity,
         'FORMAL_REVIEW_MISSING', 'FORMAL_REVIEW_NOT_ACCEPTED',
         'REVIEWER_D6_SESSION_NOT_INDEPENDENT',
         'REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
+        'REVIEWER_NATIVE_SESSION_UNVERIFIED',
+        'FORMAL_REVIEW_BINDING_MISMATCH',
         'REVIEWER_ACTOR_D6_BINDING_MISSING',
         'REVIEWER_ACTOR_D6_BINDING_MISMATCH',
         'REVIEWER_D6_HEAD_MISMATCH', 'REVIEWER_D6_HEAD_UNAVAILABLE',
     }
     reviewer_bound = (review is not None and review.get('state') == 'APPROVED' and
+                      bool(formal_marker.search(review_body)) and review_binding_verified and
                       not reviewer_gates.intersection(missing))
     checks = _github_get(f'commits/{result_sha}/check-runs?per_page=100')
-    if (type(checks) is not dict or checks.get('total_count') != len(checks.get('check_runs', [])) or
-            type(checks.get('check_runs')) is not list or len(checks['check_runs']) > 100):
+    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+            type(checks.get('total_count')) is not int or
+            checks['total_count'] != len(checks['check_runs']) or
+            len(checks['check_runs']) > 100):
         _stop('CI_EVIDENCE_INVALID')
-    successful = {check.get('name') for check in checks['check_runs']
-                  if type(check) is dict and check.get('head_sha') == result_sha and
-                  check.get('status') == 'completed' and check.get('conclusion') == 'success'}
+    latest_checks = {}
+    for check in checks['check_runs']:
+        if type(check) is not dict:
+            _stop('CI_EVIDENCE_INVALID')
+        if check.get('head_sha') != result_sha or check.get('name') not in _REQUIRED_CHECKS:
+            continue
+        check_id = check.get('id')
+        if type(check_id) is not int or check_id <= 0:
+            _stop('CI_EVIDENCE_INVALID')
+        old = latest_checks.get(check['name'])
+        if old is None or check_id > old['id']:
+            latest_checks[check['name']] = check
+        elif check_id == old['id'] and check != old:
+            _stop('CI_EVIDENCE_INVALID')
+    successful = {name for name in _REQUIRED_CHECKS
+                  if (type(latest_checks.get(name)) is dict and
+                      latest_checks[name].get('status') == 'completed' and
+                      latest_checks[name].get('conclusion') == 'success')}
     if not _REQUIRED_CHECKS.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
             'formal_review_state': 'ACCEPTED' if reviewer_bound else 'UNVERIFIED',
-            'review_actor': reviewer_login,
+            'review_actor': None if review is None else review['user']['login'].casefold(),
+            'reviewer_github_login': None if reviewer.github_login is None else reviewer.github_login.casefold(),
             'review_commit_sha': None if review is None else review['commit_id'],
             'reviewer_d6_identity': reviewer.trusted_agent_id,
+            'reviewer_task_id': reviewer_task_id,
             'reviewer_session_ref': reviewer.session_ref,
             'review_session_identity': ('D6_NATIVE_SESSION_VERIFIED'
                 if reviewer.native_session_id not in (None, 'UNKNOWN') else 'UNKNOWN'),
+            'review_task_id': task_id, 'review_run_id': run_id,
+            'review_contract_digest': contract_digest,
+            'review_binding_verified': review_binding_verified,
             'required_checks': sorted(_REQUIRED_CHECKS),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha},
             'missing_gates': sorted(set(missing))}
