@@ -308,7 +308,6 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
     packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'pm_session_id': task['pm_session_id'],
-        'original_request': task['request'], 'pm_response': task['response'],
         'source_sha': source_sha, 'read_paths': read_paths,
         'write_paths': write_paths, 'acceptance': acceptance, 'context': context,
         'pm_selected_goal': pm_goal,
