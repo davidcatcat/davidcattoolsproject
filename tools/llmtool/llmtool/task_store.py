@@ -53,6 +53,10 @@ def _fail(code='TASK_STORE_INVALID'):
     raise LLMToolError('task store unavailable; details omitted') from None
 
 
+class TaskStoreConflict(LLMToolError):
+    """A compare-and-update precondition lost to another task writer."""
+
+
 def new_id():
     return uuid.uuid4().hex
 
@@ -462,6 +466,15 @@ class TaskStore:
             os.close(directory)
 
     def update(self, task_id, **changes):
+        return self._update(task_id, expected=None, changes=changes)
+
+    def compare_and_update(self, task_id, *, expected, **changes):
+        """Update only if selected persisted fields still match under the task lock."""
+        if type(expected) is not dict or not expected:
+            _fail()
+        return self._update(task_id, expected=expected, changes=changes)
+
+    def _update(self, task_id, *, expected, changes):
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         locked = False
@@ -470,10 +483,17 @@ class TaskStore:
                 lock_fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                   0o600, dir_fd=directory)
             except FileExistsError:
+                if expected is not None:
+                    raise TaskStoreConflict(
+                        'developer assignment already exists; duplicate dispatch refused') from None
                 _fail('TASK_STORE_BUSY')
             os.close(lock_fd)
             locked = True
             current = self._read_at(directory, task_id)
+            if expected is not None and any(current.get(key) != value
+                                            for key, value in expected.items()):
+                raise TaskStoreConflict(
+                    'developer assignment already exists; duplicate dispatch refused')
             if set(changes) - (FIELDS - {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                                          'created_at', 'task_contract', 'task_binding', 'record_sha256'}):
                 _fail()

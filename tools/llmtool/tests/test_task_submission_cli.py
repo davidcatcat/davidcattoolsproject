@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -392,6 +393,83 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertRaises(LLMToolError):
             run_task_delegate(args)
         self.assertEqual(len(client.calls), 1)
+
+    def test_concurrent_stale_delegations_claim_once_before_provider_call(self):
+        task = self._pm_task_with_assignment()
+        backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        read_barrier = threading.Barrier(2)
+
+        class StaleReadStore:
+            def get(self, task_id):
+                result = backing.get(task_id)
+                read_barrier.wait(timeout=5)
+                return result
+
+            def compare_and_update(self, task_id, **kwargs):
+                return backing.compare_and_update(task_id, **kwargs)
+
+            def update(self, task_id, **kwargs):
+                return backing.update(task_id, **kwargs)
+
+        client = FakeClient(Reply(
+            'diff --git a/tools/llmtool/tests/test_task_submission_cli.py '
+            'b/tools/llmtool/tests/test_task_submission_cli.py\n'
+            '--- a/tools/llmtool/tests/test_task_submission_cli.py\n'
+            '+++ b/tools/llmtool/tests/test_task_submission_cli.py\n'
+            '@@ -1 +1 @@\n-old\n+new\n', {}))
+        outcomes = []
+
+        def delegate():
+            try:
+                outcomes.append(run_task_delegate(self._delegate_args(task), store=StaleReadStore()))
+            except Exception as exc:
+                outcomes.append(exc)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                patch('llmtool.task_submission_cli._print'):
+            workers = [threading.Thread(target=delegate) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=10)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(sum(value == 0 for value in outcomes), 1, outcomes)
+        self.assertEqual(sum(isinstance(value, LLMToolError) for value in outcomes), 1, outcomes)
+        self.assertEqual(len(client.calls), 1)
+        saved = backing.get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_mismatched_diff_headers_and_fake_empty_diff_are_rejected(self):
+        task_target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        bad_artifacts = (
+            f'diff --git a/{task_target} b/{task_target}\n'
+            '--- a/tools/llmtool/tests/outside.py\n'
+            f'+++ b/{task_target}\n@@ -1 +1 @@\n-old\n+new\n',
+            f'diff --git a/{task_target} b/{task_target}\n'
+            f'--- a/{task_target}\n+++ b/{task_target}\n',
+            f'diff --git a/{task_target} b/{task_target}\n'
+            f'--- a/{task_target}\n+++ b/{task_target}\n@@ -1 +1 @@\n',
+        )
+        for artifact in bad_artifacts:
+            with self.subTest(artifact=artifact):
+                task = self._pm_task_with_assignment()
+                client = FakeClient(Reply(artifact, {}))
+                output = io.StringIO()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.resolve_profile_config',
+                              return_value=config('openai-compatible', 'gw')), \
+                        patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                        patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                        redirect_stdout(output):
+                    code = run_task_delegate(self._delegate_args(task))
+                self.assertEqual(code, 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+                self.assertIsNone(result['developer']['artifact'])
 
 
 if __name__ == '__main__':
