@@ -22,6 +22,7 @@ try:
     from prompt_toolkit.data_structures import Size
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.utils import get_cwidth
     HAVE_TOOLKIT = True
 except ImportError:  # Optional extra; fallback tests below still run.
     HAVE_TOOLKIT = False
@@ -159,6 +160,50 @@ class WidgetTests(Base):
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
 
+    def test_fixed_bottom_layout_fills_80x24_and_99x36(self):
+        for rows, columns in ((24, 80), (36, 99)):
+            with self.subTest(rows=rows, columns=columns):
+                measurements = []
+
+                def inspect_live_layout(ui):
+                    measurements.append((ui.conversation.window.render_info.window_height,
+                                         ui.rule_window.render_info.window_height,
+                                         ui.input.window.render_info.window_height,
+                                         ui.status_window.render_info.window_height))
+
+                ui, result = self.drive([inspect_live_layout],
+                                        size=(Size(rows=rows, columns=columns),))
+                self.assertEqual(result, 0)
+                conversation, rule, input_height, status = measurements[0]
+                self.assertEqual(status, 1)
+                self.assertEqual(rule, 1)
+                self.assertLessEqual(input_height, 4)
+                self.assertEqual(conversation, rows - 3)
+                self.assertEqual(conversation + rule + input_height + status, rows)
+
+    def test_multiline_input_is_capped_and_footer_stays_single_line(self):
+        ui, _ = self.drive(['one\ntwo\nthree\nfour\nfive\nsix'],
+                           size=(Size(rows=36, columns=99),))
+        self.assertLessEqual(ui.input.window.render_info.window_height, 4)
+        self.assertEqual(ui.status_window.render_info.window_height, 1)
+        status = ui.status_text()
+        self.assertNotIn('\n', status)
+        self.assertLessEqual(get_cwidth(status), 99)
+
+    def test_status_footer_is_compact_and_single_line_at_80_columns(self):
+        self.session.config = {
+            'active_provider': 'a-very-long-profile-name',
+            'providers': {'a-very-long-profile-name': {
+                'type': 'openai-compatible', 'model': 'a-very-long-model-name',
+                'base_url': 'https://example.test', 'api_key': 'PRIVATE_KEY',
+            }},
+        }
+        ui, _ = self.drive([], size=(Size(rows=24, columns=80),))
+        status = ui.status_text()
+        self.assertNotIn('\n', status)
+        self.assertLessEqual(get_cwidth(status), 80)
+        self.assertEqual(ui.status_window.render_info.window_height, 1)
+
     def test_ctrl_d_exits_only_with_empty_input(self):
         ui, result = self.drive(['abc', '\x04', lambda ui: self.assertFalse(ui.app.is_done),
                                  lambda ui: ui.input.buffer.reset(), '\x04'])
@@ -169,7 +214,7 @@ class WidgetTests(Base):
         self.client.complete.return_value = Reply('hello 測試 \U0001f642',
                                                   {'prompt_tokens': 2, 'completion_tokens': 3, 'total_tokens': 5})
         ui, result = self.drive(['問題 \U0001f642\r', self.idle,
-                                 lambda ui: self.assertIn('tokens 2+3=5', ui.status_text())])
+                                 lambda ui: self.assertIn('t:2+3=5', ui.status_text())])
         self.assertEqual(result, 0)
         self.assertEqual(self.client.complete.call_count, 1)
         self.assertEqual(self.session.history[0]['content'], '問題 \U0001f642')
@@ -448,7 +493,7 @@ class WidgetTests(Base):
             self.assertFalse(ui.app.is_done)
             self.assertTrue(ui.quit_pending)
             self.assertIn('cannot be cancelled', ui.conversation.text)
-            self.assertIn('EXIT PENDING', ui.status_text())
+            self.assertIn('exit pending', ui.status_text())
 
         async def finish(ui):
             release.set()
@@ -460,7 +505,7 @@ class WidgetTests(Base):
     def test_request_failure_is_sanitized_and_recoverable(self):
         self.client.complete.side_effect = [RuntimeError('PRIVATE stderr'), Reply('ok', {})]
         ui, _ = self.drive(['bad\r', self.idle,
-                            lambda ui: self.assertIn('error (unclassified)', ui.status_text()),
+                            lambda ui: self.assertIn('error (unclas', ui.status_text()),
                             'good\r', self.idle])
         self.assertIn('chat request failed; history unchanged', ui.conversation.text)
         self.assertNotIn('PRIVATE', ui.conversation.text + ui.status_text())
@@ -471,7 +516,7 @@ class WidgetTests(Base):
         ui, _ = self.drive(['q\r', self.idle])
         self.assertIn('x\\x1b]52;c;secret\\x07\\u202e', ui.conversation.text)
         self.assertNotIn('\x1b', ui.conversation.text + ui.status_text())
-        self.assertIn('reported UNKNOWN', ui.status_text())
+        self.assertIn('t:UNKNOWN', ui.status_text())
 
     def test_exit_command_and_clear(self):
         ui, result = self.drive(['q\r', self.idle, '/clear\r',
