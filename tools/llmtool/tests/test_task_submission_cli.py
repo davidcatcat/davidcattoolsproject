@@ -380,6 +380,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
             code = run_task_delegate(self._delegate_args(task))
+            with self.assertRaisesRegex(
+                    LLMToolError,
+                    'developer assignment already exists; duplicate dispatch refused'):
+                run_task_delegate(self._delegate_args(task))
 
         self.assertEqual(code, 1)
         result = json.loads(output.getvalue())
@@ -389,8 +393,6 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['developer']['usage']['total_tokens'], 45)
         self.assertNotIn(fenced_patch, output.getvalue())
         self.assertNotIn('FENCED_PROVIDER_PATCH_SENTINEL', output.getvalue())
-        with self.assertRaises(LLMToolError):
-            run_task_delegate(self._delegate_args(task))
         self.assertEqual(len(client.calls), 1)
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
