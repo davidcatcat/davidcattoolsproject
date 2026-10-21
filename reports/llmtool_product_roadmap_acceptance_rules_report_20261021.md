@@ -2,10 +2,10 @@
 
 - 日期：2026-10-21（Asia/Taipei）。
 - Repository：`davidcatcat/davidcattoolsproject`。
-- 分析基準：`303b96dbe312303607ecfbe01d13f6332568d5c9`；發布前已透過 GitHub API 核對 main。
+- 分析基準：最新 GitHub main `70693d03a93fb14b23e6ac5a822271f78f644879`；本報告僅修訂既有報告檔，canonical 本機 checkout 未同步。
 - 作者：目前 Codex Integrator／PM。
 - 用途：彙整本輪 Owner／PM 討論，交給 ChatGPT review；不是正式修改 Roadmap、規則或產品程式碼。
-- 狀態：**報告候選，待 ChatGPT review**。Owner 明確回答的事項才列為「Owner 已確認」；PM 的階段細分、技術建議與 DoD 均另行標示。
+- 狀態：**PR #255 Draft；依 Owner 接受的兩項 review finding 修訂，待獨立非作者 Review**。Owner 明確回答的事項才列為「Owner 已確認」；PM 的階段細分、技術建議與 DoD 均另行標示。
 - 本次新增授權：Owner 要求「上面所有的討論，整理成一篇報告，上傳 git，我給 chatgpt review」。此授權僅用於本報告的 Git 發布，不視為開發、修改現行規則或合併授權。
 - PR #249：**CLOSED／NOT MERGED**；不恢復、不合併，不把其草案當成已接受政策。
 
@@ -129,13 +129,13 @@ UNKNOWN 應保持 UNKNOWN，不能寫零或虛構節省比例。Code Review 的 
 
 Task 恢復需要的最小狀態與證據索引，不能直接等同於保留全部原始對話；不得因此將憑證或受限內容放進 diagnostics。優先沿用現有事件、Receipt 與執行介面，維持共同狀態來源。
 
-### 4.2 G3／M2／A11c.2 的區分提案
+### 4.2 G3／M2／A11c 的界線修正
 
-- **G3：首次原生真實閉環證據檢查點**，從 llmtool 入口經指定 PM、Developer、測試、獨立 Review、必要修復，回到 PM 作合併或 STOP 決定。
-- **M2：完整核心閉環驗收**，除單件成功，還包含多任務、持久化、背景繼續、重接、失聯處理與防重播。
-- **A11c.2：真實產品驗收矩陣**，以真 Repo／工作包證明正常與失敗行為，形成可重查報告。
-- G1–G4 保持既有報告檢查點；不變成額外 Milestone。G3 原先與 M2 重疊的描述需一起校正。
-- 指定 PM 優先恢復原 Session；原生 Session 與邏輯 PM 身分如何映射、無法恢復時如何明確授權替換，仍需技術設計，不能靜默換 PM。
+- **G3 保留既有驗收定義**（Owner Outcome Reporting v1.1 §3）：一次真實、已授權的 Integrator → Developer → 不同身分的獨立 Reviewer → 必要退修／測試 → Integrator Draft PR 或如實 STOP 閉環；驗證實際派送、ACK、喚醒、結果接收及失敗／重播處理，不要求 Owner 中途轉貼提示。不要把原生 CLI、並行或背景生命週期加進 G3，也不重做已接受的 G3 證據。
+- **M2 保留原有原生 AI Agent 協作閉環目標**：llmtool 依核准計畫執行 Worker、接收可信事件並喚回原 Integrator，完成 Developer、獨立 Review、必要修復與 PR-or-STOP；G3 是其既有成果回報檢查點，不因此改寫 M2。
+- **A11c／A11c.2 承載 Mac CLI 產品驗收**：另驗證使用者直接從 llmtool 提交需求、連接指定 PM、多任務並行、關閉介面後背景繼續、重新開啟接回，以及 PM 失聯時停止新派工並讓既有工作走到需要 PM 的等待點。此產品驗收與原 G3/M2 Gate 互相對應但不互相取代。
+- **G1–G4 繼續作為既有成果回報檢查點**，不新增 Milestone、Controller 或驗收系統。依最新 Owner 會議紀錄，產品功能與完整 DoD 尚待正式納入原有 Roadmap；本報告只記錄修訂提案，不能當作已完成或正式生效。
+- 指定 PM Session 與邏輯 PM 身分的映射、無法恢復時如何取得明確替換決定，屬 A11c 技術設計；不能靜默換 PM。
 
 ### 4.3 首次 Mac CLI 應能做什麼
 
@@ -214,12 +214,13 @@ Telegram 及 Web 依賴同一核心；不為 UI 另造調度系統。完整 F2 �
 | 模型／費用 | 免費 OpenCode 路線、無隱藏付費 fallback、公司 gw 經 llmtool | 依各自授權執行，不推廣為所有路線同一限制。 |
 | Host／Worker | Admission、cap、Retry stop、Receipt、執行檔驗證、清理 | 限定路線，不拿來阻擋正常 direct Developer Session。 |
 | 公司 gw | 小型低風險工作、資料檢查、受控修復、獨立驗收 | 修正只准 triage 的舊說法；保留模型沒有直接執行權限。 |
-| Owner 升級 | 現行 AGENTS 指定需求錯誤、root/sudo、Mac 核心系統修改 | 統一表述；例行技術處理由 PM 解決，未授權動作仍不得執行。 |
+| Owner 決策與授權 | AGENTS／owner-escalation 限定日常打斷 Owner 的三類情形；Owner Outcome v1.1 保留重大產品、權限、支出、風險與正式 GO/NO-GO 決策 | PM 在既有授權內處理例行技術工作；超出既有授權的操作先停該操作，必要的 Owner 決策未到前只暫停相依動作。詳見 7.2。 |
 | Token | 實際使用量及 UNKNOWN | 成本統計與品質分離，不新增通用否決或停工規則。 |
 
 ### 7.2 本輪發現的具體風險
 
-1. **Owner 升級範圍不一致。** AGENTS／owner-escalation 的現行界線，與 WORKFLOW 第 59 行列出的較廣範圍不一致。需分清例行授權內處置、授權外不得執行、產品接受與必要 Owner 決策，避免再製造逐次批准。
+1. **Owner 決策、日常打斷與執行授權是不同問題。** AGENTS.md／owner-escalation.md 說明何時日常中斷並詢問 Owner：需求錯誤、需要 root/sudo、或 macOS 核心／系統變更；這不會取消其他操作自己的授權條件。Owner Outcome Reporting v1.1 §6 授權 PM 在既有範圍內拆任務、選擇合格 Agent、安排 Review、修復及合格 PR 合併，同時明定重大產品／範圍改變、增加支出、新 Provider 計費、擴大資料外送／憑證／危險權限／接受重大風險，以及正式 GO／LIMITED GO／NO-GO，須先取得 Owner 決策。WORKFLOW 的 decision-boundary 段落是該管理原則的操作摘要，仍要求依既有授權處理資料外送、成本與風險。D8/D8a 只授權其中明列的 OpenCode 路線與 Host 憑證方式，不擴大其他 Provider、資料類別、支出或安全權限。統一適用方式：具體 Owner 決策及路線授權界定可做範圍；PM 可在範圍內自行決定日常技術事項；一旦動作超界，先停止該受影響動作，若需要新產品／風險決策則等待 Owner，其他已授權且不依賴該決策的工作繼續。文件可用 AGENTS 作簡短入口並連到單一授權／決策參考，但本報告本身不改規則、不產生新授權。
+
 2. **公司 Skill 與最新 Developer 分工不一致。** `skills/company-llm-delegation/SKILL.md` 的 Decision order 仍偏向分析，WORKFLOW 第 438 行仍寫 company only triage。這不能覆蓋較新的 gw 真實開發決策。
 3. **特殊路線規則容易被泛化。** C1B 的 Owner-only Phase 0 grant 屬該 Worker 路線；不能解讀成所有 gw Developer 呼叫都需逐次 Owner grant。D4 同樣不能阻擋正常 OpenCode Developer。
 4. **Preflight 過度綁定環境。** `preflight-reference.md` 第 95 行固定 `tools/llmtool/.venv`，並嚴格比對 ignored inventory。合法替代 Python、預期產物變更可能導致重複 baseline 處理；應由技術審查決定適用範圍及改善，不能直接跳過或放寬來源檢查。
@@ -313,14 +314,14 @@ Mac CLI 的方向已足夠明確；目前沒有必須重新問 Owner 才能整�
 
 以下連結固定在分析基準，避免未來 main 漂移：
 
-- [原產品需求會議紀錄](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/docs/meetings/2026-10-21-llmtool-product-requirements.md)。
-- [ROADMAP](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/tools/llmtool/ROADMAP.md)、[WORKFLOW](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/tools/llmtool/WORKFLOW.md)、[README](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/tools/llmtool/README.md)。
-- [AGENTS](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/AGENTS.md)、[CLAUDE](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/CLAUDE.md)。
-- [ai-team-delivery](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/skills/ai-team-delivery/SKILL.md)、[safe-git](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/skills/safe-git/SKILL.md)、[公司委派 Skill](https://github.com/davidcatcat/davidcattoolsproject/blob/303b96dbe312303607ecfbe01d13f6332568d5c9/skills/company-llm-delegation/SKILL.md)。
-- [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)、[Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172)、[歷史移植性評估 #237](https://github.com/davidcatcat/davidcattoolsproject/pull/237)、[#249 關閉狀態](https://github.com/davidcatcat/davidcattoolsproject/pull/249)。
+- [最新產品需求會議紀錄](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/docs/meetings/2026-10-21-llmtool-product-requirements.md)。
+- [ROADMAP](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/tools/llmtool/ROADMAP.md)、[WORKFLOW](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/tools/llmtool/WORKFLOW.md)、[README](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/tools/llmtool/README.md)。
+- [AGENTS](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/AGENTS.md)、[CLAUDE](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/CLAUDE.md)。
+- [ai-team-delivery](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/skills/ai-team-delivery/SKILL.md)、[safe-git](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/skills/safe-git/SKILL.md)、[公司委派 Skill](https://github.com/davidcatcat/davidcattoolsproject/blob/70693d03a93fb14b23e6ac5a822271f78f644879/skills/company-llm-delegation/SKILL.md)。
+- [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)（最後進度留言 `6303341913` 早於 main `70693d0`；不據此主張它含有最新 Owner 決策）、[Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172)、[歷史移植性評估 #237](https://github.com/davidcatcat/davidcattoolsproject/pull/237)、[#249 關閉狀態](https://github.com/davidcatcat/davidcattoolsproject/pull/249)。
 
 ### 新增決策的來源
 
-第 2 節後續確認來自本輪 Owner 對話原文，沒有獨立既存 GitHub comment URL；不冒稱它們已在原會議檔、#249 或 main 上正式修訂。本報告是此次彙整與待審發布載體。
+第 2 節產品需求與本輪後續 Owner 決策已有最新會議紀錄 `70693d0` 作為 GitHub 可核對來源；歷史證據仍按各自 issue／PR 原文引用，不將報告提案冒稱為 Owner 已採納的 Roadmap 修訂。
 
-本輪只作來源／狀態讀取、文件內容整理及報告發布。應在 PR 記錄實際文件檢查與遠端 readback；不宣稱應用測試、CI、獨立正式 Review、Live 推論或合併完成。原先只讀規劃限制，僅由 Owner 最新指示對這份報告發布作例外，其餘保持不變。
+本輪僅修改既有 PR #255 的報告檔；已完成來源核對及本地化的文件結構／連結／範圍檢查，並在 GitHub 遠端回讀候選。PR 仍為 Draft；除非另有明確證據，下方會分別記錄獨立 Review 與 CI 狀態，不宣稱 Live 推論或產品功能完成。原有不修改正式 Roadmap／規則及不啟動 Developer 任務的限制仍有效。
