@@ -30,6 +30,18 @@ model 與明確 API credentials；`claude-cli` 使用已安裝 CLI 的預設 mod
 純文字 runtime request，不使用 CLI tools，不提供 shell、Git 或 code-edit capability。
 llmtool 不執行模型回傳的指令。見 [Roadmap](ROADMAP.md)。
 
+
+## Planned: ChatGPT ↔ GitHub ↔ llmtool Core task handoff (Owner decision 2026-10-22)
+
+**Not implemented.** Future A12 integration aims to let the owner explicitly request work from ChatGPT Web/App, commit a scoped authorized intake via GitHub and have an **already running** llmtool Core fetch it with lightweight incremental GitHubSync. The existing PM AI—not the Poller—chooses Developer/Reviewer routes. Results are posted to GitHub for on-demand ChatGPT inspection, without the owner copying prompts between ChatGPT and TUI.
+
+**Authorization is separate from discussion:** `DISCUSS` means read-only; `RECORD` permits only the named non-executable GitHub record; `EXECUTE` requires authenticated owner authority tied to exact scope/version plus Core verification; `STOP` prevents new dispatch. Issue labels/comments are not grants. No automatic Issue creation based on ChatGPT-inferred consent. No silent fallback provider, paid model, direct ChatGPT chat quota reuse or automatic ChatGPT-message notification.
+
+**Lifecycle:** One Core owns optional GitHubSync and existing Task/Worker state, not a second PM/Supervisor. No macOS boot `launchd` service, new permanent Agent/Runner or webhook. After explicit Core startup, catch-up scans old authorized Issues; idle Polling auto-stops; already authorized Workers survive TUI closure. If Core is stopped, new GitHub tasks stay pending until the next Core startup. Polling does not consume AI inference tokens.
+
+See the [detailed meeting decision and four Mermaid diagrams](../../docs/meetings/2026-10-21-llmtool-product-requirements.md) and [A12 roadmap](ROADMAP.md#a12--remote-frontends--telegram-agent). GitHubSync is planned only after accepted A11c Core background lifecycle; it does **not** gate Mac CLI delivery or change A12.1 Telegram / A12.2 Web UI priority.
+
+
 ## Accepted collaboration and mobile Codex Cloud development lane
 
 [Architecture decisions Issue #172](https://github.com/davidcatcat/davidcattoolsproject/issues/172)
