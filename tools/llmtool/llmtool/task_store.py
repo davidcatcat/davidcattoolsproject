@@ -13,12 +13,14 @@ import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
+from .task_completion import validate_host_worker_receipt
 
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
@@ -36,7 +38,10 @@ _FIELDS_V1 = frozenset((
     'record_sha256',
 ))
 _FIELDS_V2 = _FIELDS_V1 | frozenset(('developer', 'pm_assignment'))
-FIELDS = _FIELDS_V2
+_FIELDS_V2_ROUTE = _FIELDS_V2 | frozenset(('pm_route_binding',))
+_FIELDS_V2_COMPLETION = _FIELDS_V2 | frozenset(('completion',))
+_FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
+FIELDS = _FIELDS_V2_ROUTE_COMPLETION
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
@@ -88,7 +93,9 @@ def _safe_identifier(value, pattern):
 def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
-            (record.get('schema_version') == 2 and set(record) != _FIELDS_V2) or
+            (record.get('schema_version') == 2 and set(record) not in
+             (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
+              _FIELDS_V2_ROUTE_COMPLETION)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -119,6 +126,40 @@ def _validate(record):
     if record['pm_model'] is not None and re.fullmatch(
             r'[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}', record['pm_model']) is None:
         _fail()
+    if 'pm_route_binding' in record:
+        route = record['pm_route_binding']
+        if route is not None:
+            if (type(route) is not dict or set(route) != {'type', 'model', 'base_url'} or
+                    route['type'] != record['pm_provider_type'] or
+                    route['model'] != record['pm_model']):
+                _fail()
+            base_url = route['base_url']
+            if base_url is not None:
+                try:
+                    if type(base_url) is not str or len(base_url) > 2048:
+                        _fail()
+                    parsed = urlsplit(base_url)
+                    hostname = parsed.hostname
+                    if (any(c.isspace() or ord(c) < 32 for c in base_url) or
+                            parsed.scheme.lower() not in ('http', 'https') or not hostname or
+                            parsed.username is not None or parsed.password is not None or
+                            parsed.path or parsed.query or parsed.fragment):
+                        _fail()
+                    hostname = hostname.rstrip('.').encode('idna').decode('ascii').lower()
+                    port = parsed.port
+                    if port is not None and not 1 <= port <= 65535:
+                        _fail()
+                    authority_host = '[' + hostname + ']' if ':' in hostname else hostname
+                    scheme = parsed.scheme.lower()
+                    if port is not None and not (scheme == 'http' and port == 80 or
+                                                 scheme == 'https' and port == 443):
+                        authority_host += ':' + str(port)
+                    if base_url != scheme + '://' + authority_host:
+                        _fail()
+                except (AttributeError, UnicodeError, ValueError):
+                    _fail()
+        elif record['state'] == 'PM_RESPONDED':
+            _fail()
     if record['native_session_id'] is not None:
         _fail()
     if record['backend_session_semantics'] not in (
@@ -205,7 +246,8 @@ def _validate(record):
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
                     type(developer['source_sha']) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', developer['source_sha']) is None or
-                    developer['source_sha_binding'] != 'UNVERIFIED_CALLER_INPUT' or
+                    developer['source_sha_binding'] not in
+                    ('UNVERIFIED_CALLER_INPUT', 'D6_REGISTRY_OBSERVED') or
                     type(developer['context_sha256']) is not str or
                     re.fullmatch(r'[0-9a-f]{64}', developer['context_sha256']) is None or
                     type(developer['egress_basis']) is not str or
@@ -291,6 +333,143 @@ def _validate(record):
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
                     developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
+                _fail()
+        if 'completion' in record:
+            completion = record['completion']
+            fields = frozenset(('state', 'executor_task_id', 'reviewer_task_id',
+                                'evidence', 'missing_gates', 'pm_dispatch',
+                                'pm_response', 'pm_recommendation', 'pm_usage',
+                                'pm_error_code'))
+            if completion is not None:
+                if type(completion) is not dict or set(completion) != fields:
+                    _fail()
+            if completion is not None and (completion['state'] not in ('WAITING_EXECUTOR',
+                    'WAITING_REVIEW', 'WAITING_CI', 'WAITING_PM',
+                    'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED', 'PM_UNAVAILABLE',
+                    'PM_OUTCOME_UNKNOWN') or
+                    completion['pm_dispatch'] not in ('NOT_STARTED', 'CLAIMED',
+                    'RETURNED', 'UNAVAILABLE', 'UNKNOWN')):
+                _fail()
+            if completion is not None:
+                dispatch_for_state = {
+                    'WAITING_EXECUTOR': 'NOT_STARTED',
+                    'WAITING_REVIEW': 'NOT_STARTED',
+                    'WAITING_CI': 'NOT_STARTED',
+                    'WAITING_PM': 'NOT_STARTED',
+                    'PM_DISPATCHING': 'CLAIMED',
+                    'PM_RETURNED': 'RETURNED',
+                    'PM_RESPONSE_REJECTED': 'RETURNED',
+                    'PM_UNAVAILABLE': 'UNAVAILABLE',
+                    'PM_OUTCOME_UNKNOWN': 'UNKNOWN',
+                }
+                if completion['pm_dispatch'] != dispatch_for_state[completion['state']]:
+                    _fail()
+                if completion['state'] == 'WAITING_PM' and completion['missing_gates']:
+                    _fail()
+                if completion['state'] in ('WAITING_EXECUTOR', 'WAITING_REVIEW', 'WAITING_CI') and (
+                        completion['pm_dispatch'] != 'NOT_STARTED' or
+                        completion['pm_response'] is not None or
+                        completion['pm_recommendation'] is not None):
+                    _fail()
+            for name in ('executor_task_id', 'reviewer_task_id') if completion is not None else ():
+                item = completion[name]
+                if item is not None and (type(item) is not str or
+                        re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item) is None):
+                    _fail()
+            if completion is not None and (type(completion['missing_gates']) is not list or
+                    len(completion['missing_gates']) > 32 or
+                    any(type(item) is not str or
+                        re.fullmatch(r'[A-Z0-9_]{1,64}', item) is None
+                        for item in completion['missing_gates']) or
+                    completion['missing_gates'] != sorted(set(completion['missing_gates']))):
+                _fail()
+            if completion is None:
+                evidence = None
+            else:
+                evidence = completion['evidence']
+            if evidence is not None:
+                try:
+                    encoded = _json_bytes(evidence)
+                except Exception:
+                    _fail()
+                if len(encoded) > 64 * 1024 or _emitted_sensitive(encoded.decode('utf-8')):
+                    _fail()
+                if ('execution_mode' in evidence and
+                        evidence['execution_mode'] not in ('DIRECT_D6', 'HOST_WORKER')):
+                    _fail()
+            if completion is not None and completion['state'] in (
+                    'WAITING_PM', 'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED',
+                    'PM_UNAVAILABLE', 'PM_OUTCOME_UNKNOWN'):
+                if (type(evidence) is not dict or
+                        not {'task_id', 'run_id', 'contract_digest', 'result', 'tests',
+                             'review_pr_ci'}.issubset(evidence) or
+                        evidence['task_id'] != record['task_id'] or
+                        evidence['run_id'] != record['run_id'] or
+                        evidence['contract_digest'] != record['task_binding']['contract_digest'] or
+                        type(evidence['result']) is not dict or
+                        type(evidence['tests']) is not list or not evidence['tests'] or
+                        type(evidence['review_pr_ci']) is not dict):
+                    _fail()
+                result_head = evidence['result'].get('result_head')
+                review_ci = evidence['review_pr_ci']
+                checks = review_ci.get('successful_checks')
+                required = review_ci.get('required_checks')
+                if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
+                        review_ci.get('formal_review_state') != 'ACCEPTED' or
+                        review_ci.get('head_sha') != result_head or
+                        review_ci.get('review_commit_sha') != result_head or
+                        review_ci.get('ci_head_sha') != result_head or
+                        review_ci.get('review_task_id') != record['task_id'] or
+                        review_ci.get('review_run_id') != record['run_id'] or
+                        review_ci.get('review_contract_digest') != record['task_binding']['contract_digest'] or
+                        review_ci.get('review_binding_verified') is not True or
+                        review_ci.get('reviewer_task_id') != completion['reviewer_task_id'] or
+                        review_ci.get('review_actor') != review_ci.get('reviewer_github_login') or
+                        type(review_ci.get('reviewer_d6_identity')) is not str or
+                        not review_ci['reviewer_d6_identity'] or
+                        review_ci.get('review_session_identity') != 'D6_NATIVE_SESSION_VERIFIED' or
+                        type(checks) is not list or type(required) is not list or
+                        not required or any(type(item) is not str for item in checks + required) or
+                        not set(required).issubset(set(checks)) or
+                        any(type(test) is not dict or test.get('source_sha') != result_head or
+                            type(test.get('exit_code')) is not int or test.get('exit_code') != 0
+                            for test in evidence['tests'])):
+                    _fail()
+                if (evidence.get('execution_mode') == 'HOST_WORKER' and
+                        not validate_host_worker_receipt(
+                            evidence.get('host_worker_receipt'),
+                            task_binding=record['task_binding'],
+                            task_id=record['task_id'], run_id=record['run_id'],
+                            contract_digest=record['task_binding']['contract_digest'],
+                            source_sha=evidence['result'].get('source_sha'))):
+                    _fail()
+            completion_response = None if completion is None else completion['pm_response']
+            if completion_response is not None and (type(completion_response) is not str or
+                    len(completion_response.encode('utf-8')) > 64 * 1024 or
+                    _emitted_sensitive(completion_response)):
+                _fail()
+            completion_recommendation = None if completion is None else completion['pm_recommendation']
+            if completion_recommendation is not None and (
+                    type(completion_recommendation) is not dict or set(completion_recommendation) !=
+                    {'decision', 'summary'} or completion_recommendation['decision'] not in
+                    ('ACCEPT', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
+                     'WAIT_FOR_AUTHORIZATION', 'STOP') or
+                    type(completion_recommendation['summary']) is not str or
+                    not completion_recommendation['summary'] or
+                    len(completion_recommendation['summary'].encode('utf-8')) > 2048 or
+                    _emitted_sensitive(completion_recommendation['summary'])):
+                _fail()
+            completion_usage = None if completion is None else completion['pm_usage']
+            if completion_usage is not None:
+                try:
+                    if type(completion_usage) is not dict or set(completion_usage) != _USAGE_FIELDS:
+                        _fail()
+                    validate_provider_usage(completion_usage)
+                except Exception:
+                    _fail()
+            error = None if completion is None else completion['pm_error_code']
+            if error is not None and (type(error) is not str or
+                    re.fullmatch(r'[A-Z0-9_]{1,64}', error) is None):
                 _fail()
     if state == 'PM_PENDING' and (request is None or response is not None or
                                   record['error_code'] is not None or record['usage'] is not None):

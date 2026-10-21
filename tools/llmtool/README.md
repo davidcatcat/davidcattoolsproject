@@ -694,6 +694,35 @@ Provider uses one ephemeral CLI call and has no native resumable Session ID;
 `task show` retrieves the recorded Task and response but does not resume a model
 conversation, dispatch a Developer, run tests, or continue work in the background.
 
+### Bounded company Developer proposal and D6 completion evidence
+
+`task delegate` can request a bounded company-gw code proposal for a PM-assigned
+low-risk task. It reads the current root, branch, source HEAD and Executor identity
+from the registered D6 record; do not supply a SHA as an identity claim. The
+company provider returns a diff proposal only. An already authorized Executor
+must apply it and run the allowed checks in its registered worktree.
+
+Afterward, an operator must explicitly run
+`llmtool task complete TASK_ID --executor-task D6_TASK_ID --reviewer-task D6_REVIEW_TASK_ID --pr PR_NUMBER`.
+This manually invoked command checks the real D6 registration, current Git result,
+the persisted proposal against the applied diff, bounded tests, public exact-head
+PR/check data, and a formal review marker plus a binding line containing the
+exact Task ID, Run ID, contract digest and result HEAD. The review actor must
+match the registered D6 reviewer login, and the reviewer D6 agent/session and
+native session evidence must be distinct from the Executor. The public review
+and check APIs are read-only; later review dispositions and newer check runs
+override older approvals or successes. Missing gates are retained as WAITING_EXECUTOR, WAITING_REVIEW or
+WAITING_CI. Only a complete evidence packet is sent to the original PM profile;
+the PM response is persisted as a recommendation and grants no execution or Git
+permission. If the original PM is unavailable, complete evidence remains in
+WAITING_PM. Ambiguous provider outcomes are not retried automatically.
+
+There is currently no Executor completion event hook: `task complete` is a
+manual CLI step, so the complete user-to-PM workflow is not yet automatic.
+Registry and API facts are fail-closed evidence sources, not protection against
+malicious same-user tampering. Company proposal and PM-return live provider
+journeys still require their separately authorized runtime acceptance.
+
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
 同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import stat
 import subprocess
@@ -464,8 +465,123 @@ def run_with_receipt(job, policy, admission, one_native_credential, *, expect, r
     return result, final, receipt
 
 
+def _persist_task_worker_delivery(job, receipt, delivery, task_store=None):
+    """Bind only typed Host receipts and delivered ACKs to their TaskStore Task."""
+    from .opencode_result_delivery import (DELIVERED_REASON, DELIVERY_SCHEMA,
+                                           DeliveryEnvelope, receipt_digest)
+    from .opencode_result_receipt import ResultReceipt
+    from .task_store import TaskStore
+
+    if type(job) is not w.WorkerJob or type(job.task) is not TaskBinding:
+        return False
+    # Ordinary Host jobs may use non-TaskStore task identifiers. A llmtool Task
+    # identifier, however, must supply the authoritative TaskStore explicitly;
+    # otherwise a Worker run could be mistaken for the distinct direct-D6 route.
+    if re.fullmatch(r'[0-9a-f]{32}', job.task.task_id) is None:
+        return False
+    if task_store is None:
+        raise w.WorkerError('LLMTOOL_TASK_STORE_REQUIRED_FOR_HOST_COMPLETION')
+    store = task_store
+    if type(store) is not TaskStore:
+        raise w.WorkerError('LLMTOOL_TASK_STORE_INVALID_FOR_HOST_COMPLETION')
+    try:
+        task = store.get(job.task.task_id)
+    except Exception as exc:
+        # No TaskStore Task is linked to this WorkerJob; this remains an ordinary
+        # Host/Worker receipt and cannot be used for llmtool PM completion.
+        if str(exc) == 'task not found':
+            return False
+        raise
+    if task.get('task_binding') != job.task.to_dict():
+        raise w.WorkerError('LLMTOOL_HOST_TASK_BINDING_MISMATCH')
+    completion = task.get('completion')
+    if (type(completion) is not dict or completion.get('pm_dispatch') != 'NOT_STARTED' or
+            completion.get('state') not in ('WAITING_EXECUTOR', 'WAITING_REVIEW',
+                                             'WAITING_CI')):
+        raise w.WorkerError('LLMTOOL_HOST_TASK_NOT_WAITING_FOR_EXECUTOR')
+    evidence = completion.get('evidence')
+    if (type(evidence) is not dict or evidence.get('task_id') != task.get('task_id') or
+            evidence.get('run_id') != task.get('run_id') or
+            evidence.get('contract_digest') != task['task_binding'].get('contract_digest')):
+        raise w.WorkerError('LLMTOOL_HOST_TASK_EVIDENCE_MISMATCH')
+
+    packet = None
+    if type(receipt) is ResultReceipt and type(delivery) is DeliveryEnvelope:
+        try:
+            digest = receipt_digest(receipt.to_dict())
+            correlated = (
+                receipt.job_digest == job.digest and receipt.task == job.task and
+                receipt.agent == job.agent and receipt.source_sha == job.source_sha and
+                receipt.accepted is False and
+                delivery.schema == DELIVERY_SCHEMA and
+                delivery.state == 'DELIVERED' and delivery.ack == 'CALLER_RETURNED' and
+                delivery.reason == DELIVERED_REASON and delivery.redelivery is False and
+                delivery.worker_launches == 0 and delivery.provider_calls == 0 and
+                delivery.at_most_once_effect == 'NOT_CLAIMED' and
+                delivery.accepted is False and delivery.task_id == job.task.task_id and
+                delivery.agent_id == job.agent.agent_id and
+                delivery.job_digest == job.digest and delivery.source_sha == job.source_sha and
+                type(delivery.integrator_session) is str and bool(delivery.integrator_session) and
+                delivery.receipt_digest == digest and delivery.receipt_verdict == receipt.verdict and
+                delivery.receipt_reason == receipt.reason and
+                type(delivery.delivery_digest) is str and
+                re.fullmatch(r'[0-9a-f]{64}', delivery.delivery_digest) is not None)
+            if correlated:
+                delivery_body = delivery.to_dict()
+                for transport_only in ('delivery_digest', 'redelivery', 'ack'):
+                    delivery_body.pop(transport_only)
+                expected_delivery_digest = hashlib.sha256(
+                    json.dumps(delivery_body, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('ascii')).hexdigest()
+                correlated = delivery.delivery_digest == expected_delivery_digest
+            if correlated:
+                packet = {
+                    'task_binding': job.task.to_dict(), 'job_digest': job.digest,
+                    'agent_id': job.agent.agent_id, 'source_sha': job.source_sha,
+                    'receipt_verdict': receipt.verdict, 'receipt_reason': receipt.reason,
+                    'receipt_accepted': receipt.accepted, 'receipt_digest': digest,
+                    'delivery_state': delivery.state, 'delivery_reason': delivery.reason,
+                    'delivery_ack': delivery.ack, 'delivery_accepted': delivery.accepted,
+                    'delivery_task_id': delivery.task_id, 'delivery_agent_id': delivery.agent_id,
+                    'delivery_job_digest': delivery.job_digest,
+                    'delivery_source_sha': delivery.source_sha,
+                    'delivery_integrator_session': delivery.integrator_session,
+                    'delivery_receipt_digest': delivery.receipt_digest,
+                    'delivery_receipt_verdict': delivery.receipt_verdict,
+                    'delivery_receipt_reason': delivery.receipt_reason,
+                    'delivery_digest': delivery.delivery_digest,
+                }
+        except Exception:
+            packet = None
+    prior_packet = evidence.get('host_worker_receipt')
+    if prior_packet is not None:
+        if packet == prior_packet:
+            return True
+        if packet is None:
+            # A replay refusal or an unavailable duplicate delivery must not erase
+            # an already persisted good receipt/ACK pair.
+            return False
+        raise w.WorkerError('LLMTOOL_HOST_RECEIPT_DRIFT')
+    linked_evidence = dict(evidence)
+    linked_evidence['execution_mode'] = 'HOST_WORKER'
+    linked_evidence['host_worker_receipt'] = packet
+    missing = set(completion['missing_gates'])
+    if packet is None:
+        missing.add('HOST_WORKER_RECEIPT_UNAVAILABLE')
+    else:
+        missing.discard('HOST_WORKER_RECEIPT_UNAVAILABLE')
+    linked = {**completion, 'evidence': linked_evidence,
+              'missing_gates': sorted(missing)}
+    store.compare_and_update(task['task_id'], expected={
+                                 'completion': completion,
+                                 'task_binding': job.task.to_dict(),
+                                 'run_id': job.task.run_id},
+                             completion=linked)
+    return packet is not None
+
+
 def run_with_delivery(job, policy, admission, one_native_credential, *, expect,
-                      receipt_store, integrator_session):
+                      receipt_store, integrator_session, task_store=None):
     """One active Integrator invocation that also delivers the receipt to itself.
 
     Exactly ``run_with_receipt`` (same one-shot durable reservation, single Worker
@@ -484,6 +600,7 @@ def run_with_delivery(job, policy, admission, one_native_credential, *, expect,
                                               expect=expect, receipt_store=receipt_store)
     delivery = deliver_result(job=job, receipt=receipt, expect=expect,
                               integrator_session=integrator_session, store_path=receipt_store)
+    _persist_task_worker_delivery(job, receipt, delivery, task_store=task_store)
     return result, final, receipt, delivery
 
 
@@ -504,7 +621,7 @@ class DispatchAck:
 
 
 def dispatch_with_ack(job, policy, admission, one_native_credential, *, expect,
-                      receipt_store, integrator_session):
+                      receipt_store, integrator_session, task_store=None):
     """Run one already-authorized D4 job and correlate observed start + durable ACK.
 
     This is an in-process Integrator seam over the existing Host/Worker/receipt/
@@ -537,7 +654,8 @@ def dispatch_with_ack(job, policy, admission, one_native_credential, *, expect,
     try:
         result, final, receipt, delivery = run_with_delivery(
             job, policy, admission, one_native_credential, expect=expect,
-            receipt_store=receipt_store, integrator_session=integrator_session)
+            receipt_store=receipt_store, integrator_session=integrator_session,
+            task_store=task_store)
     except Exception:
         return DispatchAck('UNKNOWN', 'DISPATCH_OUTCOME_UNKNOWN', **base)
 

@@ -16,7 +16,8 @@ from llmtool.errors import LLMToolError, coded_error
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
-                                         run_task_delegate, run_task_show, run_task_submit)
+                                         _provider_route_binding, run_task_delegate,
+                                         run_task_show, run_task_submit)
 
 
 def config(provider_type='codex-cli', model='gpt-6-luna'):
@@ -44,6 +45,40 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.home = Path(self.temp.name).resolve() / 'home'
         self.home.mkdir(mode=0o700)
         self.args = Namespace(provider='selected', request=['Implement', 'a', 'health-check'])
+        self.executor_root = Path(self.temp.name).resolve() / 'executor'
+        self.executor_root.mkdir(mode=0o700)
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'feat/test-executor'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Executor Fixture'],
+                       cwd=self.executor_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
+                       cwd=self.executor_root, check=True)
+        (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py'], cwd=self.executor_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        self.executor_head = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root, text=True).strip()
+        self.executor_common_dir = str(self.executor_root / '.git')
+        registry_dir = Path(self.executor_common_dir) / 'llmtool-worktrees'
+        registry_dir.mkdir(mode=0o700)
+        root_stat = self.executor_root.stat()
+        self.executor_registry = {
+            'schema_version': 1, 'task_id': 'executor-task-1',
+            'trusted_agent_id': 'executor-agent-1', 'session_ref': 'Executor Session 1',
+            'root_realpath': str(self.executor_root),
+            'physical_identity': {'device': root_stat.st_dev, 'inode': root_stat.st_ino,
+                                  'uid': root_stat.st_uid},
+            'git_common_dir': self.executor_common_dir, 'branch': 'feat/test-executor',
+            'base_sha': self.executor_head, 'head_sha': self.executor_head,
+            'state': 'ACTIVE', 'lock_state': 'LOCKED',
+        }
+        record_path = registry_dir / 'executor-task-1.json'
+        record_path.write_text(json.dumps(self.executor_registry))
+        record_path.chmod(0o600)
+        original_cwd = os.getcwd()
+        self.addCleanup(os.chdir, original_cwd)
+        os.chdir(self.executor_root)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
@@ -68,6 +103,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertTrue(result['pm_session_id'].startswith('pm-'))
         self.assertEqual(result['pm_provider_profile'], 'selected')
         self.assertEqual(result['pm_provider_type'], 'codex-cli')
+        self.assertEqual(result['pm_route_binding'], {
+            'type': 'codex-cli', 'model': 'gpt-6-luna', 'base_url': None})
         self.assertEqual(result['backend_session_semantics'], 'EPHEMERAL_SINGLE_CALL')
         self.assertIsNone(result['native_session_id'])
         self.assertEqual(result['response'], client.reply.content)
@@ -83,6 +120,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(result['task_id'])
         self.assertEqual(saved['response'], client.reply.content)
         self.assertNotIn('api_key', json.dumps(saved).lower())
+
+    def test_pm_route_binding_normalizes_endpoint_and_omits_credentials(self):
+        route = _provider_route_binding({
+            'type': 'OPENAI-COMPATIBLE', 'model': 'pm-model',
+            'base_url': 'HTTPS://API.EXAMPLE:443/'})
+        self.assertEqual(route, {'type': 'openai-compatible', 'model': 'pm-model',
+                                 'base_url': 'https://api.example'})
+        self.assertNotIn('api_key', json.dumps(route).lower())
+        self.assertEqual(_provider_route_binding({
+            'type': 'codex-cli', 'model': 'gpt-6-luna', 'base_url': None
+        })['base_url'], None)
+        with self.assertRaises(LLMToolError):
+            _provider_route_binding({'type': 'openai-compatible', 'model': 'pm-model',
+                                     'base_url': 'https://user:pass@api.example'})
 
     def test_usage_unknown_is_recorded_without_gating_success(self):
         client = FakeClient(Reply('PM response without reported usage.', {}))
@@ -226,6 +277,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          ('submit', 'company-gw', ['build something']))
         shown = parser.parse_args(['task', 'show', 'a' * 32])
         self.assertEqual((shown.action, shown.task_id), ('show', 'a' * 32))
+        delegate = next(action for action in parser._actions
+                        if action.dest == 'command').choices['task']._subparsers._group_actions[0]
+        options = [option for action in delegate.choices['delegate']._actions
+                   for option in action.option_strings]
+        self.assertIn('--executor-task', options)
+        self.assertNotIn('--source-sha', options)
 
     def _pm_task_with_assignment(self):
         acceptance = ['new test passes']
@@ -244,7 +301,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
     def _delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='company-gw',
-                      selection_source='PM', source_sha='a' * 40,
+                      selection_source='PM',
+                      executor_task='executor-task-1',
                       read_path=['tools/llmtool/tests/test_task_submission_cli.py'],
                       write_path=['tools/llmtool/tests/test_task_submission_cli.py'],
                       acceptance=['new test passes'],
@@ -277,8 +335,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['provider_profile'], 'company-gw')
         self.assertEqual(developer['selection_source'], 'PM')
         self.assertNotEqual(developer['session_id'], result['pm_session_id'])
-        self.assertEqual(developer['source_sha'], 'a' * 40)
-        self.assertEqual(developer['source_sha_binding'], 'UNVERIFIED_CALLER_INPUT')
+        self.assertEqual(developer['source_sha'], self.executor_head)
+        self.assertEqual(developer['source_sha_binding'], 'D6_REGISTRY_OBSERVED')
         self.assertEqual(developer['artifact'], patch_text)
         self.assertEqual(developer['usage']['total_tokens'], 35)
         self.assertEqual(developer['max_tokens'], 128)
@@ -289,6 +347,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['egress_basis'],
                          'Owner approved non-sensitive source and test context')
         self.assertEqual(result['pm_session_id'], task['pm_session_id'])
+        self.assertEqual(result['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
+        self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
         self.assertNotIn('not-persisted', output.getvalue())
         system_prompt = client.calls[0][0]['content']
         self.assertIn('Do not use Markdown fences', system_prompt)
