@@ -28,6 +28,95 @@ class CompositionTests(unittest.TestCase):
         snap = (job.source_sha, 'feat/developer', b'INDEX', b'', {'PUBLIC.txt': (0o644, 'before')})
         return job, policy, a, snap
 
+    def _task_store_for_worker_job(self, job):
+        import hashlib
+        from llmtool.action_contract import TaskBinding
+        from llmtool.task_store import TaskStore
+        from llmtool.task_submission_cli import _record
+
+        task_id = '1' * 32
+        run_id = '2' * 32
+        record = _record(task_id, run_id, 'pm-host-delivery', 'pm', 'bounded request',
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(b'bounded request').hexdigest())
+        record['response'] = 'PM response'
+        record['pm_route_binding'] = {
+            'type': 'openai-compatible', 'model': 'pm-model',
+            'base_url': 'https://api.example.invalid'}
+        binding = TaskBinding(**record['task_binding'])
+        linked_job = replace(job, task=binding)
+        record['completion'] = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': job.task.task_id,
+            'reviewer_task_id': None,
+            'evidence': {'task_id': task_id, 'run_id': run_id,
+                'contract_digest': binding.contract_digest,
+                'execution_mode': 'DIRECT_D6', 'source_sha': job.source_sha},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        parent = Path(tempfile.mkdtemp(dir=str(Path(tempfile.gettempdir()).resolve())))
+        root = parent / 'tasks'
+        import shutil
+        self.addCleanup(lambda: shutil.rmtree(parent, ignore_errors=True))
+        store = TaskStore(root)
+        store.create(record)
+        return linked_job, store, record
+
+    def _worker_delivery(self, job, *, ack='CALLER_RETURNED'):
+        import hashlib
+        import json
+        from llmtool.opencode_result_delivery import (DELIVERED, DELIVERED_REASON,
+            DELIVERY_SCHEMA, DeliveryEnvelope, receipt_digest)
+        from llmtool.opencode_result_receipt import ResultReceipt
+
+        receipt = ResultReceipt('SUCCESS', 'WORKER_RUN_OBSERVED', job.digest,
+            job.task, job.agent, job.source_sha, 'OPENCODE_OUTPUT_RETURNED',
+            'backend-session', 'a' * 64, False)
+        receipt_hash = receipt_digest(receipt.to_dict())
+        delivery = DeliveryEnvelope(
+                schema=DELIVERY_SCHEMA, state=DELIVERED, reason=DELIVERED_REASON,
+                task_id=job.task.task_id, agent_id=job.agent.agent_id,
+                job_digest=job.digest, source_sha=job.source_sha,
+                integrator_session='integrator-session', receipt_verdict='SUCCESS',
+                receipt_reason='WORKER_RUN_OBSERVED', receipt_digest=receipt_hash,
+                redelivery=False, worker_launches=0, provider_calls=0,
+                accepted=False, ack=ack)
+        body = delivery.to_dict()
+        for transport_only in ('delivery_digest', 'redelivery', 'ack'):
+            body.pop(transport_only)
+        digest = hashlib.sha256(json.dumps(
+            body, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode('ascii')).hexdigest()
+        delivery = replace(delivery, delivery_digest=digest)
+        return receipt, delivery
+
+    def test_typed_persisted_receipt_and_delivered_ack_bind_to_exact_task(self):
+        from llmtool.task_completion import validate_host_worker_receipt
+
+        job, store, record = self._task_store_for_worker_job(self.fixture()[0])
+        receipt, delivery = self._worker_delivery(job)
+        self.assertTrue(h._persist_task_worker_delivery(job, receipt, delivery, store))
+        saved = store.get(record['task_id'])
+        evidence = saved['completion']['evidence']
+        self.assertEqual(evidence['execution_mode'], 'HOST_WORKER')
+        packet = evidence['host_worker_receipt']
+        self.assertTrue(validate_host_worker_receipt(packet,
+            task_binding=record['task_binding'], task_id=record['task_id'],
+            run_id=record['run_id'],
+            contract_digest=record['task_binding']['contract_digest'],
+            source_sha=job.source_sha))
+        self.assertNotIn('synthetic model text', json.dumps(evidence))
+        self.assertEqual(saved['completion']['pm_dispatch'], 'NOT_STARTED')
+
+    def test_missing_delivery_ack_persists_blocked_host_mode_without_receipt_claim(self):
+        job, store, record = self._task_store_for_worker_job(self.fixture()[0])
+        receipt, delivery = self._worker_delivery(job, ack='UNKNOWN')
+        self.assertFalse(h._persist_task_worker_delivery(job, receipt, delivery, store))
+        completion = store.get(record['task_id'])['completion']
+        self.assertEqual(completion['evidence']['execution_mode'], 'HOST_WORKER')
+        self.assertIsNone(completion['evidence']['host_worker_receipt'])
+        self.assertIn('HOST_WORKER_RECEIPT_UNAVAILABLE', completion['missing_gates'])
+
     def test_actual_composition_admission_consumption_and_source_checks(self):
         job, policy, a, snap = self.fixture()
         host = h.Host(policy, a, {'synthetic': 'never real'})
@@ -482,6 +571,9 @@ class CompositionTests(unittest.TestCase):
         from llmtool.run_budget import CallPhase, CallUsage
         from llmtool.opencode_result_delivery import DELIVERED
         job, policy, a, snap = self.fixture()
+        job, task_store, task_record = self._task_store_for_worker_job(job)
+        policy = replace(policy, contract=job.task.contract_digest)
+        a = replace(a, job_digest=job.digest)
         tmp = tempfile.TemporaryDirectory(dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(tmp.cleanup)
         store = str(Path(tmp.name) / 'host_receipts.json')
@@ -516,7 +608,8 @@ class CompositionTests(unittest.TestCase):
              patch.object(h.w, 'run_worker', side_effect=fake_worker):
             res, final, rec, delivered = h.run_with_delivery(
                 job, policy, a, {'synthetic': 'cred'}, expect=exp,
-                receipt_store=store, integrator_session=session)
+                receipt_store=store, integrator_session=session,
+                task_store=task_store)
         self.assertEqual(len(calls), 1)
         self.assertEqual((rec.verdict, rec.reason), ('SUCCESS', 'WORKER_RUN_OBSERVED'))
         self.assertEqual((delivered.state, delivered.reason), (DELIVERED, 'RECEIPT_DELIVERED'))
@@ -532,6 +625,10 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(len(delivered.delivery_digest), 64)
         persisted = json.loads(Path(store).read_text())
         self.assertEqual(persisted['deliveries'][job.digest]['integrator_session'], session)
+        linked = task_store.get(task_record['task_id'])['completion']
+        self.assertEqual(linked['evidence']['execution_mode'], 'HOST_WORKER')
+        self.assertEqual(linked['evidence']['host_worker_receipt']['delivery_digest'],
+                         delivered.delivery_digest)
         # A replayed invocation must not relaunch the Worker and must not fabricate a
         # durable receipt for the duplicate-refusal receipt returned by the reservation.
         with patch.object(h, 'git', side_effect=git_ok), \
@@ -539,13 +636,16 @@ class CompositionTests(unittest.TestCase):
              patch.object(h.w, 'run_worker', side_effect=fake_worker):
             _, _, rec_dup, delivered_dup = h.run_with_delivery(
                 replace(job), policy, replace(a), {'synthetic': 'cred'}, expect=exp,
-                receipt_store=store, integrator_session=session)
+                receipt_store=store, integrator_session=session,
+                task_store=task_store)
         self.assertEqual(len(calls), 1)
         self.assertEqual((rec_dup.verdict, rec_dup.reason), ('FAILED', 'DUPLICATE_RESULT'))
         self.assertEqual((delivered_dup.state, delivered_dup.reason),
                          ('NOT_DELIVERED', 'RECEIPT_NOT_DURABLE'))
         self.assertEqual(json.loads(Path(store).read_text())['receipts'][job.digest]['verdict'],
                          'SUCCESS')
+        self.assertEqual(task_store.get(task_record['task_id'])['completion']['evidence'][
+            'host_worker_receipt']['delivery_digest'], delivered.delivery_digest)
 
     def test_dispatch_ack_binds_observed_start_durable_receipt_and_same_integrator(self):
         from llmtool.opencode_result_delivery import DELIVERED
