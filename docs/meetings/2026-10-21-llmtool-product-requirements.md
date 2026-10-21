@@ -1,6 +1,6 @@
 # llmtool 產品需求、操作入口與背景執行 — 討論會議紀錄
 
-- **日期：** 2026-10-21（Asia/Taipei）
+- **日期：** 2026-10-21（Asia/Taipei）；**2026-10-22 追加 Desktop GUI Roadmap（第九節）**
 - **性質：** Owner 與 ChatGPT 的需求討論／決策紀錄，供後續正式規劃參考。
 - **效力：** 下文「Owner 已確認」才是本次產品需求；「建議、待定」不等於 Owner 已接受。
 - **本次工作範圍：** 只保存會議紀錄；不代表 Roadmap 已更新、功能已實作、任務已派送、預算／執行／資料外送權限已核准。
@@ -177,3 +177,55 @@ Owner 同意以上報告方向和兩個審查修正點，也說明「**之後有
 - [先前 Roadmap 草案：PR #249 — CLOSED / NOT MERGED](https://github.com/davidcatcat/davidcattoolsproject/pull/249)
 
 **紀錄更新不等於工作授權。** 保留 Owner 決定與 PM 建議的區別，不因本檔而建立或重開 PR／Issue、派發 Developer、修改 Roadmap／現行規則、合併 PR #255，或聲稱產品功能已驗收通過。後續規劃正式修訂及開發仍須相應授權。
+
+---
+
+## 九、2026-10-22 Desktop GUI（非 Web）可行性與交付排序
+
+> **本節是 2026-10-22 Owner 在 GUI 可行性討論後，明確要求「排 Roadmap，紀錄到會議記錄」的後續產品規劃。** 新增桌面 GUI 需求及以下交付順序，取代第 6.1 節「截至 2026-10-21」的優先排序；第 6.1 節仍保留為歷史決議。此處記錄規劃，不表示 GUI 已實作／驗收，也**不代表**已修改正式 [ROADMAP.md](../../tools/llmtool/ROADMAP.md)、授權派工／費用／資料外送／Git 合併。
+
+### 9.1 產品定位與架構邊界（Owner 已提出並要求納入）
+
+- **Desktop GUI 是安裝於本機的圖形桌面應用程式（先以 macOS 的 \`llmtool.app\` 為目標），不是瀏覽器 Web UI，也不同於 Terminal 裡的 TUI。** 以對話為主，輔以 Tasks、Agents、Review/PR、狀態與設定的按需頁面；不預設一定要常駐全螢幕監控 Dashboard。
+- GUI／CLI／TUI／後續 Telegram／Web 應共用 **同一 llmtool Core 的實際 Task、Run、Session、事件、權限與審計語意**。GUI 只負責輸入、展示、呼叫已授權操作與呈現確認；不得自建第二套 PM、智慧 Router、Agent 排程器、背景 Supervisor、資料庫、Git 執行器或權限判斷。
+- **llmtool 本身不具 AI 語意判斷**；至少由使用者指定的 PM／Integrator AI 進行需要 AI 決策的任務分派與模型選擇，使用者也可自行指定。公司 gw 仍是可選 Provider，不是 GUI 或通用 Core 的必要依賴。
+- 既有 Core 未提供的能力（持久化 Task/Run、回連、Agent 狀態、實際 Token 使用／餘額等）不得由 GUI 以假資料冒稱已可用；可顯示 UNKNOWN／UNAVAILABLE／NOT_VERIFIED 或停用入口。TUI 已有部分 UI 功能，不等於 GUI 或多 Agent Core 已經完成。
+- **首選候選技術為 Python PySide6／Qt**，原因是可沿用目前 Python Core 並保留跨平台方向；Tauri、SwiftUI 是備選。技術選型、Qt 授權／打包方式、與核心通訊邊界仍須 GUI-P0 驗證，並非 Owner 最終框架定案。
+
+### 9.2 更新後產品交付排序（Owner 指示納入 GUI；排序為本次規劃結果）
+
+| 順位 | 現有里程碑／新增項目 | 交付目標與依賴 |
+| --- | --- | --- |
+| 1 | **A11c — Owner Mac 原生 CLI** | 保持最高優先：原生需求入口、指定 PM、真實 Developer/Reviewer 閉環、多任務、背景執行與重接、實機驗收。GUI 不得阻擋此項。 |
+| 2 | **A12.1 — Telegram** | 依原定優先於其他非 CLI 前端；互動、通知、遠端授權範圍仍需另行定義。 |
+| 3 | **Desktop GUI — 新增 A12 前端工作項目（正式編號待整理）** | **先完成 macOS GUI**，直接使用已交付、已授權的 Core，能在本機操作會話與真實任務；排在 Web UI 之前。 |
+| 4 | **A12.2 — 本機 Web UI** | 維持原有名稱與編號，提供瀏覽器輸入／操作及工作流視覺化；不得複製 GUI 的控制與執行邏輯。 |
+| 5 | **其他使用者／跨平台發佈** | 讓他人以自己的帳號、憑證、Repo 安裝；macOS／Linux／Windows 的具體先後、安裝器與發行通道待決。 |
+
+**編號處理：** 本節先把 Desktop GUI 明確排在 Telegram 和 Web 之間，**不立即將既有 A12.2 Web 重新編號，也不擅自新增另一條獨立產品主線**。正式 A12 排程整合時，由 PM 在原有 [ROADMAP.md](../../tools/llmtool/ROADMAP.md) 做一次一致性修訂及審查；不得把本會議紀錄本身當作 ROADMAP.md 已修改或開發已開工的證據。
+
+### 9.3 GUI 內部工作切片（規劃，不是新 A Milestone）
+
+| 切片 | 工作內容 | 具體驗收／不做的事 |
+| --- | --- | --- |
+| **GUI-P0：技術驗證** | 比較 PySide6／Qt 與備選框架，驗證 Python Core 呼叫／必要 IPC、主執行緒不卡死、macOS 視窗和封裝最小原型 | 使用既有 Core 介面；無第二個 Core／PM／Executor；紀錄打包體積、安裝方式及技術風險。可在 A11c 核心契約穩定後以低干擾工作包預先進行，但**不阻擋 CLI**。 |
+| **GUI-P1：桌面對話 MVP** | macOS 原生視窗、Chat、Profile／Provider／Model 顯示與選擇、輸入編輯、設定及錯誤呈現 | 確認真實 Core 回應與授權界線；未實作的 PM/Task 不得被模擬為 LIVE。不要重做 TUI 已有的業務邏輯。 |
+| **GUI-P2：協作工作台** | 使用已可用的 Core Task/Run/Session 查看任務、Agent、執行紀錄、測試、Review、PR/CI、用量、必要操作／授權 | 同一任務在 CLI 和 GUI 的 ID、狀態、Revision、證據一致；無資料時忠實顯示 UNKNOWN；關鍵動作使用 Core 權限與審計。 |
+| **GUI-P3：關閉及重新開啟** | GUI 只依附獨立的背景執行/Task Manager；退出 GUI、重開、切換對話或錯誤後從 Core 接回工作 | **關閉 GUI 不等於取消已授權任務**；不重送 prompt，不產生第二個 Writer；程序失聯、睡眠、斷網不顯示假完成。核心無此能力則標為阻擋依賴，不自行增建 GUI 私有 Supervisor。 |
+| **GUI-P4：Mac 可安裝版** | \`.app\` 打包、設定保護、權限提示、可診斷錯誤、原生實機與安裝測試 | 在目標 Mac 實機驗證啟動/卸載、對話、背景重接、中文字元、敏感資訊保護；架構不綁死某一台 Mac 的路徑或 VPN。其他使用者與 Windows/Linux 正式發行仍在後續階段。 |
+
+此處刻意使用 **GUI-P0～P4**，避免與既有 Owner outcome reporting 的 **G1～G4** 成果回報檢查點混淆；GUI 切片不是 G1～G4，也不是 G3/M2 的驗收替代。
+
+### 9.4 共同驗收原則與風險
+
+1. **先可用 Core，後完整 GUI。** GUI 可在穩定核心上加強操作；不能把缺少的 A11c 背景工作、工作交接、持久化與權限機制包裝成介面功能。GUI-P2/P3 對 Core 有硬依賴；P0 可在不干擾主線時平行。
+2. **同一操作、同一證據。** CLI/TUI/GUI 觀察同一 Task 必須呈現一致的可靠來源、更新時間、錯誤與權限結果。GUI 不自行生成 Token 統計、Approval／Merge 或 Agent 成功狀態。
+3. **閉 GUI 不停工，但不承諾電腦關機仍執行。** 由已驗證的 Core 背景生命週期處理，遵守原先的睡眠/重啟/失聯真實狀態規則。
+4. **維持資料與安全邊界。** 只提交最小必要權限請求；不在 GUI/log 儲存憑證，不繞過既有 Provider/Host、資料外送、F2 Git、更改 Repo、CI、獨立 Reviewer、Mac Live 等 Gate。
+5. **交付條件以可重現證據為準**，每個切片須有對應自動化與 Mac 手動驗證；UI-only 修改不得隱含 Core、模型路由、額度或執行權限變更。
+
+### 9.5 此次執行授權邊界
+
+- Owner 本次明確要求 **排定 Desktop GUI Roadmap 並記入既有會議紀錄**。這是規劃和文件工作授權，不是直接實作 GUI、修改其他規範、派 Agent 或合併未審核 PR 的授權。
+- 原有 [2026-10-22 TUI UI/UX 決議](2026-10-22-llmtool-tui-ui-ux-decision.md) 仍只規範 Terminal UI；本節 Desktop GUI 另屬桌面前端，不重寫 TUI 既有決議。
+- 尚未設定發布日、工期、人工數或成本承諾；由既有 Integrator/PM 按 A11c 的實際驗收結果再細化依賴。正式 ROADMAP.md 的文字與編號同步是**後續工作**，不是本次已完成事項。
