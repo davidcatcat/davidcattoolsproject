@@ -411,7 +411,7 @@ manual fake-provider UX, and packaging evidence are in the
 [A3.5 validation report](../../reports/llmtool_a3_5_interactive_chat_validation_20261001.md).
 External ChatGPT review PASS; A4 status is documented below.
 
-### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20; UI-only decision 2026-10-22)
+### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20)
 
 **Owner-accepted UI boundary:** TUI is strictly a view/input frontend over existing llmtool Core. It renders trustworthy Core-provided content and forwards existing authorized UI actions; it MUST NOT build PM reasoning, task scheduling, provider integration, background execution/recovery, Git/PR logic, persistence, access-policy decisions, billing or a second controller. A desired screen without a Core source stays `UI_DEPENDENCY_NOT_AVAILABLE`, disabled or clearly UNKNOWN. Full decision and priority list: [2026-10-22 TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md).
 
