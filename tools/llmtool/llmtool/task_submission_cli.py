@@ -42,6 +42,16 @@ _COMPLETION_SYSTEM = (
     'Return one raw JSON object with schema_version=1, decision, and summary; no prose '
     'outside the object.'
 )
+_EXECUTOR_RESULT_SYSTEM = (
+    'You are the original llmtool PM for this Task. Review only the supplied bounded '
+    'Executor result and local test evidence. Formal independent review, PR and CI '
+    'have not yet been completed. Choose exactly one decision: SEND_TO_REVIEW, '
+    'RETURN_TO_DEVELOPER, REASSIGN_DEVELOPER, WAIT_FOR_AUTHORIZATION, or STOP. '
+    'Do not treat this Executor result as accepted product work. This is a '
+    'recommendation only and grants no execution, review, Git, PR, merge, spending, '
+    'or provider authority. Return one raw JSON object with schema_version=1, '
+    'decision, and summary; no prose outside the object.'
+)
 
 
 def _timestamp():
@@ -137,13 +147,15 @@ def _pm_assignment(response):
         return None
 
 
-def _pm_recommendation(response):
+def _pm_recommendation(response, *, executor_result=False):
     try:
         value = json.loads(response)
         if (type(value) is not dict or set(value) != {'schema_version', 'decision', 'summary'} or
                 type(value['schema_version']) is not int or value['schema_version'] != 1 or
-                value['decision'] not in ('ACCEPT', 'RETURN_TO_DEVELOPER',
-                    'REASSIGN_DEVELOPER', 'WAIT_FOR_AUTHORIZATION', 'STOP')):
+                value['decision'] not in (('SEND_TO_REVIEW', 'RETURN_TO_DEVELOPER',
+                    'REASSIGN_DEVELOPER', 'WAIT_FOR_AUTHORIZATION', 'STOP') if executor_result else
+                    ('ACCEPT', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
+                     'WAIT_FOR_AUTHORIZATION', 'STOP'))):
             return None
         return {'decision': value['decision'],
                 'summary': _screen_text(value['summary'], 2048)}
@@ -263,8 +275,8 @@ def add_task_submission_parsers(actions):
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
-    complete.add_argument('--reviewer-task', required=True, help='registered D6 independent Reviewer task id')
-    complete.add_argument('--pr', required=True, type=int, help='public GitHub pull request number')
+    complete.add_argument('--reviewer-task', help='registered D6 independent Reviewer task id (omit for the initial Executor-result callback)')
+    complete.add_argument('--pr', type=int, help='public GitHub pull request number (omit for the initial Executor-result callback)')
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
@@ -631,10 +643,18 @@ def run_task_show(args, *, store=None):
 
 
 def run_task_complete(args, *, store=None):
-    """Collect local and public evidence, then make one original-profile PM call."""
+    """Verify an Executor result and make one non-replayable original-profile PM call.
+
+    Without reviewer/PR arguments this is the first callback: it reports only the
+    D6-bound result and local test evidence and explicitly leaves review/CI pending.
+    Supplying both arguments retains the existing post-review/CI path.
+    """
     store = TaskStore() if store is None else store
     task = store.get(args.task_id)
     completion = task.get('completion')
+    executor_result_only = args.reviewer_task is None and args.pr is None
+    if (args.reviewer_task is None) != (args.pr is None):
+        raise LLMToolError('reviewer task and PR must be supplied together')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
             task.get('developer') is None or completion is None or
             completion['executor_task_id'] != args.executor_task or
@@ -705,6 +725,12 @@ def run_task_complete(args, *, store=None):
             missing.append('HOST_WORKER_RECEIPT_UNAVAILABLE')
         elif evidence['execution_mode'] not in ('DIRECT_D6', 'HOST_WORKER'):
             missing.append('EXECUTION_MODE_INVALID')
+        elif executor_result_only:
+            evidence['review_pr_ci'] = {
+                'stage': 'EXECUTOR_RESULT',
+                'formal_review_state': 'NOT_STARTED',
+                'ci_state': 'NOT_STARTED',
+            }
         else:
             github = task_completion.collect_github_evidence(
                 pr_number=args.pr, result_sha=git_evidence['result_head'],
@@ -790,7 +816,8 @@ def run_task_complete(args, *, store=None):
         return 1
     try:
         result = client.complete([
-            {'role': 'system', 'content': _COMPLETION_SYSTEM},
+            {'role': 'system', 'content': (_EXECUTOR_RESULT_SYSTEM if executor_result_only
+                                           else _COMPLETION_SYSTEM)},
             {'role': 'user', 'content': content},
         ])
     except Exception as exc:
@@ -809,7 +836,7 @@ def run_task_complete(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    recommendation = _pm_recommendation(response)
+    recommendation = _pm_recommendation(response, executor_result=executor_result_only)
     returned = {**before_claim,
                 'state': 'PM_RETURNED' if recommendation is not None else 'PM_RESPONSE_REJECTED',
                 'pm_dispatch': 'RETURNED', 'pm_response': response,
@@ -823,3 +850,14 @@ def run_task_complete(args, *, store=None):
         raise LLMToolError('PM response could not be persisted; details omitted') from None
     _print(_task_view(saved))
     return 0 if returned['pm_recommendation'] is not None else 1
+
+
+def run_task_executor_event(task_id, executor_task_id, *, store=None):
+    """Handle the existing Host's verified completion event exactly once.
+
+    The event carries identifiers only. All Git, D6, artifact, receipt and test
+    evidence is recollected by run_task_complete before the original PM is called.
+    """
+    from argparse import Namespace
+    return run_task_complete(Namespace(task_id=task_id,
+        executor_task=executor_task_id, reviewer_task=None, pr=None), store=store)
