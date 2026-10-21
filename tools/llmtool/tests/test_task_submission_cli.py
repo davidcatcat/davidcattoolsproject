@@ -14,7 +14,8 @@ from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
-from llmtool.task_submission_cli import run_task_show, run_task_submit
+from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
+                                         run_task_show, run_task_submit)
 
 
 def config(provider_type='codex-cli', model='gpt-6-luna'):
@@ -101,6 +102,24 @@ class TaskSubmissionCLITests(unittest.TestCase):
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(result['task_id'])
         self.assertEqual(saved['request'], large_text)
         self.assertEqual(saved['response'], large_text)
+
+    def test_maximum_json_escaping_from_accepted_text_round_trips(self):
+        escaped_unit = '"\\\t\n\r'
+        text = escaped_unit * (REQUEST_LIMIT // len(escaped_unit))
+        text += '"' * (REQUEST_LIMIT - len(text.encode('utf-8')))
+        self.assertEqual(len(text.encode('utf-8')), REQUEST_LIMIT)
+        self.assertEqual(REQUEST_LIMIT, RESPONSE_LIMIT)
+        self.args.request = [text]
+        client = FakeClient(Reply(text, {}))
+        code, result, _, _ = self.invoke(client=client)
+        self.assertEqual(code, 0)
+        self.assertEqual(result['state'], 'PM_RESPONDED')
+        path = Path(self.home) / '.local/state/llmtool/tasks' / (result['task_id'] + '.json')
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), MAX_RECORD_BYTES)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(result['task_id'])
+        self.assertEqual(saved['request'], text)
+        self.assertEqual(saved['response'], text)
 
     def test_later_cli_process_retrieves_original_task_and_response(self):
         with patch.dict(os.environ, {'HOME': str(self.home)}):

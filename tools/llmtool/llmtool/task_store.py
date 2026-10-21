@@ -21,7 +21,7 @@ from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 
 SCHEMA_VERSION = 1
-MAX_RECORD_BYTES = 256 * 1024
+MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 STATES = frozenset(('PM_PENDING', 'PM_RESPONDED', 'PM_UNAVAILABLE',
