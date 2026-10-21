@@ -186,7 +186,7 @@ Owner 同意以上報告方向和兩個審查修正點，也說明「**之後有
 
 ### 9.1 產品定位與架構邊界（Owner 已提出並要求納入）
 
-- **Desktop GUI 是安裝於本機的圖形桌面應用程式（先以 macOS 的 \`llmtool.app\` 為目標），不是瀏覽器 Web UI，也不同於 Terminal 裡的 TUI。** 以對話為主，輔以 Tasks、Agents、Review/PR、狀態與設定的按需頁面；不預設一定要常駐全螢幕監控 Dashboard。
+- **Desktop GUI 是安裝於本機的圖形桌面應用程式（先以 macOS 的 `llmtool.app` 為目標），不是瀏覽器 Web UI，也不同於 Terminal 裡的 TUI。** 以對話為主，輔以 Tasks、Agents、Review/PR、狀態與設定的按需頁面；不預設一定要常駐全螢幕監控 Dashboard。
 - GUI／CLI／TUI／後續 Telegram／Web 應共用 **同一 llmtool Core 的實際 Task、Run、Session、事件、權限與審計語意**。GUI 只負責輸入、展示、呼叫已授權操作與呈現確認；不得自建第二套 PM、智慧 Router、Agent 排程器、背景 Supervisor、資料庫、Git 執行器或權限判斷。
 - **llmtool 本身不具 AI 語意判斷**；至少由使用者指定的 PM／Integrator AI 進行需要 AI 決策的任務分派與模型選擇，使用者也可自行指定。公司 gw 仍是可選 Provider，不是 GUI 或通用 Core 的必要依賴。
 - 既有 Core 未提供的能力（持久化 Task/Run、回連、Agent 狀態、實際 Token 使用／餘額等）不得由 GUI 以假資料冒稱已可用；可顯示 UNKNOWN／UNAVAILABLE／NOT_VERIFIED 或停用入口。TUI 已有部分 UI 功能，不等於 GUI 或多 Agent Core 已經完成。
@@ -212,7 +212,7 @@ Owner 同意以上報告方向和兩個審查修正點，也說明「**之後有
 | **GUI-P1：桌面對話 MVP** | macOS 原生視窗、Chat、Profile／Provider／Model 顯示與選擇、輸入編輯、設定及錯誤呈現 | 確認真實 Core 回應與授權界線；未實作的 PM/Task 不得被模擬為 LIVE。不要重做 TUI 已有的業務邏輯。 |
 | **GUI-P2：協作工作台** | 使用已可用的 Core Task/Run/Session 查看任務、Agent、執行紀錄、測試、Review、PR/CI、用量、必要操作／授權 | 同一任務在 CLI 和 GUI 的 ID、狀態、Revision、證據一致；無資料時忠實顯示 UNKNOWN；關鍵動作使用 Core 權限與審計。 |
 | **GUI-P3：關閉及重新開啟** | GUI 只依附獨立的背景執行/Task Manager；退出 GUI、重開、切換對話或錯誤後從 Core 接回工作 | **關閉 GUI 不等於取消已授權任務**；不重送 prompt，不產生第二個 Writer；程序失聯、睡眠、斷網不顯示假完成。核心無此能力則標為阻擋依賴，不自行增建 GUI 私有 Supervisor。 |
-| **GUI-P4：Mac 可安裝版** | \`.app\` 打包、設定保護、權限提示、可診斷錯誤、原生實機與安裝測試 | 在目標 Mac 實機驗證啟動/卸載、對話、背景重接、中文字元、敏感資訊保護；架構不綁死某一台 Mac 的路徑或 VPN。其他使用者與 Windows/Linux 正式發行仍在後續階段。 |
+| **GUI-P4：Mac 可安裝版** | `.app` 打包、設定保護、權限提示、可診斷錯誤、原生實機與安裝測試 | 在目標 Mac 實機驗證啟動/卸載、對話、背景重接、中文字元、敏感資訊保護；架構不綁死某一台 Mac 的路徑或 VPN。其他使用者與 Windows/Linux 正式發行仍在後續階段。 |
 
 此處刻意使用 **GUI-P0～P4**，避免與既有 Owner outcome reporting 的 **G1～G4** 成果回報檢查點混淆；GUI 切片不是 G1～G4，也不是 G3/M2 的驗收替代。
 
