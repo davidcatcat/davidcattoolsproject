@@ -15,7 +15,7 @@ from llmtool.errors import LLMToolError, coded_error
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
-                                         run_task_show, run_task_submit)
+                                         run_task_delegate, run_task_show, run_task_submit)
 
 
 def config(provider_type='codex-cli', model='gpt-6-luna'):
@@ -222,6 +222,176 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          ('submit', 'company-gw', ['build something']))
         shown = parser.parse_args(['task', 'show', 'a' * 32])
         self.assertEqual((shown.action, shown.task_id), ('show', 'a' * 32))
+
+    def _pm_task_with_assignment(self):
+        acceptance = ['new test passes']
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded test-only task.',
+            'developer_assignment': {
+                'route': 'company-gw', 'risk': 'LOW', 'goal': 'Add one focused test.',
+                'acceptance': acceptance,
+            },
+        })
+        code, task, _, _ = self.invoke(client=FakeClient(Reply(response, {
+            'prompt_tokens': 12, 'completion_tokens': 18, 'total_tokens': 30,
+        })))
+        self.assertEqual(code, 0)
+        return task
+
+    def _delegate_args(self, task, **changes):
+        values = dict(task_id=task['task_id'], provider='company-gw',
+                      selection_source='PM', source_sha='a' * 40,
+                      read_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                      write_path=['tools/llmtool/tests/test_task_submission_cli.py'],
+                      acceptance=['new test passes'],
+                      egress_basis='Owner approved non-sensitive source and test context',
+                      context='class TaskSubmissionCLITests: pass')
+        values.update(changes)
+        return Namespace(**values)
+
+    def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
+        task = self._pm_task_with_assignment()
+        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        patch_text = (f'diff --git a/{target} b/{target}\n'
+                      f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n')
+        client = FakeClient(Reply(patch_text, {
+            'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+        }))
+        args = self._delegate_args(task)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 0, output.getvalue())
+        result = json.loads(output.getvalue())
+        developer = result['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['provider_profile'], 'company-gw')
+        self.assertEqual(developer['selection_source'], 'PM')
+        self.assertNotEqual(developer['session_id'], result['pm_session_id'])
+        self.assertEqual(developer['source_sha'], 'a' * 40)
+        self.assertEqual(developer['source_sha_binding'], 'UNVERIFIED_CALLER_INPUT')
+        self.assertEqual(developer['artifact'], patch_text)
+        self.assertEqual(developer['usage']['total_tokens'], 35)
+        self.assertEqual(developer['max_tokens'], 128)
+        self.assertGreater(developer['input_bytes'], 0)
+        self.assertEqual(developer['egress_basis'],
+                         'Owner approved non-sensitive source and test context')
+        self.assertEqual(result['pm_session_id'], task['pm_session_id'])
+        self.assertNotIn('not-persisted', output.getvalue())
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['artifact'], patch_text)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_pm_recommendation_not_text_or_wrong_risk_cannot_authorize_gw(self):
+        task = self._pm_task_with_assignment()
+        stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        stored['pm_assignment']['risk'] = 'OTHER'
+        TaskStore(Path(self.home) / '.local/state/llmtool/tasks').update(
+            task['task_id'], pm_assignment=stored['pm_assignment'])
+        args = self._delegate_args(task)
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            with self.assertRaises(LLMToolError):
+                run_task_delegate(args)
+
+    def test_plain_prose_or_malformed_pm_assignment_is_not_a_route_decision(self):
+        self.assertIsNone(__import__('llmtool.task_submission_cli',
+                                     fromlist=['_pm_assignment'])._pm_assignment(
+                                         'Use company-gw for this.'))
+        malformed = json.dumps({'schema_version': 1, 'summary': 'ok',
+                                'developer_assignment': {'route': 'company-gw',
+                                                         'risk': 'LOW', 'goal': 'x',
+                                                         'acceptance': [], 'authorize': True}})
+        self.assertIsNone(__import__('llmtool.task_submission_cli',
+                                     fromlist=['_pm_assignment'])._pm_assignment(malformed))
+
+    def test_fake_ack_and_sensitive_patch_are_not_persisted(self):
+        for response in ('Developer started and completed the work.',
+                         'diff --git a/tools/llmtool/tests/test_task_submission_cli.py '
+                         'b/tools/llmtool/tests/test_task_submission_cli.py\n'
+                         '+Bearer abcdefghijklmnop\n'):
+            task = self._pm_task_with_assignment()
+            args = self._delegate_args(task)
+            client = FakeClient(Reply(response, {}))
+            output = io.StringIO()
+            with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                    patch('llmtool.task_submission_cli.resolve_profile_config',
+                          return_value=config('openai-compatible', 'gw')), \
+                    patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                    patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                    redirect_stdout(output):
+                code = run_task_delegate(args)
+            self.assertEqual(code, 1)
+            result = json.loads(output.getvalue())
+            self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+            self.assertIsNone(result['developer']['artifact'])
+            self.assertNotIn('abcdefghijklmnop', output.getvalue())
+            saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+            self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
+
+    def test_provider_unavailable_is_durable_and_not_fallen_back(self):
+        task = self._pm_task_with_assignment()
+        args = self._delegate_args(task)
+        output = io.StringIO()
+        def unavailable(profile, require_configured):
+            raise LLMToolError('private configuration detail')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config', side_effect=unavailable), \
+                patch('llmtool.task_submission_cli.create_client') as create, \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertIsNone(result['developer']['artifact'])
+        self.assertNotIn('private configuration detail', output.getvalue())
+        create.assert_not_called()
+
+    def test_scope_overflow_and_out_of_scope_patch_fail_closed(self):
+        task = self._pm_task_with_assignment()
+        args = self._delegate_args(task, write_path=['tools/llmtool/tests/other.py'])
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                self.assertRaises(LLMToolError):
+            run_task_delegate(args)
+        target = 'tools/llmtool/tests/outside.py'
+        client = FakeClient(Reply(f'diff --git a/{target} b/{target}\n', {}))
+        args = self._delegate_args(task)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 1)
+        rejected = json.loads(output.getvalue())['developer']
+        self.assertEqual(rejected['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertIsNone(rejected['artifact'])
+
+    def test_ambiguous_provider_outcome_is_persisted_and_never_replayed(self):
+        task = self._pm_task_with_assignment()
+        client = FakeClient(error=coded_error('private timeout', 'PROVIDER_TIMEOUT', 'provider.test'))
+        args = self._delegate_args(task)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(output.getvalue())['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                self.assertRaises(LLMToolError):
+            run_task_delegate(args)
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == '__main__':
