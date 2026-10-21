@@ -20,13 +20,14 @@ from .errors import LLMToolError
 from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
+DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
 STATES = frozenset(('PM_PENDING', 'PM_RESPONDED', 'PM_UNAVAILABLE',
                      'INPUT_REJECTED', 'PM_RESPONSE_REJECTED'))
-FIELDS = frozenset((
+_FIELDS_V1 = frozenset((
     'schema_version', 'task_id', 'run_id', 'pm_session_id',
     'pm_provider_profile', 'pm_provider_type', 'pm_model',
     'backend_session_semantics', 'native_session_id', 'state',
@@ -34,11 +35,32 @@ FIELDS = frozenset((
     'request', 'request_sha256', 'response', 'usage', 'error_code',
     'record_sha256',
 ))
+_FIELDS_V2 = _FIELDS_V1 | frozenset(('developer', 'pm_assignment'))
+FIELDS = _FIELDS_V2
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
+_DEVELOPER_FIELDS = frozenset((
+    'assignment_id', 'selection_source', 'state', 'provider_profile',
+    'provider_type', 'model', 'backend_session_semantics', 'session_id',
+    'source_sha', 'source_sha_binding', 'read_paths', 'write_paths', 'acceptance', 'context_sha256',
+    'egress_basis', 'input_bytes', 'max_tokens',
+    'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
+    'created_at',
+))
+_DEVELOPER_REJECTION_CODES = frozenset((
+    'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
+    'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
+    'DEVELOPER_OUTPUT_SENSITIVE', 'DEVELOPER_OUTPUT_INVALID_TEXT',
+    'DEVELOPER_OUTPUT_TOO_LARGE',
+))
+_PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
 
 
 def _fail(code='TASK_STORE_INVALID'):
     raise LLMToolError('task store unavailable; details omitted') from None
+
+
+class TaskStoreConflict(LLMToolError):
+    """A compare-and-update precondition lost to another task writer."""
 
 
 def new_id():
@@ -64,9 +86,12 @@ def _safe_identifier(value, pattern):
 
 
 def _validate(record):
-    if type(record) is not dict or set(record) != FIELDS:
+    if (type(record) is not dict or
+            (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
+            (record.get('schema_version') == 2 and set(record) != _FIELDS_V2) or
+            record.get('schema_version') not in (1, 2)):
         _fail()
-    if (type(record['schema_version']) is not int or record['schema_version'] != SCHEMA_VERSION or
+    if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
             not _safe_identifier(record['task_id'], TASK_ID) or
             not _safe_identifier(record['run_id'], TASK_ID) or
             not _safe_identifier(record['pm_session_id'], SESSION_ID) or
@@ -149,6 +174,124 @@ def _validate(record):
         _fail()
     if record['error_code'] is not None and re.fullmatch(r'[A-Z0-9_]{1,64}', record['error_code']) is None:
         _fail()
+    if record['schema_version'] == 2:
+        assignment = record['pm_assignment']
+        if assignment is not None:
+            if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
+                    type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
+                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'none') or
+                    assignment['risk'] not in ('LOW', 'OTHER') or
+                    type(assignment['goal']) is not str or not assignment['goal'] or
+                    len(assignment['goal'].encode('utf-8')) > 512 or
+                    _emitted_sensitive(assignment['goal']) or
+                    type(assignment['acceptance']) is not list or
+                    not 1 <= len(assignment['acceptance']) <= 16 or
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
+                        _emitted_sensitive(item) for item in assignment['acceptance'])):
+                _fail()
+        developer = record['developer']
+        if developer is not None:
+            if type(developer) is not dict or set(developer) != _DEVELOPER_FIELDS:
+                _fail()
+            if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
+                    developer['selection_source'] not in ('PM', 'USER') or
+                    developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
+                                               'DEVELOPER_RESPONDED',
+                                               'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
+                                               'DEVELOPER_OUTPUT_REJECTED') or
+                    developer['provider_profile'] != 'company-gw' or
+                    developer['provider_type'] not in (None, 'openai-compatible') or
+                    developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                    not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
+                    type(developer['source_sha']) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', developer['source_sha']) is None or
+                    developer['source_sha_binding'] != 'UNVERIFIED_CALLER_INPUT' or
+                    type(developer['context_sha256']) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', developer['context_sha256']) is None or
+                    type(developer['egress_basis']) is not str or
+                    not developer['egress_basis'] or len(developer['egress_basis'].encode('utf-8')) > 512 or
+                    _emitted_sensitive(developer['egress_basis']) or
+                    type(developer['input_bytes']) is not int or
+                    not 1 <= developer['input_bytes'] <= 64 * 1024 or
+                    (developer['max_tokens'] is not None and
+                     (type(developer['max_tokens']) is not int or
+                      not 1 <= developer['max_tokens'] <= 1_000_000)) or
+                    developer['artifact_format'] != 'unified_diff' or
+                    type(developer['created_at']) is not str):
+                _fail()
+            try:
+                stamp = datetime.strptime(developer['created_at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                _fail()
+            if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != developer['created_at']:
+                _fail()
+            model = developer['model']
+            if model is not None and (type(model) is not str or len(model) > 256):
+                _fail()
+            for field in ('read_paths', 'write_paths'):
+                values = developer[field]
+                if (type(values) is not list or not values or len(values) > 32 or
+                        any(type(item) is not str or not item or len(item) > 512 or
+                            item.startswith('/') or '\\' in item or
+                            any(part in ('', '.', '..') for part in item.split('/')) or
+                            any(ord(char) < 0x20 or ord(char) >= 0x7f for char in item)
+                            for item in values) or values != sorted(set(values))):
+                    _fail()
+            if not set(developer['write_paths']).issubset(developer['read_paths']):
+                _fail()
+            acceptance = developer['acceptance']
+            if (type(acceptance) is not list or not 1 <= len(acceptance) <= 16 or
+                    any(type(item) is not str or not item or len(item.encode('utf-8')) > 512
+                        for item in acceptance)):
+                _fail()
+            artifact = developer['artifact']
+            artifact_sha = developer['artifact_sha256']
+            if artifact is not None:
+                if (type(artifact) is not str or len(artifact.encode('utf-8')) > 64 * 1024 or
+                        type(artifact_sha) is not str or
+                        hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
+                        _emitted_sensitive(artifact)):
+                    _fail()
+            elif artifact_sha is not None:
+                _fail()
+            usage = developer['usage']
+            if usage is not None:
+                try:
+                    if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
+                        _fail()
+                    validate_provider_usage(usage)
+                except Exception:
+                    _fail()
+            if developer['error_code'] is not None and (
+                    type(developer['error_code']) is not str or
+                    re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
+                _fail()
+            dev_state = developer['state']
+            if dev_state == 'DEVELOPER_PENDING' and (
+                    developer['provider_type'] is not None or developer['model'] is not None or
+                    artifact is not None or usage is not None or developer['error_code'] is not None):
+                _fail()
+            if dev_state == 'DEVELOPER_DISPATCHING' and (
+                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    usage is not None or developer['error_code'] is not None or
+                    developer['max_tokens'] is None):
+                _fail()
+            if dev_state == 'DEVELOPER_UNAVAILABLE' and (
+                    artifact is not None or usage is not None or
+                    developer['error_code'] is None):
+                _fail()
+            if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
+                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    usage is not None or developer['error_code'] is None):
+                _fail()
+            if dev_state == 'DEVELOPER_RESPONDED' and (
+                    developer['provider_type'] is None or artifact is None or
+                    developer['error_code'] is not None or developer['max_tokens'] is None):
+                _fail()
+            if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
+                    developer['provider_type'] is None or artifact is not None or
+                    developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
+                _fail()
     if state == 'PM_PENDING' and (request is None or response is not None or
                                   record['error_code'] is not None or record['usage'] is not None):
         _fail()
@@ -329,6 +472,15 @@ class TaskStore:
             os.close(directory)
 
     def update(self, task_id, **changes):
+        return self._update(task_id, expected=None, changes=changes)
+
+    def compare_and_update(self, task_id, *, expected, **changes):
+        """Update only if selected persisted fields still match under the task lock."""
+        if type(expected) is not dict or not expected:
+            _fail()
+        return self._update(task_id, expected=expected, changes=changes)
+
+    def _update(self, task_id, *, expected, changes):
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         locked = False
@@ -337,10 +489,17 @@ class TaskStore:
                 lock_fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                                   0o600, dir_fd=directory)
             except FileExistsError:
+                if expected is not None:
+                    raise TaskStoreConflict(
+                        'developer assignment already exists; duplicate dispatch refused') from None
                 _fail('TASK_STORE_BUSY')
             os.close(lock_fd)
             locked = True
             current = self._read_at(directory, task_id)
+            if expected is not None and any(current.get(key) != value
+                                            for key, value in expected.items()):
+                raise TaskStoreConflict(
+                    'developer assignment already exists; duplicate dispatch refused')
             if set(changes) - (FIELDS - {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                                          'created_at', 'task_contract', 'task_binding', 'record_sha256'}):
                 _fail()

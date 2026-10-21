@@ -29,7 +29,8 @@ from .retrieval_cli import add_retrieval_parser, run_retrieval
 from .diagnostics_cli import add_diagnostics_parser, run_diagnostics
 from .action_contract_cli import add_action_contract_parsers, run_action_contract
 from .task_lifecycle_cli import add_task_parser, run_task_inspect
-from .task_submission_cli import add_task_submission_parsers, run_task_show, run_task_submit
+from .task_submission_cli import (add_task_submission_parsers, run_task_delegate,
+                                 run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 
@@ -491,6 +492,8 @@ def main(argv=None):
                 return run_task_submit(args)
             if args.action == 'show':
                 return run_task_show(args)
+            if args.action == 'delegate':
+                return run_task_delegate(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
                 return run_exchange(args)
