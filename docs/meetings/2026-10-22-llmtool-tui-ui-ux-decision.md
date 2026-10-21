@@ -3,7 +3,7 @@
 - 日期：2026-10-22（Asia/Taipei）
 - 性質：Owner 與 ChatGPT 討論後確認的產品介面設計決策
 - 狀態：**Owner 已同意設計方向；僅規劃文件，尚非實作／驗收結果**
-- 參考：2026-10-21 [產品需求會議](2026-10-21-llmtool-product-requirements.md)；[A3.5 Roadmap](../../tools/llmtool/ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20-ui-only-decision-2026-10-22)
+- 參考：2026-10-21 [產品需求會議](2026-10-21-llmtool-product-requirements.md)；[A3.5 Roadmap](../../tools/llmtool/ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20)
 - 參考介面：[Claude Code interactive mode](https://code.claude.com/docs/en/interactive-mode)、[Codex CLI customization](https://developers.openai.com/codex/cli/)、[Codex slash commands](https://developers.openai.com/codex/cli/slash-commands)。參考的是 UI/UX 模式，不是要複製其代理執行功能。
 
 ## 1. Owner 已確認：TUI 只有使用者介面責任
