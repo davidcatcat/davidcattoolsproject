@@ -282,6 +282,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['artifact'], patch_text)
         self.assertEqual(developer['usage']['total_tokens'], 35)
         self.assertEqual(developer['max_tokens'], 128)
+        self.assertEqual(developer['execution_result'], {
+            'status': 'UNVERIFIED', 'code': 'EXECUTOR_EVIDENCE_NOT_ATTACHED',
+        })
         self.assertGreater(developer['input_bytes'], 0)
         self.assertEqual(developer['egress_basis'],
                          'Owner approved non-sensitive source and test context')

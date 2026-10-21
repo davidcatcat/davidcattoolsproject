@@ -159,10 +159,17 @@ def _task_view(record):
     view = {key: record[key] for key in fields}
     if record['schema_version'] == 2:
         view['pm_assignment'] = record['pm_assignment']
-        view['developer'] = (None if record['developer'] is None else {
-            **record['developer'],
-            'usage_status': ('UNKNOWN' if record['developer']['usage'] is None else 'REPORTED'),
-        })
+        if record['developer'] is None:
+            view['developer'] = None
+        else:
+            view['developer'] = {
+                **record['developer'],
+                'usage_status': ('UNKNOWN' if record['developer']['usage'] is None else 'REPORTED'),
+                'execution_result': {
+                    'status': 'UNVERIFIED',
+                    'code': 'EXECUTOR_EVIDENCE_NOT_ATTACHED',
+                },
+            }
     view['usage_status'] = 'UNKNOWN' if record['usage'] is None else 'REPORTED'
     return view
 
