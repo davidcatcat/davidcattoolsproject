@@ -1,6 +1,8 @@
 import json
 import os
+import signal
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -9,6 +11,7 @@ from unittest.mock import patch
 from llmtool.opencode_direct_developer import (
     AGENT, MODEL, DirectOpenCodeError, configuration, parse_json_events, run,
 )
+from llmtool.providers.cli_lifecycle import CLIHostTermination
 
 
 class DirectOpenCodeDeveloperTests(unittest.TestCase):
@@ -37,6 +40,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         ])
         self.assertEqual(value['mcp'], {'servers': {}})
         self.assertEqual(value['agents'][AGENT]['steps'], 1)
+        self.assertEqual(value['agents'][AGENT]['permissions'], value['permissions'])
         self.assertEqual(value['policies'][-1], {
             'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
 
@@ -79,8 +83,9 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                        if invocation_marker else '')
         mutation_code = (f"    open({str(version_mutate_path)!r}, 'w').write('CHANGED\\n')\n"
                          if version_mutate_path else '')
-        run_marker_code = (f"open({str(run_invocation_marker)!r}, 'a').write('run\\n')\n"
-                           if run_invocation_marker else '')
+        run_marker_code = (
+            f"open({str(run_invocation_marker)!r}, 'a').write(str(os.getpid()) + '\\n')\n"
+            if run_invocation_marker else '')
         version_child_code = ''
         if version_descendant_marker:
             version_child_code = (
@@ -120,9 +125,16 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             "assert sys.argv[4] == 'opencode/deepseek-v4.1-flash-free'\n"
             "assert sys.argv[sys.argv.index('--format') + 1] == 'json'\n"
             "assert sys.argv[sys.argv.index('--agent') + 1] == 'llmtool-direct-developer'\n"
-            'cfg = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])\n'
+            'config_path = os.environ["OPENCODE_CONFIG"]\n'
+            'assert os.path.dirname(config_path) == os.environ["OPENCODE_CONFIG_DIR"]\n'
+            'assert os.stat(config_path).st_mode & 0o777 == 0o600\n'
+            'assert os.environ["OPENCODE_CONFIG_PROJECT_DISABLE"] == "1"\n'
+            'assert "OPENCODE_CONFIG_CONTENT" not in os.environ\n'
+            'cfg = json.load(open(config_path, encoding="utf-8"))\n'
             'assert cfg["model"] == "opencode/deepseek-v4.1-flash-free"\n'
             'assert cfg["permissions"][0]["effect"] == "deny"\n'
+            'assert cfg["agents"]["llmtool-direct-developer"]["mode"] == "primary"\n'
+            'assert cfg["agents"]["llmtool-direct-developer"]["permissions"] == cfg["permissions"]\n'
             'assert not os.environ.get("OPENAI_API_KEY")\n'
             'sys.stdin.buffer.read()\n'
             + run_child_code +
@@ -265,6 +277,41 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(observed['source_bytes'], len(b'VALUE = 1\n'))
         self.assertEqual(observed['source_file_count'], 1)
         self.assertEqual(len(observed['source_manifest_sha256']), 64)
+
+    @unittest.skipUnless(os.name == 'posix', 'requires POSIX process signals')
+    def test_sigint_and_sigterm_reap_owned_process_and_preserve_signal_semantics(self):
+        for sig, error_type, expected_code in (
+                (signal.SIGINT, KeyboardInterrupt, None),
+                (signal.SIGTERM, CLIHostTermination, 128 + signal.SIGTERM)):
+            with self.subTest(signal=sig):
+                marker = self.root / ('signal-' + str(sig.value))
+                cli = self.fake_cli(self.event('step_start') + '\n', delay=10,
+                                    run_invocation_marker=marker)
+                def signal_when_child_starts():
+                    deadline = time.monotonic() + 5
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if marker.exists():
+                        os.kill(os.getpid(), sig)
+
+                sender = threading.Thread(target=signal_when_child_starts, daemon=True)
+                sender.start()
+                with self.assertRaises(error_type) as caught:
+                    self.run_with_valid_binding(root=self.root,
+                        read_paths=['source.py'], write_paths=['source.py'],
+                        prompt='bounded task prompt', timeout_seconds=15,
+                        executable=cli)
+                sender.join(timeout=2)
+                self.assertFalse(sender.is_alive())
+                observed = caught.exception
+                if expected_code is not None:
+                    self.assertEqual(observed.code, expected_code)
+                facts = observed._llmtool_direct_opencode_execution
+                self.assertEqual(facts['cleanup_status'], 'CONFIRMED')
+                self.assertLess(facts['process_exit_code'], 0)
+                child_pid = int(marker.read_text(encoding='ascii').splitlines()[0])
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(child_pid, 0)
 
     def test_nonzero_exit_preserves_only_observed_bounded_execution_metadata(self):
         cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7)

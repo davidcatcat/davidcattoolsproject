@@ -240,7 +240,7 @@ def _screen_prompt(prompt):
     return raw
 
 
-def _safe_environment(config_text, config_dir):
+def _safe_environment(config_file, config_dir):
     """Pass only normal OpenCode auth locations and non-secret runtime settings."""
     home = os.path.realpath(os.path.expanduser('~'))
     if not os.path.isabs(home) or not os.path.isdir(home):
@@ -248,8 +248,8 @@ def _safe_environment(config_text, config_dir):
     env = {
         'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
         'HOME': home,
+        'OPENCODE_CONFIG': str(config_file),
         'OPENCODE_CONFIG_DIR': str(config_dir),
-        'OPENCODE_CONFIG_CONTENT': config_text,
         'OPENCODE_CONFIG_PROJECT_DISABLE': '1',
         'OPENCODE_DISABLE_CLAUDE_CODE': '1',
         'OPENCODE_DISABLE_FFF': '1',
@@ -425,7 +425,16 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     cleanup = 'UNKNOWN'
     with tempfile.TemporaryDirectory(prefix='llmtool-opencode-config-') as config_dir:
         os.chmod(config_dir, 0o700)
-        env = _safe_environment(config_text, config_dir)
+        config_file = Path(config_dir) / 'opencode.json'
+        try:
+            fd = os.open(config_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                stream.write(config_text)
+                stream.flush()
+                os.fsync(stream.fileno())
+        except OSError:
+            _reject('OPENCODE_CONFIG_UNAVAILABLE')
+        env = _safe_environment(config_file, config_dir)
         argv = [executable, 'run', '--standalone', '--model', MODEL, '--agent', AGENT,
                 '--format', 'json', '--title', 'llmtool-task-developer']
         lifecycle = CLIProcessLifecycle('opencode-cli', deadline=cleanup_deadline)
