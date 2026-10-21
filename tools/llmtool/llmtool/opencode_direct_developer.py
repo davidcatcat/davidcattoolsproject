@@ -343,17 +343,18 @@ def _version(executable):
     output = bytearray()
     try:
         with lifecycle:
+            selector = None
             try:
-                process = subprocess.Popen([executable, '--version'], stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
-                    env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
-                         'HOME': os.path.realpath(os.path.expanduser('~'))},
-                    close_fds=True, start_new_session=True, bufsize=0)
-                lifecycle.own(process)
-            except Exception:
-                _reject('OPENCODE_RUNTIME_UNAVAILABLE')
-            selector = selectors.DefaultSelector()
-            try:
+                try:
+                    process = subprocess.Popen([executable, '--version'], stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
+                        env={'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
+                             'HOME': os.path.realpath(os.path.expanduser('~'))},
+                        close_fds=True, start_new_session=True, bufsize=0)
+                    lifecycle.own(process)
+                except Exception:
+                    _reject('OPENCODE_RUNTIME_UNAVAILABLE')
+                selector = selectors.DefaultSelector()
                 os.set_blocking(process.stdout.fileno(), False)
                 selector.register(process.stdout, selectors.EVENT_READ)
                 while selector.get_map():
@@ -375,8 +376,9 @@ def _version(executable):
                             _reject('OPENCODE_VERSION_OUTPUT_TOO_LARGE')
                 _await_exit_without_reap(process, deadline=deadline)
             finally:
-                selector.close()
-                if process.stdout is not None:
+                if selector is not None:
+                    selector.close()
+                if process is not None and process.stdout is not None:
                     process.stdout.close()
     except DirectOpenCodeError:
         raise
@@ -429,22 +431,23 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         lifecycle = CLIProcessLifecycle('opencode-cli', deadline=cleanup_deadline)
         try:
             with lifecycle:
+                selector = None
                 try:
-                    valid = prelaunch_validate()
-                except Exception:
-                    _reject('OPENCODE_D6_BINDING_CHANGED')
-                if valid is not True:
-                    _reject('OPENCODE_D6_BINDING_CHANGED')
-                try:
-                    process = subprocess.Popen(argv, cwd=str(root), env=env,
-                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE, bufsize=0, shell=False,
-                        close_fds=True, start_new_session=True)
-                    lifecycle.own(process)
-                except Exception:
-                    _reject('OPENCODE_RUNTIME_UNAVAILABLE')
-                selector = selectors.DefaultSelector()
-                try:
+                    try:
+                        valid = prelaunch_validate()
+                    except Exception:
+                        _reject('OPENCODE_D6_BINDING_CHANGED')
+                    if valid is not True:
+                        _reject('OPENCODE_D6_BINDING_CHANGED')
+                    try:
+                        process = subprocess.Popen(argv, cwd=str(root), env=env,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, bufsize=0, shell=False,
+                            close_fds=True, start_new_session=True)
+                        lifecycle.own(process)
+                    except Exception:
+                        _reject('OPENCODE_RUNTIME_UNAVAILABLE')
+                    selector = selectors.DefaultSelector()
                     for stream, name in ((process.stdout, 'stdout'),
                                          (process.stderr, 'stderr')):
                         os.set_blocking(stream.fileno(), False)
@@ -482,7 +485,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                             destination.extend(chunk)
                     _await_exit_without_reap(process, deadline=work_deadline)
                 finally:
-                    selector.close()
+                    if selector is not None:
+                        selector.close()
                     if process is not None:
                         for stream in (process.stdin, process.stdout, process.stderr):
                             if stream is not None:
@@ -504,8 +508,21 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
             exc.source_file_count = source_file_count
             exc.source_manifest_sha256 = source_manifest_sha256
             raise
-        except BaseException:
+        except BaseException as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
+            try:
+                exc._llmtool_direct_opencode_execution = {
+                    'process_exit_code': (process.returncode if process is not None else None),
+                    'stdout_sha256': (hashlib.sha256(bytes(stdout)).hexdigest()
+                                      if stdout else None),
+                    'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
+                    'cleanup_status': cleanup,
+                    'source_bytes': source_bytes,
+                    'source_file_count': source_file_count,
+                    'source_manifest_sha256': source_manifest_sha256,
+                }
+            except Exception:
+                pass
             raise
     elapsed = max(0, int((time.monotonic() - started) * 1000))
     raw = bytes(stdout)

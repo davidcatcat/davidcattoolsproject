@@ -13,6 +13,7 @@ from .chat import reply_usage
 from .config import api_key, resolve_profile_config, selected_provider
 from .errors import LLMToolError
 from .providers import create_client
+from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, new_id
 from . import task_completion
 from . import opencode_direct_developer
@@ -504,6 +505,55 @@ def _direct_execution(result, *, status='SUCCEEDED'):
     }
 
 
+def _interrupted_execution(exc):
+    """Return only adapter-observed process evidence after an interrupt."""
+    observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
+    fields = ('native_session_id', 'process_exit_code', 'stdout_sha256',
+              'elapsed_ms', 'cleanup_status', 'source_bytes',
+              'source_file_count', 'source_manifest_sha256')
+    value = {name: None for name in fields}
+    value.update(status='UNKNOWN', cleanup_status='UNKNOWN', usage_source='UNKNOWN')
+    if type(observed) is dict:
+        for name in fields:
+            if name in observed:
+                value[name] = observed[name]
+        # A pre-interruption CLI event stream has not been fully validated.
+        value['native_session_id'] = None
+        value['cleanup_status'] = (observed.get('cleanup_status')
+                                   if observed.get('cleanup_status') in ('CONFIRMED', 'UNKNOWN')
+                                   else 'UNKNOWN')
+        value['usage_source'] = 'UNKNOWN'
+    return value
+
+
+def _persist_opencode_interruption(store, task_id, developer, exc, *, result=None):
+    """Persist an ambiguous outcome without replaying the provider request."""
+    developer.update(
+        state='DEVELOPER_OUTCOME_UNKNOWN',
+        provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+        max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+        artifact=None, artifact_sha256=None, usage=None,
+        error_code=('OPENCODE_INTERRUPTED' if isinstance(exc, KeyboardInterrupt)
+                    else 'OPENCODE_HOST_TERMINATED'),
+        execution=(_direct_execution(result, status='UNKNOWN') if result is not None
+                   else _interrupted_execution(exc)),
+    )
+    try:
+        return store.update(task_id, developer=developer)
+    except BaseException:
+        # Keep the original interrupt/termination even if the recovery write
+        # is itself interrupted or otherwise unavailable.
+        raise exc
+
+
+def _print_without_masking_interrupt(saved):
+    try:
+        _print(_task_view(saved))
+    except BaseException:
+        # Output is best-effort on an already-interrupted command path.
+        pass
+
+
 def run_task_opencode_delegate(args, *, store):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
@@ -620,6 +670,15 @@ def run_task_opencode_delegate(args, *, store):
         saved = store.update(task['task_id'], developer=developer)
         _print(_task_view(saved))
         return 1
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        # Preserve Ctrl-C/host termination semantics, but first prevent the
+        # durable task from being stranded in DEVELOPER_DISPATCHING. The
+        # adapter attaches only observed process/cleanup facts; absent facts
+        # remain UNKNOWN, and this path never replays the provider request.
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc)
+        _print_without_masking_interrupt(saved)
+        raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
             provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
@@ -667,13 +726,24 @@ def run_task_opencode_delegate(args, *, store):
                 artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 usage=result.usage, error_code=None, execution=execution)
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc, result=result)
+        _print_without_masking_interrupt(saved)
+        raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
             provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
             execution=_direct_execution(result, status='UNKNOWN'))
-    saved = store.update(task['task_id'], developer=developer)
+    try:
+        saved = store.update(task['task_id'], developer=developer)
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc, result=result)
+        _print_without_masking_interrupt(saved)
+        raise
     _print(_task_view(saved))
     return 0 if developer['state'] == 'DEVELOPER_RESPONDED' else 1
 

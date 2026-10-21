@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
     AGENT, MODEL, DirectOpenCodeError, configuration, parse_json_events, run,
@@ -237,6 +238,33 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', timeout_seconds=1, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_TIMEOUT')
+
+    def test_keyboard_interrupt_reaps_owned_process_and_attaches_observed_facts(self):
+        cli = self.fake_cli(self.event('step_start') + '\n', delay=5)
+        from llmtool.providers.cli_lifecycle import CLIProcessLifecycle
+        original_check = CLIProcessLifecycle.check
+        run_checks = []
+
+        def interrupt_after_launch(lifecycle):
+            process_args = getattr(lifecycle.process, 'args', ())
+            if isinstance(process_args, (list, tuple)) and 'run' in process_args:
+                run_checks.append(1)
+                raise KeyboardInterrupt()
+            return original_check(lifecycle)
+
+        with patch('llmtool.opencode_direct_developer.CLIProcessLifecycle.check',
+                   autospec=True, side_effect=interrupt_after_launch), \
+                self.assertRaises(KeyboardInterrupt) as caught:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(run_checks, [1])
+        observed = caught.exception._llmtool_direct_opencode_execution
+        self.assertEqual(observed['cleanup_status'], 'CONFIRMED')
+        self.assertIsInstance(observed['process_exit_code'], int)
+        self.assertEqual(observed['source_bytes'], len(b'VALUE = 1\n'))
+        self.assertEqual(observed['source_file_count'], 1)
+        self.assertEqual(len(observed['source_manifest_sha256']), 64)
 
     def test_nonzero_exit_preserves_only_observed_bounded_execution_metadata(self):
         cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7)

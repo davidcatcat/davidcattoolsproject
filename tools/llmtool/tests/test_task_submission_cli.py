@@ -18,6 +18,7 @@ from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
+                                         run_task_opencode_delegate,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
 from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
@@ -513,6 +514,128 @@ class TaskSubmissionCLITests(unittest.TestCase):
             run_task_delegate(args)
         second.assert_not_called()
         self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_interrupt_persists_unknown_then_preserves_exit(self):
+        from llmtool.providers.cli_lifecycle import CLIHostTermination
+        for interruption, expected_code in (
+                (KeyboardInterrupt(), 'OPENCODE_INTERRUPTED'),
+                (CLIHostTermination(143), 'OPENCODE_HOST_TERMINATED')):
+            for evidence in (None, {
+                    'process_exit_code': None, 'stdout_sha256': 'd' * 64,
+                    'elapsed_ms': 35, 'cleanup_status': 'CONFIRMED',
+                    'source_bytes': 20, 'source_file_count': 1,
+                    'source_manifest_sha256': 'e' * 64,
+            }):
+                with self.subTest(interruption=type(interruption).__name__,
+                                  evidence=evidence is not None):
+                    task = self._pm_task_with_opencode_assignment()
+                    args = self._opencode_delegate_args(task)
+                    if evidence is not None:
+                        interruption._llmtool_direct_opencode_execution = evidence
+                    output = io.StringIO()
+                    with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                            patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                                  side_effect=interruption), redirect_stdout(output), \
+                            self.assertRaises(type(interruption)) as caught:
+                        run_task_delegate(args)
+                    if isinstance(interruption, CLIHostTermination):
+                        self.assertEqual(caught.exception.code, 143)
+                    result = json.loads(output.getvalue())
+                    developer = result['developer']
+                    self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                    self.assertEqual(developer['error_code'], expected_code)
+                    self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+                    self.assertEqual(developer['execution']['usage_source'], 'UNKNOWN')
+                    self.assertEqual(developer['execution']['cleanup_status'],
+                                     'CONFIRMED' if evidence else 'UNKNOWN')
+                    self.assertEqual(developer['execution']['stdout_sha256'],
+                                     'd' * 64 if evidence else None)
+                    self.assertEqual(developer['execution']['elapsed_ms'],
+                                     35 if evidence else None)
+                    self.assertEqual(developer['execution']['source_manifest_sha256'],
+                                     'e' * 64 if evidence else None)
+                    stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
+                        task['task_id'])
+                    self.assertEqual(stored['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                    self.assertEqual(stored['developer']['error_code'], expected_code)
+
+    def test_opencode_final_store_interrupt_persists_unknown_without_replay(self):
+        task = self._pm_task_with_opencode_assignment()
+        result = DirectResult(0, 'ses_Abc123', 'bounded result', None, 'UNKNOWN',
+                              'f' * 64, 45, 'CONFIRMED', 'opencode v2.0.32',
+                              20, 1, 'e' * 64)
+        backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+        class InterruptOnTerminalWrite:
+            def __init__(self, store):
+                self.store = store
+                self.update_count = 0
+                self.update_error = None
+
+            def __getattr__(self, name):
+                return getattr(self.store, name)
+
+            def update(self, task_id, **kwargs):
+                self.update_count += 1
+                if self.update_count == 2:
+                    raise KeyboardInterrupt()
+                try:
+                    return self.store.update(task_id, **kwargs)
+                except BaseException as exc:
+                    self.update_error = exc
+                    raise
+
+        wrapped = InterruptOnTerminalWrite(backing)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      return_value=result) as invoke, \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      return_value=None), redirect_stdout(output), \
+                self.assertRaises(KeyboardInterrupt):
+            run_task_opencode_delegate(self._opencode_delegate_args(task), store=wrapped)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(wrapped.update_count, 3)
+        self.assertIsNone(wrapped.update_error)
+        saved = backing.get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'], 'OPENCODE_INTERRUPTED')
+        self.assertEqual(saved['developer']['execution']['cleanup_status'], 'CONFIRMED')
+
+    def test_opencode_interrupt_survives_output_failure(self):
+        task = self._pm_task_with_opencode_assignment()
+        interruption = KeyboardInterrupt()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=interruption), \
+                patch('llmtool.task_submission_cli._print', side_effect=BrokenPipeError()), \
+                self.assertRaises(KeyboardInterrupt) as caught:
+            run_task_delegate(self._opencode_delegate_args(task))
+        self.assertIs(caught.exception, interruption)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+
+    def test_opencode_interrupt_during_result_collection_persists_unknown(self):
+        task = self._pm_task_with_opencode_assignment()
+        result = DirectResult(0, 'ses_Abc123', 'bounded result', None, 'UNKNOWN',
+                              'f' * 64, 45, 'CONFIRMED', 'opencode v2.0.32',
+                              20, 1, 'e' * 64)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      return_value=result), \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      side_effect=KeyboardInterrupt()), redirect_stdout(output), \
+                self.assertRaises(KeyboardInterrupt):
+            run_task_delegate(self._opencode_delegate_args(task))
+        saved = json.loads(output.getvalue())
+        developer = saved['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'OPENCODE_INTERRUPTED')
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
+        self.assertEqual(developer['execution']['cleanup_status'], 'CONFIRMED')
 
     def _delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='company-gw',
