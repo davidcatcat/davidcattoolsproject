@@ -7,7 +7,7 @@ Owner instructed publication of this report to Git.
 
 ## Bases and boundaries
 
-- Base / current main: `0cabd79874c6803196f65c94e5ec1e62932f01ff`; registered D6 task worktree
+- Base (main at investigation time, 2026-10-22): `0cabd79874c6803196f65c94e5ec1e62932f01ff`; registered D6 task worktree
   `~/.local/share/llmtool-dev-workspaces/davidcattoolsproject/tasks/issue83-wp-oc-01-fd-verify-20261022` (registry
   record under the real Git common dir `llmtool-worktrees/`), branch `fix/llmtool-issue83-fd-verify-20261022`.
 - Product/test files: none changed. At investigation time (base `0cabd79`, 2026-10-22) `git status` showed no
@@ -30,8 +30,10 @@ Modules in #83 order: `test_diagnostics_ask_persistence` (33), `test_feedback` (
 
 Single residual descriptor in both orders: fd, dev `16777223`, inode `135581948`, uid `0`, mode `S_IFDIR`,
 path `/private` (macOS first path component; analogous to the Linux `/tmp` observation in the #83 history),
-`F_GETFL=0x0` → `O_RDONLY` read-only directory descriptor: it confers no write capability, but as a directory
-handle it still permits listing and `*at()`-relative lookups under `/private`.
+`F_GETFL=0x0` → the directory descriptor was opened `O_RDONLY`. That open mode does not by itself restrict what
+relative operations through the descriptor can do: listing and `*at()`-relative operations under `/private`
+(including any create/modify/remove) remain governed by ordinary filesystem permissions and process privileges, so
+the open mode is not a write-capability boundary.
 
 - No module other than `test_diagnostics_ask_persistence` adds or alters any directory FD in either order.
 - Merged fixes hold on native Mac: PR #188 (`feedback_files.py`) and PR #253 (`cli.py::_validation_packet`) —
@@ -73,6 +75,9 @@ Original OpenCode record: `make test` with the venv python, 1877 tests, two runs
 separately, so whether *both* runs had exactly these counts is **UNKNOWN**. Two still earlier full-suite runs used
 the wrong interpreter/venv state and are discarded as contaminated.
 
+Both full-suite results are **old-base investigation evidence** (product code at `0cabd79`), not a current
+product gate for any later main or PR head.
+
 Independent rerun (Claude Developer, 2026-10-22, this worktree at `fca6216`, whose product code equals base
 `0cabd79`; `make test PYTHON=.venv/bin/python`, venv on Apple CommandLineTools CPython 3.9.6, macOS 15.7.9
 x86_64): **Ran 1877 tests in 698.6s — FAILED (failures=23, errors=14, skipped=3)**; all 37 in
@@ -91,9 +96,10 @@ Failure evidence from the rerun log: 7 errors `AttributeError: <module 'os' from
 '/Library/Developer/CommandLineTools/.../python3.9/os.py'> does not have the attribute 'waitid'` (tests patching
 `os.waitid`), and most failures report `OPENCODE_CLEANUP_UNKNOWN` instead of the expected code (e.g. 9 ×
 `'OPENCODE_CLEANUP_UNKNOWN' != 'OPENCODE_OUTPUT_RETURNED'`), which is the worker's fail-closed result when the
-non-reaping exit observation primitive is missing. A minority are timing assertions (e.g. one
-`'OPENCODE_TIMEOUT' != 'OPENCODE_OUTPUT_LIMIT'`); PR #270 attributes those to fixture launch latency on this
-interpreter rather than to `waitid`. This report makes no claim about other macOS CPython builds beyond the two
+non-reaping exit observation primitive is missing. Not all 37 are `waitid`-caused: some are timing assertions
+(e.g. one `'OPENCODE_TIMEOUT' != 'OPENCODE_OUTPUT_LIMIT'`), and PR #270 reports 3 failures remaining after its
+`waitid` fix that it attributes to fixture launch latency on this interpreter. This report did not classify each of
+the 37 failures individually, so the split between `waitid` and timing causes is not stated as an exact count here. This report makes no claim about other macOS CPython builds beyond the two
 probed above.
 
 ## Self-review (advisory, not formal acceptance)
@@ -109,7 +115,7 @@ verified installed copy == worktree source.
 
 | Gate | Verdict |
 |---|---|
-| Security | PASS (residual is read-only, no product code changed) |
+| Security | PASS (no product code changed; residual is one `O_RDONLY`-opened directory fd, fault-injection-only — not a write-capability boundary) |
 | Functional | PASS (147/147 both orders; no functional delta) |
 | Regression | PASS (no tracked diff; #188/#253 fixes not regressed) |
 | Resource Cleanup | PASS with carry-forward residual recorded as a store-owner handoff |
@@ -134,8 +140,15 @@ Flag-word caveat closed by measurement (`F_GETFL=0x0`).
 
 ## CI, review and merge statement
 
-No CI has been run for this branch because it carries only this report document (exact-head CI applies to product
-changes under the normal gates). Nothing here is formal acceptance; no merge is authorized from this branch.
+Observed CI fact: no GitHub Actions run is reported for this branch. The repository's workflows trigger on
+`pull_request` only for paths under `tools/llmtool/**`, `scripts/llmtool_monitor.py`,
+`scripts/test_llmtool_monitor.py`, `.github/workflows/llmtool-ci.yml` (llmtool CI) and `tools/nlf/**`,
+`.github/workflows/nlf-ci.yml` (nlf CI); this branch changes only `reports/…`, which those path filters exclude.
+This is a statement about the current workflow configuration, not a general exemption from exact-head CI.
+
+Documentation validation is reported separately, in the PR thread, against the exact head. All other applicable
+merge gates (independent formal review on the exact head, Integrator reconciliation with the current main) still
+apply. Nothing here is formal acceptance; no merge is authorized from this branch.
 
 ## Revision note (2026-10-22)
 
@@ -144,3 +157,8 @@ PR #266 HEAD `fca6216`: scoped the `waitid` claim to the tested interpreter with
 removed the prescriptive "kqueue path" wording; added per-test FD evidence and labelled the mechanism as
 code-reading; corrected scope, `/private` descriptor capability, "analogous", `close(2)`, egress, advisory-reviewer
 identity and full-suite run-count statements. Docs-only; no product or test file changed.
+
+Second revision (2026-10-22, Claude Developer) for the Codex Reviewer REVISE on HEAD `1d99cc9`: corrected the
+`O_RDONLY` directory-descriptor wording (not a write-capability boundary), replaced the implied documentation CI
+exemption with the observed workflow path-filter fact, labelled the base as main at investigation time, qualified
+the waitid/timing failure split, and marked the full-suite runs as old-base investigation evidence.
