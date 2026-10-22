@@ -493,7 +493,7 @@ def _safe_command_output(value, limit):
             return "<redacted-url>"
 
     value = value or ""
-    value = re.sub(r"(?i)\bhttps?://[^\s\"'<>]+", redact, value)
+    value = re.sub(r"(?i)\b(?:https?|file)://[^\s\"'<>]+", redact, value)
     return value.strip()[-limit:]
 
 

@@ -705,11 +705,12 @@ class CacheTest(EnvironmentTempCase):
         self.assertTrue(sentinel.is_file())
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "pre-existing data")
 
-    def test_pip_failure_diagnostics_redact_url_credentials_and_query(self):
+    def test_pip_failure_diagnostics_redact_http_and_file_url_secrets(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         original_run = subprocess.run
         secret_output = (
-            "Could not fetch https://user:password@packages.example/simple?token=secret-value"
+            "Could not fetch https://user:password@packages.example/simple?token=secret-value\n"
+            "Could not open file:///private/tmp/wheels/pkg.whl?token=file-secret#fragment-secret"
         )
 
         def run_with_pip_failure(command, *args, **kwargs):
@@ -725,7 +726,9 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(code, 5)
         self.assertIn("PIP_DOWNLOAD_FAILED", err)
         self.assertIn("PIP_DOWNLOAD_FAILED", out)
-        for secret in ("user", "password", "token", "secret-value"):
+        for secret in (
+            "user", "password", "token", "secret-value", "file-secret", "fragment-secret"
+        ):
             self.assertNotIn(secret, err)
             self.assertNotIn(secret, out)
 
