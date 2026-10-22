@@ -45,7 +45,7 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 # Python options that consume the next argument (-c ends option parsing).
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
-NO_EXPAND = frozenset({"Claude Desktop"})
+NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
 
 
 @dataclass(frozen=True)
@@ -118,6 +118,8 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".
         return None if "Helper" in command else "Claude Desktop"
+    if exe == "Antigravity":
+        return None if "Helper" in command else "Antigravity App (AGY)"
     if exe == "codex-code-mode-host":
         return "Codex code-mode host"
     if exe == "codex":
@@ -1532,6 +1534,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # client is. Without any, the Roadmap row says why OpenCode is not here.
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode
+    agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
         if name == "codex reviewer agent" and reviewing:
@@ -1540,6 +1543,10 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             continue
         if name in table:
             state, detail = _worker_state(table[name])
+            if name == "agy" and agy_open:
+                # The app being open is not work; AGY task activity is not observable here.
+                detail = ("App 開著，但 Owner 暫停派工" if state == PAUSED
+                          else "App 開著，目前沒有可觀察的工作")
             rows.append(OfficeRow(name, state, detail, None, order))
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))

@@ -34,6 +34,8 @@ class ClassifyTests(unittest.TestCase):
             "(opencode.exe)": "OpenCode CLI",
             "claude": "Claude Code CLI",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
+            "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
+            "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper": None,
             "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=gpu": None,
             "/u/bin/codex app-server --listen": "Codex APP-SERVER",
             "/u/bin/codex app-server daemon pid-update-loop": "Codex daemon",
@@ -866,7 +868,10 @@ class OfficeViewTests(unittest.TestCase):
                          (mon.STOPPED, "免費額度用完（429），等額度恢復"))
         self.assertEqual((rows["codex reviewer agent"].state, rows["codex reviewer agent"].detail),
                          (mon.PAUSED, "尚未指派工作"))
-        self.assertEqual(rows["agy"].state, mon.PAUSED)
+        self.assertEqual((rows["agy"].state, rows["agy"].detail), (mon.PAUSED, "Owner 暫停中"))
+        app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
+        agy = self.by_name(self.rows([app]))["agy"]
+        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "App 開著，但 Owner 暫停派工"))
         self.assertEqual(rows["公司 gw"].state, mon.IDLE)
         self.assertIsNone(rows["agy"].age)
 
