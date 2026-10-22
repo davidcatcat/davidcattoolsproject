@@ -35,6 +35,7 @@ class ClassifyTests(unittest.TestCase):
             "claude": "Claude Code CLI",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
             "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
+            "/Users/x/.local/bin/agy": "AGY CLI",
             "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper": None,
             "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=gpu": None,
             "/u/bin/codex app-server --listen": "Codex APP-SERVER",
@@ -895,6 +896,22 @@ class OfficeViewTests(unittest.TestCase):
                                             cwd_of=lambda pid: None))
         self.assertEqual(rows["opencode developer"].state, mon.STOPPED)
         self.assertFalse(any(name.startswith("opencode cli") for name in rows))
+
+    def test_each_agy_cli_gets_a_row_with_cpu_estimate_and_replaces_roadmap_row(self):
+        procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
+                 mon.Process(21, 1, 21, "02:00", "S+", "AGY CLI", "agy", ""),
+                 mon.Process(22, 1, 22, "03:00", "S+", "AGY CLI", "agy", "")]
+        cpu = {20: 12.0, 21: 0.0, 22: None}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of={20: self.canonical}.get, cpu_of=cpu.get))
+        self.assertNotIn("agy", rows)
+        self.assertEqual(rows["agy cli #1"].state, mon.WORKING)
+        self.assertEqual(rows["agy cli #1"].detail, "本 repo：CLI 執行中（依 CPU 12% 推算）")
+        self.assertEqual(rows["agy cli #2"].state, mon.IDLE)
+        self.assertTrue(rows["agy cli #2"].detail.startswith("位置不明："))
+        self.assertEqual(rows["agy cli #3"].state, mon.UNCHECKED)
 
     def test_each_opencode_cli_gets_its_own_row_with_place_and_state(self):
         ms = lambda age: int((self.NOW - age) * 1000)

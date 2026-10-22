@@ -118,6 +118,8 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".
         return None if "Helper" in command else "Claude Desktop"
+    if exe == "agy":
+        return "AGY CLI"
     if exe == "Antigravity":
         return None if "Helper" in command else "Antigravity App (AGY)"
     if exe == "codex-code-mode-host":
@@ -1446,7 +1448,8 @@ def opencode_rows(processes: list[Process], now: float, canonical: str,
                   db: str = OPENCODE_DB, cwd_of=process_cwd) -> list[OfficeRow]:
     """One row per running OpenCode CLI/TUI or `run` client."""
     procs = sorted((p for p in processes if p.role in OPENCODE_ROLES), key=lambda p: p.pid)
-    for pid in [pid for pid in _cwd_cache if pid not in {p.pid for p in procs}]:
+    alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + ("AGY CLI",)}
+    for pid in [pid for pid in _cwd_cache if pid not in alive]:
         _cwd_cache.pop(pid, None)
     if not procs:
         return []
@@ -1469,6 +1472,39 @@ def opencode_rows(processes: list[Process], now: float, canonical: str,
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
             rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}",
                                   opened if opened is not None else 0.0, 50 + number))
+    return rows
+
+
+AGY_BUSY_CPU = 3.0   # %CPU at or above which an open AGY CLI is treated as working
+
+
+def process_cpu(pid: int) -> float | None:
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "%cpu=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=2, check=False).stdout.strip()
+        return float(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
+             cpu_of=process_cpu) -> list[OfficeRow]:
+    """One row per open AGY CLI. AGY keeps no local activity record we can read,
+    so busy/idle is estimated from CPU use and labelled as such."""
+    rows = []
+    procs = sorted((p for p in processes if p.role == "AGY CLI"), key=lambda p: p.pid)
+    for number, proc in enumerate(procs, 1):
+        where = _where(cwd_of(proc.pid), canonical)
+        cpu = cpu_of(proc.pid)
+        opened = _elapsed_seconds(proc.elapsed)
+        if cpu is None:
+            state, note = UNCHECKED, "CLI 已開啟，無法判斷是否在工作"
+        elif cpu >= AGY_BUSY_CPU:
+            state, note = WORKING, f"CLI 執行中（依 CPU {cpu:.0f}% 推算）"
+        else:
+            state, note = IDLE, "CLI 已開啟，閒置（依 CPU 推算）"
+        rows.append(OfficeRow(f"agy cli #{number}", state, f"{where}：{note}",
+                              opened if opened is not None else 0.0, 60 + number))
     return rows
 
 
@@ -1525,7 +1561,8 @@ def _worker_state(status: str) -> tuple[str, str]:
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str = CODEX_SESSIONS, claude_root: str = CLAUDE_PROJECTS,
                 roadmap: str | None = None, canonical: str | None = None,
-                opencode_db: str = OPENCODE_DB, cwd_of=process_cwd) -> list[OfficeRow]:
+                opencode_db: str = OPENCODE_DB, cwd_of=process_cwd,
+                cpu_of=process_cpu) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
@@ -1535,11 +1572,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
+    agy = agy_rows(processes, canonical, cwd_of, cpu_of)
+    rows += agy
     table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
         if name == "codex reviewer agent" and reviewing:
             continue
-        if name == "opencode developer" and opencode:
+        if (name == "opencode developer" and opencode) or (name == "agy" and agy):
             continue
         if name in table:
             state, detail = _worker_state(table[name])
