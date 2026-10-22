@@ -23,6 +23,17 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
+## A11c developer-workflow cost reduction — environment + tests (Owner 2026-10-22)
+
+This is **A11c efficiency work**, not a new product milestone or relaxation of CI, independent reviewer, Mac-native or security/authorization gates. Parallel tracks:
+
+- **ENV-0→ENV-3:** avoid recurring worktree venv/dependency reinstall and AI-led bootstrap. [Issue #267](https://github.com/davidcatcat/davidcattoolsproject/issues/267), roadmap planning [PR #268](https://github.com/davidcatcat/davidcattoolsproject/pull/268). Baseline/measure, safe package/environment cache and isolation, deterministic bootstrap, multi-worktree native acceptance. Its planning PR is **OPEN/NOT MERGED** as of this update; avoid contradictory implementation-status claims.
+- **TEST-0:** record current number/cost/duration of repeated full-suite runs and AI log consumption, actual model tokens only where telemetry exists; otherwise UNKNOWN.
+- **TEST-1:** introduce deterministic L0 static, L1 targeted, L2 impacted regression and L3 full-suite selection, with explicit impact/risk rules. Re-run bounded failures during iterative fixes; unknown impact, sensitive Host/Worker/authorization/Git/privacy changes, and required native/CI gates still escalate. Do not assume full suite is unnecessary for high-risk change or before required merge/release gates.
+- **TEST-2:** bind reusable PASS evidence to actual source/head, command/selection, platform, interpreter/ABI, dependency/environment fingerprint and immutable result; reject mismatched/stale evidence. Keep raw logs but send AI concise bounded exit/test/failed-trace summaries with opt-in detail; preserve data-egress privacy constraints. [Issue #271](https://github.com/davidcatcat/davidcattoolsproject/issues/271).
+
+**Execution:** Finish already assigned WP-OC-03 ENV-0/1 without scope creep; assign TEST-0/1 and TEST-2 as distinct subsequent work packages with nonoverlapping ownership and Draft PRs. Require Developer advisory self-review plus formal distinct non-author review, exact-head CI, relevant Mac native verification, measured before/after setup/test wall time and tokens where observed. **Status: PLANNED, NOT IMPLEMENTED.**
+
 ## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
 **Authoritative priority and numbering:** A0–A12 are the product milestones.
