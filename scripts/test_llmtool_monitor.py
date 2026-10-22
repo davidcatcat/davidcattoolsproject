@@ -951,6 +951,18 @@ class OfficeViewTests(unittest.TestCase):
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
                         next(i for i, line in enumerate(lines) if line.startswith("agy")))
 
+    def test_unpersisted_claude_run_started_by_codex_is_shown_from_its_process(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        run = mon.Process(40, 5718, 40, "02:10", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        mine = mon.Process(41, 1, 41, "13:00:00", "S+", "Claude Code CLI", "claude", "")
+        rows = self.rows([run, mine])
+        runs = [row for row in rows if row.detail.startswith("單次呼叫執行中")]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0].state, runs[0].kind, runs[0].age), (mon.WORKING, "subagent", 130.0))
+        self.assertEqual(runs[0].group, self.by_name(rows)["codex PM"].key)
+
     def test_roadmap_workers_map_to_office_states_without_raw_text(self):
         rows = self.by_name(self.rows())
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),

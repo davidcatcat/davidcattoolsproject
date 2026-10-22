@@ -1741,6 +1741,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
+    # `claude -p --no-session-persistence` started by Codex leaves no session
+    # file; while its process runs, it is still a member at work.
+    for proc in sorted((p for p in processes if p.role == "Claude Code CLI"
+                        and p.owner.startswith("Codex")), key=lambda p: p.pid):
+        rows.append(OfficeRow("claude reviewer", WORKING, "單次呼叫執行中（不留 session 紀錄）",
+                              _elapsed_seconds(proc.elapsed) or 0.0, 30,
+                              group="codex-launched", kind="subagent"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     rows += agy
     switches = worker_dispatch(dispatch or os.path.join(canonical, DISPATCH_RELATIVE))
