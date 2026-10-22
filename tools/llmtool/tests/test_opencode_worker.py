@@ -244,18 +244,24 @@ class OpenCodeWorkerTests(unittest.TestCase):
         """Bound time a full legal fixture pipeline needs on this machine."""
         if cls._floor_ms is not None:
             return cls._floor_ms
+        # The probe instance is never run by the test runner, so the cleanups
+        # job() registers on it (fixture TemporaryDirectory) must be executed
+        # explicitly; otherwise they are only finalized at GC time.
         case = cls('test_host_denial_and_unknown_prior_usage_never_spawn')
         best = 0.0
-        for _ in range(2):
-            try:
-                t0 = time.monotonic()
-                job = case.job(budget=w.RunBudget(1, 8, 0, 10000, 100, 100))
-                result = w.run_worker(job, Host())
-                wall = (time.monotonic() - t0) * 1000
-                if result.code == 'OPENCODE_OUTPUT_RETURNED':
-                    best = max(best, wall)
-            except Exception:
-                pass
+        try:
+            for _ in range(2):
+                try:
+                    t0 = time.monotonic()
+                    job = case.job(budget=w.RunBudget(1, 8, 0, 10000, 100, 100))
+                    result = w.run_worker(job, Host())
+                    wall = (time.monotonic() - t0) * 1000
+                    if result.code == 'OPENCODE_OUTPUT_RETURNED':
+                        best = max(best, wall)
+                except Exception:
+                    pass
+        finally:
+            case.doCleanups()
         cls._floor_ms = int(best) if best else 950
         return cls._floor_ms
 

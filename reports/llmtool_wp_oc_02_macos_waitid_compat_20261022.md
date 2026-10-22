@@ -127,3 +127,14 @@ if not callable(waitid) and sys.platform == 'darwin':
 - **UNKNOWN**：Linux CI 尚未在本工作包內執行（本機為 macOS）；需 Reviewer/CI 於 Linux 驗證 1877 tests 與 1200ms 預算等值行為。
 - 待 Reviewer 驗證：真機複驗 WNOWAIT 不 reaping 與 siginfo offsets；`tight_budget()` 派生設計是否接受（量測上限 10s×2、非任意放寬）。
 - 本工作包未合併 main、未修改 PR #266、未觸及 Issue #267、無付費 Provider、未建立 daemon/controller。
+
+## 12. 追加修正（Claude Developer 接手，2026-10-22）
+
+- **CI 事實**：HEAD `7ba248c` 的 CI run 39741616251：check (3.9) SUCCESS、check (3.14) FAILURE——`test_orchestration.OrchestrationCLITests.test_explicit_text_and_file_never_read_stdin` 預期 stderr `''`，實得兩次 `ResourceWarning: Implicitly cleaning up <TemporaryDirectory '/tmp/opencode-worker-…'>`（Ran 1877, failures=1, skipped=6）。
+- **根因**：§7 的 `_pipeline_floor_ms()` 建立一個不會被 test runner 執行的 TestCase 實例 `case`，並兩次呼叫 `case.job()`；`job()` 以 `self.addCleanup(temp.cleanup)` 登記 fixture `TemporaryDirectory`，但該實例的 cleanups 從未執行，兩個目錄只能在之後的 GC 時被 finalizer 隱式清理，警告因而落入之後某個擷取 stderr 的測試。
+- **修法（修洩漏，不抑制警告）**：量測迴圈包在 `try/finally: case.doCleanups()`，兩個 fixture 目錄在量測結束即明確清理。未改任何 assertion、預算公式或生產程式碼。
+- **本機驗證（macOS，本 worktree）**：
+  - `/usr/local/bin/python3.13 -B -W always::ResourceWarning -m unittest tests.test_opencode_worker` → Ran 47, OK，ResourceWarning 0 次。
+  - `/usr/bin/python3`（Apple CLT 3.9.6）`-B -W always::ResourceWarning -m unittest discover -s tests -p test_opencode_worker.py` → Ran 47, OK，ResourceWarning 0 次。
+  - `make check PYTHON=<scratch Python 3.13.3 venv：requirements-ci.txt + editable install>` → Ran 1877 tests, OK (skipped=2), exit 0；log 中 ResourceWarning 0 次。
+  - 本機無 Python 3.14；3.14 結果以本次 push 後的 exact-head CI 為準（見 PR 留言）。
