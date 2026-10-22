@@ -8,6 +8,20 @@
 
 The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one failed with `OPENCODE_RUNTIME_INVALID` before launch because of a symlink path. Attempt two launched and returned `provider.auth`; neither attempt produced inference. The result does not establish that the login was expired. The authorized Host route is Owner D8a's in-memory handoff of the single active local OpenCode credential to an isolated worker; the credential must never be printed, logged, persisted, exported, copied or enumerated. The OpenCode-owned ACP/server credential route failed independent configuration-isolation review and remains deferred ([latest D4 evidence](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6288670305)). No live inference, Host-owned Worker Receipt, ACK or Usage/cleanup proof exists. CI, offline tests and a resident TUI do not establish live inference or a Worker Receipt. D4 Host work is background G3/M2 work and does not gate direct OpenCode Developer sessions.
 
+## Worker availability — live status
+
+This table holds **dated, live** Worker state only. Permanent role rules are in [AGENTS.md](../../AGENTS.md). The PM rechecks a row before dispatching to that Worker and records every update with a time and evidence. A row here never becomes a role restriction. For what to do when a Worker is unavailable, see the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md).
+
+| Worker | Live status (as of 2026-10-22) | Evidence | Resume / recheck condition |
+| --- | --- | --- | --- |
+| Codex Integrator/PM, Codex Developer | AVAILABLE | Active on [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6337361740) | — |
+| Claude formal Reviewer | AVAILABLE as a direct CLI. The **llmtool** Reviewer route is BLOCKED: no Claude profile and no production ReviewAuthority. | [#120 Integrator status](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6337078498) | The llmtool route needs WP2/WP3 (see the [runtime gaps](#a11c-work-packages-and-continuation-runtime-gaps)). |
+| Codex Reviewer Agent (substitute) | AVAILABLE. The Owner assigned it on 2026-10-22 to some tasks (for example the PM-continuation PR). | Owner assignment on the PR | Per task |
+| Claude Developer | Used only on explicit Owner assignment. Assigned to WP-OC-02, WP-OC-03 and PM continuation. | [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6337361740) | Per Owner assignment |
+| OpenCode Developer | PAUSED. The free DeepSeek route returned HTTP 429 `FreeUsageLimitError` before any tool use. | [#120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6337078498) | One bounded free call succeeds after the quota resets. No paid fallback. |
+| AGY | PAUSED (Owner, 2026-10-22) | Owner brief | Owner resumes it |
+| Company `gw` | **TCP PASS** at 2026-10-22T12:46:27Z (`nc -z` to the configured endpoint, from the Mac). **API auth UNKNOWN, inference UNKNOWN**: no authorized call was made in that check. **Task execution: not validated.** One test contribution was adopted after repair ([#257](https://github.com/davidcatcat/davidcattoolsproject/pull/257)); other attempts were rejected or timed out. | The earlier `UNAVAILABLE_VPN_OFF` record rested on `scutil` alone and is superseded. | Classify by the [four-layer rule](../../skills/company-llm-delegation/SKILL.md#availability-classification) at the next authorized llmtool call. |
+
 ## Historical role decisions
 
 D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
@@ -28,7 +42,7 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 **Authoritative priority and numbering:** A0–A12 are the product milestones.
 The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcatcat/davidcattoolsproject/pull/50) are **historical release/measurement aliases**, not separate tracks, duplicate executors or new sequential blockers. Keep the labels when citing old issues, tests and reports, but **all new plans, status and work contracts must name their owning A milestone**. Preserve PR #50 and subsequent historical evidence unchanged. The [Claude review](https://github.com/davidcatcat/davidcattoolsproject/pull/69) documents why much of C was already planned under A; the owner confirmed this consolidation and the temporary-runner transition after that review.
 
-**Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review (Claude, or the temporarily authorized Codex Reviewer while Claude quota is unavailable), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
+**Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review (Claude, or the Codex Reviewer substitute defined in AGENTS.md), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
 ### A11c developer-worktree environment reuse — PLANNED (Owner 2026-10-22)
 
@@ -191,7 +205,7 @@ current roadmap.
 | QG-S1 — Security Baseline / Threat Model | **PASS/CLOSED** | Retain required future A11b controls from the merged security report |
 | QG-QA1 — Formal A11a QA | **PASS/CLOSED** | Formal QA required findings closed by merged round-2 APPROVE / PR #31 |
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
-| A11c — Integration & Real-world Acceptance | **S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD; M1b useful real-task adoption and full M2 NOT_VERIFIED** | **Priority: verify first M1a/M1b real-task adoption now**, independently of F2; finish separately granted production foreground Worker trial, then verified same-Integrator resume / delegated-Worker M2. Full native cutover still needs all applicable A11b/QA/Mac/route gates; F2 specifically gates direct llmtool Git mutation |
+| A11c — Integration & Real-world Acceptance | **WP1, WP4a and WP2 slices merged ([work packages and gaps](#a11c-work-packages-and-continuation-runtime-gaps)); S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD; M1b useful real-task adoption and full M2 NOT_VERIFIED** | **Priority: verify first M1a/M1b real-task adoption now**, independently of F2; finish separately granted production foreground Worker trial, then verified same-Integrator resume / delegated-Worker M2. Full native cutover still needs all applicable A11b/QA/Mac/route gates; F2 specifically gates direct llmtool Git mutation |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
@@ -1104,6 +1118,30 @@ STOP/recovery behavior、stdout/stderr contract 與 secret safety。
 - 所有 mutation 都有 audit trail。
 
 ## A11c — Integration & Real-world Acceptance
+
+### A11c work packages and continuation runtime gaps
+
+This is the status of the current A11c work packages as of 2026-10-22. It is **not** a new milestone or supervisor. The PM's decision duty is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). The rows below cover only what the **runtime** does today.
+
+| Work package | State |
+| --- | --- |
+| WP1 — CLI PM task intake | MERGED ([#256](https://github.com/davidcatcat/davidcattoolsproject/pull/256)) |
+| WP2 — Executor evidence → original PM | Slices MERGED ([#257](https://github.com/davidcatcat/davidcattoolsproject/pull/257), [#258](https://github.com/davidcatcat/davidcattoolsproject/pull/258), [#263](https://github.com/davidcatcat/davidcattoolsproject/pull/263)). The Host/Worker receipt calls the original PM. The direct-D6 Developer → original-PM callback candidate `e6e8e763` has a local test PASS and a Mac live callback (PM returned `SEND_TO_REVIEW`), but no PR and no exact-head CI. |
+| WP3 — automatic continuation | INCOMPLETE. Gaps R1–R5 below. |
+| WP4a — direct OpenCode Developer adapter | MERGED ([#259](https://github.com/davidcatcat/davidcattoolsproject/pull/259)) |
+| WP-OC-01 / 02 / 03 | #266 REVISE; #270 MERGED; ENV-1 [#273](https://github.com/davidcatcat/davidcattoolsproject/pull/273) Draft ([#267](https://github.com/davidcatcat/davidcattoolsproject/issues/267)) |
+| Test tiers | [#271](https://github.com/davidcatcat/davidcattoolsproject/issues/271) / [#272](https://github.com/davidcatcat/davidcattoolsproject/pull/272) REVISE |
+
+| Handoff | Runtime today (evidence) | Gap → owning package |
+| --- | --- | --- |
+| Developer PASS → Reviewer | The PM callback persists `SEND_TO_REVIEW` (`test_executor_event_returns_bound_result_to_original_pm_before_review`). | **R1** No Reviewer dispatch phase: the production ReviewAuthority factory is unavailable and there is no Claude profile. → WP2/WP3 |
+| Reviewer FAIL → Developer | `CHANGES_REQUESTED` becomes `FORMAL_REVIEW_NOT_ACCEPTED`, and the Task stays `WAITING_REVIEW` without a PM call (`test_github_review_requires_d6_actor_session_and_live_exact_head`, `test_completion_missing_gate_waits_for_reviewer_without_calling_pm`). | **R2** No callback on rejection and no re-dispatch to the original Developer. → WP3 |
+| Reviewer PASS → Integrator | `task complete` checks the exact-head review and CI, then calls the original PM once (`test_original_pm_profile_receives_evidence_once_and_recommendation_persists`). | **R3** The trigger is a manual command. It also needs a verified Reviewer native session, and that session is UNKNOWN for the current Reviewers. → WP2/WP3 |
+| Work package complete → original PM | The Host/Worker path is automatic (`test_successful_host_event_invokes_only_the_bound_task_callback`). The callback is claim-once with no UNKNOWN replay (`test_ambiguous_original_pm_result_is_unknown_and_never_replayed`). | **R4** The direct-D6 callback is unpublished (`e6e8e763`). → WP2 |
+| One Task BLOCKED; other Tasks continue | Each Task record is independent (`test_pm_continuation_acceptance`). | — |
+| Worker status confirmation | Provider errors are classified per call (`NETWORK_PROVIDER_UNREACHABLE` / `AUTH_PROVIDER_REJECTED` / `MODEL_RESPONSE_INVALID`; `test_pm_continuation_acceptance`). | **R5** No persisted per-Worker availability observation for the PM to read; today the PM uses the [table above](#worker-availability--live-status). This must stay a record, not a router. → WP3 |
+
+Until R1–R5 are delivered and live-verified, these handoffs are performed manually by the PM and reported as manual.
 
 ### A11c.1 — Production Workflow Integration
 
