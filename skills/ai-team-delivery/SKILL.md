@@ -9,7 +9,7 @@ Use this workflow for product work, review, QA handoff and Git publication. [AGE
 
 ## Roles and task contract
 
-The Integrator/PM converts the accepted goal into a bounded task and owns routing, dependencies, acceptance interpretation, evidence reconciliation and integration. The assigned Developer is the sole writer in its registered task worktree. The independent Reviewer examines the exact candidate and evidence; the Reviewer does not edit or approve its own work. A Git publisher executes only the exact authorized publication operations.
+The Integrator/PM converts the accepted goal into a bounded task and owns routing, dependencies, acceptance interpretation, evidence reconciliation and integration. After every PASS, FAIL or BLOCKED it follows the [PM Continuation Contract](pm-continuation.md). The assigned Developer is the sole writer in its registered task worktree. The independent Reviewer examines the exact candidate and evidence; the Reviewer does not edit or approve its own work. A Git publisher executes only the exact authorized publication operations.
 
 Before dispatch, record:
 - base SHA and repository/worktree identity;
@@ -27,7 +27,7 @@ For OpenCode Host/Worker jobs, D8 authorizes the PM to admit qualifying tasks wi
 
 The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
 
-Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. Until Claude quota recovers (expected 2026-10-25), an independent read-only Codex Reviewer Agent (GPT-6.1-Sol, Medium) is authorized to perform the formal Security/Functional/QA gate in a separate Session/context; this is a formal substitute, not self-review or pre-review. Claude resumes the normal gate when available; accepted PRs need no duplicate review. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview. Never merge on self-review, stale verdict or green CI alone.
+Submit one consolidated exact-SHA candidate to the non-author Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. Claude is the formal Reviewer; the independent read-only Codex Reviewer Agent substitutes only under the conditions in [AGENTS.md](../../AGENTS.md). That substitute is a formal gate, not self-review or pre-review, and accepted PRs need no duplicate review. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
@@ -87,6 +87,7 @@ Use the task admission fields above. An OpenCode-authored Host/containment chang
 ## References
 
 - [Current repository authority](../../AGENTS.md)
+- [PM Continuation Contract](pm-continuation.md)
 - [Roadmap](../../tools/llmtool/ROADMAP.md)
 - [llmtool development workflow](../../tools/llmtool/WORKFLOW.md), for Cloud handoff or Mac/Cloud verification
 - [safe-git](../safe-git/SKILL.md)

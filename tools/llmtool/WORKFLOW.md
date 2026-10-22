@@ -6,7 +6,7 @@
 
 Codex and OpenCode are normal Developer routes assigned by the existing PM; direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
 
-Until Claude quota recovers (expected 2026-10-25), a separate read-only Codex Reviewer Agent (GPT-6.1-Sol, Medium) may perform Claude's formal Security/Functional/QA gate. This substitution does not reduce review scope or replace any security, CI or Mac-native gate. Claude resumes as the normal Reviewer when available; accepted reviews do not need repetition. VPN/provider unavailability for Company LLM is recorded and does not block unrelated Developers.
+Formal Reviewer roles and the Codex Reviewer substitution are defined in [AGENTS.md](../../AGENTS.md); a substitution does not reduce review scope or replace any security, CI or Mac-native gate. Live Worker availability is in the [Roadmap](ROADMAP.md#worker-availability--live-status), and the PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
 
 
 ## Historical role and stop decisions

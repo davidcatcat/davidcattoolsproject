@@ -42,6 +42,30 @@ security sign-off, QA verdict, or merge authority.
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
 
+## Availability classification
+
+This classification applies to the triage use above and to the company `gw` Developer
+route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
+layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
+[Worker availability table](../../tools/llmtool/ROADMAP.md#worker-availability--live-status):
+
+1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
+   `nc -z` connect, with no request body.
+2. **API authentication:** does an authorized llmtool call get past auth? llmtool
+   reports a rejection as `AUTH_PROVIDER_REJECTED`; an unreachable endpoint is
+   `NETWORK_PROVIDER_UNREACHABLE`.
+3. **Inference:** does the call return a valid model result? A malformed result is
+   `MODEL_RESPONSE_INVALID`; a timeout is `PROVIDER_TIMEOUT`.
+4. **Task execution:** did the route produce output for that task class that passed
+   its deterministic checks and independent review?
+
+Do not infer a layer from an earlier layer, and do not infer it from the VPN service
+list (`scutil --nc list`). Use that list only as a hint for the Owner reminder in
+[WORKFLOW](../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
+2–4 require an llmtool call that the existing data-permission basis already covers,
+and C1B live calls also need the Phase 0 grant below. Without that authorization the
+layer stays `UNKNOWN`. Never bypass a gate because TCP is reachable.
+
 ## Evidence status by route
 
 Routing evidence is task-specific; a provider PASS in one skill does not authorize
