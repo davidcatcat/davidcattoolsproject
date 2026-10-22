@@ -7,6 +7,7 @@ Git mutation or durable queue are installed here. Returned text is untrusted DAT
 """
 import hashlib
 import base64
+import errno
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ import selectors
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -155,6 +157,73 @@ def _clock(deadline):
         reject('OPENCODE_TIMEOUT')
 
 
+def _libc_waitid_binding():
+    """libc binding for waitid(2) where CPython lacks an os.waitid exposure.
+
+    Only the Darwin signature (int idtype, unsigned id, siginfo_t*, int options)
+    and the empirically pinned siginfo_t prefix (si_signo, si_errno, si_code,
+    si_pid, si_uid, si_status at offsets 0/4/8/12/16/20) are interpreted; any
+    other platform, missing symbol or ctypes failure returns None, so callers
+    keep the missing-primitive fail-closed path. WNOWAIT semantics are the
+    operating system's own: the child is never reaped or consumed here, and a
+    zero-filled siginfo means 'nothing waitable yet', the same contract
+    os.waitid follows on Linux.
+    """
+    if os.name!='posix' or sys.platform!='darwin':
+        return None
+    try:
+        import ctypes
+        library=ctypes.CDLL(None,use_errno=True)
+        syscall=library.waitid
+        syscall.argtypes=(ctypes.c_int,ctypes.c_uint,ctypes.c_void_p,ctypes.c_int)
+        syscall.restype=ctypes.c_int
+    except Exception:
+        return None
+
+    class _SigInfo(ctypes.Structure):
+        # Darwin siginfo_t is 104 bytes (verified with the platform SDK's
+        # sizeof/offsetof). The kernel fills the whole structure; the padding
+        # keeps the ctypes mapping at least that large so the write can never
+        # overflow into unrelated memory. Only si_pid/si_uid/si_status are read.
+        _fields_=(('si_signo',ctypes.c_int),
+                  ('si_errno',ctypes.c_int),
+                  ('si_code',ctypes.c_int),
+                  ('si_pid',ctypes.c_int),
+                  ('si_uid',ctypes.c_uint),
+                  ('si_status',ctypes.c_int),
+                  ('si_addr',ctypes.c_void_p),
+                  ('_pad',ctypes.c_int*24))
+    if ctypes.sizeof(_SigInfo)<104:
+        return None
+
+    class _InfoView:
+        # Plain Python view mirroring os.waitid's waitinfo attribute contract
+        # (si_pid/si_uid/si_status). No ctypes-owned object ever escapes the
+        # call: ctypes-allocated entities must not outlive the runtime.
+        __slots__=('si_pid','si_uid','si_status')
+        def __init__(self,pid,uid,status):
+            self.si_pid=pid
+            self.si_uid=uid
+            self.si_status=status
+
+    def _waitid(idtype,pid,options):
+        info=_SigInfo()
+        ctypes.set_errno(0)
+        result=syscall(idtype,pid,ctypes.byref(info),options)
+        if result:
+            number=ctypes.get_errno()
+            if number==errno.ECHILD:
+                raise ChildProcessError(number)
+            raise OSError(number,os.strerror(number),'waitid')
+        if info.si_pid==0:
+            return None
+        return _InfoView(int(info.si_pid),int(info.si_uid),int(info.si_status))
+    return _waitid
+
+
+_WAITID_FALLBACK=_libc_waitid_binding()
+
+
 def _observe_exit_without_reap(process, timeout, deadline):
     """Observe a direct child's exit while keeping it waitable for lifecycle teardown.
 
@@ -162,8 +231,19 @@ def _observe_exit_without_reap(process, timeout, deadline):
     SIGKILL and bounded reap for the whole group. WNOWAIT observes without consuming
     that state. Missing primitives, wait errors and ambiguous identity are UNKNOWN,
     never a reason to fall back to Popen.poll/wait (which would reap early).
+
+    The primitive is the same waitid(2) syscall on every supported platform.
+    os.waitid is the primary call-time seam (patchable by tests, present on Linux
+    and newer macOS Pythons). Apple CommandLineTools CPython builds expose the
+    syscall but no os.waitid binding; _WAITID_FALLBACK then issues the identical
+    syscall through libc with the identical WNOWAIT contract (running -> None,
+    exited -> siginfo view, wait errors -> exceptions raised, state never
+    consumed). A partially broken/absent binding resolves to None and stays
+    fail-closed; there is no reaping substitute on any platform.
     """
     waitid=getattr(os,'waitid',None)
+    if not callable(waitid) and sys.platform=='darwin':
+        waitid=_WAITID_FALLBACK
     p_pid=getattr(os,'P_PID',None)
     w_exited=getattr(os,'WEXITED',None)
     w_nohang=getattr(os,'WNOHANG',None)
