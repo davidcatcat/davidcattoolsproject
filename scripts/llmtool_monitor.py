@@ -1559,6 +1559,36 @@ ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, s
     ("AGY", "agy", 60),
     ("Company", "公司 gw", 70),
 )
+# Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
+# from live technical state. A PAUSED switch holds until the Owner changes it,
+# whatever quota, login or app state is observed.
+DISPATCH_RELATIVE = os.path.join("tools", "llmtool", "worker-dispatch.json")
+DISPATCH_KEYS = {"codex reviewer agent": "codex-reviewer-agent",
+                 "opencode developer": "opencode-developer", "agy": "agy",
+                 "公司 gw": "company-gw"}
+DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
+DECIDERS = frozenset({"Owner", "PM"})
+
+
+def worker_dispatch(path: str) -> dict | None:
+    """{worker key: (dispatch, decided_by, MM-DD)}; None when the file is absent/invalid."""
+    try:
+        with open(path, "rb") as handle:
+            data = json.loads(handle.read(256 << 10))
+    except (OSError, ValueError):
+        return None
+    workers = data.get("workers") if type(data) is dict and data.get("schema_version") == 1 else None
+    if type(workers) is not dict:
+        return None
+    found = {}
+    for key, item in workers.items():
+        if type(key) is not str or type(item) is not dict:
+            continue
+        dispatch, who, when = item.get("dispatch"), item.get("decided_by"), item.get("decided_at")
+        if (dispatch in DISPATCH_VALUES and who in DECIDERS and type(when) is str and
+                re.fullmatch(r"\d{4}-\d{2}-\d{2}", when)):
+            found[key] = (dispatch, who, when[5:])
+    return found
 
 
 def roadmap_workers(path: str | None = None) -> dict[str, str]:
@@ -1607,7 +1637,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
                 opencode_db: str | None = None, cwd_of=process_cwd,
-                cpu_of=process_cpu) -> list[OfficeRow]:
+                cpu_of=process_cpu, dispatch: str | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
@@ -1619,25 +1649,41 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     rows += agy
-    table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
+    switches = worker_dispatch(dispatch or os.path.join(canonical, DISPATCH_RELATIVE))
+    table = {} if switches is not None else roadmap_workers(
+        roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
         if name == "codex reviewer agent" and reviewing:
             continue
-        if (name == "opencode developer" and opencode) or (name == "agy" and agy):
-            continue
-        if name == "opencode developer":
-            # Local session evidence is newer and more exact than the dated table.
+        live = opencode if name == "opencode developer" else agy if name == "agy" else []
+        switch = (switches or {}).get(DISPATCH_KEYS[name])
+        paused = switch is not None and switch[0] == "PAUSED"
+        if live and not paused:
+            continue   # the live CLI rows say everything
+        notes, state, age = [], None, None
+        if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db)
             if outcome is not None:
-                rows.append(OfficeRow(name, outcome[0], outcome[1], outcome[2], order))
-                continue
-        if name in table:
-            state, detail = _worker_state(table[name])
-            if name == "agy" and agy_open:
-                # The app being open is not work; AGY task activity is not observable here.
-                detail = ("App 開著，但 Owner 暫停派工" if state == PAUSED
-                          else "App 開著，目前沒有可觀察的工作")
-            rows.append(OfficeRow(name, state, detail, None, order))
+                state, age = outcome[0], outcome[2]
+                notes.append(outcome[1])
+        if name == "agy" and agy_open and not live:
+            notes.append("App 開著")
+        if live:
+            notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
+        if switch is not None:
+            label = {"PAUSED": f"{switch[1]} 暫停派工（{switch[2]}）",
+                     "OWNER_ASSIGNMENT_ONLY": "僅 Owner 指定時派工",
+                     "ALLOWED": "可派工"}[switch[0]]
+            if paused:
+                state, age = PAUSED, None
+            elif state is None:
+                state = IDLE
+                notes.append("目前沒有工作")
+            rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order))
+        elif name in table:
+            table_state, detail = _worker_state(table[name])
+            parts = notes if state is not None else [detail] + notes
+            rows.append(OfficeRow(name, state or table_state, "；".join(parts), age, order))
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -1652,7 +1698,7 @@ def _pad(text: str, width: int) -> str:
 
 def _ago(age: float | None) -> str:
     if age is None:
-        return "依 Roadmap 狀態表"
+        return "依派工紀錄"
     if age < 60:
         return "剛剛"
     if age < 3600:

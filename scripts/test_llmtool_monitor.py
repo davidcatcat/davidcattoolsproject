@@ -886,7 +886,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((rows["agy"].state, rows["agy"].detail), (mon.PAUSED, "Owner 暫停中"))
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
-        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "App 開著，但 Owner 暫停派工"))
+        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停中；App 開著"))
         self.assertEqual(rows["公司 gw"].state, mon.IDLE)
         self.assertIsNone(rows["agy"].age)
 
@@ -937,6 +937,46 @@ class OfficeViewTests(unittest.TestCase):
         old = self._opencode_db([("s1", None, "/x", "t", ms(90_000), ms(90_000), "failed")],
                                 [("s1", "idle", 1, error("provider.quota", 429))])
         self.assertIsNone(mon.opencode_outcome(self.NOW, old))
+
+    def _dispatch(self, workers):
+        path = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "worker-dispatch.json"
+        path.write_text(json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        return str(path)
+
+    def test_owner_pause_switch_wins_over_live_evidence_and_replaces_the_table(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        db = self._opencode_db([("s1", None, "/x", "t", ms(600), ms(600), "failed")],
+                               [("s1", "idle", 1, json.dumps(
+                                   {"error": {"type": "provider.auth", "status": 401}}))])
+        switches = self._dispatch({
+            "opencode-developer": {"dispatch": "PAUSED", "decided_by": "Owner",
+                                   "decided_at": "2026-10-22", "reason": "quota"},
+            "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+            "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+            "codex-reviewer-agent": {"dispatch": "bogus", "decided_by": "Owner",
+                                     "decided_at": "2026-10-22"},
+        })
+        tui = mon.Process(30, 1, 30, "05:00", "S+", "OpenCode CLI", "opencode", "")
+        rows = self.by_name(mon.office_rows([tui], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=lambda pid: None, cpu_of=lambda pid: 0.0,
+                                            dispatch=switches))
+        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
+                         (mon.PAUSED, "Owner 暫停派工（10-22）；有 1 個 CLI 開著（非派工）"))
+        self.assertIn("opencode cli #1", rows)
+        self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
+        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail),
+                         (mon.IDLE, "可派工；目前沒有工作"))
+        self.assertNotIn("codex reviewer agent", rows)   # invalid record; no table fallback
+        no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                              claude_root=str(self.claude),
+                                              roadmap=str(self.roadmap), canonical=self.canonical,
+                                              opencode_db=db, cwd_of=lambda pid: None,
+                                              dispatch=switches))
+        self.assertEqual(no_cli["opencode developer"].detail,
+                         "Owner 暫停派工（10-22）；最近一次：認證失敗（401），需要重新登入")
+        self.assertEqual(no_cli["opencode developer"].state, mon.PAUSED)
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate_and_replaces_roadmap_row(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
