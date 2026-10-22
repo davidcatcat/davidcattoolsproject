@@ -125,6 +125,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['response'], client.reply.content)
         self.assertNotIn('api_key', json.dumps(saved).lower())
 
+    def test_submit_and_show_can_write_to_explicit_streams(self):
+        submit_output = io.StringIO()
+        show_output = io.StringIO()
+        process_stdout = io.StringIO()
+        client = FakeClient(Reply('PM intake recorded.', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config()), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(process_stdout):
+            code = run_task_submit(self.args, stdout=submit_output)
+            submitted = json.loads(submit_output.getvalue())
+            shown_code = run_task_show(Namespace(task_id=submitted['task_id']),
+                                       stdout=show_output)
+        self.assertEqual((code, shown_code), (0, 0))
+        self.assertEqual(json.loads(show_output.getvalue())['task_id'], submitted['task_id'])
+        self.assertEqual(process_stdout.getvalue(), '')
+
+    def test_rejected_pm_response_uses_explicit_output_stream(self):
+        task_output = io.StringIO()
+        process_stdout = io.StringIO()
+        client = FakeClient(Reply('Bearer abcdefghijklmnop', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config()), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(process_stdout):
+            code = run_task_submit(self.args, stdout=task_output)
+        result = json.loads(task_output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['state'], 'PM_RESPONSE_REJECTED')
+        self.assertEqual(result['error_code'], 'PM_RESPONSE_REJECTED')
+        self.assertIsNone(result['response'])
+        self.assertEqual(process_stdout.getvalue(), '')
+
     def test_pm_route_binding_normalizes_endpoint_and_omits_credentials(self):
         route = _provider_route_binding({
             'type': 'OPENAI-COMPATIBLE', 'model': 'pm-model',

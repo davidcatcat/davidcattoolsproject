@@ -3,6 +3,7 @@
 __pycache__/
 *.py[cod]
 /tools/llmtool/.venv/
+/tools/llmtool/.worktree-env.lock
 /tools/llmtool/build/
 /tools/llmtool/dist/
 /tools/llmtool/*.egg-info/

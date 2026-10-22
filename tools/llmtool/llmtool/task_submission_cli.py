@@ -297,11 +297,12 @@ def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
     }
 
 
-def _print(value):
+def _print(value, stdout=None):
     rendered = json.dumps(value, ensure_ascii=True, sort_keys=True,
                           separators=(',', ':'), allow_nan=False)
-    sys.stdout.write(rendered + '\n')
-    sys.stdout.flush()
+    stream = sys.stdout if stdout is None else stdout
+    stream.write(rendered + '\n')
+    stream.flush()
 
 
 def _task_view(record):
@@ -967,7 +968,7 @@ def run_task_delegate(args, *, store=None):
     return 0
 
 
-def run_task_submit(args, *, store=None):
+def run_task_submit(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
     profile = args.provider
     if type(profile) is not str or _PROFILE.fullmatch(profile) is None:
@@ -983,7 +984,7 @@ def run_task_submit(args, *, store=None):
                          state='INPUT_REJECTED', request_sha=None, contract=contract,
                          error_code='PM_INPUT_REJECTED')
         store.create(record)
-        _print(_task_view(store.get(task_id)))
+        _print(_task_view(store.get(task_id)), stdout=stdout)
         return 1
 
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
@@ -1000,7 +1001,7 @@ def run_task_submit(args, *, store=None):
             code = 'PM_PROVIDER_NOT_CONFIGURED'
         failed = store.update(task_id, state='PM_UNAVAILABLE', response=None,
                               usage=None, error_code=code)
-        _print(_task_view(failed))
+        _print(_task_view(failed), stdout=stdout)
         return 1
 
     try:
@@ -1017,12 +1018,12 @@ def run_task_submit(args, *, store=None):
     except LLMToolError as exc:
         failed = store.update(task_id, state='PM_UNAVAILABLE', response=None,
                               usage=None, error_code=_provider_error_code(exc))
-        _print(_task_view(failed))
+        _print(_task_view(failed), stdout=stdout)
         return 1
     except Exception:
         failed = store.update(task_id, state='PM_UNAVAILABLE', response=None,
                               usage=None, error_code='PM_PROVIDER_UNAVAILABLE')
-        _print(_task_view(failed))
+        _print(_task_view(failed), stdout=stdout)
         return 1
 
     try:
@@ -1030,7 +1031,7 @@ def run_task_submit(args, *, store=None):
     except LLMToolError:
         rejected = store.update(task_id, state='PM_RESPONSE_REJECTED', response=None,
                                 usage=None, error_code='PM_RESPONSE_REJECTED')
-        _print(_task_view(rejected))
+        _print(_task_view(rejected), stdout=stdout)
         return 1
     usage = reply_usage(result.metadata)
     stored_usage = None if usage is None else dict(usage)
@@ -1041,7 +1042,7 @@ def run_task_submit(args, *, store=None):
     except Exception:
         # Do not print an unpersisted provider response as a completed Task.
         raise LLMToolError('task outcome could not be saved; details omitted') from None
-    _print(_task_view(completed))
+    _print(_task_view(completed), stdout=stdout)
     return 0
 
 
@@ -1080,9 +1081,9 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
     return 0
 
 
-def run_task_show(args, *, store=None):
+def run_task_show(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
-    _print(_task_view(store.get(args.task_id)))
+    _print(_task_view(store.get(args.task_id)), stdout=stdout)
     return 0
 
 

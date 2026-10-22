@@ -28,7 +28,11 @@ KEY_HELP = """Keys
   PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
   F1                    Toggle this help (shown in place of the conversation)
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
-A request in progress cannot be cancelled; exit waits for it to finish or time out."""
+A request in progress cannot be cancelled; exit waits for it to finish or time out.
+
+Formal task commands (separate from ordinary chat)
+  /task submit --provider PROFILE REQUEST
+  /task show TASK_ID"""
 
 FAILED = "llmtool: chat terminal UI failed; details omitted"
 _TOOLKIT_MODULES = (
@@ -124,6 +128,7 @@ class ChatTUI:
         self.quit_pending = False
         self.show_help = False
         self.worker = None
+        self.worker_kind = None
         self._loop = None
         self._received_signal = None
         self.conversation = TextArea(
@@ -287,6 +292,12 @@ class ChatTUI:
 
     def run_command(self, text):
         self.append("> " + text.strip())
+        if text.strip().split(maxsplit=1)[0] == "/task":
+            self.run_task_command(text)
+            return
+        if text.strip() == "/help":
+            self.append(KEY_HELP + "\n\n" + HELP)
+            return
         try:
             output = self.session.command(text)
         except LLMToolError as exc:
@@ -299,8 +310,71 @@ class ChatTUI:
         if not self.session.active:
             self.app.exit(result=0)
 
+    def run_task_command(self, text):
+        """Run an explicit TaskStore command; chat text never enters this route."""
+        parts = text.strip().split(maxsplit=3)
+        if len(parts) >= 2 and parts[1] == "submit":
+            if (len(parts) != 4 or parts[2] != "--provider" or
+                    not parts[3].strip()):
+                self.append("usage: /task submit --provider PROFILE REQUEST")
+                return
+            # Keep the existing CLI's explicit provider and Task/Run creation path.
+            # split(maxsplit=3) leaves the provider option and request together;
+            # parse them without interpreting request text as shell syntax.
+            option_parts = parts[3].split(maxsplit=1)
+            if len(option_parts) != 2:
+                self.append("usage: /task submit --provider PROFILE REQUEST")
+                return
+            provider, request = option_parts
+            if not provider or not request.strip():
+                self.append("usage: /task submit --provider PROFILE REQUEST")
+                return
+            self.start_task("submit", provider, request.strip())
+            return
+        if len(parts) == 3 and parts[1] == "show":
+            self.start_task("show", parts[2], None)
+            return
+        self.append("usage: /task submit --provider PROFILE REQUEST\n"
+                    "       /task show TASK_ID")
+
+    def start_task(self, action, first, request):
+        self.busy = True
+        self.worker_kind = "task"
+        self.append("llmtool: task intake only; Developer dispatch is not implied")
+        self._loop = asyncio.get_running_loop()
+        self.worker = threading.Thread(target=self._task_request,
+                                       args=(action, first, request, self._loop),
+                                       name="llmtool-chat-task")
+        self.worker.start()
+
+    def _task_request(self, action, first, request, loop):
+        """Run existing task submit/show APIs with task-local captured output."""
+        import io
+        from argparse import Namespace
+        from .task_submission_cli import run_task_show, run_task_submit
+
+        output = io.StringIO()
+        try:
+            if action == "submit":
+                with background_cli_invocation():
+                    code = run_task_submit(
+                        Namespace(provider=first, request=[request]), stdout=output)
+            else:
+                code = run_task_show(Namespace(task_id=first), stdout=output)
+            rendered = output.getvalue().strip()
+            outcome = (code == 0, rendered or "task command returned no result")
+        except LLMToolError as exc:
+            outcome = (False, str(exc))
+        except BaseException:
+            outcome = (False, "task command failed; details omitted")
+        try:
+            loop.call_soon_threadsafe(self.finish_send, outcome)
+        except RuntimeError:
+            pass
+
     def start_send(self, text):
         self.busy = True
+        self.worker_kind = "chat"
         self.append("you:\n" + text)
         self._loop = asyncio.get_running_loop()
         self.worker = threading.Thread(target=self._request, args=(text, self._loop),
@@ -324,13 +398,19 @@ class ChatTUI:
     def finish_send(self, outcome):
         """Runs as an event-loop callback, where an exception would bypass run()."""
         ok, text = outcome
+        kind = self.worker_kind
         self.busy = False
         self.worker = None
+        self.worker_kind = None
         if self._received_signal is not None:
             self.app.exit(result=0)
             return
         try:
-            self.append(("assistant:\n" if ok else "llmtool: ") + (text or ""))
+            if kind == "task":
+                prefix = "task result:\n" if ok else "llmtool task command failed:\n"
+            else:
+                prefix = "assistant:\n" if ok else "llmtool: "
+            self.append(prefix + (text or ""))
         except Exception:
             self.app.exit(result=1)  # Sanitized FAILED; ChatSession history is already correct.
             return
