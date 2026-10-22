@@ -691,6 +691,44 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(self.dep_marker(worktree), "dep")
         self.assertTrue((worktree / "tools" / "llmtool" / ".venv" / "pyvenv.cfg").is_file())
 
+    def test_recreate_refuses_invalid_existing_venv_without_deleting_it(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        venv = worktree / "tools" / "llmtool" / ".venv"
+        venv.mkdir()
+        sentinel = venv / "preserve-me.txt"
+        sentinel.write_text("pre-existing data", encoding="utf-8")
+
+        code, out, err = self.bootstrap(worktree, "--recreate")
+
+        self.assertEqual(code, 4)
+        self.assertIn("INVALID_VENV", err)
+        self.assertTrue(sentinel.is_file())
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "pre-existing data")
+
+    def test_pip_failure_diagnostics_redact_url_credentials_and_query(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        original_run = subprocess.run
+        secret_output = (
+            "Could not fetch https://user:password@packages.example/simple?token=secret-value"
+        )
+
+        def run_with_pip_failure(command, *args, **kwargs):
+            if "pip" in command and "download" in command:
+                return subprocess.CompletedProcess(command, 1, "", secret_output)
+            return original_run(command, *args, **kwargs)
+
+        with mock.patch.object(we.subprocess, "run", side_effect=run_with_pip_failure):
+            code, out, err = self.run_cli(
+                "bootstrap", "--worktree", worktree, "--cache-root", self.cache, "--json"
+            )
+
+        self.assertEqual(code, 5)
+        self.assertIn("PIP_DOWNLOAD_FAILED", err)
+        self.assertIn("PIP_DOWNLOAD_FAILED", out)
+        for secret in ("user", "password", "token", "secret-value"):
+            self.assertNotIn(secret, err)
+            self.assertNotIn(secret, out)
+
     def test_missing_manifest_and_extra_wheel_fail_closed(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         fingerprint = self.seed_cache(worktree)
@@ -1124,6 +1162,36 @@ class IsolationTest(EnvironmentTempCase):
         code, out, err = self.run_cli("verify", "--worktree", third, "--json")
         self.assertEqual(code, 3)
         self.assertIn("FOREIGN_SOURCE", err)
+
+    @needs_editable_pip
+    def test_symlinked_package_directory_is_rejected_as_foreign_source(self):
+        worktree = self.make_worktree(self.tmp / "wt", "source-A")
+        code, out, err = self.bootstrap(worktree)
+        self.assertEqual(code, 0, err)
+        package_dir = worktree / "tools" / "llmtool" / "llmtool"
+        foreign_package = self.tmp / "foreign-package"
+        shutil.move(str(package_dir), str(foreign_package))
+        os.symlink(str(foreign_package), str(package_dir))
+
+        code, out, err = self.run_cli("verify", "--worktree", worktree, "--json")
+
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_SOURCE", err)
+
+    @needs_editable_pip
+    def test_symlinked_package_init_is_rejected_as_foreign_source(self):
+        worktree = self.make_worktree(self.tmp / "wt", "source-A")
+        code, out, err = self.bootstrap(worktree)
+        self.assertEqual(code, 0, err)
+        package_init = worktree / "tools" / "llmtool" / "llmtool" / "__init__.py"
+        foreign_init = self.tmp / "foreign-init.py"
+        shutil.move(str(package_init), str(foreign_init))
+        os.symlink(str(foreign_init), str(package_init))
+
+        code, out, err = self.run_cli("verify", "--worktree", worktree, "--json")
+
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_SOURCE", err)
 
     @needs_editable_pip
     def test_symlinked_venv_is_rejected(self):

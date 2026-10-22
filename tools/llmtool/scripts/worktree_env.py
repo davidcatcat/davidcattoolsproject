@@ -483,6 +483,20 @@ def strip_credentials(value):
     return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
 
 
+def _safe_command_output(value, limit):
+    """Bound subprocess diagnostics after removing URL credentials and queries."""
+
+    def redact(match):
+        try:
+            return strip_credentials(match.group(0))
+        except EnvError:
+            return "<redacted-url>"
+
+    value = value or ""
+    value = re.sub(r"(?i)\bhttps?://[^\s\"'<>]+", redact, value)
+    return value.strip()[-limit:]
+
+
 def _pip_config_files(interp):
     """Candidate pip config files (a superset of what pip itself reads).
 
@@ -923,7 +937,7 @@ def _download_wheels(python_executable, requirements, destination):
         raise EnvError(
             "PIP_DOWNLOAD_FAILED",
             "pip download failed (%d): %s"
-            % (proc.returncode, (proc.stderr or proc.stdout or "").strip()[-2000:]),
+            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
             5,
         )
     req_path.unlink()
@@ -1102,7 +1116,7 @@ def create_venv(worktree, python_executable, recreate=False):
         raise EnvError(
             "VENV_FAILED",
             "venv creation failed (%d): %s"
-            % (proc.returncode, (proc.stderr or proc.stdout or "").strip()[-2000:]),
+            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
             5,
         )
     _assert_venv_within_worktree(venv, worktree)
@@ -1137,7 +1151,7 @@ def install_requirements(python_executable, wheelhouse, requirements):
         raise EnvError(
             "PIP_INSTALL_FAILED",
             "dependency install failed (%d): %s"
-            % (proc.returncode, (proc.stderr or proc.stdout or "").strip()[-2000:]),
+            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
             5,
         )
 
@@ -1159,7 +1173,8 @@ def pip_version(python_executable):
     if proc.returncode != 0 or not match:
         raise EnvError(
             "PIP_UNAVAILABLE",
-            "venv pip did not report a version: %s" % (proc.stderr or proc.stdout or "").strip()[-500:],
+            "venv pip did not report a version: %s"
+            % _safe_command_output(proc.stderr or proc.stdout, 500),
             5,
         )
     return (int(match.group(1)), int(match.group(2)))
@@ -1223,7 +1238,7 @@ def install_project(python_executable, worktree, wheelhouse):
         raise EnvError(
             "PIP_INSTALL_FAILED",
             "worktree project install failed (%d): %s"
-            % (proc.returncode, (proc.stderr or proc.stdout or "").strip()[-2000:]),
+            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
             5,
         )
 
@@ -1353,6 +1368,16 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
 
     sections = parse_lock(Path(lock_path))
     requirements = selected_requirements(sections, extras)
+    project_expected = marker.get("project") if expect_project is None else expect_project
+    source_root = worktree / PROJECT_RELATIVE
+    package_dir = source_root / "llmtool"
+    package_init = package_dir / "__init__.py"
+    if project_expected and (package_dir.is_symlink() or package_init.is_symlink()):
+        raise EnvError(
+            "UNSAFE_SOURCE",
+            "refusing symlinked llmtool package source in this worktree",
+            3,
+        )
     probe = _probe_venv(venv_python(venv), [item["name"] for item in requirements])
     bad = [
         (item["name"], probe["versions"].get(item["name"]), item["version"])
@@ -1362,7 +1387,6 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
     if bad:
         raise EnvError("ENV_DRIFT", "installed versions do not match the lock: %s" % bad, 3)
 
-    project_expected = marker.get("project") if expect_project is None else expect_project
     if project_expected:
         if probe.get("error"):
             raise EnvError("PROJECT_MISSING", probe["error"], 3)
@@ -1370,8 +1394,7 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
             raise EnvError(
                 "PROJECT_IMPORT_FAILED", "llmtool does not import: %s" % probe["import_error"], 3
             )
-        source_root = Path(os.path.realpath(str(worktree / PROJECT_RELATIVE)))
-        expected_init = Path(os.path.realpath(str(source_root / "llmtool" / "__init__.py")))
+        expected_init = package_init
         imported = Path(probe.get("llmtool_file") or "")
         if imported != expected_init:
             raise EnvError(
@@ -1491,6 +1514,10 @@ def _bootstrap_locked(
     python_executable, inputs, fp, cache_root,
 ):
     venv = venv_dir(worktree)
+    # Validate before entering the rebuild cleanup handler so refusal preserves
+    # an existing invalid venv exactly as found.
+    if args.recreate and (venv.exists() or venv.is_symlink()):
+        _assert_venv_within_worktree(venv, worktree)
     if venv.exists() and not args.recreate:
         phase = time.monotonic()
         report = verify_env(worktree, lock_path, args.extras)
