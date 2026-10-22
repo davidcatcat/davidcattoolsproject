@@ -1330,6 +1330,100 @@ def _codex_row(path: str, now: float, canonical: str):
     return ("main", payload.get("id"), OfficeRow("codex PM", state, since, age, 0, key=key))
 
 
+# One-shot Claude reviews a Codex thread runs with `claude --print`. Only that
+# call's own result is used (directly, or via write_stdin polls of its exec
+# session), never other tool output, so a verdict quoted from GitHub cannot be
+# mistaken for one. Just the PR number, reviewed head and verdict word are
+# extracted from the first part of the result; nothing else is kept.
+CLAUDE_CALL = re.compile(r"\bclaude\b[\s\S]{0,40}?(?:--print\b|\s-p\s|'--print'|\"--print\")")
+STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
+REVIEW_VERDICT = re.compile(r"(?i)\bverdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
+REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
+REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
+REVIEW_SCAN = 6 << 20
+_review_cache: dict = {}
+
+
+def _review_target(text: str) -> tuple[str, str]:
+    pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
+    return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
+
+
+def codex_reviews(path: str) -> list[tuple]:
+    """[(time, pr, head7, verdict or None)] for `claude --print` calls in one
+    Codex thread, newest last; verdict None = no result returned yet."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    cache = _review_cache.get(path)
+    if cache is None or size < cache["offset"]:
+        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": {}, "polls": {},
+                 "sessions": {}, "done": [], "carry": b""}
+        _review_cache[path] = cache
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(cache["offset"])
+            data = cache["carry"] + handle.read(size - cache["offset"])
+    except OSError:
+        return []
+    first = cache["offset"] == max(0, size - REVIEW_SCAN) and not cache["done"] and not cache["calls"]
+    cache["offset"] = size
+    lines = data.split(b"\n")
+    cache["carry"] = lines.pop()   # an unfinished last line is read again next time
+    if first and data and not data.startswith(b"{"):
+        lines = lines[1:]
+    for raw in lines:
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            continue
+        payload = item.get("payload") if type(item) is dict else None
+        if type(payload) is not dict:
+            continue
+        when = _github_time(str(item.get("timestamp") or "")[:19] + "Z")
+        kind, call = payload.get("type"), payload.get("call_id")
+        if kind == "custom_tool_call":
+            text = str(payload.get("input") or "")
+            if CLAUDE_CALL.search(text):
+                cache["calls"][call] = (when,) + _review_target(text)
+            found = STDIN_POLL.search(text)
+            if found:
+                cache["polls"][call] = int(found.group(1))
+        elif kind == "custom_tool_call_output":
+            origin = cache["calls"].get(call)
+            if origin is None:
+                origin = cache["sessions"].get(cache["polls"].get(call))
+            if origin is None:
+                continue
+            for part in payload.get("output") or []:
+                text = part.get("text", "") if type(part) is dict else ""
+                session = re.search(r'"session_id":(\d{1,9})', text)
+                if session and '"exit_code"' not in text:
+                    cache["sessions"][int(session.group(1))] = origin
+                start = text.find('"output":')
+                if '"exit_code"' in text and start >= 0:
+                    head = text[start:start + 1500]
+                    verdict = REVIEW_VERDICT.search(head)
+                    pr, sha = _review_target(head)
+                    cache["done"].append((when, pr or origin[1], sha or origin[2],
+                                          verdict.group(1).upper() if verdict
+                                          else "結束但沒有判定（可能呼叫失敗）"))
+                    for key in [k for k, v in cache["calls"].items() if v is origin]:
+                        cache["calls"].pop(key)
+                    for key in [k for k, v in cache["sessions"].items() if v is origin]:
+                        cache["sessions"].pop(key)
+    cache["done"] = cache["done"][-20:]
+    pending = [(when, pr, sha, None) for when, pr, sha in cache["calls"].values()]
+    pending += [(when, pr, sha, None) for when, pr, sha in set(cache["sessions"].values())]
+    return sorted(cache["done"] + pending)
+
+
+def _review_label(pr: str, sha: str) -> str:
+    target = f"PR #{pr}" if pr else "（PR 未知）"
+    return f"審 {target}" + (f" @{sha}" if sha else "")
+
+
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None) -> list[OfficeRow]:
     root = CODEX_SESSIONS if root is None else root
@@ -1351,6 +1445,18 @@ def codex_rows(now: float, root: str | None = None,
         kind, key, row = found
         if kind == "main":
             mains[key] = row
+            for when, pr, sha, verdict in codex_reviews(path):
+                age = max(0.0, now - when) if when else None
+                if verdict is None and age is not None and age <= OFFICE_STALL:
+                    subs.append((key, OfficeRow("claude reviewer", WORKING,
+                                                f"{_review_label(pr, sha)}（單次呼叫執行中）",
+                                                age, 30, kind="subagent", group=row.key,
+                                                key="review")))
+                elif verdict is not None and age is not None and age <= OFFICE_DONE_WINDOW:
+                    subs.append((key, OfficeRow("claude reviewer", DONE,
+                                                f"{_review_label(pr, sha)}：{verdict}",
+                                                age, 30, kind="subagent", group=row.key,
+                                                key="review")))
         else:
             subs.append((key, row))
     rows = []
@@ -1772,12 +1878,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     # `claude -p --no-session-persistence` started by Codex leaves no session
     # file; while its process runs, it is still a member at work.
+    explained = any(row.key == "review" for row in rows)
     for proc in sorted((p for p in processes if p.role == "Claude Code CLI"
-                        and p.owner.startswith("Codex")), key=lambda p: p.pid):
+                        and p.owner.startswith("Codex") and not explained), key=lambda p: p.pid):
         rows.append(OfficeRow("claude reviewer", WORKING, "單次呼叫執行中（不留 session 紀錄）",
                               _elapsed_seconds(proc.elapsed) or 0.0, 30,
                               group="codex-launched", kind="subagent"))
-    for duration, since_end in finished_runs or []:
+    for duration, since_end in ([] if explained else finished_runs or []):
         rows.append(OfficeRow("claude reviewer", DONE,
                               f"單次呼叫已結束（跑了約 {max(1, int(duration))} 秒，不留 session 紀錄）",
                               since_end, 30, group="codex-launched", kind="subagent"))

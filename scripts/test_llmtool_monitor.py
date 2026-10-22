@@ -988,6 +988,44 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("跑了約 45 秒", done[0].detail)
         self.assertEqual(done[0].group, self.by_name(rows)["codex PM"].key)
 
+    def test_one_shot_review_shows_pr_head_and_verdict_from_the_pm_record_only(self):
+        ts = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%S.000Z", mon.time.gmtime(self.NOW - age))
+        out = lambda text: {"type": "custom_tool_call_output", "call_id": None,
+                            "output": [{"type": "input_text", "text": text}]}
+        def call(cid, text):
+            return {"type": "custom_tool_call", "call_id": cid, "name": "exec", "input": text}
+        result = ('{"exit_code":0,"output":"# Formal review PR #283\\n**Verdict: FAIL** at head '
+                  '`18538d569d94fa7e5a06605dadf3a7305407b4de`\\nPROMPT-SECRET details"}')
+        events = [
+            (900, call("c1", 'gh pr diff 283 | claude --print --tools "" "Review PR #283 head '
+                             '18538d569d94fa7e5a06605dadf3a7305407b4de"')),
+            (899, dict(out('{"session_id":70614,"output":""}'), call_id="c1")),
+            (880, call("c2", "const r=await tools.write_stdin({session_id:70614,yield_time_ms:30000});")),
+            (860, dict(out(result), call_id="c2")),
+            # a verdict quoted by gh, not from a claude call, must be ignored
+            (850, call("c3", "gh pr view 283 --json comments")),
+            (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
+                       call_id="c3")),
+            (30, call("c4", "claude -p 'Review PR #284 head 1ee2f21c8caca7c66dc497268759dc8c308adebf'")),
+        ]
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                      "thread_source": "user"}}]
+        items += [{"type": "event_msg", "payload": {"type": "task_started"}}]
+        items += [{"timestamp": ts(age), "type": "response_item", "payload": payload}
+                  for age, payload in events]
+        self._write(self.codex / day / "rollout-pm.jsonl", items, age=5)
+        run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        rows = self.rows([run])
+        reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
+        self.assertEqual(reviews, {"審 PR #283 @18538d5：FAIL": mon.DONE,
+                                   "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
+        text = "\n".join(mon.office_lines(rows))
+        self.assertNotIn("PR #999", text)
+        self.assertNotIn("PROMPT-SECRET", text)
+        self.assertNotIn("單次呼叫執行中（不留 session 紀錄）", text)   # PM record explains the process
+
     def test_roadmap_workers_map_to_office_states_without_raw_text(self):
         rows = self.by_name(self.rows())
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
