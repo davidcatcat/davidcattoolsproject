@@ -20,12 +20,12 @@ When the PM receives PASS, FAIL or BLOCKED for a Task, it records the next decis
 1. **Confirm the cause with evidence:** the exact error code, run/Task ID, observed time and the check that produced it. A stale comment, an assumption or a single indirect signal does not confirm a cause.
 2. **Classify the cause:**
    - transient (timeout, rate limit, interrupted process);
-   - Worker unavailable (quota, login, provider or VPN layer; see [Worker availability](../../tools/llmtool/ROADMAP.md#worker-availability--live-status));
+   - Worker unavailable (quota, login, provider or VPN layer): first read the Owner switch in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json), then confirm live technical state through the [local monitor](../../scripts/llmtool_monitor.py); these are separate evidence.
    - a defect in the Task itself;
    - missing authority.
 3. **Choose one action and record it:**
    - **Retry:** only when the cause is transient and the Task budget allows it. Never replay an outcome that the runtime recorded as UNKNOWN or non-replayable.
-   - **Reassign:** move the Task to another Worker that is authorized and currently available. Keep D6 single-writer ownership: hand over only after the previous writer has verifiably released the Task. Never use a paid fallback that is not already authorized.
+   - **Reassign:** move the Task only to a Worker whose worker-dispatch.json switch permits assignment and whose live technical availability is freshly confirmed. PAUSED is never overridden by a healthy provider signal; OWNER_ASSIGNMENT_ONLY requires the explicit Owner assignment. Keep D6 single-writer ownership: hand over only after the previous writer has verifiably released the Task. Never use a paid fallback that is not already authorized.
    - **Isolate:** mark only that Task BLOCKED, with the cause and the condition for resuming it.
 4. **Keep other work moving.** One unavailable Worker or one BLOCKED Task does not block other independent, authorized Tasks. The PM continues dispatching them.
 
@@ -47,7 +47,7 @@ After a work package completes, or after a Task is isolated, the PM checks:
 - open A11c Issues and PRs;
 - registered D6 Tasks.
 
-It then picks the next work package that is executable and authorized, and has an available Worker. The PM reports **IDLE** only when no such work package exists. The IDLE report lists every remaining item and the reason it cannot run.
+It then picks the next work package that is executable and authorized, and has a Worker permitted by worker-dispatch.json with freshly confirmed live availability. The PM reports **IDLE** only when no such work package exists. The IDLE report lists every remaining item and the reason it cannot run.
 
 ## Transition record
 
