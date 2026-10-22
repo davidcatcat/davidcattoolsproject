@@ -1341,7 +1341,7 @@ CHANGES_REQUIRED verdict and does not grant mutation.
 | S1a, delivered | PR #128 task inspect / explicit independent expectation, replay and read-only preview | No agent/provider/repair authority |
 | S1b A/B1, delivered source | PR #131 collector/packet/verdict/fake flow; PR #133 host adapters and one-use provider ledger | Public production factory remains unavailable; native T1 HOLD and production enablement are not passed |
 | Next S1b preparation | One finite deterministic task worker, existing events/paired contracts, fake clocks/transports and dedup; no model while waiting | Separate source task after this docs contract's independent review/merge and genuine C3; no real calls or new service |
-| Read-only native handoff | Claude author READY -> fixed Codex Reviewer queue -> exact-SHA verdict -> original Claude notification/receipt -> worker exit | Independently reviewed Codex transport/identity/tool/route extension plus explicit native synthetic scope; fake PASS never supplies a grant |
+| Read-only native handoff (historical proposal) | Claude author READY -> candidate Codex advisory/pre-review queue -> exact-SHA feedback -> original Claude notification/receipt -> worker exit | Codex feedback is not the formal Security/Functional/QA gate under current authority. Any future Codex formal-review route requires an explicit Owner authority change plus independently reviewed transport/identity/tool/route extension and native synthetic scope; fake PASS never supplies a grant |
 | S2, later | Permission-controlled repair/tests/publication and actual end-to-end execution | A11b approval/containment/recovery/audit, scoped action grants and separate F2 authority; no automatic merge |
 | A11c.2 / cutover | Independently accepted native task -> review -> bounded authorized repair -> Draft PR or STOP | All applicable gates including provider/privacy/native evidence; ai-loop fallback is not retired early |
 
@@ -1358,9 +1358,11 @@ delivery-pending snapshot only. It does not establish arbitrary GitHub wake,
 closed-TUI recovery, zero-human production pickup or the complete cross-CLI loop.
 CROSS_CLI_AUTO_HANDOFF_NOT_VERIFIED remains the overall status.
 
-The current B route is fresh isolated Claude text/no-tools, so reuse of an
-existing Codex Reviewer requires an independently reviewed S1b host/transport
-extension rather than a caller switch. Production Host/ledger/T2/T3 remain
+The current B route is fresh isolated Claude text/no-tools. Reusing an existing
+Codex Reviewer can provide advisory/pre-review feedback only under current
+authority; formal review by Codex requires an explicit Owner authority change
+and an independently reviewed S1b host/transport extension rather than a caller
+switch. Production Host/ledger/T2/T3 remain
 blocked; T1 additional native measurement is
 [HOLD_REPRIORITIZE](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6145275723).
 Read-only deterministic/fake development may be separately authorized before
