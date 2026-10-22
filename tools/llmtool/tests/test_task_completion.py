@@ -219,6 +219,14 @@ class TaskCompletionTests(unittest.TestCase):
                 expected_native_session_id='native-executor', write_paths=[self.source_path],
                 artifact='fake patch', artifact_sha256=hashlib.sha256(b'fake patch').hexdigest())
 
+    def test_dirty_tracked_source_file_is_rejected(self):
+        path = self.root / self.source_path
+        path.write_text(path.read_text() + '\n# uncommitted change\n')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.bind_executor_task(
+                self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(rejected.exception.completion_code, 'D6_SOURCE_BINDING_MISMATCH')
+
     def test_registered_branch_head_may_advance_from_its_approved_base(self):
         result_sha, _ = self._make_result()
         registration, snapshot = task_completion.bind_executor_task(
