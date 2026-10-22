@@ -16,6 +16,7 @@ from llmtool.providers.base import Reply
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record, run_task_complete
 from llmtool import task_completion
+from llmtool import worker_dispatch
 
 
 class FakeClient:
@@ -43,6 +44,14 @@ class TaskCompletionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated callback checks'
+        self.policy_path = self.base / 'worker-dispatch.json'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         self.root = self.base / 'executor'
         self.root.mkdir(mode=0o700)
         self._git('init', '-b', 'feat/executor')

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
+from llmtool import worker_dispatch
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
@@ -48,6 +49,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
         self.home.mkdir(mode=0o700)
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
+        self.policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         self.args = Namespace(provider='selected', request=['Implement', 'a', 'health-check'])
         self.executor_root = Path(self.temp.name).resolve() / 'executor'
         self.executor_root.mkdir(mode=0o700)
@@ -677,6 +686,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
         self.assertEqual(developer['execution']['cleanup_status'], 'CONFIRMED')
 
+    def test_direct_taskstore_assignment_rechecks_policy_and_denies_paused_worker(self):
+        task = self._pm_task_with_opencode_assignment()
+        policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'PAUSED'
+        policy['workers']['opencode-developer']['reason'] = 'test pause'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        args = self._opencode_delegate_args(task)
+        out = io.StringIO()
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke, \
+                redirect_stdout(out):
+            with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
+                run_task_delegate(args, store=store)
+        invoke.assert_not_called()
+        saved = store.get(task['task_id'])
+        self.assertIsNone(saved['developer'])
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
+
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test resume'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      return_value=DirectResult(0, 'ses_Abc123', 'ok', None,
+                          'CLI_REPORTED', 'a' * 64, 1, 'CONFIRMED',
+                          'opencode v2.0.32', 1, 1, 'b' * 64)) as invoke, \
+                redirect_stdout(io.StringIO()):
+            # Assignment is authorized after the policy file changes; the policy is reread.
+            result = run_task_delegate(args, store=store)
+        self.assertEqual(result, 1)
+        invoke.assert_called_once()
+        saved = store.get(task['task_id'])
+        self.assertEqual([entry['decision'] for entry in saved['dispatch_audit']],
+                         ['BLOCKED', 'ALLOWED', 'ALLOWED'])
+
     def _delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='company-gw',
                       selection_source='PM',
@@ -949,11 +995,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
         task = self._pm_task_with_assignment()
         backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         read_barrier = threading.Barrier(2)
+        synchronized_reads = [0]
+        synchronized_reads_lock = threading.Lock()
 
         class StaleReadStore:
             def get(self, task_id):
                 result = backing.get(task_id)
-                read_barrier.wait(timeout=5)
+                with synchronized_reads_lock:
+                    synchronize = synchronized_reads[0] < 2
+                    synchronized_reads[0] += 1
+                if synchronize:
+                    read_barrier.wait(timeout=5)
                 return result
 
             def compare_and_update(self, task_id, **kwargs):
@@ -961,6 +1013,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
             def update(self, task_id, **kwargs):
                 return backing.update(task_id, **kwargs)
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                return backing.append_dispatch_audit(task_id, entry, expected=expected)
 
         client = FakeClient(Reply(
             'diff --git a/tools/llmtool/tests/test_task_submission_cli.py '

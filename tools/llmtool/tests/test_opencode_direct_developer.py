@@ -12,6 +12,7 @@ from llmtool.opencode_direct_developer import (
     AGENT, MODEL, DirectOpenCodeError, configuration, parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
+from llmtool import worker_dispatch
 
 
 class DirectOpenCodeDeveloperTests(unittest.TestCase):
@@ -22,7 +23,50 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         (self.root / 'source.py').write_text('VALUE = 1\n')
 
     def run_with_valid_binding(self, **kwargs):
-        return run(**kwargs, prelaunch_validate=lambda: True)
+        with patch('llmtool.opencode_direct_developer.worker_dispatch.authorize_dispatch'):
+            return run(**kwargs, dispatch_store=object(), dispatch_task_id='a' * 32,
+                       prelaunch_validate=lambda: True)
+
+    def test_direct_adapter_cannot_run_without_dispatch_context(self):
+        marker = self.root / 'run-invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n',
+                            run_invocation_marker=marker)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'WORKER_DISPATCH_CONTEXT_UNAVAILABLE')
+        self.assertFalse(marker.exists())
+
+    def test_paused_policy_blocks_direct_adapter_before_provider_run(self):
+        class Store:
+            def __init__(self):
+                self.entries = []
+
+            def get(self, task_id):
+                return {'developer': {
+                    'state': 'DEVELOPER_DISPATCHING', 'provider_profile': 'opencode'},
+                    'dispatch_audit': self.entries}
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                self.entries.append(entry)
+
+        store = Store()
+        policy_path = Path(worker_dispatch._POLICY_PATH)
+        run_marker = self.root / 'provider-run-invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n',
+                            run_invocation_marker=run_marker)
+        with patch.object(worker_dispatch, '_POLICY_PATH', policy_path):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                    dispatch_store=store, dispatch_task_id='a' * 32,
+                    timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'OWNER_PAUSED')
+        self.assertFalse(run_marker.exists())
+        self.assertEqual(store.entries[-1]['decision'], 'BLOCKED')
+        self.assertEqual(store.entries[-1]['worker_key'], 'opencode-developer')
 
     @staticmethod
     def event(kind, **fields):
@@ -216,6 +260,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         with self.assertRaises(DirectOpenCodeError) as caught:
             run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', prelaunch_validate=lambda: False,
+                dispatch_store=object(), dispatch_task_id='a' * 32,
                 timeout_seconds=5, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_D6_BINDING_CHANGED')

@@ -15,9 +15,10 @@ from .config import api_key, resolve_profile_config, selected_provider
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
-from .task_store import TaskStore, new_id
+from .task_store import TaskStore, TaskStoreConflict, new_id
 from . import task_completion
 from . import opencode_direct_developer
+from . import worker_dispatch
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
 
@@ -702,12 +703,16 @@ def run_task_opencode_delegate(args, *, store):
         'pm_response': None, 'pm_recommendation': None,
         'pm_usage': None, 'pm_error_code': None,
     }
-    store.compare_and_update(
-        task['task_id'],
-        expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                  'completion': None},
-        developer=developer, completion=completion,
-    )
+    try:
+        store.compare_and_update(
+            task['task_id'],
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None},
+            developer=developer, completion=completion,
+        )
+    except TaskStoreConflict:
+        raise LLMToolError(
+            'developer assignment already exists; duplicate dispatch refused') from None
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=opencode_direct_developer.MODEL,
@@ -725,6 +730,7 @@ def run_task_opencode_delegate(args, *, store):
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
+            dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_prelaunch_d6_binding)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
@@ -914,12 +920,16 @@ def run_task_delegate(args, *, store=None):
     }
     # Persist the one-shot claim before network I/O. A crash or ambiguous result
     # remains pending; this task cannot silently trigger a duplicate provider call.
-    store.compare_and_update(
-        task['task_id'],
-        expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
-                  'completion': None},
-        developer=developer, completion=completion,
-    )
+    try:
+        store.compare_and_update(
+            task['task_id'],
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None},
+            developer=developer, completion=completion,
+        )
+    except TaskStoreConflict:
+        raise LLMToolError(
+            'developer assignment already exists; duplicate dispatch refused') from None
     try:
         config = resolve_profile_config('company-gw', require_configured=True)
         provider = selected_provider(config)
@@ -940,7 +950,21 @@ def run_task_delegate(args, *, store=None):
     developer['provider_type'] = 'openai-compatible'
     developer['model'] = provider.get('model')
     developer['max_tokens'] = max_tokens
-    store.update(task['task_id'], developer=developer)
+    try:
+        store.update(task['task_id'], developer=developer)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        developer.update(state='DEVELOPER_UNAVAILABLE', error_code=exc.dispatch_code)
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
+    try:
+        worker_dispatch.authorize_dispatch(
+            store, task['task_id'], 'company-gw', 'DISPATCH')
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        developer.update(state='DEVELOPER_UNAVAILABLE', error_code=exc.dispatch_code)
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
     try:
         result = client.complete(messages)
     except Exception as exc:
@@ -1727,6 +1751,19 @@ def _resume_reviewer_handoff(store, task, developer, callback, reviewer_adapter=
         with _active_review_dispatches_lock:
             _active_review_dispatches.discard(dispatch_id)
         _print(_task_view(current))
+        return 1
+    try:
+        worker_dispatch.authorize_dispatch(
+            store, task['task_id'], 'claude-reviewer', 'REVIEWER_HANDOFF')
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        pending = task_completion.review_handoff_pending(dispatching['intent'])
+        try:
+            saved = _persist_review_handoff(
+                store, task, developer, callback, dispatching, pending)
+            task = saved
+        except Exception:
+            task = store.get(task['task_id'])
+        _print(_task_view(task))
         return 1
     try:
         receipt = adapter(dispatching['intent'])

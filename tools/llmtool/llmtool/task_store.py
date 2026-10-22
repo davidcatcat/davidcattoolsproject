@@ -45,7 +45,11 @@ _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
 _V2_FIELD_SHAPES = (_FIELDS_V2_ROUTE, _FIELDS_V2_ROUTE_COMPLETION)
 _FIELDS_V2_WITH_PROVENANCE = tuple(shape | frozenset(('pm_provenance',))
                                    for shape in _V2_FIELD_SHAPES)
-FIELDS = _FIELDS_V2_ROUTE_COMPLETION
+_V2_BASE_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
+                   _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)
+_FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
+    shape | frozenset(('dispatch_audit',)) for shape in _V2_BASE_SHAPES)
+FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit',))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
@@ -110,7 +114,8 @@ def _validate(record):
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)) or
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
+              *_FIELDS_V2_WITH_DISPATCH_AUDIT)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -127,6 +132,36 @@ def _validate(record):
             _fail()
         if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != record[key]:
             _fail()
+    if 'dispatch_audit' in record:
+        audit = record['dispatch_audit']
+        if type(audit) is not list or len(audit) > 64:
+            _fail()
+        seen_attempts = set()
+        for entry in audit:
+            if (type(entry) is not dict or set(entry) != {
+                    'attempt_id', 'worker_key', 'action', 'decision',
+                    'reason_code', 'policy_sha256', 'at'} or
+                    type(entry['attempt_id']) is not str or
+                    re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id']) is None or
+                    entry['attempt_id'] in seen_attempts or
+                    type(entry['worker_key']) is not str or
+                    re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
+                    entry['action'] not in (
+                        'DISPATCH', 'RETRY', 'REASSIGN', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
+                    entry['decision'] not in ('ALLOWED', 'BLOCKED') or
+                    type(entry['reason_code']) is not str or
+                    re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or
+                    (entry['policy_sha256'] is not None and
+                     (type(entry['policy_sha256']) is not str or
+                      re.fullmatch(r'[0-9a-f]{64}', entry['policy_sha256']) is None))):
+                _fail()
+            try:
+                stamp = datetime.strptime(entry['at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                _fail()
+            if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != entry['at']:
+                _fail()
+            seen_attempts.add(entry['attempt_id'])
     for key in ('pm_provider_profile', 'pm_provider_type', 'pm_model',
                 'backend_session_semantics', 'error_code'):
         value = record[key]
@@ -981,6 +1016,26 @@ class TaskStore:
         return record
 
     def create(self, record):
+        if type(record) is not dict or 'dispatch_audit' in record:
+            _fail()
+        record = dict(record)
+        developer = record.get('developer')
+        if type(developer) is dict:
+            from . import worker_dispatch
+            attempt = worker_dispatch.task_store_attempt(
+                {'developer': None, 'dispatch_audit': []}, {'developer': developer})
+            if attempt is not None:
+                worker_key, action = attempt
+                decision = worker_dispatch.evaluate(worker_key)
+                record['dispatch_audit'] = [worker_dispatch.audit_entry(decision, action)]
+                if not decision.allowed:
+                    record['developer'] = None
+                    if 'completion' in record:
+                        record['completion'] = None
+                saved = self._write(record, create=True)
+                if not decision.allowed:
+                    raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+                return saved
         return self._write(record, create=True)
 
     def get(self, task_id):
@@ -999,7 +1054,30 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
-    def _update(self, task_id, *, expected, changes):
+    def append_dispatch_audit(self, task_id, entry, *, expected=None):
+        """Append one bounded gate result using the existing TaskStore CAS lock."""
+        for _ in range(4):
+            current = self.get(task_id)
+            audit = list(current.get('dispatch_audit', []))
+            if len(audit) >= 64:
+                _fail('WORKER_DISPATCH_AUDIT_LIMIT')
+            next_audit = audit + [entry]
+            preconditions = {'dispatch_audit': current.get('dispatch_audit')}
+            if expected is not None:
+                if type(expected) is not dict:
+                    _fail()
+                preconditions.update(expected)
+            try:
+                return self._update(task_id, expected=preconditions,
+                    changes={'dispatch_audit': next_audit},
+                    trusted_dispatch_audit=True)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False):
+        if 'dispatch_audit' in changes and not trusted_dispatch_audit:
+            _fail()
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         locked = False
@@ -1019,6 +1097,14 @@ class TaskStore:
                                             for key, value in expected.items()):
                 raise TaskStoreConflict(
                     'developer assignment already exists; duplicate dispatch refused')
+            from . import worker_dispatch
+            dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes)
+            if dispatch_denial is not None:
+                current['updated_at'] = datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat().replace('+00:00', 'Z')
+                current['record_sha256'] = _digest(current)
+                self._write(current, create=False)
+                raise dispatch_denial
             if set(changes) - (FIELDS - {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                                          'created_at', 'task_contract', 'task_binding', 'record_sha256'}):
                 _fail()
