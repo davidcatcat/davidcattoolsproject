@@ -1117,6 +1117,77 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(callback['review_return']['pm_error_code'],
                          'PM_RESPONSE_REJECTED')
 
+    def test_duplicate_event_preserves_active_reviewer_dispatch_claim(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-dispatch-claim-race')
+        persisted_claim = threading.Event()
+        release_claim = threading.Event()
+        adapter_entered = threading.Event()
+        release_adapter = threading.Event()
+        adapter_calls = []
+        original_compare = store.compare_and_update
+
+        def gated_compare(task_id, *, expected, **changes):
+            saved = original_compare(task_id, expected=expected, **changes)
+            proposed = changes.get('developer', {}).get('direct_result_callback', {})
+            handoff = proposed.get('review_handoff')
+            if type(handoff) is dict and handoff.get('dispatch_state') == 'DISPATCHING':
+                persisted_claim.set()
+                if not release_claim.wait(5):
+                    raise RuntimeError('test claim release timed out')
+            return saved
+
+        store.compare_and_update = gated_compare
+
+        def adapter(intent):
+            adapter_calls.append(intent['dispatch_id'])
+            adapter_entered.set()
+            if not release_adapter.wait(5):
+                raise RuntimeError('test adapter release timed out')
+            return self._trusted_review_receipt(intent, verdict='PASS')
+
+        first_result, first_errors = [], []
+
+        def first_event():
+            try:
+                first_result.append(self._run_direct_pm_send_to_review(
+                    task, store, result, tests, adapter=adapter)[0])
+            except BaseException as exc:
+                first_errors.append(exc)
+
+        first = threading.Thread(target=first_event)
+        first.start()
+        self.assertTrue(persisted_claim.wait(5), 'Reviewer claim was not persisted')
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            duplicate_before_adapter = run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store)
+        self.assertEqual(duplicate_before_adapter, 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'DISPATCHING')
+
+        release_claim.set()
+        self.assertTrue(adapter_entered.wait(5), 'original Reviewer adapter did not begin')
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            duplicate_during_adapter = run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store)
+        self.assertEqual(duplicate_during_adapter, 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'DISPATCHING')
+
+        release_adapter.set()
+        first.join(5)
+        self.assertFalse(first.is_alive(), 'original Reviewer dispatch did not finish')
+        self.assertEqual(first_errors, [])
+        self.assertEqual(first_result, [0])
+        self.assertEqual(len(adapter_calls), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_handoff']['receipt']['verdict'], 'PASS')
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
+
     def test_duplicate_event_preserves_active_pm_return_call(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
 
@@ -1196,18 +1267,8 @@ class TaskCompletionTests(unittest.TestCase):
         store.update(task['task_id'], developer={**developer,
             'direct_result_callback': callback})
 
-        original_compare = store.compare_and_update
-        both_claiming = threading.Barrier(2)
-
-        def interleaved_compare(task_id, *, expected, **changes):
-            proposed = changes.get('developer', {}).get('direct_result_callback', {})
-            handoff = proposed.get('review_handoff')
-            if type(handoff) is dict and handoff.get('dispatch_state') == 'DISPATCHING':
-                both_claiming.wait(timeout=5)
-            return original_compare(task_id, expected=expected, **changes)
-
-        store.compare_and_update = interleaved_compare
         adapter_calls = []
+        both_started = threading.Barrier(2)
 
         def adapter(request):
             adapter_calls.append(request['dispatch_id'])
@@ -1217,6 +1278,7 @@ class TaskCompletionTests(unittest.TestCase):
 
         def event():
             try:
+                both_started.wait(timeout=5)
                 with redirect_stdout(StringIO()):
                     results.append(run_task_direct_result_event(
                         task['task_id'], self.task_id, store=store))

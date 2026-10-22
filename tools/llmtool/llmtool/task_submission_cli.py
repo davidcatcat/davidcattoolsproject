@@ -1699,6 +1699,14 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         return 1
 
     dispatching = task_completion.review_handoff_dispatching(handoff['intent'])
+    dispatch_id = handoff['intent']['dispatch_id']
+    with _active_review_dispatches_lock:
+        already_active = dispatch_id in _active_review_dispatches
+        if not already_active:
+            _active_review_dispatches.add(dispatch_id)
+    if already_active:
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
     try:
         saved = _persist_review_handoff(store, task, developer, callback,
                                         handoff, dispatching)
@@ -1710,10 +1718,10 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         current_handoff = current['developer']['direct_result_callback'].get('review_handoff')
         # A competing process may have won, or the observed phase may now be
         # terminal. Neither case grants this invocation the dispatch claim.
+        with _active_review_dispatches_lock:
+            _active_review_dispatches.discard(dispatch_id)
         _print(_task_view(current))
         return 1
-    with _active_review_dispatches_lock:
-        _active_review_dispatches.add(dispatching['intent']['dispatch_id'])
     try:
         receipt = _trusted_reviewer_adapter(dispatching['intent'])
     except BaseException as exc:
