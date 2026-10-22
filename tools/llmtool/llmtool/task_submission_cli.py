@@ -29,6 +29,8 @@ _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 _trusted_reviewer_adapter = None
 _active_review_dispatches = set()
 _active_review_dispatches_lock = threading.Lock()
+_active_review_pm_returns = set()
+_active_review_pm_returns_lock = threading.Lock()
 _SYSTEM = (
     'You are the user-selected llmtool Integrator/PM AI. Respond directly to the '
     'submitted development request with a concise understanding, proposed next '
@@ -1445,6 +1447,12 @@ def _resume_review_result_return(store, task, developer, callback):
         task_completion.validate_review_return_record(review_return, handoff)
     state = review_return['state']
     if state == 'DISPATCHING':
+        dispatch_id = handoff['intent']['dispatch_id']
+        with _active_review_pm_returns_lock:
+            active = dispatch_id in _active_review_pm_returns
+        if active:
+            _print(_task_view(store.get(task['task_id'])))
+            return 1
         unknown = task_completion.review_return_record(
             handoff, state='OUTCOME_UNKNOWN', error_code='PM_CALL_OUTCOME_UNKNOWN')
         try:
@@ -1519,71 +1527,85 @@ def _resume_review_result_return(store, task, developer, callback):
         return 1
 
     dispatching = task_completion.review_return_record(handoff, state='DISPATCHING')
+    dispatch_id = handoff['intent']['dispatch_id']
+    with _active_review_pm_returns_lock:
+        already_active = dispatch_id in _active_review_pm_returns
+        if not already_active:
+            _active_review_pm_returns.add(dispatch_id)
+    if already_active:
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
     try:
         saved = _persist_review_return(store, task, developer, callback,
                                        review_return, dispatching)
     except Exception:
+        with _active_review_pm_returns_lock:
+            _active_review_pm_returns.discard(dispatch_id)
         _print(_task_view(store.get(task['task_id'])))
         return 1
     task, developer = saved, saved['developer']
     callback = developer['direct_result_callback']
     try:
-        reply = client.complete([
-            {'role': 'system', 'content': _REVIEW_RESULT_SYSTEM},
-            {'role': 'user', 'content': content},
-        ])
-    except (KeyboardInterrupt, CLIHostTermination) as exc:
-        unknown = task_completion.review_return_record(
-            handoff, state='OUTCOME_UNKNOWN', error_code='PM_CALL_INTERRUPTED')
         try:
-            _persist_review_return(store, task, developer, callback, dispatching, unknown)
-        except BaseException:
-            pass
-        _print_task_without_masking_interrupt(store, task['task_id'])
-        raise exc
-    except Exception as exc:
-        unknown = task_completion.review_return_record(
-            handoff, state='OUTCOME_UNKNOWN', error_code=_provider_error_code(exc))
+            reply = client.complete([
+                {'role': 'system', 'content': _REVIEW_RESULT_SYSTEM},
+                {'role': 'user', 'content': content},
+            ])
+        except (KeyboardInterrupt, CLIHostTermination) as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code='PM_CALL_INTERRUPTED')
+            try:
+                _persist_review_return(store, task, developer, callback, dispatching, unknown)
+            except BaseException:
+                pass
+            _print_task_without_masking_interrupt(store, task['task_id'])
+            raise exc
+        except Exception as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code=_provider_error_code(exc))
+            try:
+                saved = _persist_review_return(store, task, developer, callback,
+                                               dispatching, unknown)
+            except Exception:
+                saved = store.get(task['task_id'])
+            _print(_task_view(saved))
+            return 1
         try:
-            saved = _persist_review_return(store, task, developer, callback,
-                                           dispatching, unknown)
+            response = _screen_text(reply.content, RESPONSE_LIMIT)
+            recommendation = _review_pm_recommendation(response)
+            usage = reply_usage(reply.metadata)
+            verdict = receipt['verdict']
+            repair_round = handoff['intent']['repair_round']
+            if (recommendation is None or not
+                    task_completion.review_return_decision_allowed(
+                        verdict, repair_round, recommendation['decision'])):
+                raise LLMToolError('PM reviewer-result recommendation is invalid')
+        except (KeyboardInterrupt, CLIHostTermination) as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code='PM_RESPONSE_INTERRUPTED')
+            try:
+                _persist_review_return(store, task, developer, callback, dispatching, unknown)
+            except BaseException:
+                pass
+            _print_task_without_masking_interrupt(store, task['task_id'])
+            raise exc
         except Exception:
-            saved = store.get(task['task_id'])
-        _print(_task_view(saved))
-        return 1
-    try:
-        response = _screen_text(reply.content, RESPONSE_LIMIT)
-        recommendation = _review_pm_recommendation(response)
-        usage = reply_usage(reply.metadata)
-        verdict = receipt['verdict']
-        repair_round = handoff['intent']['repair_round']
-        if (recommendation is None or not
-                task_completion.review_return_decision_allowed(
-                    verdict, repair_round, recommendation['decision'])):
-            raise LLMToolError('PM reviewer-result recommendation is invalid')
-    except (KeyboardInterrupt, CLIHostTermination) as exc:
-        unknown = task_completion.review_return_record(
-            handoff, state='OUTCOME_UNKNOWN', error_code='PM_RESPONSE_INTERRUPTED')
-        try:
-            _persist_review_return(store, task, developer, callback, dispatching, unknown)
-        except BaseException:
-            pass
-        _print_task_without_masking_interrupt(store, task['task_id'])
-        raise exc
-    except Exception:
-        rejected = task_completion.review_return_record(
-            handoff, state='REJECTED', error_code='PM_RESPONSE_REJECTED')
+            rejected = task_completion.review_return_record(
+                handoff, state='REJECTED', error_code='PM_RESPONSE_REJECTED')
+            saved = _persist_review_return(store, task, developer, callback,
+                                           dispatching, rejected)
+            _print(_task_view(saved))
+            return 1
+        returned = task_completion.review_return_record(
+            handoff, state='RETURNED', response=response,
+            recommendation=recommendation, usage=None if usage is None else dict(usage))
         saved = _persist_review_return(store, task, developer, callback,
-                                       dispatching, rejected)
+                                       dispatching, returned)
         _print(_task_view(saved))
-        return 1
-    returned = task_completion.review_return_record(
-        handoff, state='RETURNED', response=response,
-        recommendation=recommendation, usage=None if usage is None else dict(usage))
-    saved = _persist_review_return(store, task, developer, callback,
-                                   dispatching, returned)
-    _print(_task_view(saved))
-    return 0 if receipt['verdict'] != 'BLOCKED' else 1
+        return 0 if receipt['verdict'] != 'BLOCKED' else 1
+    finally:
+        with _active_review_pm_returns_lock:
+            _active_review_pm_returns.discard(dispatch_id)
 
 
 def _resume_reviewer_handoff(store, task, developer, callback):

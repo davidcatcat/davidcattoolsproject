@@ -934,18 +934,19 @@ class TaskCompletionTests(unittest.TestCase):
         return task, store, result, tests
 
     def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None,
-                                     reviewer_decision='STOP'):
+                                     reviewer_decision='STOP', client=None):
         from llmtool.task_submission_cli import run_task_direct_result_event
 
-        client = FakeClient(replies=[
-            Reply(json.dumps({'schema_version': 1,
-                'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
-                {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}),
-            Reply(json.dumps({'schema_version': 1,
-                'decision': reviewer_decision,
-                'summary': 'Stop after receipt delivery.'}),
-                {'prompt_tokens': 8, 'completion_tokens': 4, 'total_tokens': 12}),
-        ])
+        if client is None:
+            client = FakeClient(replies=[
+                Reply(json.dumps({'schema_version': 1,
+                    'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
+                    {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}),
+                Reply(json.dumps({'schema_version': 1,
+                    'decision': reviewer_decision,
+                    'summary': 'Stop after receipt delivery.'}),
+                    {'prompt_tokens': 8, 'completion_tokens': 4, 'total_tokens': 12}),
+            ])
         output = StringIO()
         with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
              patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
@@ -1115,6 +1116,72 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(callback['review_return']['state'], 'REJECTED')
         self.assertEqual(callback['review_return']['pm_error_code'],
                          'PM_RESPONSE_REJECTED')
+
+    def test_duplicate_event_preserves_active_pm_return_call(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-pm-return-race')
+        pm_entered, release_pm = threading.Event(), threading.Event()
+        adapter_calls = []
+
+        class BlockingPMClient:
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, messages):
+                self.calls.append(messages)
+                if len(self.calls) == 1:
+                    return Reply(json.dumps({'schema_version': 1,
+                        'decision': 'SEND_TO_REVIEW',
+                        'summary': 'Verified result is ready.'}),
+                        {'prompt_tokens': 10, 'completion_tokens': 8,
+                         'total_tokens': 18})
+                pm_entered.set()
+                if not release_pm.wait(5):
+                    raise RuntimeError('test PM release timed out')
+                return Reply(json.dumps({'schema_version': 1,
+                    'decision': 'CONTINUE_INTEGRATION_GATES',
+                    'summary': 'Continue exact-head integration gates.'}),
+                    {'prompt_tokens': 8, 'completion_tokens': 5, 'total_tokens': 13})
+
+        client = BlockingPMClient()
+
+        def adapter(intent):
+            adapter_calls.append(intent['dispatch_id'])
+            return self._trusted_review_receipt(intent, verdict='PASS')
+
+        first_result, first_errors = [], []
+
+        def first_event():
+            try:
+                first_result.append(self._run_direct_pm_send_to_review(
+                    task, store, result, tests, adapter=adapter, client=client)[0])
+            except BaseException as exc:
+                first_errors.append(exc)
+
+        first = threading.Thread(target=first_event)
+        first.start()
+        self.assertTrue(pm_entered.wait(5), 'original PM call did not begin')
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_return']['state'], 'DISPATCHING')
+        with redirect_stdout(StringIO()):
+            duplicate_result = run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store)
+        self.assertEqual(duplicate_result, 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_return']['state'], 'DISPATCHING')
+
+        release_pm.set()
+        first.join(5)
+        self.assertFalse(first.is_alive(), 'original PM call did not finish')
+        self.assertEqual(first_errors, [])
+        self.assertEqual(first_result, [0])
+        self.assertEqual(len(adapter_calls), 1)
+        self.assertEqual(len(client.calls), 2)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
+        self.assertEqual(callback['review_return']['next_step'],
+                         'INTEGRATION_GATES_PENDING')
 
     def test_pending_cas_has_exactly_one_concurrent_adapter_claimant(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
