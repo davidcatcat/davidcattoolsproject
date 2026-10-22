@@ -23,17 +23,6 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
-## A11c developer-workflow cost reduction — environment + tests (Owner 2026-10-22)
-
-This is **A11c efficiency work**, not a new product milestone or relaxation of CI, independent reviewer, Mac-native or security/authorization gates. Parallel tracks:
-
-- **ENV-0→ENV-3:** avoid recurring worktree venv/dependency reinstall and AI-led bootstrap. [Issue #267](https://github.com/davidcatcat/davidcattoolsproject/issues/267), roadmap planning [PR #268](https://github.com/davidcatcat/davidcattoolsproject/pull/268). Baseline/measure, safe package/environment cache and isolation, deterministic bootstrap, multi-worktree native acceptance. Its planning PR is **OPEN/NOT MERGED** as of this update; avoid contradictory implementation-status claims.
-- **TEST-0:** record current number/cost/duration of repeated full-suite runs and AI log consumption, actual model tokens only where telemetry exists; otherwise UNKNOWN.
-- **TEST-1:** introduce deterministic L0 static, L1 targeted, L2 impacted regression and L3 full-suite selection, with explicit impact/risk rules. Re-run bounded failures during iterative fixes; unknown impact, sensitive Host/Worker/authorization/Git/privacy changes, and required native/CI gates still escalate. Do not assume full suite is unnecessary for high-risk change or before required merge/release gates.
-- **TEST-2:** bind reusable PASS evidence to actual source/head, command/selection, platform, interpreter/ABI, dependency/environment fingerprint and immutable result; reject mismatched/stale evidence. Keep raw logs but send AI concise bounded exit/test/failed-trace summaries with opt-in detail; preserve data-egress privacy constraints. [Issue #271](https://github.com/davidcatcat/davidcattoolsproject/issues/271).
-
-**Execution:** Finish already assigned WP-OC-03 ENV-0/1 without scope creep; assign TEST-0/1 and TEST-2 as distinct subsequent work packages with nonoverlapping ownership and Draft PRs. Require Developer advisory self-review plus formal distinct non-author review, exact-head CI, relevant Mac native verification, measured before/after setup/test wall time and tokens where observed. **Status: PLANNED, NOT IMPLEMENTED.**
-
 ## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
 **Authoritative priority and numbering:** A0–A12 are the product milestones.
@@ -41,7 +30,12 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 **Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review (Claude, or the temporarily authorized Codex Reviewer while Claude quota is unavailable), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
-### A11c developer-worktree environment reuse — PLANNED (Owner 2026-10-22)
+
+### A11c developer-workflow efficiency — PLANNED (Owner 2026-10-22)
+
+This is one A11c efficiency plan with coordinated environment and test-selection work. It does not add a product milestone or relax exact-head CI, independent review, Mac-native, security or authorization gates. Test selection consumes the environment fingerprint defined by ENV-2 below and does not define a second one.
+
+#### Worktree environment reuse (ENV-0–ENV-3; Issue #267; PR #268) — PLANNED
 
 **Owner priority: reduce repeat setup work and avoid unnecessary AI-token use when a Developer starts a fresh registered worktree.** Tracking: [Issue #267](https://github.com/davidcatcat/davidcattoolsproject/issues/267). This is an A11c delivery-efficiency slice, **not a new milestone**; it does not change the A0–A12 order and is not a prerequisite for A11c correctness or M2 gates.
 
@@ -53,6 +47,20 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 | ENV-3 — native validation | Use three fresh registered task worktrees to compare cold and warm setup, verify dependency/platform/configuration invalidation, artifact-tampering detection, interrupted-write recovery, concurrent cache population, concurrent task isolation and clean rollback/fail-closed behavior, then run supported Python tests and Mac-native checks with distinct non-author review and exact-head CI. Report observed setup-time reduction; report token savings only when usage telemetry supports the comparison. |
 
 **Release rule:** This work cannot weaken sandbox, Worktree or Git authority; leak secrets; share another task's writable environment; or claim savings from estimates. Schedule as a small independent PR after conflicting worktree scopes are checked. Current state **PLANNED / NOT IMPLEMENTED**.
+
+#### Risk-based test selection and evidence reuse (TEST-0–TEST-2; Issue #271; PR #272) — PLANNED
+
+- **TEST-0 — baseline:** Record the count, command, elapsed time and relevant output volume of repeated test runs. Record actual model-token usage only when provider telemetry is available; otherwise mark it UNKNOWN. Compare savings only against a measured baseline.
+- **TEST-1 — versioned risk-based selection:**
+  - **L0** runs diff hygiene and configured deterministic static checks for the changed files (for example whitespace, syntax, lint or type checks when configured); it does not claim product behavior was tested.
+  - **L1** runs the directly affected targeted unit/regression tests and their immediate callers or interfaces identified in the task contract.
+  - **L2** adds regression/contract tests selected by a checked-in, explicitly versioned impact map. Record that map's version with the result.
+  - **L3** runs the complete supported project test suite. Unknown or unclassifiable impact, a missing/stale impact-map entry, or a high-risk change escalates to L3. High-risk triggers include security/authorization, credential/privacy, Git mutation, Host/Worker, process/resource lifecycle, concurrency/shared state and platform-native behavior. After each repair, classify the fixed diff again and rerun its selected tier; a prior result for the pre-repair change is not evidence for the repaired change.
+  - **Exact-head full CI remains required before every merge or release, regardless of the local tier; L3 is also required for high-risk/unclassifiable changes.** Risk-tier selection cannot waive independent Security/Functional/QA review or any required Mac-native gate. Preserve existing Mac-native triggers for platform/process/CLI behavior and Host/Worker lifecycle changes.
+- **TEST-2 — bound reusable local evidence:** A test result is reusable only as a local iteration aid when bound to the source commit SHA and tree hash, base and merge-base SHAs, clean worktree state, selector version and impact-map version, environment/configuration/fixture/tool versions, exact test selection and command, creation/expiry, and tool-produced exit code plus structured result. The environment fingerprint is the ENV-2 fingerprint defined in the preceding subsection (PR #268); TEST-2 consumes it without redefining its dimensions. Reject stale, expired, missing or mismatched evidence. Reuse never substitutes for exact-head full CI, independent review or Mac-native acceptance.
+- **Result and log handling:** Derive PASS from the test process exit status and validated structured test results. Model assertions cannot set PASS; absent or malformed result evidence is NOT PASS. Keep raw logs local. Any summary sent outside the local execution boundary must be redacted, bounded and explicitly marked as truncated when incomplete; only the Owner/operator may request more detail, under the same existing data-egress rules.
+
+**Execution:** Keep ENV and TEST as distinct, non-overlapping work packages with one writer per worktree. Require Developer self-review, a distinct formal reviewer, exact-head full CI, and applicable Mac-native/security/authorization gates. Record measured before/after time and usage when available; otherwise savings remain UNKNOWN. **Status: PLANNED, NOT IMPLEMENTED.**
 
 ### Owner outcome acceptance and reporting — approved 2026-10-19
 
