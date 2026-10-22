@@ -18,6 +18,7 @@ from llmtool import task_review as r
 from llmtool.errors import LLMToolError
 from llmtool.providers.claude_cli import decode_review_envelope
 from test_review_authority import FAKE_SCRIPT, FixtureObserver, WorkerHarness
+from llmtool import task_completion
 
 
 def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue):
@@ -48,6 +49,94 @@ class ReviewHandoffTests(unittest.TestCase):
         h = WorkerHarness(**changes)
         self.addCleanup(h.close)
         return h
+
+    @staticmethod
+    def bind_harness_task_id(h, task_id):
+        ready = replace(h.ready, task_id=task_id)
+        expect = replace(h.expect, task=ready.binding(h.expect.task.run_id))
+        events = tuple(replace(event, task=expect.task,
+            evidence=tuple(replace(item, task=expect.task) for item in event.evidence),
+            handoff=None if event.handoff is None else
+                replace(event.handoff, task=expect.task)) for event in h.events)
+        approval = replace(h.fake.approval, ready_task=expect.task)
+        h.ready, h.expect, h.events = ready, expect, events
+        h.fake.ready, h.fake.expect, h.fake.events = ready, expect, events
+        h.fake.approval = approval
+        h.fake.data['evidence'][0]['record'] = events[2].evidence[0].to_dict()
+        h.packet_input = r.canonical(h.fake.data)
+        h.fake.observation = replace(h.fake.observation, task=expect.task, events=events)
+        h.pin = replace(h.pin, pair_digest=a.pair_pin(approval),
+                        packet_input_digest=hashlib.sha256(h.packet_input).hexdigest())
+        observer = FixtureObserver(h.pin, expect, events, h.clock,
+                                   baseline_check=lambda reg, facts: True,
+                                   writers_check=lambda reg, facts: True)
+        context = a.ReviewContext(ready, h.final, expect, events, approval,
+                                  h.packet_input)
+        h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, observer, context)
+
+    def test_task_completion_adapter_bridges_the_existing_host_handoff(self):
+        h = self.harness(mode='success')
+        self.bind_harness_task_id(h, '1' * 32)
+        reviewer = next(agent for agent in h.expect.agents
+                        if getattr(agent.role, 'value', agent.role) == 'REVIEWER')
+        intent = task_completion.review_dispatch_intent(
+            task_id=h.expect.task.task_id, run_id=h.expect.task.run_id,
+            contract_digest=h.expect.task.contract_digest,
+            developer_task_id='d6-developer-task',
+            developer_identity='developer-agent',
+            developer_session_ref='developer-session',
+            source_sha=h.expect.source_sha, result_head=None,
+            diff_sha256=h.fake.data['diff']['sha256'],
+            changed_paths=h.fake.data['diff']['changed_paths'])
+        adapter = rh.task_completion_adapter(
+            h.issuer, h.ledger, budget=h.fake.budget)
+
+        receipt = adapter(intent)
+
+        task_completion.validate_review_dispatch_receipt(intent, receipt)
+        self.assertEqual(receipt['verdict'], 'PASS', receipt)
+        self.assertEqual(receipt['security'], 'PASS')
+        self.assertEqual(receipt['functional'], 'PASS')
+        self.assertEqual(receipt['execution_status'], 'SUCCEEDED')
+        self.assertEqual(receipt['reviewer_task_id'], h.expect.task.task_id)
+        self.assertEqual(receipt['reviewer_identity'], reviewer.agent_id)
+        self.assertEqual(receipt['reviewer_session_ref'], reviewer.session_id)
+        self.assertEqual(receipt['source_sha'], h.expect.source_sha)
+        self.assertEqual(len(receipt['review_packet_digest']), 64)
+        self.assertIsNotNone(h.issuer.foreground_services)
+
+    def test_task_completion_adapter_rejects_context_mismatch_before_dispatch(self):
+        h = self.harness(mode='success')
+        self.bind_harness_task_id(h, '2' * 32)
+        task_id = h.expect.task.task_id
+        common = dict(
+            task_id=task_id, run_id=h.expect.task.run_id,
+            contract_digest=h.expect.task.contract_digest,
+            developer_task_id='d6-developer-task',
+            developer_identity='developer-agent',
+            developer_session_ref='developer-session',
+            source_sha=h.expect.source_sha, result_head=None,
+            diff_sha256=h.fake.data['diff']['sha256'],
+            changed_paths=h.fake.data['diff']['changed_paths'])
+        mismatched_task = task_completion.review_dispatch_intent(
+            task_id='f' * 32, run_id=h.expect.task.run_id,
+            contract_digest=h.expect.task.contract_digest,
+            developer_task_id='d6-developer-task',
+            developer_identity='developer-agent',
+            developer_session_ref='developer-session',
+            source_sha=h.expect.source_sha, result_head=None,
+            diff_sha256='a' * 64, changed_paths=['src/example.py'])
+        mismatched_packet = task_completion.review_dispatch_intent(**{
+            **common, 'diff_sha256': 'a' * 64,
+            'changed_paths': ['src/example.py']})
+        adapter = rh.task_completion_adapter(
+            h.issuer, h.ledger, budget=h.fake.budget)
+
+        with self.assertRaises(LLMToolError):
+            adapter(mismatched_task)
+        with self.assertRaises(LLMToolError):
+            adapter(mismatched_packet)
+        self.assertIsNone(h.issuer.foreground_services)
 
     def test_interactive_bracketed_paste_requires_enter_while_print_stdin_eof_submits_automatically(self):
         """Root-cause reproduction: interactive draft waits for CR; -p stdin EOF submits with 0 Enter."""

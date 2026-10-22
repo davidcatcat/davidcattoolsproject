@@ -11,6 +11,8 @@ created. Public `review_authority_factory()` remains `UnavailableReviewAuthority
 """
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Optional
 
 from .action_contract import ContractValue, _hex, _identifier, _integer, _typed
@@ -25,6 +27,7 @@ from .review_authority import (
 )
 from .run_budget import RunBudget
 from .task_review import (
+    PACKET_LIMIT,
     REVIEWER_ROLES,
     canonical,
     digest,
@@ -353,3 +356,97 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
         findings_count=findings_count,
     )
     return receipt, raw
+
+
+def task_completion_adapter(issuer, ledger, *, budget):
+    """Bind the existing one-shot Host handoff to a task-completion callback.
+
+    This factory is deliberately opt-in: callers must already possess the
+    independently constructed Host issuer, PROVIDER_REVIEW ledger and budget.
+    It does not install a CLI route or make the public ReviewAuthority factory
+    available. The returned callable accepts one validated task intent and
+    produces only the bounded receipt format consumed by task_completion.
+    """
+    if (type(issuer) is not ProductionReviewIssuer or
+            type(ledger) is not ReceiptLedger or ledger.kind != 'PROVIDER_REVIEW' or
+            type(budget) is not RunBudget):
+        reject('REVIEW_HOST_SERVICES_INVALID')
+
+    def adapt(intent):
+        from . import task_completion
+
+        task_completion.validate_review_dispatch_intent(intent)
+        try:
+            context = issuer.context
+            expected = context.expect
+            task = expected.task
+            agents = expected.agents
+            reviewers = [agent for agent in agents
+                         if getattr(agent.role, 'value', agent.role) == 'REVIEWER']
+            if (len(reviewers) != 1 or task.task_id != intent['task_id'] or
+                    task.run_id != intent['run_id'] or
+                    task.contract_digest != intent['contract_digest'] or
+                    expected.source_sha != intent['source_sha']):
+                reject('REVIEW_RECEIPT_BINDING_MISMATCH')
+            packet_input = load_json(context.packet_input.decode('utf-8'), PACKET_LIMIT)
+            packet_diff = packet_input.get('diff') if type(packet_input) is dict else None
+            if (type(packet_diff) is not dict or
+                    packet_input.get('source_sha') != intent['source_sha'] or
+                    packet_diff.get('sha256') != intent['diff_sha256'] or
+                    packet_diff.get('changed_paths') != intent['changed_paths']):
+                reject('REVIEW_RECEIPT_BINDING_MISMATCH')
+            reviewer = reviewers[0]
+            reviewer_task_id = task.task_id
+            reviewer_identity = reviewer.agent_id
+            reviewer_session_ref = reviewer.session_id
+            if (not reviewer_task_id or not reviewer_identity or
+                    not reviewer_session_ref):
+                reject('REVIEW_IDENTITY_NOT_ATTESTED')
+        except LLMToolError:
+            raise
+        except Exception:
+            reject('REVIEW_HOST_SERVICES_INVALID')
+
+        handoff, raw = dispatch_review_handoff(issuer, ledger, budget=budget)
+        severity = {'APPROVE': 'PASS', 'CHANGES_REQUIRED': 'FAIL',
+                    'BLOCKED': 'BLOCKED'}
+        status = handoff.execution_status
+        verdict = handoff.verdict
+        findings = None
+        raw_verdict = raw.get('verdict') if type(raw) is dict else None
+        if type(raw_verdict) is dict and type(raw_verdict.get('findings')) is list:
+            findings = raw_verdict['findings']
+        if findings is None:
+            if handoff.findings_count != 0:
+                reject('REVIEW_RECEIPT_INVALID')
+            findings = []
+        if len(findings) != handoff.findings_count:
+            reject('REVIEW_RECEIPT_INVALID')
+        receipt = {
+            'schema_version': 2,
+            'dispatch_id': intent['dispatch_id'],
+            'task_id': intent['task_id'],
+            'run_id': intent['run_id'],
+            'contract_digest': intent['contract_digest'],
+            'source_sha': intent['source_sha'],
+            'result_head': intent['result_head'],
+            'diff_sha256': intent['diff_sha256'],
+            'developer_task_id': intent['developer_task_id'],
+            'reviewer_task_id': reviewer_task_id,
+            'reviewer_identity': reviewer_identity,
+            'reviewer_session_ref': reviewer_session_ref,
+            'review_packet_digest': handoff.packet_digest,
+            'verdict': verdict,
+            'security': severity[handoff.security],
+            'functional': severity[handoff.functional],
+            'execution_status': status,
+            'code': handoff.code,
+            'findings_sha256': hashlib.sha256(canonical(findings)).hexdigest(),
+            'provenance': 'TRUSTED_REVIEW_ADAPTER',
+        }
+        receipt['receipt_sha256'] = hashlib.sha256(json.dumps(
+            receipt, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        return task_completion.validate_review_dispatch_receipt(intent, receipt)
+
+    return adapt
