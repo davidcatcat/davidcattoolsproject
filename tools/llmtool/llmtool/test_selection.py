@@ -6,6 +6,7 @@ commands or claim that a CI/test pipeline consumes the plan.
 
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
+from typing import Optional
 
 
 PLAN_SCHEMA_VERSION = 1
@@ -40,6 +41,11 @@ HIGH_RISK_PREFIXES = (
     "tools/llmtool/llmtool/providers",
     "tools/llmtool/llmtool/security",
 )
+HIGH_RISK_FILES = frozenset({
+    "tools/llmtool/llmtool/authorization_policy.py",
+    "tools/llmtool/llmtool/git_intel.py",
+    "tools/llmtool/llmtool/opencode_worker.py",
+})
 
 _LLMTOOL_CWD = "tools/llmtool"
 _L0_COMMAND = ("make", "syntax")
@@ -78,24 +84,25 @@ def _under_prefix(path: str, prefix: str) -> bool:
 
 
 def _test_command(path: str) -> tuple[str, ...]:
-    relative_to_package = path.removeprefix("tools/llmtool/")
-    return ("python3", "-m", "unittest", relative_to_package)
+    pattern = PurePosixPath(path).name
+    return ("python3", "-m", "unittest", "discover", "-s", "tests", "-p", pattern)
 
 
 def select_test_plan(
     changed_paths: Sequence[str],
     *,
     dependency_regression_tests: Sequence[str] = (),
-    impact_test_map: Mapping[str, Sequence[str]] | None = None,
-    impact_map_version: int | None = IMPACT_MAP_VERSION,
+    impact_test_map: Optional[Mapping[str, Sequence[str]]] = None,
+    impact_map_version: Optional[int] = IMPACT_MAP_VERSION,
 ) -> dict:
     """Return a deterministic L0-L3 test plan for validated relative paths.
 
     Unknown paths, a stale map, and high-risk changes select L3 (`make check`).
     The L1 map is exact-file based; L2 tests must be supplied explicitly by the
     caller. Test-map entries must use the repository's flat tests directory;
-    L1/L2 commands name one exact file, never a discovery pattern. This
-    function never invokes a test runner.
+    L1/L2 commands use a discovery pattern for the repository's flat tests
+    directory. Nested test entries are rejected so a selected basename cannot
+    intentionally target a nested path. This function never invokes a runner.
     """
     changed = _path_list(changed_paths)
     dependency_tests = _path_list(dependency_regression_tests, test_path=True)
@@ -121,7 +128,8 @@ def select_test_plan(
         reasons.append("stale_impact_map")
 
     high_risk = [path for path in changed
-                 if any(_under_prefix(path, prefix) for prefix in HIGH_RISK_PREFIXES)]
+                 if path in HIGH_RISK_FILES
+                 or any(_under_prefix(path, prefix) for prefix in HIGH_RISK_PREFIXES)]
     if high_risk:
         reasons.append("high_risk_path")
 

@@ -1,6 +1,10 @@
 """Focused tests for deterministic TEST-1 plan selection."""
 
+import os
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
 from llmtool.test_selection import (
     IMPACT_MAP_VERSION,
@@ -23,12 +27,31 @@ class TestSelectionTests(unittest.TestCase):
         self.assertEqual(plan["levels"][0]["command"], ["make", "syntax"])
         self.assertEqual(plan["levels"][1]["tests"], [L1_TEST])
         self.assertEqual(plan["levels"][1]["commands"], [{
-            "argv": ["python3", "-m", "unittest", "tests/test_test_selection.py"],
+            "argv": ["python3", "-m", "unittest", "discover", "-s", "tests",
+                     "-p", "test_test_selection.py"],
             "cwd": "tools/llmtool",
         }])
         self.assertEqual(plan["required_gates"], ["exact_head_ci", "security", "mac_native"])
         self.assertFalse(plan["executes_tests"])
         self.assertFalse(plan["pipeline_integrated"])
+
+    def test_emitted_l1_command_runs_on_current_python(self):
+        if os.environ.get("LLMTOOL_TEST_SELECTION_COMMAND_CHILD"):
+            self.skipTest("avoid recursively launching the command smoke test")
+        command = select_test_plan([SOURCE])["levels"][1]["commands"][0]
+        self.assertEqual(command["argv"][0], "python3")
+        environment = os.environ.copy()
+        environment["LLMTOOL_TEST_SELECTION_COMMAND_CHILD"] = "1"
+        result = subprocess.run(
+            [sys.executable, *command["argv"][1:]],
+            cwd=Path(__file__).resolve().parents[1],
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_explicit_dependency_tests_add_l2_deterministically(self):
         plan = select_test_plan(
@@ -54,11 +77,22 @@ class TestSelectionTests(unittest.TestCase):
         self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
         self.assertIn("stale_impact_map", plan["fallback_reasons"])
 
-    def test_high_risk_path_falls_back_to_l3(self):
-        plan = select_test_plan(["tools/llmtool/llmtool/providers/openai.py"])
+    def test_mapped_high_risk_files_still_fall_back_to_l3(self):
+        for path in (
+            "tools/llmtool/llmtool/providers/openai.py",
+            "tools/llmtool/llmtool/authorization_policy.py",
+            "tools/llmtool/llmtool/git_intel.py",
+            "tools/llmtool/llmtool/opencode_worker.py",
+        ):
+            with self.subTest(path=path):
+                plan = select_test_plan(
+                    [path],
+                    impact_test_map={path: [L1_TEST]},
+                    impact_map_version=IMPACT_MAP_VERSION,
+                )
 
-        self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
-        self.assertIn("high_risk_path", plan["fallback_reasons"])
+                self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
+                self.assertIn("high_risk_path", plan["fallback_reasons"])
 
     def test_empty_changes_fall_back_to_l3(self):
         plan = select_test_plan([])
