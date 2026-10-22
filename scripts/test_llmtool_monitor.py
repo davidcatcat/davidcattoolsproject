@@ -870,15 +870,53 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["公司 gw"].state, mon.IDLE)
         self.assertIsNone(rows["agy"].age)
 
-    def test_opencode_server_alone_is_not_work_but_a_client_is(self):
+    def _opencode_db(self, sessions):
+        db = Path(self.tmp.name) / "opencode.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, directory TEXT, "
+                     "title TEXT, time_updated INTEGER, time_idle INTEGER)")
+        conn.execute("CREATE TABLE credential (secret TEXT)")
+        conn.execute("INSERT INTO credential VALUES ('CREDENTIAL-SECRET')")
+        conn.executemany("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", sessions)
+        conn.commit()
+        conn.close()
+        return str(db)
+
+    def test_opencode_server_alone_is_not_a_member_and_roadmap_row_stays(self):
         server = mon.Process(1, 0, 1, "1:00", "S", "OpenCode SERVER", "opencode.exe", "")
-        client = mon.Process(2, 0, 2, "1:00", "S", "OpenCode CLIENT", "opencode.exe", "")
-        self.assertEqual(self.by_name(self.rows([server]))["opencode developer"].state, mon.STOPPED)
-        self.assertEqual(self.by_name(self.rows([server, client]))["opencode developer"].state,
-                         mon.WORKING)
-        tui = mon.Process(3, 0, 3, "1:00", "S+", "OpenCode CLI", "opencode", "")
-        self.assertEqual(self.by_name(self.rows([server, tui]))["opencode developer"].state,
-                         mon.IDLE)
+        rows = self.by_name(mon.office_rows([server], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None))
+        self.assertEqual(rows["opencode developer"].state, mon.STOPPED)
+        self.assertFalse(any(name.startswith("opencode cli") for name in rows))
+
+    def test_each_opencode_cli_gets_its_own_row_with_place_and_state(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        db = self._opencode_db([
+            ("s1", None, self.canonical, "Fix monitor token=abc", ms(5), ms(400)),
+            ("s2", None, str(self.task), "Old work", ms(3000), ms(3000)),
+            ("s3", "s1", self.canonical, "child", ms(1), None),
+        ])
+        procs = [mon.Process(10, 1, 10, "05:00", "S+", "OpenCode CLI", "opencode", ""),
+                 mon.Process(11, 1, 11, "01:02:00", "S+", "OpenCode CLI", "opencode", ""),
+                 mon.Process(12, 1, 12, "00:10", "S+", "OpenCode CLI", "opencode", "")]
+        cwd = {10: self.canonical, 11: str(self.task), 12: "/Users/davidsun"}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=cwd.get))
+        self.assertNotIn("opencode developer", rows)
+        self.assertEqual(rows["opencode cli #1"].state, mon.WORKING)
+        self.assertTrue(rows["opencode cli #1"].detail.startswith("本 repo："))
+        self.assertNotIn("token=abc", rows["opencode cli #1"].detail)
+        self.assertEqual(rows["opencode cli #2"].state, mon.IDLE)
+        self.assertIn("task wp-1", rows["opencode cli #2"].detail)
+        self.assertIn("已開 1 小時", rows["opencode cli #2"].detail)
+        self.assertEqual(rows["opencode cli #3"].detail, "其他資料夾：已開啟，沒有執行中的任務")
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
 
     def test_rendered_office_never_shows_secrets_or_private_paths(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},

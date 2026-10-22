@@ -1380,6 +1380,96 @@ def claude_rows(now: float, root: str = CLAUDE_PROJECTS,
     return rows
 
 
+OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+# Only these session columns are read; the database's account/credential tables
+# are never queried.
+OPENCODE_SESSIONS_SQL = ("SELECT directory, title, time_updated, time_idle FROM session_v2 "
+                         "WHERE parent_id IS NULL AND time_updated >= ? "
+                         "ORDER BY time_updated DESC LIMIT 200")
+OPENCODE_ROLES = ("OpenCode CLIENT", "OpenCode CLI")
+_cwd_cache: dict = {}
+
+
+def process_cwd(pid: int) -> str | None:
+    """Current directory of one process (lsof, read-only), cached per PID."""
+    if pid in _cwd_cache:
+        return _cwd_cache[pid]
+    found = None
+    try:
+        out = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=2, check=False).stdout
+        found = next((line[1:] for line in out.splitlines() if line.startswith("n/")), None)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _cwd_cache[pid] = found
+    return found
+
+
+def opencode_sessions(now: float, db: str = OPENCODE_DB) -> list[tuple]:
+    """[(directory, title, updated_s, idle_s | None)] for recent top-level sessions."""
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(OPENCODE_SESSIONS_SQL, (int((now - OFFICE_WINDOW) * 1000),)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for directory, title, updated, idle in rows:
+        if type(directory) is str and type(updated) is int:
+            out.append((directory, title, updated / 1000,
+                        idle / 1000 if type(idle) is int else None))
+    return out
+
+
+def _where(cwd, canonical: str) -> str:
+    place = _place(cwd, canonical)
+    if place is None:
+        return "其他資料夾" if cwd else "位置不明"
+    return "本 repo" if place[0] == "pm" else f"task {place[1]}"
+
+
+def _elapsed_seconds(text: str) -> float | None:
+    found = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", text or "")
+    if not found:
+        return None
+    days, hours, minutes, seconds = (int(part or 0) for part in found.groups())
+    return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
+
+
+def opencode_rows(processes: list[Process], now: float, canonical: str,
+                  db: str = OPENCODE_DB, cwd_of=process_cwd) -> list[OfficeRow]:
+    """One row per running OpenCode CLI/TUI or `run` client."""
+    procs = sorted((p for p in processes if p.role in OPENCODE_ROLES), key=lambda p: p.pid)
+    for pid in [pid for pid in _cwd_cache if pid not in {p.pid for p in procs}]:
+        _cwd_cache.pop(pid, None)
+    if not procs:
+        return []
+    sessions = opencode_sessions(now, db)
+    rows = []
+    for number, proc in enumerate(procs, 1):
+        cwd = cwd_of(proc.pid)
+        real = os.path.realpath(cwd) if cwd else None
+        latest = next((item for item in sessions if real and os.path.realpath(item[0]) == real),
+                      None)
+        busy = (latest is not None and now - latest[2] <= OFFICE_STALL and
+                (latest[3] is None or latest[2] - latest[3] > 2.0))
+        where = _where(cwd, canonical)
+        name = f"opencode {'worker' if proc.role == 'OpenCode CLIENT' else 'cli'} #{number}"
+        if busy:
+            detail = f"{where}：{_label(latest[1], 28) or '執行中'}"
+            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), 50 + number))
+        else:
+            opened = _elapsed_seconds(proc.elapsed)
+            since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
+            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}",
+                                  opened if opened is not None else 0.0, 50 + number))
+    return rows
+
+
 ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, sort order)
     ("Codex Reviewer", "codex reviewer agent", 25),
     ("OpenCode", "opencode developer", 50),
@@ -1432,23 +1522,21 @@ def _worker_state(status: str) -> tuple[str, str]:
 
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str = CODEX_SESSIONS, claude_root: str = CLAUDE_PROJECTS,
-                roadmap: str | None = None, canonical: str | None = None) -> list[OfficeRow]:
+                roadmap: str | None = None, canonical: str | None = None,
+                opencode_db: str = OPENCODE_DB, cwd_of=process_cwd) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
     reviewing = any(row.name.startswith("codex reviewer") and row.state == WORKING for row in rows)
-    # A resident OpenCode SERVER alone is not work. A `run` CLIENT is a task in
-    # progress; an interactive CLI/TUI is only open, so it is shown as standby.
-    opencode_run = any(p.role == "OpenCode CLIENT" for p in processes)
-    opencode_open = any(p.role == "OpenCode CLI" for p in processes)
+    # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
+    # client is. Without any, the Roadmap row says why OpenCode is not here.
+    opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
+    rows += opencode
     table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
         if name == "codex reviewer agent" and reviewing:
             continue
-        if name == "opencode developer" and (opencode_run or opencode_open):
-            rows.append(OfficeRow(name, WORKING if opencode_run else IDLE,
-                                  "正在執行 OpenCode 任務" if opencode_run
-                                  else "OpenCode 互動畫面已開啟，沒有執行中的任務", 0.0, order))
+        if name == "opencode developer" and opencode:
             continue
         if name in table:
             state, detail = _worker_state(table[name])
