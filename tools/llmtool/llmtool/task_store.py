@@ -25,6 +25,7 @@ from .task_completion import validate_host_worker_receipt
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
+D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
 STATES = frozenset(('PM_PENDING', 'PM_RESPONDED', 'PM_UNAVAILABLE',
@@ -41,15 +42,25 @@ _FIELDS_V2 = _FIELDS_V1 | frozenset(('developer', 'pm_assignment'))
 _FIELDS_V2_ROUTE = _FIELDS_V2 | frozenset(('pm_route_binding',))
 _FIELDS_V2_COMPLETION = _FIELDS_V2 | frozenset(('completion',))
 _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
+_V2_FIELD_SHAPES = (_FIELDS_V2_ROUTE, _FIELDS_V2_ROUTE_COMPLETION)
+_FIELDS_V2_WITH_PROVENANCE = tuple(shape | frozenset(('pm_provenance',))
+                                   for shape in _V2_FIELD_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_DEVELOPER_FIELDS = frozenset((
+_LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
     'source_sha', 'source_sha_binding', 'read_paths', 'write_paths', 'acceptance', 'context_sha256',
     'egress_basis', 'input_bytes', 'max_tokens',
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
+))
+_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
+_DIRECT_EXECUTION_FIELDS = frozenset((
+    'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
+    'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
+    'source_file_count', 'source_manifest_sha256',
 ))
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
@@ -58,6 +69,10 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_TOO_LARGE',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
+_PM_PROVENANCE_FIELDS = frozenset((
+    'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
+    'session_restored', 'automatic_callback',
+))
 
 
 def _fail(code='TASK_STORE_INVALID'):
@@ -95,7 +110,7 @@ def _validate(record):
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION)) or
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -163,7 +178,8 @@ def _validate(record):
     if record['native_session_id'] is not None:
         _fail()
     if record['backend_session_semantics'] not in (
-            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED'):
+            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED',
+            'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL'):
         _fail()
     contract_raw = record['task_contract']
     if type(contract_raw) is not dict:
@@ -230,9 +246,60 @@ def _validate(record):
                     any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
+        if 'pm_provenance' in record:
+            provenance = record['pm_provenance']
+            def unique_response_pairs(pairs):
+                response_object = {}
+                for key, value in pairs:
+                    if key in response_object:
+                        raise ValueError('duplicate JSON key')
+                    response_object[key] = value
+                return response_object
+
+            try:
+                response_object = json.loads(
+                    record['response'], object_pairs_hook=unique_response_pairs,
+                    parse_constant=lambda _: _fail())
+                response_assignment = response_object.get('developer_assignment')
+            except Exception:
+                _fail()
+            if (type(provenance) is not dict or set(provenance) != _PM_PROVENANCE_FIELDS or
+                    provenance['source'] != 'ACTIVE_PM_RUNTIME' or
+                    provenance['provider_invoked'] is not False or
+                    provenance['native_session_id_status'] != 'UNAVAILABLE' or
+                    provenance['usage_status'] != 'UNKNOWN' or
+                    provenance['session_restored'] is not False or
+                    provenance['automatic_callback'] is not False or
+                    record['pm_provider_profile'] != 'active-pm-runtime' or
+                    record['pm_provider_type'] != 'codex-cli' or
+                    record['pm_model'] is not None or
+                    record['pm_route_binding'] != {
+                        'type': 'codex-cli', 'model': None, 'base_url': None} or
+                    record['backend_session_semantics'] != 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL' or
+                    record['native_session_id'] is not None or
+                    record['state'] != 'PM_RESPONDED' or
+                    record['request'] is None or not record['response'] or
+                    record['request_sha256'] is None or record['usage'] is not None or
+                    record['error_code'] is not None or
+                    type(assignment) is not dict or assignment.get('route') != 'opencode' or
+                    assignment.get('risk') != 'LOW' or
+                    type(response_object) is not dict or
+                    set(response_object) != {
+                        'schema_version', 'summary', 'developer_assignment'} or
+                    type(response_object['schema_version']) is not int or
+                    response_object['schema_version'] != 1 or
+                    type(response_object['summary']) is not str or
+                    _emitted_sensitive(response_object['summary']) or
+                    type(response_assignment) is not dict or
+                    assignment != {'schema_version': 1, **response_assignment}):
+                _fail()
+        elif record['backend_session_semantics'] == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL':
+            _fail()
         developer = record['developer']
         if developer is not None:
-            if type(developer) is not dict or set(developer) != _DEVELOPER_FIELDS:
+            if type(developer) is not dict or set(developer) not in (
+                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
+                    _DEVELOPER_CALLBACK_FIELDS):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -240,9 +307,10 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] != 'company-gw' or
-                    developer['provider_type'] not in (None, 'openai-compatible') or
-                    developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                    developer['provider_profile'] not in ('company-gw', 'opencode') or
+                    developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
+                    developer['backend_session_semantics'] not in (
+                        'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
                     type(developer['source_sha']) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', developer['source_sha']) is None or
@@ -260,6 +328,65 @@ def _validate(record):
                       not 1 <= developer['max_tokens'] <= 1_000_000)) or
                     developer['artifact_format'] != 'unified_diff' or
                     type(developer['created_at']) is not str):
+                _fail()
+            if (developer['provider_profile'] == 'company-gw' and
+                    (developer['provider_type'] not in (None, 'openai-compatible') or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED')):
+                _fail()
+            if (developer['provider_profile'] == 'opencode' and
+                    (developer['provider_type'] not in (None, 'opencode-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if 'execution' in developer:
+                execution = developer['execution']
+                if execution is not None:
+                    if (developer['provider_profile'] != 'opencode' or
+                            type(execution) is not dict or
+                            set(execution) != _DIRECT_EXECUTION_FIELDS or
+                            execution['status'] not in ('SUCCEEDED', 'FAILED', 'UNKNOWN') or
+                            (execution['native_session_id'] is not None and
+                             (type(execution['native_session_id']) is not str or
+                              re.fullmatch(r'ses_[A-Za-z0-9]{1,100}',
+                                           execution['native_session_id']) is None)) or
+                            (execution['process_exit_code'] is not None and
+                             (type(execution['process_exit_code']) is not int or
+                              not -127 <= execution['process_exit_code'] <= 255)) or
+                            (execution['stdout_sha256'] is not None and
+                             (type(execution['stdout_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}', execution['stdout_sha256']) is None)) or
+                            (execution['elapsed_ms'] is not None and
+                             (type(execution['elapsed_ms']) is not int or
+                              not 0 <= execution['elapsed_ms'] <= 86_400_000)) or
+                            (execution['source_bytes'] is not None and
+                             (type(execution['source_bytes']) is not int or
+                              not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
+                            (execution['source_file_count'] is not None and
+                             (type(execution['source_file_count']) is not int or
+                              not 1 <= execution['source_file_count'] <= 32)) or
+                            (execution['source_manifest_sha256'] is not None and
+                             (type(execution['source_manifest_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}',
+                                           execution['source_manifest_sha256']) is None)) or
+                            execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
+                            execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+                        _fail()
+                    if execution['status'] == 'SUCCEEDED' and (
+                            execution['native_session_id'] is None or
+                            execution['process_exit_code'] != 0 or
+                            execution['stdout_sha256'] is None or
+                            execution['source_bytes'] is None or
+                            execution['source_file_count'] is None or
+                            execution['source_manifest_sha256'] is None or
+                            execution['cleanup_status'] != 'CONFIRMED'):
+                        _fail()
+                    source_observation = (execution['source_bytes'],
+                                         execution['source_file_count'],
+                                         execution['source_manifest_sha256'])
+                    if any(value is None for value in source_observation) and not all(
+                            value is None for value in source_observation):
+                        _fail()
+            elif developer['provider_profile'] == 'opencode':
                 _fail()
             try:
                 stamp = datetime.strptime(developer['created_at'], '%Y-%m-%dT%H:%M:%SZ')
@@ -309,12 +436,15 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            expected_provider = ('openai-compatible' if
+                                 developer['provider_profile'] == 'company-gw' else
+                                 'opencode-cli')
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
             if dev_state == 'DEVELOPER_DISPATCHING' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
                     developer['max_tokens'] is None):
                 _fail()
@@ -323,17 +453,162 @@ def _validate(record):
                     developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or developer['max_tokens'] is None):
                 _fail()
+            if developer['provider_profile'] == 'opencode':
+                execution = developer.get('execution')
+                if dev_state == 'DEVELOPER_RESPONDED' and (
+                        type(execution) is not dict or execution['status'] != 'SUCCEEDED' or
+                        execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
+                    _fail()
+                if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
+                    _fail()
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
                     developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
                 _fail()
+            if 'direct_result_callback' in developer:
+                callback = developer['direct_result_callback']
+                callback_fields = frozenset((
+                    'state', 'executor_task_id', 'evidence', 'missing_gates',
+                    'pm_dispatch', 'pm_response', 'pm_recommendation',
+                    'pm_usage', 'pm_error_code'))
+                states = ('WAITING_EXECUTOR', 'VERIFYING_EXECUTOR', 'WAITING_PM',
+                          'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED',
+                          'PM_UNAVAILABLE', 'PM_OUTCOME_UNKNOWN')
+                dispatch_for_state = {
+                    'WAITING_EXECUTOR': 'NOT_STARTED',
+                    'VERIFYING_EXECUTOR': 'NOT_STARTED',
+                    'WAITING_PM': 'NOT_STARTED', 'PM_DISPATCHING': 'CLAIMED',
+                    'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
+                    'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
+                if (developer['provider_profile'] != 'opencode' or
+                        type(callback) is not dict or
+                        set(callback) not in (callback_fields, callback_fields | {'review_handoff'}) or
+                        callback['state'] not in states or
+                        callback['pm_dispatch'] != dispatch_for_state[callback['state']] or
+                        not _safe_identifier(callback['executor_task_id'], D6_TASK_ID)):
+                    _fail()
+                missing = callback['missing_gates']
+                if (type(missing) is not list or len(missing) > 32 or
+                        any(type(item) is not str or
+                            re.fullmatch(r'[A-Z0-9_]{1,64}', item) is None
+                            for item in missing) or missing != sorted(set(missing))):
+                    _fail()
+                evidence = callback['evidence']
+                if (type(evidence) is not dict or len(_json_bytes(evidence)) > 64 * 1024 or
+                        _emitted_sensitive(_json_bytes(evidence).decode('utf-8')) or
+                        evidence.get('task_id') != record['task_id'] or
+                        evidence.get('run_id') != record['run_id'] or
+                        evidence.get('contract_digest') != record['task_binding']['contract_digest'] or
+                        evidence.get('executor_task_id') != callback['executor_task_id'] or
+                        evidence.get('source_sha') != developer['source_sha'] or
+                        evidence.get('execution_mode') != 'DIRECT_D6' or
+                        evidence.get('verification_state') not in
+                            ('NOT_STARTED', 'CLAIMED', 'READY', 'FAILED', 'UNKNOWN')):
+                    _fail()
+                if callback['state'] == 'VERIFYING_EXECUTOR' and (
+                        evidence.get('verification_state') != 'CLAIMED' or missing):
+                    _fail()
+                if callback['state'] in ('WAITING_EXECUTOR',) and (
+                        callback['pm_dispatch'] != 'NOT_STARTED' or
+                        callback['pm_response'] is not None or
+                        callback['pm_recommendation'] is not None):
+                    _fail()
+                if callback['state'] == 'WAITING_PM' and (
+                        callback['pm_dispatch'] != 'NOT_STARTED' or
+                        callback['pm_response'] is not None or
+                        callback['pm_recommendation'] is not None or missing):
+                    _fail()
+                if callback['state'] in ('WAITING_PM', 'PM_DISPATCHING',
+                        'PM_RETURNED', 'PM_RESPONSE_REJECTED', 'PM_UNAVAILABLE',
+                        'PM_OUTCOME_UNKNOWN'):
+                    result = evidence.get('result')
+                    tests = evidence.get('tests')
+                    review_ci = evidence.get('review_pr_ci')
+                    if (evidence.get('verification_state') != 'READY' or
+                            type(result) is not dict or type(tests) is not list or not tests or
+                            type(review_ci) is not dict or
+                            review_ci != {'stage': 'EXECUTOR_RESULT',
+                                'formal_review_state': 'NOT_STARTED',
+                                'ci_state': 'NOT_STARTED'} or
+                            result.get('result_mode') != 'UNCOMMITTED_WORKTREE' or
+                            result.get('result_head') is not None or
+                            result.get('task_id') != record['task_id'] or
+                            result.get('run_id') != record['run_id'] or
+                            result.get('source_sha') != developer['source_sha'] or
+                            type(result.get('diff_sha256')) is not str or
+                            re.fullmatch(r'[0-9a-f]{64}', result['diff_sha256']) is None or
+                            result.get('executor_task_id') != callback['executor_task_id']):
+                        _fail()
+                    paths = result.get('changed_paths')
+                    if (type(paths) is not list or not paths or paths != sorted(set(paths)) or
+                            not set(paths).issubset(set(developer['write_paths'])) or
+                            any(type(test) is not dict or test.get('exit_code') != 0 or
+                                type(test.get('exit_code')) is not int or
+                                test.get('source_sha') != developer['source_sha'] or
+                                test.get('result_head') is not None or
+                                test.get('diff_sha256') != result['diff_sha256'] or
+                                test.get('path') not in developer['read_paths'] +
+                                    developer['write_paths'] or
+                                type(test.get('output_sha256')) is not str or
+                                re.fullmatch(r'[0-9a-f]{64}', test['output_sha256']) is None
+                                for test in tests)):
+                        _fail()
+                callback_response = callback['pm_response']
+                if callback_response is not None and (
+                        type(callback_response) is not str or
+                        len(callback_response.encode('utf-8')) > 64 * 1024 or
+                        _emitted_sensitive(callback_response)):
+                    _fail()
+                recommendation = callback['pm_recommendation']
+                if recommendation is not None and (
+                        type(recommendation) is not dict or set(recommendation) !=
+                        {'decision', 'summary'} or recommendation['decision'] not in
+                        ('SEND_TO_REVIEW', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
+                         'WAIT_FOR_AUTHORIZATION', 'STOP') or
+                        type(recommendation['summary']) is not str or
+                        not recommendation['summary'] or
+                        len(recommendation['summary'].encode('utf-8')) > 2048 or
+                        _emitted_sensitive(recommendation['summary'])):
+                    _fail()
+                usage = callback['pm_usage']
+                if usage is not None:
+                    try:
+                        if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
+                            _fail()
+                        validate_provider_usage(usage)
+                    except Exception:
+                        _fail()
+                error = callback['pm_error_code']
+                if error is not None and (type(error) is not str or
+                        re.fullmatch(r'[A-Z0-9_]{1,64}', error) is None):
+                    _fail()
+                if 'review_handoff' in callback:
+                    result = evidence.get('result') if type(evidence) is dict else None
+                    try:
+                        if (callback['pm_recommendation'] is None or
+                                callback['pm_recommendation']['decision'] != 'SEND_TO_REVIEW' or
+                                type(result) is not dict):
+                            _fail()
+                        from .task_completion import validate_review_handoff_record
+                        validate_review_handoff_record(callback['review_handoff'],
+                            task_id=record['task_id'], run_id=record['run_id'],
+                            contract_digest=record['task_binding']['contract_digest'],
+                            developer_task_id=callback['executor_task_id'],
+                            developer_identity=evidence.get('executor_identity'),
+                            developer_session_ref=evidence.get('executor_session_ref'),
+                            source_sha=developer['source_sha'],
+                            result_head=result.get('result_head'),
+                            diff_sha256=result.get('diff_sha256'),
+                            changed_paths=result.get('changed_paths'))
+                    except Exception:
+                        _fail()
         if 'completion' in record:
             completion = record['completion']
             fields = frozenset(('state', 'executor_task_id', 'reviewer_task_id',
