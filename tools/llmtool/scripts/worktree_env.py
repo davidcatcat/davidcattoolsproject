@@ -474,6 +474,16 @@ def strip_credentials(value):
 
     value = value.strip()
     if "://" not in value:
+        try:
+            authority = urlsplit("//" + value)
+        except ValueError:
+            authority = None
+        if authority is not None and authority.username is not None:
+            raise EnvError(
+                "INDEX_CONFIG_INVALID",
+                "scheme-less index/find-links value contains unsupported userinfo",
+                4,
+            )
         return value
     try:
         parts = urlsplit(value)
@@ -512,7 +522,7 @@ def _redact_diagnostic(value, limit=2000):
         value,
     )
     value = re.sub(
-        r"(?<![\w.])((?:/|\.{1,2}/)[^\s\"'<>?#]*)([?#][^\s\"'<>]*)",
+        r"(?<![\w.])((?:/|\.{1,2}/|(?:[A-Za-z0-9._~-]+/)+)[^\s\"'<>?#]*)([?#][^\s\"'<>]*)",
         r"\1",
         value,
     )

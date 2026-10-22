@@ -418,6 +418,24 @@ class IndexIdentityTest(unittest.TestCase):
         self.assertEqual(we.strip_credentials("/srv/wheels"), "/srv/wheels")
         with self.assertRaises(we.EnvError):
             we.strip_credentials("https://host:notaport/simple")
+        with self.assertRaisesRegex(we.EnvError, "unsupported userinfo") as caught:
+            we.strip_credentials("alice:scheme-secret@links.example.invalid/simple")
+        self.assertNotIn("scheme-secret", str(caught.exception))
+
+    def test_scheme_less_credentials_rejected_from_env_and_pip_config(self):
+        value = "alice:scheme-secret@links.example.invalid/simple"
+        with mock.patch.dict(os.environ, {"PIP_FIND_LINKS": value}):
+            with self.assertRaises(we.EnvError) as caught:
+                we.index_identity(self.interp)
+        self.assertNotIn("scheme-secret", str(caught.exception))
+
+        tmp = Path(tempfile.mkdtemp(prefix="llmtool-pipcfg-schemeless-"))
+        config = tmp / "pip.conf"
+        config.write_text("[install]\nfind-links = %s\n" % value, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"PIP_CONFIG_FILE": str(config)}):
+            with self.assertRaises(we.EnvError) as caught:
+                we.index_identity(self.interp)
+        self.assertNotIn("scheme-secret", str(caught.exception))
 
     def test_each_source_changes_identity_and_never_records_credentials(self):
         baseline = we.index_identity(self.interp)
@@ -837,7 +855,7 @@ class CacheTest(EnvironmentTempCase):
         diagnostic = (
             "urllib3 Retry(total=0): GET /private/wheels/pkg.whl"
             "?key=key-secret&sig=sig-secret&sas=sas-secret&sv=sv-secret"
-            "#bare-fragment-secret"
+            "#bare-fragment-secret; also pkg/sub?sig=relative-secret#relative-fragment"
         )
 
         redacted = we._redact_diagnostic(diagnostic)
@@ -845,6 +863,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertIn("GET /private/wheels/pkg.whl", redacted)
         for secret in (
             "key-secret", "sig-secret", "sas-secret", "sv-secret", "bare-fragment-secret",
+            "relative-secret", "relative-fragment",
         ):
             self.assertNotIn(secret, redacted)
         self.assertNotIn("?", redacted)
