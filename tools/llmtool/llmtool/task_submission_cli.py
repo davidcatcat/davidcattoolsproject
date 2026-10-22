@@ -1089,7 +1089,7 @@ def run_task_show(args, *, store=None, stdout=None):
     return 0
 
 
-def run_task_complete(args, *, store=None):
+def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
     Without reviewer/PR arguments this is the first callback: it reports only the
@@ -1110,14 +1110,16 @@ def run_task_complete(args, *, store=None):
             direct_callback.get('evidence', {}).get('verification_state') == 'READY'):
         # Public recovery route after a pre-call PM configuration/setup failure.
         # The direct callback revalidates D6/worktree state and does not rerun tests.
-        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store,
+                                            reviewer_adapter=reviewer_adapter)
     if (executor_result_only and type(direct_callback) is dict and
             direct_callback.get('executor_task_id') == args.executor_task and
             direct_callback.get('state') == 'PM_RETURNED' and
             type(direct_callback.get('pm_recommendation')) is dict and
             direct_callback['pm_recommendation'].get('decision') == 'SEND_TO_REVIEW'):
         # Resume only the durable Reviewer phase. Never call the PM again.
-        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store,
+                                            reviewer_adapter=reviewer_adapter)
     if executor_result_only and direct_callback is not None:
         raise LLMToolError('direct Executor result callback is not retryable')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
@@ -1506,6 +1508,8 @@ def _resume_review_result_return(store, task, developer, callback):
         'repair_round': handoff['intent']['repair_round'],
         'bounded_next_step': handoff['next_step'],
     }
+    if 'review_packet_digest' in receipt:
+        pm_receipt['review_packet_digest'] = receipt['review_packet_digest']
     content = json.dumps(pm_receipt, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':'))
     _screen_text(content, 16 * 1024)
@@ -1608,7 +1612,7 @@ def _resume_review_result_return(store, task, developer, callback):
             _active_review_pm_returns.discard(dispatch_id)
 
 
-def _resume_reviewer_handoff(store, task, developer, callback):
+def _resume_reviewer_handoff(store, task, developer, callback, reviewer_adapter=None):
     recommendation = callback.get('pm_recommendation')
     if (callback.get('state') != 'PM_RETURNED' or
             type(recommendation) is not dict or
@@ -1684,7 +1688,9 @@ def _resume_reviewer_handoff(store, task, developer, callback):
             return _resume_review_result_return(store, task, developer, callback)
         _print(_task_view(store.get(task['task_id'])))
         return 1
-    if _trusted_reviewer_adapter is None:
+    adapter = (_trusted_reviewer_adapter if reviewer_adapter is None
+               else reviewer_adapter)
+    if adapter is None:
         # No call was attempted; this state is distinct from an ambiguous launch.
         receipt = task_completion.review_dispatch_blocked(handoff['intent'])
         not_dispatched = task_completion.review_handoff_not_dispatched(
@@ -1723,7 +1729,7 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         _print(_task_view(current))
         return 1
     try:
-        receipt = _trusted_reviewer_adapter(dispatching['intent'])
+        receipt = adapter(dispatching['intent'])
     except BaseException as exc:
         with _active_review_dispatches_lock:
             _active_review_dispatches.discard(dispatching['intent']['dispatch_id'])
@@ -1776,8 +1782,14 @@ def _resume_reviewer_handoff(store, task, developer, callback):
     return 1
 
 
-def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
-    """Automatically return a verified uncommitted direct-D6 result to its PM."""
+def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
+                                 reviewer_adapter=None):
+    """Return a verified direct-D6 result to its original PM.
+
+    Trusted Host callers may inject an adapter made with
+    ``review_handoff.task_completion_adapter``. No adapter is installed by
+    default, so ordinary CLI completion remains WAITING_REVIEW with zero calls.
+    """
     store = TaskStore() if store is None else store
     task = store.get(task_id)
     developer = task.get('developer')
@@ -1839,7 +1851,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
     if (callback.get('state') == 'PM_RETURNED' and
             type(callback.get('pm_recommendation')) is dict and
             callback['pm_recommendation'].get('decision') == 'SEND_TO_REVIEW'):
-        return _resume_reviewer_handoff(store, task, developer, callback)
+        return _resume_reviewer_handoff(store, task, developer, callback,
+                                        reviewer_adapter=reviewer_adapter)
     if callback['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED', 'UNAVAILABLE'):
         raise LLMToolError('direct result PM call already claimed or completed; replay refused')
 
@@ -2103,18 +2116,22 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
         raise exc
     if recommendation is not None and recommendation['decision'] == 'SEND_TO_REVIEW':
         return _resume_reviewer_handoff(store, saved_returned,
-            saved_returned['developer'], saved_returned['developer']['direct_result_callback'])
+            saved_returned['developer'], saved_returned['developer']['direct_result_callback'],
+            reviewer_adapter=reviewer_adapter)
     _print(_task_view(store.get(task_id)))
     return 0 if recommendation is not None else 1
 
 
-def run_task_executor_event(task_id, executor_task_id, *, store=None):
+def run_task_executor_event(task_id, executor_task_id, *, store=None,
+                            reviewer_adapter=None):
     """Handle the existing Host's verified completion event exactly once.
 
     The event carries identifiers only. All Git, D6, artifact, receipt and test
     evidence is recollected by run_task_complete before the original PM is called.
+    Only an already authorized Host may supply a Reviewer adapter; omission
+    preserves the zero-call WAITING_REVIEW path.
     """
     from argparse import Namespace
-    # The production entrypoint deliberately supplies no Reviewer adapter.
     return run_task_complete(Namespace(task_id=task_id,
-        executor_task=executor_task_id, reviewer_task=None, pr=None), store=store)
+        executor_task=executor_task_id, reviewer_task=None, pr=None), store=store,
+        reviewer_adapter=reviewer_adapter)
