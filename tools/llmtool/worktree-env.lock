@@ -1,4 +1,4 @@
-# llmtool developer worktree environment lock (schema 1)
+# llmtool developer worktree environment lock (schema 2)
 #
 # Authority: Issue #267 (A11c ENV-1). This file is the single source of truth for
 # the packages installed into a task-local developer venv, and its bytes are part
@@ -7,6 +7,10 @@
 #
 # Rules:
 #   * one `name = "version"` per line, version pinned exactly, no specifiers;
+#   * each entry is followed by one or more indented `sha256:<hex>` lines: the
+#     trusted digests of the wheels allowed for that pin (trailing `# filename`
+#     comments are informational). Every downloaded, seeded or cached wheel must
+#     match one of them, on every use;
 #   * a package may appear in only one group;
 #   * [base]    runtime dependencies declared in pyproject.toml `dependencies`;
 #   * [build]   `build-system.requires` plus a PEP 660 capable pip (>= 21.3),
@@ -14,15 +18,42 @@
 #               some interpreters (Apple CLT CPython 3.9.6) bundle pip 21.2.4;
 #   * [tui]     optional `tui` extra (only installed with `--extras tui`);
 #   * bumps must keep tests/test_worktree_env.py::LockTest green.
-schema = 1
+#
+# Digest provenance (2026-10-22): PyPI JSON API `digests.sha256` for each pinned
+# release, cross-checked against wheels independently fetched by `pip download`
+# for CPython 3.9.6 and 3.13.3 on macOS x86_64. Covered platform wheels: CPython
+# 3.9 / 3.13 / 3.14 on macOS x86_64 + arm64 and manylinux x86_64 + aarch64 (plus
+# pure py3 wheels). Any other platform/ABI has no pinned digest and fails closed;
+# add its PyPI digest here (reviewed) to support it.
+schema = 2
 
 [base]
 PyYAML = "6.0.3"
+    sha256:8da9669d359f02c0b91ccc01cac4a67f16afec0dac22c2ad09f46bee0697eba8  # pyyaml-6.0.3-cp313-cp313-macosx_10_13_x86_64.whl
+    sha256:2283a07e2c21a2aa78d9c4442724ec1eb15f5e42a723b99cb3d822d48f5f7ad1  # pyyaml-6.0.3-cp313-cp313-macosx_11_0_arm64.whl
+    sha256:ee2922902c45ae8ccada2c5b501ab86c36525b883eff4255313a253a3160861c  # pyyaml-6.0.3-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+    sha256:0f29edc409a6392443abf94b9cf89ce99889a1dd5376d94316ae5145dfedd5d6  # pyyaml-6.0.3-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+    sha256:8d1fab6bb153a416f9aeb4b8763bc0f22a5586065f86f7664fc23339fc1c1fac  # pyyaml-6.0.3-cp314-cp314-macosx_10_13_x86_64.whl
+    sha256:34d5fcd24b8445fadc33f9cf348c1047101756fd760b4dacb5c3e99755703310  # pyyaml-6.0.3-cp314-cp314-macosx_11_0_arm64.whl
+    sha256:501a031947e3a9025ed4405a168e6ef5ae3126c59f90ce0cd6f2bfc477be31b7  # pyyaml-6.0.3-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+    sha256:c458b6d084f9b935061bc36216e8a69a7e293a2f1e68bf956dcd9e6cbcd143f5  # pyyaml-6.0.3-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+    sha256:b865addae83924361678b652338317d1bd7e79b1f4596f96b96c77a5a34b34da  # pyyaml-6.0.3-cp39-cp39-macosx_10_13_x86_64.whl
+    sha256:c3355370a2c156cffb25e876646f149d5d68f5e0a3ce86a5084dd0b64a994917  # pyyaml-6.0.3-cp39-cp39-macosx_11_0_arm64.whl
+    sha256:3c5677e12444c15717b902a5798264fa7909e41153cdf9ef7ad571b704a63dd9  # pyyaml-6.0.3-cp39-cp39-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl
+    sha256:0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a  # pyyaml-6.0.3-cp39-cp39-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
 
 [build]
 pip = "25.1.1"
+    sha256:2913a38a2abf4ea6b64ab507bd9e967f3b53dc1ede74b01b0931e1ce548751af  # pip-25.1.1-py3-none-any.whl
 setuptools = "80.9.0"
+    sha256:062d34222ad13e0cc312a4c02d73f059e86a4acbfbdea8f8f76b28c99f306922  # setuptools-80.9.0-py3-none-any.whl
 
 [tui]
 prompt-toolkit = "3.0.52"
+    sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955  # prompt_toolkit-3.0.52-py3-none-any.whl
 wcwidth = "0.9.2"
+    sha256:7ef5a940bd5e30bac6e721f1a48fce0cd7bb3ece19e9c5d139e72c76c35cfd07  # wcwidth-0.9.2-cp310-abi3-macosx_10_9_x86_64.whl
+    sha256:ae0800c5339423cc53d33a266ad264b42ba8aaa16d4464f6e6b1bee607f50b17  # wcwidth-0.9.2-cp310-abi3-macosx_11_0_arm64.whl
+    sha256:674b518af28d38ee645ff97b74f5760abee5fad4bac74413bfc4b881ef2ce724  # wcwidth-0.9.2-cp310-abi3-manylinux2014_aarch64.manylinux_2_17_aarch64.whl
+    sha256:751bef0ab404b6a1dc028b56b4b85d46486be1c55833f80da533e42dc691f389  # wcwidth-0.9.2-cp310-abi3-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+    sha256:89ca642c5bf0101157a09366be69fad0379db1f700ae39a920e103234573670e  # wcwidth-0.9.2-py3-none-any.whl

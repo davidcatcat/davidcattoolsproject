@@ -23,8 +23,18 @@ Design notes
 ------------
 * Fingerprint inputs (all hashed together): cache schema, builder version,
   host platform, CPU architecture, `sysconfig` platform tag, Python
-  implementation + version + SOABI, selected extras, and the exact bytes of
-  `tools/llmtool/worktree-env.lock`.
+  implementation + version + SOABI, selected extras, the exact bytes of
+  `tools/llmtool/worktree-env.lock`, the installer (pip name + exact version)
+  and the credential-stripped index configuration (PIP_INDEX_URL,
+  PIP_EXTRA_INDEX_URL, PIP_FIND_LINKS, PIP_NO_INDEX and the pip config files'
+  index-url / extra-index-url / find-links / no-index; userinfo, query and
+  fragment are always dropped). The cache key uses the downloading
+  interpreter's pip; the venv marker key uses the venv's own pip.
+* Trust root: the lock pins one or more sha256 digests per package. Every
+  wheel is checked against them on download (pip `--require-hashes` plus an
+  own check), on `--wheel-source` seeding and on every cache hit; the cache
+  manifest only proves self-consistency. A platform/ABI whose wheel digest is
+  not pinned fails closed (pip hash mismatch or WHEEL_HASH_UNTRUSTED).
 * The wheelhouse lives outside every worktree at
   `~/Library/Caches/llmtool/worktree-env` (macOS) or
   `$XDG_CACHE_HOME/llmtool/worktree-env` (other POSIX). Entries are built once
@@ -59,8 +69,8 @@ import tempfile
 import time
 from pathlib import Path
 
-SCHEMA = 1
-BUILDER = "worktree_env/1"
+SCHEMA = 2
+BUILDER = "worktree_env/2"
 LOCK_RELATIVE = Path("tools/llmtool/worktree-env.lock")
 PROJECT_RELATIVE = Path("tools/llmtool")
 VENV_RELATIVE = Path("tools/llmtool/.venv")
@@ -70,6 +80,10 @@ OPTIONAL_GROUPS = ("tui",)
 PIP_TIMEOUT_S = 900
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SAFE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+INDEX_ENV_KEYS = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX")
+INDEX_CONFIG_KEYS = ("index-url", "extra-index-url", "find-links", "no-index")
+INDEX_CONFIG_SECTIONS = ("global", "download", "install")
 
 
 class EnvError(Exception):
@@ -211,19 +225,45 @@ def default_cache_root():
 # --------------------------------------------------------------------------
 
 
-def parse_lock(path):
-    """Parse the tiny INI-like lock file. Deterministic and dependency free."""
+class LockSections(dict):
+    """{group: {name: version}} plus `hashes` = {name: frozenset(sha256)}."""
 
-    sections = {}
+    hashes = None
+
+
+def parse_lock(path):
+    """Parse the tiny INI-like lock file. Deterministic and dependency free.
+
+    Every pinned entry must be followed by one or more indented
+    `sha256:<64 hex>` lines (an optional `# filename` comment may follow). These
+    digests are the trusted pinned metadata: every wheel obtained by download,
+    `--wheel-source` seeding or a cache hit must match one of them, whatever a
+    cache manifest says.
+    """
+
+    sections = LockSections()
+    hashes = {}
     current = None
+    last = None
     data = path.read_bytes()
     text = data.decode("utf-8")
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        if line.startswith("sha256:"):
+            digest = line[len("sha256:"):].split("#", 1)[0].strip()
+            if last is None:
+                raise EnvError("INVALID_LOCK", "hash on line %d does not follow an entry" % lineno, 4)
+            if not _SHA256.match(digest):
+                raise EnvError("INVALID_LOCK", "malformed sha256 on line %d: %r" % (lineno, raw), 4)
+            if digest in hashes[last]:
+                raise EnvError("INVALID_LOCK", "duplicate sha256 for %s on line %d" % (last, lineno), 4)
+            hashes[last].add(digest)
+            continue
         if line.startswith("[") and line.endswith("]"):
             current = line[1:-1].strip()
+            last = None
             if current in sections:
                 raise EnvError("INVALID_LOCK", "duplicate section [%s]" % current, 4)
             sections[current] = {}
@@ -234,6 +274,7 @@ def parse_lock(path):
         if key == "schema":
             if value != str(SCHEMA):
                 raise EnvError("INVALID_LOCK", "unsupported lock schema %r" % value, 4)
+            last = None
             continue
         if current is None:
             raise EnvError("INVALID_LOCK", "entry outside a section on line %d" % lineno, 4)
@@ -244,6 +285,8 @@ def parse_lock(path):
         if name in sections[current]:
             raise EnvError("INVALID_LOCK", "duplicate %s in [%s]" % (name, current), 4)
         sections[current][name] = version
+        hashes.setdefault(name, set())
+        last = name
 
     for group in REQUIRED_GROUPS:
         if not sections.get(group):
@@ -263,6 +306,13 @@ def parse_lock(path):
                     4,
                 )
             seen[name] = group
+            if not hashes.get(name):
+                raise EnvError(
+                    "INVALID_LOCK",
+                    "%s has no trusted sha256; every pinned package needs at least one" % name,
+                    4,
+                )
+    sections.hashes = {name: frozenset(values) for name, values in hashes.items()}
     return sections
 
 
@@ -272,15 +322,40 @@ def selected_requirements(sections, extras):
         if extra not in OPTIONAL_GROUPS:
             raise EnvError("INVALID_EXTRAS", "unknown extra %r" % extra, 4)
         groups.append(extra)
+    trusted = getattr(sections, "hashes", None) or {}
     reqs = []
     for group in groups:
         for name, version in sorted(sections[group].items()):
-            reqs.append({"name": name, "version": version, "group": group})
+            digests = sorted(trusted.get(name) or ())
+            if not digests:
+                raise EnvError("INVALID_LOCK", "%s has no trusted sha256" % name, 4)
+            reqs.append({"name": name, "version": version, "group": group, "sha256": digests})
     return reqs
 
 
 def requirement_lines(requirements):
-    return "".join("%s==%s\n" % (item["name"], item["version"]) for item in requirements)
+    """pip requirements in hash-checking mode (every line carries --hash)."""
+
+    return "".join(
+        "%s==%s %s\n"
+        % (item["name"], item["version"], " ".join("--hash=sha256:%s" % h for h in item["sha256"]))
+        for item in requirements
+    )
+
+
+def require_trusted_digest(name, digest, requirements, where):
+    """Fail closed unless `digest` is a lock-pinned sha256 for `name`."""
+
+    for item in requirements:
+        if item["name"] == name:
+            if digest in item["sha256"]:
+                return
+            raise EnvError(
+                "WHEEL_HASH_UNTRUSTED",
+                "%s: %s sha256 %s is not pinned in worktree-env.lock" % (where, name, digest),
+                3,
+            )
+    raise EnvError("WHEEL_HASH_UNTRUSTED", "%s: %s is not in the lock" % (where, name), 3)
 
 
 # --------------------------------------------------------------------------
@@ -297,6 +372,8 @@ print("@@" + json.dumps({
     "platform_tag": sysconfig.get_platform(),
     "machine": platform.machine(),
     "executable": sys.executable,
+    "prefix": sys.prefix,
+    "base_prefix": getattr(sys, "base_prefix", sys.prefix),
 }))
 """
 
@@ -383,9 +460,142 @@ def _normalize_machine(machine):
     return aliases.get(value, value)
 
 
-def fingerprint_inputs(lock_path, extras, interp):
+def strip_credentials(value):
+    """Return a URL without userinfo, query or fragment; paths pass unchanged.
+
+    Index URLs may embed credentials (`https://user:token@host/...`) or tokens
+    in the query string. Only scheme, host, port and path are kept, so no
+    credential can reach a fingerprint, manifest, marker or report.
+    """
+
+    from urllib.parse import urlsplit, urlunsplit
+
+    value = value.strip()
+    if "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        raise EnvError("INDEX_CONFIG_INVALID", "unparsable index/find-links URL in pip configuration", 4)
+    netloc = host if port is None else "%s:%d" % (host, port)
+    return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
+
+
+def _pip_config_files(interp):
+    """Candidate pip config files (a superset of what pip itself reads).
+
+    Mirrors pip's global/site/user/env locations. A superset can only cause
+    extra invalidation, never a stale hit. `PIP_CONFIG_FILE=os.devnull` makes
+    pip skip every config file, and so does this function.
+    """
+
+    env_file = os.environ.get("PIP_CONFIG_FILE")
+    if env_file == os.devnull:
+        return []
+    home = Path.home()
+    files = []
+    if sys.platform == "darwin":
+        files.append(Path("/Library/Application Support/pip/pip.conf"))
+    else:
+        for base in (os.environ.get("XDG_CONFIG_DIRS") or "/etc/xdg").split(os.pathsep):
+            if base:
+                files.append(Path(base) / "pip" / "pip.conf")
+    files.append(Path("/etc/pip.conf"))
+    for prefix in (interp.get("base_prefix"), interp.get("prefix")):
+        if prefix:
+            files.append(Path(prefix) / "pip.conf")
+    files.append(home / ".pip" / "pip.conf")
+    if sys.platform == "darwin":
+        files.append(home / "Library" / "Application Support" / "pip" / "pip.conf")
+    files.append(Path(os.environ.get("XDG_CONFIG_HOME") or str(home / ".config")) / "pip" / "pip.conf")
+    if env_file:
+        files.append(Path(env_file))
+    unique = []
+    for item in files:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def index_identity(interp):
+    """Credential-stripped package source configuration (env + pip config).
+
+    Records only index-url / extra-index-url / find-links / no-index values,
+    never file paths, user names, passwords or tokens.
+    """
+
+    import configparser
+
+    env = {}
+    for key in INDEX_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is None:
+            continue
+        if key == "PIP_NO_INDEX":
+            env[key] = [value.strip().lower()]
+        else:
+            env[key] = [strip_credentials(item) for item in value.split()]
+    config = []
+    for path in _pip_config_files(interp):
+        try:
+            if not path.is_file():
+                continue
+            parser = configparser.RawConfigParser()
+            parser.read(str(path), encoding="utf-8")
+        except (OSError, configparser.Error, UnicodeDecodeError):
+            raise EnvError("INDEX_CONFIG_INVALID", "unreadable pip configuration file", 4)
+        for section in INDEX_CONFIG_SECTIONS:
+            if not parser.has_section(section):
+                continue
+            for option, value in parser.items(section):
+                key = option.replace("_", "-").lower()
+                if key not in INDEX_CONFIG_KEYS:
+                    continue
+                if key == "no-index":
+                    values = [value.strip().lower()]
+                else:
+                    values = [strip_credentials(item) for item in value.split()]
+                config.append([section, key, values])
+    return {"env": env, "config": config}
+
+
+def pip_version_string(python_executable):
+    """Exact `pip` version of an interpreter (installer identity)."""
+
+    try:
+        proc = subprocess.run(
+            [python_executable, "-I", "-m", "pip", "--version", "--disable-pip-version-check"],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EnvError("PIP_UNAVAILABLE", "cannot run pip: %s" % exc, 5)
+    match = re.match(r"^pip (\d+(?:\.\d+)*\S*)", proc.stdout or "")
+    if proc.returncode != 0 or not match:
+        raise EnvError(
+            "PIP_UNAVAILABLE",
+            "pip did not report a version: %s" % (proc.stderr or proc.stdout or "").strip()[-500:],
+            5,
+        )
+    return match.group(1)
+
+
+def installer_identity(python_executable):
+    return {"name": "pip", "version": pip_version_string(python_executable)}
+
+
+def fingerprint_inputs(lock_path, extras, interp, installer, index):
+    """All cache/env key inputs. `installer` and `index` are mandatory."""
+
+    if not isinstance(installer, dict) or not installer.get("name") or not installer.get("version"):
+        raise EnvError("INVALID_FINGERPRINT", "installer identity is missing", 3)
+    if not isinstance(index, dict) or set(index) != {"env", "config"}:
+        raise EnvError("INVALID_FINGERPRINT", "index identity is missing", 3)
     lock_bytes = Path(lock_path).read_bytes()
     inputs = {
+        "installer": {"name": installer["name"], "version": installer["version"]},
+        "index": index,
         "schema": SCHEMA,
         "builder": BUILDER,
         "lock_sha256": sha256_bytes(lock_bytes),
@@ -520,6 +730,13 @@ def verify_wheelhouse(path, fp, requirements):
         digest = sha256_file(entry)
         if digest != item.get("sha256"):
             raise EnvError("CACHE_CORRUPT", "sha256 mismatch for %s" % name, 3)
+        parsed = _parse_wheel_filename(name)
+        if parsed is None or parsed != (item.get("name"), item.get("version")):
+            raise EnvError("CACHE_CORRUPT", "manifest entry does not match wheel file name %s" % name, 3)
+        # The manifest lives next to the wheels, so it only proves the entry is
+        # self-consistent. Trust comes from the repository lock: every wheel
+        # must match a lock-pinned sha256 on every use.
+        require_trusted_digest(parsed[0], digest, requirements, "cache entry %s" % path.name)
         seen[item.get("name")] = item
 
     expected = {item["name"]: item["version"] for item in requirements}
@@ -671,6 +888,10 @@ def _collect_wheels(requirements, wheel_source):
             "wheel versions do not match the lock: %s" % mismatched,
             3,
         )
+    for name in expected:
+        require_trusted_digest(
+            name, sha256_file(found[name][1]), requirements, "--wheel-source %s" % found[name][1].name
+        )
     return {name: found[name][1] for name in expected}
 
 
@@ -684,6 +905,7 @@ def _download_wheels(python_executable, requirements, destination):
         "download",
         "--no-deps",
         "--only-binary=:all:",
+        "--require-hashes",
         "--no-cache-dir",
         "--disable-pip-version-check",
         "--dest",
@@ -713,6 +935,7 @@ def _download_wheels(python_executable, requirements, destination):
         dist, version = info
         if dist in wheels:
             raise EnvError("PIP_DOWNLOAD_AMBIGUOUS", "multiple wheels for %s" % dist, 5)
+        require_trusted_digest(dist, sha256_file(entry), requirements, "download %s" % entry.name)
         wheels[dist] = (version, entry)
     return {name: wheels[name][1] for name in wheels}
 
@@ -755,6 +978,9 @@ def ensure_wheelhouse(
     if final.is_symlink():
         raise EnvError("CACHE_CORRUPT", "cache entry is a symlink: %s" % final, 3)
     if not rebuild and final.exists():
+        # Lock-free fast path. A concurrent `--rebuild-cache` of the same entry
+        # can remove it mid-verification; that surfaces as CACHE_CORRUPT (fail
+        # closed, retry succeeds) and can never yield an unverified hit.
         verify_wheelhouse(final, fp, requirements)
         return final, "hit"
 
@@ -895,6 +1121,7 @@ def install_requirements(python_executable, wheelhouse, requirements):
         "--find-links",
         str(wheelhouse),
         "--only-binary=:all:",
+        "--require-hashes",
         "--no-cache-dir",
         "--disable-pip-version-check",
         "-r",
@@ -1079,6 +1306,18 @@ def _probe_venv(python_executable, names):
     )
 
 
+def env_fingerprint(lock_path, extras, venv):
+    """Fingerprint of an installed venv: interpreter, lock, extras, the venv's
+    own installer (pip) and the credential-stripped index configuration."""
+
+    python = venv_python(venv)
+    interp = interpreter_info(python)
+    inputs = fingerprint_inputs(
+        lock_path, extras, interp, installer_identity(python), index_identity(interp)
+    )
+    return interp, inputs, fingerprint_id(inputs)
+
+
 def verify_env(worktree, lock_path, extras, expect_project=None):
     worktree = Path(worktree)
     venv = venv_dir(worktree)
@@ -1086,17 +1325,18 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
         raise EnvError("VENV_MISSING", "no venv at %s" % venv, 3)
     _assert_venv_within_worktree(venv, worktree)
 
-    interp = interpreter_info(venv_python(venv))
-    inputs = fingerprint_inputs(lock_path, extras, interp)
-    fp = fingerprint_id(inputs)
+    interp, inputs, fp = env_fingerprint(lock_path, extras, venv)
     marker = read_marker(venv)
     if marker.get("fingerprint") != fp:
         raise EnvError(
             "ENV_DRIFT",
-            "venv fingerprint %r does not match required %r (dependency/python/platform change); "
-            "re-run bootstrap with --recreate" % (marker.get("fingerprint"), fp),
+            "venv fingerprint %r does not match required %r (dependency/python/platform/"
+            "installer/index change); re-run bootstrap with --recreate" % (marker.get("fingerprint"), fp),
             3,
         )
+    cache_fp = marker.get("cache_fingerprint")
+    if not isinstance(cache_fp, str) or not re.fullmatch(r"[A-Za-z0-9._-]+", cache_fp):
+        raise EnvError("MARKER_CORRUPT", "marker does not record a valid cache_fingerprint", 3)
     recorded = marker.get("worktree_root")
     if not isinstance(recorded, str) or not recorded or not Path(recorded).is_absolute():
         raise EnvError(
@@ -1174,6 +1414,8 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
             )
     return {
         "fingerprint": fp,
+        "cache_fingerprint": cache_fp,
+        "installer": inputs["installer"],
         "python": interp["version"],
         "abi": interp["abi"],
         "platform": interp["platform"],
@@ -1192,8 +1434,12 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
 def cmd_fingerprint(args):
     worktree = _resolve_worktree(args.worktree)
     sections = parse_lock(worktree / LOCK_RELATIVE)
-    interp = interpreter_info(args.python or default_python_executable())
-    inputs = fingerprint_inputs(worktree / LOCK_RELATIVE, args.extras, interp)
+    python_executable = args.python or default_python_executable()
+    interp = interpreter_info(python_executable)
+    inputs = fingerprint_inputs(
+        worktree / LOCK_RELATIVE, args.extras, interp,
+        installer_identity(python_executable), index_identity(interp),
+    )
     return {
         "fingerprint": fingerprint_id(inputs),
         "inputs": inputs,
@@ -1218,7 +1464,12 @@ def cmd_bootstrap(args):
     requirements = selected_requirements(sections, args.extras)
     python_executable = args.python or default_python_executable()
     interp = interpreter_info(python_executable)
-    inputs = fingerprint_inputs(lock_path, args.extras, interp)
+    # Cache key: the downloading/seeding interpreter's installer and the
+    # credential-stripped index configuration are part of artifact provenance.
+    inputs = fingerprint_inputs(
+        lock_path, args.extras, interp,
+        installer_identity(python_executable), index_identity(interp),
+    )
     fp = fingerprint_id(inputs)
     cache_root = _resolve_cache_root(args.cache_root, worktree)
     lock_fd = worktree_lock(worktree)
@@ -1244,6 +1495,14 @@ def _bootstrap_locked(
         phase = time.monotonic()
         report = verify_env(worktree, lock_path, args.extras)
         timings["verify"] = round(time.monotonic() - phase, 3)
+        if report["cache_fingerprint"] != fp:
+            raise EnvError(
+                "ENV_DRIFT",
+                "venv was built from cache %r but the current cache key is %r "
+                "(installer/index/interpreter change); re-run bootstrap with --recreate"
+                % (report["cache_fingerprint"], fp),
+                3,
+            )
         report.update(
             {
                 "status": "env_reused",
@@ -1268,11 +1527,10 @@ def _bootstrap_locked(
     )
     timings["cache"] = round(time.monotonic() - phase, 3)
 
-    phase = time.monotonic()
-    venv = create_venv(worktree, python_executable, recreate=args.recreate)
-    timings["venv"] = round(time.monotonic() - phase, 3)
-
     try:
+        phase = time.monotonic()
+        venv = create_venv(worktree, python_executable, recreate=args.recreate)
+        timings["venv"] = round(time.monotonic() - phase, 3)
         return _install_into_new_venv(
             args, started, timings, worktree, lock_path, requirements, venv,
             wheelhouse, cache_status, inputs, fp,
@@ -1291,7 +1549,8 @@ def _install_into_new_venv(
     wheelhouse, cache_status, inputs, fp,
 ):
     venv_inputs = fingerprint_inputs(
-        lock_path, args.extras, interpreter_info(venv_python(venv))
+        lock_path, args.extras, interpreter_info(venv_python(venv)),
+        inputs["installer"], inputs["index"],
     )
     if fingerprint_id(venv_inputs) != fp:
         raise EnvError(
@@ -1310,11 +1569,14 @@ def _install_into_new_venv(
         install_project(venv_python(venv), worktree, wheelhouse)
         timings["project"] = round(time.monotonic() - phase, 3)
 
+    _interp, env_inputs, env_fp = env_fingerprint(lock_path, args.extras, venv)
     marker = {
         "schema": SCHEMA,
         "builder": BUILDER,
-        "fingerprint": fp,
-        "fingerprint_inputs": inputs,
+        "fingerprint": env_fp,
+        "fingerprint_inputs": env_inputs,
+        "cache_fingerprint": fp,
+        "cache_fingerprint_inputs": inputs,
         "worktree_root": str(Path(os.path.realpath(str(worktree)))),
         "project": not args.no_project,
         "extras": sorted(args.extras),
@@ -1425,8 +1687,9 @@ def build_parser():
     boot.add_argument("--rebuild-cache", action="store_true", help="discard this fingerprint's cache entry")
     boot.add_argument(
         "--wheel-source", default=None,
-        help="seed the cache from a directory of wheels pinned by the lock "
-        "(hashes are recorded from those files, not compared to the lock)",
+        help="seed the cache from a local directory of wheels; every used file must "
+        "match the lock's version and a lock-pinned sha256, otherwise bootstrap "
+        "fails closed (locally built wheels are therefore rejected)",
     )
     boot.add_argument(
         "--no-project", dest="no_project", action="store_true",

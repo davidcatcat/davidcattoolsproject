@@ -24,6 +24,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS / "scripts"))
@@ -162,16 +163,22 @@ requires-python = ">=3.9"
 dependencies = [%s]
 """
 
-_LOCK = """# test lock
-schema = 1
-
-[base]
-tiny-dep = "1.0.0"
-%s
-"""
+def sha256_of(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def make_worktree(root, marker, extra_base="", dependencies='"tiny-dep>=1.0"', broken=False):
+def lock_text(hashes, entries=(("tiny-dep", "1.0.0"),)):
+    """Fixture lock (schema 2): every entry carries its trusted sha256 lines."""
+
+    lines = ["# test lock", "schema = 2", "", "[base]"]
+    for name, version in entries:
+        lines.append('%s = "%s"' % (name, version))
+        for digest in hashes[name]:
+            lines.append("    sha256:%s" % digest)
+    return "\n".join(lines) + "\n"
+
+
+def make_worktree(root, marker, hashes, extra_base=(), dependencies='"tiny-dep>=1.0"', broken=False):
     root = Path(root)
     project = root / "tools" / "llmtool"
     (project / "llmtool").mkdir(parents=True, exist_ok=True)
@@ -184,7 +191,8 @@ def make_worktree(root, marker, extra_base="", dependencies='"tiny-dep>=1.0"', b
             "def build_editable(wheel_directory, config_settings=None, metadata_directory=None):\n    raise RuntimeError('simulated backend failure')",
         )
     (project / "fakebackend.py").write_text(backend, encoding="utf-8")
-    (project / "worktree-env.lock").write_text(_LOCK % extra_base, encoding="utf-8")
+    entries = (("tiny-dep", "1.0.0"),) + tuple(extra_base)
+    (project / "worktree-env.lock").write_text(lock_text(hashes, entries), encoding="utf-8")
     return root
 
 
@@ -208,11 +216,24 @@ class EnvironmentTempCase(unittest.TestCase):
     """Shared temp workspace with one wheel source and a scratch cache root."""
 
     def setUp(self):
+        # Hermetic package-source configuration: no ambient PIP_* index
+        # settings and no user/global pip config files (pip and worktree_env
+        # both skip every config file when PIP_CONFIG_FILE is os.devnull).
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for key in we.INDEX_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ["PIP_CONFIG_FILE"] = os.devnull
         self.tmp = Path(tempfile.mkdtemp(prefix="llmtool-env-test-"))
         self.wheels = self.tmp / "wheels"
-        make_wheel(self.wheels, "tiny-dep", "1.0.0", marker="dep")
-        make_wheel(self.wheels, "tiny-extra", "1.0.0", marker="extra")
+        dep = make_wheel(self.wheels, "tiny-dep", "1.0.0", marker="dep")
+        extra = make_wheel(self.wheels, "tiny-extra", "1.0.0", marker="extra")
+        self.hashes = {"tiny-dep": [sha256_of(dep)], "tiny-extra": [sha256_of(extra)]}
         self.cache = self.tmp / "cache"
+
+    def make_worktree(self, root, marker, hashes=None, **kwargs):
+        return make_worktree(root, marker, hashes or self.hashes, **kwargs)
 
     def tearDown(self):
         _chmod_writable(self.tmp)
@@ -247,7 +268,9 @@ class EnvironmentTempCase(unittest.TestCase):
         lock = Path(worktree) / "tools" / "llmtool" / "worktree-env.lock"
         python = we.default_python_executable()
         interp = we.interpreter_info(python)
-        inputs = we.fingerprint_inputs(lock, [], interp)
+        inputs = we.fingerprint_inputs(
+            lock, [], interp, we.installer_identity(python), we.index_identity(interp)
+        )
         fingerprint = we.fingerprint_id(inputs)
         requirements = we.selected_requirements(we.parse_lock(lock), [])
         we.ensure_wheelhouse(
@@ -284,6 +307,11 @@ class EnvironmentTempCase(unittest.TestCase):
         return json.loads(proc.stdout)
 
 
+_INSTALLER = {"name": "pip", "version": "25.1.1"}
+_NO_INDEX = {"env": {}, "config": []}
+_H = "a" * 64
+
+
 class FingerprintTest(unittest.TestCase):
     def _inputs(self, **overrides):
         base = {
@@ -297,23 +325,39 @@ class FingerprintTest(unittest.TestCase):
         base.update(overrides)
         return base
 
+    def _fp(self, lock, extras, interp, installer=_INSTALLER, index=_NO_INDEX):
+        return we.fingerprint_id(we.fingerprint_inputs(lock, extras, interp, installer, index))
+
     def test_fingerprint_is_deterministic_and_normalises_machine(self):
         lock = Path(tempfile.mkdtemp(prefix="llmtool-lock-")) / "lock"
-        lock.write_text("schema = 1\n[base]\ntiny-dep = \"1.0.0\"\n", encoding="utf-8")
+        lock.write_text("schema = 2\n[base]\ntiny-dep = \"1.0.0\"\n    sha256:%s\n" % _H, encoding="utf-8")
         try:
-            first = we.fingerprint_inputs(lock, ["tui"], self._inputs())
-            second = we.fingerprint_inputs(lock, ["tui"], self._inputs())
+            first = we.fingerprint_inputs(lock, ["tui"], self._inputs(), _INSTALLER, _NO_INDEX)
+            second = we.fingerprint_inputs(lock, ["tui"], self._inputs(), _INSTALLER, _NO_INDEX)
             self.assertEqual(first, second)
             self.assertEqual(first["machine"], "x86_64")
+            self.assertEqual(first["installer"], _INSTALLER)
             self.assertEqual(we.fingerprint_id(first), we.fingerprint_id(second))
+        finally:
+            shutil.rmtree(str(lock.parent), ignore_errors=True)
+
+    def test_installer_and_index_identity_are_mandatory(self):
+        lock = Path(tempfile.mkdtemp(prefix="llmtool-lock-")) / "lock"
+        lock.write_text("schema = 2\n", encoding="utf-8")
+        try:
+            for installer, index in ((None, _NO_INDEX), ({"name": "pip"}, _NO_INDEX), (_INSTALLER, None), (_INSTALLER, {})):
+                with self.subTest(installer=installer, index=index):
+                    with self.assertRaises(we.EnvError) as caught:
+                        we.fingerprint_inputs(lock, [], self._inputs(), installer, index)
+                    self.assertEqual(caught.exception.status, "INVALID_FINGERPRINT")
         finally:
             shutil.rmtree(str(lock.parent), ignore_errors=True)
 
     def test_fingerprint_changes_with_every_invalidating_input(self):
         lock = Path(tempfile.mkdtemp(prefix="llmtool-lock-")) / "lock"
-        lock.write_text("schema = 1\n[base]\ntiny-dep = \"1.0.0\"\n", encoding="utf-8")
+        lock.write_text("schema = 2\n[base]\ntiny-dep = \"1.0.0\"\n    sha256:%s\n" % _H, encoding="utf-8")
         try:
-            baseline = we.fingerprint_id(we.fingerprint_inputs(lock, [], self._inputs()))
+            baseline = self._fp(lock, [], self._inputs())
             variants = {
                 "python": self._inputs(version="3.10.0"),
                 "abi": self._inputs(abi="cpython-310-darwin"),
@@ -323,18 +367,89 @@ class FingerprintTest(unittest.TestCase):
             }
             for label, interp in variants.items():
                 with self.subTest(label):
-                    candidate = we.fingerprint_id(we.fingerprint_inputs(lock, [], interp))
-                    self.assertNotEqual(baseline, candidate)
+                    self.assertNotEqual(baseline, self._fp(lock, [], interp))
             with self.subTest("extras"):
-                candidate = we.fingerprint_id(we.fingerprint_inputs(lock, ["tui"], self._inputs()))
-                self.assertNotEqual(baseline, candidate)
+                self.assertNotEqual(baseline, self._fp(lock, ["tui"], self._inputs()))
+            with self.subTest("installer version"):
+                self.assertNotEqual(
+                    baseline, self._fp(lock, [], self._inputs(), installer={"name": "pip", "version": "21.2.4"})
+                )
+            with self.subTest("installer name"):
+                self.assertNotEqual(
+                    baseline, self._fp(lock, [], self._inputs(), installer={"name": "uv", "version": "25.1.1"})
+                )
+            for label, index in (
+                ("PIP_INDEX_URL", {"env": {"PIP_INDEX_URL": ["https://mirror.example/simple"]}, "config": []}),
+                ("PIP_EXTRA_INDEX_URL", {"env": {"PIP_EXTRA_INDEX_URL": ["https://extra.example/simple"]}, "config": []}),
+                ("PIP_FIND_LINKS", {"env": {"PIP_FIND_LINKS": ["/srv/wheels"]}, "config": []}),
+                ("pip config", {"env": {}, "config": [["global", "index-url", ["https://cfg.example/simple"]]]}),
+            ):
+                with self.subTest(label):
+                    self.assertNotEqual(baseline, self._fp(lock, [], self._inputs(), index=index))
             lock.write_text(
-                "schema = 1\n[base]\ntiny-dep = \"2.0.0\"\n", encoding="utf-8"
+                "schema = 2\n[base]\ntiny-dep = \"2.0.0\"\n    sha256:%s\n" % _H, encoding="utf-8"
             )
-            candidate = we.fingerprint_id(we.fingerprint_inputs(lock, [], self._inputs()))
-            self.assertNotEqual(baseline, candidate)
+            self.assertNotEqual(baseline, self._fp(lock, [], self._inputs()))
+            lock.write_text(
+                "schema = 2\n[base]\ntiny-dep = \"1.0.0\"\n    sha256:%s\n" % ("b" * 64), encoding="utf-8"
+            )
+            self.assertNotEqual(baseline, self._fp(lock, [], self._inputs()), "a hash change must invalidate")
         finally:
             shutil.rmtree(str(lock.parent), ignore_errors=True)
+
+
+class IndexIdentityTest(unittest.TestCase):
+    SECRETS = ("alice", "s3cr3t-pw", "tok-abc", "frag-xyz", "bob", "hunter2", "cfgpass", "cfgtoken")
+
+    def setUp(self):
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        for key in we.INDEX_ENV_KEYS:
+            os.environ.pop(key, None)
+        os.environ["PIP_CONFIG_FILE"] = os.devnull
+        self.interp = {"prefix": "/nonexistent-prefix", "base_prefix": "/nonexistent-prefix"}
+
+    def test_strip_credentials(self):
+        self.assertEqual(
+            we.strip_credentials("https://alice:s3cr3t-pw@Pypi.Example.invalid:8443/simple/?token=tok-abc#frag-xyz"),
+            "https://pypi.example.invalid:8443/simple/",
+        )
+        self.assertEqual(we.strip_credentials("/srv/wheels"), "/srv/wheels")
+        with self.assertRaises(we.EnvError):
+            we.strip_credentials("https://host:notaport/simple")
+
+    def test_each_source_changes_identity_and_never_records_credentials(self):
+        baseline = we.index_identity(self.interp)
+        self.assertEqual(baseline, {"env": {}, "config": []})
+        tmp = Path(tempfile.mkdtemp(prefix="llmtool-pipcfg-"))
+        try:
+            config = tmp / "pip.conf"
+            config.write_text(
+                "[global]\nindex-url = https://carol:cfgpass@cfg.example.invalid/simple?auth=cfgtoken\n"
+                "timeout = 5\n", encoding="utf-8",
+            )
+            cases = {
+                "PIP_INDEX_URL": "https://alice:s3cr3t-pw@pypi.example.invalid/simple?token=tok-abc#frag-xyz",
+                "PIP_EXTRA_INDEX_URL": "https://bob:hunter2@extra.example.invalid/simple https://plain.example.invalid/s",
+                "PIP_FIND_LINKS": "https://bob:hunter2@links.example.invalid/wheels/",
+                "PIP_CONFIG_FILE": str(config),
+            }
+            seen = []
+            for key, value in cases.items():
+                with self.subTest(key):
+                    with mock.patch.dict(os.environ, {key: value}):
+                        identity = we.index_identity(self.interp)
+                    self.assertNotEqual(identity, baseline)
+                    self.assertNotIn(identity, seen)
+                    seen.append(identity)
+                    blob = json.dumps(identity)
+                    for secret in self.SECRETS:
+                        self.assertNotIn(secret, blob)
+                    self.assertIn("example.invalid", blob)
+            self.assertEqual(seen[-1]["config"], [["global", "index-url", ["https://cfg.example.invalid/simple"]]])
+        finally:
+            shutil.rmtree(str(tmp), ignore_errors=True)
 
 
 class LockTest(unittest.TestCase):
@@ -347,33 +462,52 @@ class LockTest(unittest.TestCase):
         finally:
             shutil.rmtree(str(directory), ignore_errors=True)
 
-    def test_parse_normalises_names_and_allows_empty_build(self):
+    def test_parse_normalises_names_hashes_and_allows_empty_build(self):
         sections = self._parse(
-            "schema = 1\n\n[base]\ntiny_dep = \"1.0.0\"\n\n[build]\n"
+            "schema = 2\n\n[base]\ntiny_dep = \"1.0.0\"\n    sha256:%s  # tiny_dep-1.0.0.whl\n"
+            "    sha256:%s\n\n[build]\n" % (_H, "b" * 64)
         )
         self.assertEqual(sections["base"], {"tiny-dep": "1.0.0"})
         self.assertEqual(sections["build"], {})
+        self.assertEqual(sections.hashes["tiny-dep"], frozenset({_H, "b" * 64}))
+        requirements = we.selected_requirements(sections, [])
+        self.assertEqual(requirements[0]["sha256"], sorted({_H, "b" * 64}))
+        self.assertIn("--hash=sha256:%s" % _H, we.requirement_lines(requirements))
 
     def test_rejects_duplicate_package_across_groups(self):
         with self.assertRaises(we.EnvError) as caught:
             self._parse(
-                "schema = 1\n[base]\ntiny-dep = \"1.0.0\"\n[build]\nTiny_Dep = \"1.0.0\"\n"
+                "schema = 2\n[base]\ntiny-dep = \"1.0.0\"\n    sha256:%s\n[build]\nTiny_Dep = \"1.0.0\"\n    sha256:%s\n"
+                % (_H, _H)
             )
         self.assertEqual(caught.exception.status, "INVALID_LOCK")
 
-    def test_rejects_unpinned_or_invalid_entries(self):
+    def test_rejects_unpinned_unhashed_or_invalid_entries(self):
+        good_hash = "    sha256:%s\n" % _H
         for text in (
-            'schema = 1\n[base]\ntiny-dep = ">=1.0"\n',
-            'schema = 1\n[base]\ntiny dep = "1.0.0"\n',
+            'schema = 2\n[base]\ntiny-dep = ">=1.0"\n' + good_hash,
+            'schema = 2\n[base]\ntiny dep = "1.0.0"\n' + good_hash,
+            'schema = 1\n[base]\ntiny-dep = "1.0.0"\n' + good_hash,
+            'schema = 2\n[unknown]\ntiny-dep = "1.0.0"\n' + good_hash,
+            'schema = 2\n[base]\n',
+            'tiny-dep = "1.0.0"\n' + good_hash,
             'schema = 2\n[base]\ntiny-dep = "1.0.0"\n',
-            'schema = 1\n[unknown]\ntiny-dep = "1.0.0"\n',
-            'schema = 1\n[base]\n',
-            'tiny-dep = "1.0.0"\n',
+            'schema = 2\n[base]\ntiny-dep = "1.0.0"\n    sha256:XYZ\n',
+            'schema = 2\n[base]\ntiny-dep = "1.0.0"\n    sha256:%s\n' % ("a" * 63),
+            'schema = 2\n[base]\n    sha256:%s\ntiny-dep = "1.0.0"\n' % _H,
+            'schema = 2\n[base]\ntiny-dep = "1.0.0"\n' + good_hash + good_hash,
         ):
             with self.subTest(text):
                 with self.assertRaises(we.EnvError) as caught:
                     self._parse(text)
                 self.assertEqual(caught.exception.status, "INVALID_LOCK")
+
+    def test_repository_lock_pins_hashes_for_every_package(self):
+        sections = we.parse_lock(TOOLS / "worktree-env.lock")
+        for group in ("base", "build", "tui"):
+            for name in sections[group]:
+                with self.subTest(name=name):
+                    self.assertTrue(sections.hashes[name])
 
     def test_repository_lock_satisfies_pyproject_constraints(self):
         sections = we.parse_lock(TOOLS / "worktree-env.lock")
@@ -485,7 +619,7 @@ def _satisfies(version, specifier):
 
 class CacheTest(EnvironmentTempCase):
     def test_cache_miss_offline_fails_closed_without_creating_a_venv(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.run_cli(
             "bootstrap",
             "--worktree",
@@ -501,7 +635,7 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_cache_seeded_from_wheels_then_hit_and_reused(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.bootstrap(worktree)
         self.assertEqual(code, 0, err)
         first = json.loads(out)
@@ -531,17 +665,17 @@ class CacheTest(EnvironmentTempCase):
         )
 
         manifest = json.loads(
-            (self.cache / "wheels" / third["fingerprint"] / "manifest.json").read_text()
+            (self.cache / "wheels" / third["cache_fingerprint"] / "manifest.json").read_text()
         )
         self.assertEqual(
             {item["name"] for item in manifest["files"]}, {"tiny-dep"}
         )
 
     def test_corrupt_wheel_fails_closed_and_preserves_existing_venv(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.bootstrap(worktree, "--no-project")
         self.assertEqual(code, 0, err)
-        fingerprint = json.loads(out)["fingerprint"]
+        fingerprint = json.loads(out)["cache_fingerprint"]
         entry = self.cache / "wheels" / fingerprint
         wheel = next(entry.glob("*.whl"))
         _chmod_writable(entry)
@@ -558,7 +692,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertTrue((worktree / "tools" / "llmtool" / ".venv" / "pyvenv.cfg").is_file())
 
     def test_missing_manifest_and_extra_wheel_fail_closed(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         fingerprint = self.seed_cache(worktree)
         entry = self.cache / "wheels" / fingerprint
         _chmod_writable(entry)
@@ -575,7 +709,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
 
     def test_wheel_source_must_match_lock_exactly(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         empty = self.tmp / "empty-wheels"
         empty.mkdir()
         code, out, err = self.run_cli(
@@ -597,12 +731,12 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_dependency_fingerprint_mismatch_gets_its_own_cache_entry(self):
-        first = make_worktree(self.tmp / "wt-a", "A")
-        second = make_worktree(self.tmp / "wt-b", "B", extra_base='tiny-extra = "1.0.0"\n')
+        first = self.make_worktree(self.tmp / "wt-a", "A")
+        second = self.make_worktree(self.tmp / "wt-b", "B", extra_base=(("tiny-extra", "1.0.0"),))
 
         code, out, err = self.bootstrap(first)
         self.assertEqual(code, 0, err)
-        fp_a = json.loads(out)["fingerprint"]
+        fp_a = json.loads(out)["cache_fingerprint"]
 
         # The cache entry for A must not satisfy B (different dependency set).
         code, out, err = self.run_cli(
@@ -613,13 +747,13 @@ class CacheTest(EnvironmentTempCase):
 
         code, out, err = self.bootstrap(second)
         self.assertEqual(code, 0, err)
-        fp_b = json.loads(out)["fingerprint"]
+        fp_b = json.loads(out)["cache_fingerprint"]
         self.assertNotEqual(fp_a, fp_b)
         self.assertTrue((self.cache / "wheels" / fp_a / "manifest.json").is_file())
         self.assertTrue((self.cache / "wheels" / fp_b / "manifest.json").is_file())
 
     def test_cache_root_inside_worktree_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.run_cli(
             "bootstrap",
             "--worktree",
@@ -634,7 +768,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertIn("CACHE_INSIDE_WORKTREE", err)
 
     def test_cache_info_lists_entries(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         self.seed_cache(worktree)
         code, out, err = self.run_cli(
             "cache-info", "--worktree", worktree, "--cache-root", self.cache, "--json"
@@ -646,9 +780,9 @@ class CacheTest(EnvironmentTempCase):
 
 
     def test_lock_must_be_transitively_closed(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
         wheels = self.tmp / "unclosed-wheels"
-        make_wheel(wheels, "tiny-dep", "1.0.0", requires=["ghost-dep>=1.0"])
+        unclosed = make_wheel(wheels, "tiny-dep", "1.0.0", requires=["ghost-dep>=1.0"])
+        worktree = self.make_worktree(self.tmp / "wt", "A", hashes={"tiny-dep": [sha256_of(unclosed)]})
         code, out, err = self.run_cli(
             "bootstrap", "--worktree", worktree, "--cache-root", self.cache,
             "--wheel-source", wheels, "--json",
@@ -658,7 +792,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
 
     def test_stray_file_in_cache_entry_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         fingerprint = self.seed_cache(worktree)
         entry = self.cache / "wheels" / fingerprint
         _chmod_writable(entry)
@@ -671,7 +805,7 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_failed_project_install_removes_half_built_venv_and_retry_succeeds(self):
-        worktree = make_worktree(self.tmp / "wt", "A", broken=True)
+        worktree = self.make_worktree(self.tmp / "wt", "A", broken=True)
         code, out, err = self.bootstrap(worktree)
         self.assertEqual(code, 5)
         self.assertIn("PIP_INSTALL_FAILED", err)
@@ -680,14 +814,14 @@ class CacheTest(EnvironmentTempCase):
             "a failed install must not leave a marker-less venv behind",
         )
 
-        make_worktree(worktree, "A")  # repair the backend, same lock
+        self.make_worktree(worktree, "A")  # repair the backend, same lock
         code, out, err = self.bootstrap(worktree)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["status"], "env_created")
 
     @needs_editable_pip
     def test_non_editable_install_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.bootstrap(worktree)
         self.assertEqual(code, 0, err)
         venv = worktree / "tools" / "llmtool" / ".venv"
@@ -703,7 +837,7 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_marker_without_worktree_root_fails_closed(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.bootstrap(worktree)
         self.assertEqual(code, 0, err)
         marker = worktree / "tools" / "llmtool" / ".venv" / ".worktree-env.json"
@@ -722,7 +856,7 @@ class CacheTest(EnvironmentTempCase):
                 self.assertIn("FOREIGN_VENV", err)
 
     def test_text_output_of_bootstrap_and_verify(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.run_cli(
             "bootstrap", "--worktree", worktree, "--cache-root", self.cache,
             "--wheel-source", self.wheels, "--no-project",
@@ -735,7 +869,7 @@ class CacheTest(EnvironmentTempCase):
         self.assertTrue(out.startswith("verified "), out)
 
     def test_pip_without_pep660_fails_closed_and_removes_venv(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         from unittest import mock
 
         with mock.patch.object(we, "pip_version", return_value=(21, 2)):
@@ -747,8 +881,191 @@ class CacheTest(EnvironmentTempCase):
             "an old-pip venv must not be left behind or fall back to a snapshot install",
         )
 
+    def _retamper_entry(self, entry, replacement):
+        """Replace the cached tiny-dep wheel AND rewrite manifest.json to match."""
+
+        _chmod_writable(entry)
+        wheel = next(entry.glob("tiny_dep-*.whl"))
+        wheel.write_bytes(replacement.read_bytes())
+        manifest_path = entry / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        for item in manifest["files"]:
+            if item["name"] == "tiny-dep":
+                item["sha256"] = sha256_of(wheel)
+                item["size"] = wheel.stat().st_size
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def test_consistent_manifest_and_wheel_tamper_is_rejected_on_hit(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        fingerprint = self.seed_cache(worktree)
+        evil = make_wheel(self.tmp / "evil", "tiny-dep", "1.0.0", marker="evil")
+        self._retamper_entry(self.cache / "wheels" / fingerprint, evil)
+        code, out, err = self.run_cli(
+            "bootstrap", "--worktree", worktree, "--cache-root", self.cache, "--offline", "--json"
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("WHEEL_HASH_UNTRUSTED", err)
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+
+    def test_consistent_tamper_is_rejected_for_an_existing_venv_recreate(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 0, err)
+        entry = self.cache / "wheels" / json.loads(out)["cache_fingerprint"]
+        evil = make_wheel(self.tmp / "evil", "tiny-dep", "1.0.0", marker="evil")
+        self._retamper_entry(entry, evil)
+        code, out, err = self.run_cli(
+            "bootstrap", "--worktree", worktree, "--cache-root", self.cache, "--recreate",
+            "--no-project", "--json",
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("WHEEL_HASH_UNTRUSTED", err)
+        self.assertEqual(self.dep_marker(worktree), "dep", "the existing venv must survive")
+
+    def test_wheel_source_with_unpinned_digest_fails_closed(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        local = self.tmp / "locally-built"
+        make_wheel(local, "tiny-dep", "1.0.0", marker="locally-built")
+        code, out, err = self.run_cli(
+            "bootstrap", "--worktree", worktree, "--cache-root", self.cache,
+            "--wheel-source", local, "--json",
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("WHEEL_HASH_UNTRUSTED", err)
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+        wheels = self.cache / "wheels"
+        self.assertEqual(list(wheels.iterdir()) if wheels.exists() else [], [], "nothing may be published")
+
+    def test_download_uses_hash_checking_and_rejects_unpinned_wheels(self):
+        lock_dir = self.make_worktree(self.tmp / "wt", "A") / "tools" / "llmtool"
+        requirements = we.selected_requirements(we.parse_lock(lock_dir / "worktree-env.lock"), [])
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((list(cmd), Path(cmd[cmd.index("-r") + 1]).read_text()))
+            make_wheel(Path(cmd[cmd.index("--dest") + 1]), "tiny-dep", "1.0.0", marker="from-index")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        destination = self.tmp / "download"
+        destination.mkdir()
+        with mock.patch.object(we.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(we.EnvError) as caught:
+                we._download_wheels(sys.executable, requirements, destination)
+        self.assertEqual(caught.exception.status, "WHEEL_HASH_UNTRUSTED")
+        cmd, req = calls[0]
+        self.assertIn("--require-hashes", cmd)
+        self.assertIn("--hash=sha256:%s" % self.hashes["tiny-dep"][0], req)
+
+        trusted = self.tmp / "download-ok"
+        trusted.mkdir()
+
+        def fake_trusted(cmd, **kwargs):
+            shutil.copyfile(str(next(self.wheels.glob("tiny_dep-*.whl"))),
+                            str(Path(cmd[cmd.index("--dest") + 1]) / "tiny_dep-1.0.0-py3-none-any.whl"))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with mock.patch.object(we.subprocess, "run", side_effect=fake_trusted):
+            wheels = we._download_wheels(sys.executable, requirements, trusted)
+        self.assertEqual(set(wheels), {"tiny-dep"})
+
+    def test_installer_change_invalidates_env_and_cache_key(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 0, err)
+        original = json.loads(out)
+        real = we.installer_identity
+
+        def other_installer(python):
+            identity = dict(real(python))
+            identity["version"] = identity["version"] + ".post-test"
+            return identity
+
+        with mock.patch.object(we, "installer_identity", side_effect=other_installer):
+            code, out, err = self.run_cli("fingerprint", "--worktree", worktree, "--json")
+            self.assertEqual(code, 0, err)
+            self.assertNotEqual(json.loads(out)["fingerprint"], original["cache_fingerprint"])
+            code, out, err = self.run_cli("verify", "--worktree", worktree, "--no-project", "--json")
+            self.assertEqual(code, 3)
+            self.assertIn("ENV_DRIFT", err)
+            code, out, err = self.bootstrap(worktree, "--no-project")
+            self.assertEqual(code, 3)
+            self.assertIn("ENV_DRIFT", err)
+
+    def test_index_configuration_change_invalidates_env_and_cache_key(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 0, err)
+        original = json.loads(out)["cache_fingerprint"]
+        config = self.tmp / "pip.conf"
+        config.write_text("[install]\nfind-links = https://links.example.invalid/w\n", encoding="utf-8")
+        for key, value in (
+            ("PIP_INDEX_URL", "https://mirror.example.invalid/simple"),
+            ("PIP_EXTRA_INDEX_URL", "https://extra.example.invalid/simple"),
+            ("PIP_FIND_LINKS", "https://links.example.invalid/wheels"),
+            ("PIP_CONFIG_FILE", str(config)),
+        ):
+            with self.subTest(key), mock.patch.dict(os.environ, {key: value}):
+                code, out, err = self.run_cli("fingerprint", "--worktree", worktree, "--json")
+                self.assertEqual(code, 0, err)
+                self.assertNotEqual(json.loads(out)["fingerprint"], original)
+                code, out, err = self.run_cli("verify", "--worktree", worktree, "--no-project", "--json")
+                self.assertEqual(code, 3)
+                self.assertIn("ENV_DRIFT", err)
+        code, out, err = self.run_cli("verify", "--worktree", worktree, "--no-project", "--json")
+        self.assertEqual(code, 0, err)
+
+    def test_credentials_never_reach_fingerprint_manifest_marker_or_output(self):
+        secrets = ("alice", "s3cr3t-pw", "tok-abc", "bob", "hunter2", "carol", "cfgpass", "cfgtoken")
+        config = self.tmp / "pip.conf"
+        config.write_text(
+            "[global]\nextra-index-url = https://carol:cfgpass@cfg.example.invalid/simple?auth=cfgtoken\n",
+            encoding="utf-8",
+        )
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        with mock.patch.dict(os.environ, {
+            "PIP_INDEX_URL": "https://alice:s3cr3t-pw@pypi.example.invalid/simple?token=tok-abc",
+            "PIP_FIND_LINKS": "https://bob:hunter2@links.example.invalid/wheels/",
+            "PIP_CONFIG_FILE": str(config),
+        }):
+            code, boot_out, err = self.bootstrap(worktree, "--no-project")
+            self.assertEqual(code, 0, err)
+            code, fp_out, fp_err = self.run_cli("fingerprint", "--worktree", worktree, "--json")
+            self.assertEqual(code, 0, fp_err)
+            code, verify_out, verify_err = self.run_cli(
+                "verify", "--worktree", worktree, "--no-project", "--json"
+            )
+            self.assertEqual(code, 0, verify_err)
+        report = json.loads(boot_out)
+        manifest = (self.cache / "wheels" / report["cache_fingerprint"] / "manifest.json").read_text()
+        marker = (worktree / "tools" / "llmtool" / ".venv" / ".worktree-env.json").read_text()
+        for label, blob in (("manifest", manifest), ("marker", marker), ("bootstrap", boot_out + err),
+                            ("fingerprint", fp_out + fp_err), ("verify", verify_out + verify_err)):
+            for secret in secrets:
+                with self.subTest(where=label, secret=secret):
+                    self.assertNotIn(secret, blob)
+        self.assertIn("https://pypi.example.invalid/simple", manifest)
+        self.assertIn("https://cfg.example.invalid/simple", marker)
+
+    def test_failed_venv_creation_is_rolled_back_and_retry_succeeds(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        venv = worktree / "tools" / "llmtool" / ".venv"
+
+        def partial_venv(*args, **kwargs):
+            (venv / "bin").mkdir(parents=True)
+            (venv / "pyvenv.cfg").write_text("home = /nowhere\n", encoding="utf-8")
+            raise we.EnvError("VENV_FAILED", "simulated partial venv", 5)
+
+        with mock.patch.object(we, "create_venv", side_effect=partial_venv):
+            code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 5)
+        self.assertIn("VENV_FAILED", err)
+        self.assertFalse(venv.exists(), "a partially created venv must be rolled back")
+        code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["status"], "env_created")
+
     def test_usage_errors_exit_4_and_global_json_still_works(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         stderr = io.StringIO()
         with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(stderr):
             we.main(["bootstrap", "--not-a-flag"])
@@ -762,8 +1079,8 @@ class CacheTest(EnvironmentTempCase):
 class IsolationTest(EnvironmentTempCase):
     @needs_editable_pip
     def test_two_worktrees_use_their_own_source_and_venv(self):
-        first = make_worktree(self.tmp / "wt-a", "source-A")
-        second = make_worktree(self.tmp / "wt-b", "source-B")
+        first = self.make_worktree(self.tmp / "wt-a", "source-A")
+        second = self.make_worktree(self.tmp / "wt-b", "source-B")
 
         for worktree in (first, second):
             code, out, err = self.bootstrap(worktree)
@@ -787,8 +1104,8 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_copied_venv_from_another_worktree_is_rejected(self):
-        first = make_worktree(self.tmp / "wt-a", "source-A")
-        third = make_worktree(self.tmp / "wt-c", "source-C")
+        first = self.make_worktree(self.tmp / "wt-a", "source-A")
+        third = self.make_worktree(self.tmp / "wt-c", "source-C")
         code, out, err = self.bootstrap(first)
         self.assertEqual(code, 0, err)
 
@@ -810,8 +1127,8 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_symlinked_venv_is_rejected(self):
-        first = make_worktree(self.tmp / "wt-a", "source-A")
-        second = make_worktree(self.tmp / "wt-b", "source-B")
+        first = self.make_worktree(self.tmp / "wt-a", "source-A")
+        second = self.make_worktree(self.tmp / "wt-b", "source-B")
         code, out, err = self.bootstrap(first)
         self.assertEqual(code, 0, err)
         os.symlink(
@@ -827,13 +1144,13 @@ class IsolationTest(EnvironmentTempCase):
         self.assertIn("UNSAFE_VENV", err)
 
     def test_verify_without_bootstrap_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.run_cli("verify", "--worktree", worktree, "--json")
         self.assertEqual(code, 3)
         self.assertIn("VENV_MISSING", err)
 
     def test_worktree_without_lock_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         (worktree / "tools" / "llmtool" / "worktree-env.lock").unlink()
         code, out, err = self.run_cli("fingerprint", "--worktree", worktree, "--json")
         self.assertEqual(code, 4)
@@ -841,7 +1158,7 @@ class IsolationTest(EnvironmentTempCase):
 
 
     def test_symlinked_project_directory_is_rejected(self):
-        worktree = make_worktree(self.tmp / "wt", "A")
+        worktree = self.make_worktree(self.tmp / "wt", "A")
         outside = self.tmp / "outside-project"
         shutil.move(str(worktree / "tools" / "llmtool"), str(outside))
         os.symlink(str(outside), str(worktree / "tools" / "llmtool"))
