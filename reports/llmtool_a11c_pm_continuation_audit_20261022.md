@@ -78,7 +78,7 @@ All commands ran in the task D6 worktree with the task-local venv (Python 3.13.3
 | `-p test_task_completion.py` | 31 tests, OK |
 | `-p test_task_submission_cli.py` | 33 tests, OK |
 | `-p test_opencode_foreground_host.py` | 23 tests, OK |
-| `make check PYTHON=.venv/bin/python` | see the PR dispatch comment for the count |
+| `make check PYTHON=.venv/bin/python` | 1,879 tests, OK, 2 skipped, exit 0. The first attempt had 21 failures, all `No module named 'llmtool'` in child processes, because the new venv lacked the editable install. After `pip install --no-deps -e .` into the task venv, imports were verified to resolve from this worktree, and the rerun passed. |
 
 ## 7. Items for the Reviewer and the Owner
 
