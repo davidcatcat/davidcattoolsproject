@@ -25,6 +25,7 @@ from .task_completion import validate_host_worker_receipt
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
+D6_TASK_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}')
 SESSION_ID = re.compile(r'pm-[a-z0-9-]{1,60}')
 DEV_SESSION_ID = re.compile(r'dev-[a-z0-9-]{1,60}')
 STATES = frozenset(('PM_PENDING', 'PM_RESPONDED', 'PM_UNAVAILABLE',
@@ -55,6 +56,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'created_at',
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
@@ -296,7 +298,8 @@ def _validate(record):
         developer = record['developer']
         if developer is not None:
             if type(developer) is not dict or set(developer) not in (
-                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS):
+                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
+                    _DEVELOPER_CALLBACK_FIELDS):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -469,6 +472,143 @@ def _validate(record):
                     developer['provider_type'] is None or artifact is not None or
                     developer['error_code'] not in _DEVELOPER_REJECTION_CODES):
                 _fail()
+            if 'direct_result_callback' in developer:
+                callback = developer['direct_result_callback']
+                callback_fields = frozenset((
+                    'state', 'executor_task_id', 'evidence', 'missing_gates',
+                    'pm_dispatch', 'pm_response', 'pm_recommendation',
+                    'pm_usage', 'pm_error_code'))
+                states = ('WAITING_EXECUTOR', 'VERIFYING_EXECUTOR', 'WAITING_PM',
+                          'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED',
+                          'PM_UNAVAILABLE', 'PM_OUTCOME_UNKNOWN')
+                dispatch_for_state = {
+                    'WAITING_EXECUTOR': 'NOT_STARTED',
+                    'VERIFYING_EXECUTOR': 'NOT_STARTED',
+                    'WAITING_PM': 'NOT_STARTED', 'PM_DISPATCHING': 'CLAIMED',
+                    'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
+                    'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
+                if (developer['provider_profile'] != 'opencode' or
+                        type(callback) is not dict or
+                        set(callback) not in (callback_fields, callback_fields | {'review_handoff'}) or
+                        callback['state'] not in states or
+                        callback['pm_dispatch'] != dispatch_for_state[callback['state']] or
+                        not _safe_identifier(callback['executor_task_id'], D6_TASK_ID)):
+                    _fail()
+                missing = callback['missing_gates']
+                if (type(missing) is not list or len(missing) > 32 or
+                        any(type(item) is not str or
+                            re.fullmatch(r'[A-Z0-9_]{1,64}', item) is None
+                            for item in missing) or missing != sorted(set(missing))):
+                    _fail()
+                evidence = callback['evidence']
+                if (type(evidence) is not dict or len(_json_bytes(evidence)) > 64 * 1024 or
+                        _emitted_sensitive(_json_bytes(evidence).decode('utf-8')) or
+                        evidence.get('task_id') != record['task_id'] or
+                        evidence.get('run_id') != record['run_id'] or
+                        evidence.get('contract_digest') != record['task_binding']['contract_digest'] or
+                        evidence.get('executor_task_id') != callback['executor_task_id'] or
+                        evidence.get('source_sha') != developer['source_sha'] or
+                        evidence.get('execution_mode') != 'DIRECT_D6' or
+                        evidence.get('verification_state') not in
+                            ('NOT_STARTED', 'CLAIMED', 'READY', 'FAILED', 'UNKNOWN')):
+                    _fail()
+                if callback['state'] == 'VERIFYING_EXECUTOR' and (
+                        evidence.get('verification_state') != 'CLAIMED' or missing):
+                    _fail()
+                if callback['state'] in ('WAITING_EXECUTOR',) and (
+                        callback['pm_dispatch'] != 'NOT_STARTED' or
+                        callback['pm_response'] is not None or
+                        callback['pm_recommendation'] is not None):
+                    _fail()
+                if callback['state'] == 'WAITING_PM' and (
+                        callback['pm_dispatch'] != 'NOT_STARTED' or
+                        callback['pm_response'] is not None or
+                        callback['pm_recommendation'] is not None or missing):
+                    _fail()
+                if callback['state'] in ('WAITING_PM', 'PM_DISPATCHING',
+                        'PM_RETURNED', 'PM_RESPONSE_REJECTED', 'PM_UNAVAILABLE',
+                        'PM_OUTCOME_UNKNOWN'):
+                    result = evidence.get('result')
+                    tests = evidence.get('tests')
+                    review_ci = evidence.get('review_pr_ci')
+                    if (evidence.get('verification_state') != 'READY' or
+                            type(result) is not dict or type(tests) is not list or not tests or
+                            type(review_ci) is not dict or
+                            review_ci != {'stage': 'EXECUTOR_RESULT',
+                                'formal_review_state': 'NOT_STARTED',
+                                'ci_state': 'NOT_STARTED'} or
+                            result.get('result_mode') != 'UNCOMMITTED_WORKTREE' or
+                            result.get('result_head') is not None or
+                            result.get('task_id') != record['task_id'] or
+                            result.get('run_id') != record['run_id'] or
+                            result.get('source_sha') != developer['source_sha'] or
+                            type(result.get('diff_sha256')) is not str or
+                            re.fullmatch(r'[0-9a-f]{64}', result['diff_sha256']) is None or
+                            result.get('executor_task_id') != callback['executor_task_id']):
+                        _fail()
+                    paths = result.get('changed_paths')
+                    if (type(paths) is not list or not paths or paths != sorted(set(paths)) or
+                            not set(paths).issubset(set(developer['write_paths'])) or
+                            any(type(test) is not dict or test.get('exit_code') != 0 or
+                                type(test.get('exit_code')) is not int or
+                                test.get('source_sha') != developer['source_sha'] or
+                                test.get('result_head') is not None or
+                                test.get('diff_sha256') != result['diff_sha256'] or
+                                test.get('path') not in developer['read_paths'] +
+                                    developer['write_paths'] or
+                                type(test.get('output_sha256')) is not str or
+                                re.fullmatch(r'[0-9a-f]{64}', test['output_sha256']) is None
+                                for test in tests)):
+                        _fail()
+                callback_response = callback['pm_response']
+                if callback_response is not None and (
+                        type(callback_response) is not str or
+                        len(callback_response.encode('utf-8')) > 64 * 1024 or
+                        _emitted_sensitive(callback_response)):
+                    _fail()
+                recommendation = callback['pm_recommendation']
+                if recommendation is not None and (
+                        type(recommendation) is not dict or set(recommendation) !=
+                        {'decision', 'summary'} or recommendation['decision'] not in
+                        ('SEND_TO_REVIEW', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
+                         'WAIT_FOR_AUTHORIZATION', 'STOP') or
+                        type(recommendation['summary']) is not str or
+                        not recommendation['summary'] or
+                        len(recommendation['summary'].encode('utf-8')) > 2048 or
+                        _emitted_sensitive(recommendation['summary'])):
+                    _fail()
+                usage = callback['pm_usage']
+                if usage is not None:
+                    try:
+                        if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
+                            _fail()
+                        validate_provider_usage(usage)
+                    except Exception:
+                        _fail()
+                error = callback['pm_error_code']
+                if error is not None and (type(error) is not str or
+                        re.fullmatch(r'[A-Z0-9_]{1,64}', error) is None):
+                    _fail()
+                if 'review_handoff' in callback:
+                    result = evidence.get('result') if type(evidence) is dict else None
+                    try:
+                        if (callback['pm_recommendation'] is None or
+                                callback['pm_recommendation']['decision'] != 'SEND_TO_REVIEW' or
+                                type(result) is not dict):
+                            _fail()
+                        from .task_completion import validate_review_handoff_record
+                        validate_review_handoff_record(callback['review_handoff'],
+                            task_id=record['task_id'], run_id=record['run_id'],
+                            contract_digest=record['task_binding']['contract_digest'],
+                            developer_task_id=callback['executor_task_id'],
+                            developer_identity=evidence.get('executor_identity'),
+                            developer_session_ref=evidence.get('executor_session_ref'),
+                            source_sha=developer['source_sha'],
+                            result_head=result.get('result_head'),
+                            diff_sha256=result.get('diff_sha256'),
+                            changed_paths=result.get('changed_paths'))
+                    except Exception:
+                        _fail()
         if 'completion' in record:
             completion = record['completion']
             fields = frozenset(('state', 'executor_task_id', 'reviewer_task_id',

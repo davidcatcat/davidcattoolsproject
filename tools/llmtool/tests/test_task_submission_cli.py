@@ -436,7 +436,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       side_effect=execute) as invoke, \
                 redirect_stdout(output):
             code = run_task_delegate(self._opencode_delegate_args(task))
-        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(code, 1, output.getvalue())
         result = json.loads(output.getvalue())
         developer = result['developer']
         self.assertEqual(developer['provider_profile'], 'opencode')
@@ -453,6 +453,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['completion']['state'], 'WAITING_EXECUTOR')
         self.assertEqual(developer['execution_result']['status'], 'UNVERIFIED')
         self.assertEqual(invoke.call_count, 1)
+        self.assertEqual(developer['direct_result_callback']['state'], 'WAITING_EXECUTOR')
+        self.assertIn('TEST_SCOPE_MISSING',
+                      developer['direct_result_callback']['missing_gates'])
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
 
