@@ -1178,6 +1178,9 @@ class OfficeRow:
     detail: str
     age: float | None   # seconds since last observed activity; None = not observed
     order: int
+    key: str = ""       # identity other rows can name as their group
+    group: str = ""     # key of the agent that started this one ("" = top level)
+    kind: str = "agent"   # agent | subagent | worker
 
 
 def canonical_root(start: str = SCRIPT_ROOT) -> str:
@@ -1294,11 +1297,14 @@ def _codex_row(path: str, now: float, canonical: str):
             return None
         return ("sub", payload.get("parent_thread_id"),
                 OfficeRow(f"codex {role} {nick}".strip(), state,
-                          _humanize(stem) if stem else "（未命名工作）", age, 20))
+                          _humanize(stem) if stem else "（未命名工作）", age, 20,
+                          key=f"codex:{payload.get('id')}",
+                          group=f"codex:{payload.get('parent_thread_id')}", kind="subagent"))
+    key = f"codex:{payload.get('id')}"
     if place[0] == "task":
         return ("main", payload.get("id"),
-                OfficeRow("codex developer", state, place[1], age, 10))
-    return ("main", payload.get("id"), OfficeRow("codex PM", state, "", age, 0))
+                OfficeRow("codex developer", state, place[1], age, 10, key=key))
+    return ("main", payload.get("id"), OfficeRow("codex PM", state, "", age, 0, key=key))
 
 
 def codex_rows(now: float, root: str | None = None,
@@ -1330,7 +1336,8 @@ def codex_rows(now: float, root: str | None = None,
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示")
-            row = OfficeRow(row.name, WORKING if busy else row.state, detail, row.age, row.order)
+            row = OfficeRow(row.name, WORKING if busy else row.state, detail, row.age, row.order,
+                            key=row.key)
         rows.append(row)
     return rows + [row for _, row in subs]
 
@@ -1358,8 +1365,18 @@ def claude_rows(now: float, root: str | None = None,
         detail = _label(title) or (place[1] if place[0] == "task" else "（無標題）")
         reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
         name = "claude reviewer" if reviewing else "claude developer"
+        key = f"claude:{os.path.basename(path)}"
+        one_shot = any(item.get("entrypoint") == "sdk-cli" for item in tail)
+        if one_shot:
+            # `claude -p` started by another agent: it exits when its one task is done.
+            state = WORKING if age <= OFFICE_BUSY else DONE
+            if state == DONE and age > OFFICE_DONE_WINDOW:
+                continue
+            rows.append(OfficeRow(name, state, detail, age, 30, key=key,
+                                  group="codex-launched", kind="subagent"))
+            continue
         rows.append(OfficeRow(name, WORKING if age <= OFFICE_BUSY else IDLE, detail, age,
-                              30 if place[0] == "pm" else 10))
+                              30 if place[0] == "pm" else 10, key=key))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -1382,7 +1399,7 @@ def claude_rows(now: float, root: str | None = None,
                 continue
             rows.append(OfficeRow("claude subagent", state,
                                   _label(meta.get("description")) or "（未命名工作）",
-                                  sub_age, 40))
+                                  sub_age, 40, group=key, kind="subagent"))
     return rows
 
 
@@ -1511,12 +1528,14 @@ def opencode_rows(processes: list[Process], now: float, canonical: str,
         name = f"opencode {'worker' if proc.role == 'OpenCode CLIENT' else 'cli'} #{number}"
         if busy:
             detail = f"{where}：{_label(latest[1], 28) or '執行中'}"
-            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), 50 + number))
+            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), 50 + number,
+                                  kind="worker"))
         else:
             opened = _elapsed_seconds(proc.elapsed)
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
             rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}",
-                                  opened if opened is not None else 0.0, 50 + number))
+                                  opened if opened is not None else 0.0, 50 + number,
+                                  kind="worker"))
     return rows
 
 
@@ -1549,7 +1568,7 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
         else:
             state, note = IDLE, "CLI 已開啟，閒置（依 CPU 推算）"
         rows.append(OfficeRow(f"agy cli #{number}", state, f"{where}：{note}",
-                              opened if opened is not None else 0.0, 60 + number))
+                              opened if opened is not None else 0.0, 60 + number, kind="worker"))
     return rows
 
 
@@ -1679,11 +1698,21 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             elif state is None:
                 state = IDLE
                 notes.append("目前沒有工作")
-            rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order))
+            rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
+                                  kind="worker"))
         elif name in table:
             table_state, detail = _worker_state(table[name])
             parts = notes if state is not None else [detail] + notes
-            rows.append(OfficeRow(name, state or table_state, "；".join(parts), age, order))
+            rows.append(OfficeRow(name, state or table_state, "；".join(parts), age, order,
+                                  kind="worker"))
+    # One-shot Claude runs are started by Codex; hang them under the most
+    # recently active Codex PM (the launcher is not recorded more precisely).
+    pms = sorted((row for row in rows if row.name == "codex PM"),
+                 key=lambda row: row.age if row.age is not None else 1e12)
+    launcher = pms[0].key if pms else ""
+    rows = [OfficeRow(row.name, row.state, row.detail, row.age, row.order, row.key,
+                      launcher if row.group == "codex-launched" else row.group, row.kind)
+            for row in rows]
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -1706,15 +1735,45 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
+def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
+    """(prefix, row) in display order: each agent followed by what it started."""
+    keys = {row.key for row in rows if row.key}
+    children: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        if row.group in keys:
+            children.setdefault(row.group, []).append(row)
+    out: list[tuple[str, OfficeRow]] = []
+
+    def walk(row: OfficeRow, depth: int) -> None:
+        out.append(("  " * (depth - 1) + "└ " if depth else "", row))
+        for child in children.get(row.key, []) if row.key and depth < 3 else []:
+            walk(child, depth + 1)
+
+    for row in rows:
+        if row.group not in keys and row.kind != "worker":
+            walk(row, 0)
+    workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
+    if workers:
+        out.append(("—", OfficeRow("外部 Worker", "", "", None, 0)))
+        out += [("", row) for row in workers]
+    return out
+
+
 def office_lines(rows: list[OfficeRow]) -> list[str]:
     working = sum(row.state == WORKING for row in rows)
-    lines = [f"辦公室 · {len(rows)} 位成員 · {working} 位工作中"]
+    counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
+    lines = [f"辦公室 · agent {counts['agent']} · subagent {counts['subagent']} · "
+             f"外部 worker {counts['worker']} · {working} 位工作中"]
     if not rows:
         return lines + ["目前沒有觀察到任何 agent 或 worker。"]
-    width = max(_width(row.name) for row in rows) + 2
-    for row in rows:
+    tree = _tree(rows)
+    width = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    for prefix, row in tree:
+        if prefix == "—":
+            lines.append(f"── {row.name} ──")
+            continue
         detail = f"「{row.detail}」" if row.detail else ""
-        lines.append(f"{_pad(row.name, width)}{_pad(f'({row.state})', 9)}"
+        lines.append(f"{_pad(prefix + row.name, width)}{_pad(f'({row.state})', 9)}"
                      f"{_pad(detail, 46)} · {_ago(row.age)}")
     lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")
     return lines

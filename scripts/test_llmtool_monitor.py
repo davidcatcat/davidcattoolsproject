@@ -877,6 +877,37 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_one_shot_claude_runs_finish_and_hang_under_the_codex_pm(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Franklin",
+                            "agent_path": "/root/tui_dev"}, ["task_started"], age=5)
+        self._write(self.claude / "a" / "run1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"},
+            {"type": "ai-title", "aiTitle": "Review PR 284"}], age=300)
+        self._write(self.claude / "a" / "run2.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}],
+            age=mon.OFFICE_DONE_WINDOW + 60)
+        self._write(self.claude / "a" / "live.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "Owner chat"}], age=500)
+        rows = self.rows()
+        run = next(row for row in rows if row.detail == "Review PR 284")
+        self.assertEqual((run.state, run.kind), (mon.DONE, "subagent"))
+        self.assertEqual(run.group, self.by_name(rows)["codex PM"].key)
+        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 2)   # run2 hidden
+        live = next(row for row in rows if row.detail == "Owner chat")
+        self.assertEqual((live.state, live.kind, live.group), (mon.IDLE, "agent", ""))
+        lines = mon.office_lines(rows)
+        self.assertIn("agent 2 · subagent 2 · 外部 worker 4", lines[0])
+        pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM"))
+        self.assertTrue(lines[pm + 1].startswith("└ codex developer Franklin"))
+        self.assertTrue(any(line.startswith("└ claude reviewer") for line in lines[pm + 1:pm + 3]))
+        self.assertIn("── 外部 Worker ──", lines)
+        self.assertLess(lines.index("── 外部 Worker ──"),
+                        next(i for i, line in enumerate(lines) if line.startswith("agy")))
+
     def test_roadmap_workers_map_to_office_states_without_raw_text(self):
         rows = self.by_name(self.rows())
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
