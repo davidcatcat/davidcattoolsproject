@@ -1715,7 +1715,7 @@ def _worker_state(status: str) -> tuple[str, str]:
     if upper.startswith("PAUSED"):
         return PAUSED, "Owner 暫停中"
     if upper.startswith("NO ACTIVE") or "尚未" in plain:
-        return PAUSED, "尚未指派工作"
+        return IDLE, "Roadmap：目前沒有指派工作"   # unassigned is not paused
     if upper.startswith("NOT RECHECKED"):
         return UNCHECKED, ("上次免費額度用完（429），尚未重新確認" if "429" in plain
                            else "尚未重新確認")
@@ -1734,7 +1734,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
-    reviewing = any(row.name.startswith("codex reviewer") and row.state == WORKING for row in rows)
+    # Codex reviewer subagents are that role's real instances; when any is on
+    # screen, the table row would only contradict them.
+    reviewing = any(row.name.startswith("codex reviewer") for row in rows)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is. Without any, the Roadmap row says why OpenCode is not here.
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)

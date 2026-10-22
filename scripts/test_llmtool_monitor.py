@@ -835,7 +835,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["codex developer Huygens"].state, mon.WORKING)
         self.assertEqual(rows["codex reviewer Locke"].state, mon.DONE)
         self.assertNotIn("codex reviewer Old", rows)
-        self.assertEqual(sum(name.startswith("codex") for name in rows), 4)   # + reviewer agent row
+        self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
+        self.assertNotIn("codex reviewer agent", rows)   # a finished reviewer subagent replaces it
 
     def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -942,7 +943,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
                          (mon.STOPPED, "免費額度用完（429），等額度恢復"))
         self.assertEqual((rows["codex reviewer agent"].state, rows["codex reviewer agent"].detail),
-                         (mon.PAUSED, "尚未指派工作"))
+                         (mon.IDLE, "Roadmap：目前沒有指派工作"))
         self.assertEqual((rows["agy"].state, rows["agy"].detail), (mon.PAUSED, "Owner 暫停中"))
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
