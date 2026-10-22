@@ -43,7 +43,6 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 **Release rule:** This work cannot weaken sandbox, Worktree or Git authority; leak secrets; share another task's writable environment; or claim savings from estimates. Schedule as a small independent PR after conflicting worktree scopes are checked. Current state **PLANNED / NOT IMPLEMENTED**.
 
-
 ### Owner outcome acceptance and reporting — approved 2026-10-19
 
 The Owner approved **evidence-based reporting at meaningful outcomes, routine Integrator autonomy, useful Mac delivery before 24-hour unattended hosting, and a Mac-supervised M2 pilot**. The single management contract is [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md). Its G1 (M1b adopted code), G2 (real Worker), G3 (M2 full independent-agent loop), and G4 (three-work-package Mac pilot with Owner GO/LIMITED GO/NO-GO) are **reporting checkpoints within A11c**, not new product milestones, gate waivers or an extra coordinator. Integrator publishes verifiable outcome reports, material Owner decision briefs and one compact weekly status; GitHub publication is not a verified ChatGPT/Owner notification. Existing A11b/F2, provider/Host, native and independent review permissions remain unchanged.
