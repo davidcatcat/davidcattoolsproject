@@ -5,7 +5,7 @@ PYTHON ?= python3
 check: syntax test
 
 syntax:
-	$(PYTHON) -m compileall -q llmtool llmtool.py tests
+	$(PYTHON) -m compileall -q llmtool llmtool.py tests scripts
 
 test:
 	$(PYTHON) -m unittest discover -s tests -v
