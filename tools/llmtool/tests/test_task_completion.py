@@ -986,6 +986,55 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(pm_receipt['review_packet_digest'],
                          callback['review_handoff']['receipt']['review_packet_digest'])
 
+    def test_v1_reviewer_adapter_receipt_returns_to_pm_without_packet_digest(self):
+        task, store, result, tests = self._direct_opencode_task('review-v1-adapter-receipt')
+        adapter = unittest.mock.Mock(side_effect=lambda intent:
+            self._legacy_trusted_review_receipt(intent, verdict='PASS'))
+
+        code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter, inject_adapter=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(len(client.calls), 2)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        receipt = callback['review_handoff']['receipt']
+        self.assertEqual(receipt['schema_version'], 1)
+        self.assertNotIn('review_packet_digest', receipt)
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
+        pm_receipt = json.loads(client.calls[1][1]['content'])
+        self.assertNotIn('review_packet_digest', pm_receipt)
+        self.assertEqual(pm_receipt['receipt_sha256'], receipt['receipt_sha256'])
+
+    def test_persisted_v1_received_handoff_recovers_pm_return_without_redispatch(self):
+        task, store, result, tests = self._direct_opencode_task('review-v1-received-recovery')
+        _, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=None)
+        saved = store.get(task['task_id'])
+        developer = saved['developer']
+        callback = dict(developer['direct_result_callback'])
+        intent = callback['review_handoff']['intent']
+        receipt = self._legacy_trusted_review_receipt(intent, verdict='PASS')
+        handoff = task_completion.review_handoff_record(intent, receipt)
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': {**callback, 'review_handoff': handoff}})
+        adapter = unittest.mock.Mock(side_effect=AssertionError('RECEIVED must not redispatch'))
+
+        code, resumed_client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter, client=client,
+            inject_adapter=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(resumed_client.calls), 2)
+        adapter.assert_not_called()
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_handoff']['receipt'], receipt)
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
+        pm_receipt = json.loads(resumed_client.calls[1][1]['content'])
+        self.assertNotIn('review_packet_digest', pm_receipt)
+        self.assertEqual(pm_receipt['receipt_sha256'], receipt['receipt_sha256'])
+
     @staticmethod
     def _trusted_review_receipt(intent, *, verdict='PASS'):
         blocked = verdict == 'BLOCKED'
@@ -1002,6 +1051,16 @@ class TaskCompletionTests(unittest.TestCase):
             'execution_status': 'FAILED' if blocked else 'SUCCEEDED',
             'code': 'REVIEW_BLOCKED' if blocked else 'REVIEW_COMPLETED',
             'findings_sha256': '6' * 64, 'provenance': 'TRUSTED_REVIEW_ADAPTER'}
+        value['receipt_sha256'] = hashlib.sha256(json.dumps(value, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        return value
+
+    @staticmethod
+    def _legacy_trusted_review_receipt(intent, *, verdict='PASS'):
+        value = TaskCompletionTests._trusted_review_receipt(intent, verdict=verdict)
+        value.pop('review_packet_digest')
+        value['schema_version'] = 1
+        value.pop('receipt_sha256')
         value['receipt_sha256'] = hashlib.sha256(json.dumps(value, sort_keys=True,
             separators=(',', ':')).encode()).hexdigest()
         return value

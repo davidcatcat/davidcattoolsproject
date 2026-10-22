@@ -1494,7 +1494,6 @@ def _resume_review_result_return(store, task, developer, callback):
         'contract_digest': task['task_binding']['contract_digest'],
         'dispatch_id': handoff['intent']['dispatch_id'],
         'receipt_sha256': receipt['receipt_sha256'],
-        'review_packet_digest': receipt['review_packet_digest'],
         'verdict': receipt['verdict'], 'security': receipt['security'],
         'functional': receipt['functional'], 'execution_status': receipt['execution_status'],
         'code': receipt['code'], 'findings_sha256': receipt['findings_sha256'],
@@ -1509,6 +1508,8 @@ def _resume_review_result_return(store, task, developer, callback):
         'repair_round': handoff['intent']['repair_round'],
         'bounded_next_step': handoff['next_step'],
     }
+    if 'review_packet_digest' in receipt:
+        pm_receipt['review_packet_digest'] = receipt['review_packet_digest']
     content = json.dumps(pm_receipt, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':'))
     _screen_text(content, 16 * 1024)
