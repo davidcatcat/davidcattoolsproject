@@ -144,7 +144,7 @@ def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
     if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
         _stop('REVIEW_DISPATCH_BINDING_INVALID')
     receipt = {
-        'schema_version': 1,
+        'schema_version': 2,
         'dispatch_id': intent.get('dispatch_id'),
         'task_id': intent.get('task_id'),
         'run_id': intent.get('run_id'),
@@ -365,12 +365,17 @@ def validate_review_dispatch_receipt(intent, receipt):
     fields = {
         'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
         'source_sha', 'result_head', 'diff_sha256', 'developer_task_id',
-        'review_packet_digest',
         'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref', 'verdict',
         'security', 'functional', 'execution_status', 'code', 'findings_sha256',
         'provenance', 'receipt_sha256',
     }
-    if type(intent) is not dict or type(receipt) is not dict or set(receipt) != fields:
+    if type(intent) is not dict or type(receipt) is not dict:
+        _stop('REVIEW_RECEIPT_INVALID')
+    schema_version = receipt.get('schema_version')
+    legacy = schema_version == 1 and set(receipt) == fields
+    current = (schema_version == 2 and
+               set(receipt) == fields | {'review_packet_digest'})
+    if not (legacy or current):
         _stop('REVIEW_RECEIPT_INVALID')
     validate_review_dispatch_intent(intent)
     value = dict(receipt)
@@ -379,7 +384,8 @@ def validate_review_dispatch_receipt(intent, receipt):
         separators=(',', ':')).encode()).hexdigest()
     if claimed != actual:
         _stop('REVIEW_RECEIPT_DIGEST_MISMATCH')
-    if (type(receipt['schema_version']) is not int or receipt['schema_version'] != 1 or
+    packet_digest = None if legacy else receipt['review_packet_digest']
+    if (type(schema_version) is not int or
             any(receipt.get(key) != intent.get(key) for key in (
                 'dispatch_id', 'task_id', 'run_id', 'contract_digest', 'source_sha',
                 'result_head', 'diff_sha256', 'developer_task_id')) or
@@ -389,11 +395,10 @@ def validate_review_dispatch_receipt(intent, receipt):
             type(receipt['execution_status']) is not str or
             receipt['execution_status'] not in ('SUCCEEDED', 'FAILED', 'BLOCKED',
                                                  'UNKNOWN', 'NOT_DISPATCHED') or
-            (receipt['review_packet_digest'] is not None and
-             (type(receipt['review_packet_digest']) is not str or
-              _HEX64.fullmatch(receipt['review_packet_digest']) is None)) or
-            (receipt['execution_status'] == 'SUCCEEDED' and
-             receipt['review_packet_digest'] is None) or
+            (packet_digest is not None and
+             (type(packet_digest) is not str or _HEX64.fullmatch(packet_digest) is None)) or
+            (current and receipt['execution_status'] == 'SUCCEEDED' and
+             packet_digest is None) or
             type(receipt['code']) is not str or
             re.fullmatch(r'[A-Z0-9_]{1,64}', receipt['code']) is None or
             type(receipt['provenance']) is not str or
@@ -405,7 +410,7 @@ def validate_review_dispatch_receipt(intent, receipt):
                 receipt['provenance'] != 'LOCAL_NO_ADAPTER' or
                 any(receipt.get(key) is not None for key in (
                     'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref',
-                    'review_packet_digest', 'findings_sha256'))):
+                    'findings_sha256')) or packet_digest is not None):
             _stop('REVIEW_RECEIPT_INVALID')
     else:
         for key in ('reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref'):

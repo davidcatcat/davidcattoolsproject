@@ -423,7 +423,7 @@ def task_completion_adapter(issuer, ledger, *, budget):
         if len(findings) != handoff.findings_count:
             reject('REVIEW_RECEIPT_INVALID')
         receipt = {
-            'schema_version': 1,
+            'schema_version': 2,
             'dispatch_id': intent['dispatch_id'],
             'task_id': intent['task_id'],
             'run_id': intent['run_id'],

@@ -989,7 +989,7 @@ class TaskCompletionTests(unittest.TestCase):
     @staticmethod
     def _trusted_review_receipt(intent, *, verdict='PASS'):
         blocked = verdict == 'BLOCKED'
-        value = {'schema_version': 1, 'dispatch_id': intent['dispatch_id'],
+        value = {'schema_version': 2, 'dispatch_id': intent['dispatch_id'],
             'task_id': intent['task_id'], 'run_id': intent['run_id'],
             'contract_digest': intent['contract_digest'], 'source_sha': intent['source_sha'],
             'result_head': intent['result_head'], 'diff_sha256': intent['diff_sha256'],
@@ -2010,7 +2010,7 @@ class TaskCompletionTests(unittest.TestCase):
                          'WAIT_FOR_REVIEWER')
 
         for execution_status in ('FAILED', 'BLOCKED', 'UNKNOWN'):
-            uncertain = {'schema_version': 1,
+            uncertain = {'schema_version': 2,
                 'dispatch_id': intent['dispatch_id'], 'task_id': intent['task_id'],
                 'run_id': intent['run_id'], 'contract_digest': intent['contract_digest'],
                 'source_sha': intent['source_sha'], 'result_head': intent['result_head'],
@@ -2041,7 +2041,7 @@ class TaskCompletionTests(unittest.TestCase):
                     source_sha=intent['source_sha'], result_head=intent['result_head'],
                     diff_sha256=intent['diff_sha256'], changed_paths=intent['changed_paths'],
                     repair_round=repair_round)
-            value = {'schema_version': 1, 'dispatch_id': current['dispatch_id'],
+            value = {'schema_version': 2, 'dispatch_id': current['dispatch_id'],
                 'task_id': current['task_id'], 'run_id': current['run_id'],
                 'contract_digest': current['contract_digest'], 'source_sha': current['source_sha'],
                 'result_head': current['result_head'], 'diff_sha256': current['diff_sha256'],
@@ -2059,6 +2059,14 @@ class TaskCompletionTests(unittest.TestCase):
         passed_intent, passed = receipt('PASS', 'PASS', 'PASS')
         self.assertEqual(task_completion.review_handoff_record(passed_intent, passed)[
             'next_step'], 'INTEGRATION_GATES_PENDING')
+        legacy = dict(passed)
+        legacy.pop('review_packet_digest')
+        legacy['schema_version'] = 1
+        legacy.pop('receipt_sha256')
+        legacy['receipt_sha256'] = hashlib.sha256(json.dumps(
+            legacy, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual(task_completion.validate_review_dispatch_receipt(
+            passed_intent, legacy), legacy)
         failed_intent, failed = receipt('FAIL', 'PASS', 'FAIL')
         self.assertEqual(task_completion.review_handoff_record(failed_intent, failed)[
             'next_step'], 'RETURN_TO_DEVELOPER_ONCE')
