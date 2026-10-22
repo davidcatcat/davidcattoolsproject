@@ -876,6 +876,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(self.by_name(self.rows([server]))["opencode developer"].state, mon.STOPPED)
         self.assertEqual(self.by_name(self.rows([server, client]))["opencode developer"].state,
                          mon.WORKING)
+        tui = mon.Process(3, 0, 3, "1:00", "S+", "OpenCode CLI", "opencode", "")
+        self.assertEqual(self.by_name(self.rows([server, tui]))["opencode developer"].state,
+                         mon.IDLE)
 
     def test_rendered_office_never_shows_secrets_or_private_paths(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},

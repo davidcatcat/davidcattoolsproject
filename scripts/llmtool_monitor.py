@@ -1437,14 +1437,18 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
     reviewing = any(row.name.startswith("codex reviewer") and row.state == WORKING for row in rows)
-    # A resident OpenCode SERVER alone is not work; a run/TUI client is.
-    opencode_live = any(p.role in ("OpenCode CLIENT", "OpenCode CLI") for p in processes)
+    # A resident OpenCode SERVER alone is not work. A `run` CLIENT is a task in
+    # progress; an interactive CLI/TUI is only open, so it is shown as standby.
+    opencode_run = any(p.role == "OpenCode CLIENT" for p in processes)
+    opencode_open = any(p.role == "OpenCode CLI" for p in processes)
     table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
         if name == "codex reviewer agent" and reviewing:
             continue
-        if name == "opencode developer" and opencode_live:
-            rows.append(OfficeRow(name, WORKING, "OpenCode 程序執行中", 0.0, order))
+        if name == "opencode developer" and (opencode_run or opencode_open):
+            rows.append(OfficeRow(name, WORKING if opencode_run else IDLE,
+                                  "正在執行 OpenCode 任務" if opencode_run
+                                  else "OpenCode 互動畫面已開啟，沒有執行中的任務", 0.0, order))
             continue
         if name in table:
             state, detail = _worker_state(table[name])
