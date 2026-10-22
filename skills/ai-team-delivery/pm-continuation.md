@@ -25,7 +25,7 @@ When the PM receives PASS, FAIL or BLOCKED for a Task, it records the next decis
    - missing authority.
 3. **Choose one action and record it:**
    - **Retry:** only when the cause is transient and the Task budget allows it. Never replay an outcome that the runtime recorded as UNKNOWN or non-replayable.
-   - **Reassign:** move the Task only to a Worker whose worker-dispatch.json switch permits assignment and whose live technical availability is freshly confirmed. PAUSED is never overridden by a healthy provider signal; OWNER_ASSIGNMENT_ONLY requires the explicit Owner assignment. Keep D6 single-writer ownership: hand over only after the previous writer has verifiably released the Task. Never use a paid fallback that is not already authorized.
+   - **Reassign:** move the Task only to a Worker whose worker-dispatch.json switch permits assignment and whose live technical availability is freshly confirmed. Only `PAUSED`, `OWNER_ASSIGNMENT_ONLY` and `ALLOWED` are valid switch values; a missing or unrecognized value means missing authority and forbids dispatch, retry or reassignment. PAUSED is never overridden by a healthy provider signal; OWNER_ASSIGNMENT_ONLY requires the explicit Owner assignment. Keep D6 single-writer ownership: hand over only after the previous writer has verifiably released the Task. Never use a paid fallback that is not already authorized.
    - **Isolate:** mark only that Task BLOCKED, with the cause and the condition for resuming it.
 4. **Keep other work moving.** One unavailable Worker or one BLOCKED Task does not block other independent, authorized Tasks. The PM continues dispatching them.
 
