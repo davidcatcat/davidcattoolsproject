@@ -1,0 +1,17 @@
+%% RECONSTRUCTED from discussions 2026-10-16 through 2026-10-18; TARGET not verified runtime
+flowchart TB
+  Owner["Owner / 使用者"] --> PM["PM AI / 任務決策與派發"]
+  PM --> Core["llmtool Core / Policy、Dispatch、State、Evidence"]
+  PM <--> Integrator["Integrator AI / 交付驗收、合併"]
+  Core --> Codex["Codex Developer"]
+  Core --> OpenCode["OpenCode Developer"]
+  Core --> Company["公司 LLM / API Worker"]
+  Core --> Other["其他核准的 Worker"]
+  Codex --> Review["Reviewer / 獨立審查"]
+  OpenCode --> Review
+  Company --> Review
+  Other --> Review
+  Review --> Integrator
+  Integrator <--> GitHub[("GitHub / PR、Issue、證據")]
+  Integrator --> PM
+  PM --> Owner
