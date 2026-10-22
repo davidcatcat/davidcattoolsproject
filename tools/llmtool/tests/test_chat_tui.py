@@ -425,7 +425,52 @@ class WidgetTests(Base):
                             lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
                             '/help\r'])
         self.assertIn('/provider [profile]', ui.conversation.text)
+        self.assertIn('/task submit --provider PROFILE REQUEST', ui.conversation.text)
         self.factory.assert_not_called()
+
+    def test_explicit_task_submit_uses_existing_api_off_event_loop(self):
+        called = []
+
+        def submit(args, *, stdout=None):
+            called.append((args.provider, args.request, threading.current_thread()))
+            stdout.write('{"task_id":"' + 'a' * 32 + '","state":"PM_RESPONDED"}\n')
+            stdout.flush()
+            return 0
+
+        with patch('llmtool.task_submission_cli.run_task_submit', side_effect=submit):
+            ui, _ = self.drive(['/task submit --provider codex-pm add a focused test\r', self.idle])
+        self.assertEqual(called[0][0:2], ('codex-pm', ['add a focused test']))
+        self.assertIsNot(called[0][2], threading.main_thread())
+        self.assertIn('task intake only; Developer dispatch is not implied', ui.conversation.text)
+        self.assertIn('PM_RESPONDED', ui.conversation.text)
+        self.assertEqual(self.session.history, [])
+        self.factory.assert_not_called()
+
+    def test_explicit_task_show_uses_existing_lookup_api(self):
+        task_id = 'b' * 32
+        called = []
+
+        def show(args, *, stdout=None):
+            called.append(args.task_id)
+            stdout.write('{"task_id":"' + args.task_id + '","state":"PM_UNAVAILABLE"}\n')
+            return 0
+
+        with patch('llmtool.task_submission_cli.run_task_show', side_effect=show):
+            ui, _ = self.drive(['/task show ' + task_id + '\r', self.idle])
+        self.assertEqual(called, [task_id])
+        self.assertIn('PM_UNAVAILABLE', ui.conversation.text)
+        self.assertEqual(self.session.history, [])
+        self.factory.assert_not_called()
+
+    def test_task_route_requires_explicit_syntax_and_plain_text_remains_chat(self):
+        with patch('llmtool.task_submission_cli.run_task_submit') as submit:
+            ui, _ = self.drive(['/task submit add something\r',
+                                '/task show\r', 'ordinary chat\r', self.idle])
+        submit.assert_not_called()
+        self.assertIn('usage: /task submit', ui.conversation.text)
+        self.assertIn('usage: /task submit', ui.conversation.text)
+        self.assertEqual([turn['content'] for turn in self.session.history],
+                         ['ordinary chat', 'reply'])
 
     def test_tab_switches_focus_and_scroll_preserves_caret(self):
         long_reply = '\n'.join('row %d' % i for i in range(200))
