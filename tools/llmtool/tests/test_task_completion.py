@@ -277,7 +277,7 @@ class TaskCompletionTests(unittest.TestCase):
 
     def test_matching_non_string_binding_values_are_rejected(self):
         for key in ('task_id', 'run_id', 'contract_digest'):
-            for bad in (None, 123):
+            for bad in (None, 123, False):
                 binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
                            'contract_digest': '3' * 64}
                 binding[key] = bad
