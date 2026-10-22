@@ -38,6 +38,13 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "# test fixture source\n", encoding="utf-8")
         (makefile_dir / "scripts" / "d6_worktree_env.py").write_bytes(
             (SCRIPTS / "d6_worktree_env.py").read_bytes())
+        (makefile_dir / "worktree-env.lock").write_text(
+            "[base]\nexample==1.0 --hash=sha256:" + "a" * 64 + "\n",
+            encoding="utf-8")
+        (makefile_dir / "pyproject.toml").write_text(
+            "[build-system]\nrequires = ['setuptools>=68']\n"
+            "build-backend = 'setuptools.build_meta'\n",
+            encoding="utf-8")
         (self.source / "README").write_text("test\n", encoding="utf-8")
         self._git_at(self.source, "add", ".")
         self._git_at(self.source, "commit", "-m", "fixture")
@@ -184,6 +191,31 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             self.assertEqual(self._main_at_root(), 1)
         invoke.assert_not_called()
 
+    def test_changed_dependency_lock_fails_before_bootstrap(self):
+        lock = self.root / "tools" / "llmtool" / "worktree-env.lock"
+        lock.write_text("[base]\nchanged==9.9 --hash=sha256:" + "b" * 64 + "\n",
+                        encoding="utf-8")
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
+            self.assertEqual(self._main_at_root(), 1)
+        invoke.assert_not_called()
+
+    def test_changed_build_metadata_fails_before_bootstrap(self):
+        metadata = self.root / "tools" / "llmtool" / "pyproject.toml"
+        metadata.write_text(
+            "[build-system]\nrequires = ['setuptools>=1']\n"
+            "build-backend = 'setuptools.build_meta'\n",
+            encoding="utf-8")
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
+            self.assertEqual(self._main_at_root(), 1)
+        invoke.assert_not_called()
+
+    def test_untracked_setup_hook_fails_before_bootstrap(self):
+        hook = self.root / "tools" / "llmtool" / "setup.py"
+        hook.write_text("from setuptools import setup\n", encoding="utf-8")
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
+            self.assertEqual(self._main_at_root(), 1)
+        invoke.assert_not_called()
+
     def test_source_change_between_checks_fails_before_make(self):
         original = d6env.validate_registered_worktree
         calls = []
@@ -194,6 +226,27 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             if len(calls) == 1:
                 makefile = self.root / "tools" / "llmtool" / "Makefile"
                 makefile.write_text("env-bootstrap:\n\t@echo raced\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(d6env, "validate_registered_worktree",
+                               side_effect=validate_then_change) as validate:
+            with mock.patch.object(d6env, "_run_make") as run_make:
+                self.assertEqual(self._main_at_root(), 1)
+        self.assertEqual(validate.call_count, 2)
+        self.assertEqual(len(calls), 1)
+        run_make.assert_not_called()
+
+    def test_lock_change_between_checks_fails_before_make(self):
+        original = d6env.validate_registered_worktree
+        calls = []
+
+        def validate_then_change(task_id, root=None):
+            result = original(task_id, root)
+            calls.append(True)
+            if len(calls) == 1:
+                lock = self.root / "tools" / "llmtool" / "worktree-env.lock"
+                lock.write_text("[base]\nraced==9.9 --hash=sha256:" + "c" * 64 + "\n",
+                                encoding="utf-8")
             return result
 
         with mock.patch.object(d6env, "validate_registered_worktree",

@@ -151,7 +151,7 @@ def _run_git(root: Path, *args: str) -> str:
         _reject("D6_GIT_IDENTITY_INVALID")
 
 
-def _read_tracked_file(root: Path, relative: str) -> bytes:
+def _read_tracked_file(root: Path, relative: str) -> tuple[bytes, int]:
     path = root / relative
     parent = path.parent
     while parent != root:
@@ -184,30 +184,81 @@ def _read_tracked_file(root: Path, relative: str) -> bytes:
     if (len(data) > 8 * 1024 * 1024 or identity(before) != identity(after_fd) or
             identity(before) != identity(after_path)):
         _reject("D6_BOOTSTRAP_SOURCE_CHANGED")
-    return data
+    return data, stat.S_IMODE(before.st_mode)
+
+
+def _base_blob(root: Path, base_sha: str, relative: str):
+    """Return the exact base-tree file bytes/mode, or None when absent."""
+    listing = _run_git(root, "ls-tree", "-z", base_sha, "--", relative)
+    entries = listing.split("\0")
+    if entries and entries[-1] == "":
+        entries.pop()
+    if not entries:
+        return None
+    if len(entries) != 1 or "\t" not in entries[0]:
+        _reject("D6_BOOTSTRAP_SOURCE_INVALID")
+    metadata, recorded_path = entries[0].split("\t", 1)
+    fields = metadata.split(" ")
+    if (recorded_path != relative or len(fields) != 3 or fields[1] != "blob" or
+            re.fullmatch(r"[0-9a-f]{40,64}", fields[2]) is None or
+            fields[0] not in ("100644", "100755")):
+        _reject("D6_BOOTSTRAP_SOURCE_INVALID")
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.path.expanduser("~"),
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        result = subprocess.run(
+            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-C", str(root), "cat-file", "blob", fields[2]],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _reject("D6_BOOTSTRAP_SOURCE_UNAVAILABLE")
+    if result.returncode != 0 or result.stderr:
+        _reject("D6_BOOTSTRAP_SOURCE_UNAVAILABLE")
+    return result.stdout, int(fields[0][3:], 8)
 
 
 def _validate_bootstrap_sources(root: Path, base_sha: str) -> None:
-    for relative in ("tools/llmtool/Makefile",
-                     "tools/llmtool/scripts/worktree_env.py",
-                     "tools/llmtool/scripts/d6_worktree_env.py"):
-        local = _read_tracked_file(root, relative)
-        try:
-            committed = subprocess.run(
-                ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
-                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-                 "-C", str(root), "show", base_sha + ":" + relative],
-                env={"PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"),
-                     "LC_ALL": "C", "GIT_CONFIG_NOSYSTEM": "1",
-                     "GIT_CONFIG_GLOBAL": os.devnull, "GIT_ATTR_NOSYSTEM": "1",
-                     "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1",
-                     "GIT_TERMINAL_PROMPT": "0"},
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, timeout=15, check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            _reject("D6_BOOTSTRAP_SOURCE_UNAVAILABLE")
-        if committed.returncode != 0 or committed.stderr or local != committed.stdout:
+    required = (
+        "tools/llmtool/Makefile",
+        "tools/llmtool/scripts/worktree_env.py",
+        "tools/llmtool/scripts/d6_worktree_env.py",
+        "tools/llmtool/worktree-env.lock",
+        "tools/llmtool/pyproject.toml",
+    )
+    optional_build_inputs = (
+        "tools/llmtool/setup.py",
+        "tools/llmtool/setup.cfg",
+        "tools/llmtool/MANIFEST.in",
+    )
+    for relative in required + optional_build_inputs:
+        committed = _base_blob(root, base_sha, relative)
+        local_path = root / relative
+        if committed is None:
+            if relative in required:
+                _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
+            try:
+                local_path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                _reject("D6_BOOTSTRAP_SOURCE_UNAVAILABLE")
+            _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
+        local, local_mode = _read_tracked_file(root, relative)
+        committed_bytes, committed_mode = committed
+        if (local != committed_bytes or (local_mode & 0o111) != (committed_mode & 0o111) or
+                local_mode & 0o022):
             _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
 
 
