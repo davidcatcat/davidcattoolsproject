@@ -1319,10 +1319,12 @@ def _codex_row(path: str, now: float, canonical: str):
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent"))
     key = f"codex:{payload.get('id')}"
+    started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
+    since = f"（{time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）" if started else ""
     if place[0] == "task":
         return ("main", payload.get("id"),
                 OfficeRow("codex developer", state, place[1], age, 10, key=key))
-    return ("main", payload.get("id"), OfficeRow("codex PM", state, "", age, 0, key=key))
+    return ("main", payload.get("id"), OfficeRow("codex PM", state, since, age, 0, key=key))
 
 
 def codex_rows(now: float, root: str | None = None,
@@ -1353,7 +1355,7 @@ def codex_rows(now: float, root: str | None = None,
         if row.name == "codex PM":
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
-                      else "處理中" if row.state == WORKING else "等待下一個指示")
+                      else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
             row = OfficeRow(row.name, WORKING if busy else row.state, detail, row.age, row.order,
                             key=row.key)
         rows.append(row)
@@ -1849,6 +1851,10 @@ def office_lines(rows: list[OfficeRow]) -> list[str]:
              f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
     if not rows:
         return lines + ["目前沒有觀察到任何 agent 或 worker。"]
+    pms = sum(row.name == "codex PM" for row in rows)
+    if pms > 1:
+        lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
+                     "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")
     tree = _tree(rows)
     width = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
     for prefix, row in tree:

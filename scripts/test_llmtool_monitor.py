@@ -850,6 +850,18 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["codex PM"].state, mon.IDLE)
         self.assertEqual(rows["codex PM"].detail, "等待下一個指示")
 
+    def test_two_codex_main_threads_in_the_canonical_root_are_dated_and_flagged(self):
+        self._codex("pm1", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                            "timestamp": "2026-10-22T11:23:25.316Z"}, ["task_started"], age=5)
+        self._codex("pm2", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                            "timestamp": "2026-10-22T21:49:41.000Z"}, ["task_started"], age=5)
+        rows = [row for row in self.rows() if row.name == "codex PM"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all("開始）" in row.detail for row in rows))
+        self.assertNotEqual(rows[0].detail, rows[1].detail)
+        self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
+                            for line in mon.office_lines(self.rows())))
+
     def test_claude_session_title_and_subagents(self):
         project = self.claude / "proj"
         self._write(project / "s1.jsonl", [
