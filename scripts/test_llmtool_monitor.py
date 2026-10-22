@@ -869,13 +869,42 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         names = [row.name for row in rows]
         self.assertEqual(names.count("claude subagent"), 2)
-        reviewer = self.by_name(rows)["claude reviewer"]
+        reviewer = self.by_name(rows)["claude reviewer（互動）"]
         self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
         self.assertNotIn("token=abc", reviewer.detail)
-        developer = self.by_name(rows)["claude developer"]
+        developer = self.by_name(rows)["claude developer（互動）"]
         self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
+
+    def test_working_claude_shows_its_latest_action_description_only(self):
+        call = lambda description: {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "MODEL-OUTPUT-SECRET"},
+            {"type": "tool_use", "name": "Bash", "input": {
+                "command": "echo RAW-ARGV-SECRET /Users/davidsun", "description": description}}]}}
+        project = self.claude / "proj"
+        self._write(project / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "Old title"},
+            call("Run monitor tests"), call("Open Issue for gw failures token=abc"),
+            {"type": "user", "message": {"content": [{"type": "tool_result",
+                                                       "content": "TOOL-OUTPUT-SECRET"}]}},
+        ], age=5)
+        sub = project / "s1" / "subagents"
+        self._write(sub / "agent-a1.jsonl", [call("Fix flaky test")], age=5)
+        (sub / "agent-a1.meta.json").write_text(json.dumps(
+            {"description": "PR 288 repair", "finished": False}), encoding="utf-8")
+        self._write(self.claude / "idle" / "s2.jsonl", [
+            {"type": "user", "cwd": self.canonical}, {"type": "ai-title", "aiTitle": "Idle chat"},
+            call("Something long ago")], age=600)
+        rows = self.rows()
+        details = {row.detail for row in rows}
+        self.assertIn("Open Issue for gw failures [已遮蔽]", details)
+        self.assertIn("PR 288 repair：Fix flaky test", details)
+        self.assertIn("Idle chat", details)   # idle sessions keep their title
+        text = "\n".join(mon.office_lines(rows))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
 
     def test_one_shot_claude_runs_finish_and_hang_under_the_codex_pm(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -896,7 +925,7 @@ class OfficeViewTests(unittest.TestCase):
         run = next(row for row in rows if row.detail == "Review PR 284")
         self.assertEqual((run.state, run.kind), (mon.DONE, "subagent"))
         self.assertEqual(run.group, self.by_name(rows)["codex PM"].key)
-        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 2)   # run2 hidden
+        self.assertEqual(sum(row.name.startswith("claude reviewer") for row in rows), 2)   # run2 hidden
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.state, live.kind, live.group), (mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)

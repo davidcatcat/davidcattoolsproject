@@ -1254,6 +1254,24 @@ def _label(text, limit: int = 40) -> str:
     return line[:limit] + ("…" if len(line) > limit else "")
 
 
+def _last_action(tail: list) -> str:
+    """The `description` of the newest Claude tool call: the short summary Claude
+    Code writes for people (e.g. "Run monitor tests"). Only that one field is
+    read; the command, file contents and every other tool input are ignored."""
+    for item in reversed(tail):
+        message = item.get("message") if item.get("type") == "assistant" else None
+        content = message.get("content") if type(message) is dict else None
+        if type(content) is not list:
+            continue
+        for block in reversed(content):
+            if type(block) is dict and block.get("type") == "tool_use":
+                tool_input = block.get("input")
+                text = tool_input.get("description") if type(tool_input) is dict else None
+                if type(text) is str and text.strip():
+                    return _label(text)
+    return ""
+
+
 def _humanize(path_stem: str) -> str:
     return " ".join(path_stem.replace("-", "_").split("_"))
 
@@ -1365,6 +1383,9 @@ def claude_rows(now: float, root: str | None = None,
         detail = _label(title) or (place[1] if place[0] == "task" else "（無標題）")
         reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
         name = "claude reviewer" if reviewing else "claude developer"
+        action = _last_action(tail) if age <= OFFICE_BUSY else ""
+        if action:
+            detail = action   # what it is doing right now beats the session title
         key = f"claude:{os.path.basename(path)}"
         one_shot = any(item.get("entrypoint") == "sdk-cli" for item in tail)
         if one_shot:
@@ -1375,8 +1396,8 @@ def claude_rows(now: float, root: str | None = None,
             rows.append(OfficeRow(name, state, detail, age, 30, key=key,
                                   group="codex-launched", kind="subagent"))
             continue
-        rows.append(OfficeRow(name, WORKING if age <= OFFICE_BUSY else IDLE, detail, age,
-                              30 if place[0] == "pm" else 10, key=key))
+        rows.append(OfficeRow(name + "（互動）", WORKING if age <= OFFICE_BUSY else IDLE, detail,
+                              age, 30 if place[0] == "pm" else 10, key=key))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -1397,8 +1418,11 @@ def claude_rows(now: float, root: str | None = None,
                 state = WORKING if sub_age <= OFFICE_STALL else STALLED
             if (state == DONE and sub_age > OFFICE_DONE_WINDOW) or sub_age > OFFICE_WINDOW:
                 continue
-            rows.append(OfficeRow("claude subagent", state,
-                                  _label(meta.get("description")) or "（未命名工作）",
+            sub_detail = _label(meta.get("description")) or "（未命名工作）"
+            if state == WORKING:
+                doing = _last_action(_jsonl_tail(log_path))
+                sub_detail = f"{sub_detail}：{doing}" if doing else sub_detail
+            rows.append(OfficeRow("claude subagent", state, sub_detail,
                                   sub_age, 40, group=key, kind="subagent"))
     return rows
 
