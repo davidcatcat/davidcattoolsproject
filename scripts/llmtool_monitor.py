@@ -10,6 +10,12 @@ reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions. Its Activity view is limited to local task
 evidence and does not invent cross-session dispatch, delivery, review or acceptance.
 
+The office view (default screen, key 5) lists every Codex PM / developer /
+reviewer / subagent and Claude session / subagent working in this repository,
+plus the Roadmap Worker table, one row each with a live state such as 工作中,
+待命, 完成, 暫停中 or 停工. It reads session metadata only, never prompts or
+model text.
+
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
 exited is exactly what makes llmtool report CLEANUP_UNKNOWN. The Claude desktop
@@ -328,6 +334,8 @@ class Monitor:
         self.task_map: dict = {}
         self.task_baseline = False   # a successful task scan has adopted the starting point
         self.github = None   # GitHubSource for the Activity view; None means no network at all
+        self.office: list = []
+        self.office_state: dict = {}
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -401,6 +409,13 @@ class Monitor:
             new.append((stamp, "i", f"{len(tasks)} recent llmtool task(s); latest {latest.task_id}"
                                     + (f": {last.name} {stage_state(last)}" if last else ": not started")))
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
+        try:
+            office = office_rows(result.processes)
+        except Exception:  # the office view is optional; never break process monitoring
+            office = self.office
+        state, changes = office_events(self.office_state, office)
+        new += [(stamp, kind, text) for kind, text in changes]
+        self.office, self.office_state = office, state
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1126,6 +1141,363 @@ def activity_lines(tasks: list[Task], limit: int = 60,
     return render_activity(activity_events(tasks), limit, github)
 
 
+# ---------------------------------------------------------------- office view
+# One row per worker / agent / subagent, like looking across an office floor:
+# who is working, idle, paused or stopped, and on what. Local and read-only.
+# Only session *metadata* is read: Codex `session_meta` (cwd, subagent
+# nickname and agent_path) plus task_started/task_complete event types; the
+# Claude `ai-title` line and `cwd`; Claude subagent `.meta.json` descriptions;
+# the dated Worker table in the Roadmap. Prompts, model text, reasoning and
+# tool input/output are never returned or rendered. Labels are reduced with the
+# same redaction as Activity headlines and private paths are never shown.
+import unicodedata
+
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
+OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
+OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
+OFFICE_STALL = 15 * 60         # started but silent for longer: 無回應
+OFFICE_HEAD = 1 << 20
+OFFICE_TAIL = 512 << 10
+AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")
+NICKNAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
+WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED = (
+    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認")
+
+
+@dataclass(frozen=True)
+class OfficeRow:
+    name: str
+    state: str
+    detail: str
+    age: float | None   # seconds since last observed activity; None = not observed
+    order: int
+
+
+def canonical_root(start: str = SCRIPT_ROOT) -> str:
+    """The canonical checkout, also when the monitor runs from a linked worktree."""
+    marker = os.path.join(start, ".git")
+    try:
+        if os.path.isfile(marker):
+            with open(marker, encoding="utf-8") as handle:
+                found = re.match(r"gitdir:\s*(.+)", handle.read(4096))
+            if found:
+                common = os.path.realpath(os.path.join(start, found.group(1).strip()))
+                # <canonical>/.git/worktrees/<name> -> <canonical>
+                return os.path.dirname(os.path.dirname(os.path.dirname(common)))
+    except OSError:
+        pass
+    return os.path.realpath(start)
+
+
+def _place(cwd, canonical: str) -> tuple[str, str] | None:
+    """('pm'|'task', task id) for a cwd inside this repository's roots, else None."""
+    if type(cwd) is not str or not cwd:
+        return None
+    real = os.path.realpath(cwd)
+    if real == canonical or real.startswith(canonical + os.sep):
+        return "pm", ""
+    parts = real.split(os.sep)
+    name = os.path.basename(canonical)
+    for i in range(len(parts) - 2):
+        if parts[i] == "llmtool-dev-workspaces" and parts[i + 1] == name:
+            rest = parts[i + 2:]
+            if len(rest) >= 2 and rest[0] == "tasks" and AGENT_PATH.fullmatch(rest[1]):
+                return "task", rest[1]
+            if rest and AGENT_PATH.fullmatch(rest[0]):
+                return "task", rest[0]
+    return None
+
+
+def _jsonl_head(path: str):
+    try:
+        with open(path, "rb") as handle:
+            return json.loads(handle.readline(OFFICE_HEAD))
+    except (OSError, ValueError):
+        return None
+
+
+def _jsonl_tail(path: str) -> list:
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - OFFICE_TAIL))
+            data = handle.read(OFFICE_TAIL)
+    except OSError:
+        return []
+    lines = data.split(b"\n")
+    if size > OFFICE_TAIL:
+        lines = lines[1:]   # the first line is cut
+    out = []
+    for raw in lines:
+        if raw.strip():
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            if type(item) is dict:
+                out.append(item)
+    return out
+
+
+def _label(text, limit: int = 40) -> str:
+    line = _headline(text) if type(text) is str else ""
+    return line[:limit] + ("…" if len(line) > limit else "")
+
+
+def _humanize(path_stem: str) -> str:
+    return " ".join(path_stem.replace("-", "_").split("_"))
+
+
+def _codex_row(path: str, now: float, canonical: str):
+    meta = _jsonl_head(path)
+    payload = meta.get("payload") if type(meta) is dict else None
+    if type(payload) is not dict:
+        return None
+    place = _place(payload.get("cwd"), canonical)
+    if place is None:
+        return None
+    try:
+        age = max(0.0, now - os.path.getmtime(path))
+    except OSError:
+        return None
+    last = None
+    for item in _jsonl_tail(path):
+        inner = item.get("payload")
+        kind = inner.get("type") if type(inner) is dict else None
+        if item.get("type") == "event_msg" and kind in ("task_started", "task_complete",
+                                                       "turn_aborted"):
+            last = kind
+    subagent = payload.get("thread_source") == "subagent"
+    if last in ("task_complete", "turn_aborted"):
+        state = DONE if subagent else IDLE
+    elif last == "task_started":
+        state = WORKING if age <= OFFICE_STALL else STALLED
+    else:
+        state = WORKING if age <= OFFICE_BUSY else IDLE
+    if subagent:
+        # Codex names a spawned agent "/root/<short_task_name>"; anything else
+        # could carry a private path, so it is shown as unnamed.
+        found = re.fullmatch(r"/root/([A-Za-z0-9_-]{1,48})", str(payload.get("agent_path") or ""))
+        stem = found.group(1) if found else ""
+        nick = payload.get("agent_nickname")
+        nick = nick if type(nick) is str and NICKNAME.fullmatch(nick) else ""
+        role = ("reviewer" if "review" in stem.lower() else
+                "稽核" if "audit" in stem.lower() else "developer")
+        if state == DONE and age > OFFICE_DONE_WINDOW:
+            return None
+        return ("sub", payload.get("parent_thread_id"),
+                OfficeRow(f"codex {role} {nick}".strip(), state,
+                          _humanize(stem) if stem else "（未命名工作）", age, 20))
+    if place[0] == "task":
+        return ("main", payload.get("id"),
+                OfficeRow("codex developer", state, place[1], age, 10))
+    return ("main", payload.get("id"), OfficeRow("codex PM", state, "", age, 0))
+
+
+def codex_rows(now: float, root: str = CODEX_SESSIONS,
+               canonical: str | None = None) -> list[OfficeRow]:
+    canonical = canonical or canonical_root()
+    days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400)) for d in (0, 1)}
+    paths = []
+    for day in days:
+        paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
+    mains, subs = {}, []
+    for path in sorted(paths):
+        try:
+            if now - os.path.getmtime(path) > OFFICE_WINDOW:
+                continue
+        except OSError:
+            continue
+        found = _codex_row(path, now, canonical)
+        if found is None:
+            continue
+        kind, key, row = found
+        if kind == "main":
+            mains[key] = row
+        else:
+            subs.append((key, row))
+    rows = []
+    for key, row in mains.items():
+        if row.name == "codex PM":
+            busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
+            detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
+                      else "處理中" if row.state == WORKING else "等待下一個指示")
+            row = OfficeRow(row.name, WORKING if busy else row.state, detail, row.age, row.order)
+        rows.append(row)
+    return rows + [row for _, row in subs]
+
+
+def claude_rows(now: float, root: str = CLAUDE_PROJECTS,
+                canonical: str | None = None) -> list[OfficeRow]:
+    canonical = canonical or canonical_root()
+    rows = []
+    for path in sorted(glob.glob(os.path.join(root, "*", "*.jsonl"))):
+        try:
+            age = max(0.0, now - os.path.getmtime(path))
+        except OSError:
+            continue
+        if age > OFFICE_WINDOW:
+            continue
+        tail = _jsonl_tail(path)
+        cwd = next((item.get("cwd") for item in reversed(tail)
+                    if type(item.get("cwd")) is str), None)
+        place = _place(cwd, canonical)
+        if place is None:
+            continue
+        title = next((item.get("aiTitle") for item in reversed(tail)
+                      if item.get("type") == "ai-title"), None)
+        detail = _label(title) or (place[1] if place[0] == "task" else "（無標題）")
+        reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
+        name = "claude reviewer" if reviewing else "claude developer"
+        rows.append(OfficeRow(name, WORKING if age <= OFFICE_BUSY else IDLE, detail, age,
+                              30 if place[0] == "pm" else 10))
+        session_dir = path[:-len(".jsonl")]
+        for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
+                                                       "agent-*.meta.json"))):
+            log_path = meta_path[:-len(".meta.json")] + ".jsonl"
+            try:
+                sub_age = max(0.0, now - os.path.getmtime(log_path))
+                with open(meta_path, "rb") as handle:
+                    meta = json.loads(handle.read(64 << 10))
+            except (OSError, ValueError):
+                continue
+            if type(meta) is not dict:
+                continue
+            if sub_age <= OFFICE_BUSY:
+                state = WORKING
+            elif meta.get("finished") is True:
+                state = DONE
+            else:
+                state = WORKING if sub_age <= OFFICE_STALL else STALLED
+            if (state == DONE and sub_age > OFFICE_DONE_WINDOW) or sub_age > OFFICE_WINDOW:
+                continue
+            rows.append(OfficeRow("claude subagent", state,
+                                  _label(meta.get("description")) or "（未命名工作）",
+                                  sub_age, 40))
+    return rows
+
+
+ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, sort order)
+    ("Codex Reviewer", "codex reviewer agent", 25),
+    ("OpenCode", "opencode developer", 50),
+    ("AGY", "agy", 60),
+    ("Company", "公司 gw", 70),
+)
+
+
+def roadmap_workers(path: str | None = None) -> dict[str, str]:
+    """{display name: live status text} from the dated Worker availability table."""
+    path = path or os.path.join(canonical_root(), "tools", "llmtool", "ROADMAP.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read(OFFICE_HEAD)
+    except (OSError, UnicodeDecodeError):
+        return {}
+    found, inside = {}, False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            inside = "worker availability" in line.lower()
+            continue
+        if not inside or not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        worker = re.sub(r"[`*]", "", cells[0])
+        for prefix, name, _ in ROADMAP_WORKERS:
+            if worker.startswith(prefix) and name not in found:
+                found[name] = cells[1]
+    return found
+
+
+def _worker_state(status: str) -> tuple[str, str]:
+    plain = re.sub(r"[`*]", "", status)
+    upper = plain.upper()
+    if upper.startswith("PAUSED") and ("429" in plain or "USAGELIMIT" in upper.replace(" ", "")):
+        return STOPPED, "免費額度用完（429），等額度恢復"
+    if upper.startswith("PAUSED"):
+        return PAUSED, "Owner 暫停中"
+    if upper.startswith("NO ACTIVE") or "尚未" in plain:
+        return PAUSED, "尚未指派工作"
+    if upper.startswith("NOT RECHECKED"):
+        return UNCHECKED, ("上次免費額度用完（429），尚未重新確認" if "429" in plain
+                           else "尚未重新確認")
+    if "PASS" in upper or upper.startswith("AVAILABLE"):
+        return IDLE, "可用，目前沒有工作"
+    return UNCHECKED, _label(plain, 36)
+
+
+def office_rows(processes: list[Process], now: float | None = None, *,
+                codex_root: str = CODEX_SESSIONS, claude_root: str = CLAUDE_PROJECTS,
+                roadmap: str | None = None, canonical: str | None = None) -> list[OfficeRow]:
+    now = time.time() if now is None else now
+    canonical = canonical or canonical_root()
+    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
+    reviewing = any(row.name.startswith("codex reviewer") and row.state == WORKING for row in rows)
+    # A resident OpenCode SERVER alone is not work; a run/TUI client is.
+    opencode_live = any(p.role in ("OpenCode CLIENT", "OpenCode CLI") for p in processes)
+    table = roadmap_workers(roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
+    for _, name, order in ROADMAP_WORKERS:
+        if name == "codex reviewer agent" and reviewing:
+            continue
+        if name == "opencode developer" and opencode_live:
+            rows.append(OfficeRow(name, WORKING, "OpenCode 程序執行中", 0.0, order))
+            continue
+        if name in table:
+            state, detail = _worker_state(table[name])
+            rows.append(OfficeRow(name, state, detail, None, order))
+    return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
+                                         row.name))
+
+
+def _width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - _width(text))
+
+
+def _ago(age: float | None) -> str:
+    if age is None:
+        return "依 Roadmap 狀態表"
+    if age < 60:
+        return "剛剛"
+    if age < 3600:
+        return f"{int(age // 60)} 分鐘前"
+    return f"{int(age // 3600)} 小時前"
+
+
+def office_lines(rows: list[OfficeRow]) -> list[str]:
+    working = sum(row.state == WORKING for row in rows)
+    lines = [f"辦公室 · {len(rows)} 位成員 · {working} 位工作中"]
+    if not rows:
+        return lines + ["目前沒有觀察到任何 agent 或 worker。"]
+    width = max(_width(row.name) for row in rows) + 2
+    for row in rows:
+        detail = f"「{row.detail}」" if row.detail else ""
+        lines.append(f"{_pad(row.name, width)}{_pad(f'({row.state})', 9)}"
+                     f"{_pad(detail, 46)} · {_ago(row.age)}")
+    lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")
+    return lines
+
+
+def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
+    """Log lines for members whose state changed since the previous poll."""
+    new = {f"{row.name}|{row.detail}": row.state for row in rows}
+    events = []
+    for key, state in new.items():
+        before = old.get(key)
+        if before is not None and before != state:
+            name, detail = key.split("|", 1)
+            kind = "+" if state == WORKING else "!" if state in (STALLED, STOPPED) else "i"
+            events.append((kind, f"{name}「{detail}」：{before} → {state}"))
+    return new, events
+
+
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
 FOOTNOTE = "running != model generating; gone != task done"
 FOLLOW_VIEWS = frozenset({"log", "activity"})   # newest at the bottom; offset counts back
@@ -1138,6 +1510,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
+    print("\n".join(office_lines(mon.office)))
+    print()
     print("\n".join(table_lines(mon.processes)))
     print("\nRECENT LLMTOOL TASKS")
     print("\n".join(task_lines(mon.tasks, 3)))
@@ -1175,7 +1549,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                                        ("■", curses.COLOR_GREEN)), start=1):
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
-    view, offset, next_poll = "log", 0, 0.0
+    view, offset, next_poll = "office", 0, 0.0
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -1207,7 +1581,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             end = len(entries) - offset
             for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
                 put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
@@ -1220,7 +1594,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
                     attr |= colors.get("!", 0)
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         elif view == "activity":
             lines = activity_lines(mon.tasks, github=mon.github, background=True)
             offset = max(0, min(offset, len(lines) - body))
@@ -1228,24 +1602,37 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             for row, line in enumerate(lines[max(0, end - body):end]):
                 attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
+        elif view == "office":
+            lines = office_lines(mon.office)
+            offset = max(0, min(offset, len(lines) - body))
+            for row, line in enumerate(lines[offset:offset + body]):
+                attr = curses.A_BOLD if offset + row == 0 else 0
+                if f"({WORKING})" in line:
+                    attr |= colors.get("+", 0)
+                elif f"({STOPPED})" in line or f"({STALLED})" in line:
+                    attr |= colors.get("!", 0)
+                elif f"({PAUSED})" in line or f"({DONE})" in line:
+                    attr |= curses.A_DIM
+                put(3 + row, line, attr)
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (ord("q"), ord("Q"), 27):
             return
-        views = ("log", "tasks", "table", "activity")
-        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity
+        views = ("log", "tasks", "table", "activity", "office")
+        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity -> office
             view, offset = views[(views.index(view) + 1) % len(views)], 0
-        elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
+        elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
             view, offset = views[key - ord("1")], 0
         elif key == curses.KEY_UP:
             offset += 1 if view in FOLLOW_VIEWS else -1
@@ -1265,7 +1652,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
     parser.add_argument("--once", action="store_true",
-                        help="print one process table, task list and Activity view, then exit")
+                        help="print the office roster, process table, task list and Activity view, then exit")
     parser.add_argument("--plain", action="store_true",
                         help="append-only event lines instead of the interactive screen")
     parser.add_argument("--no-color", action="store_true", help="disable colors")

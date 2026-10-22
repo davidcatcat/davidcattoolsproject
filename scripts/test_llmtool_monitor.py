@@ -743,5 +743,166 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertRegex(mon._when(datetime.now().timestamp()), r"^\d{2}:\d{2}:\d{2}$")
 
 
+ROADMAP_TABLE = """# Roadmap
+## Worker availability — live status
+| Worker | Live status (as of 2026-10-23) | Evidence | Resume |
+| --- | --- | --- | --- |
+| Codex Reviewer Agent | No active Reviewer task dispatch observed as of 2026-10-23. | x | x |
+| OpenCode Developer | PAUSED. The free DeepSeek route returned HTTP 429 `FreeUsageLimitError`. | x | x |
+| AGY | PAUSED (Owner, 2026-10-22) | x | x |
+| Company `gw` | **API authentication PASS; inference PASS** token=abc | x | x |
+## Next section
+| OpenCode Developer | AVAILABLE | x | x |
+"""
+
+
+class OfficeViewTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.canonical = os.path.realpath(str(base / "repo" / "davidcattoolsproject"))
+        os.makedirs(self.canonical)
+        self.task = base / "llmtool-dev-workspaces" / "davidcattoolsproject" / "tasks" / "wp-1"
+        os.makedirs(self.task)
+        self.codex = base / "codex"
+        self.claude = base / "claude"
+        self.roadmap = base / "ROADMAP.md"
+        self.roadmap.write_text(ROADMAP_TABLE, encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, path: Path, items, age: float) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        return path
+
+    def _codex(self, name, meta, events, age):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": meta}]
+        items += [{"type": "response_item", "payload": {"type": "message",
+                   "content": "PROMPT-SECRET MODEL-OUTPUT-SECRET /Users/davidsun/x"}}]
+        items += [{"type": "event_msg", "payload": {"type": kind}} for kind in events]
+        return self._write(self.codex / day / f"rollout-{name}.jsonl", items, age)
+
+    def rows(self, processes=()):
+        return mon.office_rows(list(processes), self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), roadmap=str(self.roadmap),
+                               canonical=self.canonical)
+
+    def by_name(self, rows):
+        return {row.name: row for row in rows}
+
+    def test_codex_pm_and_subagents_show_role_task_and_state(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started", "task_complete"], age=400)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Huygens",
+                            "agent_path": "/root/env2_flow_integration"},
+                    ["task_started"], age=30)
+        self._codex("rev", {"id": "S2", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Locke",
+                            "agent_path": "/root/formal_review_pr285"},
+                    ["task_started", "task_complete"], age=120)
+        self._codex("old", {"id": "S3", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Old",
+                            "agent_path": "/root/old_review"},
+                    ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
+        self._codex("elsewhere", {"id": "X", "cwd": "/somewhere/else"}, ["task_started"], age=1)
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex PM"].state, mon.WORKING)
+        self.assertIn("env2 flow integration", rows["codex PM"].detail)
+        self.assertEqual(rows["codex developer Huygens"].state, mon.WORKING)
+        self.assertEqual(rows["codex reviewer Locke"].state, mon.DONE)
+        self.assertNotIn("codex reviewer Old", rows)
+        self.assertEqual(sum(name.startswith("codex") for name in rows), 4)   # + reviewer agent row
+
+    def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_complete"], age=10_000)
+        self._codex("dev", {"id": "S1", "cwd": str(self.task), "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Slow",
+                            "agent_path": "/root/slow_dev"},
+                    ["task_started"], age=mon.OFFICE_STALL + 5)
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex developer Slow"].state, mon.STALLED)
+        self.assertEqual(rows["codex PM"].state, mon.IDLE)
+        self.assertEqual(rows["codex PM"].detail, "等待下一個指示")
+
+    def test_claude_session_title_and_subagents(self):
+        project = self.claude / "proj"
+        self._write(project / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "message": "PROMPT-SECRET"},
+            {"type": "ai-title", "aiTitle": "Review PR 285 token=abc"},
+        ], age=10)
+        sub = project / "s1" / "subagents"
+        self._write(sub / "agent-a1.jsonl", [{"type": "user", "message": "PROMPT-SECRET"}], age=20)
+        (sub / "agent-a1.meta.json").write_text(json.dumps(
+            {"description": "Fix PR 273 review", "finished": False}), encoding="utf-8")
+        self._write(sub / "agent-a2.jsonl", [{}], age=600)
+        (sub / "agent-a2.meta.json").write_text(json.dumps(
+            {"description": "Old audit", "finished": True}), encoding="utf-8")
+        self._write(self.claude / "dev" / "s2.jsonl", [
+            {"type": "user", "cwd": str(self.task)}, {"type": "ai-title", "aiTitle": "Build env cache"},
+        ], age=4000)
+        self._write(self.claude / "other" / "s3.jsonl", [{"cwd": "/elsewhere"}], age=1)
+        rows = self.rows()
+        names = [row.name for row in rows]
+        self.assertEqual(names.count("claude subagent"), 2)
+        reviewer = self.by_name(rows)["claude reviewer"]
+        self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
+        self.assertNotIn("token=abc", reviewer.detail)
+        developer = self.by_name(rows)["claude developer"]
+        self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
+        subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
+        self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
+
+    def test_roadmap_workers_map_to_office_states_without_raw_text(self):
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
+                         (mon.STOPPED, "免費額度用完（429），等額度恢復"))
+        self.assertEqual((rows["codex reviewer agent"].state, rows["codex reviewer agent"].detail),
+                         (mon.PAUSED, "尚未指派工作"))
+        self.assertEqual(rows["agy"].state, mon.PAUSED)
+        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
+        self.assertIsNone(rows["agy"].age)
+
+    def test_opencode_server_alone_is_not_work_but_a_client_is(self):
+        server = mon.Process(1, 0, 1, "1:00", "S", "OpenCode SERVER", "opencode.exe", "")
+        client = mon.Process(2, 0, 2, "1:00", "S", "OpenCode CLIENT", "opencode.exe", "")
+        self.assertEqual(self.by_name(self.rows([server]))["opencode developer"].state, mon.STOPPED)
+        self.assertEqual(self.by_name(self.rows([server, client]))["opencode developer"].state,
+                         mon.WORKING)
+
+    def test_rendered_office_never_shows_secrets_or_private_paths(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("bad", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "x/../y",
+                            "agent_path": "/root/rm -rf /Users/davidsun"}, ["task_started"], age=5)
+        text = "\n".join(mon.office_lines(self.rows()))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+        self.assertIn("（未命名工作）", text)
+
+    def test_state_changes_become_log_events_once(self):
+        first = [mon.OfficeRow("codex developer A", mon.WORKING, "wp 1", 1.0, 20)]
+        state, events = mon.office_events({}, first)
+        self.assertEqual(events, [])
+        later = [mon.OfficeRow("codex developer A", mon.DONE, "wp 1", 1.0, 20)]
+        state, events = mon.office_events(state, later)
+        self.assertEqual(events, [("i", "codex developer A「wp 1」：工作中 → 完成")])
+        self.assertEqual(mon.office_events(state, later)[1], [])
+
+    def test_canonical_root_resolves_through_a_linked_worktree(self):
+        common = Path(self.canonical) / ".git" / "worktrees" / "wp-1"
+        common.mkdir(parents=True)
+        (self.task / ".git").write_text(f"gitdir: {common}\n", encoding="utf-8")
+        self.assertEqual(mon.canonical_root(str(self.task)), self.canonical)
+
+
 if __name__ == "__main__":
     unittest.main()
