@@ -1556,11 +1556,10 @@ def _resume_review_result_return(store, task, developer, callback):
         recommendation = _review_pm_recommendation(response)
         usage = reply_usage(reply.metadata)
         verdict = receipt['verdict']
-        if (recommendation is None or
-                (verdict == 'BLOCKED' and recommendation['decision'] not in
-                    ('WAIT_FOR_REVIEWER', 'STOP')) or
-                (verdict == 'FAIL' and recommendation['decision'] ==
-                    'CONTINUE_INTEGRATION_GATES')):
+        repair_round = handoff['intent']['repair_round']
+        if (recommendation is None or not
+                task_completion.review_return_decision_allowed(
+                    verdict, repair_round, recommendation['decision'])):
             raise LLMToolError('PM reviewer-result recommendation is invalid')
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         unknown = task_completion.review_return_record(

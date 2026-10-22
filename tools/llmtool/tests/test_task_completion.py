@@ -933,7 +933,8 @@ class TaskCompletionTests(unittest.TestCase):
             'output_sha256': 'f' * 64}]
         return task, store, result, tests
 
-    def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None):
+    def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None,
+                                     reviewer_decision='STOP'):
         from llmtool.task_submission_cli import run_task_direct_result_event
 
         client = FakeClient(replies=[
@@ -941,7 +942,8 @@ class TaskCompletionTests(unittest.TestCase):
                 'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
                 {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}),
             Reply(json.dumps({'schema_version': 1,
-                'decision': 'STOP', 'summary': 'Stop after receipt delivery.'}),
+                'decision': reviewer_decision,
+                'summary': 'Stop after receipt delivery.'}),
                 {'prompt_tokens': 8, 'completion_tokens': 4, 'total_tokens': 12}),
         ])
         output = StringIO()
@@ -1099,6 +1101,20 @@ class TaskCompletionTests(unittest.TestCase):
         callback = store.get(task['task_id'])['developer']['direct_result_callback']
         self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
         self.assertEqual(callback['review_return']['state'], 'RETURNED')
+
+    def test_invalid_pm_decision_for_pass_is_rejected_and_persisted(self):
+        task, store, result, tests = self._direct_opencode_task('review-invalid-pm-matrix')
+        adapter = lambda intent: self._trusted_review_receipt(intent, verdict='PASS')
+        code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter,
+            reviewer_decision='RETURN_TO_DEVELOPER')
+        self.assertEqual(code, 1)
+        self.assertEqual(len(client.calls), 2)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_return']['state'], 'REJECTED')
+        self.assertEqual(callback['review_return']['pm_error_code'],
+                         'PM_RESPONSE_REJECTED')
 
     def test_pending_cas_has_exactly_one_concurrent_adapter_claimant(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
@@ -1922,6 +1938,24 @@ class TaskCompletionTests(unittest.TestCase):
             reject(repaired_handoff, decision)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER'):
             reject(blocked_handoff, decision)
+        all_decisions = ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
+                         'WAIT_FOR_REVIEWER', 'STOP')
+        expected = {
+            ('PASS', 0): {'CONTINUE_INTEGRATION_GATES', 'STOP'},
+            ('PASS', 1): {'CONTINUE_INTEGRATION_GATES', 'STOP'},
+            ('FAIL', 0): {'RETURN_TO_DEVELOPER', 'STOP'},
+            ('FAIL', 1): {'STOP'},
+            ('BLOCKED', 0): {'WAIT_FOR_REVIEWER', 'STOP'},
+            ('BLOCKED', 1): {'WAIT_FOR_REVIEWER', 'STOP'},
+        }
+        for (verdict, repair_round), allowed in expected.items():
+            for decision in all_decisions:
+                with self.subTest(verdict=verdict, repair_round=repair_round,
+                                  decision=decision):
+                    self.assertEqual(task_completion.review_return_decision_allowed(
+                        verdict, repair_round, decision), decision in allowed)
+        self.assertFalse(task_completion.review_return_decision_allowed('PASS', True,
+                                                                        'STOP'))
         forged = dict(passed)
         forged['source_sha'] = '7' * 40
         forged.pop('receipt_sha256')

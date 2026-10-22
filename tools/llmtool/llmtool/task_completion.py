@@ -184,6 +184,22 @@ def review_handoff_record(intent, receipt):
             'next_step': next_step, 'error_code': None}
 
 
+def review_return_decision_allowed(verdict, repair_round, decision):
+    if type(repair_round) is not int or repair_round not in (0, 1):
+        return False
+    if verdict == 'PASS':
+        allowed = ('CONTINUE_INTEGRATION_GATES', 'STOP')
+    elif verdict == 'FAIL' and repair_round == 0:
+        allowed = ('RETURN_TO_DEVELOPER', 'STOP')
+    elif verdict == 'FAIL' and repair_round == 1:
+        allowed = ('STOP',)
+    elif verdict == 'BLOCKED':
+        allowed = ('WAIT_FOR_REVIEWER', 'STOP')
+    else:
+        return False
+    return decision in allowed
+
+
 def review_return_record(handoff, *, state='PENDING', response=None,
                          recommendation=None, usage=None, error_code=None):
     """Build the durable, bounded return of a source-bound receipt to its PM."""
@@ -223,17 +239,16 @@ def review_return_record(handoff, *, state='PENDING', response=None,
         intent = handoff['intent']
         verdict = receipt['verdict']
         repair_round = intent['repair_round']
-        if decision == 'CONTINUE_INTEGRATION_GATES' and verdict == 'PASS':
-            next_step = 'INTEGRATION_GATES_PENDING'
-        elif (decision == 'RETURN_TO_DEVELOPER' and verdict == 'FAIL' and
-              repair_round == 0):
-            next_step = 'RETURN_TO_DEVELOPER_ONCE'
-        elif decision == 'WAIT_FOR_REVIEWER' and verdict == 'BLOCKED':
-            next_step = 'WAIT_FOR_REVIEWER'
-        elif decision == 'STOP':
-            next_step = 'STOP'
-        else:
+        if not review_return_decision_allowed(verdict, repair_round, decision):
             _stop('REVIEW_RECEIPT_INVALID')
+        if decision == 'CONTINUE_INTEGRATION_GATES':
+            next_step = 'INTEGRATION_GATES_PENDING'
+        elif decision == 'RETURN_TO_DEVELOPER':
+            next_step = 'RETURN_TO_DEVELOPER_ONCE'
+        elif decision == 'WAIT_FOR_REVIEWER':
+            next_step = 'WAIT_FOR_REVIEWER'
+        else:
+            next_step = 'STOP'
     return {
         'state': state, 'receipt_sha256': receipt['receipt_sha256'],
         'next_step': next_step, 'pm_dispatch': dispatch,
