@@ -963,6 +963,31 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((runs[0].state, runs[0].kind, runs[0].age), (mon.WORKING, "subagent", 130.0))
         self.assertEqual(runs[0].group, self.by_name(rows)["codex PM"].key)
 
+    def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
+        run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        state, finished, ended = mon.track_one_shot({}, [run], 1000.0)
+        self.assertEqual((finished, ended), ([], []))
+        state, finished, ended = mon.track_one_shot(state, [run], 1012.0)
+        state, finished, ended = mon.track_one_shot(state, [], 1013.0)
+        self.assertEqual(ended, ["claude reviewer「單次呼叫」結束（約 17 秒）"])
+        self.assertEqual(finished, [(17.0, 0.0)])
+        state, finished, ended = mon.track_one_shot(state, [], 1013.0 + 60)
+        self.assertEqual((finished, ended), ([(17.0, 60.0)], []))
+        state, finished, _ = mon.track_one_shot(state, [], 1013.0 + mon.OFFICE_DONE_WINDOW + 1)
+        self.assertEqual((state, finished), ({}, []))
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        rows = mon.office_rows([], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+                               roadmap=str(self.roadmap), canonical=self.canonical,
+                               opencode_db="/nonexistent", cwd_of=lambda pid: None,
+                               finished_runs=[(45.0, 120.0)])
+        done = [row for row in rows if row.detail.startswith("單次呼叫已結束")]
+        self.assertEqual(len(done), 1)
+        self.assertEqual((done[0].state, done[0].age), (mon.DONE, 120.0))
+        self.assertIn("跑了約 45 秒", done[0].detail)
+        self.assertEqual(done[0].group, self.by_name(rows)["codex PM"].key)
+
     def test_roadmap_workers_map_to_office_states_without_raw_text(self):
         rows = self.by_name(self.rows())
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),

@@ -340,6 +340,7 @@ class Monitor:
         self.github = None   # GitHubSource for the Activity view; None means no network at all
         self.office: list = []
         self.office_state: dict = {}
+        self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -413,8 +414,10 @@ class Monitor:
             new.append((stamp, "i", f"{len(tasks)} recent llmtool task(s); latest {latest.task_id}"
                                     + (f": {last.name} {stage_state(last)}" if last else ": not started")))
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
+        self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
+        new += [(stamp, "i", text) for text in ended]
         try:
-            office = office_rows(result.processes)
+            office = office_rows(result.processes, finished_runs=finished)
         except Exception:  # the office view is optional; never break process monitoring
             office = self.office
         state, changes = office_events(self.office_state, office)
@@ -1727,12 +1730,38 @@ def _worker_state(status: str) -> tuple[str, str]:
     return UNCHECKED, _label(plain, 36)
 
 
+def track_one_shot(state: dict, processes: list[Process], now: float):
+    """Remember short `claude -p` runs started by Codex after they exit.
+
+    They leave no session file and often last under a minute, so without this
+    a run is visible only while it happens to be running. Returns the new
+    state, [(duration_s, seconds_since_end)] for runs that ended within the
+    done window, and one log line per run that just ended. Memory only."""
+    state = {pid: list(item) for pid, item in state.items()}
+    live = {p.pid: p for p in processes
+            if p.role == "Claude Code CLI" and p.owner.startswith("Codex")}
+    for pid, proc in live.items():
+        if pid not in state or state[pid][2] is not None:   # new, or a reused PID
+            state[pid] = [now - (_elapsed_seconds(proc.elapsed) or 0.0), now, None]
+        state[pid][1] = now
+    ended = []
+    for pid, item in state.items():
+        if pid not in live and item[2] is None:
+            item[2] = now
+            ended.append(f"claude reviewer「單次呼叫」結束（約 {max(1, int(item[1] - item[0]))} 秒）")
+    state = {pid: item for pid, item in state.items()
+             if item[2] is None or now - item[2] <= OFFICE_DONE_WINDOW}
+    finished = [(item[1] - item[0], now - item[2]) for item in state.values() if item[2] is not None]
+    return state, finished, ended
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
                 opencode_db: str | None = None, cwd_of=process_cwd,
                 cpu_of=process_cpu, dispatch: str | None = None,
-                llmtool_tasks: str | None = None) -> list[OfficeRow]:
+                llmtool_tasks: str | None = None,
+                finished_runs: list | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
@@ -1748,6 +1777,10 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         rows.append(OfficeRow("claude reviewer", WORKING, "單次呼叫執行中（不留 session 紀錄）",
                               _elapsed_seconds(proc.elapsed) or 0.0, 30,
                               group="codex-launched", kind="subagent"))
+    for duration, since_end in finished_runs or []:
+        rows.append(OfficeRow("claude reviewer", DONE,
+                              f"單次呼叫已結束（跑了約 {max(1, int(duration))} 秒，不留 session 紀錄）",
+                              since_end, 30, group="codex-launched", kind="subagent"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     rows += agy
     switches = worker_dispatch(dispatch or os.path.join(canonical, DISPATCH_RELATIVE))
