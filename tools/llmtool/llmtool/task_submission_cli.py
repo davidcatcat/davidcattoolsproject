@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import threading
 import unicodedata
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -26,6 +27,10 @@ _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
 _trusted_reviewer_adapter = None
+_active_review_dispatches = set()
+_active_review_dispatches_lock = threading.Lock()
+_active_review_pm_returns = set()
+_active_review_pm_returns_lock = threading.Lock()
 _SYSTEM = (
     'You are the user-selected llmtool Integrator/PM AI. Respond directly to the '
     'submitted development request with a concise understanding, proposed next '
@@ -55,6 +60,16 @@ _EXECUTOR_RESULT_SYSTEM = (
     'Do not treat this Executor result as accepted product work. This is a '
     'recommendation only and grants no execution, review, Git, PR, merge, spending, '
     'or provider authority. Return one raw JSON object with schema_version=1, '
+    'decision, and summary; no prose outside the object.'
+)
+_REVIEW_RESULT_SYSTEM = (
+    'You are the original llmtool PM for this Task. Receive only the bounded, '
+    'source-bound Reviewer receipt supplied below. The receipt is not permission '
+    'to execute, edit, publish, merge, spend, or change providers. Recommend exactly '
+    'one next step: CONTINUE_INTEGRATION_GATES, RETURN_TO_DEVELOPER, '
+    'WAIT_FOR_REVIEWER, or STOP. CONTINUE_INTEGRATION_GATES means only that the '
+    'Integrator may consider the required exact-head CI and integration gates; it '
+    'does not accept or merge the work. Return one raw JSON object with schema_version=1, '
     'decision, and summary; no prose outside the object.'
 )
 
@@ -208,6 +223,22 @@ def _pm_recommendation(response, *, executor_result=False):
                     'REASSIGN_DEVELOPER', 'WAIT_FOR_AUTHORIZATION', 'STOP') if executor_result else
                     ('ACCEPT', 'RETURN_TO_DEVELOPER', 'REASSIGN_DEVELOPER',
                      'WAIT_FOR_AUTHORIZATION', 'STOP'))):
+            return None
+        return {'decision': value['decision'],
+                'summary': _screen_text(value['summary'], 2048)}
+    except (ValueError, TypeError, LLMToolError, UnicodeError):
+        return None
+
+
+def _review_pm_recommendation(response):
+    try:
+        value = json.loads(response)
+        allowed = ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
+                   'WAIT_FOR_REVIEWER', 'STOP')
+        if (type(value) is not dict or set(value) !=
+                {'schema_version', 'decision', 'summary'} or
+                type(value['schema_version']) is not int or value['schema_version'] != 1 or
+                value['decision'] not in allowed):
             return None
         return {'decision': value['decision'],
                 'summary': _screen_text(value['summary'], 2048)}
@@ -1378,6 +1409,205 @@ def _persist_review_handoff(store, task, developer, callback,
         expected={'developer': developer}, developer=updated_developer)
 
 
+def _persist_review_return(store, task, developer, callback,
+                           expected_return, review_return):
+    if callback.get('review_return') != expected_return:
+        raise LLMToolError('Reviewer result return state changed')
+    handoff = callback.get('review_handoff')
+    task_completion.validate_review_return_record(review_return, handoff)
+    updated = {**callback, 'review_return': review_return}
+    return store.compare_and_update(task['task_id'],
+        expected={'developer': developer},
+        developer={**developer, 'direct_result_callback': updated})
+
+
+def _resume_review_result_return(store, task, developer, callback):
+    handoff = callback.get('review_handoff')
+    if type(handoff) is not dict or handoff.get('dispatch_state') != 'RECEIVED':
+        raise LLMToolError('source-bound Reviewer receipt is unavailable')
+    receipt = handoff['receipt']
+    review_return = callback.get('review_return')
+    if review_return is None:
+        review_return = task_completion.review_return_record(handoff)
+        try:
+            saved = _persist_review_return(store, task, developer, callback, None, review_return)
+            task, developer = saved, saved['developer']
+            callback = developer['direct_result_callback']
+            review_return = callback['review_return']
+        except Exception:
+            task = store.get(task['task_id'])
+            developer = task['developer']
+            callback = developer['direct_result_callback']
+            review_return = callback.get('review_return')
+            if review_return is None:
+                raise LLMToolError('Reviewer result return claim was already changed') from None
+            task_completion.validate_review_return_record(review_return,
+                                                          callback.get('review_handoff'))
+    else:
+        task_completion.validate_review_return_record(review_return, handoff)
+    state = review_return['state']
+    if state == 'DISPATCHING':
+        dispatch_id = handoff['intent']['dispatch_id']
+        with _active_review_pm_returns_lock:
+            active = dispatch_id in _active_review_pm_returns
+        if active:
+            _print(_task_view(store.get(task['task_id'])))
+            return 1
+        unknown = task_completion.review_return_record(
+            handoff, state='OUTCOME_UNKNOWN', error_code='PM_CALL_OUTCOME_UNKNOWN')
+        try:
+            saved = _persist_review_return(store, task, developer, callback,
+                                           review_return, unknown)
+            task = saved
+        except Exception:
+            task = store.get(task['task_id'])
+        _print(_task_view(task))
+        return 1
+    if state in ('RETURNED', 'REJECTED', 'OUTCOME_UNKNOWN'):
+        _print(_task_view(store.get(task['task_id'])))
+        return 0 if state == 'RETURNED' and receipt['verdict'] != 'BLOCKED' else 1
+    if state == 'UNAVAILABLE':
+        # Setup failures happen before the PM call and may be retried safely.
+        pending = task_completion.review_return_record(handoff)
+        try:
+            saved = _persist_review_return(store, task, developer, callback,
+                                           review_return, pending)
+            task, developer = saved, saved['developer']
+            callback = developer['direct_result_callback']
+            review_return = callback['review_return']
+        except Exception:
+            task = store.get(task['task_id'])
+            developer = task['developer']
+            callback = developer['direct_result_callback']
+            review_return = callback.get('review_return')
+            if review_return is None:
+                raise LLMToolError('Reviewer result return claim was already changed') from None
+            task_completion.validate_review_return_record(review_return,
+                                                          callback.get('review_handoff'))
+            _print(_task_view(task))
+            return 1
+
+    pm_receipt = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'contract_digest': task['task_binding']['contract_digest'],
+        'dispatch_id': handoff['intent']['dispatch_id'],
+        'receipt_sha256': receipt['receipt_sha256'],
+        'verdict': receipt['verdict'], 'security': receipt['security'],
+        'functional': receipt['functional'], 'execution_status': receipt['execution_status'],
+        'code': receipt['code'], 'findings_sha256': receipt['findings_sha256'],
+        'provenance': receipt['provenance'],
+        'developer_task_id': receipt['developer_task_id'],
+        'reviewer_task_id': receipt['reviewer_task_id'],
+        'reviewer_identity': receipt['reviewer_identity'],
+        'reviewer_session_ref': receipt['reviewer_session_ref'],
+        'source_sha': receipt['source_sha'], 'result_head': receipt['result_head'],
+        'diff_sha256': receipt['diff_sha256'],
+        'changed_paths': handoff['intent']['changed_paths'],
+        'repair_round': handoff['intent']['repair_round'],
+        'bounded_next_step': handoff['next_step'],
+    }
+    content = json.dumps(pm_receipt, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':'))
+    _screen_text(content, 16 * 1024)
+    try:
+        config = resolve_profile_config(task['pm_provider_profile'], require_configured=True)
+        provider = selected_provider(config)
+        if _provider_route_binding(provider) != task['pm_route_binding']:
+            raise LLMToolError('original PM provider identity changed')
+        client = create_client(config, api_key(config))
+    except (KeyboardInterrupt, CLIHostTermination):
+        _print_task_without_masking_interrupt(store, task['task_id'])
+        raise
+    except Exception as exc:
+        unavailable = task_completion.review_return_record(
+            handoff, state='UNAVAILABLE', error_code=_provider_error_code(exc))
+        saved = _persist_review_return(store, task, developer, callback,
+                                       review_return, unavailable)
+        _print(_task_view(saved))
+        return 1
+
+    dispatching = task_completion.review_return_record(handoff, state='DISPATCHING')
+    dispatch_id = handoff['intent']['dispatch_id']
+    with _active_review_pm_returns_lock:
+        already_active = dispatch_id in _active_review_pm_returns
+        if not already_active:
+            _active_review_pm_returns.add(dispatch_id)
+    if already_active:
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
+    try:
+        saved = _persist_review_return(store, task, developer, callback,
+                                       review_return, dispatching)
+    except Exception:
+        with _active_review_pm_returns_lock:
+            _active_review_pm_returns.discard(dispatch_id)
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
+    task, developer = saved, saved['developer']
+    callback = developer['direct_result_callback']
+    try:
+        try:
+            reply = client.complete([
+                {'role': 'system', 'content': _REVIEW_RESULT_SYSTEM},
+                {'role': 'user', 'content': content},
+            ])
+        except (KeyboardInterrupt, CLIHostTermination) as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code='PM_CALL_INTERRUPTED')
+            try:
+                _persist_review_return(store, task, developer, callback, dispatching, unknown)
+            except BaseException:
+                pass
+            _print_task_without_masking_interrupt(store, task['task_id'])
+            raise exc
+        except Exception as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code=_provider_error_code(exc))
+            try:
+                saved = _persist_review_return(store, task, developer, callback,
+                                               dispatching, unknown)
+            except Exception:
+                saved = store.get(task['task_id'])
+            _print(_task_view(saved))
+            return 1
+        try:
+            response = _screen_text(reply.content, RESPONSE_LIMIT)
+            recommendation = _review_pm_recommendation(response)
+            usage = reply_usage(reply.metadata)
+            verdict = receipt['verdict']
+            repair_round = handoff['intent']['repair_round']
+            if (recommendation is None or not
+                    task_completion.review_return_decision_allowed(
+                        verdict, repair_round, recommendation['decision'])):
+                raise LLMToolError('PM reviewer-result recommendation is invalid')
+        except (KeyboardInterrupt, CLIHostTermination) as exc:
+            unknown = task_completion.review_return_record(
+                handoff, state='OUTCOME_UNKNOWN', error_code='PM_RESPONSE_INTERRUPTED')
+            try:
+                _persist_review_return(store, task, developer, callback, dispatching, unknown)
+            except BaseException:
+                pass
+            _print_task_without_masking_interrupt(store, task['task_id'])
+            raise exc
+        except Exception:
+            rejected = task_completion.review_return_record(
+                handoff, state='REJECTED', error_code='PM_RESPONSE_REJECTED')
+            saved = _persist_review_return(store, task, developer, callback,
+                                           dispatching, rejected)
+            _print(_task_view(saved))
+            return 1
+        returned = task_completion.review_return_record(
+            handoff, state='RETURNED', response=response,
+            recommendation=recommendation, usage=None if usage is None else dict(usage))
+        saved = _persist_review_return(store, task, developer, callback,
+                                       dispatching, returned)
+        _print(_task_view(saved))
+        return 0 if receipt['verdict'] != 'BLOCKED' else 1
+    finally:
+        with _active_review_pm_returns_lock:
+            _active_review_pm_returns.discard(dispatch_id)
+
+
 def _resume_reviewer_handoff(store, task, developer, callback):
     recommendation = callback.get('pm_recommendation')
     if (callback.get('state') != 'PM_RETURNED' or
@@ -1432,6 +1662,11 @@ def _resume_reviewer_handoff(store, task, developer, callback):
 
     state = handoff['dispatch_state']
     if state == 'DISPATCHING':
+        with _active_review_dispatches_lock:
+            active = handoff['intent']['dispatch_id'] in _active_review_dispatches
+        if active:
+            _print(_task_view(store.get(task['task_id'])))
+            return 1
         # Write-ahead state means a crash may have occurred immediately before
         # or after entering the adapter. Never blindly invoke it a second time.
         unknown = task_completion.review_handoff_unknown(handoff['intent'])
@@ -1444,10 +1679,11 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         _print(_task_view(task))
         return 1
     if state != 'PENDING':
-        _print(_task_view(store.get(task['task_id'])))
         receipt = handoff.get('receipt')
-        return 0 if state == 'RECEIVED' and type(receipt) is dict and \
-            receipt.get('verdict') in ('PASS', 'FAIL') else 1
+        if state == 'RECEIVED' and type(receipt) is dict:
+            return _resume_review_result_return(store, task, developer, callback)
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
     if _trusted_reviewer_adapter is None:
         # No call was attempted; this state is distinct from an ambiguous launch.
         receipt = task_completion.review_dispatch_blocked(handoff['intent'])
@@ -1463,6 +1699,14 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         return 1
 
     dispatching = task_completion.review_handoff_dispatching(handoff['intent'])
+    dispatch_id = handoff['intent']['dispatch_id']
+    with _active_review_dispatches_lock:
+        already_active = dispatch_id in _active_review_dispatches
+        if not already_active:
+            _active_review_dispatches.add(dispatch_id)
+    if already_active:
+        _print(_task_view(store.get(task['task_id'])))
+        return 1
     try:
         saved = _persist_review_handoff(store, task, developer, callback,
                                         handoff, dispatching)
@@ -1474,11 +1718,15 @@ def _resume_reviewer_handoff(store, task, developer, callback):
         current_handoff = current['developer']['direct_result_callback'].get('review_handoff')
         # A competing process may have won, or the observed phase may now be
         # terminal. Neither case grants this invocation the dispatch claim.
+        with _active_review_dispatches_lock:
+            _active_review_dispatches.discard(dispatch_id)
         _print(_task_view(current))
         return 1
     try:
         receipt = _trusted_reviewer_adapter(dispatching['intent'])
     except BaseException as exc:
+        with _active_review_dispatches_lock:
+            _active_review_dispatches.discard(dispatching['intent']['dispatch_id'])
         unknown = task_completion.review_handoff_unknown(
             dispatching['intent'], 'REVIEW_ADAPTER_OUTCOME_UNKNOWN')
         try:
@@ -1494,6 +1742,8 @@ def _resume_reviewer_handoff(store, task, developer, callback):
     try:
         task_completion.validate_review_dispatch_receipt(dispatching['intent'], receipt)
     except BaseException as exc:
+        with _active_review_dispatches_lock:
+            _active_review_dispatches.discard(dispatching['intent']['dispatch_id'])
         unknown = task_completion.review_handoff_unknown(
             dispatching['intent'], 'REVIEW_RECEIPT_INVALID')
         try:
@@ -1512,13 +1762,18 @@ def _resume_reviewer_handoff(store, task, developer, callback):
     except Exception:
         # Do not overwrite a concurrent UNKNOWN or terminal receipt.
         saved = store.get(task['task_id'])
-    _print(_task_view(saved))
-    current_handoff = saved['developer']['direct_result_callback'].get('review_handoff')
+    with _active_review_dispatches_lock:
+        _active_review_dispatches.discard(dispatching['intent']['dispatch_id'])
+    current_callback = saved['developer']['direct_result_callback']
+    current_handoff = current_callback.get('review_handoff')
     current_receipt = (None if type(current_handoff) is not dict else
                        current_handoff.get('receipt'))
-    return 0 if type(current_receipt) is dict and \
-        current_handoff.get('dispatch_state') == 'RECEIVED' and \
-        current_receipt.get('verdict') in ('PASS', 'FAIL') else 1
+    if (type(current_receipt) is dict and
+            current_handoff.get('dispatch_state') == 'RECEIVED'):
+        return _resume_review_result_return(store, saved, saved['developer'],
+                                            current_callback)
+    _print(_task_view(saved))
+    return 1
 
 
 def run_task_direct_result_event(task_id, executor_task_id, *, store=None):

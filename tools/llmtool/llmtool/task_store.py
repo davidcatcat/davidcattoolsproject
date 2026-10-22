@@ -489,7 +489,8 @@ def _validate(record):
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
                 if (developer['provider_profile'] != 'opencode' or
                         type(callback) is not dict or
-                        set(callback) not in (callback_fields, callback_fields | {'review_handoff'}) or
+                        set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
+                            callback_fields | {'review_handoff', 'review_return'}) or
                         callback['state'] not in states or
                         callback['pm_dispatch'] != dispatch_for_state[callback['state']] or
                         not _safe_identifier(callback['executor_task_id'], D6_TASK_ID)):
@@ -584,6 +585,57 @@ def _validate(record):
                             _fail()
                         validate_provider_usage(usage)
                     except Exception:
+                        _fail()
+                if 'review_return' in callback:
+                    handoff = callback.get('review_handoff')
+                    returned = callback['review_return']
+                    try:
+                        if type(handoff) is not dict:
+                            _fail()
+                        from .task_completion import validate_review_return_record
+                        validate_review_return_record(returned, handoff)
+                    except Exception:
+                        _fail()
+                    states = {
+                        'PENDING': ('NOT_STARTED', None),
+                        'DISPATCHING': ('CLAIMED', None),
+                        'RETURNED': ('RETURNED', None),
+                        'REJECTED': ('RETURNED', 'PM_RESPONSE_REJECTED'),
+                        'UNAVAILABLE': ('UNAVAILABLE', returned.get('pm_error_code')),
+                        'OUTCOME_UNKNOWN': ('UNKNOWN', returned.get('pm_error_code')),
+                    }
+                    state = returned['state']
+                    if (state not in states or
+                            (returned['pm_dispatch'], returned['pm_error_code']) != states[state]):
+                        _fail()
+                    response = returned['pm_response']
+                    recommendation = returned['pm_recommendation']
+                    if response is not None and (type(response) is not str or
+                            len(response.encode('utf-8')) > 64 * 1024 or
+                            _emitted_sensitive(response)):
+                        _fail()
+                    if recommendation is not None and (
+                            type(recommendation) is not dict or set(recommendation) !=
+                            {'decision', 'summary'} or recommendation['decision'] not in
+                            ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
+                             'WAIT_FOR_REVIEWER', 'STOP') or
+                            type(recommendation['summary']) is not str or
+                            not recommendation['summary'] or
+                            len(recommendation['summary'].encode('utf-8')) > 2048 or
+                            _emitted_sensitive(recommendation['summary'])):
+                        _fail()
+                    usage = returned['pm_usage']
+                    if usage is not None:
+                        try:
+                            if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
+                                _fail()
+                            validate_provider_usage(usage)
+                        except Exception:
+                            _fail()
+                    if state == 'RETURNED' and (response is None or recommendation is None):
+                        _fail()
+                    if state != 'RETURNED' and (response is not None or recommendation is not None or
+                                                usage is not None):
                         _fail()
                 error = callback['pm_error_code']
                 if error is not None and (type(error) is not str or

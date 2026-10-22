@@ -184,6 +184,93 @@ def review_handoff_record(intent, receipt):
             'next_step': next_step, 'error_code': None}
 
 
+def review_return_decision_allowed(verdict, repair_round, decision):
+    if type(repair_round) is not int or repair_round not in (0, 1):
+        return False
+    if verdict == 'PASS':
+        allowed = ('CONTINUE_INTEGRATION_GATES', 'STOP')
+    elif verdict == 'FAIL' and repair_round == 0:
+        allowed = ('RETURN_TO_DEVELOPER', 'STOP')
+    elif verdict == 'FAIL' and repair_round == 1:
+        allowed = ('STOP',)
+    elif verdict == 'BLOCKED':
+        allowed = ('WAIT_FOR_REVIEWER', 'STOP')
+    else:
+        return False
+    return decision in allowed
+
+
+def review_return_record(handoff, *, state='PENDING', response=None,
+                         recommendation=None, usage=None, error_code=None):
+    """Build the durable, bounded return of a source-bound receipt to its PM."""
+    if type(handoff) is not dict or handoff.get('dispatch_state') != 'RECEIVED':
+        _stop('REVIEW_RECEIPT_INVALID')
+    receipt = handoff.get('receipt')
+    if type(receipt) is not dict:
+        _stop('REVIEW_RECEIPT_INVALID')
+    states = {
+        'PENDING': ('NOT_STARTED', None),
+        'DISPATCHING': ('CLAIMED', None),
+        'RETURNED': ('RETURNED', None),
+        'REJECTED': ('RETURNED', 'PM_RESPONSE_REJECTED'),
+        'UNAVAILABLE': ('UNAVAILABLE', error_code),
+        'OUTCOME_UNKNOWN': ('UNKNOWN', error_code),
+    }
+    if state not in states:
+        _stop('REVIEW_RECEIPT_INVALID')
+    dispatch, expected_error = states[state]
+    if state in ('UNAVAILABLE', 'OUTCOME_UNKNOWN') and (
+            type(error_code) is not str or
+            re.fullmatch(r'[A-Z0-9_]{1,64}', error_code) is None):
+        _stop('REVIEW_RECEIPT_INVALID')
+    if state in ('PENDING', 'DISPATCHING', 'RETURNED') and error_code is not None:
+        _stop('REVIEW_RECEIPT_INVALID')
+    if state == 'REJECTED' and error_code != 'PM_RESPONSE_REJECTED':
+        _stop('REVIEW_RECEIPT_INVALID')
+    if state == 'RETURNED' and (type(response) is not str or
+            type(recommendation) is not dict):
+        _stop('REVIEW_RECEIPT_INVALID')
+    if state != 'RETURNED' and (response is not None or recommendation is not None or
+                                usage is not None):
+        _stop('REVIEW_RECEIPT_INVALID')
+    next_step = handoff['next_step']
+    if state == 'RETURNED':
+        decision = recommendation.get('decision')
+        intent = handoff['intent']
+        verdict = receipt['verdict']
+        repair_round = intent['repair_round']
+        if not review_return_decision_allowed(verdict, repair_round, decision):
+            _stop('REVIEW_RECEIPT_INVALID')
+        if decision == 'CONTINUE_INTEGRATION_GATES':
+            next_step = 'INTEGRATION_GATES_PENDING'
+        elif decision == 'RETURN_TO_DEVELOPER':
+            next_step = 'RETURN_TO_DEVELOPER_ONCE'
+        elif decision == 'WAIT_FOR_REVIEWER':
+            next_step = 'WAIT_FOR_REVIEWER'
+        else:
+            next_step = 'STOP'
+    return {
+        'state': state, 'receipt_sha256': receipt['receipt_sha256'],
+        'next_step': next_step, 'pm_dispatch': dispatch,
+        'pm_response': response, 'pm_recommendation': recommendation,
+        'pm_usage': usage, 'pm_error_code': expected_error,
+    }
+
+
+def validate_review_return_record(record, handoff):
+    if type(record) is not dict or set(record) != {
+            'state', 'receipt_sha256', 'next_step', 'pm_dispatch', 'pm_response',
+            'pm_recommendation', 'pm_usage', 'pm_error_code'}:
+        _stop('REVIEW_RECEIPT_INVALID')
+    state = record['state']
+    expected = review_return_record(handoff, state=state,
+        response=record['pm_response'], recommendation=record['pm_recommendation'],
+        usage=record['pm_usage'], error_code=record['pm_error_code'])
+    if expected != record:
+        _stop('REVIEW_RECEIPT_INVALID')
+    return record
+
+
 def review_handoff_pending(intent):
     validate_review_dispatch_intent(intent)
     return {'intent': intent, 'dispatch_state': 'PENDING', 'receipt': None,
