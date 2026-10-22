@@ -30,7 +30,6 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 **Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review (Claude, or the temporarily authorized Codex Reviewer while Claude quota is unavailable), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
-
 ### A11c developer-workflow efficiency — PLANNED (Owner 2026-10-22)
 
 This is one A11c efficiency plan with coordinated environment and test-selection work. It does not add a product milestone or relax exact-head CI, independent review, Mac-native, security or authorization gates. Test selection consumes the environment fingerprint defined by ENV-2 below and does not define a second one.
