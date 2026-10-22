@@ -167,7 +167,8 @@ def run_plan(base_sha, *, cwd=None, dependency_tests=(), log_dir=None,
         run_dir, 0, runner,
         ["git", "-C", str(root), "diff", "--check", base_sha, "--"],
     )
-    execution = [{"kind": "diff_check", "argv": ["git", "diff", "--check", base_sha],
+    execution = [{"kind": "diff_check",
+                  "argv": ["git", "-C", str(root), "diff", "--check", base_sha, "--"],
                   "exit_status": diff_result.returncode,
                   "log_sha256": diff_digest, "log_path": str(diff_path)}]
 
@@ -225,7 +226,10 @@ def run_plan(base_sha, *, cwd=None, dependency_tests=(), log_dir=None,
     if observed_test_commands and any(
             item["counts"]["tests_run"] == 0 for item in observed_test_commands):
         summary["reported_status"] = "NO_TESTS_OBSERVED"
+    worktree_clean = not _git(root, "status", "--porcelain", "--untracked-files=all").strip()
     return {"plan": plan, "summary": summary, "execution": execution,
+            "source_binding": ("HEAD_COMMIT" if worktree_clean else
+                               "HEAD_PLUS_UNCOMMITTED_WORKTREE_CONTENT_UNBOUND"),
             "log_directory": str(run_dir), "head_sha": head,
             "exit_status": (0 if all(item["exit_status"] == 0 for item in execution) else 1)}
 
