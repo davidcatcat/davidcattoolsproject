@@ -19,13 +19,16 @@ from llmtool import task_completion
 
 
 class FakeClient:
-    def __init__(self, reply=None, error=None):
+    def __init__(self, reply=None, error=None, replies=None):
         self.reply, self.error, self.calls = reply, error, []
+        self.replies = list(replies or [])
 
     def complete(self, messages):
         self.calls.append(messages)
         if self.error:
             raise self.error
+        if self.replies:
+            return self.replies.pop(0)
         return self.reply
 
 
@@ -933,9 +936,14 @@ class TaskCompletionTests(unittest.TestCase):
     def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None):
         from llmtool.task_submission_cli import run_task_direct_result_event
 
-        client = FakeClient(Reply(json.dumps({'schema_version': 1,
-            'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
-            {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}))
+        client = FakeClient(replies=[
+            Reply(json.dumps({'schema_version': 1,
+                'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
+                {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}),
+            Reply(json.dumps({'schema_version': 1,
+                'decision': 'STOP', 'summary': 'Stop after receipt delivery.'}),
+                {'prompt_tokens': 8, 'completion_tokens': 4, 'total_tokens': 12}),
+        ])
         output = StringIO()
         with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
              patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
@@ -1086,10 +1094,11 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertFalse(first.is_alive(), 'first Reviewer event did not finish')
         self.assertEqual(first_error, [])
         self.assertEqual(second_result, 1)
-        self.assertEqual(first_result, [1])
+        self.assertEqual(first_result, [0])
         self.assertEqual(len(call_count), 1)
         callback = store.get(task['task_id'])['developer']['direct_result_callback']
-        self.assertEqual(callback['review_handoff']['dispatch_state'], 'OUTCOME_UNKNOWN')
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
 
     def test_pending_cas_has_exactly_one_concurrent_adapter_claimant(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
@@ -1131,7 +1140,13 @@ class TaskCompletionTests(unittest.TestCase):
             except BaseException as exc:
                 errors.append(exc)
 
-        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter):
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')), \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client):
             threads = [threading.Thread(target=event) for _ in range(2)]
             for thread in threads:
                 thread.start()
@@ -1141,16 +1156,17 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(sorted(results), [0, 1])
         self.assertEqual(len(adapter_calls), 1)
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(client.calls), 2)
         callback = store.get(task['task_id'])['developer']['direct_result_callback']
         self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
         self.assertEqual(callback['review_handoff']['receipt']['verdict'], 'PASS')
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
         with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
              redirect_stdout(StringIO()):
             self.assertEqual(run_task_direct_result_event(
                 task['task_id'], self.task_id, store=store), 0)
         self.assertEqual(len(adapter_calls), 1)
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(client.calls), 2)
 
     def test_legacy_handoff_normalizes_and_terminal_blocked_reentry_stays_nonzero(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
@@ -1161,6 +1177,7 @@ class TaskCompletionTests(unittest.TestCase):
         developer = saved['developer']
         callback = dict(developer['direct_result_callback'])
         handoff = callback['review_handoff']
+        callback.pop('review_return', None)
         callback['review_handoff'] = {key: handoff[key]
             for key in ('intent', 'receipt', 'next_step')}
         store.update(task['task_id'], developer={**developer,
@@ -1183,10 +1200,6 @@ class TaskCompletionTests(unittest.TestCase):
         callback = dict(developer['direct_result_callback'])
         handoff = callback['review_handoff']
         self.assertEqual(handoff['dispatch_state'], 'RECEIVED')
-        callback['review_handoff'] = {key: handoff[key]
-            for key in ('intent', 'receipt', 'next_step')}
-        store.update(task['task_id'], developer={**developer,
-            'direct_result_callback': callback})
         with redirect_stdout(StringIO()):
             self.assertEqual(run_task_direct_result_event(
                 task['task_id'], self.task_id, store=store), 1)
@@ -1194,7 +1207,7 @@ class TaskCompletionTests(unittest.TestCase):
             'review_handoff']
         self.assertEqual(normalized['dispatch_state'], 'RECEIVED')
         self.assertEqual(normalized['receipt']['verdict'], 'BLOCKED')
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(client.calls), 2)
 
     def test_legacy_direct_callback_cannot_rebind_d6_agent_or_session(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
@@ -1862,6 +1875,53 @@ class TaskCompletionTests(unittest.TestCase):
         repaired_intent, repaired = receipt('FAIL', 'PASS', 'FAIL', repair_round=1)
         self.assertEqual(task_completion.review_handoff_record(repaired_intent, repaired)[
             'next_step'], 'STOP_REPAIR_LIMIT')
+        passed_handoff = task_completion.review_handoff_record(passed_intent, passed)
+        self.assertEqual(task_completion.review_return_record(passed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'CONTINUE_INTEGRATION_GATES', 'summary': 'CI gates pending.'
+            })['next_step'], 'INTEGRATION_GATES_PENDING')
+        self.assertEqual(task_completion.review_return_record(passed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped the workflow.'
+            })['next_step'], 'STOP')
+        failed_handoff = task_completion.review_handoff_record(failed_intent, failed)
+        self.assertEqual(task_completion.review_return_record(failed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'
+            })['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+        self.assertEqual(task_completion.review_return_record(failed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped after the failure.'
+            })['next_step'], 'STOP')
+        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
+        self.assertEqual(task_completion.review_return_record(blocked_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Reviewer is blocked.'
+            })['next_step'], 'WAIT_FOR_REVIEWER')
+        self.assertEqual(task_completion.review_return_record(blocked_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped while blocked.'
+            })['next_step'], 'STOP')
+
+        def reject(handoff, decision):
+            with self.subTest(verdict=handoff['receipt']['verdict'],
+                              repair_round=handoff['intent']['repair_round'],
+                              decision=decision):
+                with self.assertRaises(LLMToolError):
+                    task_completion.review_return_record(handoff, state='RETURNED',
+                        response='{}', recommendation={'decision': decision,
+                                                       'summary': 'Matrix rejection.'})
+
+        for decision in ('RETURN_TO_DEVELOPER', 'WAIT_FOR_REVIEWER'):
+            reject(passed_handoff, decision)
+        for decision in ('CONTINUE_INTEGRATION_GATES', 'WAIT_FOR_REVIEWER'):
+            reject(failed_handoff, decision)
+        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
+        for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
+                         'WAIT_FOR_REVIEWER'):
+            reject(repaired_handoff, decision)
+        for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER'):
+            reject(blocked_handoff, decision)
         forged = dict(passed)
         forged['source_sha'] = '7' * 40
         forged.pop('receipt_sha256')
