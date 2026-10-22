@@ -373,6 +373,152 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     }
 
 
+def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
+    """Hash a registered uncommitted result without promoting it to a commit."""
+    snapshot = collect_git_snapshot(root)
+    if snapshot.head != source_sha:
+        _stop('WORKTREE_SOURCE_HEAD_MISMATCH')
+    untracked = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
+                     limit=64 * 1024)
+    if untracked:
+        _stop('WORKTREE_UNTRACKED_FILES')
+    status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'),
+                   limit=1024 * 1024)
+    patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
+                        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
+    changed_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
+                              '--no-textconv', '--no-renames', source_sha, '--'),
+                       limit=1024 * 1024)
+    try:
+        changed = tuple(sorted(set(path for path in
+            changed_raw.decode('utf-8', 'strict').split('\x00') if path)))
+    except UnicodeError:
+        _stop('WORKTREE_PATH_INVALID')
+    if (not changed or len(changed) > _PROPOSAL_FILE_LIMIT or
+            not set(changed).issubset(set(write_paths))):
+        _stop('WORKTREE_SCOPE_MISMATCH')
+    for path in changed:
+        parts = Path(path).parts
+        if (Path(path).is_absolute() or not parts or
+                any(part in ('', '.', '..') for part in parts) or '\\' in path or
+                any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
+            _stop('WORKTREE_PATH_INVALID')
+
+    paths = sorted(set(read_paths) | set(write_paths))
+    if not paths or len(paths) > 32:
+        _stop('WORKTREE_SCOPE_INVALID')
+    file_records = []
+    total = 0
+    for relative in paths:
+        if (type(relative) is not str or not relative or relative.startswith('/') or
+                '\\' in relative or any(part in ('', '.', '..') for part in relative.split('/'))):
+            _stop('WORKTREE_PATH_INVALID')
+        target = Path(root).joinpath(*relative.split('/'))
+        try:
+            before = target.lstat()
+        except FileNotFoundError:
+            file_records.append([relative, None, None, None])
+            continue
+        except OSError:
+            _stop('WORKTREE_FILE_UNAVAILABLE')
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_size > _GIT_LIMIT):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        total += before.st_size
+        if total > _PROPOSAL_TREE_LIMIT:
+            _stop('WORKTREE_FILES_TOO_LARGE')
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                opened = os.fstat(fd)
+                if (not stat.S_ISREG(opened.st_mode) or
+                        (opened.st_dev, opened.st_ino, opened.st_size) !=
+                        (before.st_dev, before.st_ino, before.st_size)):
+                    _stop('WORKTREE_FILE_CHANGED')
+                digest = hashlib.sha256()
+                size = 0
+                while True:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > _GIT_LIMIT:
+                        _stop('WORKTREE_FILE_TOO_LARGE')
+                    digest.update(chunk)
+                after = os.fstat(fd)
+                current = target.lstat()
+                if ((opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) !=
+                        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) or
+                        (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or
+                        size != opened.st_size):
+                    _stop('WORKTREE_FILE_CHANGED')
+            finally:
+                os.close(fd)
+        except LLMToolError:
+            raise
+        except Exception:
+            _stop('WORKTREE_FILE_UNAVAILABLE')
+        file_records.append([relative, before.st_mode & 0o777, size, digest.hexdigest()])
+    manifest = json.dumps(file_records, ensure_ascii=True, sort_keys=True,
+                          separators=(',', ':')).encode('utf-8')
+    return {
+        'root': snapshot.root, 'common_dir': snapshot.common_dir,
+        'branch': snapshot.branch, 'source_sha': snapshot.head,
+        'changed_paths': list(changed), 'diff': patch,
+        'diff_sha256': hashlib.sha256(patch).hexdigest(),
+        'status_sha256': hashlib.sha256(status).hexdigest(),
+        'file_manifest_sha256': hashlib.sha256(manifest).hexdigest(),
+    }
+
+
+def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_root,
+                                     expected_branch, source_sha, task_binding,
+                                     expected_agent, expected_session_ref,
+                                     expected_native_session_id, write_paths, read_paths,
+                                     artifact, artifact_sha256):
+    """Bind a real D6 uncommitted diff and refuse to call it a result commit."""
+    registration = read_d6_registration(task_id, expected_common_dir,
+                                        allowed_states=_D6_EVIDENCE_STATES)
+    if (registration.root != expected_root or registration.branch != expected_branch or
+            registration.result_sha != source_sha or registration.trusted_agent_id != expected_agent or
+            registration.session_ref != expected_session_ref or
+            registration.native_session_id != expected_native_session_id or
+            type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None):
+        _stop('D6_TASK_BINDING_MISMATCH')
+    if (type(task_binding) is not dict or
+            any(type(task_binding.get(key)) is not str for key in
+                ('task_id', 'run_id', 'contract_digest'))):
+        _stop('TASK_BINDING_MISSING')
+    live = _worktree_snapshot(root=registration.root, source_sha=source_sha,
+                              read_paths=read_paths, write_paths=write_paths)
+    if (live['common_dir'] != registration.common_dir or
+            live['branch'] != registration.branch):
+        _stop('D6_TASK_BINDING_MISMATCH')
+    try:
+        _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha,
+                                 source_sha), limit=4096)
+    except LLMToolError:
+        _stop('D6_TASK_BINDING_MISMATCH')
+    if (type(artifact) is not str or type(artifact_sha256) is not str or
+            hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
+            artifact.encode('utf-8') != live['diff']):
+        _stop('WORKTREE_ARTIFACT_MISMATCH')
+    return {
+        'task_id': task_binding['task_id'], 'run_id': task_binding['run_id'],
+        'executor_task_id': registration.task_id,
+        'executor_identity': registration.trusted_agent_id,
+        'executor_session_ref': registration.session_ref,
+        'executor_native_session_id': registration.native_session_id,
+        'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
+        'root': registration.root, 'common_dir': registration.common_dir,
+        'branch': registration.branch, 'source_sha': source_sha,
+        'result_head': None, 'result_mode': 'UNCOMMITTED_WORKTREE',
+        'changed_paths': live['changed_paths'], 'diff_sha256': live['diff_sha256'],
+        'status_sha256': live['status_sha256'],
+        'file_manifest_sha256': live['file_manifest_sha256'],
+    }
+
+
 def _tree_entry(root, tree_sha, path):
     raw = _git(root, ('ls-tree', '-z', tree_sha, '--', path), limit=4096)
     if not raw:
@@ -553,6 +699,82 @@ def run_bounded_tests(*, root, result_sha, read_paths, write_paths):
                 'command_sha256': hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
             })
     after = collect_git_snapshot(root)
+    if after != before:
+        _stop('TEST_SOURCE_CHANGED')
+    return evidence
+
+
+def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
+                               changed_paths, read_paths, write_paths):
+    """Run fixed unittest discovery against an exact, still-uncommitted D6 diff."""
+    if (type(diff_sha256) is not str or _HEX64.fullmatch(diff_sha256) is None or
+            type(changed_paths) is not list or not changed_paths):
+        _stop('TEST_BINDING_INVALID')
+    eligible = sorted({p for p in (*read_paths, *write_paths)
+                       if type(p) is str and _TEST_PATH.fullmatch(p)})
+    if not eligible:
+        _stop('TEST_SCOPE_MISSING')
+    before = _worktree_snapshot(root=root, source_sha=source_sha,
+                                read_paths=read_paths, write_paths=write_paths)
+    if (before['diff_sha256'] != diff_sha256 or
+            before['changed_paths'] != changed_paths):
+        _stop('TEST_SOURCE_MISMATCH')
+    evidence = []
+    with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home:
+        for path in eligible:
+            env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
+                   'LC_ALL': 'C', 'HOME': home,
+                   'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
+                   'PYTHONDONTWRITEBYTECODE': '1'}
+            argv = [sys.executable, '-B', '-m', 'unittest', 'discover',
+                    '-s', 'tools/llmtool/tests', '-p', Path(path).name]
+            try:
+                process = subprocess.Popen(argv, cwd=root, env=env,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, shell=False, close_fds=True,
+                    start_new_session=True)
+            except OSError:
+                _stop('TEST_RUNNER_UNAVAILABLE')
+            output = bytearray()
+            deadline = time.monotonic() + _TEST_TIMEOUT
+            selector = selectors.DefaultSelector()
+            started = time.monotonic()
+            try:
+                os.set_blocking(process.stdout.fileno(), False)
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _stop('TEST_RUNNER_TIMEOUT')
+                    for key, _ in selector.select(min(remaining, .1)):
+                        chunk = os.read(key.fileobj.fileno(), 8192)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                        else:
+                            if len(output) + len(chunk) > _TEST_OUTPUT_LIMIT:
+                                _stop('TEST_OUTPUT_TOO_LARGE')
+                            output.extend(chunk)
+                code = process.wait(timeout=max(0, deadline-time.monotonic()))
+            except subprocess.TimeoutExpired:
+                _stop('TEST_RUNNER_TIMEOUT')
+            finally:
+                selector.close()
+                if process.poll() is None:
+                    try:
+                        os.killpg(process.pid, 9)
+                    except OSError:
+                        process.kill()
+                    process.wait()
+                process.stdout.close()
+            evidence.append({
+                'path': path, 'source_sha': source_sha, 'result_head': None,
+                'diff_sha256': diff_sha256, 'exit_code': code,
+                'output_sha256': hashlib.sha256(output).hexdigest(),
+                'duration_ms': max(0, int((time.monotonic()-started)*1000)),
+                'command_sha256': hashlib.sha256(json.dumps(argv, separators=(',', ':')).encode()).hexdigest(),
+            })
+    after = _worktree_snapshot(root=root, source_sha=source_sha,
+                               read_paths=read_paths, write_paths=write_paths)
     if after != before:
         _stop('TEST_SOURCE_CHANGED')
     return evidence

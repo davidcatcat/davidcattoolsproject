@@ -702,7 +702,20 @@ from the registered D6 record; do not supply a SHA as an identity claim. The
 company provider returns a diff proposal only. An already authorized Executor
 must apply it and run the allowed checks in its registered worktree.
 
-Afterward, an operator must explicitly run
+For a direct OpenCode Developer task, the CLI now emits a completion event when the
+bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
+binds the actual uncommitted diff to the Task and Run, and runs only bounded tests
+whose test files are inside the recorded task scope. If those gates pass, llmtool
+sends a screened evidence summary in a new ephemeral call to the same persisted PM
+profile. This does not resume a native PM session. The packet identifies the result
+as an uncommitted worktree diff (`result_head: null`); independent review, PR and CI
+remain pending. A missing test scope, changed worktree or unavailable PM is retained
+as a waiting state. Ambiguous PM outcomes are not retried.
+Nonzero, rejected or ambiguous Developer outcomes remain `WAITING_EXECUTOR`; they do not
+trigger an automatic PM failure callback.
+
+For final committed-result, Reviewer, PR and exact-head CI evidence, an operator
+still explicitly runs
 `llmtool task complete TASK_ID --executor-task D6_TASK_ID --reviewer-task D6_REVIEW_TASK_ID --pr PR_NUMBER`.
 This manually invoked command checks the real D6 registration, current Git result,
 the persisted proposal against the applied diff, bounded tests, public exact-head
@@ -717,11 +730,13 @@ the PM response is persisted as a recommendation and grants no execution or Git
 permission. If the original PM is unavailable, complete evidence remains in
 WAITING_PM. Ambiguous provider outcomes are not retried automatically.
 
-There is currently no Executor completion event hook: `task complete` is a
-manual CLI step, so the complete user-to-PM workflow is not yet automatic.
-Registry and API facts are fail-closed evidence sources, not protection against
-malicious same-user tampering. Company proposal and PM-return live provider
-journeys still require their separately authorized runtime acceptance.
+The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
+verified process exit and bounded test gate. Later independent review, PR and CI
+collection still use the manual `task complete` command; the full user-to-PM-to-review
+workflow is not yet automatic. Registry and API facts are fail-closed evidence
+sources, not protection against malicious same-user tampering. Company proposal and
+PM-return live provider journeys still require their separately authorized runtime
+acceptance.
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。

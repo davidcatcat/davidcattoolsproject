@@ -188,6 +188,62 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(tests[0]['source_sha'], result_sha)
         self.assertRegex(tests[0]['output_sha256'], r'^[0-9a-f]{64}$')
 
+    def test_uncommitted_worktree_result_binds_live_diff_without_result_head(self):
+        path = self.root / self.source_path
+        path.write_text('import unittest\nclass Fixture(unittest.TestCase):\n    def test_ok(self): self.assertEqual(2, 2)\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root)
+        binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                   'contract_digest': '3' * 64}
+        result = task_completion.collect_executor_worktree_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha, task_binding=binding,
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', read_paths=[self.source_path],
+            write_paths=[self.source_path], artifact=artifact.decode('utf-8'),
+            artifact_sha256=hashlib.sha256(artifact).hexdigest())
+        self.assertEqual(result['task_id'], binding['task_id'])
+        self.assertEqual(result['run_id'], binding['run_id'])
+        self.assertIsNone(result['result_head'])
+        self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
+        self.assertEqual(result['source_sha'], self.source_sha)
+        self.assertEqual(result['changed_paths'], [self.source_path])
+        self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
+
+    def test_uncommitted_worktree_rejects_stale_artifact_or_untracked_file(self):
+        path = self.root / self.source_path
+        path.write_text(path.read_text() + '\n# live uncommitted change\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root).decode('utf-8')
+        binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                   'contract_digest': '3' * 64}
+        with self.assertRaises(LLMToolError) as stale:
+            task_completion.collect_executor_worktree_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha, task_binding=binding,
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', read_paths=[self.source_path],
+                write_paths=[self.source_path], artifact=artifact + '# caller edit\n',
+                artifact_sha256=hashlib.sha256((artifact + '# caller edit\n').encode()).hexdigest())
+        self.assertEqual(stale.exception.completion_code, 'WORKTREE_ARTIFACT_MISMATCH')
+
+        stray = self.root / 'unexpected.txt'
+        stray.write_text('untracked')
+        with self.assertRaises(LLMToolError) as untracked:
+            task_completion.collect_executor_worktree_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha, task_binding=binding,
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', read_paths=[self.source_path],
+                write_paths=[self.source_path], artifact=artifact,
+                artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(untracked.exception.completion_code, 'WORKTREE_UNTRACKED_FILES')
+
     def test_caller_injected_sha_wrong_task_contract_and_artifact_are_rejected(self):
         registration, snapshot = task_completion.bind_executor_task(
             self.task_id, expected_common_dir=self.common, root=str(self.root))
@@ -218,6 +274,22 @@ class TaskCompletionTests(unittest.TestCase):
                 expected_agent='executor-agent', expected_session_ref='Executor D6 session',
                 expected_native_session_id='native-executor', write_paths=[self.source_path],
                 artifact='fake patch', artifact_sha256=hashlib.sha256(b'fake patch').hexdigest())
+
+    def test_matching_non_string_binding_values_are_rejected(self):
+        for key in ('task_id', 'run_id', 'contract_digest'):
+            for bad in (None, 123):
+                binding = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                           'contract_digest': '3' * 64}
+                binding[key] = bad
+                supplied = dict(binding)
+                with self.subTest(key=key, bad=bad), \
+                        self.assertRaises(LLMToolError) as rejected:
+                    task_completion.validate_task_binding(
+                        stored_binding=binding, task_id=supplied['task_id'],
+                        run_id=supplied['run_id'],
+                        contract_digest=supplied['contract_digest'])
+                self.assertEqual(rejected.exception.completion_code,
+                                 'TASK_RUN_CONTRACT_MISMATCH')
 
     def test_dirty_tracked_source_file_is_rejected(self):
         path = self.root / self.source_path
@@ -731,6 +803,499 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertNotIn('artifact', packet)
         with self.assertRaises(LLMToolError):
             run_task_executor_event(task['task_id'], self.task_id, store=store)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_direct_opencode_result_event_returns_to_original_pm_once(self):
+        from llmtool.task_submission_cli import (
+            run_task_direct_result_event)
+        task, store, result, tests = self._direct_opencode_task('direct-result-tasks')
+        diff_sha = result['diff_sha256']
+        client = FakeClient(Reply(json.dumps({'schema_version': 1,
+            'decision': 'SEND_TO_REVIEW',
+            'summary': 'Verified uncommitted result is ready for review.'}),
+            {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}))
+        output = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   return_value=result) as collect, \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests) as run_tests, \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')) as resolve, \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             redirect_stdout(output):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 0, output.getvalue())
+
+        saved = store.get(task['task_id'])
+        callback = saved['developer']['direct_result_callback']
+        self.assertEqual(callback['state'], 'PM_RETURNED')
+        self.assertEqual(callback['pm_recommendation']['decision'], 'SEND_TO_REVIEW')
+        self.assertEqual(callback['evidence']['result']['result_head'], None)
+        self.assertEqual(callback['evidence']['review_pr_ci'], {
+            'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+            'ci_state': 'NOT_STARTED'})
+        self.assertIsNone(saved['completion'])
+        self.assertEqual((collect.call_count, run_tests.call_count, len(client.calls)), (3, 1, 1))
+        packet = json.loads(client.calls[0][1]['content'])
+        self.assertIsNone(packet['result_head'])
+        self.assertEqual(packet['review_pr_ci']['formal_review_state'], 'NOT_STARTED')
+        # Even if a later committed completion record exists, the public
+        # executor-only route must not issue a second PM request for this Task.
+        committed = {'state': 'WAITING_EXECUTOR', 'executor_task_id': self.task_id,
+            'reviewer_task_id': None, 'evidence': {
+                'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'executor_identity': result['executor_identity'],
+                'executor_session_ref': result['executor_session_ref'],
+                'executor_native_session_id': result['executor_native_session_id'],
+                'executor_native_session': 'VERIFIED', 'root': result['root'],
+                'common_dir': result['common_dir'], 'branch': result['branch'],
+                'source_sha': result['source_sha'], 'result_head': self.source_sha},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
+        store.update(task['task_id'], completion=committed)
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result') as collect_committed, \
+             patch('llmtool.task_submission_cli.resolve_profile_config') as resolve_committed, \
+             self.assertRaises(LLMToolError):
+            run_task_complete(Namespace(task_id=task['task_id'],
+                executor_task=self.task_id, reviewer_task=None, pr=None), store=store)
+        collect_committed.assert_not_called()
+        resolve_committed.assert_not_called()
+        self.assertEqual(len(client.calls), 1)
+        current = store.get(task['task_id'])
+        unknown_callback = {**current['developer']['direct_result_callback'],
+            'state': 'PM_OUTCOME_UNKNOWN', 'pm_dispatch': 'UNKNOWN',
+            'pm_response': None, 'pm_recommendation': None,
+            'pm_usage': None, 'pm_error_code': 'PM_CALL_INTERRUPTED'}
+        store.update(task['task_id'], developer={**current['developer'],
+            'direct_result_callback': unknown_callback})
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result') as collect_unknown, \
+             patch('llmtool.task_submission_cli.resolve_profile_config') as resolve_unknown, \
+             self.assertRaises(LLMToolError):
+            run_task_complete(Namespace(task_id=task['task_id'],
+                executor_task=self.task_id, reviewer_task=None, pr=None), store=store)
+        collect_unknown.assert_not_called()
+        resolve_unknown.assert_not_called()
+        self.assertEqual(len(client.calls), 1)
+        with self.assertRaises(LLMToolError):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        self.assertEqual(len(client.calls), 1)
+        resolve.assert_called_once_with('original-pm', require_configured=True)
+
+    def _direct_opencode_task(self, store_name):
+        from llmtool.task_submission_cli import _direct_result_callback
+
+        store = TaskStore(self.base / store_name)
+        task = self._task()
+        developer = task['developer']
+        artifact = 'diff --git a/test_fixture.py b/test_fixture.py\n'
+        developer.update(provider_profile='opencode', provider_type='opencode-cli',
+            model='opencode/deepseek-v4.1-flash-free',
+            backend_session_semantics='CLI_REPORTED_SESSION_ID',
+            state='DEVELOPER_RESPONDED', artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            execution={'status': 'SUCCEEDED', 'native_session_id': 'ses_Developer123',
+                'process_exit_code': 0, 'stdout_sha256': 'a' * 64,
+                'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN', 'source_bytes': 20,
+                'source_file_count': 1, 'source_manifest_sha256': 'b' * 64})
+        registration = task_completion.read_d6_registration(
+            self.task_id, self.common, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        developer['direct_result_callback'] = _direct_result_callback(
+            task, registration, self.source_sha)
+        task['completion'] = None
+        store.create(task)
+        diff_sha = 'c' * 64
+        result = {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'executor_task_id': self.task_id, 'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'root': registration.root, 'common_dir': registration.common_dir,
+            'branch': registration.branch, 'source_sha': self.source_sha,
+            'result_head': None, 'result_mode': 'UNCOMMITTED_WORKTREE',
+            'changed_paths': [self.source_path], 'diff_sha256': diff_sha,
+            'status_sha256': 'd' * 64, 'file_manifest_sha256': 'e' * 64}
+        tests = [{'path': self.source_path, 'source_sha': self.source_sha,
+            'result_head': None, 'diff_sha256': diff_sha, 'exit_code': 0,
+            'output_sha256': 'f' * 64}]
+        return task, store, result, tests
+
+    def test_legacy_direct_callback_cannot_rebind_d6_agent_or_session(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        for field, replacement in (
+                ('trusted_agent_id', 'replacement-agent'),
+                ('session_ref', 'replacement-session'),
+                ('native_session_id', 'replacement-native')):
+            with self.subTest(field=field):
+                task, store, _, _ = self._direct_opencode_task('legacy-' + field)
+                developer = dict(task['developer'])
+                developer.pop('direct_result_callback')
+                task['developer'] = developer
+                registration = task_completion.read_d6_registration(
+                    self.task_id, self.common,
+                    allowed_states=task_completion._D6_EVIDENCE_STATES)
+                task['completion'] = {
+                    'state': 'WAITING_EXECUTOR', 'executor_task_id': self.task_id,
+                    'reviewer_task_id': None,
+                    'evidence': {'task_id': task['task_id'], 'run_id': task['run_id'],
+                        'contract_digest': task['task_binding']['contract_digest'],
+                        'executor_identity': registration.trusted_agent_id,
+                        'executor_session_ref': registration.session_ref,
+                        'executor_native_session_id': registration.native_session_id,
+                        'executor_native_session': 'VERIFIED',
+                        'root': registration.root, 'common_dir': registration.common_dir,
+                        'branch': registration.branch, 'source_sha': self.source_sha,
+                        'result_head': None},
+                    'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+                    'pm_response': None, 'pm_recommendation': None,
+                    'pm_usage': None, 'pm_error_code': None}
+                store.update(task['task_id'], developer=developer,
+                             completion=task['completion'])
+                registration_path = (Path(self.common) / 'llmtool-worktrees' /
+                                     (self.task_id + '.json'))
+                original = json.loads(registration_path.read_text())
+                changed = dict(original)
+                changed[field] = replacement
+                registration_path.write_text(json.dumps(changed))
+                registration_path.chmod(0o600)
+                try:
+                    with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result') as collect, \
+                            self.assertRaises(LLMToolError):
+                        run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                    collect.assert_not_called()
+                finally:
+                    registration_path.write_text(json.dumps(original))
+                    registration_path.chmod(0o600)
+
+        task, store, _, _ = self._direct_opencode_task('legacy-wrong-task-id')
+        developer = dict(task['developer'])
+        developer.pop('direct_result_callback')
+        task['developer'] = developer
+        registration = task_completion.read_d6_registration(
+            self.task_id, self.common, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        task['completion'] = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': 'another-executor',
+            'reviewer_task_id': None,
+            'evidence': {'task_id': task['task_id'], 'run_id': task['run_id'],
+                'contract_digest': task['task_binding']['contract_digest'],
+                'executor_identity': registration.trusted_agent_id,
+                'executor_session_ref': registration.session_ref,
+                'executor_native_session_id': registration.native_session_id,
+                'executor_native_session': 'VERIFIED', 'root': registration.root,
+                'common_dir': registration.common_dir, 'branch': registration.branch,
+                'source_sha': self.source_sha, 'result_head': None},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None}
+        store.update(task['task_id'], developer=developer, completion=task['completion'])
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result') as collect, \
+                self.assertRaises(LLMToolError):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        collect.assert_not_called()
+
+    def test_direct_callback_rechecks_worktree_after_tests_and_provider_setup(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        for drift_call, expected_gate in ((2, 'WORKTREE_SNAPSHOT_CHANGED'),
+                                           (3, 'WORKTREE_CHANGED_BEFORE_PM_CALL')):
+            with self.subTest(drift_call=drift_call):
+                task, store, result, tests = self._direct_opencode_task(
+                    'direct-drift-' + str(drift_call))
+                calls = []
+
+                def collect(**kwargs):
+                    calls.append(kwargs)
+                    if len(calls) == drift_call:
+                        changed = dict(result)
+                        changed['diff_sha256'] = '9' * 64
+                        return changed
+                    return result
+
+                client = FakeClient(Reply(json.dumps({'schema_version': 1,
+                    'decision': 'SEND_TO_REVIEW', 'summary': 'Ready.'}), {}))
+                output = StringIO()
+                with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                           side_effect=collect), \
+                     patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                           return_value=tests) as run_tests, \
+                     patch('llmtool.task_submission_cli.resolve_profile_config',
+                           return_value=pm_config('original-pm')) as resolve, \
+                     patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+                     patch('llmtool.task_submission_cli.selected_provider', return_value={
+                           'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+                     patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                     redirect_stdout(output):
+                    self.assertEqual(run_task_direct_result_event(
+                        task['task_id'], self.task_id, store=store), 1)
+                saved = store.get(task['task_id'])['developer']['direct_result_callback']
+                self.assertEqual(saved['state'], 'WAITING_EXECUTOR')
+                self.assertIn(expected_gate, saved['missing_gates'])
+                self.assertEqual(len(calls), drift_call)
+                self.assertEqual(run_tests.call_count, 1)
+                self.assertEqual(len(client.calls), 0)
+                if drift_call == 2:
+                    resolve.assert_not_called()
+
+    def test_waiting_pm_retry_rechecks_after_setup_without_repeating_tests(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('direct-waiting-pm-retry')
+        collector_calls = []
+
+        def collect(**kwargs):
+            collector_calls.append(kwargs)
+            if len(collector_calls) == 4:
+                changed = dict(result)
+                changed['file_manifest_sha256'] = '8' * 64
+                return changed
+            return result
+
+        resolve_error = LLMToolError('profile temporarily unavailable')
+        client = FakeClient(Reply(json.dumps({'schema_version': 1,
+            'decision': 'SEND_TO_REVIEW', 'summary': 'Ready.'}), {}))
+        output = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   side_effect=collect), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests) as run_tests, \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=[resolve_error, pm_config('original-pm')]) as resolve, \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             redirect_stdout(output):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+            self.assertEqual(store.get(task['task_id'])['developer']
+                ['direct_result_callback']['state'], 'WAITING_PM')
+            self.assertEqual(run_task_complete(Namespace(task_id=task['task_id'],
+                executor_task=self.task_id, reviewer_task=None, pr=None), store=store), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['state'], 'WAITING_EXECUTOR')
+        self.assertIn('WORKTREE_CHANGED_BEFORE_PM_CALL', callback['missing_gates'])
+        self.assertEqual((run_tests.call_count, resolve.call_count,
+                          len(collector_calls), len(client.calls)), (1, 2, 4, 0))
+
+    def test_direct_verification_interrupt_persists_unknown_without_pm_call(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        from llmtool.providers.cli_lifecycle import CLIHostTermination
+        for exception in (KeyboardInterrupt(), CLIHostTermination('host stopped')):
+            with self.subTest(exception=type(exception).__name__):
+                task, store, result, _ = self._direct_opencode_task(
+                    'direct-test-interrupt-' + type(exception).__name__)
+                output = StringIO()
+                with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                           return_value=result), \
+                     patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                           side_effect=exception), \
+                     patch('llmtool.task_submission_cli.resolve_profile_config') as resolve, \
+                     redirect_stdout(output), self.assertRaises(type(exception)):
+                    run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                callback = store.get(task['task_id'])['developer']['direct_result_callback']
+                self.assertEqual(callback['state'], 'WAITING_EXECUTOR')
+                self.assertEqual(callback['evidence']['verification_state'], 'UNKNOWN')
+                self.assertEqual(callback['pm_dispatch'], 'NOT_STARTED')
+                self.assertIn('EXECUTOR_VERIFICATION_INTERRUPTED', callback['missing_gates'])
+                resolve.assert_not_called()
+
+    def test_direct_ready_persist_interrupt_releases_verification_claim_as_unknown(self):
+        from llmtool.task_submission_cli import (
+            _persist_direct_callback, run_task_direct_result_event)
+        from llmtool.providers.cli_lifecycle import CLIHostTermination
+
+        for exception in (KeyboardInterrupt(), CLIHostTermination('host stopped')):
+            with self.subTest(exception=type(exception).__name__):
+                task, store, result, tests = self._direct_opencode_task(
+                    'direct-ready-persist-interrupt-' + type(exception).__name__)
+                original_persist = _persist_direct_callback
+
+                def interrupt_ready(store_arg, task_arg, developer_arg, callback):
+                    if (callback.get('state') == 'WAITING_PM' and
+                            callback.get('evidence', {}).get('verification_state') == 'READY'):
+                        raise exception
+                    return original_persist(store_arg, task_arg, developer_arg, callback)
+
+                client = FakeClient(Reply('{"schema_version":1,"decision":"STOP",'
+                                          '"summary":"Stop."}', {}))
+                output = StringIO()
+                with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                           return_value=result), \
+                     patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                           return_value=tests) as run_tests, \
+                     patch('llmtool.task_submission_cli._persist_direct_callback',
+                           side_effect=interrupt_ready), \
+                     patch('llmtool.task_submission_cli.resolve_profile_config') as resolve, \
+                     patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                     redirect_stdout(output), self.assertRaises(type(exception)):
+                    run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                callback = store.get(task['task_id'])['developer']['direct_result_callback']
+                self.assertEqual(callback['state'], 'WAITING_EXECUTOR')
+                self.assertEqual(callback['evidence']['verification_state'], 'UNKNOWN')
+                self.assertEqual(callback['missing_gates'], ['EXECUTOR_VERIFICATION_INTERRUPTED'])
+                self.assertEqual(callback['pm_dispatch'], 'NOT_STARTED')
+                self.assertEqual(run_tests.call_count, 1)
+                self.assertEqual(client.calls, [])
+                resolve.assert_not_called()
+
+    def test_direct_return_persist_interrupt_marks_unknown_and_refuses_replay(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+        from llmtool.providers.cli_lifecycle import CLIHostTermination
+
+        for exception in (KeyboardInterrupt(), CLIHostTermination('host stopped')):
+            with self.subTest(exception=type(exception).__name__):
+                task, store, result, tests = self._direct_opencode_task(
+                    'direct-return-persist-interrupt-' + type(exception).__name__)
+                client = FakeClient(Reply('{"schema_version":1,"decision":"STOP",'
+                    '"summary":"Stop."}', {}))
+                original_update = store.update
+
+                def interrupt_returned(task_id, **changes):
+                    callback = changes.get('developer', {}).get('direct_result_callback', {})
+                    if callback.get('state') == 'PM_RETURNED':
+                        raise exception
+                    return original_update(task_id, **changes)
+
+                output = StringIO()
+                with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                           return_value=result), \
+                     patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                           return_value=tests), \
+                     patch('llmtool.task_submission_cli.resolve_profile_config',
+                           return_value=pm_config('original-pm')), \
+                     patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+                     patch('llmtool.task_submission_cli.selected_provider', return_value={
+                           'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+                     patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                     patch.object(store, 'update', side_effect=interrupt_returned), \
+                     redirect_stdout(output), self.assertRaises(type(exception)):
+                    run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                callback = store.get(task['task_id'])['developer']['direct_result_callback']
+                self.assertEqual(callback['state'], 'PM_OUTCOME_UNKNOWN')
+                self.assertEqual(callback['pm_dispatch'], 'UNKNOWN')
+                self.assertEqual(callback['pm_error_code'], 'PM_RESPONSE_PERSIST_INTERRUPTED')
+                self.assertEqual(len(client.calls), 1)
+                with self.assertRaises(LLMToolError):
+                    run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                self.assertEqual(len(client.calls), 1)
+
+    def test_direct_pm_setup_interrupt_is_retryable_without_provider_call(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+        from llmtool.providers.cli_lifecycle import CLIHostTermination
+
+        for exception in (KeyboardInterrupt(), CLIHostTermination('host stopped')):
+            with self.subTest(exception=type(exception).__name__):
+                task, store, result, tests = self._direct_opencode_task(
+                    'direct-pm-setup-interrupt-' + type(exception).__name__)
+                client = FakeClient(Reply('{"schema_version":1,"decision":"STOP",'
+                                          '"summary":"Stop."}', {}))
+                output = StringIO()
+                with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                           return_value=result), \
+                     patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                           return_value=tests), \
+                     patch('llmtool.task_submission_cli.resolve_profile_config',
+                           side_effect=exception) as resolve, \
+                     patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                     redirect_stdout(output), self.assertRaises(type(exception)):
+                    run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+                callback = store.get(task['task_id'])['developer']['direct_result_callback']
+                self.assertEqual(callback['state'], 'WAITING_PM')
+                self.assertEqual(callback['pm_dispatch'], 'NOT_STARTED')
+                self.assertEqual(callback['pm_error_code'], 'PM_SETUP_INTERRUPTED')
+                self.assertEqual(callback['evidence']['verification_state'], 'READY')
+                resolve.assert_called_once_with('original-pm', require_configured=True)
+                self.assertEqual(client.calls, [])
+
+    def test_direct_pm_response_processing_interrupt_persists_unknown(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('direct-pm-response-interrupt')
+        client = FakeClient(Reply('{"schema_version":1,"decision":"STOP",'
+                                  '"summary":"Stop."}', {}))
+        output = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   return_value=result), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')), \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             patch('llmtool.task_submission_cli._pm_recommendation', side_effect=KeyboardInterrupt()), \
+             redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['state'], 'PM_OUTCOME_UNKNOWN')
+        self.assertEqual(callback['pm_dispatch'], 'UNKNOWN')
+        self.assertEqual(callback['pm_error_code'], 'PM_RESPONSE_INTERRUPTED')
+        self.assertEqual(len(client.calls), 1)
+
+    def test_direct_pm_interrupt_persists_unknown_and_refuses_replay(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('direct-pm-interrupt')
+        client = FakeClient(error=KeyboardInterrupt())
+        output = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   return_value=result) as collect, \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')), \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             redirect_stdout(output), self.assertRaises(KeyboardInterrupt):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['state'], 'PM_OUTCOME_UNKNOWN')
+        self.assertEqual(callback['pm_dispatch'], 'UNKNOWN')
+        self.assertEqual(callback['pm_error_code'], 'PM_CALL_INTERRUPTED')
+        self.assertEqual((collect.call_count, len(client.calls)), (3, 1))
+        with self.assertRaises(LLMToolError):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_direct_pm_interrupt_keeps_interruption_if_terminal_write_or_output_fails(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('direct-pm-write-failure')
+        client = FakeClient(error=KeyboardInterrupt())
+        original_compare_and_update = store.compare_and_update
+        update_calls = []
+
+        def fail_terminal_update(task_id, *, expected, **changes):
+            update_calls.append(changes)
+            if changes.get('developer', {}).get('direct_result_callback', {}).get('state') == 'PM_OUTCOME_UNKNOWN':
+                raise LLMToolError('simulated store failure')
+            return original_compare_and_update(task_id, expected=expected, **changes)
+
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   return_value=result), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')), \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             patch.object(store, 'compare_and_update', side_effect=fail_terminal_update), \
+             patch('llmtool.task_submission_cli._print', side_effect=OSError('output closed')), \
+             self.assertRaises(KeyboardInterrupt):
+            run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        terminal_attempts = [changes for changes in update_calls
+            if changes.get('developer', {}).get('direct_result_callback', {}).get('state') ==
+                'PM_OUTCOME_UNKNOWN']
+        self.assertEqual(len(terminal_attempts), 1)
         self.assertEqual(len(client.calls), 1)
 
     def test_waiting_retry_preserves_immutable_d6_admission_binding(self):
