@@ -512,6 +512,11 @@ def _redact_diagnostic(value, limit=2000):
         value,
     )
     value = re.sub(
+        r"(?<![\w.])((?:/|\.{1,2}/)[^\s\"'<>?#]*)([?#][^\s\"'<>]*)",
+        r"\1",
+        value,
+    )
+    value = re.sub(
         r"(?i)(\b" + _SENSITIVE_DIAGNOSTIC_KEY + r"\s*[=:]\s*)"
         r"(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;\"'<>]+)",
         r"\1<redacted>",

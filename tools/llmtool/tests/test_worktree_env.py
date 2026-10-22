@@ -833,6 +833,23 @@ class CacheTest(EnvironmentTempCase):
         self.assertNotIn(secret, stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(fragment, stdout.getvalue() + stderr.getvalue())
 
+    def test_redactor_strips_arbitrary_query_keys_and_bare_path_fragments(self):
+        diagnostic = (
+            "urllib3 Retry(total=0): GET /private/wheels/pkg.whl"
+            "?key=key-secret&sig=sig-secret&sas=sas-secret&sv=sv-secret"
+            "#bare-fragment-secret"
+        )
+
+        redacted = we._redact_diagnostic(diagnostic)
+
+        self.assertIn("GET /private/wheels/pkg.whl", redacted)
+        for secret in (
+            "key-secret", "sig-secret", "sas-secret", "sv-secret", "bare-fragment-secret",
+        ):
+            self.assertNotIn(secret, redacted)
+        self.assertNotIn("?", redacted)
+        self.assertNotIn("#", redacted)
+
     def test_missing_manifest_and_extra_wheel_fail_closed(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         fingerprint = self.seed_cache(worktree)
