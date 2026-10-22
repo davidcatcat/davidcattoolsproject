@@ -1,0 +1,14 @@
+%% RECONSTRUCTED from 2026-10-21 discussion; PROPOSED only, not implemented
+flowchart LR
+  User["Owner"] <--> Chat["ChatGPT / 討論及指令入口"]
+  Chat --> Permission{"授權狀態"}
+  Permission -->|DISCUSS / RECORD| Docs["討論紀錄或設計文件"]
+  Permission -->|EXECUTE explicit| GitHub[("GitHub 指令 / 交接事件")]
+  Permission -->|STOP| Stop["停止新派工"]
+  GitHub <--> Poll["llmtool Core 增量 Polling"]
+  Poll --> Auth["授權 / 去重 / 狀態檢查"]
+  Auth --> PM["指定 PM / Integrator AI"]
+  PM --> Workers["核准的 AI Workers"]
+  Workers --> Result["PR / Status / Evidence"]
+  Result --> GitHub
+  GitHub --> Chat
