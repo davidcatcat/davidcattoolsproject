@@ -1167,8 +1167,8 @@ OFFICE_HEAD = 1 << 20
 OFFICE_TAIL = 512 << 10
 AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")
 NICKNAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
-WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED = (
-    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認")
+WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED, ATTENTION = (
+    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認", "需注意")
 
 
 @dataclass(frozen=True)
@@ -1572,6 +1572,54 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
     return rows
 
 
+LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
+LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
+PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
+    "DEVELOPER_RESPONDED": "成功回應",
+    "DEVELOPER_OUTPUT_INVALID_DIFF": "輸出被拒（diff 格式錯誤）",
+    "DEVELOPER_OUTPUT_INVALID_ENVELOPE": "輸出被拒（回應格式錯誤）",
+    "DEVELOPER_OUTPUT_REJECTED": "輸出被拒",
+    "DEVELOPER_PROVIDER_UNAVAILABLE": "連不上服務",
+    "DEVELOPER_UNAVAILABLE": "無法使用",
+    "DEVELOPER_OUTCOME_UNKNOWN": "結果不明",
+}
+
+
+def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
+    """{developer profile: (age, total, succeeded, latest words)} from llmtool's
+    local task records. Only the developer route's profile, state and error
+    code are read; requests, responses, prompts and diffs are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    found: dict = {}
+    for path in glob.glob(os.path.join(root, "*.json")):
+        try:
+            age = max(0.0, now - os.path.getmtime(path))
+            if age > LLMTOOL_EVIDENCE_WINDOW:
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(1 << 20))
+        except (OSError, ValueError):
+            continue
+        developer = record.get("developer") if type(record) is dict else None
+        if type(developer) is not dict:
+            continue
+        profile, state, code = (developer.get("provider_profile"), developer.get("state"),
+                                developer.get("error_code"))
+        if type(profile) is not str or not PROFILE.fullmatch(profile):
+            continue
+        if type(state) is not str or not CODE_TEXT.fullmatch(state):
+            continue
+        code = code if type(code) is str and CODE_TEXT.fullmatch(code) else None
+        words = (DEVELOPER_RESULTS.get(code) or DEVELOPER_RESULTS.get(state)
+                 or code or state)
+        age_, total, ok, latest = found.get(profile, (None, 0, 0, ""))
+        newer = age_ is None or age < age_
+        found[profile] = (age if newer else age_, total + 1,
+                          ok + (state == "DEVELOPER_RESPONDED"), words if newer else latest)
+    return found
+
+
 ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, sort order)
     ("Codex Reviewer", "codex reviewer agent", 25),
     ("OpenCode", "opencode developer", 50),
@@ -1648,7 +1696,8 @@ def _worker_state(status: str) -> tuple[str, str]:
         return UNCHECKED, ("上次免費額度用完（429），尚未重新確認" if "429" in plain
                            else "尚未重新確認")
     if "PASS" in upper or upper.startswith("AVAILABLE"):
-        return IDLE, "可用，目前沒有工作"
+        tested = re.search(r"\b20\d\d-(\d\d-\d\d)\b", plain)
+        return IDLE, f"Roadmap：測試 PASS（{tested.group(1)}）" if tested else "Roadmap：可用"
     return UNCHECKED, _label(plain, 36)
 
 
@@ -1656,7 +1705,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
                 opencode_db: str | None = None, cwd_of=process_cwd,
-                cpu_of=process_cpu, dispatch: str | None = None) -> list[OfficeRow]:
+                cpu_of=process_cpu, dispatch: str | None = None,
+                llmtool_tasks: str | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
@@ -1679,14 +1729,21 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         paused = switch is not None and switch[0] == "PAUSED"
         if live and not paused:
             continue   # the live CLI rows say everything
-        notes, state, age = [], None, None
+        notes, state, age, replaces_table = [], None, None, False
         if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db)
             if outcome is not None:
-                state, age = outcome[0], outcome[2]
+                state, age, replaces_table = outcome[0], outcome[2], True
                 notes.append(outcome[1])
         if name == "agy" and agy_open and not live:
             notes.append("App 開著")
+        if name == "公司 gw":
+            gw = llmtool_route_outcomes(now, llmtool_tasks).get("company-gw")
+            if gw is not None:
+                age = gw[0]
+                if gw[2] == 0:
+                    state = ATTENTION   # reachable on paper, but every recent llmtool run failed
+                notes.append(f"llmtool 最近一次：{gw[3]}（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
             notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
         if switch is not None:
@@ -1697,12 +1754,11 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 state, age = PAUSED, None
             elif state is None:
                 state = IDLE
-                notes.append("目前沒有工作")
             rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
                                   kind="worker"))
         elif name in table:
             table_state, detail = _worker_state(table[name])
-            parts = notes if state is not None else [detail] + notes
+            parts = notes if replaces_table else [detail] + notes
             rows.append(OfficeRow(name, state or table_state, "；".join(parts), age, order,
                                   kind="worker"))
     # One-shot Claude runs are started by Codex; hang them under the most
@@ -1727,7 +1783,7 @@ def _pad(text: str, width: int) -> str:
 
 def _ago(age: float | None) -> str:
     if age is None:
-        return "依派工紀錄"
+        return "無即時紀錄"
     if age < 60:
         return "剛剛"
     if age < 3600:
@@ -1787,7 +1843,7 @@ def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[st
         before = old.get(key)
         if before is not None and before != state:
             name, detail = key.split("|", 1)
-            kind = "+" if state == WORKING else "!" if state in (STALLED, STOPPED) else "i"
+            kind = "+" if state == WORKING else "!" if state in (STALLED, STOPPED, ATTENTION) else "i"
             events.append((kind, f"{name}「{detail}」：{before} → {state}"))
     return new, events
 
@@ -1906,7 +1962,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 attr = curses.A_BOLD if offset + row == 0 else 0
                 if f"({WORKING})" in line:
                     attr |= colors.get("+", 0)
-                elif f"({STOPPED})" in line or f"({STALLED})" in line:
+                elif any(f"({s})" in line for s in (STOPPED, STALLED, ATTENTION)):
                     attr |= colors.get("!", 0)
                 elif f"({PAUSED})" in line or f"({DONE})" in line:
                     attr |= curses.A_DIM

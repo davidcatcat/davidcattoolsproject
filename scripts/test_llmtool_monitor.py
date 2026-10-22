@@ -28,7 +28,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB"):
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -997,8 +997,7 @@ class OfficeViewTests(unittest.TestCase):
                          (mon.PAUSED, "Owner 暫停派工（10-22）；有 1 個 CLI 開著（非派工）"))
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
-        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail),
-                         (mon.IDLE, "可派工；目前沒有工作"))
+        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
         self.assertNotIn("codex reviewer agent", rows)   # invalid record; no table fallback
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
@@ -1008,6 +1007,31 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(no_cli["opencode developer"].detail,
                          "Owner 暫停派工（10-22）；最近一次：認證失敗（401），需要重新登入")
         self.assertEqual(no_cli["opencode developer"].state, mon.PAUSED)
+
+    def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
+        tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        def task(name, age, state, code):
+            path = tasks / f"{name}.json"
+            path.write_text(json.dumps({
+                "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
+                "developer": {"provider_profile": "company-gw", "state": state,
+                              "error_code": code, "artifact": "TOOL-OUTPUT-SECRET"}}),
+                encoding="utf-8")
+            os.utime(path, (self.NOW - age, self.NOW - age))
+        task("a", 7200, "DEVELOPER_OUTPUT_REJECTED", "DEVELOPER_OUTPUT_INVALID_DIFF")
+        task("b", 3600, "DEVELOPER_OUTPUT_REJECTED", "DEVELOPER_OUTPUT_INVALID_ENVELOPE")
+        task("c", 9 * 86400, "DEVELOPER_RESPONDED", None)   # outside the window
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, llmtool_tasks=str(tasks)))
+        gw = rows["公司 gw"]
+        self.assertEqual(gw.detail, "Roadmap：可用；llmtool 最近一次：輸出被拒（回應格式錯誤）"
+                                    "（近 7 天 2 次，成功 0 次）")
+        self.assertEqual((gw.age, gw.state), (3600.0, mon.ATTENTION))
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate_and_replaces_roadmap_row(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
