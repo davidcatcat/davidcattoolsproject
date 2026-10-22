@@ -27,19 +27,23 @@ class TestSelectionTests(unittest.TestCase):
         self.assertEqual(plan["levels"][0]["command"], ["make", "syntax"])
         self.assertEqual(plan["levels"][1]["tests"], [L1_TEST])
         self.assertEqual(plan["levels"][1]["commands"], [{
-            "argv": ["python3", "-m", "unittest", "discover", "-s", "tests",
-                     "-p", "test_test_selection.py"],
+            "argv": ["python3", "-c", "import sys; sys.path.insert(0, 'tests'); "
+                     "import unittest; unittest.main(module='test_test_selection')"],
             "cwd": "tools/llmtool",
         }])
         self.assertEqual(plan["required_gates"], ["exact_head_ci", "security", "mac_native"])
         self.assertFalse(plan["executes_tests"])
         self.assertFalse(plan["pipeline_integrated"])
 
-    def test_emitted_l1_command_runs_on_current_python(self):
+    def test_emitted_l1_command_runs_only_the_selected_module(self):
         if os.environ.get("LLMTOOL_TEST_SELECTION_COMMAND_CHILD"):
             self.skipTest("avoid recursively launching the command smoke test")
         command = select_test_plan([SOURCE])["levels"][1]["commands"][0]
         self.assertEqual(command["argv"][0], "python3")
+        self.assertEqual(command["argv"][1], "-c")
+        self.assertIn("unittest.main(module='test_test_selection')", command["argv"][2])
+        self.assertNotIn("discover", command["argv"])
+        self.assertFalse(any(char in command["argv"][2] for char in "*?[]"))
         environment = os.environ.copy()
         environment["LLMTOOL_TEST_SELECTION_COMMAND_CHILD"] = "1"
         result = subprocess.run(
@@ -81,8 +85,13 @@ class TestSelectionTests(unittest.TestCase):
         for path in (
             "tools/llmtool/llmtool/providers/openai.py",
             "tools/llmtool/llmtool/authorization_policy.py",
+            "tools/llmtool/llmtool/authorization_ledger.py",
             "tools/llmtool/llmtool/git_intel.py",
             "tools/llmtool/llmtool/opencode_worker.py",
+            "tools/llmtool/llmtool/opencode_foreground_host.py",
+            "tools/llmtool/llmtool/opencode_native_credential.py",
+            "tools/llmtool/llmtool/review_authority.py",
+            "tools/llmtool/llmtool/review_authority_cli.py",
         ):
             with self.subTest(path=path):
                 plan = select_test_plan(
@@ -102,7 +111,7 @@ class TestSelectionTests(unittest.TestCase):
 
     def test_invalid_changed_paths_are_rejected(self):
         for path in ("/absolute.py", "C:/absolute.py", "../escape.py",
-                     "tools//module.py", "tools\\module.py", ""):
+                     "tools//module.py", "tools\\module.py", "tools/module*.py", ""):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 select_test_plan([path])
 
@@ -110,6 +119,8 @@ class TestSelectionTests(unittest.TestCase):
         for path in ("tools/llmtool/llmtool/test_selection.py",
                      "tools/llmtool/tests/../test_escape.py",
                      "tools/llmtool/tests/not_a_test.py",
+                     "tools/llmtool/tests/test_*.py",
+                     "tools/llmtool/tests/test_bad-name.py",
                      "tools/llmtool/tests/nested/test_test_selection.py"):
             with self.subTest(path=path), self.assertRaises(ValueError):
                 select_test_plan([SOURCE], dependency_regression_tests=[path])
@@ -119,6 +130,10 @@ class TestSelectionTests(unittest.TestCase):
             select_test_plan([SOURCE], impact_test_map={SOURCE: ["../outside.py"]})
         with self.assertRaises(ValueError):
             select_test_plan([SOURCE], impact_test_map={SOURCE: []})
+        with self.assertRaises(ValueError):
+            select_test_plan([SOURCE], impact_test_map={
+                SOURCE: ["tools/llmtool/tests/test_*.py"]
+            })
         # A nested duplicate basename is rejected rather than broadening the
         # flat file's exact unittest invocation.
         with self.assertRaises(ValueError):

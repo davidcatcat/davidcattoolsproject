@@ -42,9 +42,14 @@ HIGH_RISK_PREFIXES = (
     "tools/llmtool/llmtool/security",
 )
 HIGH_RISK_FILES = frozenset({
+    "tools/llmtool/llmtool/authorization_ledger.py",
     "tools/llmtool/llmtool/authorization_policy.py",
     "tools/llmtool/llmtool/git_intel.py",
+    "tools/llmtool/llmtool/opencode_foreground_host.py",
+    "tools/llmtool/llmtool/opencode_native_credential.py",
     "tools/llmtool/llmtool/opencode_worker.py",
+    "tools/llmtool/llmtool/review_authority.py",
+    "tools/llmtool/llmtool/review_authority_cli.py",
 })
 
 _LLMTOOL_CWD = "tools/llmtool"
@@ -57,6 +62,8 @@ def _relative_path(value: object, *, test_path: bool = False) -> str:
     """Validate one repository-relative POSIX path without filesystem access."""
     if not isinstance(value, str) or not value or "\0" in value:
         raise ValueError("paths must be non-empty strings without NUL")
+    if any(character in value for character in "*?[]"):
+        raise ValueError("paths must be literal and must not contain glob characters")
     if ("\\" in value or value.startswith("/")
             or (len(value) >= 2 and value[1] == ":")):
         raise ValueError("paths must be relative POSIX paths")
@@ -66,10 +73,17 @@ def _relative_path(value: object, *, test_path: bool = False) -> str:
     path = PurePosixPath(value)
     if path.is_absolute() or path.as_posix() != value:
         raise ValueError("paths must use canonical repository-relative form")
-    if test_path and (path.parent.as_posix() != _TEST_ROOT.rstrip("/")
-                      or not path.name.startswith("test_")
-                      or path.suffix != ".py"):
-        raise ValueError("regression tests must be flat Python test files under tools/llmtool/tests")
+    if test_path:
+        filename = path.name
+        module_name = (filename[len("test_"):-len(".py")]
+                       if filename.startswith("test_") and filename.endswith(".py")
+                       else "")
+        if (path.parent.as_posix() != _TEST_ROOT.rstrip("/")
+                or not module_name
+                or not module_name.isidentifier()):
+            raise ValueError(
+                "regression tests must be flat test_<identifier>.py files under tools/llmtool/tests"
+            )
     return value
 
 
@@ -84,8 +98,16 @@ def _under_prefix(path: str, prefix: str) -> bool:
 
 
 def _test_command(path: str) -> tuple[str, ...]:
-    pattern = PurePosixPath(path).name
-    return ("python3", "-m", "unittest", "discover", "-s", "tests", "-p", pattern)
+    # Import one validated module by its exact name. unittest discovery's -p
+    # pattern can match the same basename in nested directories and silently
+    # expand the selected set.
+    module_name = PurePosixPath(path).stem
+    module_name = module_name[len("test_"):]
+    runner = (
+        "import sys; sys.path.insert(0, 'tests'); "
+        "import unittest; unittest.main(module='test_" + module_name + "')"
+    )
+    return ("python3", "-c", runner)
 
 
 def select_test_plan(
@@ -99,10 +121,9 @@ def select_test_plan(
 
     Unknown paths, a stale map, and high-risk changes select L3 (`make check`).
     The L1 map is exact-file based; L2 tests must be supplied explicitly by the
-    caller. Test-map entries must use the repository's flat tests directory;
-    L1/L2 commands use a discovery pattern for the repository's flat tests
-    directory. Nested test entries are rejected so a selected basename cannot
-    intentionally target a nested path. This function never invokes a runner.
+    caller. Test-map entries must use the repository's flat tests directory.
+    L1/L2 commands invoke one literal test file, avoiding discovery-pattern
+    expansion. This function never invokes a runner.
     """
     changed = _path_list(changed_paths)
     dependency_tests = _path_list(dependency_regression_tests, test_path=True)
