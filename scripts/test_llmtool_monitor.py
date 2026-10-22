@@ -930,12 +930,13 @@ class OfficeViewTests(unittest.TestCase):
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.state, live.kind, live.group), (mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertIn("agent 2 · subagent 2 · 外部 worker 3", lines[0])
+        self.assertIn("agent 2 · subagent 2 · 只看得到狀態 3", lines[0])
+        self.assertEqual(lines[1], f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM"))
         self.assertTrue(lines[pm + 1].startswith("└ codex developer Franklin"))
         self.assertTrue(any(line.startswith("└ claude reviewer") for line in lines[pm + 1:pm + 3]))
-        self.assertIn("── 外部 Worker ──", lines)
-        self.assertLess(lines.index("── 外部 Worker ──"),
+        self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
+        self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
                         next(i for i, line in enumerate(lines) if line.startswith("agy")))
 
     def test_roadmap_workers_map_to_office_states_without_raw_text(self):

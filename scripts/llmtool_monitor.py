@@ -1812,6 +1812,10 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
+LIVE_SECTION = "看得到即時進度（讀得到 session 紀錄）"
+STATUS_SECTION = "只看得到狀態（依派工紀錄和程序判斷）"
+
+
 def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
     """(prefix, row) in display order: each agent followed by what it started."""
     keys = {row.key for row in rows if row.key}
@@ -1820,6 +1824,8 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
         if row.group in keys:
             children.setdefault(row.group, []).append(row)
     out: list[tuple[str, OfficeRow]] = []
+    if any(row.kind != "worker" or row.group in keys for row in rows):
+        out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
 
     def walk(row: OfficeRow, depth: int) -> None:
         out.append(("  " * (depth - 1) + "└ " if depth else "", row))
@@ -1831,7 +1837,7 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
             walk(row, 0)
     workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
     if workers:
-        out.append(("—", OfficeRow("外部 Worker", "", "", None, 0)))
+        out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
         out += [("", row) for row in workers]
     return out
 
@@ -1840,7 +1846,7 @@ def office_lines(rows: list[OfficeRow]) -> list[str]:
     working = sum(row.state == WORKING for row in rows)
     counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
     lines = [f"辦公室 · agent {counts['agent']} · subagent {counts['subagent']} · "
-             f"外部 worker {counts['worker']} · {working} 位工作中"]
+             f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
     if not rows:
         return lines + ["目前沒有觀察到任何 agent 或 worker。"]
     tree = _tree(rows)
