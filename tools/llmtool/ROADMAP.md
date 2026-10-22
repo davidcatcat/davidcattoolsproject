@@ -25,7 +25,6 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 
 ## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
-
 ### A11c developer-worktree environment reuse — NEXT (Owner 2026-10-22)
 
 **Owner priority: reduce repeat setup work and avoid unnecessary AI-token use when a Developer starts a fresh registered worktree.** Tracking: [Issue #267](https://github.com/davidcatcat/davidcattoolsproject/issues/267). This is an A11c delivery-efficiency slice, **not a new milestone**; it does not change the A0–A12 order and is not a prerequisite for A11c correctness or M2 gates.
