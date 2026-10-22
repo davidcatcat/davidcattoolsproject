@@ -1,0 +1,28 @@
+# llmtool developer worktree environment lock (schema 1)
+#
+# Authority: Issue #267 (A11c ENV-1). This file is the single source of truth for
+# the packages installed into a task-local developer venv, and its bytes are part
+# of the cache fingerprint computed by scripts/worktree_env.py. Any edit here
+# invalidates every existing wheel cache entry (new cache directory, no reuse).
+#
+# Rules:
+#   * one `name = "version"` per line, version pinned exactly, no specifiers;
+#   * a package may appear in only one group;
+#   * [base]    runtime dependencies declared in pyproject.toml `dependencies`;
+#   * [build]   `build-system.requires` plus a PEP 660 capable pip (>= 21.3),
+#               needed for the offline `--no-build-isolation` editable install;
+#               some interpreters (Apple CLT CPython 3.9.6) bundle pip 21.2.4;
+#   * [tui]     optional `tui` extra (only installed with `--extras tui`);
+#   * bumps must keep tests/test_worktree_env.py::LockTest green.
+schema = 1
+
+[base]
+PyYAML = "6.0.3"
+
+[build]
+pip = "25.1.1"
+setuptools = "80.9.0"
+
+[tui]
+prompt-toolkit = "3.0.52"
+wcwidth = "0.9.2"
