@@ -1390,6 +1390,18 @@ OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
 OPENCODE_SESSIONS_SQL = ("SELECT directory, title, time_updated, time_idle FROM session_v2 "
                          "WHERE parent_id IS NULL AND time_updated >= ? "
                          "ORDER BY time_updated DESC LIMIT 200")
+# Outcome of the newest finished top-level session: only the typed error code
+# and HTTP status are extracted, never the error message or any content.
+OPENCODE_OUTCOME_SQL = (
+    "SELECT s.time_updated, s.idle_outcome, "
+    "(SELECT json_extract(m.data, '$.error.type') FROM session_message m "
+    " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1), "
+    "(SELECT json_extract(m.data, '$.error.status') FROM session_message m "
+    " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1) "
+    "FROM session_v2 s WHERE s.parent_id IS NULL AND s.time_idle IS NOT NULL "
+    "ORDER BY s.time_updated DESC LIMIT 1")
+OPENCODE_EVIDENCE_WINDOW = 24 * 3600
+ERROR_TYPE = re.compile(r"[a-z][a-z0-9._-]{0,47}")
 OPENCODE_ROLES = ("OpenCode CLIENT", "OpenCode CLI")
 _cwd_cache: dict = {}
 
@@ -1427,6 +1439,35 @@ def opencode_sessions(now: float, db: str = OPENCODE_DB) -> list[tuple]:
             out.append((directory, title, updated / 1000,
                         idle / 1000 if type(idle) is int else None))
     return out
+
+
+def opencode_outcome(now: float, db: str = OPENCODE_DB):
+    """(state, detail, age) from the newest finished OpenCode session, or None."""
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(OPENCODE_OUTCOME_SQL).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not row or type(row[0]) is not int:
+        return None
+    age = max(0.0, now - row[0] / 1000)
+    if age > OPENCODE_EVIDENCE_WINDOW:
+        return None
+    kind = row[2] if type(row[2]) is str and ERROR_TYPE.fullmatch(row[2]) else None
+    status = row[3] if type(row[3]) is int and 100 <= row[3] <= 599 else None
+    if kind is None and status is None:
+        return (IDLE, "最近一次執行沒有錯誤", age) if row[1] != "failed" else (
+            UNCHECKED, "最近一次執行失敗（原因不明）", age)
+    if kind == "provider.quota" or status == 429:
+        return STOPPED, "最近一次：免費額度用完（429）", age
+    if kind == "provider.auth" or status in (401, 403):
+        return STOPPED, f"最近一次：認證失敗（{status or kind}），需要重新登入", age
+    return STOPPED, f"最近一次執行失敗（{kind or status}）", age
 
 
 def _where(cwd, canonical: str) -> str:
@@ -1580,6 +1621,12 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             continue
         if (name == "opencode developer" and opencode) or (name == "agy" and agy):
             continue
+        if name == "opencode developer":
+            # Local session evidence is newer and more exact than the dated table.
+            outcome = opencode_outcome(now, opencode_db)
+            if outcome is not None:
+                rows.append(OfficeRow(name, outcome[0], outcome[1], outcome[2], order))
+                continue
         if name in table:
             state, detail = _worker_state(table[name])
             if name == "agy" and agy_open:

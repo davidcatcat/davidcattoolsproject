@@ -876,14 +876,18 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["公司 gw"].state, mon.IDLE)
         self.assertIsNone(rows["agy"].age)
 
-    def _opencode_db(self, sessions):
-        db = Path(self.tmp.name) / "opencode.db"
+    def _opencode_db(self, sessions, messages=()):
+        db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "opencode.db"
         conn = sqlite3.connect(db)
         conn.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, directory TEXT, "
-                     "title TEXT, time_updated INTEGER, time_idle INTEGER)")
+                     "title TEXT, time_updated INTEGER, time_idle INTEGER, idle_outcome TEXT)")
+        conn.execute("CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, "
+                     "data TEXT)")
+        conn.executemany("INSERT INTO session_message VALUES (?,?,?,?)", messages)
         conn.execute("CREATE TABLE credential (secret TEXT)")
         conn.execute("INSERT INTO credential VALUES ('CREDENTIAL-SECRET')")
-        conn.executemany("INSERT INTO session_v2 VALUES (?,?,?,?,?,?)", sessions)
+        conn.executemany("INSERT INTO session_v2 VALUES (?,?,?,?,?,?,?)",
+                         [tuple(row) + (None,) * (7 - len(row)) for row in sessions])
         conn.commit()
         conn.close()
         return str(db)
@@ -896,6 +900,29 @@ class OfficeViewTests(unittest.TestCase):
                                             cwd_of=lambda pid: None))
         self.assertEqual(rows["opencode developer"].state, mon.STOPPED)
         self.assertFalse(any(name.startswith("opencode cli") for name in rows))
+
+    def test_latest_opencode_outcome_overrides_the_dated_table_without_message_text(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        error = lambda kind, status: json.dumps({"error": {
+            "type": kind, "status": status, "message": "PROMPT-SECRET token=abc"}})
+        db = self._opencode_db(
+            [("s1", None, "/x", "t", ms(3000), ms(3000), "failed"),
+             ("s2", None, "/x", "t", ms(600), ms(600), "failed")],
+            [("s1", "idle", 1, error("provider.quota", 429)),
+             ("s2", "idle", 1, error("provider.auth", 401))])
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=lambda pid: None))
+        row = rows["opencode developer"]
+        self.assertEqual((row.state, row.detail, row.age),
+                         (mon.STOPPED, "最近一次：認證失敗（401），需要重新登入", 600.0))
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        self.assertNotIn("PROMPT-SECRET", text)
+        self.assertNotIn("token=abc", text)
+        old = self._opencode_db([("s1", None, "/x", "t", ms(90_000), ms(90_000), "failed")],
+                                [("s1", "idle", 1, error("provider.quota", 429))])
+        self.assertIsNone(mon.opencode_outcome(self.NOW, old))
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate_and_replaces_roadmap_row(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
