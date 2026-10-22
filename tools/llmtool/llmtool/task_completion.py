@@ -156,6 +156,7 @@ def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
         'reviewer_task_id': None,
         'reviewer_identity': None,
         'reviewer_session_ref': None,
+        'review_packet_digest': None,
         'verdict': 'BLOCKED',
         'security': 'BLOCKED',
         'functional': 'BLOCKED',
@@ -364,6 +365,7 @@ def validate_review_dispatch_receipt(intent, receipt):
     fields = {
         'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
         'source_sha', 'result_head', 'diff_sha256', 'developer_task_id',
+        'review_packet_digest',
         'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref', 'verdict',
         'security', 'functional', 'execution_status', 'code', 'findings_sha256',
         'provenance', 'receipt_sha256',
@@ -385,7 +387,13 @@ def validate_review_dispatch_receipt(intent, receipt):
             type(receipt['security']) is not str or receipt['security'] not in _REVIEW_VERDICTS or
             type(receipt['functional']) is not str or receipt['functional'] not in _REVIEW_VERDICTS or
             type(receipt['execution_status']) is not str or
-            receipt['execution_status'] not in ('SUCCEEDED', 'FAILED', 'NOT_DISPATCHED') or
+            receipt['execution_status'] not in ('SUCCEEDED', 'FAILED', 'BLOCKED',
+                                                 'UNKNOWN', 'NOT_DISPATCHED') or
+            (receipt['review_packet_digest'] is not None and
+             (type(receipt['review_packet_digest']) is not str or
+              _HEX64.fullmatch(receipt['review_packet_digest']) is None)) or
+            (receipt['execution_status'] == 'SUCCEEDED' and
+             receipt['review_packet_digest'] is None) or
             type(receipt['code']) is not str or
             re.fullmatch(r'[A-Z0-9_]{1,64}', receipt['code']) is None or
             type(receipt['provenance']) is not str or
@@ -397,7 +405,7 @@ def validate_review_dispatch_receipt(intent, receipt):
                 receipt['provenance'] != 'LOCAL_NO_ADAPTER' or
                 any(receipt.get(key) is not None for key in (
                     'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref',
-                    'findings_sha256'))):
+                    'review_packet_digest', 'findings_sha256'))):
             _stop('REVIEW_RECEIPT_INVALID')
     else:
         for key in ('reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref'):

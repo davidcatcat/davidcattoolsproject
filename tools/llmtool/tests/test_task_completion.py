@@ -934,7 +934,8 @@ class TaskCompletionTests(unittest.TestCase):
         return task, store, result, tests
 
     def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None,
-                                     reviewer_decision='STOP', client=None):
+                                     reviewer_decision='STOP', client=None,
+                                     inject_adapter=False):
         from llmtool.task_submission_cli import run_task_direct_result_event
 
         if client is None:
@@ -948,7 +949,8 @@ class TaskCompletionTests(unittest.TestCase):
                     {'prompt_tokens': 8, 'completion_tokens': 4, 'total_tokens': 12}),
             ])
         output = StringIO()
-        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter',
+                   None if inject_adapter else adapter), \
              patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
                    return_value=result), \
              patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
@@ -960,8 +962,29 @@ class TaskCompletionTests(unittest.TestCase):
                    'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
              patch('llmtool.task_submission_cli.create_client', return_value=client), \
              redirect_stdout(output):
-            code = run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+            code = run_task_direct_result_event(task['task_id'], self.task_id, store=store,
+                reviewer_adapter=adapter if inject_adapter else None)
         return code, client, output.getvalue(), resolve
+
+    def test_host_injected_reviewer_adapter_is_used_by_completion_event(self):
+        task, store, result, tests = self._direct_opencode_task('review-host-injection')
+        adapter = unittest.mock.Mock(side_effect=lambda intent:
+            self._trusted_review_receipt(intent, verdict='PASS'))
+
+        code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter, inject_adapter=True)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(len(client.calls), 2)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_handoff']['receipt']['verdict'], 'PASS')
+        self.assertEqual(callback['review_return']['state'], 'RETURNED')
+        self.assertEqual(callback['review_return']['next_step'], 'STOP')
+        pm_receipt = json.loads(client.calls[1][1]['content'])
+        self.assertEqual(pm_receipt['review_packet_digest'],
+                         callback['review_handoff']['receipt']['review_packet_digest'])
 
     @staticmethod
     def _trusted_review_receipt(intent, *, verdict='PASS'):
@@ -972,7 +995,8 @@ class TaskCompletionTests(unittest.TestCase):
             'result_head': intent['result_head'], 'diff_sha256': intent['diff_sha256'],
             'developer_task_id': intent['developer_task_id'],
             'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
-            'reviewer_session_ref': 'reviewer-session', 'verdict': verdict,
+            'reviewer_session_ref': 'reviewer-session',
+            'review_packet_digest': '7' * 64, 'verdict': verdict,
             'security': 'BLOCKED' if blocked else 'PASS',
             'functional': 'BLOCKED' if blocked else 'PASS',
             'execution_status': 'FAILED' if blocked else 'SUCCEEDED',
@@ -1985,6 +2009,26 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(task_completion.review_handoff_record(intent, blocked)['next_step'],
                          'WAIT_FOR_REVIEWER')
 
+        for execution_status in ('FAILED', 'BLOCKED', 'UNKNOWN'):
+            uncertain = {'schema_version': 1,
+                'dispatch_id': intent['dispatch_id'], 'task_id': intent['task_id'],
+                'run_id': intent['run_id'], 'contract_digest': intent['contract_digest'],
+                'source_sha': intent['source_sha'], 'result_head': intent['result_head'],
+                'diff_sha256': intent['diff_sha256'],
+                'developer_task_id': intent['developer_task_id'],
+                'reviewer_task_id': 'reviewer-task',
+                'reviewer_identity': 'reviewer-agent',
+                'reviewer_session_ref': 'reviewer-session',
+                'review_packet_digest': '7' * 64, 'verdict': 'BLOCKED',
+                'security': 'BLOCKED', 'functional': 'BLOCKED',
+                'execution_status': execution_status, 'code': 'REVIEW_UNAVAILABLE',
+                'findings_sha256': '6' * 64,
+                'provenance': 'TRUSTED_REVIEW_ADAPTER'}
+            uncertain['receipt_sha256'] = hashlib.sha256(json.dumps(
+                uncertain, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+            self.assertEqual(task_completion.review_handoff_record(
+                intent, uncertain)['next_step'], 'WAIT_FOR_REVIEWER')
+
         def receipt(verdict, security, functional, repair_round=0):
             current = dict(intent)
             if repair_round:
@@ -2003,7 +2047,8 @@ class TaskCompletionTests(unittest.TestCase):
                 'result_head': current['result_head'], 'diff_sha256': current['diff_sha256'],
                 'developer_task_id': current['developer_task_id'],
                 'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
-                'reviewer_session_ref': 'reviewer-session', 'verdict': verdict,
+                'reviewer_session_ref': 'reviewer-session',
+                'review_packet_digest': '7' * 64, 'verdict': verdict,
                 'security': security, 'functional': functional, 'execution_status': 'SUCCEEDED',
                 'code': 'REVIEW_COMPLETED', 'findings_sha256': '6' * 64,
                 'provenance': 'TRUSTED_REVIEW_ADAPTER'}
