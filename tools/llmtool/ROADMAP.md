@@ -23,6 +23,19 @@ A3 Skill Framework 已完成並合併至 main (`c9159f2`)；A3.5 Interactive Cha
 implementation/runtime 的技術能力，不是 authorization、policy 或 approval；不代表現在
 已授予任何工具執行或 Git mutation 權限。
 
+## A11c developer-worktree environment reuse — NEXT (Owner 2026-10-22)
+
+**Owner priority: eliminate repeat install and AI-token waste when each Developer starts a fresh registered worktree.** Tracking: [Issue #267](https://github.com/davidcatcat/davidcattoolsproject/issues/267). This is an A11c delivery-efficiency slice, **not** a new A milestone and **not** a prerequisite for the in-progress Mac OpenCode lifecycle repair or M2 correctness gates.
+
+| Stage | Planned deliverable and acceptance |
+| --- | --- |
+| ENV-0 — baseline first | Audit current D6 worktree bootstrap, task-local venv and OpenCode setup; measure cold/warm setup commands, time, download volume, space and model usage where reported (otherwise UNKNOWN). Do not repeat package installation just to measure it. |
+| ENV-1 — cache and fingerprint | Reuse trusted pip downloads/wheels and pinned external read-only tooling/env artifacts keyed to OS/arch, Python ABI, lockfile hashes and relevant flags. Do not blindly relocate/share a mutable task `.venv`; reject invalid or unverifiable cache. |
+| ENV-2 — deterministic fast bootstrap | One bounded non-AI bootstrap/preflight route integrated with **existing** worktree lifecycle; cache hit skips redundant setup; cache miss builds safely. Registered source/import provenance, D6 ownership and per-task read/write permissions remain authoritative. No alternate environment manager, daemon, supervisor or credential copying. |
+| ENV-3 — native validation | Three fresh task worktrees; cold vs warm metrics; dependency/platform invalidation; concurrent task isolation; clean rollback/fail-closed behavior; supported Python tests and Mac native checks, distinct non-author review and exact-head CI. Report actual saved setup time and tokens only if telemetry exists. |
+
+**Release rule:** This work cannot weaken sandbox, Worktree or Git authority, leak secrets, reuse another Agent's writable environment, or claim token savings from estimates. Schedule as a small independent PR after current conflicting worktrees/scopes are checked. Current state **PLANNED / NOT IMPLEMENTED**.
+
 ## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
 **Authoritative priority and numbering:** A0–A12 are the product milestones.
