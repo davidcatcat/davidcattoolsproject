@@ -41,15 +41,24 @@ _FIELDS_V2 = _FIELDS_V1 | frozenset(('developer', 'pm_assignment'))
 _FIELDS_V2_ROUTE = _FIELDS_V2 | frozenset(('pm_route_binding',))
 _FIELDS_V2_COMPLETION = _FIELDS_V2 | frozenset(('completion',))
 _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
+_V2_FIELD_SHAPES = (_FIELDS_V2_ROUTE, _FIELDS_V2_ROUTE_COMPLETION)
+_FIELDS_V2_WITH_PROVENANCE = tuple(shape | frozenset(('pm_provenance',))
+                                   for shape in _V2_FIELD_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_DEVELOPER_FIELDS = frozenset((
+_LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
     'source_sha', 'source_sha_binding', 'read_paths', 'write_paths', 'acceptance', 'context_sha256',
     'egress_basis', 'input_bytes', 'max_tokens',
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
+))
+_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DIRECT_EXECUTION_FIELDS = frozenset((
+    'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
+    'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
+    'source_file_count', 'source_manifest_sha256',
 ))
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
@@ -58,6 +67,10 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_TOO_LARGE',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
+_PM_PROVENANCE_FIELDS = frozenset((
+    'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
+    'session_restored', 'automatic_callback',
+))
 
 
 def _fail(code='TASK_STORE_INVALID'):
@@ -95,7 +108,7 @@ def _validate(record):
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION)) or
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -163,7 +176,8 @@ def _validate(record):
     if record['native_session_id'] is not None:
         _fail()
     if record['backend_session_semantics'] not in (
-            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED'):
+            'EPHEMERAL_SINGLE_CALL', 'NO_NATIVE_SESSION_ID_EXPOSED', 'NOT_STARTED',
+            'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL'):
         _fail()
     contract_raw = record['task_contract']
     if type(contract_raw) is not dict:
@@ -230,9 +244,59 @@ def _validate(record):
                     any(type(item) is not str or not item or len(item.encode('utf-8')) > 512 or
                         _emitted_sensitive(item) for item in assignment['acceptance'])):
                 _fail()
+        if 'pm_provenance' in record:
+            provenance = record['pm_provenance']
+            def unique_response_pairs(pairs):
+                response_object = {}
+                for key, value in pairs:
+                    if key in response_object:
+                        raise ValueError('duplicate JSON key')
+                    response_object[key] = value
+                return response_object
+
+            try:
+                response_object = json.loads(
+                    record['response'], object_pairs_hook=unique_response_pairs,
+                    parse_constant=lambda _: _fail())
+                response_assignment = response_object.get('developer_assignment')
+            except Exception:
+                _fail()
+            if (type(provenance) is not dict or set(provenance) != _PM_PROVENANCE_FIELDS or
+                    provenance['source'] != 'ACTIVE_PM_RUNTIME' or
+                    provenance['provider_invoked'] is not False or
+                    provenance['native_session_id_status'] != 'UNAVAILABLE' or
+                    provenance['usage_status'] != 'UNKNOWN' or
+                    provenance['session_restored'] is not False or
+                    provenance['automatic_callback'] is not False or
+                    record['pm_provider_profile'] != 'active-pm-runtime' or
+                    record['pm_provider_type'] != 'codex-cli' or
+                    record['pm_model'] is not None or
+                    record['pm_route_binding'] != {
+                        'type': 'codex-cli', 'model': None, 'base_url': None} or
+                    record['backend_session_semantics'] != 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL' or
+                    record['native_session_id'] is not None or
+                    record['state'] != 'PM_RESPONDED' or
+                    record['request'] is None or not record['response'] or
+                    record['request_sha256'] is None or record['usage'] is not None or
+                    record['error_code'] is not None or
+                    type(assignment) is not dict or assignment.get('route') != 'opencode' or
+                    assignment.get('risk') != 'LOW' or
+                    type(response_object) is not dict or
+                    set(response_object) != {
+                        'schema_version', 'summary', 'developer_assignment'} or
+                    type(response_object['schema_version']) is not int or
+                    response_object['schema_version'] != 1 or
+                    type(response_object['summary']) is not str or
+                    _emitted_sensitive(response_object['summary']) or
+                    type(response_assignment) is not dict or
+                    assignment != {'schema_version': 1, **response_assignment}):
+                _fail()
+        elif record['backend_session_semantics'] == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL':
+            _fail()
         developer = record['developer']
         if developer is not None:
-            if type(developer) is not dict or set(developer) != _DEVELOPER_FIELDS:
+            if type(developer) is not dict or set(developer) not in (
+                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -240,9 +304,10 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] != 'company-gw' or
-                    developer['provider_type'] not in (None, 'openai-compatible') or
-                    developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                    developer['provider_profile'] not in ('company-gw', 'opencode') or
+                    developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
+                    developer['backend_session_semantics'] not in (
+                        'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
                     type(developer['source_sha']) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', developer['source_sha']) is None or
@@ -260,6 +325,65 @@ def _validate(record):
                       not 1 <= developer['max_tokens'] <= 1_000_000)) or
                     developer['artifact_format'] != 'unified_diff' or
                     type(developer['created_at']) is not str):
+                _fail()
+            if (developer['provider_profile'] == 'company-gw' and
+                    (developer['provider_type'] not in (None, 'openai-compatible') or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED')):
+                _fail()
+            if (developer['provider_profile'] == 'opencode' and
+                    (developer['provider_type'] not in (None, 'opencode-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if 'execution' in developer:
+                execution = developer['execution']
+                if execution is not None:
+                    if (developer['provider_profile'] != 'opencode' or
+                            type(execution) is not dict or
+                            set(execution) != _DIRECT_EXECUTION_FIELDS or
+                            execution['status'] not in ('SUCCEEDED', 'FAILED', 'UNKNOWN') or
+                            (execution['native_session_id'] is not None and
+                             (type(execution['native_session_id']) is not str or
+                              re.fullmatch(r'ses_[A-Za-z0-9]{1,100}',
+                                           execution['native_session_id']) is None)) or
+                            (execution['process_exit_code'] is not None and
+                             (type(execution['process_exit_code']) is not int or
+                              not -127 <= execution['process_exit_code'] <= 255)) or
+                            (execution['stdout_sha256'] is not None and
+                             (type(execution['stdout_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}', execution['stdout_sha256']) is None)) or
+                            (execution['elapsed_ms'] is not None and
+                             (type(execution['elapsed_ms']) is not int or
+                              not 0 <= execution['elapsed_ms'] <= 86_400_000)) or
+                            (execution['source_bytes'] is not None and
+                             (type(execution['source_bytes']) is not int or
+                              not 0 <= execution['source_bytes'] <= 2 * 1024 * 1024)) or
+                            (execution['source_file_count'] is not None and
+                             (type(execution['source_file_count']) is not int or
+                              not 1 <= execution['source_file_count'] <= 32)) or
+                            (execution['source_manifest_sha256'] is not None and
+                             (type(execution['source_manifest_sha256']) is not str or
+                              re.fullmatch(r'[0-9a-f]{64}',
+                                           execution['source_manifest_sha256']) is None)) or
+                            execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
+                            execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+                        _fail()
+                    if execution['status'] == 'SUCCEEDED' and (
+                            execution['native_session_id'] is None or
+                            execution['process_exit_code'] != 0 or
+                            execution['stdout_sha256'] is None or
+                            execution['source_bytes'] is None or
+                            execution['source_file_count'] is None or
+                            execution['source_manifest_sha256'] is None or
+                            execution['cleanup_status'] != 'CONFIRMED'):
+                        _fail()
+                    source_observation = (execution['source_bytes'],
+                                         execution['source_file_count'],
+                                         execution['source_manifest_sha256'])
+                    if any(value is None for value in source_observation) and not all(
+                            value is None for value in source_observation):
+                        _fail()
+            elif developer['provider_profile'] == 'opencode':
                 _fail()
             try:
                 stamp = datetime.strptime(developer['created_at'], '%Y-%m-%dT%H:%M:%SZ')
@@ -309,12 +433,15 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            expected_provider = ('openai-compatible' if
+                                 developer['provider_profile'] == 'company-gw' else
+                                 'opencode-cli')
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
             if dev_state == 'DEVELOPER_DISPATCHING' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
                     developer['max_tokens'] is None):
                 _fail()
@@ -323,13 +450,21 @@ def _validate(record):
                     developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
-                    developer['provider_type'] != 'openai-compatible' or artifact is not None or
+                    developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is None):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or developer['max_tokens'] is None):
                 _fail()
+            if developer['provider_profile'] == 'opencode':
+                execution = developer.get('execution')
+                if dev_state == 'DEVELOPER_RESPONDED' and (
+                        type(execution) is not dict or execution['status'] != 'SUCCEEDED' or
+                        execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
+                    _fail()
+                if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
+                    _fail()
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
                     developer['error_code'] not in _DEVELOPER_REJECTION_CODES):

@@ -138,6 +138,77 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.create(value)
 
+    def _active_pm_record(self):
+        value = record()
+        value.update(
+            schema_version=2,
+            pm_provider_profile='active-pm-runtime',
+            pm_provider_type='codex-cli',
+            pm_model=None,
+            pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+            backend_session_semantics='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
+            state='PM_RESPONDED',
+            response='{"schema_version":1,"summary":"Ready.","developer_assignment":'
+                     '{"route":"opencode","risk":"LOW","goal":"Do task.",'
+                     '"acceptance":["A test passes."]}}',
+            error_code=None,
+            developer=None,
+            pm_assignment={
+                'schema_version': 1, 'route': 'opencode', 'risk': 'LOW',
+                'goal': 'Do task.', 'acceptance': ['A test passes.'],
+            },
+            completion=None,
+            pm_provenance={
+                'source': 'ACTIVE_PM_RUNTIME', 'provider_invoked': False,
+                'native_session_id_status': 'UNAVAILABLE', 'usage_status': 'UNKNOWN',
+                'session_restored': False, 'automatic_callback': False,
+            },
+        )
+        return value
+
+    def test_active_pm_provenance_is_validated_and_round_trips(self):
+        value = self._active_pm_record()
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_provenance']['usage_status'], 'UNKNOWN')
+        self.assertEqual(created['backend_session_semantics'],
+                         'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
+
+    def test_active_pm_provenance_rejects_false_or_incomplete_claims(self):
+        mutations = (
+            lambda record: record['pm_provenance'].__setitem__('provider_invoked', True),
+            lambda record: record['pm_provenance'].__setitem__('session_restored', True),
+            lambda record: record['pm_provenance'].__setitem__('automatic_callback', True),
+            lambda record: record.__setitem__('usage', {
+                'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
+            lambda record: record.__setitem__('pm_assignment', {
+                **record['pm_assignment'], 'risk': 'OTHER'}),
+            lambda record: record.pop('pm_provenance'),
+        )
+        for mutate in mutations:
+            value = self._active_pm_record()
+            mutate(value)
+            with self.subTest(mutate=mutate), self.assertRaises(LLMToolError):
+                self.store.create(value)
+
+    def test_legacy_task_shapes_remain_compatible_without_provenance(self):
+        legacy = record()
+        self.assertEqual(self.store.create(legacy)['schema_version'], 1)
+        self.assertEqual(self.store.get(legacy['task_id'])['task_id'], legacy['task_id'])
+
+        previous_v2 = record()
+        previous_v2.update(
+            schema_version=2,
+            pm_route_binding={'type': 'codex-cli', 'model': 'gpt-6-luna',
+                              'base_url': None},
+            developer=None,
+            pm_assignment=None,
+            completion=None,
+        )
+        saved = self.store.create(previous_v2)
+        self.assertEqual(self.store.get(previous_v2['task_id']), saved)
+        self.assertNotIn('pm_provenance', saved)
+
 
 if __name__ == '__main__':
     unittest.main()
