@@ -1,4 +1,6 @@
 """Host-owned foreground jobs using private synthetic executables, never models."""
+import ctypes
+import errno as _errno
 import hashlib
 import json
 import os
@@ -16,6 +18,69 @@ from llmtool import opencode_worker as w
 from llmtool.action_contract import TaskBinding
 from llmtool.run_budget import RunBudget, UsageLedger, CallUsage, CallPhase
 from llmtool.task_lifecycle import AgentBinding, Role
+
+
+_LIBC_WAITID = None
+_WEXITED = getattr(os, 'WEXITED', 4)
+_WNOHANG = getattr(os, 'WNOHANG', 1)
+_WNOWAIT = getattr(os, 'WNOWAIT', 32)
+
+
+def _test_libc_waitid():
+    """OS-native non-reaping waitid(2) binding for test land.
+
+    Independent of the production module and its patch seams (an independent
+    cross-check of opencode_worker._WAITID_FALLBACK). Same Darwin siginfo_t
+    prefix: si_pid at offset 12, si_status at offset 20. Used only where the
+    os.waitid binding is absent (Apple CommandLineTools CPython builds).
+    """
+    global _LIBC_WAITID
+    if _LIBC_WAITID is not None:
+        return _LIBC_WAITID
+    class _Info(ctypes.Structure):
+        # Darwin siginfo_t is 104 bytes; padding keeps the kernel's full write
+        # inside this mapping (si_pid@12, si_status@20 are consumed only).
+        _fields_ = (('si_signo', ctypes.c_int), ('si_errno', ctypes.c_int),
+                    ('si_code', ctypes.c_int), ('si_pid', ctypes.c_int),
+                    ('si_uid', ctypes.c_uint), ('si_status', ctypes.c_int),
+                    ('si_addr', ctypes.c_void_p), ('_pad', ctypes.c_int * 24))
+    if ctypes.sizeof(_Info) < 104:
+        return None
+    class _View:
+        __slots__ = ('si_pid', 'si_status')
+        def __init__(self, info):
+            self.si_pid = int(info.si_pid)
+            self.si_status = int(info.si_status)
+    syscall = ctypes.CDLL(None, use_errno=True).waitid
+    syscall.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int)
+    syscall.restype = ctypes.c_int
+    def _wait(idtype, pid, options):
+        info = _Info()
+        ctypes.set_errno(0)
+        result = syscall(idtype, pid, ctypes.byref(info), options)
+        if result:
+            number = ctypes.get_errno()
+            if number == _errno.ECHILD:
+                raise ChildProcessError(number)
+            raise OSError(number, os.strerror(number), 'waitid')
+        return None if info.si_pid == 0 else _View(info)
+    _LIBC_WAITID = _wait
+    return _wait
+
+
+def _waitid_nowait(pid):
+    """The platform's waitid(2) call with WEXITED|WNOHANG|WNOWAIT semantics.
+
+    CPython's os.waitid binding when the platform exposes it; the same raw
+    syscall through libc where the binding is missing. On Pythons whose real
+    os module HAS waitid but where a patch installed a stub, the patch must
+    win (mirrors what production resolves at call time).
+    """
+    waitid = getattr(os, 'waitid', None)
+    if callable(waitid):
+        return waitid(getattr(os, 'P_PID', 1), pid, _WEXITED | _WNOHANG | _WNOWAIT)
+    return _test_libc_waitid()(getattr(os, 'P_PID', 1), pid,
+                               _WEXITED | _WNOHANG | _WNOWAIT)
 
 
 FAKE = '''#!PYTHON -IB
@@ -121,7 +186,7 @@ def _still_waitable(process):
     waiter already consumed it.
     """
     try:
-        info=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+        info=_waitid_nowait(process.pid)
     except ChildProcessError:
         return False
     return info is None or info.si_pid==process.pid
@@ -157,6 +222,48 @@ class Host:
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX owned process groups required')
 class OpenCodeWorkerTests(unittest.TestCase):
+    """Fixture floor scaling keeps the SAME deadline semantics on every machine.
+
+    The timing-max-cohort tests pin a wall budget (1200ms) that developer CI
+    sized for Linux-speed process launches. On Apple CLT CPython the fixture
+    sandbox HOME carries no prebuilt bytecode cache (Apple pins the cache to
+    $HOME/Library/Caches/com.apple.python), so two serial fixture children eat
+    ~2x350ms before any event; on this hardware the legal pipeline needs
+    ~970ms, i.e. borderline at the fixed 1200ms and reads OPENCODE_TIMEOUT for
+    client-failure/overflow runs. The assertion set below (code mapping,
+    timeout-at-deadline, output-limit-before-timeout, no-resend, forced
+    reconciliation) is unchanged. The budget is derived per process from a
+    bounded fixture measurement and equals the historical 1200ms whenever the
+    machine floor is at most 800ms (the 1.5 scale only exceeds 1200 above
+    that), which is always the case on Linux CI.
+    """
+    _floor_ms: 'int | None' = None
+
+    @classmethod
+    def _pipeline_floor_ms(cls):
+        """Bound time a full legal fixture pipeline needs on this machine."""
+        if cls._floor_ms is not None:
+            return cls._floor_ms
+        case = cls('test_host_denial_and_unknown_prior_usage_never_spawn')
+        best = 0.0
+        for _ in range(2):
+            try:
+                t0 = time.monotonic()
+                job = case.job(budget=w.RunBudget(1, 8, 0, 10000, 100, 100))
+                result = w.run_worker(job, Host())
+                wall = (time.monotonic() - t0) * 1000
+                if result.code == 'OPENCODE_OUTPUT_RETURNED':
+                    best = max(best, wall)
+            except Exception:
+                pass
+        cls._floor_ms = int(best) if best else 950
+        return cls._floor_ms
+
+    def tight_budget(self):
+        """1200ms when the machine keeps the Linux floor; scaled otherwise."""
+        floor = self._pipeline_floor_ms()
+        return w.RunBudget(1, 8, 0, max(1200, int(floor * 1.5)), 100, 100)
+
     def job(self, prompt='success', script=FAKE, **changes):
         temp = tempfile.TemporaryDirectory(prefix='opencode-worker-', dir=str(Path(tempfile.gettempdir()).resolve()))
         self.addCleanup(temp.cleanup)
@@ -288,7 +395,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
     def test_timeout_and_output_limit_are_bounded_and_no_resend(self):
         for mode,code in (('timeout','OPENCODE_TIMEOUT'),('overflow','OPENCODE_OUTPUT_LIMIT')):
             with self.subTest(mode=mode):
-                job=self.job(mode,budget=RunBudget(1,8,0,1200,100,100))
+                job=self.job(mode,budget=self.tight_budget())
                 result=w.run_worker(job,Host())
                 self.assertEqual(result.code,code,result)
                 self.assertTrue(result.cleanup_confirmed)
@@ -626,7 +733,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         for mode in ('auth','unknown','incomplete','timeout','overflow'):
             with self.subTest(mode=mode):
                 host=Host()
-                result=w.run_worker(self.job(mode,budget=RunBudget(1,8,0,1200,100,100)),host)
+                result=w.run_worker(self.job(mode,budget=self.tight_budget()),host)
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertEqual(host.calls.count(('check','after')),1)
 
@@ -686,6 +793,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                     order.append(('reject',code))
                     return real_reject(code)
                 with patch.object(w,'os',OsWithout(missing)), \
+                     patch.object(w,'_WAITID_FALLBACK',None,create=True), \
                      patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
                      patch.object(w,'reject',record_reject):
                     result=w.run_worker(self.job(),Host())
@@ -768,7 +876,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
             self.assertIsNone(process.returncode)
             # WNOWAIT must leave the child waitable: a second WNOWAIT observation still
             # returns its siginfo rather than ChildProcessError, proving no early reap.
-            info=os.waitid(os.P_PID,process.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT)
+            info=_waitid_nowait(process.pid)
             self.assertIsNotNone(info)
             self.assertEqual(info.si_pid,process.pid)
             self.assertIsNone(process.returncode)
@@ -778,7 +886,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
     def test_nonreaping_observation_errors_fail_closed(self):
         process=subprocess.Popen([sys.executable,'-c','import time;time.sleep(.2)'])
         try:
-            with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone')):
+            with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone'),create=True):
                 with self.assertRaises(w.WorkerError) as caught:
                     w._observe_exit_without_reap(process,.2,time.monotonic()+2)
             self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
@@ -788,7 +896,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
 
     def test_failed_observation_is_cleanup_stage_after_successful_lifecycle_teardown(self):
         host=Host()
-        with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone')):
+        with patch.object(w.os,'waitid',side_effect=ChildProcessError('gone'),create=True):
             result=w.run_worker(self.job(),host)
         self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
         self.assertTrue(result.cleanup_confirmed)
@@ -806,7 +914,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                                         ('value-error',ValueError('bad id'),None),
                                         ('type-error',TypeError('bad option'),None)):
                 with self.subTest(label=label):
-                    with patch.object(w.os,'waitid',side_effect=effect,return_value=result):
+                    with patch.object(w.os,'waitid',side_effect=effect,return_value=result,create=True):
                         with self.assertRaises(w.WorkerError) as caught:
                             w._observe_exit_without_reap(process,.2,time.monotonic()+2)
                     self.assertEqual(caught.exception.worker_code,'OPENCODE_CLEANUP_UNKNOWN')
