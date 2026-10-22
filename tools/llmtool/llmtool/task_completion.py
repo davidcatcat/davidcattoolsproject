@@ -237,15 +237,18 @@ def collect_git_snapshot(root):
 
 
 def bind_executor_task(task_id, *, expected_common_dir, root=None):
-    """Bind a company proposal to the current exact D6 task root and source HEAD."""
+    """Bind a proposal to the current D6 root and its registered branch HEAD."""
     root = os.getcwd() if root is None else root
     registration = read_d6_registration(task_id, expected_common_dir)
     snapshot = collect_git_snapshot(root)
     if (snapshot.root != registration.root or snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
-            registration.source_sha != snapshot.head or
-            registration.result_sha != registration.source_sha or
             not snapshot.clean):
+        _stop('D6_SOURCE_BINDING_MISMATCH')
+    try:
+        _git(root, ('merge-base', '--is-ancestor', registration.source_sha, snapshot.head),
+             limit=4096)
+    except LLMToolError:
         _stop('D6_SOURCE_BINDING_MISMATCH')
     return registration, snapshot
 
@@ -315,7 +318,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_D6_EVIDENCE_STATES)
     if (registration.root != expected_root or registration.branch != expected_branch or
-            registration.source_sha != source_sha or
+            type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None or
             registration.trusted_agent_id != expected_agent or
             registration.session_ref != expected_session_ref or
             registration.native_session_id != expected_native_session_id):
@@ -328,6 +331,11 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     if (snapshot.common_dir != registration.common_dir or snapshot.branch != registration.branch or
             snapshot.head != registration.result_sha or not snapshot.clean):
         _stop('RESULT_HEAD_MISMATCH')
+    try:
+        _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha, source_sha),
+             limit=4096)
+    except LLMToolError:
+        _stop('D6_TASK_BINDING_MISMATCH')
     if source_sha == snapshot.head:
         _stop('RESULT_DIFF_EMPTY')
     ancestor = subprocess.run(['/usr/bin/git', '-C', registration.root, 'merge-base',

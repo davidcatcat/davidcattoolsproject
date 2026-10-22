@@ -13,8 +13,10 @@ from .chat import reply_usage
 from .config import api_key, resolve_profile_config, selected_provider
 from .errors import LLMToolError
 from .providers import create_client
+from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, new_id
 from . import task_completion
+from . import opencode_direct_developer
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
 
@@ -147,6 +149,53 @@ def _pm_assignment(response):
         return None
 
 
+def _strict_json_object(raw):
+    """Parse bounded JSON while rejecting duplicate keys and non-standard constants."""
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('duplicate JSON key')
+            value[key] = item
+        return value
+
+    value = json.loads(raw, object_pairs_hook=unique_pairs,
+                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    if type(value) is not dict:
+        raise ValueError('JSON object required')
+    return value
+
+
+def _read_pm_record_input(stream=None):
+    stream = sys.stdin if stream is None else stream
+    source = getattr(stream, 'buffer', stream)
+    raw = source.read(REQUEST_LIMIT + RESPONSE_LIMIT + 1024 + 1)
+    if type(raw) is str:
+        try:
+            raw = raw.encode('utf-8')
+        except UnicodeError:
+            raise LLMToolError('PM record input must be valid UTF-8 JSON') from None
+    if type(raw) is not bytes or len(raw) > REQUEST_LIMIT + RESPONSE_LIMIT + 1024:
+        raise LLMToolError('PM record input exceeds the supported size')
+    try:
+        envelope = _strict_json_object(raw.decode('utf-8', 'strict'))
+    except (UnicodeError, ValueError, TypeError):
+        raise LLMToolError('PM record input must be one strict JSON object') from None
+    if set(envelope) != {'request', 'response'}:
+        raise LLMToolError('PM record input must contain only request and response')
+    request = _screen_text(envelope['request'], REQUEST_LIMIT)
+    response = _screen_text(envelope['response'], RESPONSE_LIMIT)
+    try:
+        _strict_json_object(response)
+    except (ValueError, TypeError):
+        raise LLMToolError('PM response must be one strict JSON object') from None
+    assignment = _pm_assignment(response)
+    if (assignment is None or assignment['route'] != 'opencode' or
+            assignment['risk'] != 'LOW'):
+        raise LLMToolError('PM response must recommend one low-risk OpenCode assignment')
+    return request, response, assignment
+
+
 def _pm_recommendation(response, *, executor_result=False):
     try:
         value = json.loads(response)
@@ -235,6 +284,8 @@ def _task_view(record):
     view = {key: record[key] for key in fields}
     if 'pm_route_binding' in record:
         view['pm_route_binding'] = record['pm_route_binding']
+    if 'pm_provenance' in record:
+        view['pm_provenance'] = record['pm_provenance']
     if record['schema_version'] == 2:
         if 'completion' in record:
             view['completion'] = record['completion']
@@ -258,11 +309,16 @@ def add_task_submission_parsers(actions):
     submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
     submit.add_argument('request', nargs='+', help='development request text')
+    record_pm = actions.add_parser(
+        'record-pm', help='Record an active PM runtime decision without invoking a provider')
+    record_pm.add_argument('--stdin-json', action='store_true', required=True,
+                           help='read one bounded JSON object with request and response from stdin')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
-    delegate = actions.add_parser('delegate', help='Request a bounded company-gw code patch for an existing task')
+    delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
-    delegate.add_argument('--provider', required=True, help='must be the explicitly configured company-gw profile')
+    delegate.add_argument('--provider', required=True, choices=('company-gw', 'opencode'),
+                          help='explicit Developer route; OpenCode uses the configured local CLI auth')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -270,8 +326,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--write-path', action='append', required=True, help='authorized relative target path; repeat as needed')
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
-    delegate.add_argument('--context-stdin', action='store_true', required=True,
-                          help='read bounded, sensitive-screened code context from stdin')
+    delegate.add_argument('--context-stdin', action='store_true',
+                          help='company-gw only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
@@ -424,8 +480,292 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
                                                   sort_keys=True, separators=(',', ':'))}]
 
 
+def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
+                               acceptance, pm_goal):
+    packet = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
+        'source_sha': source_sha, 'goal': pm_goal,
+        'acceptance': acceptance, 'read_paths': read_paths,
+        'write_paths': write_paths,
+    }
+    return (
+        'You are the OpenCode Developer for this bounded llmtool Task. Make the '
+        'smallest code change that satisfies the goal and acceptance criteria. '
+        'Read only the listed paths and edit only write_paths. Do not use shell, '
+        'Git, network, MCP, integrations, subagents, or other tools. Do not include '
+        'secrets or private data. Run no tests unless a permitted tool is explicitly '
+        'available. At the end, briefly summarize the change and any uncertainty; '
+        'do not claim tests, review, commits, or PRs that did not occur.\n'
+        'TASK_PACKET_JSON=' + json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                                         separators=(',', ':'))
+    )
+
+
+def _direct_execution(result, *, status='SUCCEEDED'):
+    return {
+        'status': status,
+        'native_session_id': result.session_id,
+        'process_exit_code': result.exit_code,
+        'stdout_sha256': result.stdout_sha256,
+        'elapsed_ms': result.elapsed_ms,
+        'cleanup_status': result.cleanup_status,
+        'usage_source': result.usage_source,
+        'source_bytes': result.source_bytes,
+        'source_file_count': result.source_file_count,
+        'source_manifest_sha256': result.source_manifest_sha256,
+    }
+
+
+def _interrupted_execution(exc):
+    """Return only adapter-observed process evidence after an interrupt."""
+    observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
+    fields = ('native_session_id', 'process_exit_code', 'stdout_sha256',
+              'elapsed_ms', 'cleanup_status', 'source_bytes',
+              'source_file_count', 'source_manifest_sha256')
+    value = {name: None for name in fields}
+    value.update(status='UNKNOWN', cleanup_status='UNKNOWN', usage_source='UNKNOWN')
+    if type(observed) is dict:
+        for name in fields:
+            if name in observed:
+                value[name] = observed[name]
+        # A pre-interruption CLI event stream has not been fully validated.
+        value['native_session_id'] = None
+        value['cleanup_status'] = (observed.get('cleanup_status')
+                                   if observed.get('cleanup_status') in ('CONFIRMED', 'UNKNOWN')
+                                   else 'UNKNOWN')
+        value['usage_source'] = 'UNKNOWN'
+    return value
+
+
+def _persist_opencode_interruption(store, task_id, developer, exc, *, result=None):
+    """Persist an ambiguous outcome without replaying the provider request."""
+    developer.update(
+        state='DEVELOPER_OUTCOME_UNKNOWN',
+        provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+        max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+        artifact=None, artifact_sha256=None, usage=None,
+        error_code=('OPENCODE_INTERRUPTED' if isinstance(exc, KeyboardInterrupt)
+                    else 'OPENCODE_HOST_TERMINATED'),
+        execution=(_direct_execution(result, status='UNKNOWN') if result is not None
+                   else _interrupted_execution(exc)),
+    )
+    try:
+        return store.update(task_id, developer=developer)
+    except BaseException:
+        # Keep the original interrupt/termination even if the recovery write
+        # is itself interrupted or otherwise unavailable.
+        raise exc
+
+
+def _print_without_masking_interrupt(saved):
+    try:
+        _print(_task_view(saved))
+    except BaseException:
+        # Output is best-effort on an already-interrupted command path.
+        pass
+
+
+def run_task_opencode_delegate(args, *, store):
+    """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
+    task = store.get(args.task_id)
+    if (task['state'] != 'PM_RESPONDED' or not task['response'] or
+            task['schema_version'] != 2):
+        raise LLMToolError('task has no successful PM response')
+    if task['developer'] is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    if getattr(args, 'context_stdin', False):
+        raise LLMToolError('OpenCode reads only its registered task-local file scope')
+    pm_assignment = task['pm_assignment']
+    if args.selection_source == 'PM':
+        if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'opencode' or
+                pm_assignment.get('risk') != 'LOW'):
+            raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
+        if args.acceptance != pm_assignment['acceptance']:
+            raise LLMToolError('acceptance differs from the selected PM assignment')
+    snapshot = task_completion.collect_git_snapshot(os.getcwd())
+    registration, snapshot = task_completion.bind_executor_task(
+        args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
+        raise LLMToolError('developer acceptance scope is invalid')
+    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    egress_basis = _screen_text(args.egress_basis, 512)
+    _screen_text(task['request'], REQUEST_LIMIT)
+    _screen_text(task['response'], RESPONSE_LIMIT)
+    pm_goal = (pm_assignment['goal'] if args.selection_source == 'PM'
+               else task['request'])
+    prompt = _opencode_developer_prompt(
+        task, source_sha=snapshot.head, read_paths=read_paths,
+        write_paths=write_paths, acceptance=acceptance, pm_goal=pm_goal)
+    prompt_size = len(prompt.encode('utf-8'))
+    if prompt_size > REQUEST_LIMIT:
+        raise LLMToolError('OpenCode task prompt exceeds the supported size')
+    developer = {
+        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': read_paths, 'write_paths': write_paths,
+        'acceptance': acceptance,
+        'context_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+        'egress_basis': egress_basis, 'input_bytes': prompt_size,
+        'max_tokens': None,
+        'artifact_format': 'unified_diff', 'artifact': None,
+        'artifact_sha256': None, 'usage': None, 'error_code': None,
+        'execution': None, 'created_at': _timestamp(),
+    }
+    completion = {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
+        'reviewer_task_id': None,
+        'evidence': {
+            'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': task['task_binding']['contract_digest'],
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
+            'execution_mode': 'DIRECT_D6', 'root': registration.root,
+            'common_dir': registration.common_dir, 'branch': registration.branch,
+            'source_sha': snapshot.head, 'result_head': None,
+        },
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+        'pm_response': None, 'pm_recommendation': None,
+        'pm_usage': None, 'pm_error_code': None,
+    }
+    store.compare_and_update(
+        task['task_id'],
+        expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                  'completion': None},
+        developer=developer, completion=completion,
+    )
+    try:
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
+                         model=opencode_direct_developer.MODEL,
+                         max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
+        store.update(task['task_id'], developer=developer)
+
+        def validate_prelaunch_d6_binding():
+            current_registration, current_snapshot = task_completion.bind_executor_task(
+                registration.task_id, expected_common_dir=registration.common_dir,
+                root=registration.root)
+            if (current_registration != registration or current_snapshot != snapshot):
+                raise LLMToolError('D6 or Git identity changed before OpenCode launch')
+            return True
+
+        result = opencode_direct_developer.run(
+            root=registration.root, read_paths=read_paths,
+            write_paths=write_paths, prompt=prompt,
+            prelaunch_validate=validate_prelaunch_d6_binding)
+    except opencode_direct_developer.DirectOpenCodeError as exc:
+        if exc.attempted:
+            developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+                error_code=exc.direct_opencode_code,
+                execution={
+                    'status': 'UNKNOWN', 'native_session_id': None,
+                    'process_exit_code': exc.process_exit_code,
+                    'stdout_sha256': exc.stdout_sha256,
+                    'elapsed_ms': exc.elapsed_ms,
+                    'cleanup_status': exc.cleanup_status,
+                    'usage_source': 'UNKNOWN',
+                    'source_bytes': exc.source_bytes,
+                    'source_file_count': exc.source_file_count,
+                    'source_manifest_sha256': exc.source_manifest_sha256,
+                })
+        else:
+            developer.update(state='DEVELOPER_UNAVAILABLE',
+                              error_code=exc.direct_opencode_code)
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        # Preserve Ctrl-C/host termination semantics, but first prevent the
+        # durable task from being stranded in DEVELOPER_DISPATCHING. The
+        # adapter attaches only observed process/cleanup facts; absent facts
+        # remain UNKNOWN, and this path never replays the provider request.
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc)
+        _print_without_masking_interrupt(saved)
+        raise
+    except Exception:
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+            error_code='OPENCODE_ADAPTER_UNKNOWN',
+            execution={
+                'status': 'UNKNOWN', 'native_session_id': None,
+                'process_exit_code': None, 'stdout_sha256': None,
+                'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None,
+            })
+        try:
+            saved = store.update(task['task_id'], developer=developer)
+        except Exception:
+            raise LLMToolError('OpenCode outcome is ambiguous and could not be persisted') from None
+        _print(_task_view(saved))
+        return 1
+
+    try:
+        after = task_completion.collect_git_snapshot(registration.root)
+        if (after.root != registration.root or after.common_dir != registration.common_dir or
+                after.branch != registration.branch or after.head != snapshot.head):
+            raise LLMToolError('OpenCode changed the registered Git identity')
+        untracked = task_completion._git(registration.root,
+            ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
+        if untracked:
+            raise LLMToolError('OpenCode created an untracked file outside the captured diff')
+        artifact_raw = task_completion._git(registration.root,
+            ('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames',
+             snapshot.head, '--'), limit=64 * 1024)
+        artifact = artifact_raw.decode('utf-8', 'strict')
+        rejection = _developer_output_rejection(artifact, write_paths)
+        execution = _direct_execution(result)
+        if rejection is not None:
+            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
+                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+                usage=result.usage, error_code=rejection, execution=execution)
+        else:
+            developer.update(state='DEVELOPER_RESPONDED',
+                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+                artifact=artifact,
+                artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                usage=result.usage, error_code=None, execution=execution)
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc, result=result)
+        _print_without_masking_interrupt(saved)
+        raise
+    except Exception:
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
+            error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+            execution=_direct_execution(result, status='UNKNOWN'))
+    try:
+        saved = store.update(task['task_id'], developer=developer)
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        saved = _persist_opencode_interruption(
+            store, task['task_id'], developer, exc, result=result)
+        _print_without_masking_interrupt(saved)
+        raise
+    _print(_task_view(saved))
+    return 0 if developer['state'] == 'DEVELOPER_RESPONDED' else 1
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    if args.provider == 'opencode':
+        return run_task_opencode_delegate(args, store=store)
+    if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
+        raise LLMToolError('company-gw delegation requires explicit --context-stdin')
     task = store.get(args.task_id)
     if task['state'] != 'PM_RESPONDED' or not task['response']:
         raise LLMToolError('task has no successful PM response')
@@ -633,6 +973,41 @@ def run_task_submit(args, *, store=None):
         # Do not print an unpersisted provider response as a completed Task.
         raise LLMToolError('task outcome could not be saved; details omitted') from None
     _print(_task_view(completed))
+    return 0
+
+
+def run_task_record_pm(args, *, store=None, input_stream=None):
+    """Persist a real active-PM decision; this path never resolves or calls a provider."""
+    del args  # The required flag is enforced by argparse; no caller text is trusted from argv.
+    store = TaskStore() if store is None else store
+    prompt, response, assignment = _read_pm_record_input(input_stream)
+    task_id, run_id = new_id(), new_id()
+    digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
+    contract = _contract(task_id, digest)
+    record = _record(
+        task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
+        state='PM_RESPONDED', provider_type='codex-cli', model=None,
+        backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
+        contract=contract,
+    )
+    record.update(
+        pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+        response=response, usage=None, error_code=None, pm_assignment=assignment,
+        pm_provenance={
+            'source': 'ACTIVE_PM_RUNTIME',
+            'provider_invoked': False,
+            'native_session_id_status': 'UNAVAILABLE',
+            'usage_status': 'UNKNOWN',
+            'session_restored': False,
+            'automatic_callback': False,
+        },
+    )
+    try:
+        store.create(record)
+        saved = store.get(task_id)
+    except Exception:
+        raise LLMToolError('active PM outcome could not be saved; details omitted') from None
+    _print(_task_view(saved))
     return 0
 
 

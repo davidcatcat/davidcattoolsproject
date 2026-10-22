@@ -161,6 +161,10 @@ Keep the skill focused, define a clear process, and end with checkable completio
 - [`tools/nlf`](tools/nlf/README.md) — Natural Language Find: find files from a Chinese or English description (Go, read-only, no LLM).
 
 
+## llmtool TUI UI/UX decision
+
+The Owner accepted a **UI-only** design direction on 2026-10-22, inspired by Claude Code and Codex CLI: chat-first terminal layout, polished editing and slash-command picker, compact configurable status and optional read-only detail views. See the [new TUI decision meeting](docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md), [A3.5 roadmap](tools/llmtool/ROADMAP.md) and [current vs planned UI support](tools/llmtool/README.md#a35-ux-1ux-2--opt-in-full-screen-chat-and-truthful-status). **No new Core, routing, background, Git or approval engine is authorized as TUI work.**
+
 ## Company LLM delegation evidence
 
 Round-2/Round-3 dogfood changed the routing policy from a generic "cheap-first" idea to

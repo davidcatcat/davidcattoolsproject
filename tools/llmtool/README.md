@@ -1470,6 +1470,15 @@ Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains i
 subcommand-required behavior; automatic interactive entry is a future UX option.
 History grows in memory without token budgeting or automatic truncation; provider
 context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+
+### TUI UI/UX decision and planned polish (Owner accepted 2026-10-22)
+
+See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
+
+**TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Its conversation history remains memory-only; closing the chat does **not** establish persistent Task resume or detached background work.
+
+Agreed UI backlog, not yet fully implemented: **P0** command picker/completion for already-supported commands, input history search, composer polish and compact selectable status; **P1** Markdown/code/diff and expandable evidence display plus optional read-only Task/Agent/GitHub/Usage/Approval screens **only if Core exposes trustworthy data**; **P2** themes, syntax highlighting and optional layouts. Key mappings such as Shift+Enter, Ctrl+R, Ctrl+G and Ctrl+O are proposals subject to terminal testing and backwards compatibility. Unknown or unsupported functions are hidden/disabled or marked UNKNOWN; TUI changes must not add provider, PM, execution, Git, approval, token accounting, database or background-worker behavior.
+
 ### A3.5 UX-1/UX-2 — opt-in full-screen chat and truthful status
 
 ```sh
