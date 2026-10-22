@@ -82,12 +82,12 @@ All commands ran in the task D6 worktree with the task-local venv (Python 3.13.3
 
 ## 7. Items for the Reviewer and the Owner
 
-1. **The CLAUDE.md / AGENTS.md Reviewer wording (C1).** The new rule lets the Codex Reviewer substitute either on an Owner assignment or when the dated table marks Claude unavailable. The previous authorization was tied to a quota date. Please confirm that the condition-based form matches the Owner's intent. If it does not, it can revert to an Owner-assignment-only form without other changes.
+1. **The CLAUDE.md / AGENTS.md Reviewer wording (C1; audit-time concern).** The audit draft allowed Codex substitution whenever the availability table marked Claude unavailable, without an end date. Follow-up repair narrows this to the Owner's current dated authorization through Claude quota recovery, expected 2026-10-25; it does not establish an indefinite Codex substitution route.
 2. **Process disclosure.** Before the worktree was created, a `git fetch origin` ran in the canonical checkout. It only updated remote-tracking refs. Under the safe-git rules this should have been left to the Integrator.
-3. **Next executable A11c work.** This is the PM's decision; nothing has been started.
+3. **Next executable A11c work (audit snapshot).** This is the PM's decision; nothing had been started when the report was prepared. Subsequent status is noted where known below.
    - WP2: publish `e6e8e763`, in its existing D6 task, by its existing Codex Developer.
    - Then WP3 R2 and R1/R3, in sequence in the same task line (Codex Developer).
-   - #273 ENV-1 awaits the Codex Reviewer.
+   - At the audit snapshot, #273 ENV-1 awaited the Codex Reviewer. It subsequently merged via PR #273 at `2e6c5dc`; ENV-0, ENV-2 and ENV-3 remain open under Issue #267.
    - The #266 and #272 REVISE items are docs fixes (Codex Developer, or a Claude Developer only on Owner assignment).
    - OpenCode stays paused until a bounded free call succeeds.
    - Company `gw` may take a low-risk test task only after the PM records the data basis and an authorized llmtool call establishes layers 2–3.
