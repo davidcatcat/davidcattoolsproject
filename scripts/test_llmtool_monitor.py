@@ -22,6 +22,20 @@ SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUT
            "RAW-ARGV-SECRET", "CREDENTIAL-SECRET", "token=abc", "/Users/davidsun")
 
 
+_ISOLATED = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # Never let a test read the developer's real agent sessions: a live session
+    # changing state mid-test would add office events to unrelated assertions.
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB"):
+        setattr(mon, name, os.path.join(_ISOLATED.name, name))
+
+
+def tearDownModule():
+    _ISOLATED.cleanup()
+
+
 def ps(*rows):
     return "\n".join(rows)
 

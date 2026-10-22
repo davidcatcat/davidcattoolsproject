@@ -1301,8 +1301,9 @@ def _codex_row(path: str, now: float, canonical: str):
     return ("main", payload.get("id"), OfficeRow("codex PM", state, "", age, 0))
 
 
-def codex_rows(now: float, root: str = CODEX_SESSIONS,
+def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None) -> list[OfficeRow]:
+    root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400)) for d in (0, 1)}
     paths = []
@@ -1334,8 +1335,9 @@ def codex_rows(now: float, root: str = CODEX_SESSIONS,
     return rows + [row for _, row in subs]
 
 
-def claude_rows(now: float, root: str = CLAUDE_PROJECTS,
+def claude_rows(now: float, root: str | None = None,
                 canonical: str | None = None) -> list[OfficeRow]:
+    root = CLAUDE_PROJECTS if root is None else root
     canonical = canonical or canonical_root()
     rows = []
     for path in sorted(glob.glob(os.path.join(root, "*", "*.jsonl"))):
@@ -1421,8 +1423,9 @@ def process_cwd(pid: int) -> str | None:
     return found
 
 
-def opencode_sessions(now: float, db: str = OPENCODE_DB) -> list[tuple]:
+def opencode_sessions(now: float, db: str | None = None) -> list[tuple]:
     """[(directory, title, updated_s, idle_s | None)] for recent top-level sessions."""
+    db = OPENCODE_DB if db is None else db
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
     except sqlite3.Error:
@@ -1441,8 +1444,9 @@ def opencode_sessions(now: float, db: str = OPENCODE_DB) -> list[tuple]:
     return out
 
 
-def opencode_outcome(now: float, db: str = OPENCODE_DB):
+def opencode_outcome(now: float, db: str | None = None):
     """(state, detail, age) from the newest finished OpenCode session, or None."""
+    db = OPENCODE_DB if db is None else db
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
     except sqlite3.Error:
@@ -1486,7 +1490,7 @@ def _elapsed_seconds(text: str) -> float | None:
 
 
 def opencode_rows(processes: list[Process], now: float, canonical: str,
-                  db: str = OPENCODE_DB, cwd_of=process_cwd) -> list[OfficeRow]:
+                  db: str | None = None, cwd_of=process_cwd) -> list[OfficeRow]:
     """One row per running OpenCode CLI/TUI or `run` client."""
     procs = sorted((p for p in processes if p.role in OPENCODE_ROLES), key=lambda p: p.pid)
     alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + ("AGY CLI",)}
@@ -1600,9 +1604,9 @@ def _worker_state(status: str) -> tuple[str, str]:
 
 
 def office_rows(processes: list[Process], now: float | None = None, *,
-                codex_root: str = CODEX_SESSIONS, claude_root: str = CLAUDE_PROJECTS,
+                codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
-                opencode_db: str = OPENCODE_DB, cwd_of=process_cwd,
+                opencode_db: str | None = None, cwd_of=process_cwd,
                 cpu_of=process_cpu) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
