@@ -386,7 +386,9 @@ def interpreter_info(python_executable):
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise EnvError(
-            "INTERPRETER_UNAVAILABLE", "cannot run %s: %s" % (python_executable, exc), 4
+            "INTERPRETER_UNAVAILABLE",
+            _redact_diagnostic("cannot run %s: %s" % (python_executable, exc), 500),
+            4,
         )
     for line in proc.stdout.splitlines():
         if line.startswith("@@"):
@@ -396,7 +398,7 @@ def interpreter_info(python_executable):
         raise EnvError(
             "INTERPRETER_UNAVAILABLE",
             "%s did not report interpreter info: %s"
-            % (python_executable, (proc.stderr or "").strip()[-500:]),
+            % (python_executable, _subprocess_diagnostic(proc, 500)),
             4,
         )
     info["platform"] = info.get("platform") or sys.platform
@@ -483,18 +485,45 @@ def strip_credentials(value):
     return urlunsplit((parts.scheme.lower(), netloc, parts.path, "", ""))
 
 
-def _safe_command_output(value, limit):
-    """Bound subprocess diagnostics after removing URL credentials and queries."""
+_SENSITIVE_DIAGNOSTIC_KEY = (
+    r"(?:access[_-]?token|api[_-]?key|auth(?:orization)?|client[_-]?secret|"
+    r"credential|password|passwd|secret|signature|token|"
+    r"pip[_-]?(?:extra[_-]?)?index[_-]?url|find[_-]?links|url)"
+)
 
-    def redact(match):
-        try:
-            return strip_credentials(match.group(0))
-        except EnvError:
-            return "<redacted-url>"
 
-    value = value or ""
-    value = re.sub(r"(?i)\b(?:https?|file)://[^\s\"'<>]+", redact, value)
+def _redact_diagnostic(value, limit=2000):
+    """Sanitize subprocess and internal diagnostics before they reach users."""
+
+    value = str(value or "")
+    value = re.sub(
+        r"(?i)(\burl\s*:\s*)(?:[a-z][a-z0-9+.-]*:)?/{1,3}[^\s\"'<>]+",
+        r"\1<redacted-url>",
+        value,
+    )
+    value = re.sub(
+        r"(?i)\b[a-z][a-z0-9+.-]*:/{1,3}[^\s\"'<>]+",
+        "<redacted-url>",
+        value,
+    )
+    value = re.sub(
+        r"(?i)([\w.-]+:[^@\s/?#]+@[^/\s?#]+(?:/[^\s?#]*)?(?:\?[^\s#]*)?(?:#[^\s]*)?)",
+        "<redacted-url>",
+        value,
+    )
+    value = re.sub(
+        r"(?i)(\b" + _SENSITIVE_DIAGNOSTIC_KEY + r"\s*[=:]\s*)"
+        r"(?:bearer\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s,;\"'<>]+)",
+        r"\1<redacted>",
+        value,
+    )
     return value.strip()[-limit:]
+
+
+def _subprocess_diagnostic(proc, limit=2000):
+    """Sanitize both subprocess streams through the shared diagnostic redactor."""
+
+    return _redact_diagnostic("\n".join(part for part in (proc.stderr, proc.stdout) if part), limit)
 
 
 def _pip_config_files(interp):
@@ -584,12 +613,13 @@ def pip_version_string(python_executable):
             capture_output=True, text=True, timeout=120, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("PIP_UNAVAILABLE", "cannot run pip: %s" % exc, 5)
+        raise EnvError("PIP_UNAVAILABLE", _redact_diagnostic("cannot run pip: %s" % exc, 500), 5)
     match = re.match(r"^pip (\d+(?:\.\d+)*\S*)", proc.stdout or "")
     if proc.returncode != 0 or not match:
         raise EnvError(
             "PIP_UNAVAILABLE",
-            "pip did not report a version: %s" % (proc.stderr or proc.stdout or "").strip()[-500:],
+            "pip did not report a version: %s"
+            % _subprocess_diagnostic(proc, 500),
             5,
         )
     return match.group(1)
@@ -932,12 +962,14 @@ def _download_wheels(python_executable, requirements, destination):
             cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("PIP_DOWNLOAD_FAILED", "pip download could not run: %s" % exc, 5)
+        raise EnvError(
+            "PIP_DOWNLOAD_FAILED", _redact_diagnostic("pip download could not run: %s" % exc), 5
+        )
     if proc.returncode != 0:
         raise EnvError(
             "PIP_DOWNLOAD_FAILED",
             "pip download failed (%d): %s"
-            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
+            % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
     req_path.unlink()
@@ -1111,12 +1143,12 @@ def create_venv(worktree, python_executable, recreate=False):
             cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, check=False
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("VENV_FAILED", "venv creation could not run: %s" % exc, 5)
+        raise EnvError("VENV_FAILED", _redact_diagnostic("venv creation could not run: %s" % exc), 5)
     if proc.returncode != 0:
         raise EnvError(
             "VENV_FAILED",
             "venv creation failed (%d): %s"
-            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
+            % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
     _assert_venv_within_worktree(venv, worktree)
@@ -1144,14 +1176,18 @@ def install_requirements(python_executable, wheelhouse, requirements):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("PIP_INSTALL_FAILED", "dependency install could not run: %s" % exc, 5)
+        raise EnvError(
+            "PIP_INSTALL_FAILED",
+            _redact_diagnostic("dependency install could not run: %s" % exc),
+            5,
+        )
     finally:
         shutil.rmtree(str(req_path.parent), ignore_errors=True)
     if proc.returncode != 0:
         raise EnvError(
             "PIP_INSTALL_FAILED",
             "dependency install failed (%d): %s"
-            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
+            % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
 
@@ -1168,13 +1204,17 @@ def pip_version(python_executable):
             capture_output=True, text=True, timeout=120, check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("PIP_UNAVAILABLE", "cannot run pip in the venv: %s" % exc, 5)
+        raise EnvError(
+            "PIP_UNAVAILABLE",
+            _redact_diagnostic("cannot run pip in the venv: %s" % exc, 500),
+            5,
+        )
     match = re.match(r"^pip (\d+)\.(\d+)", proc.stdout or "")
     if proc.returncode != 0 or not match:
         raise EnvError(
             "PIP_UNAVAILABLE",
             "venv pip did not report a version: %s"
-            % _safe_command_output(proc.stderr or proc.stdout, 500),
+            % _subprocess_diagnostic(proc, 500),
             5,
         )
     return (int(match.group(1)), int(match.group(2)))
@@ -1233,12 +1273,14 @@ def install_project(python_executable, worktree, wheelhouse):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise EnvError("PIP_INSTALL_FAILED", "project install could not run: %s" % exc, 5)
+        raise EnvError(
+            "PIP_INSTALL_FAILED", _redact_diagnostic("project install could not run: %s" % exc), 5
+        )
     if proc.returncode != 0:
         raise EnvError(
             "PIP_INSTALL_FAILED",
             "worktree project install failed (%d): %s"
-            % (proc.returncode, _safe_command_output(proc.stderr or proc.stdout, 2000)),
+            % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
 
@@ -1307,16 +1349,20 @@ def _probe_venv(python_executable, names):
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise EnvError("PROBE_FAILED", "cannot run venv python: %s" % exc, 3)
+            raise EnvError("PROBE_FAILED", _redact_diagnostic("cannot run venv python: %s" % exc, 1000), 3)
     finally:
         shutil.rmtree(neutral, ignore_errors=True)
     for line in proc.stdout.splitlines():
         if line.startswith("@@"):
-            return json.loads(line[2:])
+            result = json.loads(line[2:])
+            for key in ("error", "import_error"):
+                if isinstance(result.get(key), str):
+                    result[key] = _redact_diagnostic(result[key], 1000)
+            return result
     raise EnvError(
         "PROBE_FAILED",
         "could not probe venv %s: %s"
-        % (python_executable, (proc.stderr or proc.stdout or "").strip()[-1000:]),
+        % (python_executable, _subprocess_diagnostic(proc, 1000)),
         3,
     )
 
@@ -1743,14 +1789,16 @@ def main(argv=None):
     try:
         report = handlers[args.command](args)
     except EnvError as exc:
-        sys.stderr.write("ERROR %s: %s\n" % (exc.status, exc))
+        message = _redact_diagnostic(exc)
+        sys.stderr.write("ERROR %s: %s\n" % (exc.status, message))
         if getattr(args, "json", False):
-            print(json.dumps({"status": "error", "code": exc.status, "message": str(exc)}))
+            print(json.dumps({"status": "error", "code": exc.status, "message": message}))
         return exc.exit_code
     except Exception as exc:  # never leak a traceback as exit code 1
-        sys.stderr.write("ERROR INTERNAL: %s: %s\n" % (type(exc).__name__, exc))
+        message = _redact_diagnostic(exc)
+        sys.stderr.write("ERROR INTERNAL: %s: %s\n" % (type(exc).__name__, message))
         if getattr(args, "json", False):
-            print(json.dumps({"status": "error", "code": "INTERNAL", "message": str(exc)}))
+            print(json.dumps({"status": "error", "code": "INTERNAL", "message": message}))
         return 3
     if getattr(args, "json", False):
         print(json.dumps(report, indent=2, sort_keys=True))

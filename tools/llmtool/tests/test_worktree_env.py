@@ -732,6 +732,107 @@ class CacheTest(EnvironmentTempCase):
             self.assertNotIn(secret, err)
             self.assertNotIn(secret, out)
 
+    def _capture_real_subprocess_output(self, operation, markers):
+        original_run = subprocess.run
+        captured = []
+
+        def capture(command, *args, **kwargs):
+            result = original_run(command, *args, **kwargs)
+            if len(command) > 2 and command[1:3] == ["-m", "pip"]:
+                captured.append((result.stderr or "") + (result.stdout or ""))
+            return result
+
+        with mock.patch.object(we.subprocess, "run", side_effect=capture):
+            with self.assertRaises(we.EnvError) as caught:
+                operation()
+        raw = "\n".join(captured)
+        self.assertTrue(captured, "the regression must exercise a real pip subprocess")
+        for marker in markers:
+            self.assertIn(marker, raw, "real pip output no longer reproduces the diagnostic format")
+            self.assertNotIn(marker, str(caught.exception))
+
+    def test_real_pip_download_error_redacts_file_index_query_and_fragment(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        requirements = we.selected_requirements(
+            we.parse_lock(worktree / "tools" / "llmtool" / "worktree-env.lock"), []
+        )
+        destination = self.tmp / "download-destination"
+        destination.mkdir()
+        index = "file://%s?token=download-secret#download-fragment" % (
+            self.tmp / "missing-index"
+        )
+        with mock.patch.dict(os.environ, {"PIP_INDEX_URL": index}):
+            self._capture_real_subprocess_output(
+                lambda: we._download_wheels(sys.executable, requirements, destination),
+                ("download-secret", "download-fragment"),
+            )
+
+    def test_real_pip_dependency_install_error_redacts_file_links(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        requirements = we.selected_requirements(
+            we.parse_lock(worktree / "tools" / "llmtool" / "worktree-env.lock"), []
+        )
+        wheelhouse = self.tmp / "empty-wheelhouse"
+        wheelhouse.mkdir()
+        links = "file://%s?token=install-secret#install-fragment" % wheelhouse
+        with mock.patch.dict(os.environ, {"PIP_FIND_LINKS": links}):
+            self._capture_real_subprocess_output(
+                lambda: we.install_requirements(sys.executable, wheelhouse, requirements),
+                ("install-secret", "install-fragment"),
+            )
+
+    @needs_editable_pip
+    def test_real_pip_project_install_error_redacts_worktree_path(self):
+        marker = "project-secret"
+        fragment = "project-fragment"
+        project_root = self.tmp / ("wt?token=%s#%s" % (marker, fragment))
+        wheel_source = self.tmp / "wheel-source"
+        wheel = make_wheel(wheel_source, "tiny-dep", "1.0.0")
+        worktree = self.make_worktree(
+            project_root, "A", {"tiny-dep": [sha256_of(wheel)]}, broken=True
+        )
+        wheelhouse = self.tmp / "empty-project-wheelhouse"
+        wheelhouse.mkdir()
+        self._capture_real_subprocess_output(
+            lambda: we.install_project(
+                sys.executable, worktree / "tools" / "llmtool", wheelhouse
+            ),
+            (marker, fragment),
+        )
+
+    def test_subprocess_helpers_and_internal_error_redact_url_path_diagnostics(self):
+        secret = "helper-secret"
+        fragment = "helper-fragment"
+        script = self.tmp / "diagnostic-probe"
+        script.write_text(
+            "#!/bin/sh\nprintf '%%s\\n' 'url: /private/path?token=%s#%s' >&2\nexit 1\n"
+            % (secret, fragment),
+            encoding="utf-8",
+        )
+        script.chmod(0o755)
+
+        for operation in (
+            lambda: we.interpreter_info(str(script)),
+            lambda: we.pip_version_string(str(script)),
+            lambda: we.pip_version(str(script)),
+            lambda: we._probe_venv(str(script), []),
+        ):
+            with self.assertRaises(we.EnvError) as caught:
+                operation()
+            self.assertNotIn(secret, str(caught.exception))
+            self.assertNotIn(fragment, str(caught.exception))
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            we, "cmd_fingerprint", side_effect=RuntimeError(
+                "file:/private/path?token=%s#%s" % (secret, fragment)
+            )
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            code = we.main(["--json", "fingerprint", "--worktree", str(self.tmp)])
+        self.assertEqual(code, 3)
+        self.assertNotIn(secret, stdout.getvalue() + stderr.getvalue())
+        self.assertNotIn(fragment, stdout.getvalue() + stderr.getvalue())
+
     def test_missing_manifest_and_extra_wheel_fail_closed(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         fingerprint = self.seed_cache(worktree)
