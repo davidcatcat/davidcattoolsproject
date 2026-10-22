@@ -219,7 +219,8 @@ def configuration(*, read_paths, write_paths):
             {'action': 'integration.use', 'resource': '*', 'effect': 'deny'},
         ],
         'agents': {
-            AGENT: {'mode': 'primary', 'model': MODEL, 'steps': 1,
+            # Read then edit need two tool-capable rounds before the final summary.
+            AGENT: {'mode': 'primary', 'model': MODEL, 'steps': 3,
                     'permissions': rules},
             'title': {'disabled': True},
             'summary': {'disabled': True},

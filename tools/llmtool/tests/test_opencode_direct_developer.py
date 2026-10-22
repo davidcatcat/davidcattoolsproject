@@ -39,7 +39,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             {'action': 'edit', 'resource': 'source.py', 'effect': 'allow'},
         ])
         self.assertEqual(value['mcp'], {'servers': {}})
-        self.assertEqual(value['agents'][AGENT]['steps'], 1)
+        self.assertEqual(value['agents'][AGENT]['steps'], 3)
         self.assertEqual(value['agents'][AGENT]['permissions'], value['permissions'])
         self.assertEqual(value['policies'][-1], {
             'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
