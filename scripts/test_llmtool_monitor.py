@@ -836,7 +836,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["codex reviewer Locke"].state, mon.DONE)
         self.assertNotIn("codex reviewer Old", rows)
         self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
-        self.assertNotIn("codex reviewer agent", rows)   # a finished reviewer subagent replaces it
+        self.assertNotIn("codex reviewer agent", rows)
 
     def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -930,7 +930,7 @@ class OfficeViewTests(unittest.TestCase):
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.state, live.kind, live.group), (mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertIn("agent 2 · subagent 2 · 外部 worker 4", lines[0])
+        self.assertIn("agent 2 · subagent 2 · 外部 worker 3", lines[0])
         pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM"))
         self.assertTrue(lines[pm + 1].startswith("└ codex developer Franklin"))
         self.assertTrue(any(line.startswith("└ claude reviewer") for line in lines[pm + 1:pm + 3]))
@@ -942,8 +942,7 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.by_name(self.rows())
         self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
                          (mon.STOPPED, "免費額度用完（429），等額度恢復"))
-        self.assertEqual((rows["codex reviewer agent"].state, rows["codex reviewer agent"].detail),
-                         (mon.IDLE, "Roadmap：目前沒有指派工作"))
+        self.assertNotIn("codex reviewer agent", rows)   # spawned by the PM, not a standing Worker
         self.assertEqual((rows["agy"].state, rows["agy"].detail), (mon.PAUSED, "Owner 暫停中"))
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
@@ -1028,7 +1027,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertNotIn("codex reviewer agent", rows)   # invalid record; no table fallback
+        self.assertNotIn("codex reviewer agent", rows)
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
                                               roadmap=str(self.roadmap), canonical=self.canonical,

@@ -1644,8 +1644,9 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
     return found
 
 
+# Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
+# subagents itself (Owner 2026-10-23), and those appear under the PM.
 ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, sort order)
-    ("Codex Reviewer", "codex reviewer agent", 25),
     ("OpenCode", "opencode developer", 50),
     ("AGY", "agy", 60),
     ("Company", "公司 gw", 70),
@@ -1654,8 +1655,7 @@ ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, s
 # from live technical state. A PAUSED switch holds until the Owner changes it,
 # whatever quota, login or app state is observed.
 DISPATCH_RELATIVE = os.path.join("tools", "llmtool", "worker-dispatch.json")
-DISPATCH_KEYS = {"codex reviewer agent": "codex-reviewer-agent",
-                 "opencode developer": "opencode-developer", "agy": "agy",
+DISPATCH_KEYS = {"opencode developer": "opencode-developer", "agy": "agy",
                  "公司 gw": "company-gw"}
 DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 DECIDERS = frozenset({"Owner", "PM"})
@@ -1734,9 +1734,6 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
-    # Codex reviewer subagents are that role's real instances; when any is on
-    # screen, the table row would only contradict them.
-    reviewing = any(row.name.startswith("codex reviewer") for row in rows)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is. Without any, the Roadmap row says why OpenCode is not here.
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
@@ -1748,8 +1745,6 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     table = {} if switches is not None else roadmap_workers(
         roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
     for _, name, order in ROADMAP_WORKERS:
-        if name == "codex reviewer agent" and reviewing:
-            continue
         live = opencode if name == "opencode developer" else agy if name == "agy" else []
         switch = (switches or {}).get(DISPATCH_KEYS[name])
         paused = switch is not None and switch[0] == "PAUSED"
