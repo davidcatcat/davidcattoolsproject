@@ -1,0 +1,15 @@
+%% RECONSTRUCTED from discussions 2026-09-28 through 2026-10-19; PROPOSED workflow
+flowchart TB
+  PM["PM / Integrator AI"] --> Core["llmtool Core"]
+  Core --> Worker["公司 LLM Gateway / gw"]
+  Worker --> Produce["產生程式碼 / 分析 / 小任務結果"]
+  Produce --> Self["自我檢查"]
+  Self --> Evidence{"缺少資料或無法連外？"}
+  Evidence -->|否| Review["獨立 Reviewer"]
+  Evidence -->|是| Help["由 llmtool / 其他獲授權 AI 查詢或協助"]
+  Help --> Retry["補足證據後重試"]
+  Retry --> Self
+  Review --> Final{"審查通過？"}
+  Final -->|否| PM
+  Final -->|是| Integrator["Integrator 驗收"]
+  Integrator --> GitHub[("GitHub PR / Evidence")]
