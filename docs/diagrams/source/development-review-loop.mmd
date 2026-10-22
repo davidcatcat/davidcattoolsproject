@@ -1,0 +1,19 @@
+%% RECONSTRUCTED from discussions 2026-10-17 through 2026-10-22; TARGET not verified runtime
+flowchart TD
+  Start["Owner 授權工作包"] --> PM["PM AI 分派任務"]
+  PM --> Developer["Developer 執行、測試、自審"]
+  Developer --> Result{"工作包回報"}
+  Result -->|PASS| Reviewer["獨立 Reviewer 審查"]
+  Result -->|FAIL| PM
+  Result -->|BLOCKED| PM
+  Reviewer --> Check{"審查結果"}
+  Check -->|需要修復| PM
+  Check -->|通過| Integrator["Integrator 驗收 / GitHub PR"]
+  Integrator --> Gate{"驗收與授權條件"}
+  Gate -->|通過| Finish["記錄證據、合併或完成工作包"]
+  Gate -->|未通過| PM
+  PM --> Decision{"需要 Owner 重大決策？"}
+  Decision -->|否| Developer
+  Decision -->|是| Owner["向 Owner 回報與請示"]
+  Owner --> PM
+  Finish --> PM
