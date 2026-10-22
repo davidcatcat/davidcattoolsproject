@@ -89,9 +89,11 @@ class TestSelectionTests(unittest.TestCase):
             "tools/llmtool/llmtool/git_intel.py",
             "tools/llmtool/llmtool/opencode_worker.py",
             "tools/llmtool/llmtool/opencode_foreground_host.py",
+            "tools/llmtool/llmtool/opencode_direct_developer.py",
             "tools/llmtool/llmtool/opencode_native_credential.py",
             "tools/llmtool/llmtool/review_authority.py",
             "tools/llmtool/llmtool/review_authority_cli.py",
+            "tools/llmtool/llmtool/test_output_excerpts.py",
         ):
             with self.subTest(path=path):
                 plan = select_test_plan(
@@ -99,6 +101,17 @@ class TestSelectionTests(unittest.TestCase):
                     impact_test_map={path: [L1_TEST]},
                     impact_map_version=IMPACT_MAP_VERSION,
                 )
+
+                self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
+                self.assertIn("high_risk_path", plan["fallback_reasons"])
+
+    def test_default_mapping_high_risk_files_force_l3(self):
+        for path in (
+            "tools/llmtool/llmtool/test_output_excerpts.py",
+            "tools/llmtool/llmtool/opencode_direct_developer.py",
+        ):
+            with self.subTest(path=path):
+                plan = select_test_plan([path])
 
                 self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
                 self.assertIn("high_risk_path", plan["fallback_reasons"])

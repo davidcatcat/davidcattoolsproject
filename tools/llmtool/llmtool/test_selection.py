@@ -46,10 +46,12 @@ HIGH_RISK_FILES = frozenset({
     "tools/llmtool/llmtool/authorization_policy.py",
     "tools/llmtool/llmtool/git_intel.py",
     "tools/llmtool/llmtool/opencode_foreground_host.py",
+    "tools/llmtool/llmtool/opencode_direct_developer.py",
     "tools/llmtool/llmtool/opencode_native_credential.py",
     "tools/llmtool/llmtool/opencode_worker.py",
     "tools/llmtool/llmtool/review_authority.py",
     "tools/llmtool/llmtool/review_authority_cli.py",
+    "tools/llmtool/llmtool/test_output_excerpts.py",
 })
 
 _LLMTOOL_CWD = "tools/llmtool"
