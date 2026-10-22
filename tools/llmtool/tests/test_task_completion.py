@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -827,12 +828,17 @@ class TaskCompletionTests(unittest.TestCase):
              patch('llmtool.task_submission_cli.create_client', return_value=client), \
              redirect_stdout(output):
             self.assertEqual(run_task_direct_result_event(
-                task['task_id'], self.task_id, store=store), 0, output.getvalue())
+                task['task_id'], self.task_id, store=store), 1, output.getvalue())
 
         saved = store.get(task['task_id'])
         callback = saved['developer']['direct_result_callback']
         self.assertEqual(callback['state'], 'PM_RETURNED')
         self.assertEqual(callback['pm_recommendation']['decision'], 'SEND_TO_REVIEW')
+        handoff = callback['review_handoff']
+        self.assertEqual(handoff['receipt']['verdict'], 'BLOCKED')
+        self.assertEqual(handoff['receipt']['execution_status'], 'NOT_DISPATCHED')
+        self.assertEqual(handoff['next_step'], 'WAIT_FOR_REVIEWER')
+        self.assertIsNone(handoff['receipt']['reviewer_identity'])
         self.assertEqual(callback['evidence']['result']['result_head'], None)
         self.assertEqual(callback['evidence']['review_pr_ci'], {
             'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
@@ -859,9 +865,9 @@ class TaskCompletionTests(unittest.TestCase):
         store.update(task['task_id'], completion=committed)
         with patch('llmtool.task_submission_cli.task_completion.collect_executor_result') as collect_committed, \
              patch('llmtool.task_submission_cli.resolve_profile_config') as resolve_committed, \
-             self.assertRaises(LLMToolError):
-            run_task_complete(Namespace(task_id=task['task_id'],
-                executor_task=self.task_id, reviewer_task=None, pr=None), store=store)
+             redirect_stdout(StringIO()):
+            self.assertEqual(run_task_complete(Namespace(task_id=task['task_id'],
+                executor_task=self.task_id, reviewer_task=None, pr=None), store=store), 1)
         collect_committed.assert_not_called()
         resolve_committed.assert_not_called()
         self.assertEqual(len(client.calls), 1)
@@ -870,6 +876,7 @@ class TaskCompletionTests(unittest.TestCase):
             'state': 'PM_OUTCOME_UNKNOWN', 'pm_dispatch': 'UNKNOWN',
             'pm_response': None, 'pm_recommendation': None,
             'pm_usage': None, 'pm_error_code': 'PM_CALL_INTERRUPTED'}
+        unknown_callback.pop('review_handoff', None)
         store.update(task['task_id'], developer={**current['developer'],
             'direct_result_callback': unknown_callback})
         with patch('llmtool.task_submission_cli.task_completion.collect_executor_result') as collect_unknown, \
@@ -922,6 +929,272 @@ class TaskCompletionTests(unittest.TestCase):
             'result_head': None, 'diff_sha256': diff_sha, 'exit_code': 0,
             'output_sha256': 'f' * 64}]
         return task, store, result, tests
+
+    def _run_direct_pm_send_to_review(self, task, store, result, tests, adapter=None):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        client = FakeClient(Reply(json.dumps({'schema_version': 1,
+            'decision': 'SEND_TO_REVIEW', 'summary': 'Verified result is ready.'}),
+            {'prompt_tokens': 10, 'completion_tokens': 8, 'total_tokens': 18}))
+        output = StringIO()
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                   return_value=result), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   return_value=pm_config('original-pm')) as resolve, \
+             patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+             patch('llmtool.task_submission_cli.selected_provider', return_value={
+                   'type': 'openai-compatible', 'model': 'pm-model', 'base_url': None}), \
+             patch('llmtool.task_submission_cli.create_client', return_value=client), \
+             redirect_stdout(output):
+            code = run_task_direct_result_event(task['task_id'], self.task_id, store=store)
+        return code, client, output.getvalue(), resolve
+
+    @staticmethod
+    def _trusted_review_receipt(intent, *, verdict='PASS'):
+        blocked = verdict == 'BLOCKED'
+        value = {'schema_version': 1, 'dispatch_id': intent['dispatch_id'],
+            'task_id': intent['task_id'], 'run_id': intent['run_id'],
+            'contract_digest': intent['contract_digest'], 'source_sha': intent['source_sha'],
+            'result_head': intent['result_head'], 'diff_sha256': intent['diff_sha256'],
+            'developer_task_id': intent['developer_task_id'],
+            'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
+            'reviewer_session_ref': 'reviewer-session', 'verdict': verdict,
+            'security': 'BLOCKED' if blocked else 'PASS',
+            'functional': 'BLOCKED' if blocked else 'PASS',
+            'execution_status': 'FAILED' if blocked else 'SUCCEEDED',
+            'code': 'REVIEW_BLOCKED' if blocked else 'REVIEW_COMPLETED',
+            'findings_sha256': '6' * 64, 'provenance': 'TRUSTED_REVIEW_ADAPTER'}
+        value['receipt_sha256'] = hashlib.sha256(json.dumps(value, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        return value
+
+    def test_reviewer_phase_recovers_without_replaying_pm_or_adapter(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-recovery-no-adapter')
+        code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=None)
+        self.assertEqual(code, 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'NOT_DISPATCHED')
+        self.assertEqual(len(client.calls), 1)
+
+        # Simulate a crash after the durable PM RETURNED state but before the
+        # Reviewer intent write. Recovery recreates intent without calling PM.
+        developer = store.get(task['task_id'])['developer']
+        callback = dict(developer['direct_result_callback'])
+        callback.pop('review_handoff')
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': callback})
+        with redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'NOT_DISPATCHED')
+        self.assertEqual(len(client.calls), 1)
+
+        # A persisted DISPATCHING claim is ambiguous after restart. It becomes
+        # UNKNOWN and never re-enters the adapter.
+        developer = store.get(task['task_id'])['developer']
+        callback = dict(developer['direct_result_callback'])
+        callback['review_handoff'] = task_completion.review_handoff_dispatching(
+            callback['review_handoff']['intent'])
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': callback})
+        adapter = unittest.mock.Mock()
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+        adapter.assert_not_called()
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'OUTCOME_UNKNOWN')
+        self.assertEqual(len(client.calls), 1)
+
+    def test_reviewer_adapter_error_is_persisted_unknown_and_not_replayed(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-adapter-error')
+        adapter = unittest.mock.Mock(side_effect=RuntimeError('adapter transport failure'))
+        _, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter)
+        self.assertEqual(adapter.call_count, 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'OUTCOME_UNKNOWN')
+        self.assertEqual(callback['review_handoff']['error_code'],
+                         'REVIEW_ADAPTER_OUTCOME_UNKNOWN')
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_invalid_reviewer_receipt_is_persisted_unknown(self):
+        task, store, result, tests = self._direct_opencode_task('review-invalid-receipt')
+        other_intent = task_completion.review_dispatch_intent(
+            task_id='9' * 32, run_id='8' * 32, contract_digest='7' * 64,
+            developer_task_id='other-developer', developer_identity='other-agent',
+            developer_session_ref='other-session', source_sha='6' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/other.py'])
+        adapter = unittest.mock.Mock(
+            return_value=task_completion.review_dispatch_blocked(other_intent))
+        code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter)
+        self.assertEqual(code, 1)
+        self.assertEqual(adapter.call_count, 1)
+        self.assertEqual(len(client.calls), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'OUTCOME_UNKNOWN')
+        self.assertEqual(callback['review_handoff']['error_code'], 'REVIEW_RECEIPT_INVALID')
+
+    def test_two_events_have_one_dispatch_claimant(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-two-event-race')
+        entered, release = threading.Event(), threading.Event()
+        call_count = []
+
+        def adapter(intent):
+            call_count.append(intent['dispatch_id'])
+            entered.set()
+            if not release.wait(5):
+                raise RuntimeError('test adapter release timed out')
+            return self._trusted_review_receipt(intent)
+
+        first_result, first_error = [], []
+
+        def first_event():
+            try:
+                first_result.append(self._run_direct_pm_send_to_review(
+                    task, store, result, tests, adapter=adapter)[0])
+            except BaseException as exc:
+                first_error.append(exc)
+
+        first = threading.Thread(target=first_event)
+        first.start()
+        self.assertTrue(entered.wait(5), 'first event did not enter Reviewer adapter')
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            second_result = run_task_direct_result_event(task['task_id'], self.task_id,
+                                                         store=store)
+        release.set()
+        first.join(5)
+        self.assertFalse(first.is_alive(), 'first Reviewer event did not finish')
+        self.assertEqual(first_error, [])
+        self.assertEqual(second_result, 1)
+        self.assertEqual(first_result, [1])
+        self.assertEqual(len(call_count), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'OUTCOME_UNKNOWN')
+
+    def test_pending_cas_has_exactly_one_concurrent_adapter_claimant(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-pending-cas-race')
+        _, client, _, _ = self._run_direct_pm_send_to_review(task, store, result, tests)
+        saved = store.get(task['task_id'])
+        developer = saved['developer']
+        callback = dict(developer['direct_result_callback'])
+        intent = callback['review_handoff']['intent']
+        callback['review_handoff'] = task_completion.review_handoff_pending(intent)
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': callback})
+
+        original_compare = store.compare_and_update
+        both_claiming = threading.Barrier(2)
+
+        def interleaved_compare(task_id, *, expected, **changes):
+            proposed = changes.get('developer', {}).get('direct_result_callback', {})
+            handoff = proposed.get('review_handoff')
+            if type(handoff) is dict and handoff.get('dispatch_state') == 'DISPATCHING':
+                both_claiming.wait(timeout=5)
+            return original_compare(task_id, expected=expected, **changes)
+
+        store.compare_and_update = interleaved_compare
+        adapter_calls = []
+
+        def adapter(request):
+            adapter_calls.append(request['dispatch_id'])
+            return self._trusted_review_receipt(request)
+
+        results, errors = [], []
+
+        def event():
+            try:
+                with redirect_stdout(StringIO()):
+                    results.append(run_task_direct_result_event(
+                        task['task_id'], self.task_id, store=store))
+            except BaseException as exc:
+                errors.append(exc)
+
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter):
+            threads = [threading.Thread(target=event) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [0, 1])
+        self.assertEqual(len(adapter_calls), 1)
+        self.assertEqual(len(client.calls), 1)
+        callback = store.get(task['task_id'])['developer']['direct_result_callback']
+        self.assertEqual(callback['review_handoff']['dispatch_state'], 'RECEIVED')
+        self.assertEqual(callback['review_handoff']['receipt']['verdict'], 'PASS')
+        with patch('llmtool.task_submission_cli._trusted_reviewer_adapter', adapter), \
+             redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 0)
+        self.assertEqual(len(adapter_calls), 1)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_legacy_handoff_normalizes_and_terminal_blocked_reentry_stays_nonzero(self):
+        from llmtool.task_submission_cli import run_task_direct_result_event
+
+        task, store, result, tests = self._direct_opencode_task('review-legacy-not-dispatched')
+        _, client, _, _ = self._run_direct_pm_send_to_review(task, store, result, tests)
+        saved = store.get(task['task_id'])
+        developer = saved['developer']
+        callback = dict(developer['direct_result_callback'])
+        handoff = callback['review_handoff']
+        callback['review_handoff'] = {key: handoff[key]
+            for key in ('intent', 'receipt', 'next_step')}
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': callback})
+        with redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+        normalized = store.get(task['task_id'])['developer']['direct_result_callback'][
+            'review_handoff']
+        self.assertEqual(normalized['dispatch_state'], 'NOT_DISPATCHED')
+        self.assertEqual(len(client.calls), 1)
+
+        task, store, result, tests = self._direct_opencode_task('review-received-blocked')
+        adapter = lambda intent: self._trusted_review_receipt(intent, verdict='BLOCKED')
+        first_code, client, _, _ = self._run_direct_pm_send_to_review(
+            task, store, result, tests, adapter=adapter)
+        self.assertEqual(first_code, 1)
+        saved = store.get(task['task_id'])
+        developer = saved['developer']
+        callback = dict(developer['direct_result_callback'])
+        handoff = callback['review_handoff']
+        self.assertEqual(handoff['dispatch_state'], 'RECEIVED')
+        callback['review_handoff'] = {key: handoff[key]
+            for key in ('intent', 'receipt', 'next_step')}
+        store.update(task['task_id'], developer={**developer,
+            'direct_result_callback': callback})
+        with redirect_stdout(StringIO()):
+            self.assertEqual(run_task_direct_result_event(
+                task['task_id'], self.task_id, store=store), 1)
+        normalized = store.get(task['task_id'])['developer']['direct_result_callback'][
+            'review_handoff']
+        self.assertEqual(normalized['dispatch_state'], 'RECEIVED')
+        self.assertEqual(normalized['receipt']['verdict'], 'BLOCKED')
+        self.assertEqual(len(client.calls), 1)
 
     def test_legacy_direct_callback_cannot_rebind_d6_agent_or_session(self):
         from llmtool.task_submission_cli import run_task_direct_result_event
@@ -1542,6 +1815,60 @@ class TaskCompletionTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             run_task_complete(args, store=store)
         self.assertEqual(len(client.calls), 1)
+
+    def test_reviewer_handoff_receipts_are_bound_and_next_step_is_bounded(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64,
+            changed_paths=['src/a.py'])
+        blocked = task_completion.review_dispatch_blocked(intent)
+        self.assertEqual(task_completion.review_handoff_record(intent, blocked)['next_step'],
+                         'WAIT_FOR_REVIEWER')
+
+        def receipt(verdict, security, functional, repair_round=0):
+            current = dict(intent)
+            if repair_round:
+                current = task_completion.review_dispatch_intent(
+                    task_id=intent['task_id'], run_id=intent['run_id'],
+                    contract_digest=intent['contract_digest'],
+                    developer_task_id=intent['developer_task_id'],
+                    developer_identity=intent['developer_identity'],
+                    developer_session_ref=intent['developer_session_ref'],
+                    source_sha=intent['source_sha'], result_head=intent['result_head'],
+                    diff_sha256=intent['diff_sha256'], changed_paths=intent['changed_paths'],
+                    repair_round=repair_round)
+            value = {'schema_version': 1, 'dispatch_id': current['dispatch_id'],
+                'task_id': current['task_id'], 'run_id': current['run_id'],
+                'contract_digest': current['contract_digest'], 'source_sha': current['source_sha'],
+                'result_head': current['result_head'], 'diff_sha256': current['diff_sha256'],
+                'developer_task_id': current['developer_task_id'],
+                'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
+                'reviewer_session_ref': 'reviewer-session', 'verdict': verdict,
+                'security': security, 'functional': functional, 'execution_status': 'SUCCEEDED',
+                'code': 'REVIEW_COMPLETED', 'findings_sha256': '6' * 64,
+                'provenance': 'TRUSTED_REVIEW_ADAPTER'}
+            value['receipt_sha256'] = hashlib.sha256(json.dumps(value, sort_keys=True,
+                separators=(',', ':')).encode()).hexdigest()
+            return current, value
+
+        passed_intent, passed = receipt('PASS', 'PASS', 'PASS')
+        self.assertEqual(task_completion.review_handoff_record(passed_intent, passed)[
+            'next_step'], 'INTEGRATION_GATES_PENDING')
+        failed_intent, failed = receipt('FAIL', 'PASS', 'FAIL')
+        self.assertEqual(task_completion.review_handoff_record(failed_intent, failed)[
+            'next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+        repaired_intent, repaired = receipt('FAIL', 'PASS', 'FAIL', repair_round=1)
+        self.assertEqual(task_completion.review_handoff_record(repaired_intent, repaired)[
+            'next_step'], 'STOP_REPAIR_LIMIT')
+        forged = dict(passed)
+        forged['source_sha'] = '7' * 40
+        forged.pop('receipt_sha256')
+        forged['receipt_sha256'] = hashlib.sha256(json.dumps(forged, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        with self.assertRaises(LLMToolError):
+            task_completion.validate_review_dispatch_receipt(passed_intent, forged)
 
 
 if __name__ == '__main__':

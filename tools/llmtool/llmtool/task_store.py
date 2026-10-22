@@ -488,7 +488,8 @@ def _validate(record):
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
                 if (developer['provider_profile'] != 'opencode' or
-                        type(callback) is not dict or set(callback) != callback_fields or
+                        type(callback) is not dict or
+                        set(callback) not in (callback_fields, callback_fields | {'review_handoff'}) or
                         callback['state'] not in states or
                         callback['pm_dispatch'] != dispatch_for_state[callback['state']] or
                         not _safe_identifier(callback['executor_task_id'], D6_TASK_ID)):
@@ -588,6 +589,26 @@ def _validate(record):
                 if error is not None and (type(error) is not str or
                         re.fullmatch(r'[A-Z0-9_]{1,64}', error) is None):
                     _fail()
+                if 'review_handoff' in callback:
+                    result = evidence.get('result') if type(evidence) is dict else None
+                    try:
+                        if (callback['pm_recommendation'] is None or
+                                callback['pm_recommendation']['decision'] != 'SEND_TO_REVIEW' or
+                                type(result) is not dict):
+                            _fail()
+                        from .task_completion import validate_review_handoff_record
+                        validate_review_handoff_record(callback['review_handoff'],
+                            task_id=record['task_id'], run_id=record['run_id'],
+                            contract_digest=record['task_binding']['contract_digest'],
+                            developer_task_id=callback['executor_task_id'],
+                            developer_identity=evidence.get('executor_identity'),
+                            developer_session_ref=evidence.get('executor_session_ref'),
+                            source_sha=developer['source_sha'],
+                            result_head=result.get('result_head'),
+                            diff_sha256=result.get('diff_sha256'),
+                            changed_paths=result.get('changed_paths'))
+                    except Exception:
+                        _fail()
         if 'completion' in record:
             completion = record['completion']
             fields = frozenset(('state', 'executor_task_id', 'reviewer_task_id',

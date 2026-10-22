@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import selectors
 import stat
 import subprocess
@@ -39,6 +40,8 @@ _CI_WORKFLOW_PATH = '.github/workflows/llmtool-ci.yml'
 _CI_WORKFLOW_NAME = 'llmtool CI'
 _GITHUB_ACTIONS_APP_ID = 15368
 _TEST_PATH = re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z')
+_REVIEW_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
+_REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
 
 
 def _stop(code):
@@ -54,6 +57,281 @@ def _unique_pairs(pairs):
             _stop('D6_REGISTRY_INVALID')
         result[key] = value
     return result
+
+
+def review_dispatch_intent(*, task_id, run_id, contract_digest, developer_task_id,
+                           developer_identity, developer_session_ref, source_sha,
+                           result_head, diff_sha256, changed_paths, repair_round=0):
+    """Build a bounded Reviewer request identity bound to one verified result.
+
+    This is dispatch metadata only. It conveys no provider, Session, review,
+    repair, Git, or integration authority.
+    """
+    if (type(task_id) is not str or re.fullmatch(r'[0-9a-f]{32}', task_id) is None or
+            type(run_id) is not str or re.fullmatch(r'[0-9a-f]{32}', run_id) is None or
+            type(contract_digest) is not str or _HEX64.fullmatch(contract_digest) is None or
+            type(developer_task_id) is not str or _REVIEW_ID.fullmatch(developer_task_id) is None or
+            type(developer_identity) is not str or not developer_identity or
+            len(developer_identity) > 256 or type(developer_session_ref) is not str or
+            not developer_session_ref or len(developer_session_ref) > 512 or
+            type(source_sha) is not str or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', source_sha) or
+            (result_head is not None and
+             (type(result_head) is not str or _HEX40.fullmatch(result_head) is None)) or
+            type(diff_sha256) is not str or _HEX64.fullmatch(diff_sha256) is None or
+            type(changed_paths) is not list or not changed_paths or
+            any(type(path) is not str for path in changed_paths) or
+            changed_paths != sorted(set(changed_paths)) or
+            any(not path or len(path) > 512 or
+                path.startswith('/') or '\\' in path or
+                any(part in ('', '.', '..') for part in path.split('/'))
+                for path in changed_paths) or
+            type(repair_round) is not int or repair_round not in (0, 1)):
+        _stop('REVIEW_DISPATCH_BINDING_INVALID')
+    value = {
+        'schema_version': 1,
+        'dispatch_id': secrets.token_hex(16),
+        'task_id': task_id,
+        'run_id': run_id,
+        'contract_digest': contract_digest,
+        'developer_task_id': developer_task_id,
+        'developer_identity': developer_identity,
+        'developer_session_ref': developer_session_ref,
+        'source_sha': source_sha,
+        'result_head': result_head,
+        'diff_sha256': diff_sha256,
+        'changed_paths': list(changed_paths),
+        'repair_round': repair_round,
+        'state': 'REQUESTED',
+    }
+    value['intent_sha256'] = hashlib.sha256(json.dumps(
+        value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return value
+
+
+def validate_review_dispatch_intent(intent):
+    fields = {
+        'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
+        'developer_task_id', 'developer_identity', 'developer_session_ref',
+        'source_sha', 'result_head', 'diff_sha256', 'changed_paths',
+        'repair_round', 'state', 'intent_sha256',
+    }
+    if type(intent) is not dict or set(intent) != fields:
+        _stop('REVIEW_DISPATCH_BINDING_INVALID')
+    value = dict(intent)
+    claimed = value.pop('intent_sha256')
+    actual = hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode()).hexdigest()
+    if (claimed != actual or intent['schema_version'] != 1 or intent['state'] != 'REQUESTED' or
+            type(intent['dispatch_id']) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', intent['dispatch_id']) is None):
+        _stop('REVIEW_DISPATCH_DIGEST_MISMATCH')
+    # Reuse the constructor's strict field validation without changing the ID.
+    review_dispatch_intent(
+        task_id=intent['task_id'], run_id=intent['run_id'],
+        contract_digest=intent['contract_digest'],
+        developer_task_id=intent['developer_task_id'],
+        developer_identity=intent['developer_identity'],
+        developer_session_ref=intent['developer_session_ref'],
+        source_sha=intent['source_sha'], result_head=intent['result_head'],
+        diff_sha256=intent['diff_sha256'], changed_paths=intent['changed_paths'],
+        repair_round=intent['repair_round'])
+    return intent
+
+
+def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
+    """Return an honest no-launch status receipt for a missing trusted adapter."""
+    validate_review_dispatch_intent(intent)
+    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+        _stop('REVIEW_DISPATCH_BINDING_INVALID')
+    receipt = {
+        'schema_version': 1,
+        'dispatch_id': intent.get('dispatch_id'),
+        'task_id': intent.get('task_id'),
+        'run_id': intent.get('run_id'),
+        'contract_digest': intent.get('contract_digest'),
+        'source_sha': intent.get('source_sha'),
+        'result_head': intent.get('result_head'),
+        'diff_sha256': intent.get('diff_sha256'),
+        'developer_task_id': intent.get('developer_task_id'),
+        'reviewer_task_id': None,
+        'reviewer_identity': None,
+        'reviewer_session_ref': None,
+        'verdict': 'BLOCKED',
+        'security': 'BLOCKED',
+        'functional': 'BLOCKED',
+        'execution_status': 'NOT_DISPATCHED',
+        'code': code,
+        'findings_sha256': None,
+        'provenance': 'LOCAL_NO_ADAPTER',
+    }
+    receipt['receipt_sha256'] = hashlib.sha256(json.dumps(
+        receipt, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return receipt
+
+
+def review_handoff_record(intent, receipt):
+    """Build a received Reviewer outcome and deterministic PM next step."""
+    validate_review_dispatch_receipt(intent, receipt)
+    if receipt['verdict'] == 'PASS':
+        next_step = 'INTEGRATION_GATES_PENDING'
+    elif receipt['verdict'] == 'FAIL' and intent['repair_round'] == 0:
+        next_step = 'RETURN_TO_DEVELOPER_ONCE'
+    elif receipt['verdict'] == 'FAIL':
+        next_step = 'STOP_REPAIR_LIMIT'
+    else:
+        next_step = 'WAIT_FOR_REVIEWER'
+    return {'intent': intent, 'dispatch_state': 'RECEIVED', 'receipt': receipt,
+            'next_step': next_step, 'error_code': None}
+
+
+def review_handoff_pending(intent):
+    validate_review_dispatch_intent(intent)
+    return {'intent': intent, 'dispatch_state': 'PENDING', 'receipt': None,
+            'next_step': 'DISPATCH_REVIEWER', 'error_code': None}
+
+
+def review_handoff_unknown(intent, code='REVIEW_DISPATCH_OUTCOME_UNKNOWN'):
+    validate_review_dispatch_intent(intent)
+    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+        _stop('REVIEW_DISPATCH_BINDING_INVALID')
+    return {'intent': intent, 'dispatch_state': 'OUTCOME_UNKNOWN', 'receipt': None,
+            'next_step': 'WAIT_FOR_REVIEWER_STATUS', 'error_code': code}
+
+
+def review_handoff_dispatching(intent):
+    validate_review_dispatch_intent(intent)
+    return {'intent': intent, 'dispatch_state': 'DISPATCHING', 'receipt': None,
+            'next_step': 'WAIT_FOR_REVIEWER_STATUS', 'error_code': None}
+
+
+def review_handoff_not_dispatched(intent, receipt):
+    validate_review_dispatch_receipt(intent, receipt)
+    if receipt['execution_status'] != 'NOT_DISPATCHED':
+        _stop('REVIEW_RECEIPT_INVALID')
+    return {'intent': intent, 'dispatch_state': 'NOT_DISPATCHED', 'receipt': receipt,
+            'next_step': 'WAIT_FOR_REVIEWER', 'error_code': None}
+
+
+def validate_review_handoff_record(record, *, task_id, run_id, contract_digest,
+                                   developer_task_id, developer_identity,
+                                   developer_session_ref, source_sha, result_head,
+                                   diff_sha256, changed_paths):
+    legacy_fields = {'intent', 'receipt', 'next_step'}
+    current_fields = {'intent', 'dispatch_state', 'receipt', 'next_step', 'error_code'}
+    if type(record) is not dict or set(record) not in (legacy_fields, current_fields):
+        _stop('REVIEW_RECEIPT_INVALID')
+    intent = validate_review_dispatch_intent(record['intent'])
+    expected = (task_id, run_id, contract_digest, developer_task_id,
+                developer_identity, developer_session_ref, source_sha, result_head,
+                diff_sha256, changed_paths)
+    actual = tuple(intent[key] for key in (
+        'task_id', 'run_id', 'contract_digest', 'developer_task_id',
+        'developer_identity', 'developer_session_ref', 'source_sha', 'result_head',
+        'diff_sha256', 'changed_paths'))
+    if actual != expected:
+        _stop('REVIEW_RECEIPT_BINDING_MISMATCH')
+    if set(record) == legacy_fields:
+        receipt = validate_review_dispatch_receipt(intent, record['receipt'])
+        if (review_handoff_record(intent, receipt)['next_step'] != record['next_step'] or
+                record['next_step'] not in ('INTEGRATION_GATES_PENDING',
+                    'RETURN_TO_DEVELOPER_ONCE', 'STOP_REPAIR_LIMIT', 'WAIT_FOR_REVIEWER')):
+            _stop('REVIEW_RECEIPT_INVALID')
+        return record
+    state = record['dispatch_state']
+    receipt = record['receipt']
+    if state == 'PENDING':
+        expected_record = review_handoff_pending(intent)
+    elif state == 'DISPATCHING':
+        expected_record = review_handoff_dispatching(intent)
+    elif state == 'OUTCOME_UNKNOWN':
+        expected_record = review_handoff_unknown(intent, record['error_code'])
+    elif state == 'NOT_DISPATCHED':
+        expected_record = review_handoff_not_dispatched(intent, receipt)
+    elif state == 'RECEIVED':
+        expected_record = review_handoff_record(intent, receipt)
+    else:
+        _stop('REVIEW_RECEIPT_INVALID')
+    if expected_record != record:
+        _stop('REVIEW_RECEIPT_INVALID')
+    return record
+
+
+def normalize_review_handoff_record(record, **binding):
+    """Normalize the legacy three-field receipt shape to a terminal phase."""
+    validate_review_handoff_record(record, **binding)
+    if 'dispatch_state' in record:
+        return record
+    receipt = record['receipt']
+    if receipt['execution_status'] == 'NOT_DISPATCHED':
+        return review_handoff_not_dispatched(record['intent'], receipt)
+    return review_handoff_record(record['intent'], receipt)
+
+
+def validate_review_dispatch_receipt(intent, receipt):
+    """Validate a typed-in-process Reviewer adapter result against the intent.
+
+    The injected adapter is a trusted host boundary. This check binds its DATA
+    to the exact Task/Run/contract/source/result and rejects self-review. It is
+    not a signature, Session authentication, or provider-execution proof.
+    """
+    fields = {
+        'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
+        'source_sha', 'result_head', 'diff_sha256', 'developer_task_id',
+        'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref', 'verdict',
+        'security', 'functional', 'execution_status', 'code', 'findings_sha256',
+        'provenance', 'receipt_sha256',
+    }
+    if type(intent) is not dict or type(receipt) is not dict or set(receipt) != fields:
+        _stop('REVIEW_RECEIPT_INVALID')
+    validate_review_dispatch_intent(intent)
+    value = dict(receipt)
+    claimed = value.pop('receipt_sha256')
+    actual = hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode()).hexdigest()
+    if claimed != actual:
+        _stop('REVIEW_RECEIPT_DIGEST_MISMATCH')
+    if (type(receipt['schema_version']) is not int or receipt['schema_version'] != 1 or
+            any(receipt.get(key) != intent.get(key) for key in (
+                'dispatch_id', 'task_id', 'run_id', 'contract_digest', 'source_sha',
+                'result_head', 'diff_sha256', 'developer_task_id')) or
+            type(receipt['verdict']) is not str or receipt['verdict'] not in _REVIEW_VERDICTS or
+            type(receipt['security']) is not str or receipt['security'] not in _REVIEW_VERDICTS or
+            type(receipt['functional']) is not str or receipt['functional'] not in _REVIEW_VERDICTS or
+            type(receipt['execution_status']) is not str or
+            receipt['execution_status'] not in ('SUCCEEDED', 'FAILED', 'NOT_DISPATCHED') or
+            type(receipt['code']) is not str or
+            re.fullmatch(r'[A-Z0-9_]{1,64}', receipt['code']) is None or
+            type(receipt['provenance']) is not str or
+            receipt['provenance'] not in ('TRUSTED_REVIEW_ADAPTER', 'LOCAL_NO_ADAPTER')):
+        _stop('REVIEW_RECEIPT_BINDING_MISMATCH')
+    if receipt['execution_status'] == 'NOT_DISPATCHED':
+        if (receipt['verdict'] != 'BLOCKED' or receipt['security'] != 'BLOCKED' or
+                receipt['functional'] != 'BLOCKED' or
+                receipt['provenance'] != 'LOCAL_NO_ADAPTER' or
+                any(receipt.get(key) is not None for key in (
+                    'reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref',
+                    'findings_sha256'))):
+            _stop('REVIEW_RECEIPT_INVALID')
+    else:
+        for key in ('reviewer_task_id', 'reviewer_identity', 'reviewer_session_ref'):
+            if type(receipt.get(key)) is not str or not receipt[key] or len(receipt[key]) > 512:
+                _stop('REVIEW_RECEIPT_INVALID')
+        if (receipt['reviewer_task_id'] == intent['developer_task_id'] or
+                receipt['reviewer_identity'] == intent['developer_identity'] or
+                receipt['reviewer_session_ref'] == intent['developer_session_ref'] or
+                type(receipt['findings_sha256']) is not str or
+                _HEX64.fullmatch(receipt['findings_sha256']) is None or
+                receipt['provenance'] != 'TRUSTED_REVIEW_ADAPTER'):
+            _stop('REVIEWER_NOT_INDEPENDENT')
+        if receipt['execution_status'] == 'SUCCEEDED':
+            expected = ('PASS' if receipt['security'] == receipt['functional'] == 'PASS' else
+                        'FAIL' if 'FAIL' in (receipt['security'], receipt['functional']) and
+                        'BLOCKED' not in (receipt['security'], receipt['functional']) else 'BLOCKED')
+            if receipt['verdict'] != expected:
+                _stop('REVIEW_RECEIPT_INVALID')
+        elif receipt['verdict'] != 'BLOCKED':
+            _stop('REVIEW_RECEIPT_INVALID')
+    return receipt
 
 
 @dataclass(frozen=True)

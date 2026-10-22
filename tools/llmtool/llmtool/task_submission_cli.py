@@ -23,6 +23,9 @@ from .test_output_excerpts import _emitted_sensitive
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
+# No production Reviewer dispatcher is installed. A future Host runtime may
+# bind this internal seam only after a separate authority/runtime grant.
+_trusted_reviewer_adapter = None
 _SYSTEM = (
     'You are the user-selected llmtool Integrator/PM AI. Respond directly to the '
     'submitted development request with a concise understanding, proposed next '
@@ -1076,6 +1079,13 @@ def run_task_complete(args, *, store=None):
         # Public recovery route after a pre-call PM configuration/setup failure.
         # The direct callback revalidates D6/worktree state and does not rerun tests.
         return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
+    if (executor_result_only and type(direct_callback) is dict and
+            direct_callback.get('executor_task_id') == args.executor_task and
+            direct_callback.get('state') == 'PM_RETURNED' and
+            type(direct_callback.get('pm_recommendation')) is dict and
+            direct_callback['pm_recommendation'].get('decision') == 'SEND_TO_REVIEW'):
+        # Resume only the durable Reviewer phase. Never call the PM again.
+        return run_task_direct_result_event(args.task_id, args.executor_task, store=store)
     if executor_result_only and direct_callback is not None:
         raise LLMToolError('direct Executor result callback is not retryable')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
@@ -1336,6 +1346,180 @@ def _persist_direct_callback_drift(store, task, developer, callback, gate):
     _print(_task_view(store.get(task['task_id'])))
 
 
+def _review_intent_from_callback(task, callback):
+    evidence = callback['evidence']
+    result = evidence['result']
+    return task_completion.review_dispatch_intent(
+        task_id=task['task_id'], run_id=task['run_id'],
+        contract_digest=task['task_binding']['contract_digest'],
+        developer_task_id=callback['executor_task_id'],
+        developer_identity=evidence['executor_identity'],
+        developer_session_ref=evidence['executor_session_ref'],
+        source_sha=result['source_sha'], result_head=result.get('result_head'),
+        diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'])
+
+
+def _persist_review_handoff(store, task, developer, callback,
+                            expected_handoff, handoff):
+    observed_handoff = callback.get('review_handoff')
+    if observed_handoff != expected_handoff:
+        raise LLMToolError('Reviewer handoff state changed')
+    expected_intent = (None if expected_handoff is None else
+                       expected_handoff.get('intent', {}).get('dispatch_id'))
+    next_intent = handoff.get('intent', {}).get('dispatch_id')
+    if expected_handoff is not None and next_intent != expected_intent:
+        raise LLMToolError('Reviewer dispatch identity changed')
+    updated = {**callback, 'review_handoff': handoff}
+    updated_developer = {**developer, 'direct_result_callback': updated}
+    # CAS the caller's observed Developer record. It includes both the prior
+    # phase and dispatch ID; only one concurrent PENDING claimant can win.
+    return store.compare_and_update(task['task_id'],
+        expected={'developer': developer}, developer=updated_developer)
+
+
+def _resume_reviewer_handoff(store, task, developer, callback):
+    recommendation = callback.get('pm_recommendation')
+    if (callback.get('state') != 'PM_RETURNED' or
+            type(recommendation) is not dict or
+            recommendation.get('decision') != 'SEND_TO_REVIEW'):
+        raise LLMToolError('Reviewer handoff is not bound to a returned PM decision')
+    handoff = callback.get('review_handoff')
+    if handoff is None:
+        # PM_RETURNED is durable before this phase. Reconstructing the intent is
+        # safe after a crash here because no Reviewer call could have started.
+        handoff = task_completion.review_handoff_pending(
+            _review_intent_from_callback(task, callback))
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            None, handoff)
+            task, developer = saved, saved['developer']
+            callback = developer['direct_result_callback']
+            handoff = callback['review_handoff']
+        except Exception:
+            # A concurrent event may have installed the same phase already.
+            current = store.get(task['task_id'])
+            current_callback = current['developer']['direct_result_callback']
+            if current_callback.get('review_handoff') is None:
+                raise LLMToolError('Reviewer intent could not be persisted') from None
+            task, developer, callback = (current, current['developer'], current_callback)
+            handoff = callback['review_handoff']
+    binding = dict(
+        task_id=task['task_id'], run_id=task['run_id'],
+        contract_digest=task['task_binding']['contract_digest'],
+        developer_task_id=callback['executor_task_id'],
+        developer_identity=callback['evidence']['executor_identity'],
+        developer_session_ref=callback['evidence']['executor_session_ref'],
+        source_sha=developer['source_sha'],
+        result_head=callback['evidence']['result'].get('result_head'),
+        diff_sha256=callback['evidence']['result'].get('diff_sha256'),
+        changed_paths=callback['evidence']['result'].get('changed_paths'))
+    handoff = task_completion.normalize_review_handoff_record(handoff, **binding)
+    observed_handoff = callback.get('review_handoff')
+    if handoff != observed_handoff:
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            observed_handoff, handoff)
+            task, developer = saved, saved['developer']
+            callback = developer['direct_result_callback']
+            handoff = callback['review_handoff']
+        except Exception:
+            current = store.get(task['task_id'])
+            task, developer = current, current['developer']
+            callback = developer['direct_result_callback']
+            handoff = callback.get('review_handoff')
+            handoff = task_completion.normalize_review_handoff_record(handoff, **binding)
+
+    state = handoff['dispatch_state']
+    if state == 'DISPATCHING':
+        # Write-ahead state means a crash may have occurred immediately before
+        # or after entering the adapter. Never blindly invoke it a second time.
+        unknown = task_completion.review_handoff_unknown(handoff['intent'])
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            handoff, unknown)
+            task = saved
+        except Exception:
+            task = store.get(task['task_id'])
+        _print(_task_view(task))
+        return 1
+    if state != 'PENDING':
+        _print(_task_view(store.get(task['task_id'])))
+        receipt = handoff.get('receipt')
+        return 0 if state == 'RECEIVED' and type(receipt) is dict and \
+            receipt.get('verdict') in ('PASS', 'FAIL') else 1
+    if _trusted_reviewer_adapter is None:
+        # No call was attempted; this state is distinct from an ambiguous launch.
+        receipt = task_completion.review_dispatch_blocked(handoff['intent'])
+        not_dispatched = task_completion.review_handoff_not_dispatched(
+            handoff['intent'], receipt)
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            handoff, not_dispatched)
+            task = saved
+        except Exception:
+            task = store.get(task['task_id'])
+        _print(_task_view(task))
+        return 1
+
+    dispatching = task_completion.review_handoff_dispatching(handoff['intent'])
+    try:
+        saved = _persist_review_handoff(store, task, developer, callback,
+                                        handoff, dispatching)
+        task, developer = saved, saved['developer']
+        callback = developer['direct_result_callback']
+        dispatching = callback['review_handoff']
+    except Exception:
+        current = store.get(task['task_id'])
+        current_handoff = current['developer']['direct_result_callback'].get('review_handoff')
+        # A competing process may have won, or the observed phase may now be
+        # terminal. Neither case grants this invocation the dispatch claim.
+        _print(_task_view(current))
+        return 1
+    try:
+        receipt = _trusted_reviewer_adapter(dispatching['intent'])
+    except BaseException as exc:
+        unknown = task_completion.review_handoff_unknown(
+            dispatching['intent'], 'REVIEW_ADAPTER_OUTCOME_UNKNOWN')
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            dispatching, unknown)
+        except BaseException:
+            # Persisted DISPATCHING is itself fail-closed and recovers to UNKNOWN.
+            pass
+        _print_task_without_masking_interrupt(store, task['task_id'])
+        if isinstance(exc, (KeyboardInterrupt, CLIHostTermination, SystemExit)):
+            raise
+        return 1
+    try:
+        task_completion.validate_review_dispatch_receipt(dispatching['intent'], receipt)
+    except BaseException as exc:
+        unknown = task_completion.review_handoff_unknown(
+            dispatching['intent'], 'REVIEW_RECEIPT_INVALID')
+        try:
+            saved = _persist_review_handoff(store, task, developer, callback,
+                                            dispatching, unknown)
+        except BaseException:
+            pass
+        _print_task_without_masking_interrupt(store, task['task_id'])
+        if isinstance(exc, (KeyboardInterrupt, CLIHostTermination, SystemExit)):
+            raise
+        return 1
+    received = task_completion.review_handoff_record(dispatching['intent'], receipt)
+    try:
+        saved = _persist_review_handoff(store, task, developer, callback,
+                                        dispatching, received)
+    except Exception:
+        # Do not overwrite a concurrent UNKNOWN or terminal receipt.
+        saved = store.get(task['task_id'])
+    _print(_task_view(saved))
+    current_handoff = saved['developer']['direct_result_callback'].get('review_handoff')
+    current_receipt = (None if type(current_handoff) is not dict else
+                       current_handoff.get('receipt'))
+    return 0 if type(current_receipt) is dict and \
+        current_handoff.get('dispatch_state') == 'RECEIVED' and \
+        current_receipt.get('verdict') in ('PASS', 'FAIL') else 1
+
+
 def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
     """Automatically return a verified uncommitted direct-D6 result to its PM."""
     store = TaskStore() if store is None else store
@@ -1396,6 +1580,10 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
         callback = developer['direct_result_callback']
     if callback['executor_task_id'] != executor_task_id:
         raise LLMToolError('direct Executor task binding mismatch')
+    if (callback.get('state') == 'PM_RETURNED' and
+            type(callback.get('pm_recommendation')) is dict and
+            callback['pm_recommendation'].get('decision') == 'SEND_TO_REVIEW'):
+        return _resume_reviewer_handoff(store, task, developer, callback)
     if callback['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED', 'UNAVAILABLE'):
         raise LLMToolError('direct result PM call already claimed or completed; replay refused')
 
@@ -1651,11 +1839,15 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None):
         'pm_usage': None if usage is None else dict(usage),
         'pm_error_code': None if recommendation is not None else 'PM_RESPONSE_REJECTED'}
     try:
-        store.update(task_id, developer={**developer, 'direct_result_callback': returned})
+        saved_returned = store.update(task_id, developer={**developer,
+            'direct_result_callback': returned})
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         _persist_direct_interruption(store, task_id, 'PM',
                                      error_code='PM_RESPONSE_PERSIST_INTERRUPTED')
         raise exc
+    if recommendation is not None and recommendation['decision'] == 'SEND_TO_REVIEW':
+        return _resume_reviewer_handoff(store, saved_returned,
+            saved_returned['developer'], saved_returned['developer']['direct_result_callback'])
     _print(_task_view(store.get(task_id)))
     return 0 if recommendation is not None else 1
 
@@ -1667,5 +1859,6 @@ def run_task_executor_event(task_id, executor_task_id, *, store=None):
     evidence is recollected by run_task_complete before the original PM is called.
     """
     from argparse import Namespace
+    # The production entrypoint deliberately supplies no Reviewer adapter.
     return run_task_complete(Namespace(task_id=task_id,
         executor_task=executor_task_id, reviewer_task=None, pr=None), store=store)
