@@ -20,13 +20,17 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
+import time
 
 
 _TASK_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,95}\Z")
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 _REGISTRY_LIMIT = 64 * 1024
 _LOCAL_INVENTORY_LIMIT = 16 * 1024 * 1024
-_VALID_STATES = frozenset(("ACTIVE",))
+_BOOTSTRAP_OUTPUT_LIMIT = 2 * 1024 * 1024
+_BOOTSTRAP_REPORT_RELATIVE = Path("tools/llmtool/.d6-bootstrap-report.json")
+_VALID_STATES = frozenset(("ACTIVE", "REPAIR"))
 _EXPECTED_ORIGINS = frozenset((
     "git@github.com:davidcatcat/davidcattoolsproject.git",
     "https://github.com/davidcatcat/davidcattoolsproject.git",
@@ -431,6 +435,205 @@ def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path
     return root
 
 
+def _extract_worktree_env_report(stdout) -> dict:
+    if isinstance(stdout, bytes):
+        if len(stdout) > _BOOTSTRAP_OUTPUT_LIMIT:
+            _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+        try:
+            text = stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    elif isinstance(stdout, str) and len(stdout.encode("utf-8")) <= _BOOTSTRAP_OUTPUT_LIMIT:
+        text = stdout
+    else:
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    decoder = json.JSONDecoder(
+        object_pairs_hook=_unique_pairs,
+        parse_constant=lambda _value: _reject("ENV_BOOTSTRAP_REPORT_INVALID"),
+    )
+    reports = []
+    for match in re.finditer(r"(?m)^\s*\{", text):
+        try:
+            report, _end = decoder.raw_decode(text[match.start():])
+        except (ValueError, PreflightError):
+            continue
+        if isinstance(report, dict) and report.get("status") in ("env_created", "env_reused", "error"):
+            reports.append(report)
+    if len(reports) != 1:
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    return reports[0]
+
+
+def _safe_nonnegative_count(value) -> bool:
+    return type(value) is int and 0 <= value <= 10000
+
+
+def _valid_package_list(value, expected_count) -> bool:
+    if type(value) is not list or len(value) != expected_count:
+        return False
+    seen = set()
+    for item in value:
+        if (type(item) is not dict or set(item) != {"name", "version"} or
+                type(item["name"]) is not str or
+                re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", item["name"]) is None or
+                type(item["version"]) is not str or
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", item["version"]) is None or
+                item["name"] in seen):
+            return False
+        seen.add(item["name"])
+    return True
+
+
+def _sanitize_success_report(payload: dict) -> dict:
+    if (type(payload.get("cache_fingerprint")) is not str or
+            re.fullmatch(r"[0-9a-f]{64}", payload["cache_fingerprint"]) is None or
+            type(payload.get("packages")) is not dict or len(payload["packages"]) > 1000 or
+            type(payload.get("operations")) is not dict or
+            type(payload.get("timings")) is not dict or
+            type(payload.get("total_s")) not in (int, float) or
+            payload["total_s"] < 0 or payload["total_s"] > 86400):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    package_versions = {}
+    for name, version in payload["packages"].items():
+        if (type(name) is not str or
+                re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", name) is None or
+                type(version) is not str or
+                re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version) is None):
+            _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+        package_versions[name] = version
+
+    operations = payload["operations"]
+    count_fields = (
+        "pip_download_command_count", "downloaded_wheel_count",
+        "wheel_source_copy_count", "dependency_install_command_count",
+        "dependency_install_package_count", "project_install_command_count",
+        "project_install_package_count",
+    )
+    if any(not _safe_nonnegative_count(operations.get(key)) for key in count_fields):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    downloaded = operations.get("downloaded_wheels")
+    dependencies = operations.get("dependency_installed")
+    project = operations.get("project_installed")
+    if (not _valid_package_list(downloaded, operations["downloaded_wheel_count"]) or
+            not _valid_package_list(dependencies, operations["dependency_install_package_count"]) or
+            not _valid_package_list(project, operations["project_install_package_count"]) or
+            operations["pip_download_command_count"] > 1 or
+            operations["dependency_install_command_count"] > 1 or
+            operations["project_install_command_count"] > 1 or
+            operations["wheel_source_copy_count"] > 1000):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+
+    timings = payload["timings"]
+    if len(timings) > 8 or any(
+            type(key) is not str or
+            type(value) not in (int, float) or value < 0 or value > 86400
+            for key, value in timings.items()):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    cache_status = payload.get("cache_status")
+    if (payload["status"] == "env_created" and cache_status not in ("hit", "miss") or
+            payload["status"] == "env_reused" and cache_status != "unused"):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    return {
+        "schema_version": 1,
+        "result": "PASS",
+        "status": payload["status"],
+        "cache_status": cache_status,
+        "cache_fingerprint": payload["cache_fingerprint"],
+        "total_s": round(float(payload["total_s"]), 3),
+        "timings": {key: round(float(value), 3) for key, value in sorted(timings.items())},
+        "operations": {
+            "pip_download_command_count": operations["pip_download_command_count"],
+            "downloaded_wheel_count": operations["downloaded_wheel_count"],
+            "downloaded_wheels": downloaded,
+            "wheel_source_copy_count": operations["wheel_source_copy_count"],
+            "dependency_install_command_count": operations["dependency_install_command_count"],
+            "dependency_install_package_count": operations["dependency_install_package_count"],
+            "dependency_installed": dependencies,
+            "project_install_command_count": operations["project_install_command_count"],
+            "project_install_package_count": operations["project_install_package_count"],
+            "project_installed": project,
+        },
+        "packages": package_versions,
+    }
+
+
+def _atomic_bootstrap_report(root: Path, report: dict) -> None:
+    destination = root / _BOOTSTRAP_REPORT_RELATIVE
+    parent = destination.parent
+    _directory(parent, expected_uid=os.getuid())
+    try:
+        existing = destination.lstat()
+    except FileNotFoundError:
+        existing = None
+    except OSError:
+        _reject("ENV_BOOTSTRAP_REPORT_UNAVAILABLE")
+    if existing is not None and (
+            not stat.S_ISREG(existing.st_mode) or stat.S_ISLNK(existing.st_mode) or
+            existing.st_uid != os.getuid() or stat.S_IMODE(existing.st_mode) != 0o600 or
+            existing.st_nlink != 1 or existing.st_size > _BOOTSTRAP_OUTPUT_LIMIT):
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    payload = (json.dumps(report, ensure_ascii=True, sort_keys=True,
+                          separators=(",", ":")) + "\n").encode("ascii")
+    if len(payload) > _BOOTSTRAP_OUTPUT_LIMIT:
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".d6-bootstrap-report-", dir=str(parent))
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+        temporary = None
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        _reject("ENV_BOOTSTRAP_REPORT_WRITE_FAILED")
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    try:
+        written = destination.lstat()
+    except OSError:
+        _reject("ENV_BOOTSTRAP_REPORT_WRITE_FAILED")
+    if (not stat.S_ISREG(written.st_mode) or stat.S_ISLNK(written.st_mode) or
+            written.st_uid != os.getuid() or stat.S_IMODE(written.st_mode) != 0o600 or
+            written.st_nlink != 1):
+        _reject("ENV_BOOTSTRAP_REPORT_WRITE_FAILED")
+
+
+def _bootstrap_report_binding(root: Path, task_id: str, elapsed: float) -> dict:
+    common_dir = Path(_run_git(root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir"))
+    record = _read_record(common_dir, task_id, os.getuid())
+    return {
+        "task_id": task_id,
+        "head_sha": record["head_sha"],
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "elapsed_s": elapsed,
+    }
+
+
+def _write_unknown_bootstrap_report(root: Path, task_id: str, elapsed: float) -> None:
+    report = {
+        "schema_version": 1,
+        **_bootstrap_report_binding(root, task_id, elapsed),
+        "result": "BLOCKED",
+        "status": "UNKNOWN",
+        "cache_fingerprint": "UNKNOWN",
+        "operations": "UNKNOWN",
+        "error_code": "ENV_BOOTSTRAP_REPORT_INVALID",
+    }
+    _atomic_bootstrap_report(root, report)
+
+
 def _invoke_bootstrap(root: Path, task_id: str) -> int:
     # Revalidate immediately before Make resolves path-based source files.
     # D6's verified single-writer lease is the remaining cooperative race bound.
@@ -454,6 +657,7 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
             _reject("ENV_BOOTSTRAP_SOURCE_MISSING")
         if not stat.S_ISREG(info.st_mode):
             _reject("ENV_BOOTSTRAP_SOURCE_INVALID")
+    started = time.monotonic()
     try:
         result = _run_make(
             ["/usr/bin/make", "-f", "Makefile", "-C", str(makefile_dir),
@@ -464,6 +668,36 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
         )
     except (OSError, subprocess.SubprocessError):
         _reject("ENV_BOOTSTRAP_UNAVAILABLE")
+    elapsed = round(time.monotonic() - started, 3)
+    try:
+        payload = _extract_worktree_env_report(result.stdout)
+    except PreflightError:
+        _write_unknown_bootstrap_report(root, task_id, elapsed)
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    report_binding = _bootstrap_report_binding(root, task_id, elapsed)
+    if result.returncode == 0 and payload.get("status") in ("env_created", "env_reused"):
+        try:
+            report = {**report_binding, **_sanitize_success_report(payload)}
+        except PreflightError:
+            _write_unknown_bootstrap_report(root, task_id, elapsed)
+            _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    elif (result.returncode != 0 and payload.get("status") == "error" and
+          type(payload.get("code")) is str and
+          re.fullmatch(r"[A-Z0-9_]{1,64}", payload["code"]) is not None):
+        report = {
+            "schema_version": 1,
+            **report_binding,
+            "result": "FAIL",
+            "status": "error",
+            "error_code": payload["code"],
+            "cache_fingerprint": "UNKNOWN",
+            "elapsed_s": elapsed,
+            "operations": "UNKNOWN",
+        }
+    else:
+        _write_unknown_bootstrap_report(root, task_id, elapsed)
+        _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+    _atomic_bootstrap_report(root, report)
     return result.returncode
 
 
@@ -477,7 +711,8 @@ def _bootstrap_environment():
 
 def _run_make(argv, *, cwd, env):
     return subprocess.run(argv, cwd=str(cwd), env=env,
-                          stdin=subprocess.DEVNULL, check=False)
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, check=False)
 
 
 def main(argv=None) -> int:

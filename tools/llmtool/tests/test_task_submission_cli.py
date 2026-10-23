@@ -83,6 +83,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
         original_cwd = os.getcwd()
         self.addCleanup(os.chdir, original_cwd)
         os.chdir(self.executor_root)
+        self.bootstrap_patch = patch(
+            'llmtool.task_submission_cli._bootstrap_registered_d6')
+        self.bootstrap_patch.start()
+        self.addCleanup(self.bootstrap_patch.stop)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
@@ -522,6 +526,37 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['developer']['error_code'], 'OPENCODE_D6_BINDING_CHANGED')
         self.assertFalse(provider_process_started)
         self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_bootstraps_registered_d6_before_provider_launch(self):
+        task = self._pm_task_with_opencode_assignment()
+        events = []
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None, 'UNKNOWN',
+                              'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                              10, 1, 'b' * 64)
+
+        def bootstrap(registration):
+            self.assertEqual(registration.task_id, 'executor-task-1')
+            events.append('bootstrap')
+
+        def launch(**kwargs):
+            kwargs['prelaunch_validate']()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            events.append('provider')
+            return result
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                      side_effect=bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=launch), \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      return_value=None), redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
+        self.assertEqual(events, ['bootstrap', 'provider'])
 
     def test_opencode_failed_call_is_unknown_and_never_replayed(self):
         task = self._pm_task_with_opencode_assignment()

@@ -95,7 +95,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "head_sha": self._git("rev-parse", "HEAD"),
             "state": "ACTIVE",
             "lock_state": "LOCKED",
-            "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/build/"],
+            "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/build/",
+                                "tools/llmtool/.d6-bootstrap-report.json"],
         }
 
     def _write_record(self, record=None):
@@ -112,6 +113,33 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         finally:
             os.chdir(previous)
 
+    def _make_result(self, returncode=0, *, report=None, stderr=b""):
+        payload = report or {
+            "status": "env_created",
+            "cache_status": "miss",
+            "cache_fingerprint": "a" * 64,
+            "total_s": 2.5,
+            "timings": {"cache": 1.0, "deps": 0.5, "project": 0.2},
+            "operations": {
+                "pip_download_command_count": 1,
+                "downloaded_wheels": [{"name": "example", "version": "1.0"}],
+                "downloaded_wheel_count": 1,
+                "wheel_source_copy_count": 0,
+                "dependency_install_command_count": 1,
+                "dependency_installed": [{"name": "example", "version": "1.0"}],
+                "dependency_install_package_count": 1,
+                "project_install_command_count": 1,
+                "project_installed": [{"name": "llmtool", "version": "0.1.0"}],
+                "project_install_package_count": 1,
+            },
+            "packages": {"example": "1.0"},
+        }
+        return subprocess.CompletedProcess(
+            ["/usr/bin/make"], returncode,
+            stdout=b"make recipe output\n" + json.dumps(payload).encode("utf-8"),
+            stderr=stderr,
+        )
+
     def test_valid_locked_registration_invokes_existing_make_target(self):
         with mock.patch.object(d6env, "_invoke_bootstrap", return_value=0) as invoke:
             self.assertEqual(self._main_at_root(), 0)
@@ -119,7 +147,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
 
     def test_bootstrap_invokes_existing_make_target_without_shell(self):
         makefile_dir = self.root / "tools" / "llmtool"
-        result = type("Result", (), {"returncode": 0})()
+        result = self._make_result(stderr=b"secret-token=https://u:p@host/?token=secret\n")
         with mock.patch.object(d6env, "_run_make", return_value=result) as run:
             self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 0)
         argv = run.call_args.args[0]
@@ -130,18 +158,53 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
                       " -I -B", argv)
         self.assertIn("env", run.call_args.kwargs)
         self.assertNotIn("shell", run.call_args.kwargs)
+        report_path = self.root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
+        self.assertEqual(report["result"], "PASS")
+        self.assertEqual(report["task_id"], self.task_id)
+        self.assertEqual(report["head_sha"], self._git("rev-parse", "HEAD"))
+        self.assertEqual(report["cache_fingerprint"], "a" * 64)
+        self.assertEqual(report["operations"]["downloaded_wheel_count"], 1)
+        self.assertEqual(report["operations"]["dependency_install_package_count"], 1)
+        self.assertEqual(report["operations"]["project_install_package_count"], 1)
+        self.assertNotIn("secret-token", report_path.read_text(encoding="utf-8"))
+        self.assertNotIn("token=secret", report_path.read_text(encoding="utf-8"))
+        # The report itself is in retention_paths and must not break revalidation.
+        with mock.patch.object(d6env, "_run_make", return_value=result):
+            self.assertEqual(self._main_at_root(), 0)
 
     def test_interpreter_path_with_spaces_is_shell_quoted(self):
         makefile_dir = self.root / "tools" / "llmtool"
-        result = type("Result", (), {"returncode": 0})()
+        result = self._make_result()
         with mock.patch.object(d6env.sys, "executable", "/opt/Python Home/bin/python3"):
             with mock.patch.object(d6env, "_run_make", return_value=result) as run:
                 self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 0)
         self.assertIn("WORKTREE_ENV_PYTHON='/opt/Python Home/bin/python3' -I -B",
                       run.call_args.args[0])
 
+    def test_invalid_bootstrap_output_records_unknown_without_raw_logs(self):
+        result = subprocess.CompletedProcess(
+            ["/usr/bin/make"], 0,
+            stdout=b"https://user:password@example.invalid/?token=secret",
+            stderr=b"restricted raw diagnostic",
+        )
+        with mock.patch.object(d6env, "_run_make", return_value=result):
+            with self.assertRaises(d6env.PreflightError) as raised:
+                d6env._invoke_bootstrap(self.root, self.task_id)
+        self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_REPORT_INVALID")
+        report_path = self.root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["result"], "BLOCKED")
+        self.assertEqual(report["cache_fingerprint"], "UNKNOWN")
+        self.assertEqual(report["operations"], "UNKNOWN")
+        evidence = report_path.read_text(encoding="utf-8")
+        self.assertNotIn("password", evidence)
+        self.assertNotIn("token=secret", evidence)
+        self.assertNotIn("restricted raw diagnostic", evidence)
+
     def test_make_and_python_environment_overrides_are_scrubbed(self):
-        result = type("Result", (), {"returncode": 0})()
+        result = self._make_result()
         injected = {
             "MAKEFILES": "attacker.mk",
             "MAKEFLAGS": "-f attacker.mk",
@@ -161,7 +224,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         output = self.root / "tools" / "llmtool" / "build" / "generated.txt"
         output.parent.mkdir(parents=True)
         output.write_text("registered retention output\n", encoding="utf-8")
-        result = type("Result", (), {"returncode": 0})()
+        result = self._make_result()
         with mock.patch.object(d6env, "_run_make", return_value=result) as run:
             self.assertEqual(self._main_at_root(), 0)
         run.assert_called_once()
@@ -232,13 +295,13 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             self.assertEqual(self._main_at_root(), 1)
         invoke.assert_not_called()
 
-    def test_repair_state_fails_closed(self):
+    def test_repair_state_is_valid_for_registered_resume(self):
         record = self._record()
         record["state"] = "REPAIR"
         self._write_record(record)
-        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
-            self.assertEqual(self._main_at_root(), 1)
-        invoke.assert_not_called()
+        with mock.patch.object(d6env, "_invoke_bootstrap", return_value=0) as invoke:
+            self.assertEqual(self._main_at_root(), 0)
+        invoke.assert_called_once_with(self.root, self.task_id)
 
     def test_non_private_worktree_mode_fails_closed(self):
         os.chmod(self.root, 0o750)

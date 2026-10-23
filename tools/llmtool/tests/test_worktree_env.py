@@ -681,6 +681,17 @@ class CacheTest(EnvironmentTempCase):
         first = json.loads(out)
         self.assertEqual(first["status"], "env_created")
         self.assertEqual(first["cache_status"], "miss")
+        first_ops = first["operations"]
+        self.assertEqual(first_ops["pip_download_command_count"], 0)
+        self.assertEqual(first_ops["downloaded_wheel_count"], 0)
+        self.assertEqual(first_ops["wheel_source_copy_count"], len(first["packages"]))
+        self.assertEqual(first_ops["dependency_install_command_count"], 1)
+        self.assertEqual(first_ops["dependency_install_package_count"],
+                         len(first_ops["dependency_installed"]))
+        self.assertTrue(first_ops["dependency_installed"])
+        self.assertEqual(first_ops["project_install_command_count"], 1)
+        self.assertEqual(first_ops["project_install_package_count"], 1)
+        self.assertEqual(first_ops["project_installed"][0]["name"], "llmtool")
 
         report = self.venv_report(worktree)
         self.assertEqual(report["marker"], "A")
@@ -690,6 +701,9 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(code, 0, err)
         second = json.loads(out)
         self.assertEqual(second["status"], "env_reused")
+        self.assertEqual(second["operations"]["pip_download_command_count"], 0)
+        self.assertEqual(second["operations"]["dependency_install_command_count"], 0)
+        self.assertEqual(second["operations"]["project_install_command_count"], 0)
 
         base = os.path.realpath(we.default_python_executable())
         mode_before = stat.S_IMODE(os.stat(base).st_mode)
@@ -698,6 +712,10 @@ class CacheTest(EnvironmentTempCase):
         third = json.loads(out)
         self.assertEqual(third["status"], "env_created")
         self.assertEqual(third["cache_status"], "hit")
+        self.assertEqual(third["operations"]["pip_download_command_count"], 0)
+        self.assertEqual(third["operations"]["downloaded_wheel_count"], 0)
+        self.assertEqual(third["operations"]["dependency_install_command_count"], 1)
+        self.assertEqual(third["operations"]["project_install_command_count"], 1)
         self.assertEqual(
             mode_before,
             stat.S_IMODE(os.stat(base).st_mode),

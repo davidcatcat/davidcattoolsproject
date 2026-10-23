@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import unicodedata
@@ -574,6 +575,28 @@ def _direct_result_callback(task, registration, source_sha):
     }
 
 
+def _bootstrap_registered_d6(registration):
+    """Require ENV-2 validation/bootstrap before a managed Developer launch."""
+    root = registration.root
+    script = os.path.join(root, 'tools', 'llmtool', 'scripts', 'd6_worktree_env.py')
+    env = dict(os.environ)
+    for name in tuple(env):
+        if name.startswith(('MAKE', 'PYTHON')) or name in ('GNUMAKEFLAGS', 'MFLAGS'):
+            env.pop(name, None)
+    try:
+        result = subprocess.run(
+            [sys.executable, '-B', '-I', script, '--task-id', registration.task_id],
+            cwd=root, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError:
+        raise opencode_direct_developer.DirectOpenCodeError(
+            'ENV_BOOTSTRAP_UNAVAILABLE') from None
+    if result.returncode:
+        raise opencode_direct_developer.DirectOpenCodeError(
+            'ENV_BOOTSTRAP_REJECTED')
+
+
 def _interrupted_execution(exc):
     """Return only adapter-observed process evidence after an interrupt."""
     observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
@@ -721,6 +744,15 @@ def run_task_opencode_delegate(args, *, store):
             if (current_registration != registration or current_snapshot != snapshot):
                 raise LLMToolError('D6 or Git identity changed before OpenCode launch')
             return True
+
+        # This route owns the OpenCode launch, so ENV-2 is an executable gate
+        # here rather than an instruction left to the Developer prompt.
+        try:
+            validate_prelaunch_d6_binding()
+        except Exception:
+            raise opencode_direct_developer.DirectOpenCodeError(
+                'OPENCODE_D6_BINDING_CHANGED') from None
+        _bootstrap_registered_d6(registration)
 
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,

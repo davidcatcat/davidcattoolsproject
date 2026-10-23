@@ -1083,7 +1083,13 @@ def ensure_wheelhouse(
     offline=False,
     rebuild=False,
 ):
-    """Return (wheelhouse path, "hit"|"miss"). Never returns a corrupt entry."""
+    """Return path, cache status, and observed wheel download/copy operations."""
+
+    no_wheel_ops = {
+        "pip_download_command_count": 0,
+        "downloaded_wheels": [],
+        "wheel_source_copy_count": 0,
+    }
 
     if not re.fullmatch(r"[A-Za-z0-9._-]+", fp or ""):
         raise EnvError("INVALID_FINGERPRINT", "unsafe fingerprint value %r" % (fp,), 3)
@@ -1095,7 +1101,7 @@ def ensure_wheelhouse(
         # can remove it mid-verification; that surfaces as CACHE_CORRUPT (fail
         # closed, retry succeeds) and can never yield an unverified hit.
         verify_wheelhouse(final, fp, requirements)
-        return final, "hit"
+        return final, "hit", no_wheel_ops
 
     tmp_root = Path(cache_root) / "tmp"
     _ensure_dir(tmp_root)
@@ -1109,7 +1115,7 @@ def ensure_wheelhouse(
             remove_cache_entry(cache_root, fp)
         if final.exists():
             verify_wheelhouse(final, fp, requirements)
-            return final, "hit"
+            return final, "hit", no_wheel_ops
         if offline and not wheel_source:
             raise EnvError(
                 "CACHE_MISS",
@@ -1124,8 +1130,21 @@ def ensure_wheelhouse(
                 wheels = _collect_wheels(requirements, wheel_source)
                 for wheel in wheels.values():
                     shutil.copyfile(str(wheel), str(staging / wheel.name))
+                wheel_ops = {
+                    "pip_download_command_count": 0,
+                    "downloaded_wheels": [],
+                    "wheel_source_copy_count": len(wheels),
+                }
             else:
                 wheels = _download_wheels(python_executable, requirements, staging)
+                wheel_ops = {
+                    "pip_download_command_count": 1,
+                    "downloaded_wheels": [
+                        {"name": name, "version": _parse_wheel_filename(path.name)[1]}
+                        for name, path in sorted(wheels.items())
+                    ],
+                    "wheel_source_copy_count": 0,
+                }
             schema_mismatch = sorted(
                 name
                 for name, wheel in wheels.items()
@@ -1151,10 +1170,10 @@ def ensure_wheelhouse(
             except OSError as exc:
                 if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                     verify_wheelhouse(final, fp, requirements)
-                    return final, "hit"
+                    return final, "hit", wheel_ops
                 raise
             os.chmod(str(final), 0o555)
-            return final, "miss"
+            return final, "miss", wheel_ops
         except BaseException:
             if staging.exists():
                 _make_tree_writable(staging)
@@ -1223,6 +1242,7 @@ def create_venv(worktree, python_executable, recreate=False):
 
 
 def install_requirements(python_executable, wheelhouse, requirements):
+    before = installed_versions(python_executable)
     req_path = Path(tempfile.mkdtemp(prefix="llmtool-env-req-")) / "requirements.txt"
     req_path.write_text(requirement_lines(requirements), encoding="utf-8")
     cmd = [
@@ -1253,6 +1273,42 @@ def install_requirements(python_executable, wheelhouse, requirements):
             % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
+    after = installed_versions(python_executable)
+    expected = {item["name"] for item in requirements}
+    return [
+        {"name": name, "version": after[name]}
+        for name in sorted(expected)
+        if name in after and before.get(name) != after[name]
+    ]
+
+
+def installed_versions(python_executable):
+    """Return a bounded, normalized inventory from this interpreter's pip."""
+    cmd = [python_executable, "-I", "-m", "pip", "list", "--format=json",
+           "--disable-pip-version-check"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=PIP_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EnvError("PIP_INVENTORY_FAILED", _redact_diagnostic(str(exc)), 5)
+    if proc.returncode != 0 or len(proc.stdout.encode("utf-8")) > 2 * 1024 * 1024:
+        raise EnvError("PIP_INVENTORY_FAILED", _subprocess_diagnostic(proc), 5)
+    try:
+        payload = json.loads(proc.stdout)
+        if not isinstance(payload, list):
+            raise ValueError("pip list was not a list")
+        versions = {}
+        for item in payload:
+            if (not isinstance(item, dict) or not isinstance(item.get("name"), str) or
+                    not isinstance(item.get("version"), str)):
+                raise ValueError("pip list entry was malformed")
+            name = normalize_name(item["name"])
+            if name in versions:
+                raise ValueError("pip list contained duplicate names")
+            versions[name] = item["version"]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise EnvError("PIP_INVENTORY_INVALID", "pip package inventory was invalid", 5)
+    return versions
 
 
 PEP660_MIN_PIP = (21, 3)
@@ -1316,6 +1372,7 @@ def install_project(python_executable, worktree, wheelhouse):
     """
 
     require_editable_capable_pip(python_executable)
+    before = installed_versions(python_executable)
     project = Path(worktree) / PROJECT_RELATIVE
     cmd = [
         python_executable,
@@ -1341,6 +1398,10 @@ def install_project(python_executable, worktree, wheelhouse):
             % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
+    after = installed_versions(python_executable)
+    name = "llmtool"
+    return ([{"name": name, "version": after[name]}]
+            if name in after and before.get(name) != after[name] else [])
 
 
 def write_marker(venv, marker):
@@ -1668,6 +1729,18 @@ def _bootstrap_locked(
                 "status": "env_reused",
                 "cache": str(wheelhouse_path(cache_root, fp)),
                 "cache_status": "unused",
+                "operations": {
+                    "pip_download_command_count": 0,
+                    "downloaded_wheels": [],
+                    "downloaded_wheel_count": 0,
+                    "wheel_source_copy_count": 0,
+                    "dependency_install_command_count": 0,
+                    "dependency_installed": [],
+                    "dependency_install_package_count": 0,
+                    "project_install_command_count": 0,
+                    "project_installed": [],
+                    "project_install_package_count": 0,
+                },
                 "timings": timings,
                 "total_s": round(time.monotonic() - started, 3),
             }
@@ -1675,7 +1748,7 @@ def _bootstrap_locked(
         return report
 
     phase = time.monotonic()
-    wheelhouse, cache_status = ensure_wheelhouse(
+    wheelhouse, cache_status, wheel_operations = ensure_wheelhouse(
         cache_root,
         fp,
         inputs,
@@ -1693,7 +1766,7 @@ def _bootstrap_locked(
         timings["venv"] = round(time.monotonic() - phase, 3)
         return _install_into_new_venv(
             args, started, timings, worktree, lock_path, requirements, venv,
-            wheelhouse, cache_status, inputs, fp,
+            wheelhouse, cache_status, wheel_operations, inputs, fp,
         )
     except BaseException:
         # Never leave a half-built venv that would block the next bootstrap with
@@ -1706,7 +1779,7 @@ def _bootstrap_locked(
 
 def _install_into_new_venv(
     args, started, timings, worktree, lock_path, requirements, venv,
-    wheelhouse, cache_status, inputs, fp,
+    wheelhouse, cache_status, wheel_operations, inputs, fp,
 ):
     venv_inputs = fingerprint_inputs(
         lock_path, args.extras, interpreter_info(venv_python(venv)),
@@ -1722,12 +1795,14 @@ def _install_into_new_venv(
         )
 
     phase = time.monotonic()
-    install_requirements(venv_python(venv), wheelhouse, requirements)
+    dependency_installed = install_requirements(
+        venv_python(venv), wheelhouse, requirements)
     timings["deps"] = round(time.monotonic() - phase, 3)
 
+    project_installed = []
     if not args.no_project:
         phase = time.monotonic()
-        install_project(venv_python(venv), worktree, wheelhouse)
+        project_installed = install_project(venv_python(venv), worktree, wheelhouse)
         timings["project"] = round(time.monotonic() - phase, 3)
 
     project_install = not args.no_project
@@ -1758,6 +1833,16 @@ def _install_into_new_venv(
             "status": "env_created",
             "cache": str(wheelhouse),
             "cache_status": cache_status,
+            "operations": {
+                **wheel_operations,
+                "downloaded_wheel_count": len(wheel_operations["downloaded_wheels"]),
+                "dependency_install_command_count": 1,
+                "dependency_installed": dependency_installed,
+                "dependency_install_package_count": len(dependency_installed),
+                "project_install_command_count": 0 if args.no_project else 1,
+                "project_installed": project_installed,
+                "project_install_package_count": len(project_installed),
+            },
             "timings": timings,
             "total_s": round(time.monotonic() - started, 3),
         }
