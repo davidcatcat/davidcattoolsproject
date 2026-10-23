@@ -16,6 +16,7 @@ from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
                                          run_task_opencode_delegate,
@@ -557,6 +558,52 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(code, 1, output.getvalue())
         self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
         self.assertEqual(events, ['bootstrap', 'provider'])
+
+    def test_opencode_bootstrap_rejection_blocks_launch_and_binds_process(self):
+        self.bootstrap_patch.stop()
+        task = self._pm_task_with_opencode_assignment()
+        target_script = (self.executor_root / 'tools' / 'llmtool' / 'scripts' /
+                         'd6_worktree_env.py')
+        captured = []
+        real_run = subprocess.run
+
+        def reject_env_bootstrap(argv, *args, **kwargs):
+            if str(target_script) in argv:
+                captured.append((argv, kwargs))
+                return subprocess.CompletedProcess(argv, 23)
+            return real_run(argv, *args, **kwargs)
+
+        output = io.StringIO()
+        injected = {
+            'HOME': str(self.home), 'MAKEFLAGS': '-f attacker.mk',
+            'MAKEFILES': 'attacker.mk', 'PYTHONPATH': '/tmp/shadow',
+            'PYTHONHOME': '/tmp/other-python', 'GNUMAKEFLAGS': '--eval=bad',
+            'MFLAGS': '-f attacker.mk',
+        }
+        with patch.dict(os.environ, injected), \
+                patch.object(submission_cli.subprocess, 'run',
+                             side_effect=reject_env_bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as launch, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'ENV_BOOTSTRAP_REJECTED')
+        launch.assert_not_called()
+        self.assertEqual(len(captured), 1)
+        argv, kwargs = captured[0]
+        self.assertEqual(argv, [sys.executable, '-B', '-I', str(target_script),
+                                '--task-id', 'executor-task-1'])
+        self.assertEqual(kwargs['cwd'], str(self.executor_root))
+        self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+        self.assertFalse(kwargs['check'])
+        for name in ('MAKEFLAGS', 'MAKEFILES', 'PYTHONPATH', 'PYTHONHOME',
+                     'GNUMAKEFLAGS', 'MFLAGS'):
+            self.assertNotIn(name, kwargs['env'])
 
     def test_opencode_failed_call_is_unknown_and_never_replayed(self):
         task = self._pm_task_with_opencode_assignment()

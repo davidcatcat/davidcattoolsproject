@@ -38,7 +38,8 @@ RETENTION_PATHS = [
     "tools/llmtool/.worktree-env.lock",
     "tools/llmtool/.d6-bootstrap-report.json",
     "tools/llmtool/llmtool.egg-info/",
-    "tools/llmtool/llmtool/__pycache__/__init__.cpython-313.pyc",
+    "tools/llmtool/llmtool/__pycache__/__init__." +
+    sys.implementation.cache_tag + ".pyc",
     "tools/llmtool/build/",
 ]
 
@@ -281,17 +282,45 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
         os.close(lock_fd)
 
 
+def resume_worktree(*, task_id, root):
+    """Revalidate and bootstrap one existing ACTIVE/REPAIR D6 worktree."""
+    if not TASK_ID_RE.fullmatch(task_id or ""):
+        _stop("D6_TASK_INPUT_INVALID")
+    try:
+        root = Path(root).resolve(strict=True)
+    except (OSError, TypeError):
+        _stop("D6_ROOT_INVALID")
+    if not root.is_absolute():
+        _stop("D6_ROOT_INVALID")
+    # ENV-2 validates the owner-only record, ACTIVE/REPAIR state, physical
+    # root, clean executable sources, exact HEAD and live worktree lock.
+    _bootstrap(root, task_id)
+    print("D6_WORKTREE_RESUMED task_id=" + task_id + " root=" + str(root))
+    return root
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task-id", required=True)
-    parser.add_argument("--agent-id", required=True)
-    parser.add_argument("--session-ref", required=True)
-    parser.add_argument("--lease-ref", required=True)
-    parser.add_argument("--branch", required=True)
-    parser.add_argument("--base-sha", required=True)
+    parser.add_argument("--task-id")
+    parser.add_argument("--agent-id")
+    parser.add_argument("--session-ref")
+    parser.add_argument("--lease-ref")
+    parser.add_argument("--branch")
+    parser.add_argument("--base-sha")
+    parser.add_argument("--resume-task-id")
+    parser.add_argument("--resume-root")
     parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
     args = parser.parse_args(argv)
     try:
+        create_values = (args.task_id, args.agent_id, args.session_ref,
+                         args.lease_ref, args.branch, args.base_sha)
+        if args.resume_task_id is not None:
+            if (args.resume_root is None or any(value is not None for value in create_values)):
+                _stop("D6_TASK_INPUT_INVALID")
+            resume_worktree(task_id=args.resume_task_id, root=args.resume_root)
+            return 0
+        if args.resume_root is not None or any(value is None for value in create_values):
+            _stop("D6_TASK_INPUT_INVALID")
         create_worktree(
             canonical_root=args.repo_root, task_id=args.task_id,
             agent_id=args.agent_id, session_ref=args.session_ref,

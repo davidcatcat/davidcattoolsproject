@@ -2,6 +2,7 @@
 
 import json
 import os
+import platform
 from pathlib import Path
 import stat
 import subprocess
@@ -14,6 +15,16 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import d6_worktree_env as d6env  # noqa: E402
+import worktree_env as worktreeenv  # noqa: E402
+
+
+def _actual_cache_fingerprint():
+    return worktreeenv.fingerprint_id({
+        "implementation": sys.implementation.name,
+        "python_version": "%d.%d.%d" % sys.version_info[:3],
+        "platform": sys.platform,
+        "machine": platform.machine(),
+    })
 
 
 class D6WorktreeEnvironmentTests(unittest.TestCase):
@@ -117,7 +128,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         payload = report or {
             "status": "env_created",
             "cache_status": "miss",
-            "cache_fingerprint": "cpython3.13-darwin-arm64-0123456789ab",
+            "cache_fingerprint": _actual_cache_fingerprint(),
             "total_s": 2.5,
             "timings": {"cache": 1.0, "deps": 0.5, "project": 0.2},
             "operations": {
@@ -164,8 +175,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertEqual(report["result"], "PASS")
         self.assertEqual(report["task_id"], self.task_id)
         self.assertEqual(report["head_sha"], self._git("rev-parse", "HEAD"))
-        self.assertEqual(report["cache_fingerprint"],
-                         "cpython3.13-darwin-arm64-0123456789ab")
+        self.assertEqual(report["cache_fingerprint"], _actual_cache_fingerprint())
         self.assertEqual(report["operations"]["downloaded_wheel_count"], 1)
         self.assertEqual(report["operations"]["dependency_install_package_count"], 1)
         self.assertEqual(report["operations"]["project_install_package_count"], 1)
@@ -205,10 +215,10 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertNotIn("restricted raw diagnostic", evidence)
 
     def test_cache_fingerprint_requires_real_worktree_env_format(self):
-        self.assertTrue(d6env._valid_cache_fingerprint(
-            "cpython3.13-darwin-arm64-0123456789ab"))
-        for value in ("a" * 64, "../python3.13-darwin-arm64-0123456789ab",
-                      "cpython3.13-darwin-arm64-0123456789abcdef"):
+        generated = _actual_cache_fingerprint()
+        self.assertTrue(d6env._valid_cache_fingerprint(generated))
+        for value in ("a" * 64, "../" + generated,
+                      generated + "abcdef"):
             with self.subTest(value=value):
                 self.assertFalse(d6env._valid_cache_fingerprint(value))
 

@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import stat
@@ -19,9 +20,19 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import d6_worktree_lifecycle as lifecycle  # noqa: E402
 import d6_worktree_env as d6env  # noqa: E402
+import worktree_env as worktreeenv  # noqa: E402
 
 
 REPO = Path(__file__).resolve().parents[3]
+
+
+def _actual_cache_fingerprint():
+    return worktreeenv.fingerprint_id({
+        "implementation": sys.implementation.name,
+        "python_version": "%d.%d.%d" % sys.version_info[:3],
+        "platform": sys.platform,
+        "machine": platform.machine(),
+    })
 
 
 class D6WorktreeLifecycleTests(unittest.TestCase):
@@ -50,7 +61,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             "env-bootstrap:\n"
             "\t@printf 'bootstrapped\\n' > .worktree-env.lock\n"
             "\t@printf '%s\\n' '{\"status\":\"env_created\",\"cache_status\":\"miss\","
-            "\"cache_fingerprint\":\"cpython3.13-darwin-arm64-0123456789ab\","
+            "\"cache_fingerprint\":\"" + _actual_cache_fingerprint() + "\","
             "\"total_s\":0,\"timings\":{},\"operations\":{"
             "\"pip_download_command_count\":0,\"downloaded_wheels\":[],"
             "\"downloaded_wheel_count\":0,\"wheel_source_copy_count\":0,"
@@ -114,7 +125,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(record["head_sha"], self.base)
         self.assertEqual(record["branch"], "test/d6-integration-test")
         self.assertEqual(record["root_realpath"], str(root))
-        generated_pyc = "tools/llmtool/llmtool/__pycache__/__init__.cpython-313.pyc"
+        generated_pyc = ("tools/llmtool/llmtool/__pycache__/__init__." +
+                         sys.implementation.cache_tag + ".pyc")
         self.assertIn(generated_pyc, record["retention_paths"])
         worktrees = subprocess.check_output(
             ["/usr/bin/git", "worktree", "list", "--porcelain"],
@@ -122,9 +134,22 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertIn("worktree " + str(root), worktrees)
         self.assertIn("locked", worktrees)
 
+        record["state"] = "REPAIR"
+        lifecycle._replace_record(record_path, record)
+        resume_output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(resume_output):
+            self.assertEqual(lifecycle._main([
+                "--resume-task-id", "d6-integration-test",
+                "--resume-root", str(root), "--repo-root", str(self.source),
+            ]), 0)
+        self.assertIn("D6_WORKTREE_RESUMED task_id=d6-integration-test",
+                      resume_output.getvalue())
+
         package_cache = root / "tools" / "llmtool" / "llmtool" / "__pycache__"
         package_cache.mkdir(parents=True)
-        (package_cache / "__init__.cpython-313.pyc").write_bytes(b"generated editable-install bytecode")
+        (package_cache / ("__init__." + sys.implementation.cache_tag + ".pyc")) \
+            .write_bytes(b"generated editable-install bytecode")
         self.assertEqual(self._revalidate_d6(root, "d6-integration-test"), 0)
 
         (package_cache / "unregistered.cpython-313.pyc").write_bytes(b"unknown")
