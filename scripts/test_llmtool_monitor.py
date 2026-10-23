@@ -1526,23 +1526,51 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("可派工 ", gw)
         self.assertTrue(gw.endswith("  34 小時前"))   # the time stays in its own column
 
-    def test_office_view_colors_by_state_and_cuts_detail_to_keep_the_time(self):
+    def test_office_view_colors_by_state_and_wraps_detail_to_keep_the_time(self):
         rows = [mon.OfficeRow("codex PM?", mon.WORKING, "x" * 200, 5, 10, key="T1"),
                 mon.OfficeRow("codex 稽核? A", mon.STALLED, "audit", 1000, 20, group="T1",
                               kind="subagent"),
                 mon.OfficeRow("agy", mon.PAUSED, "Owner 暫停派工（10-22）", None, 60,
                               kind="worker")]
-        view = dict(mon.office_view(rows, width=80))
+        listed = mon.office_view(rows, width=80)
+        view = dict(listed)
         line = next(text for text in view if text.startswith("codex PM?"))
         self.assertEqual(view[line], "+")
-        self.assertLessEqual(mon._width(line), 80)
-        self.assertTrue(line.endswith("x…  剛剛"))
+        self.assertTrue(all(mon._width(text) <= 80 for text, _ in listed))
+        self.assertTrue(line.endswith("x  剛剛"))
+        # a long detail wraps under itself instead of being cut
+        at = [text for text, _ in listed].index(line)
+        rest = [text for text, _ in listed[at + 1:at + 10] if text.startswith(" ")]
+        self.assertEqual(sum(text.count("x") for text in rest) + line.count("x") - 1, 200)   # 1 = "codex"
+        self.assertTrue(all(view[text] == "+" for text in rest))
+        # a blank line sits above the Worker section
+        texts = [text for text, _ in listed]
+        self.assertEqual(texts[texts.index(f"── {mon.STATUS_SECTION} ──") - 1], "")
+        # on a wide screen the time stays near its text
+        wide = next(text for text, _ in mon.office_view(rows, width=240)
+                    if text.startswith("agy"))
+        self.assertTrue(wide.startswith("agy ") and wide.endswith("暫停中  Owner 暫停派工（10-22）"))
+        stalled = next(text for text, _ in mon.office_view(rows, width=240)
+                       if text.startswith("└ codex 稽核"))
+        self.assertIn("  audit  ", stalled)
+        self.assertTrue(stalled.endswith("  16 分前"))
+        self.assertLessEqual(mon._width(stalled), 18 + 8 + mon.DETAIL_MAX + 2 + 7)
         self.assertEqual(view[next(t for t in view if t.startswith("└ codex 稽核"))], "!")
         self.assertEqual(view[next(t for t in view if t.startswith("agy"))], "dim")
         self.assertEqual(view[next(t for t in view if t.startswith("⚠ codex 稽核"))], "!")
         self.assertEqual(view[next(iter(view))], "title")
         # without a width (--once) nothing is cut
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
+
+    def test_wrap_breaks_at_punctuation_and_never_starts_with_a_closing_mark(self):
+        text = "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒（回應格式錯誤）"
+        for cols in range(8, 40):
+            pieces = mon._wrap(text, cols)
+            self.assertEqual("".join(pieces).replace(" ", ""), text.replace(" ", ""))
+            self.assertTrue(all(mon._width(piece) <= cols for piece in pieces))
+            self.assertFalse(any(piece[:1] in mon.NO_LINE_START for piece in pieces))
+        self.assertEqual(mon._wrap(text, 30)[0], "可派工；本機 llmtool")   # at the space
+        self.assertEqual(mon._wrap("短", 10), ["短"])
 
     def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
         stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)

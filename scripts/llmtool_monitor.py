@@ -2430,18 +2430,27 @@ def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
 
 
 DETAIL_COLS = 44   # detail width when the screen width is not known
+DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
+BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
+NO_LINE_START = "）」』】，。、；：！？)]}"
 
 
-def _cut(text: str, cols: int) -> str:
-    """text cut to at most cols display columns, marked with … when cut."""
-    if _width(text) <= cols:
-        return text
-    out = ""
-    for char in text:
-        if _width(out + char) > cols - 1:
-            break
-        out += char
-    return out + "…"
+def _wrap(text: str, cols: int) -> list[str]:
+    """text split into lines of at most cols display columns (at least one),
+    broken after ；，、 or a space where possible, never before a closing mark."""
+    pieces = []
+    while _width(text) > cols:
+        fit = 0
+        while _width(text[:fit + 1]) <= cols:
+            fit += 1
+        cut = max((i + 1 for i in range(fit) if text[i] in BREAK_AFTER), default=0)
+        if cut < fit // 2:   # no good break point in the second half: break anywhere
+            cut = fit
+            while 1 < cut and text[cut] in NO_LINE_START:
+                cut -= 1
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    return pieces + [text]
 
 
 def _row_style(state: str) -> str:
@@ -2490,25 +2499,35 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
     alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
                if row.state in ALERT_STATES and not row.alert]
-    out += [(f"⚠ {text}", "!") for text in alerts]
-    out += [(text, "!") for text in notes]
+    for text in [f"⚠ {text}" for text in alerts] + notes:
+        out += [(("  " if i else "") + piece, "!") for i, piece in
+                enumerate(_wrap(text, width - 2) if width else [text])]
     tree = _tree(_fold_done(rows))
     name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
-    detail_cols = DETAIL_COLS if width is None else max(12, width - name_cols - 8 - 10)
+    # The detail column is as wide as the longest detail, up to DETAIL_MAX and
+    # what the screen leaves, so the time stays near its text on a wide screen.
+    longest = max([_width(row.detail) for _, row in tree if row.detail] or [0])
+    detail_cols = (DETAIL_COLS if width is None else
+                   max(12, min(longest, DETAIL_MAX, width - name_cols - 8 - 11)))
     for prefix, row in tree:
         if prefix == "—":
+            if row.name == STATUS_SECTION:
+                out.append(("", ""))   # a blank line sets the Worker list apart
             out.append((f"── {row.name} ──", "section"))
             continue
-        detail = row.detail if width is None else _cut(row.detail, detail_cols)
+        # In the TUI a long detail continues on the next lines under itself.
+        pieces = [row.detail] if width is None else _wrap(row.detail, detail_cols)
         when = _short_ago(row.age)
-        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{detail}"
+        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         out.append((line.rstrip(), _row_style(row.state)))
+        out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
     if any(row.basis == GUESSED for row in rows):
         legend.append("名稱帶 ? = 依資料夾或名稱推測")
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
-    out.append(("；".join(legend), "dim"))
+    text = "；".join(legend)
+    out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
     return out
 
 
