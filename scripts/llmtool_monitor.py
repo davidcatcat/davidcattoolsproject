@@ -1439,6 +1439,8 @@ CODEX_TOOLS = {"wait_agent": "等 subagent 回報", "spawn_agent": "派出 subag
                "send_message": "傳話給 subagent", "followup_task": "交代 subagent 下一步",
                "list_agents": "查看 subagent", "sleep": "等一下再看",
                "request_user_input_async": "等你回覆"}
+CODEX_ITEMS = {"FileChange": "改檔案", "McpToolCall": "呼叫 MCP 工具",
+               "AgentMessage": "回報進度", "CollabAgentToolCall": "和 subagent 協作"}
 FILE_NAME = re.compile(r"[\w.+-]{1,60}")
 EXEC_WORKDIR = re.compile(r'\bworkdir\s*:\s*"([^"\\\n]{1,1024})"')
 
@@ -1480,6 +1482,8 @@ def _codex_action(tail: list, canonical: str) -> str:
                 return _codex_command(done, canonical)
             if done.get("type") == "Reasoning":
                 return "思考中"
+            if done.get("type") in CODEX_ITEMS:
+                return CODEX_ITEMS[done["type"]]
         if kind in ("task_started", "task_complete", "turn_aborted"):
             return ""
     return ""
@@ -2308,7 +2312,8 @@ def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set,
         names = os.listdir(sessions)
     except OSError:
         return None
-    pids = {p.pid for p in processes if p.role == "Claude Code CLI"}
+    pids = {p.pid for p in processes
+            if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
     live = set()
     for name in names:
         pid = name[:-len(".json")]

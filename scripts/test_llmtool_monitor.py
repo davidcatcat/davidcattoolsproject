@@ -1032,6 +1032,9 @@ class OfficeViewTests(unittest.TestCase):
                          "等指令跑完")
         self.assertEqual(detail(done([]), call("wait_agent", arguments="{}")),
                          "等 subagent 回報")
+        self.assertEqual(detail(done([]), item({"type": "item_completed",
+                                                "item": {"type": "FileChange", "changes": "SECRET"}})),
+                         "改檔案")
         text = "".join(row.detail for row in self.rows())
         self.assertNotIn("SECRET", text)
         self.assertNotIn("secret-token", text)
@@ -1088,6 +1091,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows, {"title live": mon.IDLE,
                                 "推測 Claude CLI 已關閉（title recent）": mon.CLOSED,
                                 "（無標題）": mon.IDLE})   # desktop session is not judged
+        # An npm install runs the CLI as a node launcher; it is the same CLI.
+        node = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI (node launcher)", "node", "")
+        self.assertEqual({row.detail: row.state for row in self.rows([node])}["title live"], mon.IDLE)
         # A running CLI with no readable entry keeps the most recent unnamed session.
         other = mon.Process(42, 1, 42, "05:00", "S+", "Claude Code CLI", "claude", "")
         rows = {row.detail: row.state for row in self.rows([cli, other])}
