@@ -328,6 +328,37 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             self.assertEqual(self._main_at_root(), 1)
         invoke.assert_not_called()
 
+    def test_registered_descendant_head_is_accepted_and_marker_binds_current_head(self):
+        base = self._git("rev-parse", "HEAD")
+        readme = self.root / "README"
+        readme.write_text(readme.read_text(encoding="utf-8") + "advanced\n",
+                          encoding="utf-8")
+        self._git("add", "README")
+        self._git("commit", "-m", "advance registered task head")
+        head = self._git("rev-parse", "HEAD")
+        record = self._record()
+        record["base_sha"] = base
+        record["head_sha"] = head
+        self._write_record(record)
+        result = self._make_result()
+        with mock.patch.object(d6env, "_run_make", return_value=result):
+            self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 0)
+        updated = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertEqual(updated["base_sha"], base)
+        self.assertEqual(updated["head_sha"], head)
+        self.assertEqual(updated["env2_pass_marker"]["submitted_head_sha"], head)
+        self.assertEqual(updated["env2_pass_marker"]["current_head_sha"], head)
+
+    def test_registered_divergent_base_is_rejected(self):
+        tree = self._git("rev-parse", "HEAD^{tree}")
+        unrelated_base = self._git("commit-tree", tree)
+        record = self._record()
+        record["base_sha"] = unrelated_base
+        self._write_record(record)
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
+            self.assertEqual(self._main_at_root(), 1)
+        invoke.assert_not_called()
+
     def test_unlocked_git_worktree_fails_even_if_record_claims_locked(self):
         self._git("worktree", "unlock", str(self.root))
         with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:

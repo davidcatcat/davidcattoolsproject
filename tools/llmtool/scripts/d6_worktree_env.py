@@ -308,11 +308,10 @@ def _base_blob(root: Path, base_sha: str, relative: str):
     return result.stdout, int(fields[0][3:], 8)
 
 
-def _validate_bootstrap_sources(root: Path, base_sha: str) -> None:
+def _validate_bootstrap_sources(root: Path, base_sha: str, head_sha: str) -> None:
     required = (
         "tools/llmtool/Makefile",
         "tools/llmtool/scripts/worktree_env.py",
-        "tools/llmtool/scripts/d6_worktree_env.py",
         "tools/llmtool/worktree-env.lock",
         "tools/llmtool/pyproject.toml",
     )
@@ -339,6 +338,19 @@ def _validate_bootstrap_sources(root: Path, base_sha: str) -> None:
         if (local != committed_bytes or (local_mode & 0o111) != (committed_mode & 0o111) or
                 local_mode & 0o022):
             _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
+
+    # The installed helper may evolve with a registered descendant task HEAD;
+    # the on-disk executable must still be exactly the committed blob, never a
+    # dirty same-UID edit. Install/build inputs above remain pinned to base_sha.
+    helper_path = "tools/llmtool/scripts/d6_worktree_env.py"
+    committed_helper = _base_blob(root, head_sha, helper_path)
+    if committed_helper is None:
+        _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
+    local_helper, local_mode = _read_tracked_file(root, helper_path)
+    helper_bytes, helper_mode = committed_helper
+    if (local_helper != helper_bytes or
+            (local_mode & 0o111) != (helper_mode & 0o111) or local_mode & 0o022):
+        _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
 
 
 def _worktree_entry(root: Path, common_dir: Path, head: str, branch: str) -> None:
@@ -419,10 +431,13 @@ def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path
     head = _run_git(root, "rev-parse", "HEAD")
     origin = _run_git(root, "remote", "get-url", "origin")
     if (branch != record["branch"] or head != record["head_sha"] or
-            head != record["base_sha"] or
             origin not in _EXPECTED_ORIGINS):
         _reject("D6_SOURCE_BINDING_MISMATCH")
-    _validate_bootstrap_sources(root, record["base_sha"])
+    try:
+        _run_git(root, "merge-base", "--is-ancestor", record["base_sha"], head)
+    except PreflightError:
+        _reject("D6_SOURCE_BINDING_MISMATCH")
+    _validate_bootstrap_sources(root, record["base_sha"], head)
     _validate_local_inventory(root, record.get("retention_paths"))
     _worktree_entry(root, common_dir, head, branch)
     if _read_record(common_dir, task_id, os.getuid()) != record:
