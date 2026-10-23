@@ -281,17 +281,28 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             return self.monitor.poll()
 
     def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
-        self.monitor.office = [mon.OfficeRow("codex PM?", mon.WORKING, "old", 1.0, 0)]
+        self.monitor.office = [mon.OfficeRow("codex 主對話", mon.WORKING, "old", 1.0, 0)]
         with patch.object(mon, "office_rows", side_effect=TypeError("boom")):
             new = self.poll([])
         self.assertEqual(self.monitor.office, [])
         self.assertIn(("?", "office view unavailable: TypeError"),
                       [(kind, text) for _, kind, text in new])
+        self.assertEqual(self.monitor.office_state, {})   # recovery starts from a fresh baseline
         lines = mon.office_lines(self.monitor.office, self.monitor.office_error)
         self.assertTrue(lines[1].startswith("⚠ 辦公室資料讀取失敗（TypeError）"))
+        self.monitor.office_due = 0.0
         with patch.object(mon, "office_rows", return_value=[]):
             self.poll([])
         self.assertIsNone(self.monitor.office_error)
+
+    def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
+        with patch.object(mon, "office_rows", return_value=[]) as rows:
+            self.poll([])
+            self.poll([])
+            self.assertEqual(rows.call_count, 1)   # the second tick reuses the office
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertEqual(rows.call_count, 2)
 
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
@@ -852,20 +863,20 @@ class OfficeViewTests(unittest.TestCase):
         self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
                             "originator": "codex_vscode"}, ["task_complete"], age=60)
         cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
-        self.assertEqual(self.by_name(self.rows([cli]))["codex PM?"].state, mon.IDLE)
+        self.assertEqual(self.by_name(self.rows([cli]))["codex 主對話"].state, mon.IDLE)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex PM?"].state, mon.CLOSED)
-        self.assertTrue(rows["codex PM?"].detail.startswith("推測 Codex CLI 已關閉"))
-        self.assertEqual(rows["codex developer? Bacon"].state, mon.DONE)
+        self.assertEqual(rows["codex 主對話"].state, mon.CLOSED)
+        self.assertTrue(rows["codex 主對話"].detail.startswith("推測 Codex CLI 已關閉"))
+        self.assertEqual(rows["codex subagent Bacon"].state, mon.DONE)
         self.assertEqual(rows["codex developer"].state, mon.IDLE)   # not opened from the CLI
-        self.assertEqual((rows["codex developer"].task, rows["codex developer"].basis),
-                         ("task wp-1", ""))   # a registered D6 root binds the role
+        self.assertEqual((rows["codex developer"].task, rows["codex developer"].role),
+                         ("task wp-1", "developer"))   # a registered D6 root binds the role
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                            "originator": "codex-tui"}, ["task_complete"],
                     age=mon.OFFICE_DONE_WINDOW + 60)
         rows = self.by_name(self.rows())
-        self.assertNotIn("codex PM?", rows)
-        self.assertNotIn("codex developer? Bacon", rows)   # leaves with the PM that started it
+        self.assertNotIn("codex 主對話", rows)
+        self.assertNotIn("codex subagent Bacon", rows)   # leaves with the PM that started it
 
     def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
         self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
@@ -874,7 +885,7 @@ class OfficeViewTests(unittest.TestCase):
                             "originator": "codex-tui"}, ["task_started", "task_complete"], age=10)
         cli = [mon.Process(8, 7, 8, "01:14", "S+", "Codex CLI", "codex", "Codex CLI (node launcher) 7"),
                mon.Process(7, 1, 7, "01:14", "S+", "Codex CLI (node launcher)", "node", "")]
-        pms = [row for row in self.rows(cli) if row.name == "codex PM?"]
+        pms = [row for row in self.rows(cli) if row.name == "codex 主對話"]
         self.assertEqual(sorted(row.state for row in pms), sorted([mon.IDLE, mon.CLOSED]))
         self.assertEqual(next(row for row in pms if row.state == mon.IDLE).age, 10.0)
         self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows(cli))))
@@ -892,8 +903,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(mon._place(str(loose), self.canonical)[0], "unregistered")
         self._codex("dev", {"id": "T9", "cwd": str(loose), "thread_source": "user"},
                     ["task_started"], age=5)
-        row = self.by_name(self.rows())["codex developer?"]
-        self.assertEqual((row.detail, row.basis, row.task), ("未登記資料夾 stray", mon.GUESSED, ""))
+        row = self.by_name(self.rows())["codex 對話"]
+        self.assertEqual((row.detail, row.role, row.task), ("未登記資料夾 stray", "", ""))
 
     def test_a_subagent_named_by_a_d6_session_ref_is_a_bound_developer(self):
         self._register("wp-1", str(self.task), session_ref="collaboration:/root/env2_flow_integration")
@@ -907,9 +918,9 @@ class OfficeViewTests(unittest.TestCase):
                             "agent_path": "/root/env2_flow"}, ["task_started"], age=5)
         rows = self.by_name(self.rows())
         dev = rows["codex developer Huygens"]
-        self.assertEqual((dev.role, dev.basis, dev.task), ("developer", "", "task wp-1"))
+        self.assertEqual((dev.role, dev.task), ("developer", "task wp-1"))
         self.assertIn("（task wp-1）", dev.detail)
-        self.assertIn("codex developer? Locke", rows)   # a name prefix is not a match
+        self.assertIn("codex subagent Locke", rows)   # a name prefix is not a match
 
     def test_long_first_line_and_a_thread_started_days_ago_are_still_shown(self):
         day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW - 3 * 86400))
@@ -922,7 +933,7 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "event_msg", "payload": {"type": "task_started"}}) + "\n", encoding="utf-8")
         os.utime(path, (self.NOW - 5, self.NOW - 5))
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex PM?"].state, mon.WORKING)
+        self.assertEqual(rows["codex 主對話"].state, mon.WORKING)
 
     def test_review_records_without_timestamps_do_not_break_sorting(self):
         day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
@@ -956,15 +967,16 @@ class OfficeViewTests(unittest.TestCase):
                     ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
         self._codex("elsewhere", {"id": "X", "cwd": "/somewhere/else"}, ["task_started"], age=1)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex PM?"].state, mon.WORKING)
-        self.assertIn("env2 flow integration", rows["codex PM?"].detail)
-        self.assertEqual(rows["codex developer? Huygens"].state, mon.WORKING)
-        self.assertEqual(rows["codex reviewer? Locke"].state, mon.DONE)
-        self.assertNotIn("codex reviewer? Old", rows)
+        self.assertEqual(rows["codex 主對話"].state, mon.WORKING)
+        self.assertIn("env2 flow integration", rows["codex 主對話"].detail)
+        self.assertEqual(rows["codex subagent Huygens"].state, mon.WORKING)
+        self.assertEqual(rows["codex subagent Locke"].state, mon.DONE)
+        self.assertNotIn("codex subagent Old", rows)
         self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
-        self.assertEqual(rows["codex PM?"].basis, mon.GUESSED)
-        self.assertIn("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。",
-                      mon.office_lines(list(rows.values())))
+        self.assertEqual((rows["codex 主對話"].role, rows["codex 主對話"].main), ("", True))
+        # no role is guessed from a name or folder, so nothing is marked "?"
+        self.assertFalse(any("?" in name for name in rows))
+        self.assertNotIn("推測", mon.office_lines(list(rows.values()))[-1])
         self.assertNotIn("codex reviewer agent", rows)
 
     def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
@@ -975,16 +987,16 @@ class OfficeViewTests(unittest.TestCase):
                             "agent_path": "/root/slow_dev"},
                     ["task_started"], age=mon.OFFICE_STALL + 5)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex developer? Slow"].state, mon.STALLED)
-        self.assertEqual(rows["codex PM?"].state, mon.IDLE)
-        self.assertEqual(rows["codex PM?"].detail, "等待下一個指示")
+        self.assertEqual(rows["codex subagent Slow"].state, mon.STALLED)
+        self.assertEqual(rows["codex 主對話"].state, mon.IDLE)
+        self.assertEqual(rows["codex 主對話"].detail, "等待下一個指示")
 
     def test_two_codex_main_threads_in_the_canonical_root_are_dated_and_flagged(self):
         self._codex("pm1", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                             "timestamp": "2026-10-22T11:23:25.316Z"}, ["task_started"], age=5)
         self._codex("pm2", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
                             "timestamp": "2026-10-22T21:49:41.000Z"}, ["task_started"], age=5)
-        rows = [row for row in self.rows() if row.name == "codex PM?"]
+        rows = [row for row in self.rows() if row.name == "codex 主對話"]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all("開始）" in row.detail for row in rows))
         self.assertNotEqual(rows[0].detail, rows[1].detail)
@@ -1011,7 +1023,7 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         names = [row.name for row in rows]
         self.assertEqual(names.count("claude subagent"), 2)
-        reviewer = self.by_name(rows)["claude reviewer?（互動）"]
+        reviewer = self.by_name(rows)["claude 互動"]
         self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
         self.assertNotIn("token=abc", reviewer.detail)
         developer = self.by_name(rows)["claude developer（互動）"]
@@ -1073,13 +1085,14 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(sum(row.name == "claude 單次呼叫" for row in rows), 1)   # run2 hidden
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.name, live.state, live.kind, live.group),
-                         ("claude reviewer?（互動）", mon.IDLE, "agent", ""))
+                         ("claude 互動", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertIn("agent 2 · subagent 2 · 只看得到狀態 3", lines[0])
-        self.assertEqual(lines[1], f"── {mon.LIVE_SECTION} ──")
-        pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM?"))
-        self.assertTrue(lines[pm + 1].startswith("└ codex developer? Franklin"))
-        self.assertTrue(any(line.startswith("claude 單次呼叫") for line in lines))
+        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
+        live = lines.index(f"── {mon.LIVE_SECTION} ──")
+        pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
+        self.assertLess(live, pm)
+        self.assertIn("└ codex subagent Franklin", lines[pm + 1])
+        self.assertTrue(any("claude 單次呼叫" in line for line in lines))
         self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
                         next(i for i, line in enumerate(lines) if line.startswith("agy")))
@@ -1454,6 +1467,135 @@ class OfficeViewTests(unittest.TestCase):
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)
+
+    def _review(self, sha, outcome, age):
+        label = f"審 PR #288 @{sha}"
+        return mon.OfficeRow("claude reviewer", mon.WORKING if outcome is None else mon.DONE,
+                             f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
+                             age, 30, kind="subagent", group="T1", key="review",
+                             role="reviewer", task=f"PR #288 @{sha}", outcome=outcome or "")
+
+    def test_office_lines_put_repeated_review_failures_and_alerts_first(self):
+        missing = mon.DISPATCH_PROBLEMS["missing"]
+        rows = [
+            mon.OfficeRow("codex 主對話", mon.WORKING, "指揮", 5, 10, key="T1", main=True),
+            self._review("71db418", None, 10),
+            self._review("3f86dc6", mon.NO_VERDICT, 180),
+            self._review("3f86dc6", mon.NO_VERDICT, 400),
+            self._review("d4ed21d", mon.NO_VERDICT, 1500),
+            self._review("d4ed21d", "FAIL", 1620),
+            mon.OfficeRow("codex subagent Dewey", mon.DONE, "audit 284 release", 600, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("codex subagent Huygens", mon.DONE, "audit r4 handoff", 20, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("opencode developer", mon.UNCHECKED,
+                          f"{missing}；本 repo 最近一次：認證失敗（401），需要重新登入", 7200, 50,
+                          kind="worker", alert="本 repo 最近一次：認證失敗（401），需要重新登入"),
+            mon.OfficeRow("agy", mon.UNCHECKED, f"{missing}；App 開著", None, 60, kind="worker"),
+            mon.OfficeRow("公司 gw", mon.UNCHECKED, missing, None, 70, kind="worker"),
+        ]
+        lines = mon.office_lines(rows)
+        text = "\n".join(lines)
+        self.assertEqual(lines[1], "⚠ #288 reviewer：3 次沒有判定、1 次 FAIL；目前執行中 @71db418")
+        self.assertEqual(lines[2], "⚠ opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
+        # one dispatch line instead of the same words on every Worker row
+        self.assertEqual(lines[3], f"ℹ {missing}：opencode developer、agy、公司 gw")
+        self.assertEqual(text.count(missing), 1)
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertTrue(gw.endswith("沒有其他紀錄"))
+        # name first, then state; the time is last and only where there is one
+        review = next(line for line in lines if "@71db418（" in line)
+        self.assertTrue(review.startswith("└ claude reviewer"))
+        self.assertTrue(review.endswith("  剛剛"))
+        self.assertTrue(next(line for line in lines if line.startswith("agy")).endswith("App 開著"))
+        # older finished work is folded; the newest verdict of each review target stays
+        self.assertNotIn("audit 284 release", text)
+        self.assertNotIn("FAIL」", text)
+        self.assertIn("audit r4 handoff", text)
+        self.assertIn("@3f86dc6：結束但沒有判定", text)
+        self.assertEqual(text.count("@3f86dc6："), 1)
+        folded = next(line for line in lines if "└ … 另 4 項已完成" in line)
+        self.assertTrue(folded.endswith("5–30 分鐘前，已收起"))
+
+    def test_office_lines_say_nothing_extra_when_all_is_well(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),
+                self._review("71db418", "PASS", 60),
+                mon.OfficeRow("agy", mon.IDLE, "可派工", None, 60, kind="worker")]
+        lines = mon.office_lines(rows)
+        self.assertFalse(any(line.startswith(("⚠", "ℹ")) for line in lines))
+        self.assertFalse(any("已收起" in line for line in lines))
+
+    def test_office_lines_name_a_shared_dispatch_source_once(self):
+        source = "本機 origin/main 的派工檔（可能不是最新）"
+        rows = [mon.OfficeRow("opencode developer", mon.PAUSED,
+                              f"Owner 暫停派工（10-22）（{source}）；App 開著", None, 50,
+                              kind="worker", evidence=source),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, f"可派工（{source}）", 34 * 3600, 70,
+                              kind="worker", evidence=source)]
+        lines = mon.office_lines(rows)
+        self.assertTrue(lines[-1].startswith(f"派工狀態讀自{source}；"))   # dimmed legend
+        self.assertEqual("\n".join(lines).count(source), 1)
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertIn("可派工 ", gw)
+        self.assertTrue(gw.endswith("  34 小時前"))   # the time stays in its own column
+
+    def test_office_view_colors_by_state_and_wraps_detail_to_keep_the_time(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.WORKING, "x" * 200, 5, 10, key="T1"),
+                mon.OfficeRow("codex subagent A", mon.STALLED, "audit", 1000, 20, group="T1",
+                              kind="subagent"),
+                mon.OfficeRow("agy", mon.PAUSED, "Owner 暫停派工（10-22）", None, 60,
+                              kind="worker")]
+        listed = mon.office_view(rows, width=80)
+        view = dict(listed)
+        line = next(text for text in view if text.startswith("codex 主對話"))
+        self.assertEqual(view[line], "+")
+        self.assertTrue(all(mon._width(text) <= 80 for text, _ in listed))
+        self.assertTrue(line.endswith("x  剛剛"))
+        # a long detail wraps under itself instead of being cut
+        at = [text for text, _ in listed].index(line)
+        rest = [text for text, _ in listed[at + 1:at + 10] if text.startswith(" ")]
+        self.assertEqual(sum(text.count("x") for text in rest) + line.count("x") - 1, 200)   # 1 = "codex"
+        self.assertTrue(all(view[text] == "+" for text in rest))
+        # a blank line sits above the Worker section
+        texts = [text for text, _ in listed]
+        self.assertEqual(texts[texts.index(f"── {mon.STATUS_SECTION} ──") - 1], "")
+        # on a wide screen the time stays near its text
+        wide = next(text for text, _ in mon.office_view(rows, width=240)
+                    if text.startswith("agy"))
+        self.assertTrue(wide.startswith("agy ") and wide.endswith("暫停中  Owner 暫停派工（10-22）"))
+        stalled = next(text for text, _ in mon.office_view(rows, width=240)
+                       if text.startswith("└ codex subagent A"))
+        self.assertIn("  audit  ", stalled)
+        self.assertTrue(stalled.endswith("  16 分前"))
+        self.assertLessEqual(mon._width(stalled), mon._width("└ codex subagent A") + 2 + 8 + mon.DETAIL_MAX + 2 + 7)
+        self.assertEqual(view[next(t for t in view if t.startswith("└ codex subagent A"))], "!")
+        self.assertEqual(view[next(t for t in view if t.startswith("agy"))], "dim")
+        self.assertEqual(view[next(t for t in view if t.startswith("⚠ codex subagent A"))], "!")
+        self.assertEqual(view[next(iter(view))], "title")
+        # without a width (--once) nothing is cut
+        self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
+
+    def test_wrap_breaks_at_punctuation_and_never_starts_with_a_closing_mark(self):
+        text = "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒（回應格式錯誤）"
+        for cols in range(8, 40):
+            pieces = mon._wrap(text, cols)
+            self.assertEqual("".join(pieces).replace(" ", ""), text.replace(" ", ""))
+            self.assertTrue(all(mon._width(piece) <= cols for piece in pieces))
+            self.assertFalse(any(piece[:1] in mon.NO_LINE_START for piece in pieces))
+        self.assertEqual(mon._wrap(text, 30)[0], "可派工；本機 llmtool")   # at the space
+        self.assertEqual(mon._wrap("短", 10), ["短"])
+
+    def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
+        stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)
+        with patch.object(mon, "opencode_outcome", return_value=stopped):
+            unknown = self.by_name(mon.office_rows(
+                [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+                canonical=self.canonical, dispatch=str(Path(self.tmp.name) / "no-such-dispatch.json")))
+            paused = self.by_name(self.rows())
+        self.assertEqual(unknown["opencode developer"].state, mon.UNCHECKED)
+        self.assertEqual(unknown["opencode developer"].alert, "本 repo 最近一次：免費額度用完（429）")
+        self.assertEqual(paused["opencode developer"].state, mon.PAUSED)
+        self.assertEqual(paused["opencode developer"].alert, "")
 
     def test_rendered_office_never_shows_secrets_or_private_paths(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},

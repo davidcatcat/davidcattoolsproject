@@ -14,8 +14,10 @@ The office view (default screen, key 5) lists every Codex PM / developer /
 reviewer / subagent and Claude session / subagent working in this repository,
 plus each Worker's dispatch switch, one row each with a live state such as
 工作中, 待命, 完成, 暫停中 or 停工. It parses local session files but shows only
-labels, titles and verdict words (see the office view section); roles that no
-record binds are marked as guessed.
+labels, titles and verdict words (see the office view section); a role is
+named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
+and finished subagent work for 30 minutes; office data is rebuilt at most every
+5 seconds.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -349,6 +351,7 @@ class Monitor:
         self.office: list = []
         self.office_state: dict = {}
         self.office_error: str | None = None   # why the office view could not be built
+        self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
@@ -425,17 +428,22 @@ class Monitor:
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
         self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
         new += [(stamp, "i", text) for text in ended]
-        try:
-            office = office_rows(result.processes, finished_runs=finished)
-        except Exception as exc:  # never break process monitoring, but never show stale rows
-            message = type(exc).__name__
-            if message != self.office_error:
-                new.append((stamp, "?", f"office view unavailable: {message}"))
-            self.office, self.office_error = [], message
-        else:
-            state, changes = office_events(self.office_state, office)
-            new += [(stamp, kind, text) for kind, text in changes]
-            self.office, self.office_state, self.office_error = office, state, None
+        if time.monotonic() >= self.office_due:
+            # Session scans, tails, sqlite and AGY lookups are the costly part of a
+            # poll; they run at most every OFFICE_EVERY seconds, not every tick.
+            self.office_due = time.monotonic() + OFFICE_EVERY
+            try:
+                office = office_rows(result.processes, finished_runs=finished)
+            except Exception as exc:  # never break process monitoring, but never show stale rows
+                message = type(exc).__name__
+                if message != self.office_error:
+                    new.append((stamp, "?", f"office view unavailable: {message}"))
+                # A fresh baseline after the error, so recovery is not logged as changes.
+                self.office, self.office_state, self.office_error = [], {}, message
+            else:
+                state, changes = office_events(self.office_state, office)
+                new += [(stamp, kind, text) for kind, text in changes]
+                self.office, self.office_state, self.office_error = office, state, None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1180,9 +1188,9 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 # Titles and descriptions are model- or prompt-derived text: they are passed
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
-# are never shown. A role is shown as fact only when a record binds it (a D6
-# registry root or session_ref, or a PM call naming a PR and head); otherwise
-# it is marked as guessed.
+# are never shown. A role is named only when a record binds it (a D6 registry
+# root or session_ref, or a PM call naming a PR and head); otherwise no role is
+# claimed and the row says only who it is.
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
@@ -1192,6 +1200,7 @@ OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
 OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
 OFFICE_STALL = 15 * 60         # started but silent for longer: 無回應
+OFFICE_EVERY = 5.0             # seconds between office rebuilds (process polling stays faster)
 OFFICE_HEAD = 1 << 20
 OFFICE_TAIL = 512 << 10
 AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")
@@ -1212,20 +1221,19 @@ class OfficeRow:
     kind: str = "agent"   # agent | subagent | worker
     tui: bool = False     # a Codex thread opened from the terminal CLI
     # What is known about the member, kept apart from the display text:
-    role: str = ""        # PM | developer | reviewer | "" = no role claimed
-    basis: str = ""       # GUESSED: role read from location or a name, not bound by a record
+    role: str = ""        # developer | reviewer, only when a record binds it; "" = not claimed
+    main: bool = False    # a Codex main thread in the canonical checkout (D6 Integrator's place)
     task: str = ""        # bound work, e.g. "PR #284 @c40c80a" or "task <id>"; "" = unbound
     evidence: str = ""    # where the row comes from (codex 紀錄, claude 紀錄, 程序, 派工檔, ...)
     authority: str = ""   # who set a dispatch switch: Owner | PM
+    outcome: str = ""     # a finished one-shot review: verdict word or why it has none
+    alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
 
 
-GUESSED = "推測"
-
-
-def _who(agent: str, role: str, basis: str = "", nick: str = "") -> str:
-    """Display name; a guessed role carries a "?" so it never reads as fact."""
-    mark = "?" if role and basis == GUESSED else ""
-    return " ".join(part for part in (agent, role + mark if role else "", nick) if part)
+def _who(agent: str, role: str, nick: str = "") -> str:
+    """Display name. A role is named only when a record binds it (Owner
+    2026-10-23: no guessed roles); otherwise just who it is."""
+    return " ".join(part for part in (agent, role or "subagent", nick) if part)
 
 
 def canonical_root(start: str = SCRIPT_ROOT) -> str:
@@ -1458,23 +1466,18 @@ def _codex_row(path: str, now: float, canonical: str):
         if state == DONE and age > OFFICE_DONE_WINDOW:
             return None
         # A D6 record whose session_ref names this agent binds it to that task;
-        # otherwise the role is only read from the name the PM gave it.
+        # otherwise no role is claimed: the work name says what it does.
         task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
                      if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
                     "")
-        if task:
-            role, basis = "developer", ""
-        else:
-            role = ("reviewer" if "review" in stem.lower() else
-                    "稽核" if "audit" in stem.lower() else "developer")
-            basis = GUESSED
+        role = "developer" if task else ""
         return ("sub", payload.get("parent_thread_id"),
-                OfficeRow(_who("codex", role, basis, nick), state,
+                OfficeRow(_who("codex", role, nick), state,
                           (_humanize(stem) if stem else "（未命名工作）") +
                           (f"（task {task}）" if task else ""), age, 20,
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
-                          role=role, basis=basis, task=f"task {task}" if task else "",
+                          role=role, task=f"task {task}" if task else "",
                           evidence="codex 紀錄"))
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
@@ -1487,14 +1490,13 @@ def _codex_row(path: str, now: float, canonical: str):
                           evidence="codex 紀錄"))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
-                OfficeRow(_who("codex", "developer", GUESSED), state, _place_label(place),
-                          age, 10, key=key, tui=tui, role="developer", basis=GUESSED,
-                          evidence="codex 紀錄"))
+                OfficeRow("codex 對話", state, _place_label(place),
+                          age, 10, key=key, tui=tui, evidence="codex 紀錄"))
     # The canonical checkout is the Integrator's under D6, but nothing records
-    # which thread holds that role.
+    # which thread holds that role, so none is claimed.
     return ("main", payload.get("id"),
-            OfficeRow(_who("codex", "PM", GUESSED), state, since, age, 0, key=key, tui=tui,
-                      role="PM", basis=GUESSED, evidence="codex 紀錄"))
+            OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
+                      evidence="codex 紀錄"))
 
 
 # One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
@@ -1688,7 +1690,7 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
                               f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
                               age, 30, kind="subagent", group=parent.key, key="review",
                               role="reviewer" if bound else "", task=task,
-                              evidence="codex 紀錄（呼叫與結果）"))
+                              evidence="codex 紀錄（呼叫與結果）", outcome=outcome or ""))
     return rows
 
 
@@ -1722,9 +1724,9 @@ def codex_rows(now: float, root: str | None = None,
     forget_reviews(scanned)
     rows = []
     for key, row in mains.items():
-        if row.role == "PM":
+        if row.main:
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
-            detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
+            detail = (f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
@@ -1752,11 +1754,9 @@ def claude_rows(now: float, root: str | None = None,
         title = next((item.get("aiTitle") for item in reversed(tail)
                       if item.get("type") == "ai-title"), None)
         detail = _label(title) or (_place_label(place) if place[0] != "pm" else "（無標題）")
-        if place[0] == "task":   # a registered D6 root belongs to its one Developer
-            role, basis, task = "developer", "", f"task {place[1]}"
-        else:   # read from the folder and the title; nothing records the role
-            reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
-            role, basis, task = ("reviewer" if reviewing else "developer"), GUESSED, ""
+        # A registered D6 root belongs to its one Developer; elsewhere nothing
+        # records the role, so none is claimed.
+        role, task = ("developer", f"task {place[1]}") if place[0] == "task" else ("", "")
         action = _last_action(tail) if age <= OFFICE_BUSY else ""
         if action:
             detail = action   # what it is doing right now beats the session title
@@ -1775,10 +1775,10 @@ def claude_rows(now: float, root: str | None = None,
             rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
-        rows.append(OfficeRow(_who("claude", role, basis) + "（互動）",
+        rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               WORKING if age <= OFFICE_BUSY else IDLE, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              basis=basis, task=task, evidence="claude 紀錄"))
+                              task=task, evidence="claude 紀錄"))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -2273,12 +2273,14 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         paused = not trouble and switch[0] == "PAUSED"
         if live and not trouble and not paused:
             continue   # the live CLI rows say everything
-        notes, state, age = [], None, None
+        notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db, canonical)
             if outcome is not None:
                 state, age = outcome[0], outcome[2]
                 notes.append("本 repo " + outcome[1])
+                if state == STOPPED:   # kept even when the dispatch state is unknown
+                    alert = "本 repo " + outcome[1]
         if name == "agy" and agy_open and not live:
             notes.append("App 開著")
         if name == "公司 gw":
@@ -2287,6 +2289,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 age = gw[0]
                 if gw[2] == 0:
                     state = ATTENTION   # reachable on paper, but every recent llmtool run failed
+                    alert = f"近 7 天 {gw[1]} 次都沒成功，最近一次：{gw[3]}"
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
@@ -2304,8 +2307,11 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 state, age = PAUSED, None
             elif state is None:
                 state = IDLE
+        if paused:
+            alert = ""   # the Owner already stopped dispatch; a fault is not news
         rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
-                              kind="worker", evidence=source or "派工檔", authority=authority))
+                              kind="worker", evidence=source or "派工檔", authority=authority,
+                              alert=alert))
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -2328,8 +2334,8 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
-LIVE_SECTION = "看得到即時進度（讀得到 session 紀錄）"
-STATUS_SECTION = "只看得到狀態（依派工紀錄和程序判斷）"
+LIVE_SECTION = "即時（讀得到 session 紀錄）"
+STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
 
 def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
@@ -2358,32 +2364,172 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
     return out
 
 
-def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
+RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
+REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH})
+ALERT_STATES = (STALLED, STOPPED, ATTENTION)
+
+
+def _short_ago(age: float | None) -> str:
+    """The time column: short, and kept clear of the cut-off detail."""
+    if age is None:
+        return ""
+    if age < 60:
+        return "剛剛"
+    if age < 3600:
+        return f"{int(age // 60)} 分前"
+    return f"{int(age // 3600)} 小時前"
+
+
+def _review_alerts(rows: list[OfficeRow]) -> list[str]:
+    """One line per PR whose one-shot reviews ended without a verdict more than
+    once: repeated calls on one PR read as one problem, not as separate rows."""
+    by_pr: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        if row.key == "review" and row.task.startswith("PR #"):
+            by_pr.setdefault(row.task.split()[1], []).append(row)
+    out = []
+    for pr, items in by_pr.items():
+        missing = sum(row.outcome in REVIEW_NO_VERDICT for row in items)
+        if missing < 2:
+            continue
+        parts = [f"{missing} 次沒有判定"]
+        fails = sum(row.outcome == "FAIL" for row in items)
+        if fails:
+            parts.append(f"{fails} 次 FAIL")
+        running = [row for row in items if row.state == WORKING]
+        tail = (f"；目前執行中 {running[0].task.split()[-1]}" if running
+                else "；目前沒有在跑")
+        out.append(f"{pr} reviewer：" + "、".join(parts) + tail)
+    return out
+
+
+def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
+    """Finished subagent work older than RECENT_DONE becomes one line per parent.
+    The newest finished review of each PR stays, so its verdict is not hidden."""
+    keys = {row.key for row in rows if row.key}
+    newest: dict[str, OfficeRow] = {}
+    for row in rows:
+        if row.key == "review" and row.state == DONE and row.task:
+            held = newest.get(row.task.split()[1])
+            if held is None or (row.age or 0.0) < (held.age or 0.0):
+                newest[row.task.split()[1]] = row
+    kept, folded = [], {}
+    for row in rows:
+        if (row.state == DONE and row.group in keys and row.age is not None
+                and row.age > RECENT_DONE and row not in newest.values()):
+            folded[row.group] = folded.get(row.group, 0) + 1
+        else:
+            kept.append(row)
+    for group, count in folded.items():
+        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前，已收起"
+        kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
+                              group=group, kind="subagent"))
+    return kept
+
+
+DETAIL_COLS = 44   # detail width when the screen width is not known
+DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
+BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
+NO_LINE_START = "）」』】，。、；：！？)]}"
+
+
+def _wrap(text: str, cols: int) -> list[str]:
+    """text split into lines of at most cols display columns (at least one),
+    broken after ；，、 or a space where possible, never before a closing mark."""
+    pieces = []
+    while _width(text) > cols:
+        fit = 0
+        while _width(text[:fit + 1]) <= cols:
+            fit += 1
+        cut = max((i + 1 for i in range(fit) if text[i] in BREAK_AFTER), default=0)
+        if cut < fit // 2:   # no good break point in the second half: break anywhere
+            cut = fit
+            while 1 < cut and text[cut] in NO_LINE_START:
+                cut -= 1
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    return pieces + [text]
+
+
+def _row_style(state: str) -> str:
+    """Working rows stand out, problems are yellow, everything else is dimmed."""
+    return "+" if state == WORKING else "!" if state in ALERT_STATES else "dim"
+
+
+def office_view(rows: list[OfficeRow], error: str | None = None,
+                width: int | None = None) -> list[tuple[str, str]]:
+    """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
+    With a screen width, each detail is cut so the time column stays visible."""
     working = sum(row.state == WORKING for row in rows)
-    counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
-    lines = [f"辦公室 · agent {counts['agent']} · subagent {counts['subagent']} · "
-             f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
+    out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
     if error:
-        return lines + [f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。"]
+        return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
-        return lines + ["目前沒有觀察到任何 agent 或 worker。"]
-    pms = sum(row.role == "PM" and row.state != CLOSED for row in rows)
-    if pms > 1:
-        lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
-                     "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")
-    tree = _tree(rows)
-    width = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+        return out + [("目前沒有觀察到任何 agent 或 worker。", "dim")]
+    mains = sum(row.main and row.state != CLOSED for row in rows)
+    if mains > 1:
+        out.append((f"⚠ 有 {mains} 個 Codex 主對話都開在主 repo："
+                    "可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
+    # The same dispatch problem on several Workers is said once, not per row.
+    notes = []
+    shared: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        label = next((text for text in DISPATCH_PROBLEMS.values()
+                      if row.kind == "worker" and row.detail.startswith(text)), None)
+        if label:
+            shared.setdefault(label, []).append(row)
+    shared = {label: items for label, items in shared.items() if len(items) > 1}
+    for label, items in shared.items():
+        notes.append(f"ℹ {label}：" + "、".join(row.name for row in items))
+    trimmed = {id(row): row.detail[len(label):].lstrip("；") or "沒有其他紀錄"
+               for label, items in shared.items() for row in items}
+    rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
+            for row in rows]
+    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…"),
+    # which goes to the dimmed legend at the bottom.
+    legend = []
+    for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
+        note = f"（{source}）"
+        if source and sum(note in row.detail for row in rows) > 1:
+            legend.append(f"派工狀態讀自{source}")
+            rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
+    alerts = _review_alerts(rows)
+    alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
+    alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
+               if row.state in ALERT_STATES and not row.alert]
+    for text in [f"⚠ {text}" for text in alerts] + notes:
+        out += [(("  " if i else "") + piece, "!") for i, piece in
+                enumerate(_wrap(text, width - 2) if width else [text])]
+    tree = _tree(_fold_done(rows))
+    name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    # The detail column is as wide as the longest detail, up to DETAIL_MAX and
+    # what the screen leaves, so the time stays near its text on a wide screen.
+    longest = max([_width(row.detail) for _, row in tree if row.detail] or [0])
+    detail_cols = (DETAIL_COLS if width is None else
+                   max(12, min(longest, DETAIL_MAX, width - name_cols - 8 - 11)))
     for prefix, row in tree:
         if prefix == "—":
-            lines.append(f"── {row.name} ──")
+            if row.name == STATUS_SECTION:
+                out.append(("", ""))   # a blank line sets the Worker list apart
+            out.append((f"── {row.name} ──", "section"))
             continue
-        detail = f"「{row.detail}」" if row.detail else ""
-        lines.append(f"{_pad(prefix + row.name, width)}{_pad(f'({row.state})', 9)}"
-                     f"{_pad(detail, 46)} · {_ago(row.age)}")
-    if any(row.basis == GUESSED for row in rows):
-        lines.append("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。")
-    lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")
-    return lines
+        # In the TUI a long detail continues on the next lines under itself.
+        pieces = [row.detail] if width is None else _wrap(row.detail, detail_cols)
+        when = _short_ago(row.age)
+        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{pieces[0]}"
+        if when:
+            line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
+        out.append((line.rstrip(), _row_style(row.state)))
+        out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
+    legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
+    text = "；".join(legend)
+    out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
+    return out
+
+
+def office_lines(rows: list[OfficeRow], error: str | None = None,
+                 width: int | None = None) -> list[str]:
+    return [line for line, _ in office_view(rows, error, width)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -2507,17 +2653,12 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
-            lines = office_lines(mon.office, mon.office_error)
+            lines = office_view(mon.office, mon.office_error, w - 1)
             offset = max(0, min(offset, len(lines) - body))
-            for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if offset + row == 0 else 0
-                if f"({WORKING})" in line:
-                    attr |= colors.get("+", 0)
-                elif any(f"({s})" in line for s in (STOPPED, STALLED, ATTENTION)):
-                    attr |= colors.get("!", 0)
-                elif f"({PAUSED})" in line or f"({DONE})" in line:
-                    attr |= curses.A_DIM
-                put(3 + row, line, attr)
+            styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
+                      "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
+            for row, (line, style) in enumerate(lines[offset:offset + body]):
+                put(3 + row, line, styles.get(style, 0))
             hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
