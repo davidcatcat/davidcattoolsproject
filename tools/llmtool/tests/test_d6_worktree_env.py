@@ -45,6 +45,9 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "[build-system]\nrequires = ['setuptools>=68']\n"
             "build-backend = 'setuptools.build_meta'\n",
             encoding="utf-8")
+        (self.source / ".gitignore").write_text(
+            "/tools/llmtool/.venv/\n/tools/llmtool/build/\n",
+            encoding="utf-8")
         (self.source / "README").write_text("test\n", encoding="utf-8")
         self._git_at(self.source, "add", ".")
         self._git_at(self.source, "commit", "-m", "fixture")
@@ -92,6 +95,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "head_sha": self._git("rev-parse", "HEAD"),
             "state": "ACTIVE",
             "lock_state": "LOCKED",
+            "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/build/"],
         }
 
     def _write_record(self, record=None):
@@ -119,10 +123,12 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         with mock.patch.object(d6env, "_run_make", return_value=result) as run:
             self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 0)
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["/usr/bin/make", "-C", str(makefile_dir),
-                                    "env-bootstrap"])
+        self.assertEqual(argv[:6], ["/usr/bin/make", "-f", "Makefile", "-C",
+                                    str(makefile_dir), "env-bootstrap"])
         self.assertIn("WORKTREE_ENV_ROOT=../..", argv)
-        self.assertIn("WORKTREE_ENV_PYTHON=" + d6env.shlex.quote(sys.executable), argv)
+        self.assertIn("WORKTREE_ENV_PYTHON=" + d6env.shlex.quote(sys.executable) +
+                      " -I -B", argv)
+        self.assertIn("env", run.call_args.kwargs)
         self.assertNotIn("shell", run.call_args.kwargs)
 
     def test_interpreter_path_with_spaces_is_shell_quoted(self):
@@ -131,8 +137,78 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         with mock.patch.object(d6env.sys, "executable", "/opt/Python Home/bin/python3"):
             with mock.patch.object(d6env, "_run_make", return_value=result) as run:
                 self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 0)
-        self.assertIn("WORKTREE_ENV_PYTHON='/opt/Python Home/bin/python3'",
+        self.assertIn("WORKTREE_ENV_PYTHON='/opt/Python Home/bin/python3' -I -B",
                       run.call_args.args[0])
+
+    def test_make_and_python_environment_overrides_are_scrubbed(self):
+        result = type("Result", (), {"returncode": 0})()
+        injected = {
+            "MAKEFILES": "attacker.mk",
+            "MAKEFLAGS": "-f attacker.mk",
+            "GNUMAKEFLAGS": "--eval=bad",
+            "MFLAGS": "-f attacker.mk",
+            "PYTHONPATH": "/tmp/shadow",
+            "PYTHONHOME": "/tmp/other-python",
+        }
+        with mock.patch.dict(os.environ, injected, clear=False):
+            with mock.patch.object(d6env, "_run_make", return_value=result) as run:
+                self.assertEqual(self._main_at_root(), 0)
+        make_env = run.call_args.kwargs["env"]
+        for name in injected:
+            self.assertNotIn(name, make_env)
+
+    def test_registered_ignored_build_output_is_allowed(self):
+        output = self.root / "tools" / "llmtool" / "build" / "generated.txt"
+        output.parent.mkdir(parents=True)
+        output.write_text("registered retention output\n", encoding="utf-8")
+        result = type("Result", (), {"returncode": 0})()
+        with mock.patch.object(d6env, "_run_make", return_value=result) as run:
+            self.assertEqual(self._main_at_root(), 0)
+        run.assert_called_once()
+
+    def test_untracked_gnumakefile_fails_before_make(self):
+        (self.root / "tools" / "llmtool" / "GNUmakefile").write_text(
+            "env-bootstrap:\n\t@echo shadow\n", encoding="utf-8")
+        with mock.patch.object(d6env, "_run_make") as run:
+            self.assertEqual(self._main_at_root(), 1)
+        run.assert_not_called()
+
+    def test_untracked_python_shadow_module_fails_before_make(self):
+        shadow = self.root / "tools" / "llmtool" / "scripts" / "json.py"
+        shadow.write_text("raise RuntimeError('shadow')\n", encoding="utf-8")
+        with mock.patch.object(d6env, "_run_make") as run:
+            self.assertEqual(self._main_at_root(), 1)
+        run.assert_not_called()
+
+    def test_ignored_python_shadow_module_fails_before_make(self):
+        ignore = self.root / ".gitignore"
+        ignore.write_text(ignore.read_text(encoding="utf-8") +
+                          "/tools/llmtool/scripts/json.py\n", encoding="utf-8")
+        shadow = self.root / "tools" / "llmtool" / "scripts" / "json.py"
+        shadow.write_text("raise RuntimeError('ignored shadow')\n", encoding="utf-8")
+        with mock.patch.object(d6env, "_run_make") as run:
+            self.assertEqual(self._main_at_root(), 1)
+        run.assert_not_called()
+
+    def test_untracked_inventory_drift_between_validations_fails_before_make(self):
+        original = d6env.validate_registered_worktree
+        calls = []
+
+        def validate_then_add_untracked(task_id, root=None):
+            result = original(task_id, root)
+            calls.append(True)
+            if len(calls) == 1:
+                shadow = self.root / "tools" / "llmtool" / "GNUmakefile"
+                shadow.write_text("env-bootstrap:\n\t@echo raced\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(d6env, "validate_registered_worktree",
+                               side_effect=validate_then_add_untracked) as validate:
+            with mock.patch.object(d6env, "_run_make") as run_make:
+                self.assertEqual(self._main_at_root(), 1)
+        self.assertEqual(validate.call_count, 2)
+        self.assertEqual(len(calls), 1)
+        run_make.assert_not_called()
 
     def test_record_head_mismatch_fails_before_bootstrap(self):
         record = self._record()

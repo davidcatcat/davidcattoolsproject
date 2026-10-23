@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 import shlex
 import stat
@@ -24,6 +25,7 @@ import sys
 _TASK_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,95}\Z")
 _SHA40 = re.compile(r"[0-9a-f]{40}\Z")
 _REGISTRY_LIMIT = 64 * 1024
+_LOCAL_INVENTORY_LIMIT = 16 * 1024 * 1024
 _VALID_STATES = frozenset(("ACTIVE",))
 _EXPECTED_ORIGINS = frozenset((
     "git@github.com:davidcatcat/davidcattoolsproject.git",
@@ -149,6 +151,78 @@ def _run_git(root: Path, *args: str) -> str:
         return result.stdout.decode("utf-8").rstrip("\n")
     except UnicodeDecodeError:
         _reject("D6_GIT_IDENTITY_INVALID")
+
+
+def _untracked_paths(root: Path) -> list[str]:
+    """List all untracked paths, including ignored paths, without exclude rules."""
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.path.expanduser("~"),
+        "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    try:
+        result = subprocess.run(
+            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-c", "gc.auto=0", "-C", str(root), "ls-files", "--others", "-z"],
+            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=30, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _reject("D6_LOCAL_INVENTORY_UNAVAILABLE")
+    if (result.returncode != 0 or result.stderr or
+            len(result.stdout) > _LOCAL_INVENTORY_LIMIT or
+            (result.stdout and not result.stdout.endswith(b"\0"))):
+        _reject("D6_LOCAL_INVENTORY_UNAVAILABLE")
+    paths = []
+    for raw_path in result.stdout.split(b"\0")[:-1]:
+        try:
+            path = raw_path.decode("utf-8")
+        except UnicodeDecodeError:
+            _reject("D6_LOCAL_INVENTORY_INVALID")
+        parsed = PurePosixPath(path)
+        if (not path or path.startswith("/") or "\\" in path or
+                any(ord(char) < 32 or ord(char) == 127 for char in path) or
+                parsed.as_posix() != path or
+                any(part in ("", ".", "..") for part in path.split("/"))):
+            _reject("D6_LOCAL_INVENTORY_INVALID")
+        paths.append(path)
+    if len(paths) != len(set(paths)):
+        _reject("D6_LOCAL_INVENTORY_INVALID")
+    return paths
+
+
+def _validate_local_inventory(root: Path, registered_paths) -> None:
+    if type(registered_paths) is not list:
+        _reject("D6_REGISTRY_INVALID")
+    retained = []
+    for item in registered_paths:
+        if (type(item) is not str or not item or "\0" in item or "\\" in item or
+                item.startswith("/") or
+                any(ord(char) < 32 or ord(char) == 127 for char in item)):
+            _reject("D6_REGISTRY_INVALID")
+        is_directory = item.endswith("/")
+        path = item[:-1] if is_directory else item
+        parsed = PurePosixPath(path)
+        if (not path or parsed.as_posix() != path or
+                any(part in ("", ".", "..") for part in path.split("/"))):
+            _reject("D6_REGISTRY_INVALID")
+        retained.append((path, is_directory))
+    if len(retained) != len(set(retained)):
+        _reject("D6_REGISTRY_INVALID")
+
+    for untracked_path in _untracked_paths(root):
+        if not any(
+                untracked_path == retained_path or
+                (is_directory and untracked_path.startswith(retained_path + "/"))
+                for retained_path, is_directory in retained):
+            _reject("D6_UNREGISTERED_LOCAL_STATE")
 
 
 def _read_tracked_file(root: Path, relative: str) -> tuple[bytes, int]:
@@ -344,6 +418,7 @@ def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path
             origin not in _EXPECTED_ORIGINS):
         _reject("D6_SOURCE_BINDING_MISMATCH")
     _validate_bootstrap_sources(root, record["base_sha"])
+    _validate_local_inventory(root, record.get("retention_paths"))
     _worktree_entry(root, common_dir, head, branch)
     if _read_record(common_dir, task_id, os.getuid()) != record:
         _reject("D6_REGISTRY_CHANGED")
@@ -381,17 +456,28 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
             _reject("ENV_BOOTSTRAP_SOURCE_INVALID")
     try:
         result = _run_make(
-            ["/usr/bin/make", "-C", str(makefile_dir), "env-bootstrap",
+            ["/usr/bin/make", "-f", "Makefile", "-C", str(makefile_dir),
+             "env-bootstrap",
              "WORKTREE_ENV_ROOT=../..",
-             "WORKTREE_ENV_PYTHON=" + shlex.quote(sys.executable)], cwd=root,
+             "WORKTREE_ENV_PYTHON=" + shlex.quote(sys.executable) + " -I -B"],
+            cwd=root, env=_bootstrap_environment(),
         )
     except (OSError, subprocess.SubprocessError):
         _reject("ENV_BOOTSTRAP_UNAVAILABLE")
     return result.returncode
 
 
-def _run_make(argv, *, cwd):
-    return subprocess.run(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, check=False)
+def _bootstrap_environment():
+    env = dict(os.environ)
+    for name in tuple(env):
+        if name.startswith(("MAKE", "PYTHON")) or name in ("GNUMAKEFLAGS", "MFLAGS"):
+            env.pop(name, None)
+    return env
+
+
+def _run_make(argv, *, cwd, env):
+    return subprocess.run(argv, cwd=str(cwd), env=env,
+                          stdin=subprocess.DEVNULL, check=False)
 
 
 def main(argv=None) -> int:
