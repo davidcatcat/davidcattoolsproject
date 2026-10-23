@@ -14,8 +14,8 @@ The office view (default screen, key 5) lists every Codex PM / developer /
 reviewer / subagent and Claude session / subagent working in this repository,
 plus each Worker's dispatch switch, one row each with a live state such as
 工作中, 待命, 完成, 暫停中 or 停工. It parses local session files but shows only
-labels, titles and verdict words (see the office view section); roles that no
-record binds are marked as guessed. A session untouched for 6 hours is left out,
+labels, titles and verdict words (see the office view section); a role is
+named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
 and finished subagent work for 30 minutes; office data is rebuilt at most every
 5 seconds.
 
@@ -1188,9 +1188,9 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 # Titles and descriptions are model- or prompt-derived text: they are passed
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
-# are never shown. A role is shown as fact only when a record binds it (a D6
-# registry root or session_ref, or a PM call naming a PR and head); otherwise
-# it is marked as guessed.
+# are never shown. A role is named only when a record binds it (a D6 registry
+# root or session_ref, or a PM call naming a PR and head); otherwise no role is
+# claimed and the row says only who it is.
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
@@ -1221,8 +1221,8 @@ class OfficeRow:
     kind: str = "agent"   # agent | subagent | worker
     tui: bool = False     # a Codex thread opened from the terminal CLI
     # What is known about the member, kept apart from the display text:
-    role: str = ""        # PM | developer | reviewer | "" = no role claimed
-    basis: str = ""       # GUESSED: role read from location or a name, not bound by a record
+    role: str = ""        # developer | reviewer, only when a record binds it; "" = not claimed
+    main: bool = False    # a Codex main thread in the canonical checkout (D6 Integrator's place)
     task: str = ""        # bound work, e.g. "PR #284 @c40c80a" or "task <id>"; "" = unbound
     evidence: str = ""    # where the row comes from (codex 紀錄, claude 紀錄, 程序, 派工檔, ...)
     authority: str = ""   # who set a dispatch switch: Owner | PM
@@ -1230,13 +1230,10 @@ class OfficeRow:
     alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
 
 
-GUESSED = "推測"
-
-
-def _who(agent: str, role: str, basis: str = "", nick: str = "") -> str:
-    """Display name; a guessed role carries a "?" so it never reads as fact."""
-    mark = "?" if role and basis == GUESSED else ""
-    return " ".join(part for part in (agent, role + mark if role else "", nick) if part)
+def _who(agent: str, role: str, nick: str = "") -> str:
+    """Display name. A role is named only when a record binds it (Owner
+    2026-10-23: no guessed roles); otherwise just who it is."""
+    return " ".join(part for part in (agent, role or "subagent", nick) if part)
 
 
 def canonical_root(start: str = SCRIPT_ROOT) -> str:
@@ -1469,23 +1466,18 @@ def _codex_row(path: str, now: float, canonical: str):
         if state == DONE and age > OFFICE_DONE_WINDOW:
             return None
         # A D6 record whose session_ref names this agent binds it to that task;
-        # otherwise the role is only read from the name the PM gave it.
+        # otherwise no role is claimed: the work name says what it does.
         task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
                      if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
                     "")
-        if task:
-            role, basis = "developer", ""
-        else:
-            role = ("reviewer" if "review" in stem.lower() else
-                    "稽核" if "audit" in stem.lower() else "developer")
-            basis = GUESSED
+        role = "developer" if task else ""
         return ("sub", payload.get("parent_thread_id"),
-                OfficeRow(_who("codex", role, basis, nick), state,
+                OfficeRow(_who("codex", role, nick), state,
                           (_humanize(stem) if stem else "（未命名工作）") +
                           (f"（task {task}）" if task else ""), age, 20,
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
-                          role=role, basis=basis, task=f"task {task}" if task else "",
+                          role=role, task=f"task {task}" if task else "",
                           evidence="codex 紀錄"))
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
@@ -1498,14 +1490,13 @@ def _codex_row(path: str, now: float, canonical: str):
                           evidence="codex 紀錄"))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
-                OfficeRow(_who("codex", "developer", GUESSED), state, _place_label(place),
-                          age, 10, key=key, tui=tui, role="developer", basis=GUESSED,
-                          evidence="codex 紀錄"))
+                OfficeRow("codex 對話", state, _place_label(place),
+                          age, 10, key=key, tui=tui, evidence="codex 紀錄"))
     # The canonical checkout is the Integrator's under D6, but nothing records
-    # which thread holds that role.
+    # which thread holds that role, so none is claimed.
     return ("main", payload.get("id"),
-            OfficeRow(_who("codex", "PM", GUESSED), state, since, age, 0, key=key, tui=tui,
-                      role="PM", basis=GUESSED, evidence="codex 紀錄"))
+            OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
+                      evidence="codex 紀錄"))
 
 
 # One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
@@ -1733,7 +1724,7 @@ def codex_rows(now: float, root: str | None = None,
     forget_reviews(scanned)
     rows = []
     for key, row in mains.items():
-        if row.role == "PM":
+        if row.main:
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
@@ -1763,11 +1754,9 @@ def claude_rows(now: float, root: str | None = None,
         title = next((item.get("aiTitle") for item in reversed(tail)
                       if item.get("type") == "ai-title"), None)
         detail = _label(title) or (_place_label(place) if place[0] != "pm" else "（無標題）")
-        if place[0] == "task":   # a registered D6 root belongs to its one Developer
-            role, basis, task = "developer", "", f"task {place[1]}"
-        else:   # read from the folder and the title; nothing records the role
-            reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
-            role, basis, task = ("reviewer" if reviewing else "developer"), GUESSED, ""
+        # A registered D6 root belongs to its one Developer; elsewhere nothing
+        # records the role, so none is claimed.
+        role, task = ("developer", f"task {place[1]}") if place[0] == "task" else ("", "")
         action = _last_action(tail) if age <= OFFICE_BUSY else ""
         if action:
             detail = action   # what it is doing right now beats the session title
@@ -1786,10 +1775,10 @@ def claude_rows(now: float, root: str | None = None,
             rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
-        rows.append(OfficeRow(_who("claude", role, basis) + "（互動）",
+        rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               WORKING if age <= OFFICE_BUSY else IDLE, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              basis=basis, task=task, evidence="claude 紀錄"))
+                              task=task, evidence="claude 紀錄"))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -2477,10 +2466,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
         return out + [("目前沒有觀察到任何 agent 或 worker。", "dim")]
-    pms = sum(row.role == "PM" and row.state != CLOSED for row in rows)
-    if pms > 1:
-        out.append((f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
-                    "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
+    mains = sum(row.main and row.state != CLOSED for row in rows)
+    if mains > 1:
+        out.append((f"⚠ 有 {mains} 個 Codex 主對話都開在主 repo："
+                    "可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
     # The same dispatch problem on several Workers is said once, not per row.
     notes = []
     shared: dict[str, list[OfficeRow]] = {}
@@ -2532,8 +2521,6 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         out.append((line.rstrip(), _row_style(row.state)))
         out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
-    if any(row.basis == GUESSED for row in rows):
-        legend.append("名稱帶 ? = 依資料夾或名稱推測")
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
     text = "；".join(legend)
     out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
