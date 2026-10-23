@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sysconfig
 import uuid
 
 from .errors import LLMToolError
@@ -27,10 +28,13 @@ AUDIT_ACTIONS = frozenset((
     'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
 ))
 def _policy_path():
-    """Resolve the installed data-file or the one canonical source-tree policy."""
+    """Resolve the packaged data-file or canonical source-tree policy."""
     package_policy = Path(__file__).with_name('worker-dispatch.json')
     if os.path.lexists(package_policy):
         return package_policy
+    installed_policy = Path(sysconfig.get_path('data')) / 'llmtool' / 'worker-dispatch.json'
+    if os.path.lexists(installed_policy):
+        return installed_policy
     return Path(__file__).resolve().parent.parent / 'worker-dispatch.json'
 
 

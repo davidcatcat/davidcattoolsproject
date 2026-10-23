@@ -1,5 +1,4 @@
 import hashlib
-import importlib.resources
 import json
 import os
 import subprocess
@@ -7,6 +6,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+import venv
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -145,8 +145,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertFalse((Path(worker_dispatch.__file__).parent / 'worker-dispatch.json').exists())
 
     def test_policy_is_packaged_once_and_resolves_from_installed_wheel_and_sdist(self):
-        import setuptools.build_meta
-
         project_root = Path(__file__).resolve().parents[1]
         expected_policy = (project_root / 'worker-dispatch.json').read_bytes()
         previous = os.getcwd()
@@ -155,49 +153,71 @@ class WorkerDispatchTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as output:
                 output = Path(output)
                 wheel_dir = output / 'wheel'
-                install_dir = output / 'installed'
+                install_dir = output / 'installed-venv'
                 sdist_dir = output / 'sdist'
                 isolated_cwd = output / 'cwd'
                 for directory in (wheel_dir, install_dir, sdist_dir, isolated_cwd):
                     directory.mkdir()
 
+                venv.EnvBuilder(with_pip=True).create(str(install_dir))
+                if os.name == 'nt':
+                    installed_python = install_dir / 'Scripts' / 'python.exe'
+                else:
+                    installed_python = install_dir / 'bin' / 'python'
+
+                add_build_tools = subprocess.run(
+                    [str(installed_python), '-B', '-m', 'pip', 'install', '--disable-pip-version-check',
+                     'setuptools>=68'],
+                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
+                self.assertEqual(add_build_tools.returncode, 0, add_build_tools.stderr)
+                sdist_build = subprocess.run(
+                    [str(installed_python), '-B', '-c',
+                     'import setuptools.build_meta as b, sys; print(b.build_sdist(sys.argv[1]))',
+                     str(sdist_dir)],
+                    cwd=project_root, check=False, capture_output=True, text=True, timeout=60)
+                self.assertEqual(sdist_build.returncode, 0, sdist_build.stderr)
+                sdist_name = sdist_build.stdout.strip().splitlines()[-1]
+                sdist = sdist_dir / sdist_name
+                with tarfile.open(sdist, 'r:gz') as archive:
+                    sdist_members = [name for name in archive.getnames()
+                                     if name.endswith('/worker-dispatch.json')]
+                    self.assertEqual(len(sdist_members), 1)
+                    self.assertEqual(archive.extractfile(sdist_members[0]).read(), expected_policy)
+
                 built = subprocess.run(
                     [sys.executable, '-B', '-m', 'pip', 'wheel', '--no-deps',
-                     '--no-build-isolation', '--wheel-dir', str(wheel_dir), '.'],
-                    cwd=project_root, check=False, capture_output=True, text=True, timeout=60)
+                     '--wheel-dir', str(wheel_dir), str(sdist)],
+                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
                 self.assertEqual(built.returncode, 0, built.stderr)
                 wheel = next(wheel_dir.glob('*.whl'))
                 with zipfile.ZipFile(wheel) as archive:
                     members = [name for name in archive.namelist()
-                               if name.endswith('.data/data/llmtool/worker-dispatch.json')]
+                               if name.endswith('/worker-dispatch.json')]
                     self.assertEqual(len(members), 1)
+                    self.assertTrue(members[0].endswith(
+                        '.data/data/llmtool/worker-dispatch.json'), members[0])
                     self.assertEqual(archive.read(members[0]), expected_policy)
 
                 installed = subprocess.run(
-                    [sys.executable, '-B', '-m', 'pip', 'install', '--no-deps',
-                     '--target', str(install_dir), str(wheel)],
+                    [str(installed_python), '-B', '-m', 'pip', 'install', '--no-deps',
+                     str(wheel)],
                     cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
                 self.assertEqual(installed.returncode, 0, installed.stderr)
+                installed_policy = install_dir / 'llmtool' / 'worker-dispatch.json'
+                self.assertTrue(installed_policy.is_file())
+                self.assertEqual(installed_policy.read_bytes(), expected_policy)
                 lookup_script = (
-                    "import importlib.resources as r, json, pathlib, sys; "
-                    "sys.path.insert(0, sys.argv[1]); "
+                    "import json, pathlib, sys; "
                     "from llmtool import worker_dispatch as w; "
-                    "p=r.files('llmtool').joinpath('worker-dispatch.json'); "
-                    "assert p.is_file(); "
+                    "p=pathlib.Path(sys.prefix) / 'llmtool' / 'worker-dispatch.json'; "
                     "assert json.loads(p.read_text(encoding='utf-8'))['schema_version'] == 2; "
-                    "assert w._POLICY_PATH.resolve() == pathlib.Path(p).resolve(); "
+                    "assert w._POLICY_PATH.resolve() == p.resolve(), "
+                    "(str(w._POLICY_PATH), sys.prefix, str(p)); "
                     "assert w.evaluate('codex-developer').allowed")
                 lookup = subprocess.run(
-                    [sys.executable, '-B', '-c', lookup_script, str(install_dir)],
+                    [str(installed_python), '-B', '-I', '-c', lookup_script],
                     cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=10)
                 self.assertEqual(lookup.returncode, 0, lookup.stderr)
-
-                sdist_name = setuptools.build_meta.build_sdist(str(sdist_dir))
-                with tarfile.open(sdist_dir / sdist_name, 'r:gz') as archive:
-                    members = [name for name in archive.getnames()
-                               if name.endswith('/worker-dispatch.json')]
-                    self.assertEqual(len(members), 1)
-                    self.assertEqual(archive.extractfile(members[0]).read(), expected_policy)
         finally:
             os.chdir(previous)
 
