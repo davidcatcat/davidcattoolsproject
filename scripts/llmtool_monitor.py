@@ -2336,8 +2336,8 @@ def _ago(age: float | None) -> str:
     return f"{int(age // 3600)} 小時前"
 
 
-LIVE_SECTION = "看得到即時進度（讀得到 session 紀錄）"
-STATUS_SECTION = "只看得到狀態（依派工紀錄和程序判斷）"
+LIVE_SECTION = "即時（讀得到 session 紀錄）"
+STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
 
 def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
@@ -2372,9 +2372,9 @@ ALERT_STATES = (STALLED, STOPPED, ATTENTION)
 
 
 def _short_ago(age: float | None) -> str:
-    """The time column: short and fixed-width, so it is never cut off."""
+    """The time column: short, and kept clear of the cut-off detail."""
     if age is None:
-        return "—"
+        return ""
     if age < 60:
         return "剛剛"
     if age < 3600:
@@ -2423,25 +2423,46 @@ def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
         else:
             kept.append(row)
     for group, count in folded.items():
-        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成，已收起"
-        kept.append(OfficeRow(f"另 {count} 項已完成", "", when, None, 10 ** 6,
+        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前，已收起"
+        kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
                               group=group, kind="subagent"))
     return kept
 
 
-def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
+DETAIL_COLS = 44   # detail width when the screen width is not known
+
+
+def _cut(text: str, cols: int) -> str:
+    """text cut to at most cols display columns, marked with … when cut."""
+    if _width(text) <= cols:
+        return text
+    out = ""
+    for char in text:
+        if _width(out + char) > cols - 1:
+            break
+        out += char
+    return out + "…"
+
+
+def _row_style(state: str) -> str:
+    """Working rows stand out, problems are yellow, everything else is dimmed."""
+    return "+" if state == WORKING else "!" if state in ALERT_STATES else "dim"
+
+
+def office_view(rows: list[OfficeRow], error: str | None = None,
+                width: int | None = None) -> list[tuple[str, str]]:
+    """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
+    With a screen width, each detail is cut so the time column stays visible."""
     working = sum(row.state == WORKING for row in rows)
-    counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
-    lines = [f"辦公室 · 工作中 {working} · 共 {len(rows)}（agent {counts['agent']}、"
-             f"subagent {counts['subagent']}、只看得到狀態 {counts['worker']}）"]
+    out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
     if error:
-        return lines + [f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。"]
+        return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
-        return lines + ["目前沒有觀察到任何 agent 或 worker。"]
+        return out + [("目前沒有觀察到任何 agent 或 worker。", "dim")]
     pms = sum(row.role == "PM" and row.state != CLOSED for row in rows)
     if pms > 1:
-        lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
-                     "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")
+        out.append((f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
+                    "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
     # The same dispatch problem on several Workers is said once, not per row.
     notes = []
     shared: dict[str, list[OfficeRow]] = {}
@@ -2457,33 +2478,43 @@ def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
                for label, items in shared.items() for row in items}
     rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
             for row in rows]
-    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…").
+    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…"),
+    # which goes to the dimmed legend at the bottom.
+    legend = []
     for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
         note = f"（{source}）"
         if source and sum(note in row.detail for row in rows) > 1:
-            notes.append(f"ℹ 派工狀態讀自{source}")
+            legend.append(f"派工狀態讀自{source}")
             rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
     alerts = _review_alerts(rows)
     alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
     alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
                if row.state in ALERT_STATES and not row.alert]
-    if alerts:
-        lines.append("⚠ 需要注意")
-        lines += [f"  {text}" for text in alerts]
-    lines += notes
+    out += [(f"⚠ {text}", "!") for text in alerts]
+    out += [(text, "!") for text in notes]
     tree = _tree(_fold_done(rows))
-    width = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    detail_cols = DETAIL_COLS if width is None else max(12, width - name_cols - 8 - 10)
     for prefix, row in tree:
         if prefix == "—":
-            lines.append(f"── {row.name} ──")
+            out.append((f"── {row.name} ──", "section"))
             continue
-        detail = f"「{row.detail}」" if row.detail else ""
-        lines.append(f"{_pad(_short_ago(row.age), 10)}{_pad(row.state, 8)}"
-                     f"{_pad(prefix + row.name, width)}{detail}")
+        detail = row.detail if width is None else _cut(row.detail, detail_cols)
+        when = _short_ago(row.age)
+        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{detail}"
+        if when:
+            line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
+        out.append((line.rstrip(), _row_style(row.state)))
     if any(row.basis == GUESSED for row in rows):
-        lines.append("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。")
-    lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")
-    return lines
+        legend.append("名稱帶 ? = 依資料夾或名稱推測")
+    legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
+    out.append(("；".join(legend), "dim"))
+    return out
+
+
+def office_lines(rows: list[OfficeRow], error: str | None = None,
+                 width: int | None = None) -> list[str]:
+    return [line for line, _ in office_view(rows, error, width)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -2607,17 +2638,12 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
-            lines = office_lines(mon.office, mon.office_error)
+            lines = office_view(mon.office, mon.office_error, w - 1)
             offset = max(0, min(offset, len(lines) - body))
-            for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if offset + row == 0 else 0
-                if f"({WORKING})" in line:
-                    attr |= colors.get("+", 0)
-                elif any(f"({s})" in line for s in (STOPPED, STALLED, ATTENTION)):
-                    attr |= colors.get("!", 0)
-                elif f"({PAUSED})" in line or f"({DONE})" in line:
-                    attr |= curses.A_DIM
-                put(3 + row, line, attr)
+            styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
+                      "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
+            for row, (line, style) in enumerate(lines[offset:offset + body]):
+                put(3 + row, line, styles.get(style, 0))
             hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]

@@ -963,8 +963,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("codex reviewer? Old", rows)
         self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
         self.assertEqual(rows["codex PM?"].basis, mon.GUESSED)
-        self.assertIn("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。",
-                      mon.office_lines(list(rows.values())))
+        self.assertIn("名稱帶 ? = 依資料夾或名稱推測", mon.office_lines(list(rows.values()))[-1])
         self.assertNotIn("codex reviewer agent", rows)
 
     def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
@@ -1075,7 +1074,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude reviewer?（互動）", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertIn("共 7（agent 2、subagent 2、只看得到狀態 3）", lines[0])
+        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if "codex PM?" in line)
         self.assertLess(live, pm)
@@ -1083,7 +1082,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(any("claude 單次呼叫" in line for line in lines))
         self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
-                        next(i for i, line in enumerate(lines) if " agy" in line))
+                        next(i for i, line in enumerate(lines) if line.startswith("agy")))
 
     def test_unpersisted_claude_run_started_by_codex_is_shown_from_its_process(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -1484,26 +1483,26 @@ class OfficeViewTests(unittest.TestCase):
         ]
         lines = mon.office_lines(rows)
         text = "\n".join(lines)
-        self.assertEqual(lines[1], "⚠ 需要注意")
-        self.assertEqual(lines[2], "  #288 reviewer：3 次沒有判定、1 次 FAIL；目前執行中 @71db418")
-        self.assertEqual(lines[3], "  opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
+        self.assertEqual(lines[1], "⚠ #288 reviewer：3 次沒有判定、1 次 FAIL；目前執行中 @71db418")
+        self.assertEqual(lines[2], "⚠ opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
         # one dispatch line instead of the same words on every Worker row
-        self.assertEqual(lines[4], f"ℹ {missing}：opencode developer、agy、公司 gw")
+        self.assertEqual(lines[3], f"ℹ {missing}：opencode developer、agy、公司 gw")
         self.assertEqual(text.count(missing), 1)
-        gw = next(line for line in lines if "公司 gw" in line and "ℹ" not in line)
-        self.assertIn("「沒有其他紀錄」", gw)
-        # time and state lead each row, so a cut-off detail never hides them
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertTrue(gw.endswith("沒有其他紀錄"))
+        # name first, then state; the time is last and only where there is one
         review = next(line for line in lines if "@71db418（" in line)
-        self.assertTrue(review.startswith("剛剛      工作中  "))
-        self.assertTrue(next(line for line in lines if " agy " in line).startswith("—"))
+        self.assertTrue(review.startswith("└ claude reviewer"))
+        self.assertTrue(review.endswith("  剛剛"))
+        self.assertTrue(next(line for line in lines if line.startswith("agy")).endswith("App 開著"))
         # older finished work is folded; the newest verdict of each review target stays
         self.assertNotIn("audit 284 release", text)
         self.assertNotIn("FAIL」", text)
         self.assertIn("audit r4 handoff", text)
         self.assertIn("@3f86dc6：結束但沒有判定", text)
         self.assertEqual(text.count("@3f86dc6："), 1)
-        folded = next(line for line in lines if "└ 另 4 項已完成" in line)
-        self.assertTrue(folded.endswith("「5–30 分鐘前完成，已收起」"))
+        folded = next(line for line in lines if "└ … 另 4 項已完成" in line)
+        self.assertTrue(folded.endswith("5–30 分鐘前，已收起"))
 
     def test_office_lines_say_nothing_extra_when_all_is_well(self):
         rows = [mon.OfficeRow("codex PM?", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),
@@ -1521,10 +1520,29 @@ class OfficeViewTests(unittest.TestCase):
                 mon.OfficeRow("公司 gw", mon.ATTENTION, f"可派工（{source}）", 34 * 3600, 70,
                               kind="worker", evidence=source)]
         lines = mon.office_lines(rows)
-        self.assertIn(f"ℹ 派工狀態讀自{source}", lines)
+        self.assertTrue(lines[-1].startswith(f"派工狀態讀自{source}；"))   # dimmed legend
         self.assertEqual("\n".join(lines).count(source), 1)
-        gw = next(line for line in lines if line.endswith("「可派工」"))
-        self.assertTrue(gw.startswith("34 小時前 "))   # the time column never runs into the state
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertIn("可派工 ", gw)
+        self.assertTrue(gw.endswith("  34 小時前"))   # the time stays in its own column
+
+    def test_office_view_colors_by_state_and_cuts_detail_to_keep_the_time(self):
+        rows = [mon.OfficeRow("codex PM?", mon.WORKING, "x" * 200, 5, 10, key="T1"),
+                mon.OfficeRow("codex 稽核? A", mon.STALLED, "audit", 1000, 20, group="T1",
+                              kind="subagent"),
+                mon.OfficeRow("agy", mon.PAUSED, "Owner 暫停派工（10-22）", None, 60,
+                              kind="worker")]
+        view = dict(mon.office_view(rows, width=80))
+        line = next(text for text in view if text.startswith("codex PM?"))
+        self.assertEqual(view[line], "+")
+        self.assertLessEqual(mon._width(line), 80)
+        self.assertTrue(line.endswith("x…  剛剛"))
+        self.assertEqual(view[next(t for t in view if t.startswith("└ codex 稽核"))], "!")
+        self.assertEqual(view[next(t for t in view if t.startswith("agy"))], "dim")
+        self.assertEqual(view[next(t for t in view if t.startswith("⚠ codex 稽核"))], "!")
+        self.assertEqual(view[next(iter(view))], "title")
+        # without a width (--once) nothing is cut
+        self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
 
     def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
         stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)
