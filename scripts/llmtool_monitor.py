@@ -12,9 +12,10 @@ evidence and does not invent cross-session dispatch, delivery, review or accepta
 
 The office view (default screen, key 5) lists every Codex PM / developer /
 reviewer / subagent and Claude session / subagent working in this repository,
-plus the Roadmap Worker table, one row each with a live state such as 工作中,
-待命, 完成, 暫停中 or 停工. It reads session metadata only, never prompts or
-model text.
+plus each Worker's dispatch switch, one row each with a live state such as
+工作中, 待命, 完成, 暫停中 or 停工. It parses local session files but shows only
+labels, titles and verdict words (see the office view section); roles that no
+record binds are marked as guessed.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -347,6 +348,7 @@ class Monitor:
         self.github = None   # GitHubSource for the Activity view; None means no network at all
         self.office: list = []
         self.office_state: dict = {}
+        self.office_error: str | None = None   # why the office view could not be built
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
@@ -425,11 +427,15 @@ class Monitor:
         new += [(stamp, "i", text) for text in ended]
         try:
             office = office_rows(result.processes, finished_runs=finished)
-        except Exception:  # the office view is optional; never break process monitoring
-            office = self.office
-        state, changes = office_events(self.office_state, office)
-        new += [(stamp, kind, text) for kind, text in changes]
-        self.office, self.office_state = office, state
+        except Exception as exc:  # never break process monitoring, but never show stale rows
+            message = type(exc).__name__
+            if message != self.office_error:
+                new.append((stamp, "?", f"office view unavailable: {message}"))
+            self.office, self.office_error = [], message
+        else:
+            state, changes = office_events(self.office_state, office)
+            new += [(stamp, kind, text) for kind, text in changes]
+            self.office, self.office_state, self.office_error = office, state, None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1158,12 +1164,25 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 # ---------------------------------------------------------------- office view
 # One row per worker / agent / subagent, like looking across an office floor:
 # who is working, idle, paused or stopped, and on what. Local and read-only.
-# Only session *metadata* is read: Codex `session_meta` (cwd, subagent
-# nickname and agent_path) plus task_started/task_complete event types; the
-# Claude `ai-title` line and `cwd`; Claude subagent `.meta.json` descriptions;
-# the dated Worker table in the Roadmap. Prompts, model text, reasoning and
-# tool input/output are never returned or rendered. Labels are reduced with the
-# same redaction as Activity headlines and private paths are never shown.
+#
+# What is read: the tail of each recent Codex and Claude session file is loaded
+# into memory and parsed (it contains prompts, model text and tool calls), and
+# the recent part of a Codex thread is scanned for `claude --print` calls and
+# their results. What is kept and shown is limited to:
+#   - Codex: cwd (as a place label), originator, thread ids, subagent nickname
+#     and the "/root/<name>" agent path, task_started/complete event types;
+#   - Claude: cwd, the model-written `ai-title`, subagent `.meta.json`
+#     description, and the `description` field of the newest tool call;
+#   - one-shot reviews: the PR number and head named in the PM's call, and the
+#     verdict word on its own line in the call's result;
+#   - OpenCode/Kilo session titles and timestamps, typed error codes;
+#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes.
+# Titles and descriptions are model- or prompt-derived text: they are passed
+# through the same redaction as Activity headlines and shortened. Prompts, other
+# model text, reasoning, commands and tool output are never shown; private paths
+# are never shown. A role is shown as fact only when a record binds it (a D6
+# registry root or session_ref, or a PM call naming a PR and head); otherwise
+# it is marked as guessed.
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
@@ -1192,6 +1211,21 @@ class OfficeRow:
     group: str = ""     # key of the agent that started this one ("" = top level)
     kind: str = "agent"   # agent | subagent | worker
     tui: bool = False     # a Codex thread opened from the terminal CLI
+    # What is known about the member, kept apart from the display text:
+    role: str = ""        # PM | developer | reviewer | "" = no role claimed
+    basis: str = ""       # GUESSED: role read from location or a name, not bound by a record
+    task: str = ""        # bound work, e.g. "PR #284 @c40c80a" or "task <id>"; "" = unbound
+    evidence: str = ""    # where the row comes from (codex 紀錄, claude 紀錄, 程序, 派工檔, ...)
+    authority: str = ""   # who set a dispatch switch: Owner | PM
+
+
+GUESSED = "推測"
+
+
+def _who(agent: str, role: str, basis: str = "", nick: str = "") -> str:
+    """Display name; a guessed role carries a "?" so it never reads as fact."""
+    mark = "?" if role and basis == GUESSED else ""
+    return " ".join(part for part in (agent, role + mark if role else "", nick) if part)
 
 
 def canonical_root(start: str = SCRIPT_ROOT) -> str:
@@ -1210,31 +1244,113 @@ def canonical_root(start: str = SCRIPT_ROOT) -> str:
     return os.path.realpath(start)
 
 
+D6_GONE_STATES = frozenset({"REMOVED"})
+_registry_cache: dict = {}
+
+
+def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
+    """{task id: (registered root, session_ref)} from the D6 registry, read-only.
+
+    A record counts only when the registry and the record are the user's own,
+    owner-only, not symlinks, name the same task, give an exact real root, and
+    the worktree is still LOCKED and not removed. Anything else grants nothing."""
+    registry = os.path.join(canonical, ".git", "llmtool-worktrees")
+    try:
+        st = os.lstat(registry)
+    except OSError:
+        return {}
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+        return {}
+    stamp = (st.st_ino, st.st_mtime_ns)   # an atomic record replace changes the dir mtime
+    cached = _registry_cache.get(registry)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    found: dict[str, tuple[str, str]] = {}
+    try:
+        names = os.listdir(registry)
+    except OSError:
+        names = []
+    for name in names:
+        task_id = name[:-len(".json")]
+        if not name.endswith(".json") or not AGENT_PATH.fullmatch(task_id):
+            continue
+        path = os.path.join(registry, name)
+        try:
+            file_st = os.lstat(path)
+            if (not stat.S_ISREG(file_st.st_mode) or file_st.st_uid != os.getuid()
+                    or file_st.st_mode & 0o077 or file_st.st_size > 64 << 10):
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(64 << 10))
+        except (OSError, ValueError):
+            continue
+        root = record.get("root_realpath") if type(record) is dict else None
+        if (type(root) is not str or not os.path.isabs(root) or os.path.realpath(root) != root
+                or record.get("task_id") != task_id or record.get("lock_state") != "LOCKED"
+                or record.get("state") in D6_GONE_STATES):
+            continue
+        ref = record.get("session_ref")
+        found[task_id] = (root, ref if type(ref) is str else "")
+    _registry_cache.clear()
+    _registry_cache[registry] = (stamp, found)
+    return found
+
+
 def _place(cwd, canonical: str) -> tuple[str, str] | None:
-    """('pm'|'task', task id) for a cwd inside this repository's roots, else None."""
+    """Where a session works: ('pm', '') for the canonical checkout, ('task', id)
+    for a registered D6 root, ('unregistered', name) for a folder that only looks
+    like a task root, else None (not this repository)."""
     if type(cwd) is not str or not cwd:
         return None
     real = os.path.realpath(cwd)
     if real == canonical or real.startswith(canonical + os.sep):
         return "pm", ""
+    for task_id, (root, _) in registered_tasks(canonical).items():
+        if real == root or real.startswith(root + os.sep):
+            return "task", task_id
     parts = real.split(os.sep)
     name = os.path.basename(canonical)
     for i in range(len(parts) - 2):
         if parts[i] == "llmtool-dev-workspaces" and parts[i + 1] == name:
             rest = parts[i + 2:]
             if len(rest) >= 2 and rest[0] == "tasks" and AGENT_PATH.fullmatch(rest[1]):
-                return "task", rest[1]
+                return "unregistered", rest[1]
             if rest and AGENT_PATH.fullmatch(rest[0]):
-                return "task", rest[0]
+                return "unregistered", rest[0]
     return None
+
+
+def _place_label(place: tuple[str, str]) -> str:
+    return {"pm": "本 repo", "task": f"task {place[1]}",
+            "unregistered": f"未登記資料夾 {place[1]}"}[place[0]]
+
+
+META_FIELDS = ("id", "timestamp", "cwd", "originator", "thread_source", "parent_thread_id",
+               "agent_nickname", "agent_path")
 
 
 def _jsonl_head(path: str):
     try:
         with open(path, "rb") as handle:
-            return json.loads(handle.readline(OFFICE_HEAD))
-    except (OSError, ValueError):
+            raw = handle.readline(OFFICE_HEAD)
+    except OSError:
         return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    # An oversized first line (long base instructions) is cut off. Codex writes
+    # the small identity fields before the instructions, so take the first
+    # occurrence of each and nothing else.
+    payload = {}
+    for field in META_FIELDS:
+        found = re.search(rb'"' + field.encode() + rb'"\s*:\s*"((?:[^"\\]|\\.){0,4096})"', raw)
+        if found:
+            try:
+                payload[field] = json.loads(b'"' + found.group(1) + b'"')
+            except ValueError:
+                pass
+    return {"type": "session_meta", "payload": payload} if "cwd" in payload else None
 
 
 def _first_entrypoint(path: str, lines: int = 64):
@@ -1339,31 +1455,54 @@ def _codex_row(path: str, now: float, canonical: str):
         stem = found.group(1) if found else ""
         nick = payload.get("agent_nickname")
         nick = nick if type(nick) is str and NICKNAME.fullmatch(nick) else ""
-        role = ("reviewer" if "review" in stem.lower() else
-                "稽核" if "audit" in stem.lower() else "developer")
         if state == DONE and age > OFFICE_DONE_WINDOW:
             return None
+        # A D6 record whose session_ref names this agent binds it to that task;
+        # otherwise the role is only read from the name the PM gave it.
+        task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
+                     if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
+                    "")
+        if task:
+            role, basis = "developer", ""
+        else:
+            role = ("reviewer" if "review" in stem.lower() else
+                    "稽核" if "audit" in stem.lower() else "developer")
+            basis = GUESSED
         return ("sub", payload.get("parent_thread_id"),
-                OfficeRow(f"codex {role} {nick}".strip(), state,
-                          _humanize(stem) if stem else "（未命名工作）", age, 20,
+                OfficeRow(_who("codex", role, basis, nick), state,
+                          (_humanize(stem) if stem else "（未命名工作）") +
+                          (f"（task {task}）" if task else ""), age, 20,
                           key=f"codex:{payload.get('id')}",
-                          group=f"codex:{payload.get('parent_thread_id')}", kind="subagent"))
+                          group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
+                          role=role, basis=basis, task=f"task {task}" if task else "",
+                          evidence="codex 紀錄"))
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
     since = f"（{time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）" if started else ""
     tui = payload.get("originator") == "codex-tui"
-    if place[0] == "task":
+    if place[0] == "task":   # a registered D6 root belongs to its one Developer
         return ("main", payload.get("id"),
-                OfficeRow("codex developer", state, place[1], age, 10, key=key, tui=tui))
+                OfficeRow("codex developer", state, _place_label(place), age, 10, key=key,
+                          tui=tui, role="developer", task=f"task {place[1]}",
+                          evidence="codex 紀錄"))
+    if place[0] == "unregistered":
+        return ("main", payload.get("id"),
+                OfficeRow(_who("codex", "developer", GUESSED), state, _place_label(place),
+                          age, 10, key=key, tui=tui, role="developer", basis=GUESSED,
+                          evidence="codex 紀錄"))
+    # The canonical checkout is the Integrator's under D6, but nothing records
+    # which thread holds that role.
     return ("main", payload.get("id"),
-            OfficeRow("codex PM", state, since, age, 0, key=key, tui=tui))
+            OfficeRow(_who("codex", "PM", GUESSED), state, since, age, 0, key=key, tui=tui,
+                      role="PM", basis=GUESSED, evidence="codex 紀錄"))
 
 
-# One-shot Claude reviews a Codex thread runs with `claude --print`. Only that
-# call's own result is used (directly, or via write_stdin polls of its exec
-# session), never other tool output, so a verdict quoted from GitHub cannot be
-# mistaken for one. Just the PR number, reviewed head and verdict word are
-# extracted from the first part of the result; nothing else is kept.
+# One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
+# head come from the call itself (the dispatch), and only that call's own
+# result is used (directly, or via write_stdin polls of its exec session), never
+# other tool output, so a verdict quoted from GitHub cannot be mistaken for one.
+# Just the PR number, reviewed head and verdict word are extracted from the first
+# part of the result; nothing else is kept.
 # `claude` must start a command (line start, after ; && || "| " $( or an
 # opening quote of an argv/cmd string) and --print must be in that same
 # command, so a search pattern such as `pgrep -f 'x|claude --print'` is not one.
@@ -1371,13 +1510,24 @@ CLAUDE_CALL = re.compile(
     r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
     r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
 STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
-REVIEW_VERDICT = re.compile(r"(?i)\bverdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
+# A verdict counts only as its own line ("**Verdict: FAIL**"), not inside a
+# sentence quoting an earlier one.
+REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*verdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
 REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
 REVIEW_SCAN = 6 << 20
-RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION (\d{1,9})$', re.M)
-EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT -?\d{1,3}$', re.M)
+# PM poll scripts report a still-running exec session as JSON "session_id":N or
+# as a line such as "SESSION N" / "SESSION_ID=N", and an exit as "exit_code",
+# "EXIT N" or "EXIT=N".
+RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION(?: |_ID=)(\d{1,9})$', re.M)
+EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT[ =]-?\d{1,3}$',
+                    re.M)
+CONTROL_LINE = re.compile(
+    r"\s*(?:SESSION(?: |_ID=)\d{1,9}|EXIT[ =]-?\d{1,3}|exit_code=\S*)\s*")
 OVER_BUDGET = re.compile(r"^Error: Exceeded USD budget\b", re.M)
+NO_VERDICT, OVER_BUDGET_TEXT = "結束但沒有判定（可能呼叫失敗）", "超過預算上限，沒有判定"
+AMBIGUOUS = "結果無法對應（同一次輸出裡有多個指令的結果）"
+MISMATCH = "回覆的 PR／版本跟呼叫時不同"
 _review_cache: dict = {}
 
 
@@ -1386,9 +1536,50 @@ def _review_target(text: str) -> tuple[str, str]:
     return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
 
 
-def codex_reviews(path: str) -> list[tuple]:
-    """[(time, pr, head7, verdict or None)] for `claude --print` calls in one
-    Codex thread, newest last; verdict None = no result returned yet."""
+def _result_text(text: str) -> str:
+    """The command's own output from one exec result: a JSON result object's
+    "output" string (also inside a Promise.allSettled "value"), else the text."""
+    if text.lstrip().startswith("{"):
+        try:
+            item = json.loads(text)
+        except ValueError:
+            return text
+        if type(item) is dict and type(item.get("value")) is dict:
+            item = item["value"]
+        if type(item) is dict and type(item.get("output")) is str:
+            return item["output"]
+    return text
+
+
+def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None:
+    """Verdict word or a reason it has none; None while there is no result yet.
+    A direct call that reports no running session has already finished (for
+    example a CLI usage error); a poll needs an exit marker or a verdict."""
+    results = [text for text in parts
+               if text.strip() and not text.startswith("Script completed")
+               and not CONTROL_LINE.fullmatch(text)]
+    if not direct and not any(EXITED.search(text) for text in parts) and not any(
+            REVIEW_VERDICT.search(text) for text in results):
+        return None
+    if len(results) > 1:
+        return AMBIGUOUS
+    head = _result_text(results[0])[:1500] if results else ""
+    verdict = REVIEW_VERDICT.search(head)
+    if verdict is None:
+        return OVER_BUDGET_TEXT if any(map(OVER_BUDGET.search, parts)) else NO_VERDICT
+    pr, sha = _review_target(head)
+    if (pr and origin[1] and pr != origin[1]) or (sha and origin[2] and
+                                                  not (sha.startswith(origin[2]) or
+                                                       origin[2].startswith(sha))):
+        return MISMATCH
+    return verdict.group(1).upper()
+
+
+def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
+    """[(time, pr, head7, outcome or None)] for `claude --print` calls in one
+    Codex thread, oldest first; outcome None = no result returned yet. PR and
+    head are the ones the call named."""
+    now = time.time() if now is None else now
     try:
         size = os.path.getsize(path)
     except OSError:
@@ -1429,7 +1620,7 @@ def codex_reviews(path: str) -> list[tuple]:
                 cache["polls"][call] = int(found.group(1))
         elif kind == "custom_tool_call_output":
             origin = cache["calls"].get(call)
-            polled = cache["polls"].get(call)
+            polled = cache["polls"].pop(call, None)
             if origin is None:
                 origin = cache["sessions"].get(polled)
             if origin is None:
@@ -1442,31 +1633,34 @@ def codex_reviews(path: str) -> list[tuple]:
                        for a, b in RUNNING_SESSION.findall(text)}
             if polled is not None and polled in running:
                 continue   # still running; an exit code here belongs to a parallel command
-            if polled is None:
+            if polled is None and running:
                 for session in running:
                     cache["sessions"][session] = origin
-            segments = [text[text.find('"output":'):][:1500] if '"output":' in text
-                        else text[:1500] for text in parts]
-            found = [(segment, REVIEW_VERDICT.search(segment)) for segment in segments]
-            segment, verdict = next(((seg, hit) for seg, hit in found if hit),
-                                    ("\n".join(segments), None))
-            if verdict is None and (running or not any(EXITED.search(text) for text in parts)):
+                continue
+            outcome = _review_outcome(origin, parts, direct=polled is None)
+            if outcome is None:
                 continue   # no result yet
-            pr, sha = _review_target(segment)
-            failed = ("超過預算上限，沒有判定" if any(map(OVER_BUDGET.search, parts))
-                      else "結束但沒有判定（可能呼叫失敗）")
-            cache["done"].append((when, pr or origin[1], sha or origin[2],
-                                  verdict.group(1).upper() if verdict else failed))
+            cache["done"].append((when, origin[1], origin[2], outcome))
             for key in [k for k, v in cache["calls"].items() if v is origin]:
                 cache["calls"].pop(key)
             for key in [k for k, v in cache["sessions"].items() if v is origin]:
                 cache["sessions"].pop(key)
     cache["done"] = cache["done"][-20:]
+    # A call that never reports back is dropped once it is older than the office window.
+    for table in ("calls", "sessions"):
+        cache[table] = {k: v for k, v in cache[table].items()
+                        if v[0] is not None and now - v[0] <= OFFICE_WINDOW}
     # A call and the exec session it opened share one origin: list it once.
     origins = {id(origin): origin for origin in
                list(cache["calls"].values()) + list(cache["sessions"].values())}
     pending = [(when, pr, sha, None) for when, pr, sha in origins.values()]
-    return sorted(cache["done"] + pending)
+    return sorted(cache["done"] + pending, key=lambda item: item[0] or 0.0)
+
+
+def forget_reviews(paths) -> None:
+    """Drop cached review state for threads no longer scanned."""
+    for path in [path for path in _review_cache if path not in paths]:
+        _review_cache.pop(path, None)
 
 
 def _review_label(pr: str, sha: str) -> str:
@@ -1474,15 +1668,40 @@ def _review_label(pr: str, sha: str) -> str:
     return f"審 {target}" + (f" @{sha}" if sha else "")
 
 
+CODEX_DAYS = 7   # a long-running thread lives in the folder of the day it started
+
+
+def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
+    """One row per recent `claude --print` call a Codex thread made. A call that
+    names a PR and head is a Reviewer bound to that dispatch; any other call is
+    an unbound one-shot run."""
+    rows = []
+    for when, pr, sha, outcome in codex_reviews(path, now):
+        age = max(0.0, now - when) if when else None
+        if age is None or age > (OFFICE_STALL if outcome is None else OFFICE_DONE_WINDOW):
+            continue
+        bound = bool(pr and sha)
+        task = f"PR #{pr} @{sha}" if bound else ""
+        label = _review_label(pr, sha) if bound else "單次呼叫（呼叫裡沒寫 PR 和版本）"
+        rows.append(OfficeRow("claude reviewer" if bound else "claude 單次呼叫",
+                              WORKING if outcome is None else DONE,
+                              f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
+                              age, 30, kind="subagent", group=parent.key, key="review",
+                              role="reviewer" if bound else "", task=task,
+                              evidence="codex 紀錄（呼叫與結果）"))
+    return rows
+
+
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None) -> list[OfficeRow]:
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
-    days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400)) for d in (0, 1)}
+    days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
+            for d in range(CODEX_DAYS)}
     paths = []
     for day in days:
         paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
-    mains, subs = {}, []
+    mains, subs, scanned = {}, [], set()
     for path in sorted(paths):
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
@@ -1492,26 +1711,18 @@ def codex_rows(now: float, root: str | None = None,
         found = _codex_row(path, now, canonical)
         if found is None:
             continue
+        scanned.add(path)
         kind, key, row = found
         if kind == "main":
             mains[key] = row
-            for when, pr, sha, verdict in codex_reviews(path):
-                age = max(0.0, now - when) if when else None
-                if verdict is None and age is not None and age <= OFFICE_STALL:
-                    subs.append((key, OfficeRow("claude reviewer", WORKING,
-                                                f"{_review_label(pr, sha)}（單次呼叫執行中）",
-                                                age, 30, kind="subagent", group=row.key,
-                                                key="review")))
-                elif verdict is not None and age is not None and age <= OFFICE_DONE_WINDOW:
-                    subs.append((key, OfficeRow("claude reviewer", DONE,
-                                                f"{_review_label(pr, sha)}：{verdict}",
-                                                age, 30, kind="subagent", group=row.key,
-                                                key="review")))
         else:
             subs.append((key, row))
+        reviews = _review_rows(path, now, row)
+        subs += [(key if kind == "main" else None, review) for review in reviews]
+    forget_reviews(scanned)
     rows = []
     for key, row in mains.items():
-        if row.name == "codex PM":
+        if row.role == "PM":
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
@@ -1540,9 +1751,12 @@ def claude_rows(now: float, root: str | None = None,
             continue
         title = next((item.get("aiTitle") for item in reversed(tail)
                       if item.get("type") == "ai-title"), None)
-        detail = _label(title) or (place[1] if place[0] == "task" else "（無標題）")
-        reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
-        name = "claude reviewer" if reviewing else "claude developer"
+        detail = _label(title) or (_place_label(place) if place[0] != "pm" else "（無標題）")
+        if place[0] == "task":   # a registered D6 root belongs to its one Developer
+            role, basis, task = "developer", "", f"task {place[1]}"
+        else:   # read from the folder and the title; nothing records the role
+            reviewing = place[0] == "pm" or re.search(r"(?i)review|審", detail) is not None
+            role, basis, task = ("reviewer" if reviewing else "developer"), GUESSED, ""
         action = _last_action(tail) if age <= OFFICE_BUSY else ""
         if action:
             detail = action   # what it is doing right now beats the session title
@@ -1553,15 +1767,18 @@ def claude_rows(now: float, root: str | None = None,
         one_shot = first == "sdk-cli" or first is None and any(
             item.get("entrypoint") == "sdk-cli" for item in tail)
         if one_shot:
-            # `claude -p` started by another agent: it exits when its one task is done.
+            # A `claude -p` run: it exits when its one task is done. The session
+            # does not say who started it, so it is not hung under anyone.
             state = WORKING if age <= OFFICE_BUSY else DONE
             if state == DONE and age > OFFICE_DONE_WINDOW:
                 continue
-            rows.append(OfficeRow(name, state, detail, age, 30, key=key,
-                                  group="codex-launched", kind="subagent"))
+            rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
+                                  kind="subagent", task=task, evidence="claude 紀錄"))
             continue
-        rows.append(OfficeRow(name + "（互動）", WORKING if age <= OFFICE_BUSY else IDLE, detail,
-                              age, 30 if place[0] == "pm" else 10, key=key))
+        rows.append(OfficeRow(_who("claude", role, basis) + "（互動）",
+                              WORKING if age <= OFFICE_BUSY else IDLE, detail,
+                              age, 30 if place[0] == "pm" else 10, key=key, role=role,
+                              basis=basis, task=task, evidence="claude 紀錄"))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -1587,7 +1804,8 @@ def claude_rows(now: float, root: str | None = None,
                 doing = _last_action(_jsonl_tail(log_path))
                 sub_detail = f"{sub_detail}：{doing}" if doing else sub_detail
             rows.append(OfficeRow("claude subagent", state, sub_detail,
-                                  sub_age, 40, group=key, kind="subagent"))
+                                  sub_age, 40, group=key, kind="subagent",
+                                  evidence="claude 紀錄"))
     return rows
 
 
@@ -1605,8 +1823,9 @@ OPENCODE_OUTCOME_SQL = (
     " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1), "
     "(SELECT json_extract(m.data, '$.error.status') FROM session_message m "
     " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1) "
+    ", s.directory "
     "FROM session_v2 s WHERE s.parent_id IS NULL AND s.time_idle IS NOT NULL "
-    "ORDER BY s.time_updated DESC LIMIT 1")
+    "ORDER BY s.time_updated DESC LIMIT 50")
 OPENCODE_EVIDENCE_WINDOW = 24 * 3600
 ERROR_TYPE = re.compile(r"[a-z][a-z0-9._-]{0,47}")
 OPENCODE_ROLES = ("OpenCode CLIENT", "OpenCode CLI")
@@ -1619,7 +1838,8 @@ def process_cwd(pid: int) -> str | None:
         return _cwd_cache[pid]
     found = None
     try:
-        out = subprocess.run(["/usr/sbin/lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+        lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+        out = subprocess.run([lsof, "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
                              capture_output=True, text=True, timeout=2, check=False).stdout
         found = next((line[1:] for line in out.splitlines() if line.startswith("n/")), None)
     except (OSError, subprocess.SubprocessError):
@@ -1649,19 +1869,22 @@ def opencode_sessions(now: float, db: str | None = None) -> list[tuple]:
     return out
 
 
-def opencode_outcome(now: float, db: str | None = None):
-    """(state, detail, age) from the newest finished OpenCode session, or None."""
+def opencode_outcome(now: float, db: str | None = None, canonical: str | None = None):
+    """(state, detail, age) from the newest finished OpenCode session that worked
+    in this repository (canonical checkout or a task root), or None."""
     db = OPENCODE_DB if db is None else db
+    canonical = canonical or canonical_root()
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
     except sqlite3.Error:
         return None
     try:
-        row = conn.execute(OPENCODE_OUTCOME_SQL).fetchone()
+        rows = conn.execute(OPENCODE_OUTCOME_SQL).fetchall()
     except sqlite3.Error:
         return None
     finally:
         conn.close()
+    row = next((row for row in rows if _place(row[4], canonical) is not None), None)
     if not row or type(row[0]) is not int:
         return None
     age = max(0.0, now - row[0] / 1000)
@@ -1683,7 +1906,7 @@ def _where(cwd, canonical: str) -> str:
     place = _place(cwd, canonical)
     if place is None:
         return "其他資料夾" if cwd else "位置不明"
-    return "本 repo" if place[0] == "pm" else f"task {place[1]}"
+    return _place_label(place)
 
 
 def _elapsed_seconds(text: str) -> float | None:
@@ -1873,83 +2096,86 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
 
 # Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
 # subagents itself (Owner 2026-10-23), and those appear under the PM.
-ROADMAP_WORKERS = (   # (row prefix in the Roadmap Worker table, display name, sort order)
-    ("OpenCode", "opencode developer", 50),
-    ("AGY", "agy", 60),
-    ("Company", "公司 gw", 70),
+WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
+    ("opencode developer", "opencode-developer", 50),
+    ("agy", "agy", 60),
+    ("公司 gw", "company-gw", 70),
 )
 # Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
 # from live technical state. A PAUSED switch holds until the Owner changes it,
-# whatever quota, login or app state is observed.
+# whatever quota, login or app state is observed. Without a readable, valid
+# switch the monitor says it cannot tell; it never falls back to other text.
 DISPATCH_RELATIVE = os.path.join("tools", "llmtool", "worker-dispatch.json")
-DISPATCH_KEYS = {"opencode developer": "opencode-developer", "agy": "agy",
-                 "公司 gw": "company-gw"}
+DISPATCH_REFS = ("origin/main", "main")   # local refs only; the monitor never fetches
 DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 DECIDERS = frozenset({"Owner", "PM"})
+DISPATCH_TTL = 30.0
+_dispatch_cache: dict = {}
 
 
-def worker_dispatch(path: str) -> dict | None:
-    """{worker key: (dispatch, decided_by, MM-DD)}; None when the file is absent/invalid."""
+def load_dispatch(canonical: str, path: str | None = None) -> tuple[bytes | None, str]:
+    """(file bytes or None, where they came from). The checkout's file wins;
+    without it, the newest local main ref that has it (possibly behind GitHub)."""
+    candidates = [path] if path is not None else [os.path.join(canonical, DISPATCH_RELATIVE)]
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as handle:
+                return handle.read(256 << 10), "派工檔"
+        except OSError:
+            pass
+    if path is not None:
+        return None, ""
+    cached = _dispatch_cache.get(canonical)
+    if cached is not None and time.monotonic() - cached[0] < DISPATCH_TTL:
+        return cached[1]
+    found: tuple[bytes | None, str] = (None, "")
+    for ref in DISPATCH_REFS:
+        try:
+            result = subprocess.run(["git", "-C", canonical, "cat-file", "blob",
+                                     f"{ref}:tools/llmtool/worker-dispatch.json"],
+                                    capture_output=True, timeout=2, check=False)
+        except (OSError, subprocess.SubprocessError):
+            break
+        if result.returncode == 0 and len(result.stdout) <= 256 << 10:
+            found = (result.stdout, f"本機 {ref} 的派工檔（可能不是最新）")
+            break
+    _dispatch_cache[canonical] = (time.monotonic(), found)
+    return found
+
+
+def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
+    """({worker key: (dispatch, decided_by, MM-DD)}, problem). problem is "" when
+    the file is valid, else why nothing can be read from it. An entry that is
+    present but invalid maps to ("INVALID", "", "")."""
+    if raw is None:
+        return {}, "missing"
     try:
-        with open(path, "rb") as handle:
-            data = json.loads(handle.read(256 << 10))
-    except (OSError, ValueError):
-        return None
+        data = json.loads(raw)
+    except ValueError:
+        return {}, "invalid"
     workers = data.get("workers") if type(data) is dict and data.get("schema_version") == 1 else None
     if type(workers) is not dict:
-        return None
+        return {}, "invalid"
     found = {}
     for key, item in workers.items():
-        if type(key) is not str or type(item) is not dict:
+        if type(key) is not str:
             continue
-        dispatch, who, when = item.get("dispatch"), item.get("decided_by"), item.get("decided_at")
+        dispatch, who, when = ((item.get("dispatch"), item.get("decided_by"), item.get("decided_at"))
+                               if type(item) is dict else (None, None, None))
         if (dispatch in DISPATCH_VALUES and who in DECIDERS and type(when) is str and
                 re.fullmatch(r"\d{4}-\d{2}-\d{2}", when)):
             found[key] = (dispatch, who, when[5:])
-    return found
+        else:
+            found[key] = ("INVALID", "", "")
+    return found, ""
 
 
-def roadmap_workers(path: str | None = None) -> dict[str, str]:
-    """{display name: live status text} from the dated Worker availability table."""
-    path = path or os.path.join(canonical_root(), "tools", "llmtool", "ROADMAP.md")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read(OFFICE_HEAD)
-    except (OSError, UnicodeDecodeError):
-        return {}
-    found, inside = {}, False
-    for line in text.splitlines():
-        if line.startswith("#"):
-            inside = "worker availability" in line.lower()
-            continue
-        if not inside or not line.startswith("|"):
-            continue
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        worker = re.sub(r"[`*]", "", cells[0])
-        for prefix, name, _ in ROADMAP_WORKERS:
-            if worker.startswith(prefix) and name not in found:
-                found[name] = cells[1]
-    return found
-
-
-def _worker_state(status: str) -> tuple[str, str]:
-    plain = re.sub(r"[`*]", "", status)
-    upper = plain.upper()
-    if upper.startswith("PAUSED") and ("429" in plain or "USAGELIMIT" in upper.replace(" ", "")):
-        return STOPPED, "免費額度用完（429），等額度恢復"
-    if upper.startswith("PAUSED"):
-        return PAUSED, "Owner 暫停中"
-    if upper.startswith("NO ACTIVE") or "尚未" in plain:
-        return IDLE, "Roadmap：目前沒有指派工作"   # unassigned is not paused
-    if upper.startswith("NOT RECHECKED"):
-        return UNCHECKED, ("上次免費額度用完（429），尚未重新確認" if "429" in plain
-                           else "尚未重新確認")
-    if "PASS" in upper or upper.startswith("AVAILABLE"):
-        tested = re.search(r"\b20\d\d-(\d\d-\d\d)\b", plain)
-        return IDLE, f"Roadmap：測試 PASS（{tested.group(1)}）" if tested else "Roadmap：可用"
-    return UNCHECKED, _label(plain, 36)
+DISPATCH_PROBLEMS = {
+    "missing": "讀不到派工檔，無法判斷能否派工",
+    "invalid": "派工檔格式錯誤，無法判斷能否派工",
+    "absent": "派工檔沒有這個 worker，無法判斷能否派工",
+    "entry": "派工檔裡這個 worker 的設定無效，無法判斷能否派工",
+}
 
 
 def track_one_shot(state: dict, processes: list[Process], now: float):
@@ -1970,7 +2196,7 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
     for pid, item in state.items():
         if pid not in live and item[2] is None:
             item[2] = now
-            ended.append(f"claude reviewer「單次呼叫」結束（約 {max(1, int(item[1] - item[0]))} 秒）")
+            ended.append(f"claude 單次呼叫（由 Codex 啟動）結束（約 {max(1, int(item[1] - item[0]))} 秒）")
     state = {pid: item for pid, item in state.items()
              if item[2] is None or now - item[2] <= OFFICE_DONE_WINDOW}
     finished = [(item[1] - item[0], now - item[2]) for item in state.values() if item[2] is not None]
@@ -1993,14 +2219,14 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
         elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
             gone.add(row.key)
         else:
-            out.append(replace(row, state=CLOSED, detail="Codex CLI 已關閉" + (
+            out.append(replace(row, state=CLOSED, detail="推測 Codex CLI 已關閉" + (
                 row.detail[row.detail.rfind("（"):] if row.detail.endswith("開始）") else "")))
     return [row for row in out if row.group not in gone]
 
 
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
-                roadmap: str | None = None, canonical: str | None = None,
+                canonical: str | None = None,
                 opencode_db: str | None = None, kilo_db: str | None = None,
                 cwd_of=process_cwd,
                 cpu_of=process_cpu, dispatch: str | None = None,
@@ -2015,40 +2241,44 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         p.role == "Codex CLI (node launcher)" for p in processes)
     rows = _closed_codex_cli(rows, clis)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
-    # client is. Without any, the Roadmap row says why OpenCode is not here.
+    # client is.
     _forget_cwds(processes)
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     # `claude -p --no-session-persistence` started by Codex leaves no session
-    # file; while its process runs, it is still a member at work.
-    explained = any(row.key == "review" for row in rows)
-    for proc in sorted((p for p in processes if p.role == "Claude Code CLI"
-                        and p.owner.startswith("Codex") and not explained), key=lambda p: p.pid):
-        rows.append(OfficeRow("claude reviewer", WORKING, "單次呼叫執行中（不留 session 紀錄）",
-                              _elapsed_seconds(proc.elapsed) or 0.0, 30,
-                              group="codex-launched", kind="subagent"))
-    for duration, since_end in ([] if explained else finished_runs or []):
-        rows.append(OfficeRow("claude reviewer", DONE,
-                              f"單次呼叫已結束（跑了約 {max(1, int(duration))} 秒，不留 session 紀錄）",
-                              since_end, 30, group="codex-launched", kind="subagent"))
+    # file. Calls a Codex record already shows are not repeated; any further
+    # process is listed on its own, since nothing says which thread started it.
+    recorded = [row for row in rows if row.key == "review"]
+    running = sorted((p for p in processes if p.role == "Claude Code CLI"
+                      and p.owner.startswith("Codex")), key=lambda p: p.pid)
+    for proc in running[sum(row.state == WORKING for row in recorded):]:
+        rows.append(OfficeRow("claude 單次呼叫", WORKING,
+                              "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",
+                              _elapsed_seconds(proc.elapsed) or 0.0, 30, kind="subagent",
+                              evidence="程序"))
+    for duration, since_end in (finished_runs or [])[sum(row.state == DONE for row in recorded):]:
+        rows.append(OfficeRow("claude 單次呼叫", DONE,
+                              f"由 Codex 啟動，已結束（跑了約 {max(1, int(duration))} 秒，"
+                              "看不出在做什麼）", since_end, 30, kind="subagent", evidence="程序"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     rows += agy
-    switches = worker_dispatch(dispatch or os.path.join(canonical, DISPATCH_RELATIVE))
-    table = {} if switches is not None else roadmap_workers(
-        roadmap or os.path.join(canonical, "tools", "llmtool", "ROADMAP.md"))
-    for _, name, order in ROADMAP_WORKERS:
+    raw, source = load_dispatch(canonical, dispatch)
+    switches, problem = worker_dispatch(raw)
+    for name, key, order in WORKER_ROSTER:
         live = opencode if name == "opencode developer" else agy if name == "agy" else []
-        switch = (switches or {}).get(DISPATCH_KEYS[name])
-        paused = switch is not None and switch[0] == "PAUSED"
-        if live and not paused:
+        switch = switches.get(key)
+        trouble = problem or ("absent" if switch is None else
+                              "entry" if switch[0] == "INVALID" else "")
+        paused = not trouble and switch[0] == "PAUSED"
+        if live and not trouble and not paused:
             continue   # the live CLI rows say everything
-        notes, state, age, replaces_table = [], None, None, False
+        notes, state, age = [], None, None
         if name == "opencode developer" and not live:
-            outcome = opencode_outcome(now, opencode_db)
+            outcome = opencode_outcome(now, opencode_db, canonical)
             if outcome is not None:
-                state, age, replaces_table = outcome[0], outcome[2], True
-                notes.append(outcome[1])
+                state, age = outcome[0], outcome[2]
+                notes.append("本 repo " + outcome[1])
         if name == "agy" and agy_open and not live:
             notes.append("App 開著")
         if name == "公司 gw":
@@ -2057,31 +2287,25 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 age = gw[0]
                 if gw[2] == 0:
                     state = ATTENTION   # reachable on paper, but every recent llmtool run failed
-                notes.append(f"llmtool 最近一次：{gw[3]}（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
+                notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
+                             f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
             notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
-        if switch is not None:
+        if trouble:
+            label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
+        else:
             label = {"PAUSED": f"{switch[1]} 暫停派工（{switch[2]}）",
                      "OWNER_ASSIGNMENT_ONLY": "僅 Owner 指定時派工",
                      "ALLOWED": "可派工"}[switch[0]]
+            if source != "派工檔":
+                label += f"（{source}）"
+            authority = switch[1]
             if paused:
                 state, age = PAUSED, None
             elif state is None:
                 state = IDLE
-            rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
-                                  kind="worker"))
-        elif name in table:
-            table_state, detail = _worker_state(table[name])
-            parts = notes if replaces_table else [detail] + notes
-            rows.append(OfficeRow(name, state or table_state, "；".join(parts), age, order,
-                                  kind="worker"))
-    # One-shot Claude runs are started by Codex; hang them under the most
-    # recently active Codex PM (the launcher is not recorded more precisely).
-    pms = sorted((row for row in rows if row.name == "codex PM"),
-                 key=lambda row: row.age if row.age is not None else 1e12)
-    launcher = pms[0].key if pms else ""
-    rows = [replace(row, group=launcher) if row.group == "codex-launched" else row
-            for row in rows]
+        rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
+                              kind="worker", evidence=source or "派工檔", authority=authority))
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -2134,14 +2358,16 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
     return out
 
 
-def office_lines(rows: list[OfficeRow]) -> list[str]:
+def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
     working = sum(row.state == WORKING for row in rows)
     counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
     lines = [f"辦公室 · agent {counts['agent']} · subagent {counts['subagent']} · "
              f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
+    if error:
+        return lines + [f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。"]
     if not rows:
         return lines + ["目前沒有觀察到任何 agent 或 worker。"]
-    pms = sum(row.name == "codex PM" and row.state != CLOSED for row in rows)
+    pms = sum(row.role == "PM" and row.state != CLOSED for row in rows)
     if pms > 1:
         lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
                      "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")
@@ -2154,6 +2380,8 @@ def office_lines(rows: list[OfficeRow]) -> list[str]:
         detail = f"「{row.detail}」" if row.detail else ""
         lines.append(f"{_pad(prefix + row.name, width)}{_pad(f'({row.state})', 9)}"
                      f"{_pad(detail, 46)} · {_ago(row.age)}")
+    if any(row.basis == GUESSED for row in rows):
+        lines.append("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。")
     lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")
     return lines
 
@@ -2183,7 +2411,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
-    print("\n".join(office_lines(mon.office)))
+    print("\n".join(office_lines(mon.office, mon.office_error)))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\nRECENT LLMTOOL TASKS")
@@ -2279,7 +2507,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
-            lines = office_lines(mon.office)
+            lines = office_lines(mon.office, mon.office_error)
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 attr = curses.A_BOLD if offset + row == 0 else 0

@@ -280,6 +280,19 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         with patch.object(mon, "collect", side_effect=RuntimeError("ps unavailable")):
             return self.monitor.poll()
 
+    def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
+        self.monitor.office = [mon.OfficeRow("codex PM?", mon.WORKING, "old", 1.0, 0)]
+        with patch.object(mon, "office_rows", side_effect=TypeError("boom")):
+            new = self.poll([])
+        self.assertEqual(self.monitor.office, [])
+        self.assertIn(("?", "office view unavailable: TypeError"),
+                      [(kind, text) for _, kind, text in new])
+        lines = mon.office_lines(self.monitor.office, self.monitor.office_error)
+        self.assertTrue(lines[1].startswith("⚠ 辦公室資料讀取失敗（TypeError）"))
+        with patch.object(mon, "office_rows", return_value=[]):
+            self.poll([])
+        self.assertIsNone(self.monitor.office_error)
+
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
 
@@ -763,17 +776,11 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertRegex(mon._when(datetime.now().timestamp()), r"^\d{2}:\d{2}:\d{2}$")
 
 
-ROADMAP_TABLE = """# Roadmap
-## Worker availability — live status
-| Worker | Live status (as of 2026-10-23) | Evidence | Resume |
-| --- | --- | --- | --- |
-| Codex Reviewer Agent | No active Reviewer task dispatch observed as of 2026-10-23. | x | x |
-| OpenCode Developer | PAUSED. The free DeepSeek route returned HTTP 429 `FreeUsageLimitError`. | x | x |
-| AGY | PAUSED (Owner, 2026-10-22) | x | x |
-| Company `gw` | **API authentication PASS; inference PASS** token=abc | x | x |
-## Next section
-| OpenCode Developer | AVAILABLE | x | x |
-"""
+DISPATCH = {   # the Owner's switches as of 2026-10-23
+    "opencode-developer": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+    "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+    "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+}
 
 
 class OfficeViewTests(unittest.TestCase):
@@ -788,8 +795,27 @@ class OfficeViewTests(unittest.TestCase):
         os.makedirs(self.task)
         self.codex = base / "codex"
         self.claude = base / "claude"
-        self.roadmap = base / "ROADMAP.md"
-        self.roadmap.write_text(ROADMAP_TABLE, encoding="utf-8")
+        self._write_dispatch(DISPATCH)
+        self._register("wp-1", str(self.task))
+
+    def _write_dispatch(self, workers, raw=None):
+        path = Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw if raw is not None else
+                        json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        return path
+
+    def _register(self, task_id, root, **fields):
+        registry = Path(self.canonical) / ".git" / "llmtool-worktrees"
+        registry.mkdir(parents=True, exist_ok=True)
+        os.chmod(registry, 0o700)
+        record = {"task_id": task_id, "root_realpath": os.path.realpath(root),
+                  "lock_state": "LOCKED", "state": "ACTIVE", "session_ref": ""}
+        record.update(fields)
+        path = registry / f"{task_id}.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(path, 0o600)
+        mon._registry_cache.clear()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -810,7 +836,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def rows(self, processes=()):
         return mon.office_rows(list(processes), self.NOW, codex_root=str(self.codex),
-                               claude_root=str(self.claude), roadmap=str(self.roadmap),
+                               claude_root=str(self.claude),
                                canonical=self.canonical)
 
     def by_name(self, rows):
@@ -826,18 +852,20 @@ class OfficeViewTests(unittest.TestCase):
         self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
                             "originator": "codex_vscode"}, ["task_complete"], age=60)
         cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
-        self.assertEqual(self.by_name(self.rows([cli]))["codex PM"].state, mon.IDLE)
+        self.assertEqual(self.by_name(self.rows([cli]))["codex PM?"].state, mon.IDLE)
         rows = self.by_name(self.rows())
-        self.assertEqual((rows["codex PM"].state, rows["codex PM"].detail[:13]),
-                         (mon.CLOSED, "Codex CLI 已關閉"))
-        self.assertEqual(rows["codex developer Bacon"].state, mon.DONE)
+        self.assertEqual(rows["codex PM?"].state, mon.CLOSED)
+        self.assertTrue(rows["codex PM?"].detail.startswith("推測 Codex CLI 已關閉"))
+        self.assertEqual(rows["codex developer? Bacon"].state, mon.DONE)
         self.assertEqual(rows["codex developer"].state, mon.IDLE)   # not opened from the CLI
+        self.assertEqual((rows["codex developer"].task, rows["codex developer"].basis),
+                         ("task wp-1", ""))   # a registered D6 root binds the role
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                            "originator": "codex-tui"}, ["task_complete"],
                     age=mon.OFFICE_DONE_WINDOW + 60)
         rows = self.by_name(self.rows())
-        self.assertNotIn("codex PM", rows)
-        self.assertNotIn("codex developer Bacon", rows)   # leaves with the PM that started it
+        self.assertNotIn("codex PM?", rows)
+        self.assertNotIn("codex developer? Bacon", rows)   # leaves with the PM that started it
 
     def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
         self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
@@ -846,10 +874,70 @@ class OfficeViewTests(unittest.TestCase):
                             "originator": "codex-tui"}, ["task_started", "task_complete"], age=10)
         cli = [mon.Process(8, 7, 8, "01:14", "S+", "Codex CLI", "codex", "Codex CLI (node launcher) 7"),
                mon.Process(7, 1, 7, "01:14", "S+", "Codex CLI (node launcher)", "node", "")]
-        pms = [row for row in self.rows(cli) if row.name == "codex PM"]
+        pms = [row for row in self.rows(cli) if row.name == "codex PM?"]
         self.assertEqual(sorted(row.state for row in pms), sorted([mon.IDLE, mon.CLOSED]))
         self.assertEqual(next(row for row in pms if row.state == mon.IDLE).age, 10.0)
         self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows(cli))))
+
+    def test_only_a_registered_d6_root_counts_as_a_task(self):
+        loose = Path(self.tmp.name) / "llmtool-dev-workspaces" / "davidcattoolsproject" / "tasks" / "stray"
+        os.makedirs(loose)
+        self.assertEqual(mon._place(str(self.task), self.canonical), ("task", "wp-1"))
+        self.assertEqual(mon._place(str(loose), self.canonical), ("unregistered", "stray"))
+        self._register("stray", str(loose))
+        os.chmod(Path(self.canonical) / ".git" / "llmtool-worktrees" / "stray.json", 0o644)
+        mon._registry_cache.clear()
+        self.assertEqual(mon._place(str(loose), self.canonical)[0], "unregistered")   # not owner-only
+        self._register("stray", str(loose), lock_state="UNLOCKED")
+        self.assertEqual(mon._place(str(loose), self.canonical)[0], "unregistered")
+        self._codex("dev", {"id": "T9", "cwd": str(loose), "thread_source": "user"},
+                    ["task_started"], age=5)
+        row = self.by_name(self.rows())["codex developer?"]
+        self.assertEqual((row.detail, row.basis, row.task), ("未登記資料夾 stray", mon.GUESSED, ""))
+
+    def test_a_subagent_named_by_a_d6_session_ref_is_a_bound_developer(self):
+        self._register("wp-1", str(self.task), session_ref="collaboration:/root/env2_flow_integration")
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Huygens",
+                            "agent_path": "/root/env2_flow_integration"}, ["task_started"], age=5)
+        self._codex("rev", {"id": "S2", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Locke",
+                            "agent_path": "/root/env2_flow"}, ["task_started"], age=5)
+        rows = self.by_name(self.rows())
+        dev = rows["codex developer Huygens"]
+        self.assertEqual((dev.role, dev.basis, dev.task), ("developer", "", "task wp-1"))
+        self.assertIn("（task wp-1）", dev.detail)
+        self.assertIn("codex developer? Locke", rows)   # a name prefix is not a match
+
+    def test_long_first_line_and_a_thread_started_days_ago_are_still_shown(self):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW - 3 * 86400))
+        meta = {"type": "session_meta", "payload": {
+            "id": "T1", "timestamp": "2026-10-20T01:00:00.000Z", "cwd": self.canonical,
+            "thread_source": "user", "base_instructions": "x" * (mon.OFFICE_HEAD + 10)}}
+        path = self.codex / day / "rollout-old.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta) + "\n" + json.dumps(
+            {"type": "event_msg", "payload": {"type": "task_started"}}) + "\n", encoding="utf-8")
+        os.utime(path, (self.NOW - 5, self.NOW - 5))
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex PM?"].state, mon.WORKING)
+
+    def test_review_records_without_timestamps_do_not_break_sorting(self):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        self._write(self.codex / day / "rollout-pm.jsonl", [
+            {"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                 "thread_source": "user"}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "a",
+                                                  "input": "claude -p 'Review PR #1 head 1234567'"}},
+            {"timestamp": "2026-10-23T00:00:00Z", "type": "response_item",
+             "payload": {"type": "custom_tool_call", "call_id": "b",
+                         "input": "claude -p 'Review PR #2 head 7654321'"}}], age=5)
+        found = mon.codex_reviews(str(self.codex / day / "rollout-pm.jsonl"), self.NOW)
+        self.assertEqual(found, [])   # undated calls are dropped; dated ones expire
+        mon.forget_reviews(set())
+        self.assertEqual(mon._review_cache, {})
 
     def test_codex_pm_and_subagents_show_role_task_and_state(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -868,12 +956,15 @@ class OfficeViewTests(unittest.TestCase):
                     ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
         self._codex("elsewhere", {"id": "X", "cwd": "/somewhere/else"}, ["task_started"], age=1)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex PM"].state, mon.WORKING)
-        self.assertIn("env2 flow integration", rows["codex PM"].detail)
-        self.assertEqual(rows["codex developer Huygens"].state, mon.WORKING)
-        self.assertEqual(rows["codex reviewer Locke"].state, mon.DONE)
-        self.assertNotIn("codex reviewer Old", rows)
+        self.assertEqual(rows["codex PM?"].state, mon.WORKING)
+        self.assertIn("env2 flow integration", rows["codex PM?"].detail)
+        self.assertEqual(rows["codex developer? Huygens"].state, mon.WORKING)
+        self.assertEqual(rows["codex reviewer? Locke"].state, mon.DONE)
+        self.assertNotIn("codex reviewer? Old", rows)
         self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
+        self.assertEqual(rows["codex PM?"].basis, mon.GUESSED)
+        self.assertIn("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。",
+                      mon.office_lines(list(rows.values())))
         self.assertNotIn("codex reviewer agent", rows)
 
     def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
@@ -884,16 +975,16 @@ class OfficeViewTests(unittest.TestCase):
                             "agent_path": "/root/slow_dev"},
                     ["task_started"], age=mon.OFFICE_STALL + 5)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex developer Slow"].state, mon.STALLED)
-        self.assertEqual(rows["codex PM"].state, mon.IDLE)
-        self.assertEqual(rows["codex PM"].detail, "等待下一個指示")
+        self.assertEqual(rows["codex developer? Slow"].state, mon.STALLED)
+        self.assertEqual(rows["codex PM?"].state, mon.IDLE)
+        self.assertEqual(rows["codex PM?"].detail, "等待下一個指示")
 
     def test_two_codex_main_threads_in_the_canonical_root_are_dated_and_flagged(self):
         self._codex("pm1", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                             "timestamp": "2026-10-22T11:23:25.316Z"}, ["task_started"], age=5)
         self._codex("pm2", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
                             "timestamp": "2026-10-22T21:49:41.000Z"}, ["task_started"], age=5)
-        rows = [row for row in self.rows() if row.name == "codex PM"]
+        rows = [row for row in self.rows() if row.name == "codex PM?"]
         self.assertEqual(len(rows), 2)
         self.assertTrue(all("開始）" in row.detail for row in rows))
         self.assertNotEqual(rows[0].detail, rows[1].detail)
@@ -920,7 +1011,7 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         names = [row.name for row in rows]
         self.assertEqual(names.count("claude subagent"), 2)
-        reviewer = self.by_name(rows)["claude reviewer（互動）"]
+        reviewer = self.by_name(rows)["claude reviewer?（互動）"]
         self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
         self.assertNotIn("token=abc", reviewer.detail)
         developer = self.by_name(rows)["claude developer（互動）"]
@@ -957,7 +1048,7 @@ class OfficeViewTests(unittest.TestCase):
         for secret in SECRETS:
             self.assertNotIn(secret, text)
 
-    def test_one_shot_claude_runs_finish_and_hang_under_the_codex_pm(self):
+    def test_one_shot_claude_runs_finish_and_are_not_guessed_onto_a_pm(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
                     ["task_started"], age=5)
         self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
@@ -976,17 +1067,19 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}], age=500)
         rows = self.rows()
         run = next(row for row in rows if row.detail == "Review PR 284")
-        self.assertEqual((run.state, run.kind), (mon.DONE, "subagent"))
-        self.assertEqual(run.group, self.by_name(rows)["codex PM"].key)
-        self.assertEqual(sum(row.name.startswith("claude reviewer") for row in rows), 2)   # run2 hidden
+        # the session does not say who started it, and its title binds no role
+        self.assertEqual((run.name, run.state, run.kind, run.group, run.role),
+                         ("claude 單次呼叫", mon.DONE, "subagent", "", ""))
+        self.assertEqual(sum(row.name == "claude 單次呼叫" for row in rows), 1)   # run2 hidden
         live = next(row for row in rows if row.detail == "Owner chat")
-        self.assertEqual((live.state, live.kind, live.group), (mon.IDLE, "agent", ""))
+        self.assertEqual((live.name, live.state, live.kind, live.group),
+                         ("claude reviewer?（互動）", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
         self.assertIn("agent 2 · subagent 2 · 只看得到狀態 3", lines[0])
         self.assertEqual(lines[1], f"── {mon.LIVE_SECTION} ──")
-        pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM"))
-        self.assertTrue(lines[pm + 1].startswith("└ codex developer Franklin"))
-        self.assertTrue(any(line.startswith("└ claude reviewer") for line in lines[pm + 1:pm + 3]))
+        pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM?"))
+        self.assertTrue(lines[pm + 1].startswith("└ codex developer? Franklin"))
+        self.assertTrue(any(line.startswith("claude 單次呼叫") for line in lines))
         self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
                         next(i for i, line in enumerate(lines) if line.startswith("agy")))
@@ -998,10 +1091,11 @@ class OfficeViewTests(unittest.TestCase):
                           "Codex APP-SERVER 5718")
         mine = mon.Process(41, 1, 41, "13:00:00", "S+", "Claude Code CLI", "claude", "")
         rows = self.rows([run, mine])
-        runs = [row for row in rows if row.detail.startswith("單次呼叫執行中")]
+        runs = [row for row in rows if row.name == "claude 單次呼叫"]
         self.assertEqual(len(runs), 1)
-        self.assertEqual((runs[0].state, runs[0].kind, runs[0].age), (mon.WORKING, "subagent", 130.0))
-        self.assertEqual(runs[0].group, self.by_name(rows)["codex PM"].key)
+        self.assertEqual((runs[0].state, runs[0].kind, runs[0].age, runs[0].group, runs[0].evidence),
+                         (mon.WORKING, "subagent", 130.0, "", "程序"))
+        self.assertIn("看不出是哪個對話", runs[0].detail)
 
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
@@ -1010,7 +1104,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((finished, ended), ([], []))
         state, finished, ended = mon.track_one_shot(state, [run], 1012.0)
         state, finished, ended = mon.track_one_shot(state, [], 1013.0)
-        self.assertEqual(ended, ["claude reviewer「單次呼叫」結束（約 17 秒）"])
+        self.assertEqual(ended, ["claude 單次呼叫（由 Codex 啟動）結束（約 17 秒）"])
         self.assertEqual(finished, [(17.0, 0.0)])
         state, finished, ended = mon.track_one_shot(state, [], 1013.0 + 60)
         self.assertEqual((finished, ended), ([(17.0, 60.0)], []))
@@ -1019,14 +1113,13 @@ class OfficeViewTests(unittest.TestCase):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
                     ["task_started"], age=5)
         rows = mon.office_rows([], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
-                               roadmap=str(self.roadmap), canonical=self.canonical,
+                               canonical=self.canonical,
                                opencode_db="/nonexistent", cwd_of=lambda pid: None,
                                finished_runs=[(45.0, 120.0)])
-        done = [row for row in rows if row.detail.startswith("單次呼叫已結束")]
+        done = [row for row in rows if row.name == "claude 單次呼叫"]
         self.assertEqual(len(done), 1)
-        self.assertEqual((done[0].state, done[0].age), (mon.DONE, 120.0))
+        self.assertEqual((done[0].state, done[0].age, done[0].group), (mon.DONE, 120.0, ""))
         self.assertIn("跑了約 45 秒", done[0].detail)
-        self.assertEqual(done[0].group, self.by_name(rows)["codex PM"].key)
 
     def test_one_shot_review_shows_pr_head_and_verdict_from_the_pm_record_only(self):
         ts = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%S.000Z", mon.time.gmtime(self.NOW - age))
@@ -1054,7 +1147,8 @@ class OfficeViewTests(unittest.TestCase):
             (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
                        call_id="c3")),
             # a plain-text poll format: "SESSION N" while running, raw output at the end
-            (800, call("p1", "claude -p --tools \"\" --no-session-persistence 'Review PR #285'")),
+            (800, call("p1", "claude -p --tools \"\" --no-session-persistence 'Review PR #285 head "
+                             "c40c80acae77147190684a1ea8b66d744378ff41'")),
             (799, dict(out("SESSION 81"), call_id="p1")),
             (790, call("p2", "const r=await tools.write_stdin({session_id:81});text(r.output);"
                              "if(r.session_id)text(\"SESSION \"+r.session_id)")),
@@ -1069,6 +1163,26 @@ class OfficeViewTests(unittest.TestCase):
             (57, {"type": "custom_tool_call_output", "call_id": "b2", "output": [
                 {"type": "input_text", "text": "Error: Exceeded USD budget (0.25)"},
                 {"type": "input_text", "text": "EXIT 1"}]}),
+            # the reply names another PR than the call did
+            (700, call("m1", "claude -p 'Review PR #287 head 1111111aaaa'")),
+            (699, dict(out('{"exit_code":0,"output":"# Review PR #290 head 2222222\\n**Verdict: PASS**"}'),
+                       call_id="m1")),
+            # a verdict only quoted inside a sentence is not this review's verdict
+            (690, call("q1", "claude -p 'Review PR #289 head 3333333bbbb'")),
+            (689, dict(out('{"exit_code":1,"output":"The earlier verdict: FAIL was stale."}'),
+                       call_id="q1")),
+            # a call that fails at once (bad CLI option) is finished, not running
+            (680, call("e1", "git diff a...b | claude --print --bad-flag 'Review PR #291 head 4444444cccc'")),
+            (679, dict(out("error: unknown option '--bad-flag'"), call_id="e1")),
+            # SESSION_ID= / EXIT= poll format
+            (670, call("f1", "claude --print 'Review PR #292 head 5555555dddd'")),
+            (669, dict(out("SESSION_ID=91"), call_id="f1")),
+            (660, call("f2", "const r=await tools.write_stdin({session_id:91});text(r.output);"
+                             "if(r.session_id)text(`SESSION_ID=${r.session_id}`);"
+                             "if(r.exit_code!==undefined)text(`EXIT=${r.exit_code}`)")),
+            (659, {"type": "custom_tool_call_output", "call_id": "f2", "output": [
+                {"type": "input_text", "text": "# Review\n**Verdict: FAIL**"},
+                {"type": "input_text", "text": "EXIT=0"}]}),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
             # searching for running reviews is not a review
@@ -1087,28 +1201,55 @@ class OfficeViewTests(unittest.TestCase):
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
         rows = self.rows([run])
-        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 4)
         reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
         self.assertEqual(reviews, {"審 PR #283 @18538d5：FAIL": mon.DONE,
                                    "審 PR #285 @c40c80a：PASS": mon.DONE,
-                                   "審 PR #286：超過預算上限，沒有判定": mon.DONE,
+                                   f"審 PR #287 @1111111：{mon.MISMATCH}": mon.DONE,
+                                   f"審 PR #289 @3333333：{mon.NO_VERDICT}": mon.DONE,
+                                   f"審 PR #291 @4444444：{mon.NO_VERDICT}": mon.DONE,
+                                   "審 PR #292 @5555555：FAIL": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
+        self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
+                            for row in rows if row.name == "claude reviewer"))
+        # a status question names no head: it is a one-shot call, not a Reviewer
+        unbound = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual([(row.detail, row.role) for row in unbound],
+                         [("單次呼叫（呼叫裡沒寫 PR 和版本）：超過預算上限，沒有判定", "")])
         text = "\n".join(mon.office_lines(rows))
         self.assertNotIn("PR #999", text)
         self.assertNotIn("PROMPT-SECRET", text)
         self.assertNotIn("單次呼叫執行中（不留 session 紀錄）", text)   # PM record explains the process
 
-    def test_roadmap_workers_map_to_office_states_without_raw_text(self):
+    def test_worker_rows_come_from_the_dispatch_switches(self):
         rows = self.by_name(self.rows())
-        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
-                         (mon.STOPPED, "免費額度用完（429），等額度恢復"))
+        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail,
+                          rows["opencode developer"].authority),
+                         (mon.PAUSED, "Owner 暫停派工（10-22）", "Owner"))
         self.assertNotIn("codex reviewer agent", rows)   # spawned by the PM, not a standing Worker
-        self.assertEqual((rows["agy"].state, rows["agy"].detail), (mon.PAUSED, "Owner 暫停中"))
         app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
         agy = self.by_name(self.rows([app]))["agy"]
-        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停中；App 開著"))
-        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
+        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停派工（10-22）；App 開著"))
+        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
         self.assertIsNone(rows["agy"].age)
+
+    def test_missing_or_invalid_dispatch_says_it_cannot_tell_and_never_falls_back(self):
+        (Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json").unlink()
+        mon._dispatch_cache.clear()
+        rows = self.by_name(self.rows())
+        for name in ("opencode developer", "agy", "公司 gw"):
+            self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
+                             (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["missing"]))
+        self._write_dispatch({}, raw="{not json")
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["agy"].detail, mon.DISPATCH_PROBLEMS["invalid"])
+        self._write_dispatch({"agy": {"dispatch": "MAYBE", "decided_by": "Owner",
+                                      "decided_at": "2026-10-22"},
+                              "company-gw": DISPATCH["company-gw"]})
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["agy"].state, rows["agy"].detail),
+                         (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["entry"]))
+        self.assertEqual(rows["opencode developer"].detail, mon.DISPATCH_PROBLEMS["absent"])
+        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
 
     def _opencode_db(self, sessions, messages=()):
         db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "opencode.db"
@@ -1126,46 +1267,49 @@ class OfficeViewTests(unittest.TestCase):
         conn.close()
         return str(db)
 
-    def test_opencode_server_alone_is_not_a_member_and_roadmap_row_stays(self):
+    def test_opencode_server_alone_is_not_a_member_and_dispatch_row_stays(self):
         server = mon.Process(1, 0, 1, "1:00", "S", "OpenCode SERVER", "opencode.exe", "")
         rows = self.by_name(mon.office_rows([server], self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None))
-        self.assertEqual(rows["opencode developer"].state, mon.STOPPED)
+        self.assertEqual(rows["opencode developer"].state, mon.PAUSED)
         self.assertFalse(any(name.startswith("opencode cli") for name in rows))
 
-    def test_latest_opencode_outcome_overrides_the_dated_table_without_message_text(self):
+    def test_latest_opencode_outcome_in_this_repo_without_message_text(self):
+        self._write_dispatch(dict(DISPATCH, **{"opencode-developer": DISPATCH["company-gw"]}))
         ms = lambda age: int((self.NOW - age) * 1000)
         error = lambda kind, status: json.dumps({"error": {
             "type": kind, "status": status, "message": "PROMPT-SECRET token=abc"}})
         db = self._opencode_db(
-            [("s1", None, "/x", "t", ms(3000), ms(3000), "failed"),
-             ("s2", None, "/x", "t", ms(600), ms(600), "failed")],
+            [("s1", None, self.canonical, "t", ms(3000), ms(3000), "failed"),
+             ("s2", None, str(self.task), "t", ms(600), ms(600), "failed"),
+             ("s3", None, "/other/project", "t", ms(100), ms(100), "failed")],
             [("s1", "idle", 1, error("provider.quota", 429)),
-             ("s2", "idle", 1, error("provider.auth", 401))])
+             ("s2", "idle", 1, error("provider.auth", 401)),
+             ("s3", "idle", 1, error("provider.quota", 429))])
         rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db=db,
                                             cwd_of=lambda pid: None))
-        row = rows["opencode developer"]
+        row = rows["opencode developer"]   # another project's newer 429 does not count
         self.assertEqual((row.state, row.detail, row.age),
-                         (mon.STOPPED, "最近一次：認證失敗（401），需要重新登入", 600.0))
+                         (mon.STOPPED, "可派工；本 repo 最近一次：認證失敗（401），需要重新登入", 600.0))
         text = "\n".join(mon.office_lines(list(rows.values())))
         self.assertNotIn("PROMPT-SECRET", text)
         self.assertNotIn("token=abc", text)
-        old = self._opencode_db([("s1", None, "/x", "t", ms(90_000), ms(90_000), "failed")],
+        old = self._opencode_db([("s1", None, self.canonical, "t", ms(90_000), ms(90_000), "failed")],
                                 [("s1", "idle", 1, error("provider.quota", 429))])
-        self.assertIsNone(mon.opencode_outcome(self.NOW, old))
+        self.assertIsNone(mon.opencode_outcome(self.NOW, old, self.canonical))
 
     def _dispatch(self, workers):
         path = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "worker-dispatch.json"
         path.write_text(json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
         return str(path)
 
-    def test_owner_pause_switch_wins_over_live_evidence_and_replaces_the_table(self):
+    def test_owner_pause_switch_wins_over_live_evidence(self):
         ms = lambda age: int((self.NOW - age) * 1000)
-        db = self._opencode_db([("s1", None, "/x", "t", ms(600), ms(600), "failed")],
+        db = self._opencode_db([("s1", None, self.canonical, "t", ms(600), ms(600), "failed")],
                                [("s1", "idle", 1, json.dumps(
                                    {"error": {"type": "provider.auth", "status": 401}}))])
         switches = self._dispatch({
@@ -1178,7 +1322,7 @@ class OfficeViewTests(unittest.TestCase):
         })
         tui = mon.Process(30, 1, 30, "05:00", "S+", "OpenCode CLI", "opencode", "")
         rows = self.by_name(mon.office_rows([tui], self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db=db,
                                             cwd_of=lambda pid: None, cpu_of=lambda pid: 0.0,
                                             dispatch=switches))
@@ -1187,14 +1331,14 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertNotIn("codex reviewer agent", rows)
+        self.assertNotIn("codex reviewer agent", rows)   # an invalid extra entry names no row
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
-                                              roadmap=str(self.roadmap), canonical=self.canonical,
+                                              canonical=self.canonical,
                                               opencode_db=db, cwd_of=lambda pid: None,
                                               dispatch=switches))
         self.assertEqual(no_cli["opencode developer"].detail,
-                         "Owner 暫停派工（10-22）；最近一次：認證失敗（401），需要重新登入")
+                         "Owner 暫停派工（10-22）；本 repo 最近一次：認證失敗（401），需要重新登入")
         self.assertEqual(no_cli["opencode developer"].state, mon.PAUSED)
 
     def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
@@ -1211,27 +1355,28 @@ class OfficeViewTests(unittest.TestCase):
         task("b", 3600, "DEVELOPER_OUTPUT_REJECTED", "DEVELOPER_OUTPUT_INVALID_ENVELOPE")
         task("c", 9 * 86400, "DEVELOPER_RESPONDED", None)   # outside the window
         rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of=lambda pid: None, llmtool_tasks=str(tasks)))
         gw = rows["公司 gw"]
-        self.assertEqual(gw.detail, "Roadmap：可用；llmtool 最近一次：輸出被拒（回應格式錯誤）"
-                                    "（近 7 天 2 次，成功 0 次）")
+        self.assertEqual(gw.detail, "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒"
+                                    "（回應格式錯誤）（近 7 天 2 次，成功 0 次）")
         self.assertEqual((gw.age, gw.state), (3600.0, mon.ATTENTION))
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)
 
-    def test_each_agy_cli_gets_a_row_with_cpu_estimate_and_replaces_roadmap_row(self):
+    def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
                  mon.Process(21, 1, 21, "02:00", "S+", "AGY CLI", "agy", ""),
                  mon.Process(22, 1, 22, "03:00", "S+", "AGY CLI", "agy", "")]
         cpu = {20: 12.0, 21: 0.0, 22: None}
         rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db="/nonexistent",
                                             cwd_of={20: self.canonical}.get, cpu_of=cpu.get))
-        self.assertNotIn("agy", rows)
+        # paused by the Owner, so the switch row stays beside the open CLIs
+        self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）；有 3 個 CLI 開著（非派工）")
         self.assertEqual(rows["agy cli #1"].state, mon.WORKING)
         self.assertEqual(rows["agy cli #1"].detail, "本 repo：CLI 執行中（依 CPU 12% 推算）")
         self.assertEqual(rows["agy cli #2"].state, mon.IDLE)
@@ -1250,10 +1395,10 @@ class OfficeViewTests(unittest.TestCase):
                  mon.Process(12, 1, 12, "00:10", "S+", "OpenCode CLI", "opencode", "")]
         cwd = {10: self.canonical, 11: str(self.task), 12: "/Users/davidsun"}
         rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, opencode_db=db,
                                             cwd_of=cwd.get))
-        self.assertNotIn("opencode developer", rows)
+        self.assertEqual(rows["opencode developer"].state, mon.PAUSED)
         self.assertEqual(rows["opencode cli #1"].state, mon.WORKING)
         self.assertTrue(rows["opencode cli #1"].detail.startswith("本 repo："))
         self.assertNotIn("token=abc", rows["opencode cli #1"].detail)
@@ -1296,7 +1441,7 @@ class OfficeViewTests(unittest.TestCase):
                  mon.Process(22, 1, 22, "07:37:41", "S+", "Kilo CLI (node launcher)", "node", "")]
         cwd = {20: self.canonical, 21: str(self.task), 22: self.canonical}
         rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
-                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            claude_root=str(self.claude),
                                             canonical=self.canonical, kilo_db=db,
                                             cwd_of=cwd.get))
         self.assertNotIn("kilo cli #3", rows)   # the npm launcher is not a second Kilo
