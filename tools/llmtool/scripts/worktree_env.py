@@ -70,7 +70,7 @@ import time
 from pathlib import Path
 
 SCHEMA = 2
-BUILDER = "worktree_env/2"
+BUILDER = "worktree_env/3"
 LOCK_RELATIVE = Path("tools/llmtool/worktree-env.lock")
 PROJECT_RELATIVE = Path("tools/llmtool")
 VENV_RELATIVE = Path("tools/llmtool/.venv")
@@ -84,6 +84,28 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 INDEX_ENV_KEYS = ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_NO_INDEX")
 INDEX_CONFIG_KEYS = ("index-url", "extra-index-url", "find-links", "no-index")
 INDEX_CONFIG_SECTIONS = ("global", "download", "install")
+DEPENDENCY_INSTALL_OPTIONS = (
+    "--no-index",
+    "--only-binary=:all:",
+    "--require-hashes",
+    "--no-cache-dir",
+    "--disable-pip-version-check",
+)
+WHEEL_DOWNLOAD_OPTIONS = (
+    "--no-deps",
+    "--only-binary=:all:",
+    "--require-hashes",
+    "--no-cache-dir",
+    "--disable-pip-version-check",
+)
+PROJECT_INSTALL_OPTIONS = (
+    "--no-deps",
+    "--no-index",
+    "--only-binary=:all:",
+    "--no-build-isolation",
+    "--no-cache-dir",
+    "--disable-pip-version-check",
+)
 
 
 class EnvError(Exception):
@@ -644,13 +666,20 @@ def installer_identity(python_executable):
     return {"name": "pip", "version": pip_version_string(python_executable)}
 
 
-def fingerprint_inputs(lock_path, extras, interp, installer, index):
-    """All cache/env key inputs. `installer` and `index` are mandatory."""
+def fingerprint_inputs(lock_path, extras, interp, installer, index, project_install=True):
+    """All cache/env key inputs. `installer` and `index` are mandatory.
+
+    The effective install mode and the flags that control dependency/project
+    installation are part of the key. A venv built with dependencies only must
+    never be accepted as an editable project environment (or vice versa).
+    """
 
     if not isinstance(installer, dict) or not installer.get("name") or not installer.get("version"):
         raise EnvError("INVALID_FINGERPRINT", "installer identity is missing", 3)
     if not isinstance(index, dict) or set(index) != {"env", "config"}:
         raise EnvError("INVALID_FINGERPRINT", "index identity is missing", 3)
+    if not isinstance(project_install, bool):
+        raise EnvError("INVALID_FINGERPRINT", "project install mode is missing", 3)
     lock_bytes = Path(lock_path).read_bytes()
     inputs = {
         "installer": {"name": installer["name"], "version": installer["version"]},
@@ -659,6 +688,33 @@ def fingerprint_inputs(lock_path, extras, interp, installer, index):
         "builder": BUILDER,
         "lock_sha256": sha256_bytes(lock_bytes),
         "extras": sorted(extras),
+        "install": {
+            "project_install": project_install,
+            "project_mode": "editable-pep660-no-build-isolation" if project_install else "disabled",
+            "dependency_flags": [
+                *DEPENDENCY_INSTALL_OPTIONS,
+                "--find-links",
+                "<verified-wheelhouse>",
+            ],
+            "project_flags": (
+                [
+                    "--editable",
+                    "<current-worktree-project>",
+                    *PROJECT_INSTALL_OPTIONS,
+                    "--find-links",
+                    "<verified-wheelhouse>",
+                ]
+                if project_install
+                else []
+            ),
+            "wheel_download_flags": [
+                *WHEEL_DOWNLOAD_OPTIONS,
+                "--dest",
+                "<staging-directory>",
+                "-r",
+                "<generated-requirements>",
+            ],
+        },
         "platform": interp.get("platform") or sys.platform,
         "platform_tag": interp.get("platform_tag") or sysconfig.get_platform(),
         "machine": _normalize_machine(interp.get("machine")),
@@ -962,11 +1018,7 @@ def _download_wheels(python_executable, requirements, destination):
         "-m",
         "pip",
         "download",
-        "--no-deps",
-        "--only-binary=:all:",
-        "--require-hashes",
-        "--no-cache-dir",
-        "--disable-pip-version-check",
+        *WHEEL_DOWNLOAD_OPTIONS,
         "--dest",
         str(destination),
         "-r",
@@ -1031,7 +1083,13 @@ def ensure_wheelhouse(
     offline=False,
     rebuild=False,
 ):
-    """Return (wheelhouse path, "hit"|"miss"). Never returns a corrupt entry."""
+    """Return path, cache status, and observed wheel download/copy operations."""
+
+    no_wheel_ops = {
+        "pip_download_command_count": 0,
+        "downloaded_wheels": [],
+        "wheel_source_copy_count": 0,
+    }
 
     if not re.fullmatch(r"[A-Za-z0-9._-]+", fp or ""):
         raise EnvError("INVALID_FINGERPRINT", "unsafe fingerprint value %r" % (fp,), 3)
@@ -1043,7 +1101,7 @@ def ensure_wheelhouse(
         # can remove it mid-verification; that surfaces as CACHE_CORRUPT (fail
         # closed, retry succeeds) and can never yield an unverified hit.
         verify_wheelhouse(final, fp, requirements)
-        return final, "hit"
+        return final, "hit", no_wheel_ops
 
     tmp_root = Path(cache_root) / "tmp"
     _ensure_dir(tmp_root)
@@ -1057,7 +1115,7 @@ def ensure_wheelhouse(
             remove_cache_entry(cache_root, fp)
         if final.exists():
             verify_wheelhouse(final, fp, requirements)
-            return final, "hit"
+            return final, "hit", no_wheel_ops
         if offline and not wheel_source:
             raise EnvError(
                 "CACHE_MISS",
@@ -1072,8 +1130,21 @@ def ensure_wheelhouse(
                 wheels = _collect_wheels(requirements, wheel_source)
                 for wheel in wheels.values():
                     shutil.copyfile(str(wheel), str(staging / wheel.name))
+                wheel_ops = {
+                    "pip_download_command_count": 0,
+                    "downloaded_wheels": [],
+                    "wheel_source_copy_count": len(wheels),
+                }
             else:
                 wheels = _download_wheels(python_executable, requirements, staging)
+                wheel_ops = {
+                    "pip_download_command_count": 1,
+                    "downloaded_wheels": [
+                        {"name": name, "version": _parse_wheel_filename(path.name)[1]}
+                        for name, path in sorted(wheels.items())
+                    ],
+                    "wheel_source_copy_count": 0,
+                }
             schema_mismatch = sorted(
                 name
                 for name, wheel in wheels.items()
@@ -1099,10 +1170,10 @@ def ensure_wheelhouse(
             except OSError as exc:
                 if exc.errno in (errno.EEXIST, errno.ENOTEMPTY):
                     verify_wheelhouse(final, fp, requirements)
-                    return final, "hit"
+                    return final, "hit", wheel_ops
                 raise
             os.chmod(str(final), 0o555)
-            return final, "miss"
+            return final, "miss", wheel_ops
         except BaseException:
             if staging.exists():
                 _make_tree_writable(staging)
@@ -1171,6 +1242,7 @@ def create_venv(worktree, python_executable, recreate=False):
 
 
 def install_requirements(python_executable, wheelhouse, requirements):
+    before = installed_versions(python_executable)
     req_path = Path(tempfile.mkdtemp(prefix="llmtool-env-req-")) / "requirements.txt"
     req_path.write_text(requirement_lines(requirements), encoding="utf-8")
     cmd = [
@@ -1178,13 +1250,9 @@ def install_requirements(python_executable, wheelhouse, requirements):
         "-m",
         "pip",
         "install",
-        "--no-index",
+        *DEPENDENCY_INSTALL_OPTIONS,
         "--find-links",
         str(wheelhouse),
-        "--only-binary=:all:",
-        "--require-hashes",
-        "--no-cache-dir",
-        "--disable-pip-version-check",
         "-r",
         str(req_path),
     ]
@@ -1205,6 +1273,42 @@ def install_requirements(python_executable, wheelhouse, requirements):
             % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
+    after = installed_versions(python_executable)
+    expected = {item["name"] for item in requirements}
+    return [
+        {"name": name, "version": after[name]}
+        for name in sorted(expected)
+        if name in after and before.get(name) != after[name]
+    ]
+
+
+def installed_versions(python_executable):
+    """Return a bounded, normalized inventory from this interpreter's pip."""
+    cmd = [python_executable, "-I", "-m", "pip", "list", "--format=json",
+           "--disable-pip-version-check"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=PIP_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise EnvError("PIP_INVENTORY_FAILED", _redact_diagnostic(str(exc)), 5)
+    if proc.returncode != 0 or len(proc.stdout.encode("utf-8")) > 2 * 1024 * 1024:
+        raise EnvError("PIP_INVENTORY_FAILED", _subprocess_diagnostic(proc), 5)
+    try:
+        payload = json.loads(proc.stdout)
+        if not isinstance(payload, list):
+            raise ValueError("pip list was not a list")
+        versions = {}
+        for item in payload:
+            if (not isinstance(item, dict) or not isinstance(item.get("name"), str) or
+                    not isinstance(item.get("version"), str)):
+                raise ValueError("pip list entry was malformed")
+            name = normalize_name(item["name"])
+            if name in versions:
+                raise ValueError("pip list contained duplicate names")
+            versions[name] = item["version"]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        raise EnvError("PIP_INVENTORY_INVALID", "pip package inventory was invalid", 5)
+    return versions
 
 
 PEP660_MIN_PIP = (21, 3)
@@ -1268,6 +1372,7 @@ def install_project(python_executable, worktree, wheelhouse):
     """
 
     require_editable_capable_pip(python_executable)
+    before = installed_versions(python_executable)
     project = Path(worktree) / PROJECT_RELATIVE
     cmd = [
         python_executable,
@@ -1276,14 +1381,9 @@ def install_project(python_executable, worktree, wheelhouse):
         "install",
         "--editable",
         str(project),
-        "--no-deps",
-        "--no-index",
+        *PROJECT_INSTALL_OPTIONS,
         "--find-links",
         str(wheelhouse),
-        "--only-binary=:all:",
-        "--no-build-isolation",
-        "--no-cache-dir",
-        "--disable-pip-version-check",
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=PIP_TIMEOUT_S, check=False)
@@ -1298,6 +1398,10 @@ def install_project(python_executable, worktree, wheelhouse):
             % (proc.returncode, _subprocess_diagnostic(proc)),
             5,
         )
+    after = installed_versions(python_executable)
+    name = "llmtool"
+    return ([{"name": name, "version": after[name]}]
+            if name in after and before.get(name) != after[name] else [])
 
 
 def write_marker(venv, marker):
@@ -1382,14 +1486,19 @@ def _probe_venv(python_executable, names):
     )
 
 
-def env_fingerprint(lock_path, extras, venv):
+def env_fingerprint(lock_path, extras, venv, project_install=True):
     """Fingerprint of an installed venv: interpreter, lock, extras, the venv's
     own installer (pip) and the credential-stripped index configuration."""
 
     python = venv_python(venv)
     interp = interpreter_info(python)
     inputs = fingerprint_inputs(
-        lock_path, extras, interp, installer_identity(python), index_identity(interp)
+        lock_path,
+        extras,
+        interp,
+        installer_identity(python),
+        index_identity(interp),
+        project_install=project_install,
     )
     return interp, inputs, fingerprint_id(inputs)
 
@@ -1401,8 +1510,21 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
         raise EnvError("VENV_MISSING", "no venv at %s" % venv, 3)
     _assert_venv_within_worktree(venv, worktree)
 
-    interp, inputs, fp = env_fingerprint(lock_path, extras, venv)
     marker = read_marker(venv)
+    recorded_project = marker.get("project")
+    if not isinstance(recorded_project, bool):
+        raise EnvError("MARKER_CORRUPT", "venv marker has no valid project install mode", 3)
+    project_expected = recorded_project if expect_project is None else expect_project
+    if project_expected != recorded_project:
+        raise EnvError(
+            "ENV_DRIFT",
+            "venv project install mode does not match the requested mode; re-run bootstrap with --recreate",
+            3,
+        )
+
+    interp, inputs, fp = env_fingerprint(
+        lock_path, extras, venv, project_install=recorded_project
+    )
     if marker.get("fingerprint") != fp:
         raise EnvError(
             "ENV_DRIFT",
@@ -1429,7 +1551,6 @@ def verify_env(worktree, lock_path, extras, expect_project=None):
 
     sections = parse_lock(Path(lock_path))
     requirements = selected_requirements(sections, extras)
-    project_expected = marker.get("project") if expect_project is None else expect_project
     source_root = worktree / PROJECT_RELATIVE
     package_dir = source_root / "llmtool"
     package_init = package_dir / "__init__.py"
@@ -1520,9 +1641,14 @@ def cmd_fingerprint(args):
     sections = parse_lock(worktree / LOCK_RELATIVE)
     python_executable = args.python or default_python_executable()
     interp = interpreter_info(python_executable)
+    project_install = True if args.project is None else args.project
     inputs = fingerprint_inputs(
-        worktree / LOCK_RELATIVE, args.extras, interp,
-        installer_identity(python_executable), index_identity(interp),
+        worktree / LOCK_RELATIVE,
+        args.extras,
+        interp,
+        installer_identity(python_executable),
+        index_identity(interp),
+        project_install=project_install,
     )
     return {
         "fingerprint": fingerprint_id(inputs),
@@ -1550,9 +1676,14 @@ def cmd_bootstrap(args):
     interp = interpreter_info(python_executable)
     # Cache key: the downloading/seeding interpreter's installer and the
     # credential-stripped index configuration are part of artifact provenance.
+    project_install = not args.no_project
     inputs = fingerprint_inputs(
-        lock_path, args.extras, interp,
-        installer_identity(python_executable), index_identity(interp),
+        lock_path,
+        args.extras,
+        interp,
+        installer_identity(python_executable),
+        index_identity(interp),
+        project_install=project_install,
     )
     fp = fingerprint_id(inputs)
     cache_root = _resolve_cache_root(args.cache_root, worktree)
@@ -1581,7 +1712,9 @@ def _bootstrap_locked(
         _assert_venv_within_worktree(venv, worktree)
     if venv.exists() and not args.recreate:
         phase = time.monotonic()
-        report = verify_env(worktree, lock_path, args.extras)
+        report = verify_env(
+            worktree, lock_path, args.extras, expect_project=not args.no_project
+        )
         timings["verify"] = round(time.monotonic() - phase, 3)
         if report["cache_fingerprint"] != fp:
             raise EnvError(
@@ -1596,6 +1729,18 @@ def _bootstrap_locked(
                 "status": "env_reused",
                 "cache": str(wheelhouse_path(cache_root, fp)),
                 "cache_status": "unused",
+                "operations": {
+                    "pip_download_command_count": 0,
+                    "downloaded_wheels": [],
+                    "downloaded_wheel_count": 0,
+                    "wheel_source_copy_count": 0,
+                    "dependency_install_command_count": 0,
+                    "dependency_installed": [],
+                    "dependency_install_package_count": 0,
+                    "project_install_command_count": 0,
+                    "project_installed": [],
+                    "project_install_package_count": 0,
+                },
                 "timings": timings,
                 "total_s": round(time.monotonic() - started, 3),
             }
@@ -1603,7 +1748,7 @@ def _bootstrap_locked(
         return report
 
     phase = time.monotonic()
-    wheelhouse, cache_status = ensure_wheelhouse(
+    wheelhouse, cache_status, wheel_operations = ensure_wheelhouse(
         cache_root,
         fp,
         inputs,
@@ -1621,7 +1766,7 @@ def _bootstrap_locked(
         timings["venv"] = round(time.monotonic() - phase, 3)
         return _install_into_new_venv(
             args, started, timings, worktree, lock_path, requirements, venv,
-            wheelhouse, cache_status, inputs, fp,
+            wheelhouse, cache_status, wheel_operations, inputs, fp,
         )
     except BaseException:
         # Never leave a half-built venv that would block the next bootstrap with
@@ -1634,11 +1779,12 @@ def _bootstrap_locked(
 
 def _install_into_new_venv(
     args, started, timings, worktree, lock_path, requirements, venv,
-    wheelhouse, cache_status, inputs, fp,
+    wheelhouse, cache_status, wheel_operations, inputs, fp,
 ):
     venv_inputs = fingerprint_inputs(
         lock_path, args.extras, interpreter_info(venv_python(venv)),
         inputs["installer"], inputs["index"],
+        project_install=not args.no_project,
     )
     if fingerprint_id(venv_inputs) != fp:
         raise EnvError(
@@ -1649,15 +1795,20 @@ def _install_into_new_venv(
         )
 
     phase = time.monotonic()
-    install_requirements(venv_python(venv), wheelhouse, requirements)
+    dependency_installed = install_requirements(
+        venv_python(venv), wheelhouse, requirements)
     timings["deps"] = round(time.monotonic() - phase, 3)
 
+    project_installed = []
     if not args.no_project:
         phase = time.monotonic()
-        install_project(venv_python(venv), worktree, wheelhouse)
+        project_installed = install_project(venv_python(venv), worktree, wheelhouse)
         timings["project"] = round(time.monotonic() - phase, 3)
 
-    _interp, env_inputs, env_fp = env_fingerprint(lock_path, args.extras, venv)
+    project_install = not args.no_project
+    _interp, env_inputs, env_fp = env_fingerprint(
+        lock_path, args.extras, venv, project_install=project_install
+    )
     marker = {
         "schema": SCHEMA,
         "builder": BUILDER,
@@ -1682,6 +1833,16 @@ def _install_into_new_venv(
             "status": "env_created",
             "cache": str(wheelhouse),
             "cache_status": cache_status,
+            "operations": {
+                **wheel_operations,
+                "downloaded_wheel_count": len(wheel_operations["downloaded_wheels"]),
+                "dependency_install_command_count": 1,
+                "dependency_installed": dependency_installed,
+                "dependency_install_package_count": len(dependency_installed),
+                "project_install_command_count": 0 if args.no_project else 1,
+                "project_installed": project_installed,
+                "project_install_package_count": len(project_installed),
+            },
             "timings": timings,
             "total_s": round(time.monotonic() - started, 3),
         }
@@ -1765,7 +1926,7 @@ def build_parser():
         )
 
     fp_parser = sub.add_parser("fingerprint", help="print the environment fingerprint")
-    common(fp_parser)
+    common(fp_parser, project_flag=True)
 
     boot = sub.add_parser("bootstrap", help="create or verify the per-worktree venv")
     common(boot)

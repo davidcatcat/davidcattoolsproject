@@ -51,8 +51,10 @@ class TaskCompletionTests(unittest.TestCase):
         self.source_path = 'tools/llmtool/tests/test_fixture.py'
         source = self.root / self.source_path
         source.parent.mkdir(parents=True)
+        (self.root / 'tools' / 'llmtool' / '.gitignore').write_text(
+            '/.d6-bootstrap-report.json\n')
         source.write_text('import unittest\nclass Fixture(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n')
-        self._git('add', self.source_path)
+        self._git('add', self.source_path, 'tools/llmtool/.gitignore')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
@@ -116,13 +118,34 @@ class TaskCompletionTests(unittest.TestCase):
                  'git_common_dir': self.common, 'branch': branch, 'base_sha': base,
                  'head_sha': head, 'state': 'ACTIVE', 'lock_state': 'LOCKED'}
         value.update(extra)
+        self._write_env2_marker(value, root, submitted_head=head, current_head=head)
         path = Path(self.common) / 'llmtool-worktrees' / (task_id + '.json')
         path.write_text(json.dumps(value))
         path.chmod(0o600)
         return path
 
+    def _write_env2_marker(self, record, root, *, submitted_head, current_head):
+        report_path = root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        tooling_sha = (record.get('env2_approved_tooling_sha') or record['base_sha'])
+        report = {'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+            'task_id': record['task_id'], 'root_realpath': str(root),
+            'head_sha': current_head, 'tooling_sha': tooling_sha,
+            'cache_fingerprint':
+                'cpython3.13-darwin-arm64-012345abcdef'}
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        record['env2_pass_marker'] = {
+            'schema_version': 1, 'result': 'PASS', 'task_id': record['task_id'],
+            'root_realpath': str(root), 'submitted_head_sha': submitted_head,
+            'current_head_sha': current_head,
+            'tooling_sha': tooling_sha,
+            'environment_fingerprint': report['cache_fingerprint'],
+            'report_sha256': hashlib.sha256(report_bytes).hexdigest()}
+
     def _make_result(self, *, code='    def test_ok(self): self.assertEqual(1, 1)\n',
-                     source_sha=None):
+                     source_sha=None, refresh_env2_marker=True):
         source_sha = self.source_sha if source_sha is None else source_sha
         path = self.root / self.source_path
         path.write_text('import unittest\nclass Fixture(unittest.TestCase):\n' + code)
@@ -135,6 +158,9 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = result_sha
+        if refresh_env2_marker:
+            self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                    current_head=result_sha)
         registry_path.write_text(json.dumps(record))
         registry_path.chmod(0o600)
         return result_sha, patch_text
@@ -148,6 +174,8 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = dispatch_source
+        self._write_env2_marker(record, self.root, submitted_head=dispatch_source,
+                                current_head=dispatch_source)
         registry_path.write_text(json.dumps(record))
         registry_path.chmod(0o600)
 
@@ -191,6 +219,62 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(tests[0]['exit_code'], 0)
         self.assertEqual(tests[0]['source_sha'], result_sha)
         self.assertRegex(tests[0]['output_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_result_collection_rejects_missing_env2_pass_marker(self):
+        result_sha, artifact = self._make_result()
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record.pop('env2_pass_marker')
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', write_paths=[self.source_path],
+                artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISSING')
+
+    def test_result_collection_rejects_marker_for_unapproved_tooling_sha(self):
+        result_sha, artifact = self._make_result()
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['env2_approved_tooling_sha'] = result_sha
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', write_paths=[self.source_path],
+                artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
+
+    def test_result_collection_rejects_env2_marker_stale_after_commit(self):
+        result_sha, artifact = self._make_result(refresh_env2_marker=False)
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', write_paths=[self.source_path],
+                artifact=artifact, artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(raised.exception.completion_code, 'D6_ENV2_PASS_MARKER_MISMATCH')
 
     def test_uncommitted_worktree_result_binds_live_diff_without_result_head(self):
         path = self.root / self.source_path

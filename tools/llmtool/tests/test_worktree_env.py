@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import venv
 import zipfile
 from pathlib import Path
 from unittest import mock
@@ -325,8 +326,14 @@ class FingerprintTest(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def _fp(self, lock, extras, interp, installer=_INSTALLER, index=_NO_INDEX):
-        return we.fingerprint_id(we.fingerprint_inputs(lock, extras, interp, installer, index))
+    def _fp(
+        self, lock, extras, interp, installer=_INSTALLER, index=_NO_INDEX, project_install=True
+    ):
+        return we.fingerprint_id(
+            we.fingerprint_inputs(
+                lock, extras, interp, installer, index, project_install=project_install
+            )
+        )
 
     def test_fingerprint_is_deterministic_and_normalises_machine(self):
         lock = Path(tempfile.mkdtemp(prefix="llmtool-lock-")) / "lock"
@@ -337,6 +344,9 @@ class FingerprintTest(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(first["machine"], "x86_64")
             self.assertEqual(first["installer"], _INSTALLER)
+            self.assertTrue(first["install"]["project_install"])
+            self.assertIn("--no-build-isolation", first["install"]["project_flags"])
+            self.assertIn("--require-hashes", first["install"]["dependency_flags"])
             self.assertEqual(we.fingerprint_id(first), we.fingerprint_id(second))
         finally:
             shutil.rmtree(str(lock.parent), ignore_errors=True)
@@ -370,6 +380,18 @@ class FingerprintTest(unittest.TestCase):
                     self.assertNotEqual(baseline, self._fp(lock, [], interp))
             with self.subTest("extras"):
                 self.assertNotEqual(baseline, self._fp(lock, ["tui"], self._inputs()))
+            with self.subTest("project install mode"):
+                self.assertNotEqual(
+                    baseline,
+                    self._fp(lock, [], self._inputs(), project_install=False),
+                )
+            with self.subTest("build flags"):
+                with mock.patch.object(
+                    we,
+                    "PROJECT_INSTALL_OPTIONS",
+                    tuple(we.PROJECT_INSTALL_OPTIONS) + ("--no-build-isolation-test",),
+                ):
+                    self.assertNotEqual(baseline, self._fp(lock, [], self._inputs()))
             with self.subTest("installer version"):
                 self.assertNotEqual(
                     baseline, self._fp(lock, [], self._inputs(), installer={"name": "pip", "version": "21.2.4"})
@@ -659,6 +681,17 @@ class CacheTest(EnvironmentTempCase):
         first = json.loads(out)
         self.assertEqual(first["status"], "env_created")
         self.assertEqual(first["cache_status"], "miss")
+        first_ops = first["operations"]
+        self.assertEqual(first_ops["pip_download_command_count"], 0)
+        self.assertEqual(first_ops["downloaded_wheel_count"], 0)
+        self.assertEqual(first_ops["wheel_source_copy_count"], len(first["packages"]))
+        self.assertEqual(first_ops["dependency_install_command_count"], 1)
+        self.assertEqual(first_ops["dependency_install_package_count"],
+                         len(first_ops["dependency_installed"]))
+        self.assertTrue(first_ops["dependency_installed"])
+        self.assertEqual(first_ops["project_install_command_count"], 1)
+        self.assertEqual(first_ops["project_install_package_count"], 1)
+        self.assertEqual(first_ops["project_installed"][0]["name"], "llmtool")
 
         report = self.venv_report(worktree)
         self.assertEqual(report["marker"], "A")
@@ -668,6 +701,9 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(code, 0, err)
         second = json.loads(out)
         self.assertEqual(second["status"], "env_reused")
+        self.assertEqual(second["operations"]["pip_download_command_count"], 0)
+        self.assertEqual(second["operations"]["dependency_install_command_count"], 0)
+        self.assertEqual(second["operations"]["project_install_command_count"], 0)
 
         base = os.path.realpath(we.default_python_executable())
         mode_before = stat.S_IMODE(os.stat(base).st_mode)
@@ -676,6 +712,10 @@ class CacheTest(EnvironmentTempCase):
         third = json.loads(out)
         self.assertEqual(third["status"], "env_created")
         self.assertEqual(third["cache_status"], "hit")
+        self.assertEqual(third["operations"]["pip_download_command_count"], 0)
+        self.assertEqual(third["operations"]["downloaded_wheel_count"], 0)
+        self.assertEqual(third["operations"]["dependency_install_command_count"], 1)
+        self.assertEqual(third["operations"]["project_install_command_count"], 1)
         self.assertEqual(
             mode_before,
             stat.S_IMODE(os.stat(base).st_mode),
@@ -688,6 +728,47 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(
             {item["name"] for item in manifest["files"]}, {"tiny-dep"}
         )
+
+    @needs_editable_pip
+    def test_project_install_mode_is_fingerprinted_and_existing_env_rejects_mode_change(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        code, out, err = self.bootstrap(worktree, "--no-project")
+        self.assertEqual(code, 0, err)
+        first = json.loads(out)
+        self.assertEqual(first["status"], "env_created")
+        self.assertFalse(first["project"])
+
+        code, out, err = self.run_cli(
+            "fingerprint", "--worktree", worktree, "--no-project", "--json"
+        )
+        self.assertEqual(code, 0, err)
+        dependencies_only = json.loads(out)
+        self.assertFalse(dependencies_only["inputs"]["install"]["project_install"])
+        self.assertEqual(dependencies_only["fingerprint"], first["cache_fingerprint"])
+
+        code, out, err = self.run_cli("fingerprint", "--worktree", worktree, "--json")
+        self.assertEqual(code, 0, err)
+        project_mode = json.loads(out)
+        self.assertTrue(project_mode["inputs"]["install"]["project_install"])
+        self.assertNotEqual(project_mode["fingerprint"], first["cache_fingerprint"])
+
+        code, out, err = self.run_cli(
+            "verify", "--worktree", worktree, "--project", "--json"
+        )
+        self.assertEqual(code, 3)
+        self.assertIn("ENV_DRIFT", err)
+
+        code, out, err = self.bootstrap(worktree)
+        self.assertEqual(code, 3)
+        self.assertIn("ENV_DRIFT", err)
+        self.assertTrue(self.venv_python(worktree).is_file())
+
+        code, out, err = self.bootstrap(worktree, "--recreate")
+        self.assertEqual(code, 0, err)
+        rebuilt = json.loads(out)
+        self.assertEqual(rebuilt["status"], "env_created")
+        self.assertTrue(rebuilt["project"])
+        self.assertNotEqual(rebuilt["cache_fingerprint"], first["cache_fingerprint"])
 
     def test_corrupt_wheel_fails_closed_and_preserves_existing_venv(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
@@ -702,7 +783,7 @@ class CacheTest(EnvironmentTempCase):
         data[-8:] = b"tampered"
         wheel.write_bytes(bytes(data))
 
-        code, out, err = self.bootstrap(worktree, "--recreate")
+        code, out, err = self.bootstrap(worktree, "--recreate", "--no-project")
         self.assertEqual(code, 3)
         self.assertIn("CACHE_CORRUPT", err)
         self.assertTrue(self.venv_python(worktree).is_file(), "venv must survive a failed rebuild")
@@ -792,10 +873,12 @@ class CacheTest(EnvironmentTempCase):
         )
         wheelhouse = self.tmp / "empty-wheelhouse"
         wheelhouse.mkdir()
+        isolated_python = self.tmp / "pip-dependency-venv" / "bin" / "python"
+        venv.EnvBuilder(with_pip=True).create(isolated_python.parent.parent)
         links = "file://%s?token=install-secret#install-fragment" % wheelhouse
         with mock.patch.dict(os.environ, {"PIP_FIND_LINKS": links}):
             self._capture_real_subprocess_output(
-                lambda: we.install_requirements(sys.executable, wheelhouse, requirements),
+                lambda: we.install_requirements(str(isolated_python), wheelhouse, requirements),
                 ("install-secret", "install-fragment"),
             )
 
@@ -811,9 +894,11 @@ class CacheTest(EnvironmentTempCase):
         )
         wheelhouse = self.tmp / "empty-project-wheelhouse"
         wheelhouse.mkdir()
+        isolated_python = self.tmp / "pip-project-venv" / "bin" / "python"
+        venv.EnvBuilder(with_pip=True).create(isolated_python.parent.parent)
         self._capture_real_subprocess_output(
             lambda: we.install_project(
-                sys.executable, worktree / "tools" / "llmtool", wheelhouse
+                str(isolated_python), worktree / "tools" / "llmtool", wheelhouse
             ),
             (marker, fragment),
         )
