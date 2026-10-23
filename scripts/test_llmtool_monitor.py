@@ -1051,6 +1051,9 @@ class OfficeViewTests(unittest.TestCase):
             (850, call("c3", "gh pr view 283 --json comments")),
             (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
                        call_id="c3")),
+            # searching for running reviews is not a review
+            (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf "
+                            "'(^|/)codex|claude -p|claude --print|claude$' | head -40")),
             (30, call("c4", "claude -p 'Review PR #284 head 1ee2f21c8caca7c66dc497268759dc8c308adebf'")),
             (29, dict(out('{"session_id":70615,"output":""}'), call_id="c4")),
         ]

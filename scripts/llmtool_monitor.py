@@ -1345,7 +1345,12 @@ def _codex_row(path: str, now: float, canonical: str):
 # session), never other tool output, so a verdict quoted from GitHub cannot be
 # mistaken for one. Just the PR number, reviewed head and verdict word are
 # extracted from the first part of the result; nothing else is kept.
-CLAUDE_CALL = re.compile(r"\bclaude\b[\s\S]{0,40}?(?:--print\b|\s-p\s|'--print'|\"--print\")")
+# `claude` must start a command (line start, after ; && || "| " $( or an
+# opening quote of an argv/cmd string) and --print must be in that same
+# command, so a search pattern such as `pgrep -f 'x|claude --print'` is not one.
+CLAUDE_CALL = re.compile(
+    r"(?:^|[\n;(`\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
+    r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
 STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
 REVIEW_VERDICT = re.compile(r"(?i)\bverdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
