@@ -17,6 +17,7 @@ from llmtool.errors import LLMToolError, coded_error
 from llmtool import worker_dispatch
 from llmtool.providers.base import Reply
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
                                          run_task_opencode_delegate,
@@ -67,7 +68,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
-        subprocess.run(['/usr/bin/git', 'add', 'sample.py'], cwd=self.executor_root, check=True)
+        report_dir = self.executor_root / 'tools' / 'llmtool'
+        report_dir.mkdir(parents=True)
+        (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore'],
+                       cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
         self.executor_head = subprocess.check_output(
@@ -75,6 +80,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.executor_common_dir = str(self.executor_root / '.git')
         registry_dir = Path(self.executor_common_dir) / 'llmtool-worktrees'
         registry_dir.mkdir(mode=0o700)
+        lock_path = registry_dir / '.lifecycle.lock'
+        lock_path.touch(mode=0o600)
+        lock_path.chmod(0o600)
         root_stat = self.executor_root.stat()
         self.executor_registry = {
             'schema_version': 1, 'task_id': 'executor-task-1',
@@ -86,12 +94,32 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'base_sha': self.executor_head, 'head_sha': self.executor_head,
             'state': 'ACTIVE', 'lock_state': 'LOCKED',
         }
+        report = {'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+            'task_id': 'executor-task-1', 'root_realpath': str(self.executor_root),
+            'head_sha': self.executor_head,
+            'tooling_sha': self.executor_head,
+            'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'}
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path = report_dir / '.d6-bootstrap-report.json'
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        self.executor_registry['env2_pass_marker'] = {
+            'schema_version': 1, 'result': 'PASS', 'task_id': 'executor-task-1',
+            'root_realpath': str(self.executor_root),
+            'submitted_head_sha': self.executor_head, 'current_head_sha': self.executor_head,
+            'tooling_sha': self.executor_head,
+            'environment_fingerprint': report['cache_fingerprint'],
+            'report_sha256': hashlib.sha256(report_bytes).hexdigest()}
         record_path = registry_dir / 'executor-task-1.json'
         record_path.write_text(json.dumps(self.executor_registry))
         record_path.chmod(0o600)
         original_cwd = os.getcwd()
         self.addCleanup(os.chdir, original_cwd)
         os.chdir(self.executor_root)
+        self.bootstrap_patch = patch(
+            'llmtool.task_submission_cli._bootstrap_registered_d6')
+        self.bootstrap_patch.start()
+        self.addCleanup(self.bootstrap_patch.stop)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
@@ -106,6 +134,161 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 redirect_stdout(out):
             code = run_task_submit(self.args)
         return code, json.loads(out.getvalue()), client, resolve
+
+    def test_trusted_bootstrap_helper_requires_clean_pinned_dispatcher_source(self):
+        dispatcher_root = Path(self.temp.name).resolve() / 'dispatcher'
+        helper = dispatcher_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        dispatcher = (dispatcher_root / 'tools' / 'llmtool' / 'llmtool' /
+                      'task_submission_cli.py')
+        helper.parent.mkdir(parents=True)
+        dispatcher.parent.mkdir(parents=True)
+        helper.write_bytes(b"raise SystemExit(0)\n")
+        dispatcher.write_bytes(b"# pinned dispatcher fixture\n")
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=dispatcher_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
+                       cwd=dispatcher_root, check=True, capture_output=True)
+
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+                patch.object(submission_cli, '__file__', str(dispatcher)):
+            root, source = submission_cli._trusted_d6_helper_source()
+        self.assertEqual(root, dispatcher_root)
+        self.assertEqual(source, b"raise SystemExit(0)\n")
+
+        helper.write_bytes(b"raise SystemExit(23)\n")
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+                patch.object(submission_cli, '__file__', str(dispatcher)):
+            with self.assertRaises(ValueError):
+                submission_cli._trusted_d6_helper_source()
+
+    def test_committed_task_tree_dispatcher_and_helper_cannot_be_trust_source(self):
+        trusted_root = Path(self.temp.name).resolve() / 'trusted-dispatcher'
+        helper = trusted_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        dispatcher = (trusted_root / 'tools' / 'llmtool' / 'llmtool' /
+                      'task_submission_cli.py')
+        helper.parent.mkdir(parents=True)
+        dispatcher.parent.mkdir(parents=True)
+        helper.write_text('# trusted pinned helper\n', encoding='utf-8')
+        dispatcher.write_text('# trusted pinned dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=trusted_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
+                       cwd=trusted_root, check=True, capture_output=True)
+
+        task_root = Path(self.temp.name).resolve() / 'committed-task-tree'
+        subprocess.run(['/usr/bin/git', 'clone', '-b', 'main', str(trusted_root),
+                        str(task_root)], check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Task Fixture'],
+                       cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'task@example.invalid'],
+                       cwd=task_root, check=True)
+        task_helper = task_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        task_dispatcher = (task_root / 'tools' / 'llmtool' / 'llmtool' /
+                           'task_submission_cli.py')
+        marker_path = Path(self.temp.name).resolve() / 'committed-task-helper-ran'
+        task_helper.write_text(
+            'from pathlib import Path\nPath(' + repr(str(marker_path)) +
+            ").write_text('ran')\n", encoding='utf-8')
+        task_dispatcher.write_text('# committed descendant dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'committed task descendant'],
+                       cwd=task_root, check=True, capture_output=True)
+
+        registration = type('Registration', (), {
+            'root': str(self.executor_root), 'task_id': 'executor-task-1'})()
+        self.bootstrap_patch.stop()
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+                patch.object(submission_cli, '__file__', str(task_dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(registration)
+
+        self.assertEqual(raised.exception.direct_opencode_code,
+                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        self.assertFalse(marker_path.exists())
+
+    def test_integrator_approved_tooling_reads_exact_source_blobs_from_shared_store(self):
+        trusted_root = Path(self.temp.name).resolve() / 'approved-dispatcher'
+        paths = {
+            'helper': trusted_root / 'tools' / 'llmtool' / 'scripts' /
+                      'd6_worktree_env.py',
+            'lifecycle': trusted_root / 'tools' / 'llmtool' / 'scripts' /
+                         'd6_worktree_lifecycle.py',
+            'dispatcher': trusted_root / 'tools' / 'llmtool' / 'llmtool' /
+                          'task_submission_cli.py',
+        }
+        for key in ('helper', 'lifecycle', 'dispatcher'):
+            paths[key].parent.mkdir(parents=True, exist_ok=True)
+        paths['helper'].write_text('# base helper\n', encoding='utf-8')
+        paths['lifecycle'].write_text('# base lifecycle\n', encoding='utf-8')
+        paths['dispatcher'].write_text('# pinned dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=trusted_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'approved fixture base'],
+                       cwd=trusted_root, check=True, capture_output=True)
+        base_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                           cwd=trusted_root, text=True).strip()
+
+        task_root = Path(self.temp.name).resolve() / 'approved-task'
+        branch = 'feat/approved-env2-source'
+        subprocess.run(['/usr/bin/git', 'worktree', 'add', '-b', branch,
+                        str(task_root), base_sha], cwd=trusted_root,
+                       check=True, capture_output=True)
+        marker_path = Path(self.temp.name).resolve() / 'approved-source-ran'
+        helper_bytes = (
+            'from pathlib import Path\nPath(' + repr(str(marker_path)) +
+            ").write_text('ran')\n").encode()
+        lifecycle_bytes = b'# exact reviewed lifecycle candidate\n'
+        (task_root / 'tools' / 'llmtool' / 'scripts' /
+         'd6_worktree_env.py').write_bytes(helper_bytes)
+        (task_root / 'tools' / 'llmtool' / 'scripts' /
+         'd6_worktree_lifecycle.py').write_bytes(lifecycle_bytes)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'approved candidate sources'],
+                       cwd=task_root, check=True, capture_output=True)
+        approved_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                              cwd=task_root, text=True).strip()
+        registration = type('Registration', (), {
+            'task_id': 'approved-task-1',
+            'common_dir': str((trusted_root / '.git').resolve()),
+            'root': str(task_root), 'branch': branch,
+            'source_sha': base_sha, 'result_sha': approved_sha,
+            'env2_approved_tooling_sha': approved_sha,
+        })()
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+                patch.object(submission_cli, '__file__', str(paths['dispatcher'])), \
+                patch.object(submission_cli.task_completion, 'read_d6_registration',
+                             return_value=registration):
+            _root, loaded_helper = submission_cli._trusted_d6_helper_source(registration)
+            _root, loaded_lifecycle = submission_cli._trusted_d6_helper_source(
+                registration, 'tools/llmtool/scripts/d6_worktree_lifecycle.py')
+
+        self.assertEqual(loaded_helper, helper_bytes)
+        self.assertEqual(loaded_lifecycle, lifecycle_bytes)
+        self.assertFalse(marker_path.exists())
 
     def test_direct_submit_persists_logical_binding_real_reply_and_usage(self):
         code, result, client, resolve = self.invoke()
@@ -555,6 +738,119 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['developer']['error_code'], 'OPENCODE_D6_BINDING_CHANGED')
         self.assertFalse(provider_process_started)
         self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_bootstraps_registered_d6_before_provider_launch(self):
+        task = self._pm_task_with_opencode_assignment()
+        events = []
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None, 'UNKNOWN',
+                              'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                              10, 1, 'b' * 64)
+
+        def bootstrap(registration):
+            self.assertEqual(registration.task_id, 'executor-task-1')
+            events.append('bootstrap')
+
+        def launch(**kwargs):
+            kwargs['prelaunch_validate']()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            events.append('provider')
+            return result
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                      side_effect=bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=launch), \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      return_value=None), redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
+        self.assertEqual(events, ['bootstrap', 'provider'])
+
+    def test_opencode_bootstrap_rejection_blocks_launch_and_binds_process(self):
+        self.bootstrap_patch.stop()
+        task = self._pm_task_with_opencode_assignment()
+        target_script = (self.executor_root / 'tools' / 'llmtool' / 'scripts' /
+                         'd6_worktree_env.py')
+        target_script.parent.mkdir(parents=True, exist_ok=True)
+        marker_path = Path(self.temp.name) / 'untrusted-helper-ran'
+        target_script.write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker_path)) +
+            ").write_text('ran')\n", encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'add', 'tools/llmtool/scripts/d6_worktree_env.py'],
+                       cwd=self.executor_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'untrusted descendant helper'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        self.executor_registry['head_sha'] = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root,
+            text=True).strip()
+        report_path = (self.executor_root / 'tools' / 'llmtool' /
+                       '.d6-bootstrap-report.json')
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+        report['head_sha'] = self.executor_registry['head_sha']
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        self.executor_registry['env2_pass_marker'].update(
+            submitted_head_sha=self.executor_registry['head_sha'],
+            current_head_sha=self.executor_registry['head_sha'],
+            report_sha256=hashlib.sha256(report_bytes).hexdigest())
+        record_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                       'executor-task-1.json')
+        record_path.write_text(json.dumps(self.executor_registry))
+        record_path.chmod(0o600)
+        captured = []
+        real_run = subprocess.run
+
+        def reject_env_bootstrap(argv, *args, **kwargs):
+            if '-c' in argv:
+                captured.append((argv, kwargs))
+                return subprocess.CompletedProcess(argv, 23)
+            return real_run(argv, *args, **kwargs)
+
+        output = io.StringIO()
+        injected = {
+            'HOME': str(self.home), 'MAKEFLAGS': '-f attacker.mk',
+            'MAKEFILES': 'attacker.mk', 'PYTHONPATH': '/tmp/shadow',
+            'PYTHONHOME': '/tmp/other-python', 'GNUMAKEFLAGS': '--eval=bad',
+            'MFLAGS': '-f attacker.mk',
+        }
+        with patch.dict(os.environ, injected), \
+                patch('llmtool.task_submission_cli._trusted_d6_helper_source',
+                      return_value=(self.executor_root, b'raise SystemExit(0)')), \
+                patch.object(submission_cli.subprocess, 'run',
+                             side_effect=reject_env_bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as launch, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'ENV_BOOTSTRAP_REJECTED')
+        launch.assert_not_called()
+        self.assertEqual(len(captured), 1)
+        argv, kwargs = captured[0]
+        self.assertEqual(argv, [sys.executable, '-B', '-I', '-c',
+                                'raise SystemExit(0)', '--task-id', 'executor-task-1',
+                                '--worktree-root', str(self.executor_root)])
+        self.assertNotIn(str(target_script), argv)
+        self.assertFalse(marker_path.exists())
+        self.assertEqual(Path(kwargs['cwd']), self.executor_root)
+        self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+        self.assertFalse(kwargs['check'])
+        self.assertEqual(set(kwargs['env']), {
+            'PATH', 'HOME', 'LC_ALL', 'LANG', 'PIP_CONFIG_FILE',
+            'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_ATTR_NOSYSTEM',
+            'GIT_OPTIONAL_LOCKS', 'GIT_NO_LAZY_FETCH', 'GIT_TERMINAL_PROMPT'})
+        for name in ('MAKEFLAGS', 'MAKEFILES', 'PYTHONPATH', 'PYTHONHOME',
+                     'GNUMAKEFLAGS', 'MFLAGS'):
+            self.assertNotIn(name, kwargs['env'])
 
     def test_opencode_failed_call_is_unknown_and_never_replayed(self):
         task = self._pm_task_with_opencode_assignment()

@@ -451,6 +451,8 @@ class D6Registration:
     uid: int
     native_session_id: str | None
     github_login: str | None
+    env2_pass_marker: object
+    env2_approved_tooling_sha: str | None
 
 
 def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
@@ -523,11 +525,104 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     if github_login is not None and (type(github_login) is not str or
             not re.fullmatch(r'[A-Za-z0-9-]{1,39}', github_login)):
         _stop('D6_REGISTRY_INVALID')
+    approved_tooling_sha = value.get('env2_approved_tooling_sha')
+    if approved_tooling_sha is not None and (
+            type(approved_tooling_sha) is not str or
+            _HEX40.fullmatch(approved_tooling_sha) is None or
+            approved_tooling_sha != value['head_sha']):
+        _stop('D6_REGISTRY_INVALID')
     return D6Registration(task_id, value['trusted_agent_id'], value['session_ref'],
                           value['root_realpath'], common_dir, value['branch'],
                           value['base_sha'], value['head_sha'], value['state'],
                           value['lock_state'], identity['device'], identity['inode'],
-                          identity['uid'], native_session, github_login)
+                          identity['uid'], native_session, github_login,
+                          value.get('env2_pass_marker'), approved_tooling_sha)
+
+
+def validate_env2_pass_marker(registration, *, expected_root, current_head):
+    """Require the owner-only registry marker and report for this exact D6 HEAD."""
+    marker = registration.env2_pass_marker
+    if marker is None:
+        _stop('D6_ENV2_PASS_MARKER_MISSING')
+    required = {
+        'schema_version', 'result', 'task_id', 'root_realpath',
+        'submitted_head_sha', 'current_head_sha', 'environment_fingerprint',
+        'tooling_sha', 'report_sha256',
+    }
+    fingerprint_re = re.compile(
+        r'[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-'
+        r'[a-z0-9][a-z0-9._-]{0,31}-[0-9a-f]{12}\Z')
+    if type(marker) is not dict or set(marker) != required:
+        _stop('D6_ENV2_PASS_MARKER_INVALID')
+    if (type(marker['schema_version']) is not int or marker['schema_version'] != 1 or
+            marker['result'] != 'PASS' or marker['task_id'] != registration.task_id or
+            marker['root_realpath'] != expected_root or expected_root != registration.root or
+            type(current_head) is not str or _HEX40.fullmatch(current_head) is None or
+            marker['submitted_head_sha'] != current_head or
+            marker['current_head_sha'] != current_head or
+            current_head != registration.result_sha or
+            marker['tooling_sha'] != (registration.env2_approved_tooling_sha or
+                                      registration.source_sha) or
+            type(marker['tooling_sha']) is not str or
+            _HEX40.fullmatch(marker['tooling_sha']) is None or
+            type(marker['environment_fingerprint']) is not str or
+            fingerprint_re.fullmatch(marker['environment_fingerprint']) is None or
+            type(marker['report_sha256']) is not str or
+            _HEX64.fullmatch(marker['report_sha256']) is None):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+
+    report_path = Path(expected_root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+    for directory in (Path(expected_root) / 'tools', Path(expected_root) / 'tools' / 'llmtool'):
+        try:
+            info = directory.lstat()
+        except OSError:
+            _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    try:
+        before = report_path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or
+                before.st_uid != os.getuid() or stat.S_IMODE(before.st_mode) != 0o600 or
+                before.st_nlink != 1 or before.st_size > 2 * 1024 * 1024):
+            _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+        fd = os.open(report_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            opened = os.fstat(fd)
+            raw = bytearray()
+            while len(raw) <= 2 * 1024 * 1024:
+                chunk = os.read(fd, min(65536, 2 * 1024 * 1024 + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            after = os.fstat(fd)
+            current = report_path.lstat()
+        finally:
+            os.close(fd)
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+    if (len(raw) > 2 * 1024 * 1024 or identity(before) != identity(opened) or
+            identity(opened) != identity(after) or
+            (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) or
+            hashlib.sha256(raw).hexdigest() != marker['report_sha256']):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    try:
+        report = json.loads(bytes(raw).decode('utf-8'), object_pairs_hook=_unique_pairs,
+                            parse_constant=lambda _: _stop('D6_ENV2_PASS_MARKER_INVALID'))
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('D6_ENV2_PASS_MARKER_INVALID')
+    if (type(report) is not dict or report.get('result') != 'PASS' or
+            report.get('task_id') != registration.task_id or
+            report.get('root_realpath') != registration.root or
+            report.get('head_sha') != current_head or
+            report.get('tooling_sha') != marker['tooling_sha'] or
+            report.get('cache_fingerprint') != marker['environment_fingerprint']):
+        _stop('D6_ENV2_PASS_MARKER_MISMATCH')
+    return marker
 
 
 def _git(root, args, *, limit=_GIT_LIMIT):
@@ -709,6 +804,8 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     if (snapshot.common_dir != registration.common_dir or snapshot.branch != registration.branch or
             snapshot.head != registration.result_sha or not snapshot.clean):
         _stop('RESULT_HEAD_MISMATCH')
+    validate_env2_pass_marker(registration, expected_root=expected_root,
+                              current_head=snapshot.head)
     try:
         _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha, source_sha),
              limit=4096)
@@ -872,6 +969,8 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
     if (live['common_dir'] != registration.common_dir or
             live['branch'] != registration.branch):
         _stop('D6_TASK_BINDING_MISMATCH')
+    validate_env2_pass_marker(registration, expected_root=expected_root,
+                              current_head=live['source_sha'])
     try:
         _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha,
                                  source_sha), limit=4096)
