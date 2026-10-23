@@ -1196,8 +1196,40 @@ class OfficeViewTests(unittest.TestCase):
             (659, {"type": "custom_tool_call_output", "call_id": "f2", "output": [
                 {"type": "input_text", "text": "# Review\n**Verdict: FAIL**"},
                 {"type": "input_text", "text": "EXIT=0"}]}),
+            # the PM's exec script: cmd=`timeout 180 claude --print ...`, output plus a
+            # trailer line "exit_code=... session_id=..."
+            (650, call("t1", 'const prompt=`Review PR #293 head 6666666eeee`;\n'
+                             'const cmd=`timeout 180 claude --print --no-session-persistence '
+                             '--max-budget-usd 1.50 "${prompt}"`;\n'
+                             'const r=await tools.exec_command({cmd});text(r.output);\n'
+                             'text(`exit_code=${r.exit_code ?? "running"} session_id=${r.session_id ?? ""}`);')),
+            (649, {"type": "custom_tool_call_output", "call_id": "t1", "output": [
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "exit_code=running session_id=93"}]}),
+            (640, call("t2", "const r=await tools.write_stdin({session_id:93});text(r.output);"
+                             'text(`exit_code=${r.exit_code ?? "running"} session_id=${r.session_id ?? ""}`);')),
+            (639, {"type": "custom_tool_call_output", "call_id": "t2", "output": [
+                {"type": "input_text", "text": "# Review PR #293\n**Verdict: PASS**"},
+                {"type": "input_text", "text": "exit_code=0 session_id="}]}),
+            # a delta review names the old head first; "## Review Verdict:" heading
+            (630, call("d1", 'const cmd=`timeout 180 claude --print "Review PR #294 head 7777777ffff"`;')),
+            (629, {"type": "custom_tool_call_output", "call_id": "d1", "output": [
+                {"type": "input_text", "text": "## Review Verdict: PASS\nfrom head 0000000aaaa to "
+                                               "head 7777777ffff on PR #294"},
+                {"type": "input_text", "text": "exit_code=0 session_id="}]}),
+            # killed by `timeout`
+            (620, call("k1", 'const cmd=`timeout 180 claude --print "Review PR #295 head 8888888aaaa"`;')),
+            (619, {"type": "custom_tool_call_output", "call_id": "k1", "output": [
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "exit_code=124 session_id="}]}),
+            # the PM's script broke before claude ran
+            (610, call("s1", 'const cmd=`timeout 180 claude --print "Review PR #296 head 9999999bbbb"`;')),
+            (609, {"type": "custom_tool_call_output", "call_id": "s1", "output": [
+                {"type": "input_text", "text": "Script failed"},
+                {"type": "input_text", "text": "Script error: x is not defined"}]}),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
+            (44, call("c7", "const note=`see claude --print in the docs`;")),
             # searching for running reviews is not a review
             (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf "
                             "'(^|/)codex|claude -p|claude --print|claude$' | head -40")),
@@ -1221,6 +1253,10 @@ class OfficeViewTests(unittest.TestCase):
                                    f"審 PR #289 @3333333：{mon.NO_VERDICT}": mon.DONE,
                                    f"審 PR #291 @4444444：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #292 @5555555：FAIL": mon.DONE,
+                                   "審 PR #293 @6666666：PASS": mon.DONE,
+                                   "審 PR #294 @7777777：PASS": mon.DONE,
+                                   f"審 PR #295 @8888888：{mon.TIMED_OUT_TEXT}": mon.DONE,
+                                   f"審 PR #296 @9999999：{mon.SCRIPT_FAILED}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))
@@ -1521,6 +1557,16 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("audit 284 release", full)
         self.assertEqual(full.count("@3f86dc6："), 2)
         self.assertNotIn("另 4 項已完成", full)
+
+    def test_no_review_alert_once_the_newest_review_reached_a_verdict(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "", 5, 10, key="T1", main=True),
+                self._review("293a9d8", "PASS", 60),
+                self._review("293a9d8", mon.NO_VERDICT, 200),
+                self._review("293a9d8", mon.TIMED_OUT_TEXT, 400)]
+        self.assertFalse(any(line.startswith("⚠ #288") for line in mon.office_lines(rows)))
+        rows.append(self._review("293a9d8", mon.SCRIPT_FAILED, 30))   # newer, and failed again
+        self.assertTrue(any(line.startswith("⚠ #288 reviewer：3 次沒有判定")
+                            for line in mon.office_lines(rows)))
 
     def test_office_lines_say_nothing_extra_when_all_is_well(self):
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),

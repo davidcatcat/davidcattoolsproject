@@ -1506,29 +1506,37 @@ def _codex_row(path: str, now: float, canonical: str):
 # Just the PR number, reviewed head and verdict word are extracted from the first
 # part of the result; nothing else is kept.
 # `claude` must start a command (line start, after ; && || "| " $( or an
-# opening quote of an argv/cmd string) and --print must be in that same
-# command, so a search pattern such as `pgrep -f 'x|claude --print'` is not one.
+# opening quote of an argv/cmd string, or a JS template assigned with =`...`),
+# optionally behind `timeout N`, and --print must be in that same command, so a
+# search pattern such as `pgrep -f 'x|claude --print'` or prose quoting
+# `claude --print` is not one.
 CLAUDE_CALL = re.compile(
-    r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
+    r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\(|=\s*`)\s*(?:timeout\s+\d+[smhd]?\s+)?"
+    r"(?:[\w./~-]*/)?claude\b"
     r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
 STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
-# A verdict counts only as its own line ("**Verdict: FAIL**"), not inside a
-# sentence quoting an earlier one.
-REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*verdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
+# A verdict counts only as its own line ("**Verdict: FAIL**", "## Review Verdict:
+# PASS"), not inside a sentence quoting an earlier one.
+REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*(?:(?:formal\s+)?review\s+)?verdict\b\W{0,8}"
+                            r"(PASS|FAIL|REVISE|BLOCKED)\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
 REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
 REVIEW_SCAN = 6 << 20
-# PM poll scripts report a still-running exec session as JSON "session_id":N or
-# as a line such as "SESSION N" / "SESSION_ID=N", and an exit as "exit_code",
-# "EXIT N" or "EXIT=N".
-RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION(?: |_ID=)(\d{1,9})$', re.M)
+# PM poll scripts report a still-running exec session as JSON "session_id":N,
+# as a line such as "SESSION N" / "SESSION_ID=N" or as a trailer such as
+# "exit_code=running session_id=N", and an exit as "exit_code", "EXIT N" or "EXIT=N".
+RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION(?: |_ID=)(\d{1,9})$'
+                             r'|^exit_code=\S* session_id=(\d{1,9})$', re.M)
 EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT[ =]-?\d{1,3}$',
                     re.M)
 CONTROL_LINE = re.compile(
-    r"\s*(?:SESSION(?: |_ID=)\d{1,9}|EXIT[ =]-?\d{1,3}|exit_code=\S*)\s*")
+    r"\s*(?:SESSION(?: |_ID=)\d{1,9}|EXIT[ =]-?\d{1,3}|exit_code=\S*(?: session_id=\d*)?)\s*")
 OVER_BUDGET = re.compile(r"^Error: Exceeded USD budget\b", re.M)
+TIMED_OUT = re.compile(r'"exit_code":124\b|\bexit_code=124\b|^EXIT[ =]124$', re.M)   # `timeout` killed it
 NO_VERDICT, OVER_BUDGET_TEXT = "結束但沒有判定（可能呼叫失敗）", "超過預算上限，沒有判定"
 AMBIGUOUS = "結果無法對應（同一次輸出裡有多個指令的結果）"
+TIMED_OUT_TEXT = "逾時被中止，沒有判定"
+SCRIPT_FAILED = "PM 的呼叫腳本出錯，claude 沒有回覆"
 MISMATCH = "回覆的 PR／版本跟呼叫時不同"
 _review_cache: dict = {}
 
@@ -1563,16 +1571,24 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     if not direct and not any(EXITED.search(text) for text in parts) and not any(
             REVIEW_VERDICT.search(text) for text in results):
         return None
+    if any(text.startswith("Script failed") for text in parts):
+        return SCRIPT_FAILED   # the PM's exec script broke before claude answered
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
     verdict = REVIEW_VERDICT.search(head)
     if verdict is None:
-        return OVER_BUDGET_TEXT if any(map(OVER_BUDGET.search, parts)) else NO_VERDICT
-    pr, sha = _review_target(head)
-    if (pr and origin[1] and pr != origin[1]) or (sha and origin[2] and
-                                                  not (sha.startswith(origin[2]) or
-                                                       origin[2].startswith(sha))):
+        if any(map(OVER_BUDGET.search, parts)):
+            return OVER_BUDGET_TEXT
+        return TIMED_OUT_TEXT if any(map(TIMED_OUT.search, parts)) else NO_VERDICT
+    # A delta review names the old head too: the reply matches when the PR and
+    # head the call named are among those it mentions.
+    prs = REVIEW_PR.findall(head)
+    heads = [sha.lower() for sha in REVIEW_HEAD.findall(head)]
+    want = origin[2].lower() if origin[2] else ""
+    if (prs and origin[1] and origin[1] not in prs) or (
+            heads and want and not any(sha.startswith(want) or want.startswith(sha)
+                                       for sha in heads)):
         return MISMATCH
     return verdict.group(1).upper()
 
@@ -1630,9 +1646,9 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
             parts = [part.get("text", "") if type(part) is dict else ""
                      for part in payload.get("output") or []]
             # A still-running exec session is reported as JSON "session_id":N or,
-            # by some PM poll scripts, as a plain "SESSION N" line.
-            running = {int(a or b) for text in parts
-                       for a, b in RUNNING_SESSION.findall(text)}
+            # by some PM poll scripts, as a plain line (see RUNNING_SESSION).
+            running = {int(next(group for group in found if group)) for text in parts
+                       for found in RUNNING_SESSION.findall(text)}
             if polled is not None and polled in running:
                 continue   # still running; an exit code here belongs to a parallel command
             if polled is None and running:
@@ -2365,7 +2381,8 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
 
 
 RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
-REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH})
+REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH,
+                               TIMED_OUT_TEXT, SCRIPT_FAILED})
 ALERT_STATES = (STALLED, STOPPED, ATTENTION)
 
 
@@ -2390,13 +2407,15 @@ def _review_alerts(rows: list[OfficeRow]) -> list[str]:
     out = []
     for pr, items in by_pr.items():
         missing = sum(row.outcome in REVIEW_NO_VERDICT for row in items)
-        if missing < 2:
-            continue
+        running = [row for row in items if row.state == WORKING]
+        done = sorted((row for row in items if row.state == DONE),
+                      key=lambda row: row.age if row.age is not None else 1e12)
+        if missing < 2 or (done and not running and done[0].outcome not in REVIEW_NO_VERDICT):
+            continue   # fine, or the newest review did reach a verdict
         parts = [f"{missing} 次沒有判定"]
         fails = sum(row.outcome == "FAIL" for row in items)
         if fails:
             parts.append(f"{fails} 次 FAIL")
-        running = [row for row in items if row.state == WORKING]
         tail = (f"；目前執行中 {running[0].task.split()[-1]}" if running
                 else "；目前沒有在跑")
         out.append(f"{pr} reviewer：" + "、".join(parts) + tail)
