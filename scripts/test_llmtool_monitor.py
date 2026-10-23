@@ -1003,6 +1003,42 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
                             for line in mon.office_lines(self.rows())))
 
+    def test_codex_main_shows_what_it_is_doing(self):
+        item = lambda payload: {"type": "event_msg", "payload": payload}
+        call = lambda name, **kw: {"type": "response_item",
+                                   "payload": {"type": kind_of(name), "name": name, **kw}}
+        kind_of = lambda name: "custom_tool_call" if name == "exec" else "function_call"
+        done = lambda parsed, cwd=self.canonical: item({"type": "item_completed", "item": {
+            "type": "CommandExecution", "cwd": cwd, "aggregated_output": "TOOL-OUTPUT-SECRET",
+            "command": "sed -n 1,9p secret-token=abc", "parsed_cmd": parsed}})
+        meta = {"id": "T1", "cwd": self.canonical, "thread_source": "user"}
+        def detail(*events):
+            self._codex("pm", meta, ["task_started"], age=5)
+            path = next(self.codex.rglob("rollout-pm.jsonl"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.writelines(json.dumps(event) + "\n" for event in events)
+            os.utime(path, (self.NOW - 5, self.NOW - 5))
+            return self.by_name(self.rows())["codex 主對話"].detail.split("（")[0]
+        self.assertEqual(detail(), "處理中")
+        self.assertEqual(detail(done([{"type": "read", "name": "a.py", "path": "/x/a.py"},
+                                      {"type": "read", "name": "b.md", "path": "b.md"}])),
+                         "讀 a.py 等 2 個檔")
+        self.assertEqual(detail(done([{"type": "search", "query": "secret-token=abc"}])),
+                         "搜尋程式碼")
+        self.assertEqual(detail(done([{"type": "unknown"}], cwd=str(self.task))),
+                         "執行指令")
+        self.assertIn(f"task {self.task.name}", self.by_name(self.rows())["codex 主對話"].detail)
+        self.assertEqual(detail(call("exec", input='tools.write_stdin({session_id:3})')),
+                         "等指令跑完")
+        self.assertEqual(detail(done([]), call("wait_agent", arguments="{}")),
+                         "等 subagent 回報")
+        self.assertEqual(detail(done([]), item({"type": "item_completed",
+                                                "item": {"type": "FileChange", "changes": "SECRET"}})),
+                         "改檔案")
+        text = "".join(row.detail for row in self.rows())
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("secret-token", text)
+
     def test_claude_session_title_and_subagents(self):
         project = self.claude / "proj"
         self._write(project / "s1.jsonl", [
@@ -1030,6 +1066,39 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
+
+    def test_claude_cli_sessions_show_closed_after_the_cli_exits_then_leave(self):
+        for sid, age in (("live", 300), ("recent", 200), ("old", 3 * 3600)):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=age)
+        self._write(self.claude / "proj" / "old" / "subagents" / "agent-a1.jsonl", [{}], age=60)
+        (self.claude / "proj" / "old" / "subagents" / "agent-a1.meta.json").write_text(
+            json.dumps({"description": "Old sub", "finished": False}), encoding="utf-8")
+        self._write(self.claude / "proj" / "app.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "claude-desktop"}], age=3600)
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        # No registry: nothing is judged.
+        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude 互動"],
+                         [mon.IDLE] * 4)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "41.json").write_text(json.dumps({"pid": 41, "sessionId": "live"}),
+                                          encoding="utf-8")
+        (sessions / "77.json").write_text(json.dumps({"pid": 77, "sessionId": "recent"}),
+                                          encoding="utf-8")   # stale: pid 77 is gone
+        rows = {row.detail: row.state for row in self.rows([cli]) if row.kind != "worker"}
+        self.assertEqual(rows, {"title live": mon.IDLE,
+                                "推測 Claude CLI 已關閉（title recent）": mon.CLOSED,
+                                "（無標題）": mon.IDLE})   # desktop session is not judged
+        # An npm install runs the CLI as a node launcher; it is the same CLI.
+        node = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI (node launcher)", "node", "")
+        self.assertEqual({row.detail: row.state for row in self.rows([node])}["title live"], mon.IDLE)
+        # A running CLI with no readable entry keeps the most recent unnamed session.
+        other = mon.Process(42, 1, 42, "05:00", "S+", "Claude Code CLI", "claude", "")
+        rows = {row.detail: row.state for row in self.rows([cli, other])}
+        self.assertEqual(rows["title recent"], mon.IDLE)
+        self.assertNotIn("Old sub", rows)
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [
@@ -1196,8 +1265,40 @@ class OfficeViewTests(unittest.TestCase):
             (659, {"type": "custom_tool_call_output", "call_id": "f2", "output": [
                 {"type": "input_text", "text": "# Review\n**Verdict: FAIL**"},
                 {"type": "input_text", "text": "EXIT=0"}]}),
+            # the PM's exec script: cmd=`timeout 180 claude --print ...`, output plus a
+            # trailer line "exit_code=... session_id=..."
+            (650, call("t1", 'const prompt=`Review PR #293 head 6666666eeee`;\n'
+                             'const cmd=`timeout 180 claude --print --no-session-persistence '
+                             '--max-budget-usd 1.50 "${prompt}"`;\n'
+                             'const r=await tools.exec_command({cmd});text(r.output);\n'
+                             'text(`exit_code=${r.exit_code ?? "running"} session_id=${r.session_id ?? ""}`);')),
+            (649, {"type": "custom_tool_call_output", "call_id": "t1", "output": [
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "exit_code=running session_id=93"}]}),
+            (640, call("t2", "const r=await tools.write_stdin({session_id:93});text(r.output);"
+                             'text(`exit_code=${r.exit_code ?? "running"} session_id=${r.session_id ?? ""}`);')),
+            (639, {"type": "custom_tool_call_output", "call_id": "t2", "output": [
+                {"type": "input_text", "text": "# Review PR #293\n**Verdict: PASS**"},
+                {"type": "input_text", "text": "exit_code=0 session_id="}]}),
+            # a delta review names the old head first; "## Review Verdict:" heading
+            (630, call("d1", 'const cmd=`timeout 180 claude --print "Review PR #294 head 7777777ffff"`;')),
+            (629, {"type": "custom_tool_call_output", "call_id": "d1", "output": [
+                {"type": "input_text", "text": "## Review Verdict: PASS\nfrom head 0000000aaaa to "
+                                               "head 7777777ffff on PR #294"},
+                {"type": "input_text", "text": "exit_code=0 session_id="}]}),
+            # killed by `timeout`
+            (620, call("k1", 'const cmd=`timeout 180 claude --print "Review PR #295 head 8888888aaaa"`;')),
+            (619, {"type": "custom_tool_call_output", "call_id": "k1", "output": [
+                {"type": "input_text", "text": ""},
+                {"type": "input_text", "text": "exit_code=124 session_id="}]}),
+            # the PM's script broke before claude ran
+            (610, call("s1", 'const cmd=`timeout 180 claude --print "Review PR #296 head 9999999bbbb"`;')),
+            (609, {"type": "custom_tool_call_output", "call_id": "s1", "output": [
+                {"type": "input_text", "text": "Script failed"},
+                {"type": "input_text", "text": "Script error: x is not defined"}]}),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
+            (44, call("c7", "const note=`see claude --print in the docs`;")),
             # searching for running reviews is not a review
             (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf "
                             "'(^|/)codex|claude -p|claude --print|claude$' | head -40")),
@@ -1221,6 +1322,10 @@ class OfficeViewTests(unittest.TestCase):
                                    f"審 PR #289 @3333333：{mon.NO_VERDICT}": mon.DONE,
                                    f"審 PR #291 @4444444：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #292 @5555555：FAIL": mon.DONE,
+                                   "審 PR #293 @6666666：PASS": mon.DONE,
+                                   "審 PR #294 @7777777：PASS": mon.DONE,
+                                   f"審 PR #295 @8888888：{mon.TIMED_OUT_TEXT}": mon.DONE,
+                                   f"審 PR #296 @9999999：{mon.SCRIPT_FAILED}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))
@@ -1521,6 +1626,16 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("audit 284 release", full)
         self.assertEqual(full.count("@3f86dc6："), 2)
         self.assertNotIn("另 4 項已完成", full)
+
+    def test_no_review_alert_once_the_newest_review_reached_a_verdict(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "", 5, 10, key="T1", main=True),
+                self._review("293a9d8", "PASS", 60),
+                self._review("293a9d8", mon.NO_VERDICT, 200),
+                self._review("293a9d8", mon.TIMED_OUT_TEXT, 400)]
+        self.assertFalse(any(line.startswith("⚠ #288") for line in mon.office_lines(rows)))
+        rows.append(self._review("293a9d8", mon.SCRIPT_FAILED, 30))   # newer, and failed again
+        self.assertTrue(any(line.startswith("⚠ #288 reviewer：3 次沒有判定")
+                            for line in mon.office_lines(rows)))
 
     def test_office_lines_say_nothing_extra_when_all_is_well(self):
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),
