@@ -1040,20 +1040,21 @@ class TaskStore:
         developer = record.get('developer')
         if type(developer) is dict:
             from . import worker_dispatch
-            attempt = worker_dispatch.task_store_attempt(
-                {'developer': None, 'dispatch_audit': []}, {'developer': developer})
-            if attempt is not None:
-                worker_key, action = attempt
-                decision = worker_dispatch.evaluate(
-                    worker_key, developer.get('owner_assignment_ref'), record['task_id'])
-                record['dispatch_audit'] = [worker_dispatch.audit_entry(decision, action)]
-                if not decision.allowed:
+            gate_record = {'task_id': record['task_id'], 'developer': None,
+                           'dispatch_audit': []}
+            attempts = worker_dispatch.task_store_attempts(
+                gate_record, {'developer': developer})
+            if attempts:
+                denial = worker_dispatch.authorize_task_store_change(
+                    gate_record, {'developer': developer})
+                record['dispatch_audit'] = gate_record['dispatch_audit']
+                if denial is not None:
                     record['developer'] = None
                     if 'completion' in record:
                         record['completion'] = None
                 saved = self._write(record, create=True)
-                if not decision.allowed:
-                    raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+                if denial is not None:
+                    raise denial
                 return saved
         return self._write(record, create=True)
 
@@ -1120,7 +1121,7 @@ class TaskStore:
                 raise TaskStoreConflict(
                     'developer assignment already exists; duplicate dispatch refused')
             from . import worker_dispatch
-            dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes)
+            dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
             if dispatch_denial is not None:
                 current['updated_at'] = datetime.now(timezone.utc).replace(
                     microsecond=0).isoformat().replace('+00:00', 'Z')

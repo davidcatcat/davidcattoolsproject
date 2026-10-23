@@ -82,6 +82,13 @@ class WorkerDispatchTests(unittest.TestCase):
                          'OWNER_PAUSED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
 
+    def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848'
+        self.assertEqual(self.policy['workers']['claude-developer'].get('owner_assignments', []), [])
+        decision = worker_dispatch.evaluate('claude-developer', ref, self.task['task_id'])
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
+
     def test_owner_assignment_requires_exact_task_reference_and_policy_allowlist(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
         task_id = self.task['task_id']
@@ -126,7 +133,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][0]['worker_key'], 'claude-developer')
         self.assertEqual(saved['dispatch_audit'][0]['reason_code'], 'OWNER_ASSIGNMENT_MATCHED')
 
-    def test_policy_evidence_is_canonical_and_does_not_accept_self_asserted_owner(self):
+    def test_policy_evidence_is_canonical_and_owner_label_does_not_grant_dispatch(self):
         self.policy['workers']['company-gw']['evidence'] = (
             'https://github.com/davidcatcat/davidcattoolsproject/issues/2890')
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
@@ -134,10 +141,36 @@ class WorkerDispatchTests(unittest.TestCase):
                          'WORKER_POLICY_INVALID')
         self.policy['workers']['company-gw']['evidence'] = (
             'https://github.com/davidcatcat/davidcattoolsproject/issues/289')
-        self.policy['workers']['company-gw']['decided_by'] = 'Owner'
+        self.policy['workers']['company-gw']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
+                         'OWNER_ASSIGNMENT_REQUIRED')
+        self.policy['workers']['company-gw']['decided_by'] = 'Worker'
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
                          'WORKER_POLICY_INVALID')
+
+    def test_source_policy_wins_and_conflicting_installed_copy_fails_closed(self):
+        module = self.root / 'repo' / 'tools' / 'llmtool' / 'llmtool' / 'worker_dispatch.py'
+        module.parent.mkdir(parents=True)
+        module.write_text('# module fixture', encoding='utf-8')
+        canonical = module.parent.parent / 'worker-dispatch.json'
+        canonical.write_text(json.dumps(self.policy), encoding='utf-8')
+        prefix = self.root / 'installed-prefix'
+        installed = prefix / 'llmtool' / 'worker-dispatch.json'
+        installed.parent.mkdir(parents=True)
+        stale = json.loads(json.dumps(self.policy))
+        stale['workers']['company-gw']['dispatch'] = 'PAUSED'
+        installed.write_text(json.dumps(stale), encoding='utf-8')
+        with patch.object(worker_dispatch, '__file__', str(module)), \
+                patch.object(worker_dispatch.sysconfig, 'get_path',
+                             return_value=str(prefix)), \
+                patch.object(worker_dispatch, '_POLICY_PATH', canonical), \
+                patch.object(worker_dispatch, '_DEFAULT_POLICY_PATH', canonical):
+            self.assertEqual(worker_dispatch._policy_path(), canonical)
+            decision = worker_dispatch.evaluate('company-gw')
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'WORKER_POLICY_AMBIGUOUS')
 
     def test_source_policy_resolves_to_the_single_canonical_repository_file(self):
         canonical = Path(__file__).resolve().parents[1] / 'worker-dispatch.json'
@@ -165,13 +198,12 @@ class WorkerDispatchTests(unittest.TestCase):
                 else:
                     installed_python = install_dir / 'bin' / 'python'
 
-                add_build_tools = subprocess.run(
-                    [str(installed_python), '-B', '-m', 'pip', 'install', '--disable-pip-version-check',
-                     'setuptools>=68'],
-                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
-                self.assertEqual(add_build_tools.returncode, 0, add_build_tools.stderr)
+                try:
+                    import setuptools.build_meta  # noqa: F401
+                except ImportError:
+                    self.skipTest('run the package-install gate with local setuptools available')
                 sdist_build = subprocess.run(
-                    [str(installed_python), '-B', '-c',
+                    [sys.executable, '-B', '-c',
                      'import setuptools.build_meta as b, sys; print(b.build_sdist(sys.argv[1]))',
                      str(sdist_dir)],
                     cwd=project_root, check=False, capture_output=True, text=True, timeout=60)
@@ -185,8 +217,8 @@ class WorkerDispatchTests(unittest.TestCase):
                     self.assertEqual(archive.extractfile(sdist_members[0]).read(), expected_policy)
 
                 built = subprocess.run(
-                    [sys.executable, '-B', '-m', 'pip', 'wheel', '--no-deps',
-                     '--wheel-dir', str(wheel_dir), str(sdist)],
+                    [sys.executable, '-B', '-m', 'pip', 'wheel', '--no-build-isolation',
+                     '--no-deps', '--wheel-dir', str(wheel_dir), str(sdist)],
                     cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
                 self.assertEqual(built.returncode, 0, built.stderr)
                 wheel = next(wheel_dir.glob('*.whl'))
@@ -210,7 +242,7 @@ class WorkerDispatchTests(unittest.TestCase):
                     "import json, pathlib, sys; "
                     "from llmtool import worker_dispatch as w; "
                     "p=pathlib.Path(sys.prefix) / 'llmtool' / 'worker-dispatch.json'; "
-                    "assert json.loads(p.read_text(encoding='utf-8'))['schema_version'] == 2; "
+                    "assert json.loads(p.read_text(encoding='utf-8'))['schema_version'] == 1; "
                     "assert w._POLICY_PATH.resolve() == p.resolve(), "
                     "(str(w._POLICY_PATH), sys.prefix, str(p)); "
                     "assert w.evaluate('codex-developer').allowed")
@@ -322,9 +354,14 @@ class WorkerDispatchTests(unittest.TestCase):
         developer = self.developer()
         self.store.compare_and_update(
             self.task['task_id'], expected={'developer': None}, developer=developer)
+        replacement = {**developer, 'provider_profile': 'opencode'}
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
-            self.store.update(self.task['task_id'],
-                              developer={**developer, 'provider_profile': 'opencode'})
+            self.store.update(self.task['task_id'], developer=replacement)
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_REASSIGN_PRECONDITION')
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self.store.compare_and_update(
+                self.task['task_id'], expected={'developer': developer},
+                developer=replacement)
         self.assertEqual(caught.exception.dispatch_code, 'OWNER_PAUSED')
         saved = self.store.get(self.task['task_id'])
         self.assertEqual(saved['developer']['provider_profile'], 'company-gw')
@@ -385,6 +422,60 @@ class WorkerDispatchTests(unittest.TestCase):
             {'developer': repair_reassigned})
         self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
         self.assertEqual(denied.dispatch_code, 'WORKER_REPAIR_NOT_AUTHORIZED')
+
+    def test_combined_developer_and_reviewer_transition_gates_both_actions(self):
+        previous = self.developer(state='DEVELOPER_PENDING')
+        previous['direct_result_callback'] = {
+            'review_handoff': {'dispatch_state': 'PENDING'}}
+        updated = {**previous, 'state': 'DEVELOPER_DISPATCHING',
+                   'direct_result_callback': {
+                       'review_handoff': {'dispatch_state': 'DISPATCHING'}}}
+        current = {'task_id': self.task['task_id'], 'developer': previous,
+                   'dispatch_audit': []}
+        self._set_state('claude-reviewer', 'PAUSED')
+        self._set_state('company-gw', 'PAUSED')
+        denial = worker_dispatch.authorize_task_store_change(
+            current, {'developer': updated})
+        self.assertIsInstance(denial, worker_dispatch.WorkerDispatchDenied)
+        self.assertEqual(denial.dispatch_code, 'OWNER_PAUSED')
+        self.assertEqual([entry['action'] for entry in current['dispatch_audit']],
+                         ['REVIEWER_HANDOFF', 'DISPATCH'])
+        self.assertEqual([entry['decision'] for entry in current['dispatch_audit']],
+                         ['BLOCKED', 'BLOCKED'])
+
+    def test_reassignment_requires_safe_prior_state_and_bound_precondition(self):
+        unknown = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN')
+        reassigned = {**unknown, 'assignment_id': 'c' * 32}
+        current = {'task_id': self.task['task_id'], 'developer': unknown,
+                   'dispatch_audit': []}
+        denied = worker_dispatch.authorize_task_store_change(
+            current, {'developer': reassigned})
+        self.assertEqual(denied.dispatch_code, 'WORKER_REASSIGN_PRECONDITION')
+
+        pending = self.developer(state='DEVELOPER_PENDING')
+        reassigned_pending = {**pending, 'assignment_id': 'd' * 32}
+        current = {'task_id': self.task['task_id'], 'developer': pending,
+                   'dispatch_audit': []}
+        denied = worker_dispatch.authorize_task_store_change(
+            current, {'developer': reassigned_pending})
+        self.assertEqual(denied.dispatch_code, 'WORKER_REASSIGN_PRECONDITION')
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            current, {'developer': reassigned_pending}, expected={'developer': pending}))
+
+    def test_audit_cap_blocks_without_dropping_prior_evidence(self):
+        developer = self.developer(state='DEVELOPER_PENDING')
+        dispatching = {**developer, 'state': 'DEVELOPER_DISPATCHING'}
+        audit = [worker_dispatch.audit_entry(
+            worker_dispatch.PolicyDecision('company-gw', True,
+                                           'OWNER_POLICY_ALLOWED', 'a' * 64), 'DISPATCH')
+            for _ in range(worker_dispatch.MAX_AUDIT_ENTRIES)]
+        current = {'task_id': self.task['task_id'], 'developer': developer,
+                   'dispatch_audit': audit}
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            worker_dispatch.authorize_task_store_change(
+                current, {'developer': dispatching})
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_DISPATCH_AUDIT_LIMIT')
+        self.assertEqual(current['dispatch_audit'], audit)
 
     def test_audit_append_retries_against_latest_concurrent_audit(self):
         developer = self.developer()
