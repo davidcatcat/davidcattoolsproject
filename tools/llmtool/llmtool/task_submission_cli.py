@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -24,6 +25,8 @@ from .test_output_excerpts import _emitted_sensitive
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
+D6_INTEGRATOR_DISPATCHER_ROOT = Path(
+    '/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -575,23 +578,130 @@ def _direct_result_callback(task, registration, source_sha):
     }
 
 
-def _bootstrap_registered_d6(registration):
-    """Require ENV-2 validation/bootstrap before a managed Developer launch."""
-    root = registration.root
-    script = os.path.join(root, 'tools', 'llmtool', 'scripts', 'd6_worktree_env.py')
-    env = dict(os.environ)
-    for name in tuple(env):
-        if name.startswith(('MAKE', 'PYTHON')) or name in ('GNUMAKEFLAGS', 'MFLAGS'):
-            env.pop(name, None)
-    try:
+def _trusted_d6_helper_source(registration=None, source_rel=None):
+    """Return pinned helper/source bytes, using approved D6 blobs when present."""
+    dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
+    helper_rel = 'tools/llmtool/scripts/d6_worktree_env.py'
+    source_rel = helper_rel if source_rel is None else source_rel
+    candidate_sources = {
+        helper_rel,
+        'tools/llmtool/scripts/d6_worktree_lifecycle.py',
+    }
+    if source_rel not in candidate_sources:
+        raise ValueError('D6 source path is outside the bootstrap allowlist')
+    dispatcher_rel = 'tools/llmtool/llmtool/task_submission_cli.py'
+    git_env = {
+        'PATH': '/usr/bin:/bin', 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
+        'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+        'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
+        'GIT_NO_LAZY_FETCH': '1', 'GIT_TERMINAL_PROMPT': '0',
+    }
+
+    def git(*args, input_data=None):
         result = subprocess.run(
-            [sys.executable, '-B', '-I', script, '--task-id', registration.task_id],
-            cwd=root, env=env, stdin=subprocess.DEVNULL,
+            ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
+             '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+             '-C', str(dispatcher_root), *args],
+            env=git_env, input=input_data, stdin=(None if input_data is not None
+                                                 else subprocess.DEVNULL),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        if result.returncode or result.stderr:
+            raise ValueError('dispatcher Git preflight failed')
+        return result.stdout
+
+    if (not dispatcher_root.is_absolute() or
+            Path(__file__).resolve() != dispatcher_root / dispatcher_rel or
+            Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
+            git('rev-parse', '--show-toplevel').decode().rstrip('\n') != str(dispatcher_root) or
+            git('remote', 'get-url', 'origin').decode().strip() not in (
+                'git@github.com:davidcatcat/davidcattoolsproject.git',
+                'https://github.com/davidcatcat/davidcattoolsproject.git') or
+            git('status', '--porcelain=v1', '--untracked-files=all')):
+        raise ValueError('dispatcher checkout is not clean and trusted')
+    pinned_head = git('rev-parse', 'HEAD').decode().strip()
+    if re.fullmatch(r'[0-9a-f]{40}', pinned_head) is None:
+        raise ValueError('dispatcher HEAD is invalid')
+    helper_source = git('show', pinned_head + ':' + helper_rel)
+    dispatcher_source = git('show', pinned_head + ':' + dispatcher_rel)
+    for relative, expected in ((helper_rel, helper_source),
+                               (dispatcher_rel, dispatcher_source)):
+        source_path = dispatcher_root / relative
+        info = source_path.lstat()
+        if (not source_path.is_file() or source_path.is_symlink() or
+                info.st_uid != os.getuid() or source_path.read_bytes() != expected):
+            raise ValueError('dispatcher source differs from pinned HEAD')
+    if registration is not None and registration.env2_approved_tooling_sha is not None:
+        approved_sha = registration.env2_approved_tooling_sha
+        current = task_completion.read_d6_registration(
+            registration.task_id, registration.common_dir)
+        common_dir = Path(git('rev-parse', '--git-common-dir').decode().strip())
+        if not common_dir.is_absolute():
+            common_dir = dispatcher_root / common_dir
+        common_dir = common_dir.resolve(strict=True)
+        task_head = git('-C', registration.root, 'rev-parse', 'HEAD').decode().strip()
+        task_branch = git('-C', registration.root, 'branch', '--show-current').decode().strip()
+        if (re.fullmatch(r'[0-9a-f]{40}', approved_sha) is None or
+                current.root != registration.root or
+                current.common_dir != registration.common_dir or
+                current.branch != registration.branch or
+                current.source_sha != registration.source_sha or
+                current.result_sha != approved_sha or
+                current.env2_approved_tooling_sha != approved_sha or
+                task_head != approved_sha or task_branch != registration.branch or
+                str(common_dir) != registration.common_dir):
+            raise ValueError('approved D6 tooling source binding changed')
+        git('-C', registration.root, 'merge-base', '--is-ancestor',
+            registration.source_sha, approved_sha)
+        listing = git('ls-tree', '-z', approved_sha, '--', source_rel)
+        entries = listing.split(b'\0')
+        if entries and entries[-1] == b'':
+            entries.pop()
+        if len(entries) != 1 or b'\t' not in entries[0]:
+            raise ValueError('approved D6 helper blob is missing')
+        metadata, path = entries[0].split(b'\t', 1)
+        fields = metadata.split(b' ')
+        if (path != source_rel.encode() or len(fields) != 3 or
+                fields[0] != b'100644' or fields[1] != b'blob' or
+                re.fullmatch(rb'[0-9a-f]{40}', fields[2]) is None):
+            raise ValueError('approved D6 helper blob is invalid')
+        approved_source = git('cat-file', 'blob', fields[2].decode())
+        object_id = git('hash-object', '--stdin', input_data=approved_source).decode().strip()
+        if object_id != fields[2].decode():
+            raise ValueError('approved D6 source blob hash changed')
+        helper_source = approved_source
+    elif source_rel != helper_rel:
+        raise ValueError('approved D6 source commit is required')
+    helper_source.decode('utf-8')
+    return dispatcher_root, helper_source
+
+
+def _bootstrap_registered_d6(registration):
+    """Run the pinned dispatcher helper against an explicit registered root."""
+    root = Path(registration.root)
+    try:
+        dispatcher_root, helper_source = _trusted_d6_helper_source(registration)
+        env = {
+            'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+            'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
+            'PIP_CONFIG_FILE': os.devnull,
+            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
+            'GIT_NO_LAZY_FETCH': '1', 'GIT_TERMINAL_PROMPT': '0',
+        }
+        result = subprocess.run(
+            [sys.executable, '-B', '-I', '-c', helper_source.decode('utf-8'),
+             '--task-id', registration.task_id, '--worktree-root', str(root)],
+            cwd=dispatcher_root, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
     except OSError:
         raise opencode_direct_developer.DirectOpenCodeError(
             'ENV_BOOTSTRAP_UNAVAILABLE') from None
+    except (UnicodeDecodeError, ValueError):
+        raise opencode_direct_developer.DirectOpenCodeError(
+            'ENV_BOOTSTRAP_SOURCE_UNTRUSTED') from None
     if result.returncode:
         raise opencode_direct_developer.DirectOpenCodeError(
             'ENV_BOOTSTRAP_REJECTED')

@@ -33,6 +33,8 @@ ORIGINS = frozenset((
     "git@github.com:davidcatcat/davidcattoolsproject.git",
     "https://github.com/davidcatcat/davidcattoolsproject.git",
 ))
+D6_INTEGRATOR_DISPATCHER_ROOT = Path(
+    "/Users/davidsun/git/davidcataiporject/davidcattoolsproject")
 RETENTION_PATHS = [
     "tools/llmtool/.venv/",
     "tools/llmtool/.worktree-env.lock",
@@ -152,19 +154,225 @@ def _replace_record(path, record):
         _stop("D6_REGISTRY_UPDATE_FAILED")
 
 
-def _bootstrap(root, task_id):
-    script = root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
-    env = dict(os.environ)
-    for name in tuple(env):
-        if name.startswith(("MAKE", "PYTHON")) or name in ("GNUMAKEFLAGS", "MFLAGS"):
-            env.pop(name, None)
+def _read_registry_record(path):
+    """Read one owner-only D6 record without following a registry symlink."""
     try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        _stop("D6_REGISTRY_UNAVAILABLE")
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                before.st_size > 64 * 1024):
+            _stop("D6_REGISTRY_INVALID")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            raw = stream.read(64 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+        current = path.lstat()
+        identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
+                                 item.st_mtime_ns, item.st_ctime_ns)
+        if (len(raw) > 64 * 1024 or identity(before) != identity(after) or
+                identity(before) != identity(current)):
+            _stop("D6_REGISTRY_CHANGED")
+    except LifecycleError:
+        raise
+    except Exception:
+        _stop("D6_REGISTRY_INVALID")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+    def unique_pairs(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                _stop("D6_REGISTRY_INVALID")
+            value[key] = item
+        return value
+
+    try:
+        record = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_pairs,
+                            parse_constant=lambda _value: _stop("D6_REGISTRY_INVALID"))
+    except LifecycleError:
+        raise
+    except Exception:
+        _stop("D6_REGISTRY_INVALID")
+    if type(record) is not dict:
+        _stop("D6_REGISTRY_INVALID")
+    return record
+
+
+def _trusted_dispatcher_git():
+    """Return pinned Git access after proving the caller is the clean Integrator checkout."""
+    dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
+    lifecycle_rel = "tools/llmtool/scripts/d6_worktree_lifecycle.py"
+    git_env = {
+        "PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "LC_ALL": "C",
+        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+    }
+
+    def git(*args, input_data=None):
         result = subprocess.run(
-            [sys.executable, "-B", "-I", str(script), "--task-id", task_id],
-            cwd=str(root), env=env, stdin=subprocess.DEVNULL,
+            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+             "-C", str(dispatcher_root), *args],
+            env=git_env, input=input_data, stdin=(None if input_data is not None
+                                                 else subprocess.DEVNULL),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False,
+        )
+        if result.returncode or result.stderr:
+            _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+        return result.stdout
+
+    try:
+        if (not dispatcher_root.is_absolute() or
+                Path(__file__).resolve() != dispatcher_root / lifecycle_rel or
+                Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
+                git("rev-parse", "--show-toplevel").decode().rstrip("\n") != str(dispatcher_root) or
+                git("remote", "get-url", "origin").decode().strip() not in ORIGINS or
+                git("status", "--porcelain=v1", "--untracked-files=all")):
+            _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+        pinned_head = git("rev-parse", "HEAD").decode().strip()
+        if re.fullmatch(r"[0-9a-f]{40}", pinned_head) is None:
+            _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+        helper_rel = "tools/llmtool/scripts/d6_worktree_env.py"
+        helper_source = git("show", pinned_head + ":" + helper_rel)
+        lifecycle_source = git("show", pinned_head + ":" + lifecycle_rel)
+        for relative, expected in ((helper_rel, helper_source),
+                                   (lifecycle_rel, lifecycle_source)):
+            source_path = dispatcher_root / relative
+            info = source_path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or
+                    info.st_uid != os.getuid() or source_path.read_bytes() != expected):
+                _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    except (OSError, UnicodeDecodeError):
+        _stop("ENV_BOOTSTRAP_UNAVAILABLE")
+    return dispatcher_root, pinned_head, git, helper_source
+
+
+def _approved_task_source(root, task_id, relative, dispatcher_root, git):
+    """Read one Integrator-approved source blob from the shared Git object store."""
+    if not TASK_ID_RE.fullmatch(task_id or ""):
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    common_dir = Path(git("rev-parse", "--git-common-dir").decode().strip())
+    if not common_dir.is_absolute():
+        common_dir = dispatcher_root / common_dir
+    common_dir = common_dir.resolve(strict=True)
+    registry_dir = common_dir / "llmtool-worktrees"
+    registry_stat = registry_dir.lstat()
+    if (not stat.S_ISDIR(registry_stat.st_mode) or
+            registry_stat.st_uid != os.getuid() or
+            stat.S_IMODE(registry_stat.st_mode) != 0o700):
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    record = _read_registry_record(registry_dir / (task_id + ".json"))
+    approved_sha = record.get("env2_approved_tooling_sha")
+    if approved_sha is None:
+        return None
+    root_realpath = str(root.resolve(strict=True))
+    root_stat = Path(root_realpath).lstat()
+    identity = record.get("physical_identity")
+    task_head = git("-C", root_realpath, "rev-parse", "HEAD").decode().strip()
+    task_branch = git("-C", root_realpath, "branch", "--show-current").decode().strip()
+    if (type(approved_sha) is not str or
+            not re.fullmatch(r"[0-9a-f]{40}", approved_sha) or
+            record.get("schema_version") != 1 or record.get("task_id") != task_id or
+            record.get("root_realpath") != root_realpath or
+            type(identity) is not dict or
+            set(identity) != {"device", "inode", "uid", "mode"} or
+            any(type(identity[key]) is not int or identity[key] < 0
+                for key in ("device", "inode", "uid")) or
+            identity.get("mode") != "0o700" or
+            (root_stat.st_dev, root_stat.st_ino, root_stat.st_uid) !=
+            (identity["device"], identity["inode"], identity["uid"]) or
+            root_stat.st_uid != os.getuid() or not stat.S_ISDIR(root_stat.st_mode) or
+            stat.S_IMODE(root_stat.st_mode) != 0o700 or
+            record.get("git_common_dir") != str(common_dir) or
+            record.get("state") not in ("ACTIVE", "REPAIR") or
+            record.get("lock_state") != "LOCKED" or
+            type(record.get("base_sha")) is not str or
+            not re.fullmatch(r"[0-9a-f]{40}", record["base_sha"]) or
+            record.get("head_sha") != approved_sha or task_head != approved_sha or
+            type(record.get("branch")) is not str or not record["branch"] or
+            task_branch != record.get("branch")):
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    git("-C", root_realpath, "merge-base", "--is-ancestor",
+        record["base_sha"], approved_sha)
+    listing = git("ls-tree", "-z", approved_sha, "--", relative)
+    entries = listing.split(b"\0")
+    if entries and entries[-1] == b"":
+        entries.pop()
+    if len(entries) != 1 or b"\t" not in entries[0]:
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    metadata, path = entries[0].split(b"\t", 1)
+    fields = metadata.split(b" ")
+    if (path != relative.encode() or len(fields) != 3 or
+            fields[0] != b"100644" or fields[1] != b"blob" or
+            re.fullmatch(rb"[0-9a-f]{40}", fields[2]) is None):
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    source = git("cat-file", "blob", fields[2].decode())
+    if git("hash-object", "--stdin", input_data=source).strip() != fields[2]:
+        _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+    return source
+
+
+def _run_approved_lifecycle(task_id, root, lifecycle_args):
+    """Execute the exact Integrator-approved lifecycle blob without opening its task path."""
+    try:
+        dispatcher_root, _pinned_head, git, _helper_source = _trusted_dispatcher_git()
+        lifecycle_rel = "tools/llmtool/scripts/d6_worktree_lifecycle.py"
+        source = _approved_task_source(root, task_id, lifecycle_rel, dispatcher_root, git)
+        if source is None:
+            _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
+        source_text = source.decode("utf-8")
+        source_path = str(dispatcher_root / lifecycle_rel)
+        code = ("exec(compile(" + repr(source_text) + ", " + repr(source_path) +
+                ", 'exec'), {'__name__': '__main__', '__file__': " +
+                repr(source_path) + "})")
+        env = {
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": os.path.expanduser("~"), "LC_ALL": "C", "LANG": "C",
+            "PIP_CONFIG_FILE": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+        }
+        result = subprocess.run(
+            [sys.executable, "-B", "-I", "-c", code, *lifecycle_args],
+            cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL, check=False)
+    except (OSError, UnicodeDecodeError):
+        _stop("ENV_BOOTSTRAP_UNAVAILABLE")
+    return result.returncode
+
+
+def _bootstrap(root, task_id):
+    dispatcher_root, _pinned_head, git, helper_source = _trusted_dispatcher_git()
+    helper_rel = "tools/llmtool/scripts/d6_worktree_env.py"
+    try:
+        approved_helper = _approved_task_source(
+            root, task_id, helper_rel, dispatcher_root, git)
+        if approved_helper is not None:
+            helper_source = approved_helper
+        helper_code = helper_source.decode("utf-8")
+        env = {
+            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+            "HOME": os.path.expanduser("~"), "LC_ALL": "C", "LANG": "C",
+            "PIP_CONFIG_FILE": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
+        }
+        result = subprocess.run(
+            [sys.executable, "-B", "-I", "-c", helper_code,
+             "--task-id", task_id, "--worktree-root", str(root)],
+            cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         _stop("ENV_BOOTSTRAP_UNAVAILABLE")
     if result.returncode:
         _stop("ENV_BOOTSTRAP_REJECTED")
@@ -265,6 +473,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             record["last_verified_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             _replace_record(record_path, record)
+            active_record = dict(record)
             # Bootstrap updates the D6 record with its ENV-2 pass marker under
             # this same registry lock. Release the global lock while the
             # isolated bootstrap process runs; the durable ACTIVE/LOCKED record
@@ -286,10 +495,13 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
                     _stop("D6_REGISTRY_LOCK_INVALID")
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
                 lock_held = True
-                record["state"] = "REPAIR"
-                record["last_verified_at"] = time.strftime(
+                current_record = _read_registry_record(record_path)
+                if current_record != active_record:
+                    _stop("D6_REGISTRY_CHANGED")
+                current_record["state"] = "REPAIR"
+                current_record["last_verified_at"] = time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                _replace_record(record_path, record)
+                _replace_record(record_path, current_record)
                 raise
             print("D6_WORKTREE_READY task_id=" + task_id + " head=" + head + " root=" + str(root))
             return root
@@ -331,11 +543,23 @@ def _main(argv=None):
     parser.add_argument("--base-sha")
     parser.add_argument("--resume-task-id")
     parser.add_argument("--resume-root")
-    parser.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
+    parser.add_argument("--execute-approved-lifecycle", action="store_true")
+    parser.add_argument("--repo-root", default=str(D6_INTEGRATOR_DISPATCHER_ROOT))
     args = parser.parse_args(argv)
     try:
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
+        if args.execute_approved_lifecycle:
+            if (args.resume_task_id is None or args.resume_root is None or
+                    any(value is not None for value in create_values) or
+                    args.repo_root != str(D6_INTEGRATOR_DISPATCHER_ROOT)):
+                _stop("D6_TASK_INPUT_INVALID")
+            return _run_approved_lifecycle(
+                args.resume_task_id, Path(args.resume_root), [
+                    "--resume-task-id", args.resume_task_id,
+                    "--resume-root", args.resume_root,
+                    "--repo-root", args.repo_root,
+                ])
         if args.resume_task_id is not None:
             if (args.resume_root is None or any(value is not None for value in create_values)):
                 _stop("D6_TASK_INPUT_INVALID")

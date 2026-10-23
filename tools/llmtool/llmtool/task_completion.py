@@ -452,6 +452,7 @@ class D6Registration:
     native_session_id: str | None
     github_login: str | None
     env2_pass_marker: object
+    env2_approved_tooling_sha: str | None
 
 
 def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
@@ -524,12 +525,18 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     if github_login is not None and (type(github_login) is not str or
             not re.fullmatch(r'[A-Za-z0-9-]{1,39}', github_login)):
         _stop('D6_REGISTRY_INVALID')
+    approved_tooling_sha = value.get('env2_approved_tooling_sha')
+    if approved_tooling_sha is not None and (
+            type(approved_tooling_sha) is not str or
+            _HEX40.fullmatch(approved_tooling_sha) is None or
+            approved_tooling_sha != value['head_sha']):
+        _stop('D6_REGISTRY_INVALID')
     return D6Registration(task_id, value['trusted_agent_id'], value['session_ref'],
                           value['root_realpath'], common_dir, value['branch'],
                           value['base_sha'], value['head_sha'], value['state'],
                           value['lock_state'], identity['device'], identity['inode'],
                           identity['uid'], native_session, github_login,
-                          value.get('env2_pass_marker'))
+                          value.get('env2_pass_marker'), approved_tooling_sha)
 
 
 def validate_env2_pass_marker(registration, *, expected_root, current_head):
@@ -540,7 +547,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
     required = {
         'schema_version', 'result', 'task_id', 'root_realpath',
         'submitted_head_sha', 'current_head_sha', 'environment_fingerprint',
-        'report_sha256',
+        'tooling_sha', 'report_sha256',
     }
     fingerprint_re = re.compile(
         r'[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-'
@@ -554,6 +561,10 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
             marker['submitted_head_sha'] != current_head or
             marker['current_head_sha'] != current_head or
             current_head != registration.result_sha or
+            marker['tooling_sha'] != (registration.env2_approved_tooling_sha or
+                                      registration.source_sha) or
+            type(marker['tooling_sha']) is not str or
+            _HEX40.fullmatch(marker['tooling_sha']) is None or
             type(marker['environment_fingerprint']) is not str or
             fingerprint_re.fullmatch(marker['environment_fingerprint']) is None or
             type(marker['report_sha256']) is not str or
@@ -608,6 +619,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
             report.get('task_id') != registration.task_id or
             report.get('root_realpath') != registration.root or
             report.get('head_sha') != current_head or
+            report.get('tooling_sha') != marker['tooling_sha'] or
             report.get('cache_fingerprint') != marker['environment_fingerprint']):
         _stop('D6_ENV2_PASS_MARKER_MISMATCH')
     return marker

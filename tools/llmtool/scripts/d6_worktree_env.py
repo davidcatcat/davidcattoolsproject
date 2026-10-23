@@ -308,9 +308,11 @@ def _base_blob(root: Path, base_sha: str, relative: str):
     return result.stdout, int(fields[0][3:], 8)
 
 
-def _validate_bootstrap_sources(root: Path, base_sha: str, head_sha: str) -> None:
+def _validate_bootstrap_sources(root: Path, base_sha: str, head_sha: str,
+                                tooling_sha: str) -> None:
     required = (
         "tools/llmtool/Makefile",
+        "tools/llmtool/.gitignore",
         "tools/llmtool/scripts/worktree_env.py",
         "tools/llmtool/worktree-env.lock",
         "tools/llmtool/pyproject.toml",
@@ -321,7 +323,7 @@ def _validate_bootstrap_sources(root: Path, base_sha: str, head_sha: str) -> Non
         "tools/llmtool/MANIFEST.in",
     )
     for relative in required + optional_build_inputs:
-        committed = _base_blob(root, base_sha, relative)
+        committed = _base_blob(root, tooling_sha, relative)
         local_path = root / relative
         if committed is None:
             if relative in required:
@@ -339,11 +341,10 @@ def _validate_bootstrap_sources(root: Path, base_sha: str, head_sha: str) -> Non
                 local_mode & 0o022):
             _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
 
-    # The installed helper may evolve with a registered descendant task HEAD;
-    # the on-disk executable must still be exactly the committed blob, never a
-    # dirty same-UID edit. Install/build inputs above remain pinned to base_sha.
+    # This code is executed from the Integrator-pinned dispatcher source. The
+    # task-tree copy is only checked as data; it is never the executable.
     helper_path = "tools/llmtool/scripts/d6_worktree_env.py"
-    committed_helper = _base_blob(root, head_sha, helper_path)
+    committed_helper = _base_blob(root, tooling_sha, helper_path)
     if committed_helper is None:
         _reject("D6_BOOTSTRAP_SOURCE_MISMATCH")
     local_helper, local_mode = _read_tracked_file(root, helper_path)
@@ -437,7 +438,14 @@ def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path
         _run_git(root, "merge-base", "--is-ancestor", record["base_sha"], head)
     except PreflightError:
         _reject("D6_SOURCE_BINDING_MISMATCH")
-    _validate_bootstrap_sources(root, record["base_sha"], head)
+    approved_tooling_sha = record.get("env2_approved_tooling_sha")
+    if approved_tooling_sha is not None and (
+            type(approved_tooling_sha) is not str or
+            _SHA40.fullmatch(approved_tooling_sha) is None or
+            approved_tooling_sha != head):
+        _reject("D6_TOOLING_APPROVAL_INVALID")
+    tooling_sha = approved_tooling_sha or record["base_sha"]
+    _validate_bootstrap_sources(root, record["base_sha"], head, tooling_sha)
     _validate_local_inventory(root, record.get("retention_paths"))
     _worktree_entry(root, common_dir, head, branch)
     if _read_record(common_dir, task_id, os.getuid()) != record:
@@ -637,10 +645,12 @@ def _bootstrap_report_binding(root: Path, task_id: str, elapsed: float) -> dict:
     common_dir = Path(_run_git(root, "rev-parse", "--path-format=absolute",
                                 "--git-common-dir"))
     record = _read_record(common_dir, task_id, os.getuid())
+    tooling_sha = record.get("env2_approved_tooling_sha") or record["base_sha"]
     return {
         "task_id": task_id,
         "root_realpath": str(root),
         "head_sha": record["head_sha"],
+        "tooling_sha": tooling_sha,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_s": elapsed,
     }
@@ -675,6 +685,13 @@ def _update_env2_pass_marker(root: Path, task_id: str, report: dict | None) -> N
                 type(record.get("head_sha")) is not str or
                 _SHA40.fullmatch(record["head_sha"]) is None):
             _reject("D6_REGISTRY_CHANGED")
+        approved_tooling_sha = record.get("env2_approved_tooling_sha")
+        if approved_tooling_sha is not None and (
+                type(approved_tooling_sha) is not str or
+                _SHA40.fullmatch(approved_tooling_sha) is None or
+                approved_tooling_sha != record["head_sha"]):
+            _reject("D6_TOOLING_APPROVAL_INVALID")
+        tooling_sha = approved_tooling_sha or record["base_sha"]
         if report is None:
             record.pop("env2_pass_marker", None)
         else:
@@ -717,6 +734,7 @@ def _update_env2_pass_marker(root: Path, task_id: str, report: dict | None) -> N
                     report.get("task_id") != task_id or
                     report.get("root_realpath") != str(root) or
                     report.get("head_sha") != record["head_sha"] or
+                    report.get("tooling_sha") != tooling_sha or
                     type(report.get("cache_fingerprint")) is not str or
                     not _valid_cache_fingerprint(report["cache_fingerprint"])):
                 _reject("ENV_BOOTSTRAP_REPORT_INVALID")
@@ -727,6 +745,7 @@ def _update_env2_pass_marker(root: Path, task_id: str, report: dict | None) -> N
                 "root_realpath": str(root),
                 "submitted_head_sha": record["head_sha"],
                 "current_head_sha": record["head_sha"],
+                "tooling_sha": tooling_sha,
                 "environment_fingerprint": report["cache_fingerprint"],
                 "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
             }
@@ -852,11 +871,21 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
 
 
 def _bootstrap_environment():
-    env = dict(os.environ)
-    for name in tuple(env):
-        if name.startswith(("MAKE", "PYTHON")) or name in ("GNUMAKEFLAGS", "MFLAGS"):
-            env.pop(name, None)
-    return env
+    """Keep only deterministic, non-secret variables needed by Make and pip."""
+    return {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "HOME": os.path.expanduser("~"),
+        "LC_ALL": "C",
+        "LANG": "C",
+        # Disable ambient per-user pip configuration and its embedded credentials.
+        "PIP_CONFIG_FILE": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_LAZY_FETCH": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
 
 
 def _run_make(argv, *, cwd, env):
@@ -869,12 +898,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id", required=True,
                         help="registered D6 task whose current worktree is being prepared")
+    parser.add_argument("--worktree-root", required=True,
+                        help="explicit root of the registered D6 worktree")
     args = parser.parse_args(argv)
     try:
-        root = validate_registered_worktree(args.task_id)
-        expected_script = root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
-        if Path(os.path.realpath(__file__)) != expected_script:
-            _reject("D6_ENTRYPOINT_PATH_MISMATCH")
+        root = validate_registered_worktree(args.task_id, Path(args.worktree_root))
         return _invoke_bootstrap(root, args.task_id)
     except PreflightError as exc:
         print("STOP: D6 environment preflight rejected (" + exc.code + ")",

@@ -49,6 +49,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "# test fixture source\n", encoding="utf-8")
         (makefile_dir / "scripts" / "d6_worktree_env.py").write_bytes(
             (SCRIPTS / "d6_worktree_env.py").read_bytes())
+        (makefile_dir / ".gitignore").write_bytes(
+            (Path(__file__).resolve().parents[1] / ".gitignore").read_bytes())
         (makefile_dir / "worktree-env.lock").write_text(
             "[base]\nexample==1.0 --hash=sha256:" + "a" * 64 + "\n",
             encoding="utf-8")
@@ -123,7 +125,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         try:
             script_path = self.root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
             with mock.patch.object(d6env, "__file__", str(script_path)):
-                return d6env.main(["--task-id", self.task_id])
+                return d6env.main(["--task-id", self.task_id,
+                                   "--worktree-root", str(self.root)])
         finally:
             os.chdir(previous)
 
@@ -276,6 +279,17 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             self.assertEqual(self._main_at_root(), 0)
         run.assert_called_once()
 
+    def test_bootstrap_report_is_ignored_by_repository_configuration(self):
+        report = self.root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
+        report.write_text("{}\n", encoding="utf-8")
+        result = subprocess.run(
+            ["/usr/bin/git", "-C", str(self.root), "check-ignore", "-v",
+             "tools/llmtool/.d6-bootstrap-report.json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("tools/llmtool/.gitignore", result.stdout)
+        self.assertIn(".d6-bootstrap-report.json", result.stdout)
+
     def test_untracked_gnumakefile_fails_before_make(self):
         (self.root / "tools" / "llmtool" / "GNUmakefile").write_text(
             "env-bootstrap:\n\t@echo shadow\n", encoding="utf-8")
@@ -348,6 +362,43 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertEqual(updated["head_sha"], head)
         self.assertEqual(updated["env2_pass_marker"]["submitted_head_sha"], head)
         self.assertEqual(updated["env2_pass_marker"]["current_head_sha"], head)
+        self.assertEqual(updated["env2_pass_marker"]["tooling_sha"], base)
+
+    def test_tooling_edit_requires_exact_integrator_approved_head(self):
+        base = self._git("rev-parse", "HEAD")
+        helper = self.root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
+        helper.write_text(helper.read_text(encoding="utf-8") + "\n# reviewed tooling edit\n",
+                          encoding="utf-8")
+        self._git("add", "tools/llmtool/scripts/d6_worktree_env.py")
+        self._git("commit", "-m", "edit bootstrap tooling")
+        head = self._git("rev-parse", "HEAD")
+        record = self._record()
+        record["base_sha"] = base
+        record["head_sha"] = head
+        self._write_record(record)
+
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke:
+            self.assertEqual(self._main_at_root(), 1)
+        invoke.assert_not_called()
+        self.assertNotIn("env2_pass_marker", json.loads(
+            self.record_path.read_text(encoding="utf-8")))
+
+        record["env2_approved_tooling_sha"] = head
+        self._write_record(record)
+        with mock.patch.object(d6env, "_run_make", return_value=self._make_result()):
+            self.assertEqual(self._main_at_root(), 0)
+        marker = json.loads(self.record_path.read_text(encoding="utf-8"))["env2_pass_marker"]
+        self.assertEqual(marker["tooling_sha"], head)
+
+    def test_invalid_tooling_approval_fails_before_make_or_marker_write(self):
+        record = self._record()
+        record["env2_approved_tooling_sha"] = "f" * 40
+        self._write_record(record)
+        with mock.patch.object(d6env, "_run_make") as run_make:
+            self.assertEqual(self._main_at_root(), 1)
+        run_make.assert_not_called()
+        updated = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertNotIn("env2_pass_marker", updated)
 
     def test_registered_divergent_base_is_rejected(self):
         tree = self._git("rev-parse", "HEAD^{tree}")
