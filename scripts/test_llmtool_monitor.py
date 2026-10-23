@@ -1515,7 +1515,12 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("@3f86dc6：結束但沒有判定", text)
         self.assertEqual(text.count("@3f86dc6："), 1)
         folded = next(line for line in lines if "└ … 另 4 項已完成" in line)
-        self.assertTrue(folded.endswith("5–30 分鐘前，已收起"))
+        self.assertTrue(folded.endswith("5–30 分鐘前完成；按 a 展開"))
+        # expanded (key a in the TUI, always in --once) lists every finished item
+        full = "\n".join(mon.office_lines(rows, expand=True))
+        self.assertIn("audit 284 release", full)
+        self.assertEqual(full.count("@3f86dc6："), 2)
+        self.assertNotIn("另 4 項已完成", full)
 
     def test_office_lines_say_nothing_extra_when_all_is_well(self):
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),

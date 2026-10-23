@@ -2421,7 +2421,7 @@ def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
         else:
             kept.append(row)
     for group, count in folded.items():
-        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前，已收起"
+        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成；按 a 展開"
         kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
                               group=group, kind="subagent"))
     return kept
@@ -2457,9 +2457,10 @@ def _row_style(state: str) -> str:
 
 
 def office_view(rows: list[OfficeRow], error: str | None = None,
-                width: int | None = None) -> list[tuple[str, str]]:
+                width: int | None = None, expand: bool = False) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
-    With a screen width, each detail is cut so the time column stays visible."""
+    With a screen width, each detail is cut so the time column stays visible.
+    expand lists older finished work too instead of folding it into one line."""
     working = sum(row.state == WORKING for row in rows)
     out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
     if error:
@@ -2500,7 +2501,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
-    tree = _tree(_fold_done(rows))
+    tree = _tree(rows if expand else _fold_done(rows))
     name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
@@ -2528,8 +2529,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
 
 
 def office_lines(rows: list[OfficeRow], error: str | None = None,
-                 width: int | None = None) -> list[str]:
-    return [line for line, _ in office_view(rows, error, width)]
+                 width: int | None = None, expand: bool = False) -> list[str]:
+    return [line for line, _ in office_view(rows, error, width, expand)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -2557,7 +2558,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
-    print("\n".join(office_lines(mon.office, mon.office_error)))
+    print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\nRECENT LLMTOOL TASKS")
@@ -2597,6 +2598,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
+    expanded = False   # office view: also list older finished work (key a)
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -2653,13 +2655,14 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
-            lines = office_view(mon.office, mon.office_error, w - 1)
+            lines = office_view(mon.office, mon.office_error, w - 1, expanded)
             offset = max(0, min(offset, len(lines) - body))
             styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                       "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
             for row, (line, style) in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, styles.get(style, 0))
-            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
+                    f"a: {'收起' if expanded else '展開'}已完成  q: quit")
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
@@ -2676,6 +2679,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             view, offset = views[(views.index(view) + 1) % len(views)], 0
         elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
             view, offset = views[key - ord("1")], 0
+        elif key in (ord("a"), ord("A")) and view == "office":
+            expanded = not expanded
         elif key == curses.KEY_UP:
             offset += 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_DOWN:
