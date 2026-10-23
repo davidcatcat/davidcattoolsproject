@@ -14,8 +14,12 @@ from unittest.mock import patch
 
 from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
+from llmtool import worker_dispatch
+from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
+from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_delegate,
                                          run_task_opencode_delegate,
@@ -29,6 +33,17 @@ def config(provider_type='codex-cli', model='gpt-6-luna'):
         'selected': {'type': provider_type, 'model': model,
                      'timeout_seconds': 30, 'provider_options': {}}
     }, 'generation': {'temperature': 0, 'max_tokens': 128}}
+
+
+def codex_pm_config():
+    return {
+        'active_provider': 'codex-pm',
+        'providers': {'codex-pm': {
+            'type': 'codex-cli', 'model': 'gpt-6-luna', 'timeout_seconds': 30,
+            'provider_options': {},
+        }},
+        'generation': {'temperature': 0, 'max_tokens': 128},
+    }
 
 
 class FakeClient:
@@ -48,6 +63,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
         self.home.mkdir(mode=0o700)
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
+        self.policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         self.args = Namespace(provider='selected', request=['Implement', 'a', 'health-check'])
         self.executor_root = Path(self.temp.name).resolve() / 'executor'
         self.executor_root.mkdir(mode=0o700)
@@ -58,7 +81,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
-        subprocess.run(['/usr/bin/git', 'add', 'sample.py'], cwd=self.executor_root, check=True)
+        report_dir = self.executor_root / 'tools' / 'llmtool'
+        report_dir.mkdir(parents=True)
+        (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore'],
+                       cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
         self.executor_head = subprocess.check_output(
@@ -66,6 +93,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.executor_common_dir = str(self.executor_root / '.git')
         registry_dir = Path(self.executor_common_dir) / 'llmtool-worktrees'
         registry_dir.mkdir(mode=0o700)
+        lock_path = registry_dir / '.lifecycle.lock'
+        lock_path.touch(mode=0o600)
+        lock_path.chmod(0o600)
         root_stat = self.executor_root.stat()
         self.executor_registry = {
             'schema_version': 1, 'task_id': 'executor-task-1',
@@ -77,12 +107,32 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'base_sha': self.executor_head, 'head_sha': self.executor_head,
             'state': 'ACTIVE', 'lock_state': 'LOCKED',
         }
+        report = {'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+            'task_id': 'executor-task-1', 'root_realpath': str(self.executor_root),
+            'head_sha': self.executor_head,
+            'tooling_sha': self.executor_head,
+            'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'}
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path = report_dir / '.d6-bootstrap-report.json'
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        self.executor_registry['env2_pass_marker'] = {
+            'schema_version': 1, 'result': 'PASS', 'task_id': 'executor-task-1',
+            'root_realpath': str(self.executor_root),
+            'submitted_head_sha': self.executor_head, 'current_head_sha': self.executor_head,
+            'tooling_sha': self.executor_head,
+            'environment_fingerprint': report['cache_fingerprint'],
+            'report_sha256': hashlib.sha256(report_bytes).hexdigest()}
         record_path = registry_dir / 'executor-task-1.json'
         record_path.write_text(json.dumps(self.executor_registry))
         record_path.chmod(0o600)
         original_cwd = os.getcwd()
         self.addCleanup(os.chdir, original_cwd)
         os.chdir(self.executor_root)
+        self.bootstrap_patch = patch(
+            'llmtool.task_submission_cli._bootstrap_registered_d6')
+        self.bootstrap_patch.start()
+        self.addCleanup(self.bootstrap_patch.stop)
 
     def invoke(self, *, resolver=None, client=None, key=None):
         out = io.StringIO()
@@ -97,6 +147,161 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 redirect_stdout(out):
             code = run_task_submit(self.args)
         return code, json.loads(out.getvalue()), client, resolve
+
+    def test_trusted_bootstrap_helper_requires_clean_pinned_dispatcher_source(self):
+        dispatcher_root = Path(self.temp.name).resolve() / 'dispatcher'
+        helper = dispatcher_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        dispatcher = (dispatcher_root / 'tools' / 'llmtool' / 'llmtool' /
+                      'task_submission_cli.py')
+        helper.parent.mkdir(parents=True)
+        dispatcher.parent.mkdir(parents=True)
+        helper.write_bytes(b"raise SystemExit(0)\n")
+        dispatcher.write_bytes(b"# pinned dispatcher fixture\n")
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=dispatcher_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=dispatcher_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
+                       cwd=dispatcher_root, check=True, capture_output=True)
+
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+                patch.object(submission_cli, '__file__', str(dispatcher)):
+            root, source = submission_cli._trusted_d6_helper_source()
+        self.assertEqual(root, dispatcher_root)
+        self.assertEqual(source, b"raise SystemExit(0)\n")
+
+        helper.write_bytes(b"raise SystemExit(23)\n")
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+                patch.object(submission_cli, '__file__', str(dispatcher)):
+            with self.assertRaises(ValueError):
+                submission_cli._trusted_d6_helper_source()
+
+    def test_committed_task_tree_dispatcher_and_helper_cannot_be_trust_source(self):
+        trusted_root = Path(self.temp.name).resolve() / 'trusted-dispatcher'
+        helper = trusted_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        dispatcher = (trusted_root / 'tools' / 'llmtool' / 'llmtool' /
+                      'task_submission_cli.py')
+        helper.parent.mkdir(parents=True)
+        dispatcher.parent.mkdir(parents=True)
+        helper.write_text('# trusted pinned helper\n', encoding='utf-8')
+        dispatcher.write_text('# trusted pinned dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=trusted_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
+                       cwd=trusted_root, check=True, capture_output=True)
+
+        task_root = Path(self.temp.name).resolve() / 'committed-task-tree'
+        subprocess.run(['/usr/bin/git', 'clone', '-b', 'main', str(trusted_root),
+                        str(task_root)], check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Task Fixture'],
+                       cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'task@example.invalid'],
+                       cwd=task_root, check=True)
+        task_helper = task_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        task_dispatcher = (task_root / 'tools' / 'llmtool' / 'llmtool' /
+                           'task_submission_cli.py')
+        marker_path = Path(self.temp.name).resolve() / 'committed-task-helper-ran'
+        task_helper.write_text(
+            'from pathlib import Path\nPath(' + repr(str(marker_path)) +
+            ").write_text('ran')\n", encoding='utf-8')
+        task_dispatcher.write_text('# committed descendant dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'committed task descendant'],
+                       cwd=task_root, check=True, capture_output=True)
+
+        registration = type('Registration', (), {
+            'root': str(self.executor_root), 'task_id': 'executor-task-1'})()
+        self.bootstrap_patch.stop()
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+                patch.object(submission_cli, '__file__', str(task_dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(registration)
+
+        self.assertEqual(raised.exception.direct_opencode_code,
+                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        self.assertFalse(marker_path.exists())
+
+    def test_integrator_approved_tooling_reads_exact_source_blobs_from_shared_store(self):
+        trusted_root = Path(self.temp.name).resolve() / 'approved-dispatcher'
+        paths = {
+            'helper': trusted_root / 'tools' / 'llmtool' / 'scripts' /
+                      'd6_worktree_env.py',
+            'lifecycle': trusted_root / 'tools' / 'llmtool' / 'scripts' /
+                         'd6_worktree_lifecycle.py',
+            'dispatcher': trusted_root / 'tools' / 'llmtool' / 'llmtool' /
+                          'task_submission_cli.py',
+        }
+        for key in ('helper', 'lifecycle', 'dispatcher'):
+            paths[key].parent.mkdir(parents=True, exist_ok=True)
+        paths['helper'].write_text('# base helper\n', encoding='utf-8')
+        paths['lifecycle'].write_text('# base lifecycle\n', encoding='utf-8')
+        paths['dispatcher'].write_text('# pinned dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=trusted_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=trusted_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'approved fixture base'],
+                       cwd=trusted_root, check=True, capture_output=True)
+        base_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                           cwd=trusted_root, text=True).strip()
+
+        task_root = Path(self.temp.name).resolve() / 'approved-task'
+        branch = 'feat/approved-env2-source'
+        subprocess.run(['/usr/bin/git', 'worktree', 'add', '-b', branch,
+                        str(task_root), base_sha], cwd=trusted_root,
+                       check=True, capture_output=True)
+        marker_path = Path(self.temp.name).resolve() / 'approved-source-ran'
+        helper_bytes = (
+            'from pathlib import Path\nPath(' + repr(str(marker_path)) +
+            ").write_text('ran')\n").encode()
+        lifecycle_bytes = b'# exact reviewed lifecycle candidate\n'
+        (task_root / 'tools' / 'llmtool' / 'scripts' /
+         'd6_worktree_env.py').write_bytes(helper_bytes)
+        (task_root / 'tools' / 'llmtool' / 'scripts' /
+         'd6_worktree_lifecycle.py').write_bytes(lifecycle_bytes)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'approved candidate sources'],
+                       cwd=task_root, check=True, capture_output=True)
+        approved_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                              cwd=task_root, text=True).strip()
+        registration = type('Registration', (), {
+            'task_id': 'approved-task-1',
+            'common_dir': str((trusted_root / '.git').resolve()),
+            'root': str(task_root), 'branch': branch,
+            'source_sha': base_sha, 'result_sha': approved_sha,
+            'env2_approved_tooling_sha': approved_sha,
+        })()
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+                patch.object(submission_cli, '__file__', str(paths['dispatcher'])), \
+                patch.object(submission_cli.task_completion, 'read_d6_registration',
+                             return_value=registration):
+            _root, loaded_helper = submission_cli._trusted_d6_helper_source(registration)
+            _root, loaded_lifecycle = submission_cli._trusted_d6_helper_source(
+                registration, 'tools/llmtool/scripts/d6_worktree_lifecycle.py')
+
+        self.assertEqual(loaded_helper, helper_bytes)
+        self.assertEqual(loaded_lifecycle, lifecycle_bytes)
+        self.assertFalse(marker_path.exists())
 
     def test_direct_submit_persists_logical_binding_real_reply_and_usage(self):
         code, result, client, resolve = self.invoke()
@@ -316,6 +521,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         args = parser.parse_args(['task', 'submit', '--provider', 'company-gw', 'build something'])
         self.assertEqual((args.action, args.provider, args.request),
                          ('submit', 'company-gw', ['build something']))
+        delegated = parser.parse_args([
+            'task', 'delegate', 'a' * 32, '--provider', 'codex',
+            '--selection-source', 'PM', '--executor-task', 'executor-task-1',
+            '--read-path', 'sample.py', '--write-path', 'sample.py',
+            '--acceptance', 'focused test passes', '--egress-basis', 'synthetic text',
+            '--context-stdin',
+        ])
+        self.assertEqual((delegated.action, delegated.provider, delegated.context_stdin),
+                         ('delegate', 'codex', True))
         shown = parser.parse_args(['task', 'show', 'a' * 32])
         self.assertEqual((shown.action, shown.task_id), ('show', 'a' * 32))
         delegate = next(action for action in parser._actions
@@ -444,6 +658,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(code, 0)
         return task
 
+    def _pm_task_with_codex_assignment(self):
+        acceptance = ['new test passes']
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded low-risk task.',
+            'developer_assignment': {
+                'route': 'codex', 'risk': 'LOW', 'goal': 'Add one focused test.',
+                'acceptance': acceptance,
+            },
+        })
+        code, task, _, _ = self.invoke(client=FakeClient(Reply(response, {
+            'prompt_tokens': 12, 'completion_tokens': 18, 'total_tokens': 30,
+        })))
+        self.assertEqual(code, 0)
+        return task
+
     def _opencode_delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='opencode',
                       selection_source='PM', executor_task='executor-task-1',
@@ -522,6 +751,119 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['developer']['error_code'], 'OPENCODE_D6_BINDING_CHANGED')
         self.assertFalse(provider_process_started)
         self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_bootstraps_registered_d6_before_provider_launch(self):
+        task = self._pm_task_with_opencode_assignment()
+        events = []
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None, 'UNKNOWN',
+                              'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                              10, 1, 'b' * 64)
+
+        def bootstrap(registration):
+            self.assertEqual(registration.task_id, 'executor-task-1')
+            events.append('bootstrap')
+
+        def launch(**kwargs):
+            kwargs['prelaunch_validate']()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            events.append('provider')
+            return result
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                      side_effect=bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=launch), \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      return_value=None), redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
+        self.assertEqual(events, ['bootstrap', 'provider'])
+
+    def test_opencode_bootstrap_rejection_blocks_launch_and_binds_process(self):
+        self.bootstrap_patch.stop()
+        task = self._pm_task_with_opencode_assignment()
+        target_script = (self.executor_root / 'tools' / 'llmtool' / 'scripts' /
+                         'd6_worktree_env.py')
+        target_script.parent.mkdir(parents=True, exist_ok=True)
+        marker_path = Path(self.temp.name) / 'untrusted-helper-ran'
+        target_script.write_text(
+            "from pathlib import Path\nPath(" + repr(str(marker_path)) +
+            ").write_text('ran')\n", encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'add', 'tools/llmtool/scripts/d6_worktree_env.py'],
+                       cwd=self.executor_root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'untrusted descendant helper'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        self.executor_registry['head_sha'] = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root,
+            text=True).strip()
+        report_path = (self.executor_root / 'tools' / 'llmtool' /
+                       '.d6-bootstrap-report.json')
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+        report['head_sha'] = self.executor_registry['head_sha']
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        self.executor_registry['env2_pass_marker'].update(
+            submitted_head_sha=self.executor_registry['head_sha'],
+            current_head_sha=self.executor_registry['head_sha'],
+            report_sha256=hashlib.sha256(report_bytes).hexdigest())
+        record_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                       'executor-task-1.json')
+        record_path.write_text(json.dumps(self.executor_registry))
+        record_path.chmod(0o600)
+        captured = []
+        real_run = subprocess.run
+
+        def reject_env_bootstrap(argv, *args, **kwargs):
+            if '-c' in argv:
+                captured.append((argv, kwargs))
+                return subprocess.CompletedProcess(argv, 23)
+            return real_run(argv, *args, **kwargs)
+
+        output = io.StringIO()
+        injected = {
+            'HOME': str(self.home), 'MAKEFLAGS': '-f attacker.mk',
+            'MAKEFILES': 'attacker.mk', 'PYTHONPATH': '/tmp/shadow',
+            'PYTHONHOME': '/tmp/other-python', 'GNUMAKEFLAGS': '--eval=bad',
+            'MFLAGS': '-f attacker.mk',
+        }
+        with patch.dict(os.environ, injected), \
+                patch('llmtool.task_submission_cli._trusted_d6_helper_source',
+                      return_value=(self.executor_root, b'raise SystemExit(0)')), \
+                patch.object(submission_cli.subprocess, 'run',
+                             side_effect=reject_env_bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as launch, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'ENV_BOOTSTRAP_REJECTED')
+        launch.assert_not_called()
+        self.assertEqual(len(captured), 1)
+        argv, kwargs = captured[0]
+        self.assertEqual(argv, [sys.executable, '-B', '-I', '-c',
+                                'raise SystemExit(0)', '--task-id', 'executor-task-1',
+                                '--worktree-root', str(self.executor_root)])
+        self.assertNotIn(str(target_script), argv)
+        self.assertFalse(marker_path.exists())
+        self.assertEqual(Path(kwargs['cwd']), self.executor_root)
+        self.assertEqual(kwargs['stdin'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
+        self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+        self.assertFalse(kwargs['check'])
+        self.assertEqual(set(kwargs['env']), {
+            'PATH', 'HOME', 'LC_ALL', 'LANG', 'PIP_CONFIG_FILE',
+            'GIT_CONFIG_NOSYSTEM', 'GIT_CONFIG_GLOBAL', 'GIT_ATTR_NOSYSTEM',
+            'GIT_OPTIONAL_LOCKS', 'GIT_NO_LAZY_FETCH', 'GIT_TERMINAL_PROMPT'})
+        for name in ('MAKEFLAGS', 'MAKEFILES', 'PYTHONPATH', 'PYTHONHOME',
+                     'GNUMAKEFLAGS', 'MFLAGS'):
+            self.assertNotIn(name, kwargs['env'])
 
     def test_opencode_failed_call_is_unknown_and_never_replayed(self):
         task = self._pm_task_with_opencode_assignment()
@@ -677,6 +1019,43 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
         self.assertEqual(developer['execution']['cleanup_status'], 'CONFIRMED')
 
+    def test_direct_taskstore_assignment_rechecks_policy_and_denies_paused_worker(self):
+        task = self._pm_task_with_opencode_assignment()
+        policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'PAUSED'
+        policy['workers']['opencode-developer']['reason'] = 'test pause'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        args = self._opencode_delegate_args(task)
+        out = io.StringIO()
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke, \
+                redirect_stdout(out):
+            with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
+                run_task_delegate(args, store=store)
+        invoke.assert_not_called()
+        saved = store.get(task['task_id'])
+        self.assertIsNone(saved['developer'])
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
+
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test resume'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      return_value=DirectResult(0, 'ses_Abc123', 'ok', None,
+                          'CLI_REPORTED', 'a' * 64, 1, 'CONFIRMED',
+                          'opencode v2.0.32', 1, 1, 'b' * 64)) as invoke, \
+                redirect_stdout(io.StringIO()):
+            # Assignment is authorized after the policy file changes; the policy is reread.
+            result = run_task_delegate(args, store=store)
+        self.assertEqual(result, 1)
+        invoke.assert_called_once()
+        saved = store.get(task['task_id'])
+        self.assertEqual([entry['decision'] for entry in saved['dispatch_audit']],
+                         ['BLOCKED', 'ALLOWED', 'ALLOWED'])
+
     def _delegate_args(self, task, **changes):
         values = dict(task_id=task['task_id'], provider='company-gw',
                       selection_source='PM',
@@ -688,6 +1067,204 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       context='class TaskSubmissionCLITests: pass')
         values.update(changes)
         return Namespace(**values)
+
+    def _codex_delegate_args(self, task, **changes):
+        values = dict(task_id=task['task_id'], provider='codex',
+                      selection_source='PM', executor_task='executor-task-1',
+                      read_path=['sample.py'], write_path=['sample.py'],
+                      acceptance=['new test passes'],
+                      egress_basis='Owner-approved public synthetic source only',
+                      context='VALUE = 1\n')
+        values.update(changes)
+        return Namespace(**values)
+
+    def test_codex_delegate_persists_scoped_proposal_and_unknown_usage(self):
+        task = self._pm_task_with_codex_assignment()
+        patch_text = ('diff --git a/sample.py b/sample.py\n'
+                      '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
+                      '-VALUE = 1\n+VALUE = 2\n')
+        codex_config = codex_pm_config()
+        output = io.StringIO()
+        args = self._codex_delegate_args(task)
+        bind_executor_task = submission_cli.task_completion.bind_executor_task
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_config) as resolve, \
+                patch('llmtool.task_submission_cli.api_key',
+                      side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             wraps=bind_executor_task) as bind_executor, \
+                patch.object(CodexCLIProvider, 'complete', autospec=True,
+                             return_value=Reply(patch_text, {'elapsed_seconds': 0.25,
+                                                             'model': 'gpt-6-luna'})) as complete, \
+                redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 0, output.getvalue())
+        result = json.loads(output.getvalue())
+        developer = result['developer']
+        self.assertEqual(resolve.call_args.args, ('codex-pm',))
+        self.assertEqual(bind_executor.call_count, 2)
+        complete.assert_called_once()
+        client = complete.call_args.args[0]
+        messages = complete.call_args.args[1]
+        self.assertIsInstance(client, CodexCLIProvider)
+        self.assertEqual(client.provider, codex_config['providers']['codex-pm'])
+        capabilities = get_provider_capabilities('codex-cli').to_dict()
+        self.assertFalse(capabilities['code_edit'])
+        self.assertFalse(capabilities['shell'])
+        self.assertFalse(capabilities['git'])
+        self.assertEqual(OUTPUT_LIMIT, 1024 * 1024)
+        argv = client._argv('/usr/bin/codex', '/tmp/llmtool-isolated-test')
+        settings = [argv[index + 1] for index, item in enumerate(argv) if item == '-c']
+        self.assertIn('permissions.llmtool-text.extends=":read-only"', settings)
+        self.assertIn('permissions.llmtool-text.network.enabled=false', settings)
+        self.assertIn('features.shell_tool=false', settings)
+        self.assertIn('features.unified_exec=false', settings)
+        self.assertNotIn('--sandbox', argv)
+        with client._temporary_directory() as isolated:
+            isolated_path = Path(isolated).resolve()
+            self.assertFalse(isolated_path.is_relative_to(self.executor_root))
+            self.assertEqual(list(isolated_path.iterdir()), [])
+        self.assertEqual(messages[1]['content'][:1], '{')
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['provider_profile'], 'codex')
+        self.assertEqual(developer['provider_type'], 'codex-cli')
+        self.assertEqual(developer['model'], 'gpt-6-luna')
+        self.assertIsNone(developer['max_tokens'])
+        self.assertIsNone(developer['usage'])
+        self.assertEqual(developer['usage_status'], 'UNKNOWN')
+        self.assertEqual(developer['artifact'], patch_text)
+        self.assertEqual(developer['artifact_sha256'], hashlib.sha256(
+            patch_text.encode()).hexdigest())
+        self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
+        self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
+        packet = json.loads(messages[1]['content'])
+        self.assertEqual(packet['task_contract_digest'], task['task_binding']['contract_digest'])
+        self.assertEqual(packet['source_sha'], self.executor_head)
+        self.assertEqual(packet['write_paths'], ['sample.py'])
+        self.assertIn('codex-cli code Developer', messages[0]['content'])
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['artifact'], patch_text)
+        self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'codex-developer')
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
+
+    def test_codex_d6_revalidation_failure_blocks_provider_call(self):
+        task = self._pm_task_with_codex_assignment()
+        original_bind = submission_cli.task_completion.bind_executor_task
+        bind_calls = []
+
+        def drift_after_dispatch(*args, **kwargs):
+            bind_calls.append((args, kwargs))
+            if len(bind_calls) == 1:
+                return original_bind(*args, **kwargs)
+            raise LLMToolError('simulated D6 registry drift')
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_pm_config()), \
+                patch('llmtool.task_submission_cli.api_key',
+                      side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             side_effect=drift_after_dispatch), \
+                patch.object(CodexCLIProvider, 'complete', autospec=True) as complete, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(bind_calls), 2)
+        complete.assert_not_called()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'],
+                         'DEVELOPER_CALL_BINDING_INVALID')
+
+    def test_codex_proposal_is_host_size_and_scope_validated(self):
+        cases = (
+            ('DEVELOPER_OUTPUT_OUT_OF_SCOPE',
+             'diff --git a/outside.py b/outside.py\n'
+             '--- a/outside.py\n+++ b/outside.py\n@@ -1 +1 @@\n-old\n+new\n'),
+            ('DEVELOPER_OUTPUT_TOO_LARGE',
+             'diff --git a/sample.py b/sample.py\n' + ('x' * (RESPONSE_LIMIT + 1))),
+        )
+        for reason, proposal in cases:
+            with self.subTest(reason=reason):
+                task = self._pm_task_with_codex_assignment()
+                client = FakeClient(Reply(proposal, {'elapsed_seconds': 0.1}))
+                output = io.StringIO()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.resolve_profile_config',
+                              return_value=codex_pm_config()), \
+                        patch('llmtool.task_submission_cli.api_key',
+                              side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                        patch('llmtool.task_submission_cli.create_client',
+                              return_value=client), redirect_stdout(output):
+                    code = run_task_delegate(self._codex_delegate_args(task))
+                self.assertEqual(code, 1)
+                self.assertEqual(len(client.calls), 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['developer']['state'],
+                                 'DEVELOPER_OUTPUT_REJECTED')
+                self.assertEqual(result['developer']['error_code'], reason)
+                self.assertIsNone(result['developer']['artifact'])
+                self.assertNotIn(proposal[:64], output.getvalue())
+
+    def test_codex_paused_or_invalid_policy_never_calls_provider(self):
+        for policy_change, expected_reason in (
+                ('paused', 'OWNER_PAUSED'), ('missing', 'WORKER_POLICY_INVALID')):
+            with self.subTest(policy_change=policy_change):
+                task = self._pm_task_with_codex_assignment()
+                policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+                if policy_change == 'paused':
+                    policy['workers']['codex-developer']['dispatch'] = 'PAUSED'
+                else:
+                    policy['workers'].pop('codex-developer')
+                self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+                client = FakeClient(Reply('must not be returned', {}))
+                args = self._codex_delegate_args(task)
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.resolve_profile_config',
+                              return_value=config('codex-cli')), \
+                        patch('llmtool.task_submission_cli.create_client',
+                              side_effect=AssertionError('denied route must not build provider')), \
+                        redirect_stdout(io.StringIO()):
+                    with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
+                        run_task_delegate(args)
+                saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+                self.assertIsNone(saved['developer'])
+                self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+                self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], expected_reason)
+
+    def test_codex_d6_mismatch_and_unknown_provider_result_are_not_replayed(self):
+        task = self._pm_task_with_codex_assignment()
+        registry = Path(self.executor_common_dir) / 'llmtool-worktrees' / 'executor-task-1.json'
+        record = json.loads(registry.read_text(encoding='utf-8'))
+        record['head_sha'] = '0' * 40
+        registry.write_text(json.dumps(record))
+        client = FakeClient(Reply('unused', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('codex-cli')), \
+                patch('llmtool.task_submission_cli.create_client',
+                      side_effect=AssertionError('invalid D6 binding must block client creation')):
+            with self.assertRaises(LLMToolError):
+                run_task_delegate(self._codex_delegate_args(task))
+        registry.write_text(json.dumps(self.executor_registry))
+
+        task = self._pm_task_with_codex_assignment()
+        client = FakeClient(error=RuntimeError('simulated provider failure'))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('codex-cli')), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_delegate(self._codex_delegate_args(task)), 1)
+            with self.assertRaises(LLMToolError):
+                run_task_delegate(self._codex_delegate_args(task))
+        self.assertEqual(len(client.calls), 1)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertIsNone(saved['developer']['usage'])
 
     def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
         task = self._pm_task_with_assignment()
@@ -949,11 +1526,17 @@ class TaskSubmissionCLITests(unittest.TestCase):
         task = self._pm_task_with_assignment()
         backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         read_barrier = threading.Barrier(2)
+        synchronized_reads = [0]
+        synchronized_reads_lock = threading.Lock()
 
         class StaleReadStore:
             def get(self, task_id):
                 result = backing.get(task_id)
-                read_barrier.wait(timeout=5)
+                with synchronized_reads_lock:
+                    synchronize = synchronized_reads[0] < 2
+                    synchronized_reads[0] += 1
+                if synchronize:
+                    read_barrier.wait(timeout=5)
                 return result
 
             def compare_and_update(self, task_id, **kwargs):
@@ -961,6 +1544,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
             def update(self, task_id, **kwargs):
                 return backing.update(task_id, **kwargs)
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                return backing.append_dispatch_audit(task_id, entry, expected=expected)
 
         client = FakeClient(Reply(
             'diff --git a/tools/llmtool/tests/test_task_submission_cli.py '
