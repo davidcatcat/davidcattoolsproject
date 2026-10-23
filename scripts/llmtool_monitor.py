@@ -1652,6 +1652,47 @@ MISMATCH = "回覆的 PR／版本跟呼叫時不同"
 _review_cache: dict = {}
 
 
+# `claude --print ... > /tmp/x.json`: the reply went to a file, not the exec
+# output. Only that file's verdict line is read, like the exec output's.
+RESULT_FILE = re.compile(r"(?<![\d&>])>\s*(/[\w./+-]{1,200})")
+
+
+def _review_file(text: str) -> str:
+    found = CLAUDE_CALL.search(text)
+    if found is None:
+        return ""
+    command = re.split(r"\n|\\n", text[found.start():found.start() + 4096], maxsplit=1)[0]
+    target = RESULT_FILE.search(command)
+    return target.group(1) if target else ""
+
+
+def _file_reply(path: str, since: float | None) -> str | None:
+    """The reply a call wrote to its result file: the `--output-format json`
+    "result" text, a reason when that run reports an error, or None when the
+    file is missing, too large, or older than the call."""
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1 << 20:
+            return None
+        if since is not None and info.st_mtime < since - 5:
+            return None   # left over from an earlier run
+        with open(path, "rb") as handle:
+            raw = handle.read(1 << 20).decode("utf-8", "replace")
+    except OSError:
+        return None
+    try:
+        item = json.loads(raw)
+    except ValueError:
+        return raw
+    if type(item) is not dict:
+        return raw
+    if item.get("subtype") == "error_max_budget_usd":
+        return OVER_BUDGET_TEXT
+    if item.get("is_error") is True:
+        return NO_VERDICT
+    return item["result"] if type(item.get("result")) is str else ""
+
+
 def _review_target(text: str) -> tuple[str, str]:
     pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
     return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
@@ -1687,6 +1728,12 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
+    if not head.strip() and len(origin) > 3 and origin[3] and not any(
+            map(TIMED_OUT.search, parts)):
+        reply = _file_reply(origin[3], origin[0])
+        if reply in (OVER_BUDGET_TEXT, NO_VERDICT):
+            return reply
+        head = (reply or "")[:1500]
     verdict = REVIEW_VERDICT.search(head)
     if verdict is None:
         if any(map(OVER_BUDGET.search, parts)):
@@ -1743,7 +1790,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         if kind == "custom_tool_call":
             text = str(payload.get("input") or "")
             if CLAUDE_CALL.search(text):
-                cache["calls"][call] = (when,) + _review_target(text)
+                cache["calls"][call] = (when,) + _review_target(text) + (_review_file(text),)
             found = STDIN_POLL.search(text)
             if found:
                 cache["polls"][call] = int(found.group(1))
@@ -1782,7 +1829,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     # A call and the exec session it opened share one origin: list it once.
     origins = {id(origin): origin for origin in
                list(cache["calls"].values()) + list(cache["sessions"].values())}
-    pending = [(when, pr, sha, None) for when, pr, sha in origins.values()]
+    pending = [(origin[0], origin[1], origin[2], None) for origin in origins.values()]
     return sorted(cache["done"] + pending, key=lambda item: item[0] or 0.0)
 
 
