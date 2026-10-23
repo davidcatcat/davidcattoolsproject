@@ -1940,13 +1940,18 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
     return state, finished, ended
 
 
-def _closed_codex_cli(rows: list[OfficeRow]) -> list[OfficeRow]:
-    """With no Codex CLI running, a thread opened from the CLI has no terminal:
-    the app-server daemon may still hold its record open, but nobody is there.
-    It shows as closed for a while, then leaves with what it started."""
+def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
+    """A thread opened from the Codex CLI keeps its record open in the
+    app-server daemon after the CLI exits or moves on to a new thread. With N
+    CLIs running, the N most recently active CLI threads are taken as the
+    attached ones; any other shows as closed for a while, then leaves with
+    what it started."""
+    tui = sorted((row for row in rows if row.tui),
+                 key=lambda row: row.age if row.age is not None else 1e12)
+    attached = {row.key for row in tui[:clis]}
     gone, out = set(), []
     for row in rows:
-        if not row.tui:
+        if not row.tui or row.key in attached:
             out.append(row)
         elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
             gone.add(row.key)
@@ -1967,8 +1972,11 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
-    if not any(p.role.startswith("Codex CLI") for p in processes):
-        rows = _closed_codex_cli(rows)
+    # Each running CLI is attached to one thread; with npm, the launcher and
+    # its binary are one CLI.
+    clis = sum(p.role == "Codex CLI" for p in processes) or sum(
+        p.role == "Codex CLI (node launcher)" for p in processes)
+    rows = _closed_codex_cli(rows, clis)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is. Without any, the Roadmap row says why OpenCode is not here.
     _forget_cwds(processes)
@@ -2096,7 +2104,7 @@ def office_lines(rows: list[OfficeRow]) -> list[str]:
              f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
     if not rows:
         return lines + ["目前沒有觀察到任何 agent 或 worker。"]
-    pms = sum(row.name == "codex PM" for row in rows)
+    pms = sum(row.name == "codex PM" and row.state != CLOSED for row in rows)
     if pms > 1:
         lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
                      "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")

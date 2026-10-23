@@ -839,6 +839,18 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("codex PM", rows)
         self.assertNotIn("codex developer Bacon", rows)   # leaves with the PM that started it
 
+    def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
+        self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started", "turn_aborted"], age=90)
+        self._codex("new", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started", "task_complete"], age=10)
+        cli = [mon.Process(8, 7, 8, "01:14", "S+", "Codex CLI", "codex", "Codex CLI (node launcher) 7"),
+               mon.Process(7, 1, 7, "01:14", "S+", "Codex CLI (node launcher)", "node", "")]
+        pms = [row for row in self.rows(cli) if row.name == "codex PM"]
+        self.assertEqual(sorted(row.state for row in pms), sorted([mon.IDLE, mon.CLOSED]))
+        self.assertEqual(next(row for row in pms if row.state == mon.IDLE).age, 10.0)
+        self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows(cli))))
+
     def test_codex_pm_and_subagents_show_role_task_and_state(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
                     ["task_started", "task_complete"], age=400)
