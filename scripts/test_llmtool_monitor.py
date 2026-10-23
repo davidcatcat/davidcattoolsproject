@@ -1003,6 +1003,23 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
                             for line in mon.office_lines(self.rows())))
 
+    def test_codex_turn_longer_than_the_tail_is_still_working(self):
+        meta = {"id": "T1", "cwd": self.canonical, "thread_source": "user"}
+        filler = {"type": "response_item", "payload": {"type": "reasoning", "x": "y" * 1000}}
+        path = self._codex("pm", meta, ["task_started"], age=200)
+        def grow(*markers):
+            with open(path, "a", encoding="utf-8") as handle:
+                for kind in markers:
+                    handle.write(json.dumps({"type": "event_msg", "payload": {"type": kind}}) + "\n")
+                handle.writelines(json.dumps(filler) + "\n"
+                                  for _ in range(mon.OFFICE_TAIL // 1000 + 10))
+            os.utime(path, (self.NOW - 200, self.NOW - 200))
+            return self.by_name(self.rows())["codex 主對話"].state
+        mon._turn_cache.clear()
+        self.assertEqual(grow(), mon.WORKING)   # the start marker is now before the tail
+        self.assertEqual(grow("task_complete"), mon.IDLE)
+        self.assertEqual(grow("task_started"), mon.WORKING)
+
     def test_codex_main_shows_what_it_is_doing(self):
         item = lambda payload: {"type": "event_msg", "payload": payload}
         call = lambda name, **kw: {"type": "response_item",
@@ -1337,6 +1354,44 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("PR #999", text)
         self.assertNotIn("PROMPT-SECRET", text)
         self.assertNotIn("單次呼叫執行中（不留 session 紀錄）", text)   # PM record explains the process
+
+    def test_review_reply_written_to_a_result_file_gives_its_verdict(self):
+        ts = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%S.000Z", mon.time.gmtime(self.NOW - age))
+        out = Path(self.tmp.name)
+        def result(name, body, age=100):
+            path = out / name
+            path.write_text(json.dumps(body), encoding="utf-8")
+            os.utime(path, (self.NOW - age, self.NOW - age))
+            return path
+        ok = result("ok.json", {"subtype": "success", "is_error": False,
+                                "result": "**Verdict: PASS** PR #305 head db3c3a9\nPROMPT-SECRET"})
+        broke = result("err.json", {"subtype": "error_during_execution", "is_error": True})
+        budget = result("budget.json", {"subtype": "error_max_budget_usd", "is_error": True})
+        old = result("old.json", {"result": "**Verdict: FAIL** PR #306 head 0000006"}, age=5000)
+        events = []
+        for n, (pr, path) in enumerate(((305, ok), (307, broke), (308, budget), (306, old))):
+            head = {305: "db3c3a9", 307: "0000007", 308: "0000008", 306: "0000006"}[pr]
+            cmd = (f'const r=await tools.exec_command({{cmd:"python3 - <<PY\\nprompt=\'Review PR #{pr} '
+                   f'head {head}\'\\nPY\\ncd /tmp && claude --print --tools \'\' < /tmp/p.txt '
+                   f'> {path}","workdir":"/x","yield_time_ms":1000}});')
+            events += [(600 - n * 10, {"type": "custom_tool_call", "call_id": f"c{n}", "name": "exec",
+                                       "input": cmd}),
+                       (599 - n * 10, {"type": "custom_tool_call_output", "call_id": f"c{n}", "output": [
+                           {"type": "input_text", "text": "Script completed"},
+                           {"type": "input_text", "text": '{"exit_code":0,"output":""}'}]})]
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                      "thread_source": "user"}}]
+        items += [{"timestamp": ts(age), "type": "response_item", "payload": payload}
+                  for age, payload in events]
+        self._write(self.codex / day / "rollout-pm.jsonl", items, age=5)
+        rows = self.rows()
+        reviews = {row.detail for row in rows if row.name == "claude reviewer"}
+        self.assertEqual(reviews, {"審 PR #305 @db3c3a9：PASS",
+                                   f"審 PR #307 @0000007：{mon.NO_VERDICT}",
+                                   f"審 PR #308 @0000008：{mon.OVER_BUDGET_TEXT}",
+                                   f"審 PR #306 @0000006：{mon.NO_VERDICT}"})   # stale file is not read
+        self.assertNotIn("PROMPT-SECRET", "\n".join(mon.office_lines(rows)))
 
     def test_worker_rows_come_from_the_dispatch_switches(self):
         rows = self.by_name(self.rows())

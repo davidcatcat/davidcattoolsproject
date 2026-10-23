@@ -1404,6 +1404,55 @@ def _jsonl_tail(path: str) -> list:
     return out
 
 
+TURN_MARKERS = ("task_started", "task_complete", "turn_aborted")
+OFFICE_TURN_SCAN = 64 << 20   # how far before the tail a Codex turn marker is looked for
+_turn_cache: dict = {}        # {path: (scanned up to, marker)} for the part before the tail
+
+
+def _newest_turn_marker(handle, low: int, high: int):
+    """The newest turn marker in whole lines inside [low, high) of a record."""
+    carry = b""
+    while high > low:
+        start = max(low, high - (4 << 20))
+        handle.seek(start)
+        lines = (handle.read(high - start) + carry).split(b"\n")
+        carry, high = (lines.pop(0) if start > low else b""), start
+        for raw in reversed(lines):
+            if b'"event_msg"' not in raw or not any(m.encode() in raw for m in TURN_MARKERS):
+                continue
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            inner = item.get("payload") if type(item) is dict else None
+            if (item.get("type") == "event_msg" and type(inner) is dict
+                    and inner.get("type") in TURN_MARKERS):
+                return inner["type"]
+    return None
+
+
+def _codex_turn_marker(path: str):
+    """The newest turn marker before the tail of a long Codex record: one turn
+    can outgrow the tail. Only the part that left the tail since the last look
+    is read again."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            end = max(0, size - OFFICE_TAIL)
+            # Start on a line boundary: the tail's cut first line belongs here.
+            handle.seek(end)
+            end += len(handle.readline(OFFICE_TAIL)) if end else 0
+            seen, marker = _turn_cache.get(path, (None, None))
+            if seen is None or seen > end:
+                seen, marker = max(0, end - OFFICE_TURN_SCAN), None
+            # A marker that left the tail since the last look is newer.
+            marker = _newest_turn_marker(handle, seen, end) or marker
+    except OSError:
+        return None
+    _turn_cache[path] = (end, marker)
+    return marker
+
+
 def _label(text, limit: int = 40) -> str:
     line = _headline(text) if type(text) is str else ""
     return line[:limit] + ("…" if len(line) > limit else "")
@@ -1506,9 +1555,10 @@ def _codex_row(path: str, now: float, canonical: str):
     for item in tail:
         inner = item.get("payload")
         kind = inner.get("type") if type(inner) is dict else None
-        if item.get("type") == "event_msg" and kind in ("task_started", "task_complete",
-                                                       "turn_aborted"):
+        if item.get("type") == "event_msg" and kind in TURN_MARKERS:
             last = kind
+    if last is None:
+        last = _codex_turn_marker(path)
     subagent = payload.get("thread_source") == "subagent"
     if last in ("task_complete", "turn_aborted"):
         state = DONE if subagent else IDLE
@@ -1602,6 +1652,47 @@ MISMATCH = "回覆的 PR／版本跟呼叫時不同"
 _review_cache: dict = {}
 
 
+# `claude --print ... > /tmp/x.json`: the reply went to a file, not the exec
+# output. Only that file's verdict line is read, like the exec output's.
+RESULT_FILE = re.compile(r"(?<![\d&>])>\s*(/[\w./+-]{1,200})")
+
+
+def _review_file(text: str) -> str:
+    found = CLAUDE_CALL.search(text)
+    if found is None:
+        return ""
+    command = re.split(r"\n|\\n", text[found.start():found.start() + 4096], maxsplit=1)[0]
+    target = RESULT_FILE.search(command)
+    return target.group(1) if target else ""
+
+
+def _file_reply(path: str, since: float | None) -> str | None:
+    """The reply a call wrote to its result file: the `--output-format json`
+    "result" text, a reason when that run reports an error, or None when the
+    file is missing, too large, or older than the call."""
+    try:
+        info = os.stat(path)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1 << 20:
+            return None
+        if since is not None and info.st_mtime < since - 5:
+            return None   # left over from an earlier run
+        with open(path, "rb") as handle:
+            raw = handle.read(1 << 20).decode("utf-8", "replace")
+    except OSError:
+        return None
+    try:
+        item = json.loads(raw)
+    except ValueError:
+        return raw
+    if type(item) is not dict:
+        return raw
+    if item.get("subtype") == "error_max_budget_usd":
+        return OVER_BUDGET_TEXT
+    if item.get("is_error") is True:
+        return NO_VERDICT
+    return item["result"] if type(item.get("result")) is str else ""
+
+
 def _review_target(text: str) -> tuple[str, str]:
     pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
     return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
@@ -1637,6 +1728,12 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
+    if not head.strip() and len(origin) > 3 and origin[3] and not any(
+            map(TIMED_OUT.search, parts)):
+        reply = _file_reply(origin[3], origin[0])
+        if reply in (OVER_BUDGET_TEXT, NO_VERDICT):
+            return reply
+        head = (reply or "")[:1500]
     verdict = REVIEW_VERDICT.search(head)
     if verdict is None:
         if any(map(OVER_BUDGET.search, parts)):
@@ -1693,7 +1790,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         if kind == "custom_tool_call":
             text = str(payload.get("input") or "")
             if CLAUDE_CALL.search(text):
-                cache["calls"][call] = (when,) + _review_target(text)
+                cache["calls"][call] = (when,) + _review_target(text) + (_review_file(text),)
             found = STDIN_POLL.search(text)
             if found:
                 cache["polls"][call] = int(found.group(1))
@@ -1732,7 +1829,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     # A call and the exec session it opened share one origin: list it once.
     origins = {id(origin): origin for origin in
                list(cache["calls"].values()) + list(cache["sessions"].values())}
-    pending = [(when, pr, sha, None) for when, pr, sha in origins.values()]
+    pending = [(origin[0], origin[1], origin[2], None) for origin in origins.values()]
     return sorted(cache["done"] + pending, key=lambda item: item[0] or 0.0)
 
 
