@@ -468,6 +468,15 @@ def _safe_nonnegative_count(value) -> bool:
     return type(value) is int and 0 <= value <= 10000
 
 
+def _valid_cache_fingerprint(value) -> bool:
+    # worktree_env.fingerprint_id() emits implementation+major.minor,
+    # platform, normalized machine, and a 12-hex digest suffix.
+    return (type(value) is str and len(value) <= 128 and
+            re.fullmatch(
+                r"[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-"
+                r"[a-z0-9][a-z0-9._-]{0,31}-[0-9a-f]{12}", value) is not None)
+
+
 def _valid_package_list(value, expected_count) -> bool:
     if type(value) is not list or len(value) != expected_count:
         return False
@@ -485,8 +494,7 @@ def _valid_package_list(value, expected_count) -> bool:
 
 
 def _sanitize_success_report(payload: dict) -> dict:
-    if (type(payload.get("cache_fingerprint")) is not str or
-            re.fullmatch(r"[0-9a-f]{64}", payload["cache_fingerprint"]) is None or
+    if (not _valid_cache_fingerprint(payload.get("cache_fingerprint")) or
             type(payload.get("packages")) is not dict or len(payload["packages"]) > 1000 or
             type(payload.get("operations")) is not dict or
             type(payload.get("timings")) is not dict or

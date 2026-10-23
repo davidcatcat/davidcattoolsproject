@@ -117,7 +117,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         payload = report or {
             "status": "env_created",
             "cache_status": "miss",
-            "cache_fingerprint": "a" * 64,
+            "cache_fingerprint": "cpython3.13-darwin-arm64-0123456789ab",
             "total_s": 2.5,
             "timings": {"cache": 1.0, "deps": 0.5, "project": 0.2},
             "operations": {
@@ -164,7 +164,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertEqual(report["result"], "PASS")
         self.assertEqual(report["task_id"], self.task_id)
         self.assertEqual(report["head_sha"], self._git("rev-parse", "HEAD"))
-        self.assertEqual(report["cache_fingerprint"], "a" * 64)
+        self.assertEqual(report["cache_fingerprint"],
+                         "cpython3.13-darwin-arm64-0123456789ab")
         self.assertEqual(report["operations"]["downloaded_wheel_count"], 1)
         self.assertEqual(report["operations"]["dependency_install_package_count"], 1)
         self.assertEqual(report["operations"]["project_install_package_count"], 1)
@@ -202,6 +203,14 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertNotIn("password", evidence)
         self.assertNotIn("token=secret", evidence)
         self.assertNotIn("restricted raw diagnostic", evidence)
+
+    def test_cache_fingerprint_requires_real_worktree_env_format(self):
+        self.assertTrue(d6env._valid_cache_fingerprint(
+            "cpython3.13-darwin-arm64-0123456789ab"))
+        for value in ("a" * 64, "../python3.13-darwin-arm64-0123456789ab",
+                      "cpython3.13-darwin-arm64-0123456789abcdef"):
+            with self.subTest(value=value):
+                self.assertFalse(d6env._valid_cache_fingerprint(value))
 
     def test_make_and_python_environment_overrides_are_scrubbed(self):
         result = self._make_result()

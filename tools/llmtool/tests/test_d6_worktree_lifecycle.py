@@ -49,7 +49,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             "env-bootstrap:\n"
             "\t@printf 'bootstrapped\\n' > .worktree-env.lock\n"
             "\t@printf '%s\\n' '{\"status\":\"env_created\",\"cache_status\":\"miss\","
-            "\"cache_fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+            "\"cache_fingerprint\":\"cpython3.13-darwin-arm64-0123456789ab\","
             "\"total_s\":0,\"timings\":{},\"operations\":{"
             "\"pip_download_command_count\":0,\"downloaded_wheels\":[],"
             "\"downloaded_wheel_count\":0,\"wheel_source_copy_count\":0,"
