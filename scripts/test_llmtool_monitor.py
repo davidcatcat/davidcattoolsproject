@@ -1003,6 +1003,39 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
                             for line in mon.office_lines(self.rows())))
 
+    def test_codex_main_shows_what_it_is_doing(self):
+        item = lambda payload: {"type": "event_msg", "payload": payload}
+        call = lambda name, **kw: {"type": "response_item",
+                                   "payload": {"type": kind_of(name), "name": name, **kw}}
+        kind_of = lambda name: "custom_tool_call" if name == "exec" else "function_call"
+        done = lambda parsed, cwd=self.canonical: item({"type": "item_completed", "item": {
+            "type": "CommandExecution", "cwd": cwd, "aggregated_output": "TOOL-OUTPUT-SECRET",
+            "command": "sed -n 1,9p secret-token=abc", "parsed_cmd": parsed}})
+        meta = {"id": "T1", "cwd": self.canonical, "thread_source": "user"}
+        def detail(*events):
+            self._codex("pm", meta, ["task_started"], age=5)
+            path = next(self.codex.rglob("rollout-pm.jsonl"))
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.writelines(json.dumps(event) + "\n" for event in events)
+            os.utime(path, (self.NOW - 5, self.NOW - 5))
+            return self.by_name(self.rows())["codex 主對話"].detail.split("（")[0]
+        self.assertEqual(detail(), "處理中")
+        self.assertEqual(detail(done([{"type": "read", "name": "a.py", "path": "/x/a.py"},
+                                      {"type": "read", "name": "b.md", "path": "b.md"}])),
+                         "讀 a.py 等 2 個檔")
+        self.assertEqual(detail(done([{"type": "search", "query": "secret-token=abc"}])),
+                         "搜尋程式碼")
+        self.assertEqual(detail(done([{"type": "unknown"}], cwd=str(self.task))),
+                         "執行指令")
+        self.assertIn(f"task {self.task.name}", self.by_name(self.rows())["codex 主對話"].detail)
+        self.assertEqual(detail(call("exec", input='tools.write_stdin({session_id:3})')),
+                         "等指令跑完")
+        self.assertEqual(detail(done([]), call("wait_agent", arguments="{}")),
+                         "等 subagent 回報")
+        text = "".join(row.detail for row in self.rows())
+        self.assertNotIn("SECRET", text)
+        self.assertNotIn("secret-token", text)
+
     def test_claude_session_title_and_subagents(self):
         project = self.claude / "proj"
         self._write(project / "s1.jsonl", [
@@ -1030,6 +1063,36 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
+
+    def test_claude_cli_sessions_show_closed_after_the_cli_exits_then_leave(self):
+        for sid, age in (("live", 300), ("recent", 200), ("old", 3 * 3600)):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=age)
+        self._write(self.claude / "proj" / "old" / "subagents" / "agent-a1.jsonl", [{}], age=60)
+        (self.claude / "proj" / "old" / "subagents" / "agent-a1.meta.json").write_text(
+            json.dumps({"description": "Old sub", "finished": False}), encoding="utf-8")
+        self._write(self.claude / "proj" / "app.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "claude-desktop"}], age=3600)
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        # No registry: nothing is judged.
+        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude 互動"],
+                         [mon.IDLE] * 4)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "41.json").write_text(json.dumps({"pid": 41, "sessionId": "live"}),
+                                          encoding="utf-8")
+        (sessions / "77.json").write_text(json.dumps({"pid": 77, "sessionId": "recent"}),
+                                          encoding="utf-8")   # stale: pid 77 is gone
+        rows = {row.detail: row.state for row in self.rows([cli]) if row.kind != "worker"}
+        self.assertEqual(rows, {"title live": mon.IDLE,
+                                "推測 Claude CLI 已關閉（title recent）": mon.CLOSED,
+                                "（無標題）": mon.IDLE})   # desktop session is not judged
+        # A running CLI with no readable entry keeps the most recent unnamed session.
+        other = mon.Process(42, 1, 42, "05:00", "S+", "Claude Code CLI", "claude", "")
+        rows = {row.detail: row.state for row in self.rows([cli, other])}
+        self.assertEqual(rows["title recent"], mon.IDLE)
+        self.assertNotIn("Old sub", rows)
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [

@@ -1220,6 +1220,7 @@ class OfficeRow:
     group: str = ""     # key of the agent that started this one ("" = top level)
     kind: str = "agent"   # agent | subagent | worker
     tui: bool = False     # a Codex thread opened from the terminal CLI
+    cli: bool = False     # an interactive Claude session started from the terminal CLI
     # What is known about the member, kept apart from the display text:
     role: str = ""        # developer | reviewer, only when a record binds it; "" = not claimed
     main: bool = False    # a Codex main thread in the canonical checkout (D6 Integrator's place)
@@ -1430,6 +1431,60 @@ def _humanize(path_stem: str) -> str:
     return " ".join(path_stem.replace("-", "_").split("_"))
 
 
+# What a Codex thread is doing, from structure only: the name of its newest
+# agent tool call, or the kind of its newest command as Codex itself parsed it
+# (read / search / list_files) with just a file's basename. The command text,
+# search query, output and every model message are ignored.
+CODEX_TOOLS = {"wait_agent": "等 subagent 回報", "spawn_agent": "派出 subagent",
+               "send_message": "傳話給 subagent", "followup_task": "交代 subagent 下一步",
+               "list_agents": "查看 subagent", "sleep": "等一下再看",
+               "request_user_input_async": "等你回覆"}
+FILE_NAME = re.compile(r"[\w.+-]{1,60}")
+EXEC_WORKDIR = re.compile(r'\bworkdir\s*:\s*"([^"\\\n]{1,1024})"')
+
+
+def _codex_command(item: dict, canonical: str) -> str:
+    parsed = [entry for entry in item.get("parsed_cmd") or [] if type(entry) is dict]
+    kinds = [entry.get("type") for entry in parsed]
+    if parsed and all(kind == "read" for kind in kinds):
+        names = [os.path.basename(str(entry.get("path") or entry.get("name") or ""))
+                 for entry in parsed]
+        names = [name for name in names if FILE_NAME.fullmatch(name)]
+        if names:
+            return f"讀 {names[0]}" + (f" 等 {len(names)} 個檔" if len(names) > 1 else "")
+        return "讀檔案"
+    if parsed and all(kind in ("search", "list_files") for kind in kinds):
+        return "搜尋程式碼" if "search" in kinds else "列出檔案"
+    place = _place(item.get("cwd") if type(item.get("cwd")) is str else None, canonical)
+    return "執行指令" + (f"（{_place_label(place)}）" if place and place[0] == "task" else "")
+
+
+def _codex_action(tail: list, canonical: str) -> str:
+    for item in reversed(tail):
+        inner = item.get("payload")
+        if type(inner) is not dict:
+            continue
+        kind = inner.get("type")
+        if kind == "function_call" and inner.get("name") in CODEX_TOOLS:
+            return CODEX_TOOLS[inner["name"]]
+        if kind == "custom_tool_call" and inner.get("name") == "exec":
+            # Newer than any finished command: still running.
+            code = str(inner.get("input") or "")[:4096]
+            found = EXEC_WORKDIR.search(code)
+            place = _place(found.group(1), canonical) if found else None
+            where = f"（{_place_label(place)}）" if place and place[0] == "task" else ""
+            return ("等指令跑完" if "write_stdin" in code else "執行指令") + where
+        if kind == "item_completed" and type(inner.get("item")) is dict:
+            done = inner["item"]
+            if done.get("type") == "CommandExecution":
+                return _codex_command(done, canonical)
+            if done.get("type") == "Reasoning":
+                return "思考中"
+        if kind in ("task_started", "task_complete", "turn_aborted"):
+            return ""
+    return ""
+
+
 def _codex_row(path: str, now: float, canonical: str):
     meta = _jsonl_head(path)
     payload = meta.get("payload") if type(meta) is dict else None
@@ -1443,7 +1498,8 @@ def _codex_row(path: str, now: float, canonical: str):
     except OSError:
         return None
     last = None
-    for item in _jsonl_tail(path):
+    tail = _jsonl_tail(path)
+    for item in tail:
         inner = item.get("payload")
         kind = inner.get("type") if type(inner) is dict else None
         if item.get("type") == "event_msg" and kind in ("task_started", "task_complete",
@@ -1496,7 +1552,8 @@ def _codex_row(path: str, now: float, canonical: str):
     # which thread holds that role, so none is claimed.
     return ("main", payload.get("id"),
             OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
-                      evidence="codex 紀錄"))
+                      evidence="codex 紀錄"),
+            _codex_action(tail, canonical) if state == WORKING else "")
 
 
 # One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
@@ -1719,7 +1776,7 @@ def codex_rows(now: float, root: str | None = None,
     paths = []
     for day in days:
         paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
-    mains, subs, scanned = {}, [], set()
+    mains, subs, scanned, actions = {}, [], set(), {}
     for path in sorted(paths):
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
@@ -1730,9 +1787,10 @@ def codex_rows(now: float, root: str | None = None,
         if found is None:
             continue
         scanned.add(path)
-        kind, key, row = found
+        kind, key, row = found[:3]
         if kind == "main":
             mains[key] = row
+            actions[key] = found[3] if len(found) > 3 else ""
         else:
             subs.append((key, row))
         reviews = _review_rows(path, now, row)
@@ -1742,8 +1800,10 @@ def codex_rows(now: float, root: str | None = None,
     for key, row in mains.items():
         if row.main:
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
-            detail = (f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
-                      else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
+            detail = (
+                f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
+                else (actions.get(key) or "處理中") if row.state == WORKING
+                else "等待下一個指示") + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
@@ -1794,7 +1854,7 @@ def claude_rows(now: float, root: str | None = None,
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               WORKING if age <= OFFICE_BUSY else IDLE, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              task=task, evidence="claude 紀錄"))
+                              task=task, evidence="claude 紀錄", cli=first == "cli"))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -2240,6 +2300,57 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     return [row for row in out if row.group not in gone]
 
 
+def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
+    """Session ids of running Claude CLIs, from the CLI's own <pid>.json
+    registry, plus how many running CLIs have no readable entry. None when
+    there is no registry to read, so nothing is judged closed."""
+    try:
+        names = os.listdir(sessions)
+    except OSError:
+        return None
+    pids = {p.pid for p in processes if p.role == "Claude Code CLI"}
+    live = set()
+    for name in names:
+        pid = name[:-len(".json")]
+        if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
+            continue
+        try:
+            with open(os.path.join(sessions, name), "rb") as handle:
+                entry = json.loads(handle.read(64 << 10))
+        except (OSError, ValueError):
+            continue
+        if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
+            live.add(entry["sessionId"])
+            pids.discard(int(pid))
+    return live, len(pids)
+
+
+def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
+                       processes: list[Process]) -> list[OfficeRow]:
+    """An interactive CLI session whose process has exited still leaves its
+    record behind. Each running CLI names its session in the registry; a CLI
+    without a readable entry keeps the most recently active unnamed session.
+    Any other CLI session shows as closed for a while, then leaves with its
+    subagents."""
+    found = _claude_live_sessions(sessions, processes)
+    if found is None:
+        return rows
+    live, unnamed = found
+    keys = {f"claude:{sid}.jsonl" for sid in live}
+    rest = sorted((row for row in rows if row.cli and row.key not in keys),
+                  key=lambda row: row.age if row.age is not None else 1e12)
+    keys |= {row.key for row in rest[:unnamed]}
+    gone, out = set(), []
+    for row in rows:
+        if not row.cli or row.key in keys:
+            out.append(row)
+        elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
+            gone.add(row.key)
+        else:
+            out.append(replace(row, state=CLOSED, detail=f"推測 Claude CLI 已關閉（{row.detail}）"))
+    return [row for row in out if row.group not in gone]
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 canonical: str | None = None,
@@ -2256,6 +2367,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
         p.role == "Codex CLI (node launcher)" for p in processes)
     rows = _closed_codex_cli(rows, clis)
+    rows = _closed_claude_cli(rows, os.path.join(os.path.dirname(
+        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions"), processes)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
