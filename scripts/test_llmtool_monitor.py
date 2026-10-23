@@ -969,9 +969,11 @@ class OfficeViewTests(unittest.TestCase):
         self._write(self.claude / "a" / "run2.jsonl", [
             {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}],
             age=mon.OFFICE_DONE_WINDOW + 60)
+        # an interactive session the PM pinged with `claude --resume <id> -p`
         self._write(self.claude / "a" / "live.jsonl", [
             {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
-            {"type": "ai-title", "aiTitle": "Owner chat"}], age=500)
+            {"type": "ai-title", "aiTitle": "Owner chat"},
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}], age=500)
         rows = self.rows()
         run = next(row for row in rows if row.detail == "Review PR 284")
         self.assertEqual((run.state, run.kind), (mon.DONE, "subagent"))
@@ -1051,6 +1053,24 @@ class OfficeViewTests(unittest.TestCase):
             (850, call("c3", "gh pr view 283 --json comments")),
             (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
                        call_id="c3")),
+            # a plain-text poll format: "SESSION N" while running, raw output at the end
+            (800, call("p1", "claude -p --tools \"\" --no-session-persistence 'Review PR #285'")),
+            (799, dict(out("SESSION 81"), call_id="p1")),
+            (790, call("p2", "const r=await tools.write_stdin({session_id:81});text(r.output);"
+                             "if(r.session_id)text(\"SESSION \"+r.session_id)")),
+            (789, {"type": "custom_tool_call_output", "call_id": "p2", "output": [
+                {"type": "input_text", "text": ""}, {"type": "input_text", "text": "SESSION 81"}]}),
+            (780, call("p3", "const r=await tools.write_stdin({session_id:81});text(r.output)")),
+            (779, dict(out("# Formal Review: PR #285 at c40c80a\n\n**Verdict: PASS**\n- head "
+                           "c40c80acae77147190684a1ea8b66d744378ff41"), call_id="p3")),
+            (60, call("b1", "claude --resume abc -p 'status of PR #286'")),
+            (59, dict(out("SESSION 82"), call_id="b1")),
+            (58, call("b2", "const r=await tools.write_stdin({session_id:82});text(r.output)")),
+            (57, {"type": "custom_tool_call_output", "call_id": "b2", "output": [
+                {"type": "input_text", "text": "Error: Exceeded USD budget (0.25)"},
+                {"type": "input_text", "text": "EXIT 1"}]}),
+            # prose quoting the command is not a call
+            (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
             # searching for running reviews is not a review
             (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf "
                             "'(^|/)codex|claude -p|claude --print|claude$' | head -40")),
@@ -1067,9 +1087,11 @@ class OfficeViewTests(unittest.TestCase):
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
         rows = self.rows([run])
-        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 2)
+        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 4)
         reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
         self.assertEqual(reviews, {"審 PR #283 @18538d5：FAIL": mon.DONE,
+                                   "審 PR #285 @c40c80a：PASS": mon.DONE,
+                                   "審 PR #286：超過預算上限，沒有判定": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         text = "\n".join(mon.office_lines(rows))
         self.assertNotIn("PR #999", text)

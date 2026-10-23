@@ -1237,6 +1237,25 @@ def _jsonl_head(path: str):
         return None
 
 
+def _first_entrypoint(path: str, lines: int = 64):
+    """How a Claude session was first started ("cli" or "sdk-cli")."""
+    try:
+        with open(path, "rb") as handle:
+            for _ in range(lines):
+                raw = handle.readline(OFFICE_HEAD)
+                if not raw:
+                    break
+                try:
+                    item = json.loads(raw)
+                except ValueError:
+                    continue
+                if type(item) is dict and type(item.get("entrypoint")) is str:
+                    return item["entrypoint"]
+    except OSError:
+        pass
+    return None
+
+
 def _jsonl_tail(path: str) -> list:
     try:
         size = os.path.getsize(path)
@@ -1349,13 +1368,16 @@ def _codex_row(path: str, now: float, canonical: str):
 # opening quote of an argv/cmd string) and --print must be in that same
 # command, so a search pattern such as `pgrep -f 'x|claude --print'` is not one.
 CLAUDE_CALL = re.compile(
-    r"(?:^|[\n;(`\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
+    r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
     r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
 STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
 REVIEW_VERDICT = re.compile(r"(?i)\bverdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
 REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
 REVIEW_SCAN = 6 << 20
+RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION (\d{1,9})$', re.M)
+EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT -?\d{1,3}$', re.M)
+OVER_BUDGET = re.compile(r"^Error: Exceeded USD budget\b", re.M)
 _review_cache: dict = {}
 
 
@@ -1414,25 +1436,31 @@ def codex_reviews(path: str) -> list[tuple]:
                 continue
             parts = [part.get("text", "") if type(part) is dict else ""
                      for part in payload.get("output") or []]
-            if polled is not None and any(re.search(rf'"session_id":{polled}\b', text)
-                                          for text in parts):
+            # A still-running exec session is reported as JSON "session_id":N or,
+            # by some PM poll scripts, as a plain "SESSION N" line.
+            running = {int(a or b) for text in parts
+                       for a, b in RUNNING_SESSION.findall(text)}
+            if polled is not None and polled in running:
                 continue   # still running; an exit code here belongs to a parallel command
-            for text in parts:
-                session = re.search(r'"session_id":(\d{1,9})', text)
-                if session and '"exit_code"' not in text:
-                    cache["sessions"][int(session.group(1))] = origin
-                start = text.find('"output":')
-                if '"exit_code"' in text and start >= 0:
-                    head = text[start:start + 1500]
-                    verdict = REVIEW_VERDICT.search(head)
-                    pr, sha = _review_target(head)
-                    cache["done"].append((when, pr or origin[1], sha or origin[2],
-                                          verdict.group(1).upper() if verdict
-                                          else "結束但沒有判定（可能呼叫失敗）"))
-                    for key in [k for k, v in cache["calls"].items() if v is origin]:
-                        cache["calls"].pop(key)
-                    for key in [k for k, v in cache["sessions"].items() if v is origin]:
-                        cache["sessions"].pop(key)
+            if polled is None:
+                for session in running:
+                    cache["sessions"][session] = origin
+            segments = [text[text.find('"output":'):][:1500] if '"output":' in text
+                        else text[:1500] for text in parts]
+            found = [(segment, REVIEW_VERDICT.search(segment)) for segment in segments]
+            segment, verdict = next(((seg, hit) for seg, hit in found if hit),
+                                    ("\n".join(segments), None))
+            if verdict is None and (running or not any(EXITED.search(text) for text in parts)):
+                continue   # no result yet
+            pr, sha = _review_target(segment)
+            failed = ("超過預算上限，沒有判定" if any(map(OVER_BUDGET.search, parts))
+                      else "結束但沒有判定（可能呼叫失敗）")
+            cache["done"].append((when, pr or origin[1], sha or origin[2],
+                                  verdict.group(1).upper() if verdict else failed))
+            for key in [k for k, v in cache["calls"].items() if v is origin]:
+                cache["calls"].pop(key)
+            for key in [k for k, v in cache["sessions"].items() if v is origin]:
+                cache["sessions"].pop(key)
     cache["done"] = cache["done"][-20:]
     # A call and the exec session it opened share one origin: list it once.
     origins = {id(origin): origin for origin in
@@ -1519,7 +1547,11 @@ def claude_rows(now: float, root: str | None = None,
         if action:
             detail = action   # what it is doing right now beats the session title
         key = f"claude:{os.path.basename(path)}"
-        one_shot = any(item.get("entrypoint") == "sdk-cli" for item in tail)
+        # An interactive session another agent pings with `claude --resume -p`
+        # gains sdk-cli entries but is still the interactive member.
+        first = _first_entrypoint(path)
+        one_shot = first == "sdk-cli" or first is None and any(
+            item.get("entrypoint") == "sdk-cli" for item in tail)
         if one_shot:
             # `claude -p` started by another agent: it exits when its one task is done.
             state = WORKING if age <= OFFICE_BUSY else DONE
