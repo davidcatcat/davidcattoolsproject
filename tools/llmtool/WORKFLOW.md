@@ -4,9 +4,9 @@
 
 ## Current Developer and Reviewer routing (Owner decision 2026-10-21)
 
-Codex and OpenCode are normal Developer routes assigned by the existing PM; direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
+Codex and OpenCode are Developer routes assigned by the existing PM only after checking [worker-dispatch.json](worker-dispatch.json); a PAUSED switch forbids dispatch regardless of live health. Direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
 
-Formal Reviewer roles and the Codex Reviewer substitution are defined in [AGENTS.md](../../AGENTS.md); a substitution does not reduce review scope or replace any security, CI or Mac-native gate. Live Worker availability is in the [Roadmap](ROADMAP.md#worker-availability--live-status), and the PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
+Claude is the fixed formal Reviewer under [AGENTS.md](../../AGENTS.md). Codex Reviewer output is advisory/pre-review only and does not replace the formal Claude gate. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
 
 
 ## Historical role and stop decisions
@@ -119,7 +119,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent formal Reviewer (Claude; temporary Codex Reviewer while Claude quota is unavailable) → Integrator path and 2026-10-21 routing in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
+Follow the bounded Developer → independent formal Claude Reviewer → Integrator path and the dispatch-switch check in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Codex Reviewer output may provide advisory/pre-review feedback only and does not replace formal Claude review. D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
@@ -1063,12 +1063,12 @@ human-authorized Developer fixes are engineering work under their own scoped
 task grant and safe-git, not adapter permission to mutate.
 
 The B contract currently launches a fresh isolated Claude text/no-tools child.
-Queueing an existing Codex Reviewer is a different host/session/tool boundary:
-its approved launch/attachment provenance, actual restrictive tools, route,
-packet-export policy and independence must be separately reviewed before a
-real transport is wired. Do not select it via caller JSON or silently replace
-the B reviewer role. Deterministic/fake work can precede that extension; a CLI
-feature is not a provider grant. This docs task performs no model launch.
+A future Codex Reviewer transport would be a separate host/session/tool boundary;
+its launch provenance, restrictive tools, route, packet-export policy and
+independence would require separate review before wiring. Under current authority,
+Codex Reviewer output is advisory/pre-review only and cannot replace the fixed
+Claude formal gate. Do not select a reviewer through caller JSON or infer a
+provider grant from CLI support. This docs task performs no model launch.
 
 #### Minimal adapter: existing events and one finite worker
 
@@ -1756,7 +1756,7 @@ runtime routing or a new milestone.
 | Role | Requested model / reasoning | Responsibility |
 | --- | --- | --- |
 | Developer | `gpt-6.1-sol` / high | Implement the accepted scope and run required tests; sole source/test writer |
-| Reviewer | `gpt-6.1-sol` / high | Independently inspect requirements, source, diff and evidence; read-only review |
+| Codex Cloud advisory Reviewer | `gpt-6.1-sol` / high | Independently inspect requirements, source, diff and evidence; read-only pre-review only. This does not satisfy llmtool’s fixed Claude formal gate |
 | Git agent | `gpt-5.6-luna` / low | Bounded branch inspection, staging/commit, push, PR updates and exact-head CI checks; execute an authorized merge after all gates pass |
 | Coordinator | Current main agent | Pin scope, coordinate handoffs, decide acceptance and handle exceptions |
 
