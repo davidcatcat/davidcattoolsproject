@@ -38,6 +38,7 @@ RETENTION_PATHS = [
     "tools/llmtool/.worktree-env.lock",
     "tools/llmtool/.d6-bootstrap-report.json",
     "tools/llmtool/llmtool.egg-info/",
+    "tools/llmtool/llmtool/__pycache__/__init__.cpython-313.pyc",
     "tools/llmtool/build/",
 ]
 

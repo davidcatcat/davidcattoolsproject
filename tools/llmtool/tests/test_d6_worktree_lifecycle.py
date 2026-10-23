@@ -18,6 +18,7 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import d6_worktree_lifecycle as lifecycle  # noqa: E402
+import d6_worktree_env as d6env  # noqa: E402
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -113,11 +114,34 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(record["head_sha"], self.base)
         self.assertEqual(record["branch"], "test/d6-integration-test")
         self.assertEqual(record["root_realpath"], str(root))
+        generated_pyc = "tools/llmtool/llmtool/__pycache__/__init__.cpython-313.pyc"
+        self.assertIn(generated_pyc, record["retention_paths"])
         worktrees = subprocess.check_output(
             ["/usr/bin/git", "worktree", "list", "--porcelain"],
             cwd=self.source, text=True)
         self.assertIn("worktree " + str(root), worktrees)
         self.assertIn("locked", worktrees)
+
+        package_cache = root / "tools" / "llmtool" / "llmtool" / "__pycache__"
+        package_cache.mkdir(parents=True)
+        (package_cache / "__init__.cpython-313.pyc").write_bytes(b"generated editable-install bytecode")
+        self.assertEqual(self._revalidate_d6(root, "d6-integration-test"), 0)
+
+        (package_cache / "unregistered.cpython-313.pyc").write_bytes(b"unknown")
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            self.assertEqual(self._revalidate_d6(root, "d6-integration-test"), 1)
+        self.assertIn("D6_UNREGISTERED_LOCAL_STATE", output.getvalue())
+
+    def _revalidate_d6(self, root, task_id):
+        previous = Path.cwd()
+        os.chdir(root)
+        try:
+            script = root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
+            with patch.object(d6env, "__file__", str(script)):
+                return d6env.main(["--task-id", task_id])
+        finally:
+            os.chdir(previous)
 
     def test_lock_failure_records_repair_and_skips_bootstrap(self):
         original_run_git = lifecycle._run_git
