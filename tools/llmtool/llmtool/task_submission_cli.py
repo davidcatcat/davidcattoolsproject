@@ -525,6 +525,42 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
                                                   sort_keys=True, separators=(',', ':'))}]
 
 
+def _validate_codex_call_binding(store, task, developer, completion,
+                                registration, snapshot, executor_task_id):
+    """Recheck the durable Task and D6 source immediately before Codex invocation."""
+    current = store.get(task['task_id'])
+    binding = current.get('task_binding')
+    contract_digest = task['task_binding']['contract_digest']
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=current.get('task_id'),
+        run_id=current.get('run_id'), contract_digest=contract_digest)
+    evidence = (current.get('completion', {}).get('evidence')
+                if type(current.get('completion')) is dict else None)
+    if (current.get('schema_version') != 2 or
+            current.get('run_id') != task['run_id'] or
+            current.get('task_contract') != task['task_contract'] or
+            binding != task['task_binding'] or
+            current.get('request_sha256') != task['request_sha256'] or
+            current.get('response') != task['response'] or
+            current.get('developer') != developer or
+            current.get('completion') != completion or
+            current.get('state') != 'PM_RESPONDED' or
+            type(evidence) is not dict or
+            current['completion'].get('executor_task_id') != executor_task_id or
+            evidence.get('task_id') != current['task_id'] or
+            evidence.get('run_id') != current['run_id'] or
+            evidence.get('contract_digest') != contract_digest or
+            evidence.get('source_sha') != snapshot.head or
+            evidence.get('root') != registration.root or
+            evidence.get('common_dir') != registration.common_dir or
+            evidence.get('branch') != registration.branch):
+        raise LLMToolError('Codex Task binding changed before provider invocation')
+    current_registration, current_snapshot = task_completion.bind_executor_task(
+        executor_task_id, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    if current_registration != registration or current_snapshot != snapshot:
+        raise LLMToolError('Codex D6 source binding changed before provider invocation')
+
+
 def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
                                acceptance, pm_goal):
     packet = {
@@ -1132,6 +1168,17 @@ def run_task_delegate(args, *, store=None):
         saved = store.update(task['task_id'], developer=developer)
         _print(_task_view(saved))
         return 1
+    if args.provider == 'codex':
+        try:
+            _validate_codex_call_binding(
+                store, task, developer, completion, registration, snapshot,
+                args.executor_task)
+        except Exception:
+            developer.update(state='DEVELOPER_UNAVAILABLE',
+                             error_code='DEVELOPER_CALL_BINDING_INVALID')
+            saved = store.update(task['task_id'], developer=developer)
+            _print(_task_view(saved))
+            return 1
     try:
         result = client.complete(messages)
     except Exception as exc:

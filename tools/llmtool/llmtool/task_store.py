@@ -51,6 +51,13 @@ _FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
     shape | frozenset(('dispatch_audit',)) for shape in _V2_BASE_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit',))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
+_DISPATCH_AUDIT_FIELDS = frozenset((
+    'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
+    'policy_sha256', 'at',
+))
+_DISPATCH_AUDIT_BINDING_FIELDS = frozenset((
+    'assignment_id', 'source_sha', 'contract_digest',
+))
 _LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
@@ -138,9 +145,11 @@ def _validate(record):
             _fail()
         seen_attempts = set()
         for entry in audit:
-            if (type(entry) is not dict or set(entry) != {
-                    'attempt_id', 'worker_key', 'action', 'decision',
-                    'reason_code', 'policy_sha256', 'at'} or
+            if (type(entry) is not dict or set(entry) not in (
+                    _DISPATCH_AUDIT_FIELDS,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS |
+                    frozenset(('authorization_id',))) or
                     type(entry['attempt_id']) is not str or
                     re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id']) is None or
                     entry['attempt_id'] in seen_attempts or
@@ -155,6 +164,18 @@ def _validate(record):
                     (entry['policy_sha256'] is not None and
                      (type(entry['policy_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', entry['policy_sha256']) is None))):
+                _fail()
+            if _DISPATCH_AUDIT_BINDING_FIELDS.issubset(entry):
+                if (type(entry['assignment_id']) is not str or
+                        re.fullmatch(r'[0-9a-f]{32}', entry['assignment_id']) is None or
+                        type(entry['source_sha']) is not str or
+                        re.fullmatch(r'[0-9a-f]{40}', entry['source_sha']) is None or
+                        type(entry['contract_digest']) is not str or
+                        re.fullmatch(r'[0-9a-f]{64}', entry['contract_digest']) is None):
+                    _fail()
+            if 'authorization_id' in entry and (
+                    type(entry['authorization_id']) is not str or
+                    re.fullmatch(r'[0-9a-f]{32}', entry['authorization_id']) is None):
                 _fail()
             try:
                 stamp = datetime.strptime(entry['at'], '%Y-%m-%dT%H:%M:%SZ')
@@ -1133,6 +1154,56 @@ class TaskStore:
                 raise TaskStoreConflict(
                     'developer assignment already exists; duplicate dispatch refused')
             from . import worker_dispatch
+            if trusted_dispatch_audit:
+                prior_audit = list(current.get('dispatch_audit', []))
+                requested_audit = changes.get('dispatch_audit')
+                if (type(requested_audit) is list and
+                        len(requested_audit) == len(prior_audit) + 1 and
+                        requested_audit[:-1] == prior_audit):
+                    attempted = requested_audit[-1]
+                    refusal = worker_dispatch._adapter_authorization_block_reason(
+                        current, attempted)
+                    if refusal is not None:
+                        blocked = {**attempted, 'decision': 'BLOCKED',
+                                   'reason_code': refusal}
+                        current['dispatch_audit'] = prior_audit + [blocked]
+                        current['updated_at'] = datetime.now(timezone.utc).replace(
+                            microsecond=0).isoformat().replace('+00:00', 'Z')
+                        current['record_sha256'] = _digest(current)
+                        try:
+                            self._write(current, create=False)
+                        except Exception:
+                            raise worker_dispatch.WorkerDispatchDenied(
+                                'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
+                        raise worker_dispatch.WorkerDispatchDenied(refusal)
+            if (type(current.get('developer')) is dict and
+                    'developer' in changes and changes['developer'] is None):
+                old_developer = current['developer']
+                worker_key = worker_dispatch.worker_key_for(
+                    old_developer.get('provider_profile'))
+                policy = worker_dispatch.evaluate(worker_key or 'unknown')
+                denied = worker_dispatch.PolicyDecision(
+                    worker_key or 'unknown', False,
+                    'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN', policy.policy_sha256)
+                audit = list(current.get('dispatch_audit', []))
+                if len(audit) >= worker_dispatch.MAX_AUDIT_ENTRIES:
+                    raise worker_dispatch.WorkerDispatchDenied(
+                        'WORKER_DISPATCH_AUDIT_LIMIT')
+                current['dispatch_audit'] = audit + [
+                    worker_dispatch.audit_entry(
+                        denied, 'REASSIGN',
+                        binding=worker_dispatch._assignment_audit_binding(
+                            current, old_developer))]
+                current['updated_at'] = datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat().replace('+00:00', 'Z')
+                current['record_sha256'] = _digest(current)
+                try:
+                    self._write(current, create=False)
+                except Exception:
+                    raise worker_dispatch.WorkerDispatchDenied(
+                        'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
+                raise worker_dispatch.WorkerDispatchDenied(
+                    'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
             dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
             if dispatch_denial is not None:
                 current['updated_at'] = datetime.now(timezone.utc).replace(

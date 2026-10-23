@@ -18,6 +18,8 @@ from .errors import LLMToolError
 POLICY_SCHEMA_VERSION = 1
 MAX_POLICY_BYTES = 64 * 1024
 MAX_AUDIT_ENTRIES = 64
+MAX_REPAIR_PER_ASSIGNMENT = 1
+MAX_RECOVERY_PER_ASSIGNMENT = 1
 WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'claude-reviewer',
@@ -211,10 +213,10 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     return PolicyDecision(worker_key, False, 'OWNER_PAUSED', digest)
 
 
-def audit_entry(decision, action):
+def audit_entry(decision, action, *, binding=None, authorization_id=None):
     if type(action) is not str or action not in AUDIT_ACTIONS:
         raise WorkerDispatchDenied('WORKER_DISPATCH_ACTION_INVALID')
-    return {
+    entry = {
         'attempt_id': uuid.uuid4().hex,
         'worker_key': decision.worker_key,
         'action': action,
@@ -223,6 +225,86 @@ def audit_entry(decision, action):
         'policy_sha256': decision.policy_sha256,
         'at': datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z'),
     }
+    if binding is not None:
+        if (type(binding) is not dict or set(binding) != set(_AUDIT_BINDING_FIELDS) or
+                type(binding['assignment_id']) is not str or
+                re.fullmatch(r'[0-9a-f]{32}', binding['assignment_id']) is None or
+                type(binding['source_sha']) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', binding['source_sha']) is None or
+                type(binding['contract_digest']) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', binding['contract_digest']) is None):
+            raise WorkerDispatchDenied('WORKER_DISPATCH_BINDING_INVALID')
+        entry.update(binding)
+    if authorization_id is not None:
+        if (type(authorization_id) is not str or
+                re.fullmatch(r'[0-9a-f]{32}', authorization_id) is None or
+                binding is None):
+            raise WorkerDispatchDenied('WORKER_DISPATCH_BINDING_INVALID')
+        entry['authorization_id'] = authorization_id
+    return entry
+
+
+_AUDIT_BINDING_FIELDS = ('assignment_id', 'source_sha', 'contract_digest')
+
+
+def _assignment_audit_binding(record, developer):
+    """Return the validated Task/Run and D6 source binding for one assignment."""
+    task_binding = record.get('task_binding') if type(record) is dict else None
+    if type(developer) is not dict or type(task_binding) is not dict:
+        return None
+    assignment_id = developer.get('assignment_id')
+    source_sha = developer.get('source_sha')
+    contract_digest = task_binding.get('contract_digest')
+    if (type(assignment_id) is not str or re.fullmatch(r'[0-9a-f]{32}', assignment_id) is None or
+            type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None or
+            type(contract_digest) is not str or
+            re.fullmatch(r'[0-9a-f]{64}', contract_digest) is None):
+        return None
+    return {'assignment_id': assignment_id, 'source_sha': source_sha,
+            'contract_digest': contract_digest}
+
+
+def _matches_assignment_binding(entry, binding):
+    return (type(binding) is dict and
+            all(entry.get(field) == binding[field] for field in _AUDIT_BINDING_FIELDS))
+
+
+def _latest_transition_authorization(record, worker_key, action, binding):
+    audit = record.get('dispatch_audit', []) if type(record) is dict else []
+    for entry in reversed(audit):
+        if (type(entry) is dict and entry.get('worker_key') == worker_key and
+                entry.get('action') == action and entry.get('decision') == 'ALLOWED' and
+                'authorization_id' not in entry and _matches_assignment_binding(entry, binding)):
+            return entry.get('attempt_id')
+    return None
+
+
+def _adapter_authorization_block_reason(record, entry):
+    """Validate an adapter authorization against its current assignment and transition."""
+    if 'authorization_id' not in entry:
+        return None
+    developer = record.get('developer') if type(record) is dict else None
+    binding = _assignment_audit_binding(record, developer)
+    if binding is None or not _matches_assignment_binding(entry, binding):
+        return 'WORKER_DISPATCH_BINDING_MISMATCH'
+    if entry.get('decision') != 'ALLOWED':
+        return None
+    state_code = _adapter_state_code(record, entry['worker_key'])
+    if state_code is not None:
+        return state_code
+    transition_id = _latest_transition_authorization(
+        record, entry['worker_key'], entry['action'], binding)
+    if transition_id != entry.get('authorization_id'):
+        return 'WORKER_DISPATCH_TRANSITION_NOT_FOUND'
+    audit = record.get('dispatch_audit', [])
+    if any(type(previous) is dict and previous.get('decision') == 'ALLOWED' and
+           previous.get('authorization_id') == transition_id and
+           previous.get('worker_key') == entry['worker_key'] and
+           previous.get('action') == entry['action'] and
+           _matches_assignment_binding(previous, binding)
+           for previous in audit):
+        return 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'
+    return None
 
 
 def authorize_dispatch(store, task_id, worker_key, action='DISPATCH'):
@@ -240,21 +322,40 @@ def authorize_dispatch(store, task_id, worker_key, action='DISPATCH'):
     developer = current.get('developer') if type(current) is dict else None
     owner_assignment_ref = (developer.get('owner_assignment_ref')
                             if type(developer) is dict else None)
+    binding = _assignment_audit_binding(current, developer)
+    authorization_id = (_latest_transition_authorization(
+        current, worker_key, action, binding) if binding is not None else None)
     decision = evaluate(worker_key, owner_assignment_ref, task_id)
     state_code = _adapter_state_code(current, worker_key)
+    if state_code is None and binding is None:
+        state_code = 'WORKER_DISPATCH_BINDING_INVALID'
+    elif state_code is None and authorization_id is None:
+        state_code = 'WORKER_DISPATCH_TRANSITION_NOT_FOUND'
+    elif state_code is None and any(type(entry) is dict and entry.get('decision') == 'ALLOWED' and
+             entry.get('authorization_id') == authorization_id and
+             entry.get('worker_key') == worker_key and entry.get('action') == action and
+             _matches_assignment_binding(entry, binding)
+             for entry in current.get('dispatch_audit', [])):
+        state_code = 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED'
     if state_code is not None:
         decision = PolicyDecision(worker_key, False, state_code, decision.policy_sha256)
-    entry = audit_entry(decision, action)
+    entry = audit_entry(decision, action, binding=binding,
+                        authorization_id=authorization_id)
     try:
         append = getattr(store, 'append_dispatch_audit')
-        append(task_id, entry, expected={
+        saved = append(task_id, entry, expected={
             'developer': current.get('developer'),
             'dispatch_audit': current.get('dispatch_audit'),
         })
+    except WorkerDispatchDenied:
+        raise
     except Exception:
         raise WorkerDispatchDenied('WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
-    if not decision.allowed:
-        raise WorkerDispatchDenied(decision.reason_code)
+    saved_entry = (saved.get('dispatch_audit', [])[-1]
+                   if type(saved) is dict and saved.get('dispatch_audit') else None)
+    if (type(saved_entry) is not dict or saved_entry.get('decision') != 'ALLOWED'):
+        reason = (saved_entry.get('reason_code') if type(saved_entry) is dict else None)
+        raise WorkerDispatchDenied(reason or decision.reason_code)
     return decision
 
 
@@ -275,6 +376,41 @@ def _adapter_state_code(record, worker_key):
             worker_key_for(developer.get('provider_profile')) != worker_key):
         return 'WORKER_ASSIGNMENT_NOT_DISPATCHING'
     return None
+
+
+_DEVELOPER_IDENTITY_FIELDS = (
+    'assignment_id', 'selection_source', 'provider_profile', 'provider_type',
+    'model', 'backend_session_semantics', 'session_id', 'source_sha',
+    'source_sha_binding', 'owner_assignment_ref',
+)
+_PROVIDER_TYPES = {
+    'company-gw': 'openai-compatible',
+    'codex': 'codex-cli',
+    'opencode': 'opencode-cli',
+    'claude': 'claude-cli',
+}
+
+
+def _initial_provider_binding(old_developer, new_developer):
+    """Allow the first route identity to be recorded on a pending dispatch only."""
+    return (
+        old_developer.get('state') in ('DEVELOPER_PENDING', 'DEVELOPER_UNAVAILABLE') and
+        new_developer.get('state') == 'DEVELOPER_DISPATCHING' and
+        old_developer.get('assignment_id') == new_developer.get('assignment_id') and
+        old_developer.get('provider_profile') == new_developer.get('provider_profile') and
+        old_developer.get('provider_type') is None and old_developer.get('model') is None and
+        new_developer.get('provider_type') == _PROVIDER_TYPES.get(
+            new_developer.get('provider_profile')) and
+        all(old_developer.get(field) == new_developer.get(field)
+            for field in _DEVELOPER_IDENTITY_FIELDS
+            if field not in ('provider_type', 'model'))
+    )
+
+
+def _developer_identity_changed(old_developer, new_developer):
+    changed = any(old_developer.get(field) != new_developer.get(field)
+                  for field in _DEVELOPER_IDENTITY_FIELDS)
+    return changed and not _initial_provider_binding(old_developer, new_developer)
 
 
 def task_store_attempts(current, changes):
@@ -305,14 +441,9 @@ def task_store_attempts(current, changes):
         attempts.append((worker or 'unknown', 'DISPATCH'))
         return attempts
 
-    if (new_developer.get('assignment_id') != old_developer.get('assignment_id') or
-            new_developer.get('provider_profile') != old_developer.get('provider_profile')):
+    if _developer_identity_changed(old_developer, new_developer):
         worker = worker_key_for(new_developer.get('provider_profile'))
-        old_state = old_developer.get('state')
-        action = ('RECOVERY' if old_state == 'DEVELOPER_UNAVAILABLE'
-                  else 'REPAIR' if old_state in (
-                      'DEVELOPER_RESPONDED', 'DEVELOPER_OUTPUT_REJECTED') else 'REASSIGN')
-        attempts.append((worker or 'unknown', action))
+        attempts.append((worker or 'unknown', 'REASSIGN'))
         return attempts
 
     if (new_developer.get('state') == 'DEVELOPER_PENDING' and
@@ -365,6 +496,7 @@ def authorize_task_store_change(current, changes, expected=None):
     new_developer = changes.get('developer', old_developer)
     owner_assignment_ref = (new_developer.get('owner_assignment_ref')
                             if type(new_developer) is dict else None)
+    binding = _assignment_audit_binding(current, new_developer)
     audit = list(current.get('dispatch_audit', []))
     if len(audit) + len(attempts) > MAX_AUDIT_ENTRIES:
         raise WorkerDispatchDenied('WORKER_DISPATCH_AUDIT_LIMIT')
@@ -385,6 +517,20 @@ def authorize_task_store_change(current, changes, expected=None):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_REPAIR_NOT_AUTHORIZED',
                                           decision.policy_sha256)
+            limit = {'REPAIR': MAX_REPAIR_PER_ASSIGNMENT,
+                     'RECOVERY': MAX_RECOVERY_PER_ASSIGNMENT}.get(action)
+            if limit is not None:
+                assignment_id = old_developer.get('assignment_id')
+                prior_attempts = sum(
+                    1 for item in audit
+                    if type(item) is dict and item.get('worker_key') == worker_key and
+                    item.get('action') == action and
+                    item.get('assignment_id') in (None, assignment_id))
+                if prior_attempts >= limit:
+                    reason = ('WORKER_REPAIR_LIMIT_REACHED' if action == 'REPAIR' else
+                              'WORKER_RECOVERY_LIMIT_REACHED')
+                    decision = PolicyDecision(worker_key, False, reason,
+                                              decision.policy_sha256)
         if action == 'REASSIGN':
             bound = (type(expected) is dict and 'developer' in expected and
                      expected['developer'] == old_developer)
@@ -392,7 +538,11 @@ def authorize_task_store_change(current, changes, expected=None):
                 decision = PolicyDecision(worker_key, False,
                                           'WORKER_REASSIGN_PRECONDITION',
                                           decision.policy_sha256)
-        entries.append(audit_entry(decision, action))
+            elif old_developer.get('assignment_id') == new_developer.get('assignment_id'):
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_REASSIGN_NEW_ASSIGNMENT_REQUIRED',
+                                          decision.policy_sha256)
+        entries.append(audit_entry(decision, action, binding=binding))
         decisions.append(decision)
     current['dispatch_audit'] = audit + entries
     for decision in decisions:

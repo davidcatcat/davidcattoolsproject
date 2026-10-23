@@ -15,7 +15,9 @@ from unittest.mock import patch
 from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
 from llmtool import worker_dispatch
+from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
+from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
@@ -31,6 +33,17 @@ def config(provider_type='codex-cli', model='gpt-6-luna'):
         'selected': {'type': provider_type, 'model': model,
                      'timeout_seconds': 30, 'provider_options': {}}
     }, 'generation': {'temperature': 0, 'max_tokens': 128}}
+
+
+def codex_pm_config():
+    return {
+        'active_provider': 'codex-pm',
+        'providers': {'codex-pm': {
+            'type': 'codex-cli', 'model': 'gpt-6-luna', 'timeout_seconds': 30,
+            'provider_options': {},
+        }},
+        'generation': {'temperature': 0, 'max_tokens': 128},
+    }
 
 
 class FakeClient:
@@ -1070,24 +1083,49 @@ class TaskSubmissionCLITests(unittest.TestCase):
         patch_text = ('diff --git a/sample.py b/sample.py\n'
                       '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
                       '-VALUE = 1\n+VALUE = 2\n')
-        client = FakeClient(Reply(patch_text, {'elapsed_seconds': 0.25,
-                                               'model': 'gpt-6-luna'}))
+        codex_config = codex_pm_config()
         output = io.StringIO()
         args = self._codex_delegate_args(task)
+        bind_executor_task = submission_cli.task_completion.bind_executor_task
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=config('codex-cli', 'gpt-6-luna')) as resolve, \
+                      return_value=codex_config) as resolve, \
                 patch('llmtool.task_submission_cli.api_key',
                       side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
-                patch('llmtool.task_submission_cli.create_client', return_value=client) as create, \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             wraps=bind_executor_task) as bind_executor, \
+                patch.object(CodexCLIProvider, 'complete', autospec=True,
+                             return_value=Reply(patch_text, {'elapsed_seconds': 0.25,
+                                                             'model': 'gpt-6-luna'})) as complete, \
                 redirect_stdout(output):
             code = run_task_delegate(args)
         self.assertEqual(code, 0, output.getvalue())
         result = json.loads(output.getvalue())
         developer = result['developer']
         self.assertEqual(resolve.call_args.args, ('codex-pm',))
-        create.assert_called_once_with(config('codex-cli', 'gpt-6-luna'))
-        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(bind_executor.call_count, 2)
+        complete.assert_called_once()
+        client = complete.call_args.args[0]
+        messages = complete.call_args.args[1]
+        self.assertIsInstance(client, CodexCLIProvider)
+        self.assertEqual(client.provider, codex_config['providers']['codex-pm'])
+        capabilities = get_provider_capabilities('codex-cli').to_dict()
+        self.assertFalse(capabilities['code_edit'])
+        self.assertFalse(capabilities['shell'])
+        self.assertFalse(capabilities['git'])
+        self.assertEqual(OUTPUT_LIMIT, 1024 * 1024)
+        argv = client._argv('/usr/bin/codex', '/tmp/llmtool-isolated-test')
+        settings = [argv[index + 1] for index, item in enumerate(argv) if item == '-c']
+        self.assertIn('permissions.llmtool-text.extends=":read-only"', settings)
+        self.assertIn('permissions.llmtool-text.network.enabled=false', settings)
+        self.assertIn('features.shell_tool=false', settings)
+        self.assertIn('features.unified_exec=false', settings)
+        self.assertNotIn('--sandbox', argv)
+        with client._temporary_directory() as isolated:
+            isolated_path = Path(isolated).resolve()
+            self.assertFalse(isolated_path.is_relative_to(self.executor_root))
+            self.assertEqual(list(isolated_path.iterdir()), [])
+        self.assertEqual(messages[1]['content'][:1], '{')
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(developer['provider_profile'], 'codex')
         self.assertEqual(developer['provider_type'], 'codex-cli')
@@ -1100,16 +1138,76 @@ class TaskSubmissionCLITests(unittest.TestCase):
             patch_text.encode()).hexdigest())
         self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
         self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
-        packet = json.loads(client.calls[0][1]['content'])
+        packet = json.loads(messages[1]['content'])
         self.assertEqual(packet['task_contract_digest'], task['task_binding']['contract_digest'])
         self.assertEqual(packet['source_sha'], self.executor_head)
         self.assertEqual(packet['write_paths'], ['sample.py'])
-        self.assertIn('codex-cli code Developer', client.calls[0][0]['content'])
+        self.assertIn('codex-cli code Developer', messages[0]['content'])
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['artifact'], patch_text)
         self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'codex-developer')
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
+
+    def test_codex_d6_revalidation_failure_blocks_provider_call(self):
+        task = self._pm_task_with_codex_assignment()
+        original_bind = submission_cli.task_completion.bind_executor_task
+        bind_calls = []
+
+        def drift_after_dispatch(*args, **kwargs):
+            bind_calls.append((args, kwargs))
+            if len(bind_calls) == 1:
+                return original_bind(*args, **kwargs)
+            raise LLMToolError('simulated D6 registry drift')
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=codex_pm_config()), \
+                patch('llmtool.task_submission_cli.api_key',
+                      side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             side_effect=drift_after_dispatch), \
+                patch.object(CodexCLIProvider, 'complete', autospec=True) as complete, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task))
+        self.assertEqual(code, 1)
+        self.assertEqual(len(bind_calls), 2)
+        complete.assert_not_called()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'],
+                         'DEVELOPER_CALL_BINDING_INVALID')
+
+    def test_codex_proposal_is_host_size_and_scope_validated(self):
+        cases = (
+            ('DEVELOPER_OUTPUT_OUT_OF_SCOPE',
+             'diff --git a/outside.py b/outside.py\n'
+             '--- a/outside.py\n+++ b/outside.py\n@@ -1 +1 @@\n-old\n+new\n'),
+            ('DEVELOPER_OUTPUT_TOO_LARGE',
+             'diff --git a/sample.py b/sample.py\n' + ('x' * (RESPONSE_LIMIT + 1))),
+        )
+        for reason, proposal in cases:
+            with self.subTest(reason=reason):
+                task = self._pm_task_with_codex_assignment()
+                client = FakeClient(Reply(proposal, {'elapsed_seconds': 0.1}))
+                output = io.StringIO()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.resolve_profile_config',
+                              return_value=codex_pm_config()), \
+                        patch('llmtool.task_submission_cli.api_key',
+                              side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
+                        patch('llmtool.task_submission_cli.create_client',
+                              return_value=client), redirect_stdout(output):
+                    code = run_task_delegate(self._codex_delegate_args(task))
+                self.assertEqual(code, 1)
+                self.assertEqual(len(client.calls), 1)
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['developer']['state'],
+                                 'DEVELOPER_OUTPUT_REJECTED')
+                self.assertEqual(result['developer']['error_code'], reason)
+                self.assertIsNone(result['developer']['artifact'])
+                self.assertNotIn(proposal[:64], output.getvalue())
 
     def test_codex_paused_or_invalid_policy_never_calls_provider(self):
         for policy_change, expected_reason in (

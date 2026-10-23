@@ -113,6 +113,21 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['provider_type'], 'codex-cli')
         self.assertIsNone(saved['developer']['max_tokens'])
         self.assertIsNone(saved['developer']['usage'])
+        before_clear = saved
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self.store.update(task['task_id'], developer=None)
+        self.assertEqual(caught.exception.dispatch_code,
+                         'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+        after_clear = self.store.get(task['task_id'])
+        self.assertEqual(after_clear['developer'], before_clear['developer'])
+        self.assertEqual(len(after_clear['dispatch_audit']),
+                         len(before_clear['dispatch_audit']) + 1)
+        refusal = after_clear['dispatch_audit'][-1]
+        self.assertEqual(refusal['worker_key'], 'codex-developer')
+        self.assertEqual(refusal['action'], 'REASSIGN')
+        self.assertEqual(refusal['decision'], 'BLOCKED')
+        self.assertEqual(refusal['reason_code'], 'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+        self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
 
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()

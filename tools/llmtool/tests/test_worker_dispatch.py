@@ -300,14 +300,27 @@ class WorkerDispatchTests(unittest.TestCase):
         saved = self.store.update(self.task['task_id'], developer=dispatching)
         self.assertEqual([entry['decision'] for entry in saved['dispatch_audit']],
                          ['ALLOWED', 'ALLOWED'])
+        transition = saved['dispatch_audit'][-1]
+        decision = worker_dispatch.authorize_dispatch(
+            self.store, self.task['task_id'], 'company-gw', 'DISPATCH')
+        saved = self.store.get(self.task['task_id'])
+        adapter = saved['dispatch_audit'][-1]
+        self.assertTrue(decision.allowed)
+        self.assertEqual(adapter['assignment_id'], developer['assignment_id'])
+        self.assertEqual(adapter['source_sha'], developer['source_sha'])
+        self.assertEqual(adapter['contract_digest'], self.task['task_binding']['contract_digest'])
+        self.assertEqual(adapter['authorization_id'], transition['attempt_id'])
+        self.assertEqual(adapter['decision'], 'ALLOWED')
         self._set_state('company-gw', 'PAUSED')
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
             worker_dispatch.authorize_dispatch(
                 self.store, self.task['task_id'], 'company-gw', 'DISPATCH')
-        self.assertEqual(caught.exception.dispatch_code, 'OWNER_PAUSED')
+        self.assertEqual(caught.exception.dispatch_code,
+                         'WORKER_DISPATCH_AUTHORIZATION_CONSUMED')
         saved = self.store.get(self.task['task_id'])
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
-        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'],
+                         'WORKER_DISPATCH_AUTHORIZATION_CONSUMED')
 
     def test_adapter_requires_a_durable_taskstore_dispatching_claim(self):
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
@@ -319,11 +332,11 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
 
     def test_ambiguous_provider_outcome_cannot_be_replayed_through_taskstore(self):
-        developer = self.developer()
+        developer = self.developer(state='DEVELOPER_DISPATCHING')
+        developer.update(provider_type='openai-compatible', model='gw-model')
         self.store.compare_and_update(
             self.task['task_id'], expected={'developer': None}, developer=developer)
         unknown = {**developer, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
-                   'provider_type': 'openai-compatible', 'model': 'gw-model',
                    'error_code': 'DEVELOPER_TIMEOUT'}
         self.store.update(self.task['task_id'], developer=unknown)
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
@@ -335,11 +348,11 @@ class WorkerDispatchTests(unittest.TestCase):
                          'WORKER_REPLAY_FORBIDDEN')
 
     def test_ambiguous_provider_outcome_cannot_reset_to_pending(self):
-        developer = self.developer()
+        developer = self.developer(state='DEVELOPER_DISPATCHING')
+        developer.update(provider_type='openai-compatible', model='gw-model')
         self.store.compare_and_update(
             self.task['task_id'], expected={'developer': None}, developer=developer)
         unknown = {**developer, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
-                   'provider_type': 'openai-compatible', 'model': 'gw-model',
                    'error_code': 'DEVELOPER_TIMEOUT'}
         self.store.update(self.task['task_id'], developer=unknown)
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied):
@@ -350,14 +363,35 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'],
                          'WORKER_REPLAY_FORBIDDEN')
 
-    def test_same_id_provider_route_change_is_a_gated_reassignment(self):
+    def test_provider_identity_changes_require_a_new_reassignment(self):
+        claude_pending = self.developer(provider='claude')
+        claude_dispatching = {**claude_pending, 'state': 'DEVELOPER_DISPATCHING',
+                              'provider_type': 'claude-cli', 'model': 'claude-model'}
+        self.assertEqual(worker_dispatch.task_store_attempt(
+            {'developer': claude_pending}, {'developer': claude_dispatching}),
+            ('claude-developer', 'DISPATCH'))
+
         developer = self.developer()
         self.store.compare_and_update(
             self.task['task_id'], expected={'developer': None}, developer=developer)
-        replacement = {**developer, 'provider_profile': 'opencode'}
+        for field, value in (
+                ('provider_profile', 'opencode'), ('provider_type', 'codex-cli'),
+                ('model', 'other-model'), ('source_sha', 'c' * 40),
+                ('session_id', 'dev-new-session')):
+            with self.subTest(field=field):
+                replacement = {**developer, field: value}
+                with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+                    self.store.update(self.task['task_id'], developer=replacement)
+                self.assertEqual(caught.exception.dispatch_code,
+                                 'WORKER_REASSIGN_PRECONDITION')
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
-            self.store.update(self.task['task_id'], developer=replacement)
-        self.assertEqual(caught.exception.dispatch_code, 'WORKER_REASSIGN_PRECONDITION')
+            self.store.compare_and_update(
+                self.task['task_id'], expected={'developer': developer},
+                developer={**developer, 'provider_profile': 'opencode'})
+        self.assertEqual(caught.exception.dispatch_code,
+                         'WORKER_REASSIGN_NEW_ASSIGNMENT_REQUIRED')
+        replacement = {**developer, 'assignment_id': 'e' * 32,
+                       'provider_profile': 'opencode'}
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
             self.store.compare_and_update(
                 self.task['task_id'], expected={'developer': developer},
@@ -391,14 +425,14 @@ class WorkerDispatchTests(unittest.TestCase):
         recovery_reassigned = {**recovery, 'assignment_id': 'b' * 32}
         self.assertEqual(worker_dispatch.task_store_attempt(
             {'developer': developer}, {'developer': recovery_reassigned}),
-            ('company-gw', 'RECOVERY'))
+            ('company-gw', 'REASSIGN'))
 
         responded = self.developer(state='DEVELOPER_RESPONDED')
+        responded.update(provider_type='openai-compatible', model='gw-model')
         responded['direct_result_callback'] = {
             'review_return': {'state': 'RETURNED',
                               'next_step': 'RETURN_TO_DEVELOPER_ONCE'}}
-        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING',
-                  'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING'}
         self.assertEqual(worker_dispatch.task_store_attempt(
             {'developer': responded}, {'developer': repair}), ('company-gw', 'REPAIR'))
         self.assertIsNone(worker_dispatch.authorize_task_store_change(
@@ -406,12 +440,46 @@ class WorkerDispatchTests(unittest.TestCase):
         repair_reassigned = {**repair, 'assignment_id': 'b' * 32}
         self.assertEqual(worker_dispatch.task_store_attempt(
             {'developer': responded}, {'developer': repair_reassigned}),
-            ('company-gw', 'REPAIR'))
+            ('company-gw', 'REASSIGN'))
+
+    def test_repair_and_recovery_limits_are_per_assignment(self):
+        unavailable = self.developer(state='DEVELOPER_UNAVAILABLE')
+        recovery = {**unavailable, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        recovery_task = self._task()
+        recovery_task['developer'] = unavailable
+        recovery_task['dispatch_audit'] = []
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            recovery_task, {'developer': recovery}))
+        second_recovery = worker_dispatch.authorize_task_store_change(
+            recovery_task, {'developer': recovery})
+        self.assertIsInstance(second_recovery, worker_dispatch.WorkerDispatchDenied)
+        self.assertEqual(second_recovery.dispatch_code, 'WORKER_RECOVERY_LIMIT_REACHED')
+        self.assertEqual(recovery_task['dispatch_audit'][-1]['reason_code'],
+                         'WORKER_RECOVERY_LIMIT_REACHED')
+
+        responded = self.developer(state='DEVELOPER_RESPONDED')
+        responded.update(provider_type='openai-compatible', model='gw-model')
+        responded['direct_result_callback'] = {
+            'review_return': {'state': 'RETURNED',
+                              'next_step': 'RETURN_TO_DEVELOPER_ONCE'}}
+        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING'}
+        repair_task = self._task()
+        repair_task['developer'] = responded
+        repair_task['dispatch_audit'] = []
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            repair_task, {'developer': repair}))
+        second_repair = worker_dispatch.authorize_task_store_change(
+            repair_task, {'developer': repair})
+        self.assertIsInstance(second_repair, worker_dispatch.WorkerDispatchDenied)
+        self.assertEqual(second_repair.dispatch_code, 'WORKER_REPAIR_LIMIT_REACHED')
+        self.assertEqual(repair_task['dispatch_audit'][-1]['reason_code'],
+                         'WORKER_REPAIR_LIMIT_REACHED')
 
     def test_repair_requires_a_persisted_failed_review_decision(self):
         responded = self.developer(state='DEVELOPER_RESPONDED')
-        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING',
-                  'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        responded.update(provider_type='openai-compatible', model='gw-model')
+        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING'}
         denied = worker_dispatch.authorize_task_store_change(
             {'developer': responded, 'dispatch_audit': []}, {'developer': repair})
         self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
@@ -421,7 +489,7 @@ class WorkerDispatchTests(unittest.TestCase):
             {'developer': responded, 'dispatch_audit': []},
             {'developer': repair_reassigned})
         self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
-        self.assertEqual(denied.dispatch_code, 'WORKER_REPAIR_NOT_AUTHORIZED')
+        self.assertEqual(denied.dispatch_code, 'WORKER_REASSIGN_PRECONDITION')
 
     def test_combined_developer_and_reviewer_transition_gates_both_actions(self):
         previous = self.developer(state='DEVELOPER_PENDING')
