@@ -816,6 +816,29 @@ class OfficeViewTests(unittest.TestCase):
     def by_name(self, rows):
         return {row.name: row for row in rows}
 
+    def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                           "originator": "codex-tui"}, ["task_started", "task_complete"], age=180)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Bacon",
+                            "originator": "codex-tui", "agent_path": "/root/issue289_runtime_dev"},
+                    ["task_started", "task_complete"], age=420)
+        self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
+                            "originator": "codex_vscode"}, ["task_complete"], age=60)
+        cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
+        self.assertEqual(self.by_name(self.rows([cli]))["codex PM"].state, mon.IDLE)
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["codex PM"].state, rows["codex PM"].detail[:13]),
+                         (mon.CLOSED, "Codex CLI 已關閉"))
+        self.assertEqual(rows["codex developer Bacon"].state, mon.DONE)
+        self.assertEqual(rows["codex developer"].state, mon.IDLE)   # not opened from the CLI
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                           "originator": "codex-tui"}, ["task_complete"],
+                    age=mon.OFFICE_DONE_WINDOW + 60)
+        rows = self.by_name(self.rows())
+        self.assertNotIn("codex PM", rows)
+        self.assertNotIn("codex developer Bacon", rows)   # leaves with the PM that started it
+
     def test_codex_pm_and_subagents_show_role_task_and_state(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
                     ["task_started", "task_complete"], age=400)

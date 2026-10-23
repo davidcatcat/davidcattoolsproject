@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import os
 import re
@@ -1177,8 +1177,8 @@ OFFICE_HEAD = 1 << 20
 OFFICE_TAIL = 512 << 10
 AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")
 NICKNAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
-WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED, ATTENTION = (
-    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認", "需注意")
+WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED, ATTENTION, CLOSED = (
+    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認", "需注意", "已關閉")
 
 
 @dataclass(frozen=True)
@@ -1191,6 +1191,7 @@ class OfficeRow:
     key: str = ""       # identity other rows can name as their group
     group: str = ""     # key of the agent that started this one ("" = top level)
     kind: str = "agent"   # agent | subagent | worker
+    tui: bool = False     # a Codex thread opened from the terminal CLI
 
 
 def canonical_root(start: str = SCRIPT_ROOT) -> str:
@@ -1331,10 +1332,12 @@ def _codex_row(path: str, now: float, canonical: str):
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
     since = f"（{time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）" if started else ""
+    tui = payload.get("originator") == "codex-tui"
     if place[0] == "task":
         return ("main", payload.get("id"),
-                OfficeRow("codex developer", state, place[1], age, 10, key=key))
-    return ("main", payload.get("id"), OfficeRow("codex PM", state, since, age, 0, key=key))
+                OfficeRow("codex developer", state, place[1], age, 10, key=key, tui=tui))
+    return ("main", payload.get("id"),
+            OfficeRow("codex PM", state, since, age, 0, key=key, tui=tui))
 
 
 # One-shot Claude reviews a Codex thread runs with `claude --print`. Only that
@@ -1479,8 +1482,7 @@ def codex_rows(now: float, root: str | None = None,
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
-            row = OfficeRow(row.name, WORKING if busy else row.state, detail, row.age, row.order,
-                            key=row.key)
+            row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
 
@@ -1938,6 +1940,22 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
     return state, finished, ended
 
 
+def _closed_codex_cli(rows: list[OfficeRow]) -> list[OfficeRow]:
+    """With no Codex CLI running, a thread opened from the CLI has no terminal:
+    the app-server daemon may still hold its record open, but nobody is there.
+    It shows as closed for a while, then leaves with what it started."""
+    gone, out = set(), []
+    for row in rows:
+        if not row.tui:
+            out.append(row)
+        elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
+            gone.add(row.key)
+        else:
+            out.append(replace(row, state=CLOSED, detail="Codex CLI 已關閉" + (
+                row.detail[row.detail.rfind("（"):] if row.detail.endswith("開始）") else "")))
+    return [row for row in out if row.group not in gone]
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
@@ -1949,6 +1967,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
+    if not any(p.role.startswith("Codex CLI") for p in processes):
+        rows = _closed_codex_cli(rows)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is. Without any, the Roadmap row says why OpenCode is not here.
     _forget_cwds(processes)
@@ -2015,8 +2035,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     pms = sorted((row for row in rows if row.name == "codex PM"),
                  key=lambda row: row.age if row.age is not None else 1e12)
     launcher = pms[0].key if pms else ""
-    rows = [OfficeRow(row.name, row.state, row.detail, row.age, row.order, row.key,
-                      launcher if row.group == "codex-launched" else row.group, row.kind)
+    rows = [replace(row, group=launcher) if row.group == "codex-launched" else row
             for row in rows]
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
