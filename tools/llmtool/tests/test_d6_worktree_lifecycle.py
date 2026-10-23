@@ -125,6 +125,13 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(record["head_sha"], self.base)
         self.assertEqual(record["branch"], "test/d6-integration-test")
         self.assertEqual(record["root_realpath"], str(root))
+        marker = record["env2_pass_marker"]
+        self.assertEqual(marker["result"], "PASS")
+        self.assertEqual(marker["task_id"], "d6-integration-test")
+        self.assertEqual(marker["root_realpath"], str(root))
+        self.assertEqual(marker["submitted_head_sha"], self.base)
+        self.assertEqual(marker["current_head_sha"], self.base)
+        self.assertEqual(marker["environment_fingerprint"], _actual_cache_fingerprint())
         generated_pyc = ("tools/llmtool/llmtool/__pycache__/__init__." +
                          sys.implementation.cache_tag + ".pyc")
         self.assertIn(generated_pyc, record["retention_paths"])
@@ -206,6 +213,32 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             cwd=self.source, text=True)
         self.assertIn("worktree " + str(root), worktrees)
         self.assertNotIn("\nlocked\n", worktrees)
+
+    def test_bootstrap_failure_relocks_registry_and_records_repair_without_marker(self):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap",
+                             side_effect=lifecycle.LifecycleError("ENV_BOOTSTRAP_FAILED")), \
+                contextlib.redirect_stdout(output):
+            with self.assertRaises(lifecycle.LifecycleError) as raised:
+                lifecycle.create_worktree(
+                    canonical_root=self.source,
+                    workspace_root=self.tasks,
+                    task_id="d6-bootstrap-failure-test",
+                    agent_id="codex-developer-test",
+                    session_ref="live test session",
+                    lease_ref="live test lease",
+                    branch="fix/d6-bootstrap-failure-test",
+                    base_sha=self.base,
+                )
+        self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_FAILED")
+        record_path = (self.source / ".git" / "llmtool-worktrees" /
+                       "d6-bootstrap-failure-test.json")
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record["state"], "REPAIR")
+        self.assertEqual(record["lock_state"], "LOCKED")
+        self.assertNotIn("env2_pass_marker", record)
+        self.assertNotIn("D6_WORKTREE_READY", output.getvalue())
 
     def test_option_like_and_reflog_expansion_branches_fail_closed(self):
         for index, branch in enumerate(("--help", "fix/topic@{1}")):

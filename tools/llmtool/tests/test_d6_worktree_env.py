@@ -74,6 +74,9 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.registry = self.common / "llmtool-worktrees"
         self.registry.mkdir(mode=0o700)
         os.chmod(self.registry, 0o700)
+        lock_path = self.registry / ".lifecycle.lock"
+        lock_path.touch(mode=0o600)
+        os.chmod(lock_path, 0o600)
         self.record_path = self.registry / (self.task_id + ".json")
         self._write_record()
 
@@ -174,16 +177,41 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(report_path.stat().st_mode), 0o600)
         self.assertEqual(report["result"], "PASS")
         self.assertEqual(report["task_id"], self.task_id)
+        self.assertEqual(report["root_realpath"], str(self.root))
         self.assertEqual(report["head_sha"], self._git("rev-parse", "HEAD"))
         self.assertEqual(report["cache_fingerprint"], _actual_cache_fingerprint())
         self.assertEqual(report["operations"]["downloaded_wheel_count"], 1)
         self.assertEqual(report["operations"]["dependency_install_package_count"], 1)
+        record = json.loads(self.record_path.read_text(encoding="utf-8"))
+        marker = record["env2_pass_marker"]
+        self.assertEqual(marker["result"], "PASS")
+        self.assertEqual(marker["task_id"], self.task_id)
+        self.assertEqual(marker["root_realpath"], str(self.root))
+        self.assertEqual(marker["submitted_head_sha"], self._git("rev-parse", "HEAD"))
+        self.assertEqual(marker["current_head_sha"], self._git("rev-parse", "HEAD"))
+        self.assertEqual(marker["environment_fingerprint"], _actual_cache_fingerprint())
+        self.assertEqual(marker["report_sha256"],
+                         __import__("hashlib").sha256(report_path.read_bytes()).hexdigest())
         self.assertEqual(report["operations"]["project_install_package_count"], 1)
         self.assertNotIn("secret-token", report_path.read_text(encoding="utf-8"))
         self.assertNotIn("token=secret", report_path.read_text(encoding="utf-8"))
         # The report itself is in retention_paths and must not break revalidation.
         with mock.patch.object(d6env, "_run_make", return_value=result):
             self.assertEqual(self._main_at_root(), 0)
+
+    def test_failed_bootstrap_clears_previous_pass_marker(self):
+        record = self._record()
+        record["env2_pass_marker"] = {"result": "PASS", "task_id": self.task_id}
+        self._write_record(record)
+        failed = self._make_result(returncode=1,
+                                   report={"status": "error", "code": "PIP_FAILED"})
+        with mock.patch.object(d6env, "_run_make", return_value=failed):
+            self.assertEqual(d6env._invoke_bootstrap(self.root, self.task_id), 1)
+        updated = json.loads(self.record_path.read_text(encoding="utf-8"))
+        self.assertNotIn("env2_pass_marker", updated)
+        report = json.loads((self.root / "tools" / "llmtool" /
+                             ".d6-bootstrap-report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["result"], "FAIL")
 
     def test_interpreter_path_with_spaces_is_shell_quoted(self):
         makefile_dir = self.root / "tools" / "llmtool"

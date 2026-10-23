@@ -10,6 +10,7 @@ or mutate Git worktrees, registrations, or provider state.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -623,10 +624,133 @@ def _bootstrap_report_binding(root: Path, task_id: str, elapsed: float) -> dict:
     record = _read_record(common_dir, task_id, os.getuid())
     return {
         "task_id": task_id,
+        "root_realpath": str(root),
         "head_sha": record["head_sha"],
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "elapsed_s": elapsed,
     }
+
+
+def _update_env2_pass_marker(root: Path, task_id: str, report: dict | None) -> None:
+    """Clear or atomically publish the registry marker under the D6 lifecycle lock."""
+    common_dir = Path(_run_git(root, "rev-parse", "--path-format=absolute",
+                               "--git-common-dir"))
+    registry = common_dir / "llmtool-worktrees"
+    path = registry / (task_id + ".json")
+    lock_path = registry / ".lifecycle.lock"
+    try:
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        _reject("D6_REGISTRY_LOCK_UNAVAILABLE")
+    temporary = None
+    try:
+        lock_info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or
+                stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            _reject("D6_REGISTRY_LOCK_INVALID")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        record = _read_record(common_dir, task_id, os.getuid())
+        if (record.get("task_id") != task_id or
+                record.get("root_realpath") != str(root) or
+                record.get("git_common_dir") != str(common_dir) or
+                record.get("state") not in _VALID_STATES or
+                record.get("lock_state") != "LOCKED" or
+                type(record.get("base_sha")) is not str or
+                _SHA40.fullmatch(record["base_sha"]) is None or
+                type(record.get("head_sha")) is not str or
+                _SHA40.fullmatch(record["head_sha"]) is None):
+            _reject("D6_REGISTRY_CHANGED")
+        if report is None:
+            record.pop("env2_pass_marker", None)
+        else:
+            report_path = root / _BOOTSTRAP_REPORT_RELATIVE
+            try:
+                before = report_path.lstat()
+                if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode) or
+                        before.st_uid != os.getuid() or
+                        stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                        before.st_size > _BOOTSTRAP_OUTPUT_LIMIT):
+                    _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+                report_fd = os.open(report_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                try:
+                    opened = os.fstat(report_fd)
+                    report_bytes = bytearray()
+                    while len(report_bytes) <= _BOOTSTRAP_OUTPUT_LIMIT:
+                        chunk = os.read(report_fd, min(
+                            65536, _BOOTSTRAP_OUTPUT_LIMIT + 1 - len(report_bytes)))
+                        if not chunk:
+                            break
+                        report_bytes.extend(chunk)
+                    after = os.fstat(report_fd)
+                    current = report_path.lstat()
+                finally:
+                    os.close(report_fd)
+            except OSError:
+                _reject("ENV_BOOTSTRAP_REPORT_UNAVAILABLE")
+            identity = lambda value: (value.st_dev, value.st_ino, value.st_size,
+                                      value.st_mtime_ns)
+            if (len(report_bytes) > _BOOTSTRAP_OUTPUT_LIMIT or
+                    identity(before) != identity(opened) or identity(opened) != identity(after) or
+                    (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)):
+                _reject("ENV_BOOTSTRAP_REPORT_CHANGED")
+            try:
+                written_report = json.loads(bytes(report_bytes).decode("utf-8"),
+                                            object_pairs_hook=_unique_pairs)
+            except Exception:
+                _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+            if (written_report != report or report.get("result") != "PASS" or
+                    report.get("task_id") != task_id or
+                    report.get("root_realpath") != str(root) or
+                    report.get("head_sha") != record["head_sha"] or
+                    type(report.get("cache_fingerprint")) is not str or
+                    not _valid_cache_fingerprint(report["cache_fingerprint"])):
+                _reject("ENV_BOOTSTRAP_REPORT_INVALID")
+            record["env2_pass_marker"] = {
+                "schema_version": 1,
+                "result": "PASS",
+                "task_id": task_id,
+                "root_realpath": str(root),
+                "submitted_head_sha": record["head_sha"],
+                "current_head_sha": record["head_sha"],
+                "environment_fingerprint": report["cache_fingerprint"],
+                "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+            }
+        payload = (json.dumps(record, ensure_ascii=True, sort_keys=True,
+                              separators=(",", ":")) + "\n").encode("ascii")
+        if len(payload) > _REGISTRY_LIMIT:
+            _reject("D6_REGISTRY_INVALID")
+        existing = path.lstat()
+        if (not stat.S_ISREG(existing.st_mode) or existing.st_uid != os.getuid() or
+                stat.S_IMODE(existing.st_mode) != 0o600 or existing.st_nlink != 1):
+            _reject("D6_REGISTRY_INVALID")
+        fd, temporary = tempfile.mkstemp(prefix="." + task_id + ".", suffix=".tmp",
+                                         dir=str(registry))
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(registry, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except PreflightError:
+        raise
+    except OSError:
+        _reject("D6_REGISTRY_WRITE_FAILED")
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
 
 
 def _write_unknown_bootstrap_report(root: Path, task_id: str, elapsed: float) -> None:
@@ -646,6 +770,7 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
     # Revalidate immediately before Make resolves path-based source files.
     # D6's verified single-writer lease is the remaining cooperative race bound.
     root = validate_registered_worktree(task_id, root)
+    _update_env2_pass_marker(root, task_id, None)
     print("D6_PREFLIGHT_PASS task_id=" + task_id)
     makefile_dir = root / "tools" / "llmtool"
     makefile = makefile_dir / "Makefile"
@@ -706,6 +831,8 @@ def _invoke_bootstrap(root: Path, task_id: str) -> int:
         _write_unknown_bootstrap_report(root, task_id, elapsed)
         _reject("ENV_BOOTSTRAP_REPORT_INVALID")
     _atomic_bootstrap_report(root, report)
+    if report.get("result") == "PASS":
+        _update_env2_pass_marker(root, task_id, report)
     return result.returncode
 
 

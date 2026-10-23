@@ -59,7 +59,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
-        subprocess.run(['/usr/bin/git', 'add', 'sample.py'], cwd=self.executor_root, check=True)
+        report_dir = self.executor_root / 'tools' / 'llmtool'
+        report_dir.mkdir(parents=True)
+        (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore'],
+                       cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
         self.executor_head = subprocess.check_output(
@@ -67,6 +71,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.executor_common_dir = str(self.executor_root / '.git')
         registry_dir = Path(self.executor_common_dir) / 'llmtool-worktrees'
         registry_dir.mkdir(mode=0o700)
+        lock_path = registry_dir / '.lifecycle.lock'
+        lock_path.touch(mode=0o600)
+        lock_path.chmod(0o600)
         root_stat = self.executor_root.stat()
         self.executor_registry = {
             'schema_version': 1, 'task_id': 'executor-task-1',
@@ -78,6 +85,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'base_sha': self.executor_head, 'head_sha': self.executor_head,
             'state': 'ACTIVE', 'lock_state': 'LOCKED',
         }
+        report = {'schema_version': 1, 'result': 'PASS', 'status': 'env_reused',
+            'task_id': 'executor-task-1', 'root_realpath': str(self.executor_root),
+            'head_sha': self.executor_head,
+            'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'}
+        report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) + '\n').encode()
+        report_path = report_dir / '.d6-bootstrap-report.json'
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        self.executor_registry['env2_pass_marker'] = {
+            'schema_version': 1, 'result': 'PASS', 'task_id': 'executor-task-1',
+            'root_realpath': str(self.executor_root),
+            'submitted_head_sha': self.executor_head, 'current_head_sha': self.executor_head,
+            'environment_fingerprint': report['cache_fingerprint'],
+            'report_sha256': hashlib.sha256(report_bytes).hexdigest()}
         record_path = registry_dir / 'executor-task-1.json'
         record_path.write_text(json.dumps(self.executor_registry))
         record_path.chmod(0o600)

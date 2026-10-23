@@ -213,6 +213,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
     except OSError:
         _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    lock_held = True
     root = workspace_root / task_id
     record_path = registry / (task_id + ".json")
     try:
@@ -264,9 +265,27 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             record["last_verified_at"] = time.strftime(
                 "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             _replace_record(record_path, record)
+            # Bootstrap updates the D6 record with its ENV-2 pass marker under
+            # this same registry lock. Release the global lock while the
+            # isolated bootstrap process runs; the durable ACTIVE/LOCKED record
+            # and unique task ID prevent duplicate creation meanwhile.
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            lock_fd = None
+            lock_held = False
             try:
                 _bootstrap(root, task_id)
             except LifecycleError:
+                lock_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+                lock_info = os.fstat(lock_fd)
+                if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != uid or
+                        stat.S_IMODE(lock_info.st_mode) != 0o600 or
+                        lock_info.st_nlink != 1):
+                    os.close(lock_fd)
+                    lock_fd = None
+                    _stop("D6_REGISTRY_LOCK_INVALID")
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                lock_held = True
                 record["state"] = "REPAIR"
                 record["last_verified_at"] = time.strftime(
                     "%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -279,7 +298,10 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             # No cleanup is attempted because ignored setup evidence may exist.
             raise
     finally:
-        os.close(lock_fd)
+        if lock_fd is not None:
+            if lock_held:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
 
 def resume_worktree(*, task_id, root):
