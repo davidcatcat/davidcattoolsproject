@@ -84,6 +84,8 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848'
+        self.policy['workers']['claude-developer'].pop('owner_assignments', None)
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.assertEqual(self.policy['workers']['claude-developer'].get('owner_assignments', []), [])
         decision = worker_dispatch.evaluate('claude-developer', ref, self.task['task_id'])
         self.assertFalse(decision.allowed)
