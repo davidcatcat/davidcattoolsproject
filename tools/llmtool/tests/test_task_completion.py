@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import threading
@@ -16,6 +17,7 @@ from llmtool.providers.base import Reply
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record, run_task_complete
 from llmtool import task_completion
+from llmtool import worker_dispatch
 
 
 class FakeClient:
@@ -43,6 +45,14 @@ class TaskCompletionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated callback checks'
+        self.policy_path = self.base / 'worker-dispatch.json'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
+        policy_patch.start()
+        self.addCleanup(policy_patch.stop)
         self.root = self.base / 'executor'
         self.root.mkdir(mode=0o700)
         self._git('init', '-b', 'feat/executor')
@@ -109,12 +119,14 @@ class TaskCompletionTests(unittest.TestCase):
 
     def _write_registration(self, task_id, agent, session, root, branch, base, head,
                             **extra):
+        root.chmod(0o700)
         root_stat = root.stat()
         value = {'schema_version': 1, 'task_id': task_id,
                  'trusted_agent_id': agent, 'session_ref': session,
                  'root_realpath': str(root),
                  'physical_identity': {'device': root_stat.st_dev,
-                                       'inode': root_stat.st_ino, 'uid': root_stat.st_uid},
+                                       'inode': root_stat.st_ino, 'uid': root_stat.st_uid,
+                                       'mode': oct(stat.S_IMODE(root_stat.st_mode))},
                  'git_common_dir': self.common, 'branch': branch, 'base_sha': base,
                  'head_sha': head, 'state': 'ACTIVE', 'lock_state': 'LOCKED'}
         value.update(extra)
@@ -362,6 +374,53 @@ class TaskCompletionTests(unittest.TestCase):
                 expected_agent='executor-agent', expected_session_ref='Executor D6 session',
                 expected_native_session_id='native-executor', write_paths=[self.source_path],
                 artifact='fake patch', artifact_sha256=hashlib.sha256(b'fake patch').hexdigest())
+
+    def test_d6_registration_accepts_exact_lifecycle_physical_identity(self):
+        path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(path.read_text())
+        self.assertEqual(set(record['physical_identity']),
+                         {'device', 'inode', 'uid', 'mode'})
+        self.assertEqual(record['physical_identity']['mode'], '0o700')
+        registration, snapshot = task_completion.bind_executor_task(
+            self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(registration.root, str(self.root))
+        self.assertEqual(snapshot.head, self.source_sha)
+
+    def test_d6_registration_rejects_noncanonical_physical_modes(self):
+        path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        original = json.loads(path.read_text())
+        for mode in ('0700', '0o770', 448, None):
+            with self.subTest(mode=mode):
+                record = json.loads(json.dumps(original))
+                record['physical_identity']['mode'] = mode
+                path.write_text(json.dumps(record))
+                path.chmod(0o600)
+                with self.assertRaises(LLMToolError) as rejected:
+                    task_completion.read_d6_registration(self.task_id, self.common)
+                self.assertEqual(rejected.exception.completion_code,
+                                 'D6_REGISTRY_INVALID')
+        path.write_text(json.dumps(original))
+        path.chmod(0o600)
+
+    def test_legacy_d6_physical_identity_requires_owner_only_root_mode(self):
+        path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(path.read_text())
+        del record['physical_identity']['mode']
+        path.write_text(json.dumps(record))
+        path.chmod(0o600)
+        registration, snapshot = task_completion.bind_executor_task(
+            self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(registration.root, str(self.root))
+        self.assertEqual(snapshot.head, self.source_sha)
+
+        self.root.chmod(0o755)
+        try:
+            with self.assertRaises(LLMToolError) as rejected:
+                task_completion.read_d6_registration(self.task_id, self.common)
+            self.assertEqual(rejected.exception.completion_code,
+                             'D6_ROOT_IDENTITY_MISMATCH')
+        finally:
+            self.root.chmod(0o700)
 
     def test_matching_non_string_binding_values_are_rejected(self):
         for key in ('task_id', 'run_id', 'contract_digest'):

@@ -22,3 +22,6 @@ namespaces = false
 
 [tool.setuptools.package-data]
 llmtool = ["skills/*/SKILL.md"]
+
+[tool.setuptools.data-files]
+llmtool = ["worker-dispatch.json"]

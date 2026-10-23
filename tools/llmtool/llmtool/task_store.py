@@ -45,8 +45,19 @@ _FIELDS_V2_ROUTE_COMPLETION = _FIELDS_V2_ROUTE | frozenset(('completion',))
 _V2_FIELD_SHAPES = (_FIELDS_V2_ROUTE, _FIELDS_V2_ROUTE_COMPLETION)
 _FIELDS_V2_WITH_PROVENANCE = tuple(shape | frozenset(('pm_provenance',))
                                    for shape in _V2_FIELD_SHAPES)
-FIELDS = _FIELDS_V2_ROUTE_COMPLETION
+_V2_BASE_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
+                   _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)
+_FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
+    shape | frozenset(('dispatch_audit',)) for shape in _V2_BASE_SHAPES)
+FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit',))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
+_DISPATCH_AUDIT_FIELDS = frozenset((
+    'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
+    'policy_sha256', 'at',
+))
+_DISPATCH_AUDIT_BINDING_FIELDS = frozenset((
+    'assignment_id', 'source_sha', 'contract_digest',
+))
 _LEGACY_DEVELOPER_FIELDS = frozenset((
     'assignment_id', 'selection_source', 'state', 'provider_profile',
     'provider_type', 'model', 'backend_session_semantics', 'session_id',
@@ -110,7 +121,8 @@ def _validate(record):
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)) or
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
+              *_FIELDS_V2_WITH_DISPATCH_AUDIT)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -127,6 +139,51 @@ def _validate(record):
             _fail()
         if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != record[key]:
             _fail()
+    if 'dispatch_audit' in record:
+        audit = record['dispatch_audit']
+        if type(audit) is not list or len(audit) > 64:
+            _fail()
+        seen_attempts = set()
+        for entry in audit:
+            if (type(entry) is not dict or set(entry) not in (
+                    _DISPATCH_AUDIT_FIELDS,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS,
+                    _DISPATCH_AUDIT_FIELDS | _DISPATCH_AUDIT_BINDING_FIELDS |
+                    frozenset(('authorization_id',))) or
+                    type(entry['attempt_id']) is not str or
+                    re.fullmatch(r'[0-9a-f]{32}', entry['attempt_id']) is None or
+                    entry['attempt_id'] in seen_attempts or
+                    type(entry['worker_key']) is not str or
+                    re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
+                    entry['action'] not in (
+                        'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
+                        'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
+                    entry['decision'] not in ('ALLOWED', 'BLOCKED') or
+                    type(entry['reason_code']) is not str or
+                    re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or
+                    (entry['policy_sha256'] is not None and
+                     (type(entry['policy_sha256']) is not str or
+                      re.fullmatch(r'[0-9a-f]{64}', entry['policy_sha256']) is None))):
+                _fail()
+            if _DISPATCH_AUDIT_BINDING_FIELDS.issubset(entry):
+                if (type(entry['assignment_id']) is not str or
+                        re.fullmatch(r'[0-9a-f]{32}', entry['assignment_id']) is None or
+                        type(entry['source_sha']) is not str or
+                        re.fullmatch(r'[0-9a-f]{40}', entry['source_sha']) is None or
+                        type(entry['contract_digest']) is not str or
+                        re.fullmatch(r'[0-9a-f]{64}', entry['contract_digest']) is None):
+                    _fail()
+            if 'authorization_id' in entry and (
+                    type(entry['authorization_id']) is not str or
+                    re.fullmatch(r'[0-9a-f]{32}', entry['authorization_id']) is None):
+                _fail()
+            try:
+                stamp = datetime.strptime(entry['at'], '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                _fail()
+            if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != entry['at']:
+                _fail()
+            seen_attempts.add(entry['attempt_id'])
     for key in ('pm_provider_profile', 'pm_provider_type', 'pm_model',
                 'backend_session_semantics', 'error_code'):
         value = record[key]
@@ -297,9 +354,14 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            if type(developer) is not dict or set(developer) not in (
-                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
-                    _DEVELOPER_CALLBACK_FIELDS):
+            assignment_shapes = (
+                _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
+                _DEVELOPER_CALLBACK_FIELDS,
+                _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+                _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+                _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+            )
+            if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -307,8 +369,9 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] not in ('company-gw', 'opencode') or
-                    developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
+                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude') or
+                    developer['provider_type'] not in (
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -329,6 +392,12 @@ def _validate(record):
                     developer['artifact_format'] != 'unified_diff' or
                     type(developer['created_at']) is not str):
                 _fail()
+            if 'owner_assignment_ref' in developer:
+                from .worker_dispatch import _OWNER_COMMENT_REF
+                ref = developer['owner_assignment_ref']
+                if (developer['provider_profile'] != 'claude' or
+                        type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
+                    _fail()
             if (developer['provider_profile'] == 'company-gw' and
                     (developer['provider_type'] not in (None, 'openai-compatible') or
                      developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED')):
@@ -337,6 +406,17 @@ def _validate(record):
                     (developer['provider_type'] not in (None, 'opencode-cli') or
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if (developer['provider_profile'] == 'codex' and
+                    (developer['provider_type'] not in (None, 'codex-cli') or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['max_tokens'] is not None)):
+                _fail()
+            if (developer['provider_profile'] == 'claude' and
+                    (developer['provider_type'] is not None or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['state'] != 'DEVELOPER_PENDING' or
+                     'owner_assignment_ref' not in developer)):
                 _fail()
             if 'execution' in developer:
                 execution = developer['execution']
@@ -436,9 +516,14 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
-            expected_provider = ('openai-compatible' if
-                                 developer['provider_profile'] == 'company-gw' else
-                                 'opencode-cli')
+            expected_provider = {
+                'company-gw': 'openai-compatible',
+                'codex': 'codex-cli',
+                'opencode': 'opencode-cli',
+            }.get(developer['provider_profile'])
+            token_cap_required = not (
+                developer['provider_profile'] == 'codex' and
+                developer['provider_type'] == 'codex-cli')
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
@@ -446,7 +531,7 @@ def _validate(record):
             if dev_state == 'DEVELOPER_DISPATCHING' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
-                    developer['max_tokens'] is None):
+                    (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if dev_state == 'DEVELOPER_UNAVAILABLE' and (
                     artifact is not None or usage is not None or
@@ -458,7 +543,8 @@ def _validate(record):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
-                    developer['error_code'] is not None or developer['max_tokens'] is None):
+                    developer['error_code'] is not None or
+                    (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
@@ -981,6 +1067,28 @@ class TaskStore:
         return record
 
     def create(self, record):
+        if type(record) is not dict or 'dispatch_audit' in record:
+            _fail()
+        record = dict(record)
+        developer = record.get('developer')
+        if type(developer) is dict:
+            from . import worker_dispatch
+            gate_record = {'task_id': record['task_id'], 'developer': None,
+                           'dispatch_audit': []}
+            attempts = worker_dispatch.task_store_attempts(
+                gate_record, {'developer': developer})
+            if attempts:
+                denial = worker_dispatch.authorize_task_store_change(
+                    gate_record, {'developer': developer})
+                record['dispatch_audit'] = gate_record['dispatch_audit']
+                if denial is not None:
+                    record['developer'] = None
+                    if 'completion' in record:
+                        record['completion'] = None
+                saved = self._write(record, create=True)
+                if denial is not None:
+                    raise denial
+                return saved
         return self._write(record, create=True)
 
     def get(self, task_id):
@@ -999,7 +1107,33 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
-    def _update(self, task_id, *, expected, changes):
+    def append_dispatch_audit(self, task_id, entry, *, expected=None):
+        """Append one bounded gate result using the existing TaskStore CAS lock."""
+        if expected is not None and type(expected) is not dict:
+            _fail()
+        expected_fields = {} if expected is None else {
+            key: value for key, value in expected.items() if key != 'dispatch_audit'}
+        for _ in range(4):
+            current = self.get(task_id)
+            audit = list(current.get('dispatch_audit', []))
+            if len(audit) >= 64:
+                _fail('WORKER_DISPATCH_AUDIT_LIMIT')
+            next_audit = audit + [entry]
+            # Audit appends compare against the freshest list every time; other
+            # caller preconditions (such as the assignment) stay bound.
+            preconditions = dict(expected_fields)
+            preconditions['dispatch_audit'] = current.get('dispatch_audit')
+            try:
+                return self._update(task_id, expected=preconditions,
+                    changes={'dispatch_audit': next_audit},
+                    trusted_dispatch_audit=True)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False):
+        if 'dispatch_audit' in changes and not trusted_dispatch_audit:
+            _fail()
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         locked = False
@@ -1019,6 +1153,64 @@ class TaskStore:
                                             for key, value in expected.items()):
                 raise TaskStoreConflict(
                     'developer assignment already exists; duplicate dispatch refused')
+            from . import worker_dispatch
+            if trusted_dispatch_audit:
+                prior_audit = list(current.get('dispatch_audit', []))
+                requested_audit = changes.get('dispatch_audit')
+                if (type(requested_audit) is list and
+                        len(requested_audit) == len(prior_audit) + 1 and
+                        requested_audit[:-1] == prior_audit):
+                    attempted = requested_audit[-1]
+                    refusal = worker_dispatch._adapter_authorization_block_reason(
+                        current, attempted)
+                    if refusal is not None:
+                        blocked = {**attempted, 'decision': 'BLOCKED',
+                                   'reason_code': refusal}
+                        current['dispatch_audit'] = prior_audit + [blocked]
+                        current['updated_at'] = datetime.now(timezone.utc).replace(
+                            microsecond=0).isoformat().replace('+00:00', 'Z')
+                        current['record_sha256'] = _digest(current)
+                        try:
+                            self._write(current, create=False)
+                        except Exception:
+                            raise worker_dispatch.WorkerDispatchDenied(
+                                'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
+                        raise worker_dispatch.WorkerDispatchDenied(refusal)
+            if (type(current.get('developer')) is dict and
+                    'developer' in changes and changes['developer'] is None):
+                old_developer = current['developer']
+                worker_key = worker_dispatch.worker_key_for(
+                    old_developer.get('provider_profile'))
+                policy = worker_dispatch.evaluate(worker_key or 'unknown')
+                denied = worker_dispatch.PolicyDecision(
+                    worker_key or 'unknown', False,
+                    'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN', policy.policy_sha256)
+                audit = list(current.get('dispatch_audit', []))
+                if len(audit) >= worker_dispatch.MAX_AUDIT_ENTRIES:
+                    raise worker_dispatch.WorkerDispatchDenied(
+                        'WORKER_DISPATCH_AUDIT_LIMIT')
+                current['dispatch_audit'] = audit + [
+                    worker_dispatch.audit_entry(
+                        denied, 'REASSIGN',
+                        binding=worker_dispatch._assignment_audit_binding(
+                            current, old_developer))]
+                current['updated_at'] = datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat().replace('+00:00', 'Z')
+                current['record_sha256'] = _digest(current)
+                try:
+                    self._write(current, create=False)
+                except Exception:
+                    raise worker_dispatch.WorkerDispatchDenied(
+                        'WORKER_DISPATCH_AUDIT_UNAVAILABLE') from None
+                raise worker_dispatch.WorkerDispatchDenied(
+                    'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+            dispatch_denial = worker_dispatch.authorize_task_store_change(current, changes, expected)
+            if dispatch_denial is not None:
+                current['updated_at'] = datetime.now(timezone.utc).replace(
+                    microsecond=0).isoformat().replace('+00:00', 'Z')
+                current['record_sha256'] = _digest(current)
+                self._write(current, create=False)
+                raise dispatch_denial
             if set(changes) - (FIELDS - {'schema_version', 'task_id', 'run_id', 'pm_session_id',
                                          'created_at', 'task_contract', 'task_binding', 'record_sha256'}):
                 _fail()

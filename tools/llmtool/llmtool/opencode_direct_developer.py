@@ -21,6 +21,7 @@ import tempfile
 import time
 
 from .errors import LLMToolError
+from . import worker_dispatch
 from .opencode_worker import _observe_exit_without_reap, _path
 from .providers.cli_lifecycle import CLIProcessLifecycle
 from .test_output_excerpts import _emitted_sensitive
@@ -393,6 +394,7 @@ def _version(executable):
 
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
+        dispatch_store=None, dispatch_task_id=None,
         timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None):
     """Invoke one bounded OpenCode run in the existing D6 task worktree."""
     root = Path(root).resolve(strict=True)
@@ -404,6 +406,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         _screen_sources(root, read_paths)
     if not callable(prelaunch_validate):
         _reject('OPENCODE_D6_BINDING_CHANGED')
+    if dispatch_store is None or type(dispatch_task_id) is not str:
+        _reject('WORKER_DISPATCH_CONTEXT_UNAVAILABLE')
     if (type(timeout_seconds) is not int or
             not 1 <= timeout_seconds <= MAX_WALL_CLOCK_SECONDS):
         _reject('OPENCODE_BUDGET_INVALID')
@@ -449,6 +453,11 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         _reject('OPENCODE_D6_BINDING_CHANGED')
                     if valid is not True:
                         _reject('OPENCODE_D6_BINDING_CHANGED')
+                    try:
+                        worker_dispatch.authorize_dispatch(
+                            dispatch_store, dispatch_task_id, 'opencode-developer', 'DISPATCH')
+                    except worker_dispatch.WorkerDispatchDenied as exc:
+                        raise DirectOpenCodeError(exc.dispatch_code) from None
                     try:
                         process = subprocess.Popen(argv, cwd=str(root), env=env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,

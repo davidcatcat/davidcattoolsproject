@@ -12,6 +12,7 @@ from llmtool.opencode_direct_developer import (
     AGENT, MODEL, DirectOpenCodeError, configuration, parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
+from llmtool import worker_dispatch
 
 
 class DirectOpenCodeDeveloperTests(unittest.TestCase):
@@ -22,7 +23,91 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         (self.root / 'source.py').write_text('VALUE = 1\n')
 
     def run_with_valid_binding(self, **kwargs):
-        return run(**kwargs, prelaunch_validate=lambda: True)
+        with patch('llmtool.opencode_direct_developer.worker_dispatch.authorize_dispatch'):
+            return run(**kwargs, dispatch_store=object(), dispatch_task_id='a' * 32,
+                       prelaunch_validate=lambda: True)
+
+    def test_direct_adapter_cannot_run_without_dispatch_context(self):
+        marker = self.root / 'run-invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n',
+                            run_invocation_marker=marker)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'WORKER_DISPATCH_CONTEXT_UNAVAILABLE')
+        self.assertFalse(marker.exists())
+
+    def test_paused_policy_blocks_direct_adapter_before_provider_run(self):
+        class Store:
+            def __init__(self, task_id, allowed_policy_path):
+                from llmtool.action_contract import TaskBinding
+
+                binding = {
+                    'task_id': task_id, 'run_id': 'b' * 32,
+                    'contract_version': 1, 'contract_digest': 'c' * 64,
+                }
+                developer = {
+                    'assignment_id': 'd' * 32, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_profile': 'opencode', 'provider_type': 'opencode-cli',
+                    'model': 'opencode/deepseek-v4.1-flash-free',
+                    'source_sha': 'e' * 40,
+                }
+                with patch.object(worker_dispatch, '_POLICY_PATH', allowed_policy_path):
+                    transition = worker_dispatch.audit_entry(
+                        worker_dispatch.evaluate('opencode-developer', task_id=task_id),
+                        'DISPATCH', binding={
+                            'assignment_id': developer['assignment_id'],
+                            'source_sha': developer['source_sha'],
+                            'contract_digest': binding['contract_digest'],
+                        })
+                self.record = {
+                    'schema_version': 2, 'task_id': task_id,
+                    'task_binding': TaskBinding(**binding).to_dict(),
+                    'developer': developer, 'dispatch_audit': [transition],
+                }
+
+            def get(self, task_id):
+                if task_id != self.record['task_id']:
+                    raise worker_dispatch.WorkerDispatchDenied('TEST_TASK_MISMATCH')
+                return json.loads(json.dumps(self.record))
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                if (task_id != self.record['task_id'] or type(expected) is not dict or
+                        any(self.record.get(key) != value for key, value in expected.items())):
+                    raise worker_dispatch.WorkerDispatchDenied('TEST_STORE_CONFLICT')
+                self.record['dispatch_audit'].append(json.loads(json.dumps(entry)))
+                return json.loads(json.dumps(self.record))
+
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['reason'] = 'prior assignment transition'
+        allowed_policy_path = self.root / 'worker-dispatch-allowed.json'
+        allowed_policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        policy['workers']['opencode-developer']['dispatch'] = 'PAUSED'
+        policy['workers']['opencode-developer']['reason'] = 'controlled paused test'
+        paused_policy_path = self.root / 'worker-dispatch-paused.json'
+        paused_policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        store = Store('a' * 32, allowed_policy_path)
+        run_marker = self.root / 'provider-run-invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n',
+                            run_invocation_marker=run_marker)
+        with patch.object(worker_dispatch, '_POLICY_PATH', paused_policy_path):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                    dispatch_store=store, dispatch_task_id='a' * 32,
+                    timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'OWNER_PAUSED')
+        self.assertFalse(run_marker.exists())
+        refusal = store.record['dispatch_audit'][-1]
+        self.assertEqual(refusal['decision'], 'BLOCKED')
+        self.assertEqual(refusal['worker_key'], 'opencode-developer')
+        self.assertEqual(refusal['reason_code'], 'OWNER_PAUSED')
+        self.assertEqual(refusal['assignment_id'], 'd' * 32)
+        self.assertEqual(refusal['source_sha'], 'e' * 40)
+        self.assertEqual(refusal['contract_digest'], 'c' * 64)
 
     @staticmethod
     def event(kind, **fields):
@@ -216,6 +301,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         with self.assertRaises(DirectOpenCodeError) as caught:
             run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', prelaunch_validate=lambda: False,
+                dispatch_store=object(), dispatch_task_id='a' * 32,
                 timeout_seconds=5, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_D6_BINDING_CHANGED')

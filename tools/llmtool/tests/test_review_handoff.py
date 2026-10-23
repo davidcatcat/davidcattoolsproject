@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,49 @@ from llmtool.errors import LLMToolError
 from llmtool.providers.claude_cli import decode_review_envelope
 from test_review_authority import FAKE_SCRIPT, FixtureObserver, WorkerHarness
 from llmtool import task_completion
+from llmtool import worker_dispatch
+
+
+class _TestDispatchStore:
+    def __init__(self):
+        self.record = None
+
+    def bind(self, task, source_sha):
+        binding = task.to_dict()
+        assignment = {
+            'assignment_id': 'd' * 32, 'state': 'DEVELOPER_DISPATCHING',
+            'provider_profile': 'company-gw', 'provider_type': 'openai-compatible',
+            'model': 'gw-model', 'source_sha': source_sha,
+            'direct_result_callback': {
+                'review_handoff': {'dispatch_state': 'DISPATCHING'},
+            },
+        }
+        audit_binding = {
+            'assignment_id': assignment['assignment_id'],
+            'source_sha': source_sha,
+            'contract_digest': binding['contract_digest'],
+        }
+        transition = worker_dispatch.audit_entry(
+            worker_dispatch.evaluate('claude-reviewer', task_id=binding['task_id']),
+            'REVIEWER_HANDOFF', binding=audit_binding)
+        self.record = {
+            'schema_version': 2, 'task_id': binding['task_id'],
+            'run_id': binding['run_id'], 'task_binding': binding,
+            'developer': assignment, 'dispatch_audit': [transition],
+        }
+
+    def get(self, task_id):
+        if self.record is None or task_id != self.record['task_id']:
+            raise worker_dispatch.WorkerDispatchDenied('TEST_TASK_MISMATCH')
+        return deepcopy(self.record)
+
+    def append_dispatch_audit(self, task_id, entry, *, expected=None):
+        if (self.record is None or task_id != self.record['task_id'] or
+                type(expected) is not dict or
+                any(self.record.get(key) != value for key, value in expected.items())):
+            raise worker_dispatch.WorkerDispatchDenied('TEST_STORE_CONFLICT')
+        self.record['dispatch_audit'].append(deepcopy(entry))
+        return deepcopy(self.record)
 
 
 def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue):
@@ -36,7 +80,10 @@ def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approv
                                       kind='PROVIDER_REVIEW', creation_nonce=ledger_nonce)
         try:
             barrier.wait(timeout=5)
-            receipt, raw = rh.dispatch_review_handoff(issuer, ledger, budget=budget)
+            store = _TestDispatchStore()
+            store.bind(expect.task, expect.source_sha)
+            receipt, raw = rh.dispatch_review_handoff(
+                issuer, ledger, budget=budget, dispatch_store=store)
             result_queue.put((receipt.verdict, receipt.execution_status, receipt.provider_calls, receipt.code))
         finally:
             ledger.close()
@@ -45,13 +92,45 @@ def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approv
 
 
 class ReviewHandoffTests(unittest.TestCase):
+    def setUp(self):
+        self.dispatch_store = _TestDispatchStore()
+        patcher = patch('llmtool.task_store.TaskStore', return_value=self.dispatch_store)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def harness(self, **changes):
         h = WorkerHarness(**changes)
         self.addCleanup(h.close)
+        self.dispatch_store.bind(h.expect.task, h.expect.source_sha)
         return h
 
-    @staticmethod
-    def bind_harness_task_id(h, task_id):
+    def test_paused_reviewer_policy_is_audited_and_provider_is_not_called(self):
+        h = self.harness(mode='success')
+        policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        policy['workers']['claude-reviewer']['dispatch'] = 'PAUSED'
+        policy['workers']['claude-reviewer']['reason'] = 'test pause'
+        with tempfile.TemporaryDirectory() as directory:
+            policy_path = Path(directory) / 'worker-dispatch.json'
+            policy_path.write_text(json.dumps(policy), encoding='utf-8')
+            store = _TestDispatchStore()
+            store.bind(h.expect.task, h.expect.source_sha)
+            with patch.object(worker_dispatch, '_POLICY_PATH', policy_path), \
+                    patch('llmtool.review_handoff.run_foreground_review') as invoke:
+                receipt, raw = rh.dispatch_review_handoff(
+                    h.issuer, h.ledger, budget=h.fake.budget, dispatch_store=store)
+        invoke.assert_not_called()
+        self.assertEqual(receipt.code, 'OWNER_PAUSED')
+        self.assertEqual(receipt.provider_calls, 0)
+        self.assertEqual(raw['provider_calls'], 0)
+        refusal = store.record['dispatch_audit'][-1]
+        self.assertEqual(refusal['decision'], 'BLOCKED')
+        self.assertEqual(refusal['worker_key'], 'claude-reviewer')
+        self.assertEqual(refusal['reason_code'], 'OWNER_PAUSED')
+        self.assertEqual(refusal['assignment_id'], 'd' * 32)
+        self.assertEqual(refusal['source_sha'], h.expect.source_sha)
+        self.assertEqual(refusal['contract_digest'], h.expect.task.contract_digest)
+
+    def bind_harness_task_id(self, h, task_id):
         ready = replace(h.ready, task_id=task_id)
         expect = replace(h.expect, task=ready.binding(h.expect.task.run_id))
         events = tuple(replace(event, task=expect.task,
@@ -73,6 +152,7 @@ class ReviewHandoffTests(unittest.TestCase):
         context = a.ReviewContext(ready, h.final, expect, events, approval,
                                   h.packet_input)
         h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, observer, context)
+        self.dispatch_store.bind(h.expect.task, h.expect.source_sha)
 
     def test_task_completion_adapter_bridges_the_existing_host_handoff(self):
         h = self.harness(mode='success')
@@ -89,7 +169,8 @@ class ReviewHandoffTests(unittest.TestCase):
             diff_sha256=h.fake.data['diff']['sha256'],
             changed_paths=h.fake.data['diff']['changed_paths'])
         adapter = rh.task_completion_adapter(
-            h.issuer, h.ledger, budget=h.fake.budget)
+            h.issuer, h.ledger, budget=h.fake.budget,
+            dispatch_store=self.dispatch_store)
 
         receipt = adapter(intent)
 
@@ -341,7 +422,7 @@ class ReviewHandoffTests(unittest.TestCase):
             r2, _ = rh.dispatch_review_handoff(h.issuer, h.ledger, budget=h.fake.budget)
             spawn.assert_not_called()
         self.assertEqual(r2.verdict, 'BLOCKED')
-        self.assertEqual(r2.code, 'REVIEW_GRANT_NOT_AUTHORIZED')
+        self.assertEqual(r2.code, 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED')
 
         # Fresh issuer object + reopened ledger from disk -> blocked without spawning
         reopened = l.ReceiptLedger.open(
@@ -356,6 +437,7 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertEqual(r3.verdict, 'BLOCKED')
         self.assertEqual(r3.execution_status, 'BLOCKED')
         self.assertEqual(r3.provider_calls, 0)
+        self.assertEqual(r3.code, 'WORKER_DISPATCH_AUTHORIZATION_CONSUMED')
         self.assertEqual(reopened._db.execute('SELECT count(*) FROM receipts').fetchone()[0], 1)
 
     def test_concurrent_multiprocess_barrier_launches_at_most_once(self):

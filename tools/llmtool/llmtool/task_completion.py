@@ -503,9 +503,14 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
             type(value.get('head_sha')) is not str or _HEX40.fullmatch(value['head_sha']) is None):
         _stop('D6_REGISTRY_INVALID')
     identity = value.get('physical_identity')
-    if (type(identity) is not dict or
-            set(identity) != {'device', 'inode', 'uid'} or
-            any(type(identity[k]) is not int or identity[k] < 0 for k in identity)):
+    identity_keys = set(identity) if type(identity) is dict else None
+    legacy_identity = identity_keys == {'device', 'inode', 'uid'}
+    lifecycle_identity = identity_keys == {'device', 'inode', 'uid', 'mode'}
+    if (not (legacy_identity or lifecycle_identity) or
+            (lifecycle_identity and
+             (type(identity['mode']) is not str or identity['mode'] != '0o700')) or
+            any(type(identity[k]) is not int or identity[k] < 0
+                for k in ('device', 'inode', 'uid'))):
         _stop('D6_REGISTRY_INVALID')
     try:
         root_stat = Path(value['root_realpath']).lstat()
@@ -514,7 +519,8 @@ def read_d6_registration(task_id, common_dir, *, allowed_states=('ACTIVE',)):
     if ((root_stat.st_dev, root_stat.st_ino, root_stat.st_uid) !=
             (identity['device'], identity['inode'], identity['uid']) or
             identity['uid'] != os.getuid() or
-            stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode)):
+            stat.S_ISLNK(root_stat.st_mode) or not stat.S_ISDIR(root_stat.st_mode) or
+            stat.S_IMODE(root_stat.st_mode) != 0o700):
         _stop('D6_ROOT_IDENTITY_MISMATCH')
     native_session = value.get('native_session_id')
     if native_session is not None and (type(native_session) is not str or

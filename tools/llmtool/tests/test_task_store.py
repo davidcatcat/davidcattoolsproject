@@ -9,7 +9,9 @@ from unittest.mock import patch
 
 from llmtool.action_contract import TaskBinding
 from llmtool.errors import LLMToolError
+from llmtool import worker_dispatch
 from llmtool.task_store import TaskStore, new_id
+from llmtool.task_submission_cli import _record
 from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
 
@@ -42,6 +44,108 @@ class TaskStoreTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
+
+    def _codex_dispatch_task(self):
+        request = 'Bounded non-sensitive Codex proposal task.'
+        task_id, run_id = new_id(), new_id()
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = _record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded task.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Produce a proposal diff.',
+                           'acceptance': ['the proposal is recorded']},
+        )
+        return task
+
+    @staticmethod
+    def _developer_assignment(*, provider='codex', max_tokens=None):
+        return {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': provider,
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['the proposal is recorded'],
+            'context_sha256': 'b' * 64,
+            'egress_basis': 'Approved non-sensitive test context.', 'input_bytes': 10,
+            'max_tokens': max_tokens, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
+        }
+
+    def _allow_codex_dispatch(self):
+        policy_path = Path(worker_dispatch._POLICY_PATH)
+        policy = json.loads(policy_path.read_text(encoding='utf-8'))
+        policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        temporary_policy = Path(self.temp.name) / 'worker-dispatch.json'
+        temporary_policy.write_text(json.dumps(policy), encoding='utf-8')
+        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_codex_cli_dispatch_and_response_allow_unknown_token_cap(self):
+        self._allow_codex_dispatch()
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        responded = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+        }
+        saved = self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(saved['developer']['provider_profile'], 'codex')
+        self.assertEqual(saved['developer']['provider_type'], 'codex-cli')
+        self.assertIsNone(saved['developer']['max_tokens'])
+        self.assertIsNone(saved['developer']['usage'])
+        before_clear = saved
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self.store.update(task['task_id'], developer=None)
+        self.assertEqual(caught.exception.dispatch_code,
+                         'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+        after_clear = self.store.get(task['task_id'])
+        self.assertEqual(after_clear['developer'], before_clear['developer'])
+        self.assertEqual(len(after_clear['dispatch_audit']),
+                         len(before_clear['dispatch_audit']) + 1)
+        refusal = after_clear['dispatch_audit'][-1]
+        self.assertEqual(refusal['worker_key'], 'codex-developer')
+        self.assertEqual(refusal['action'], 'REASSIGN')
+        self.assertEqual(refusal['decision'], 'BLOCKED')
+        self.assertEqual(refusal['reason_code'], 'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
+        self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
+        self._allow_codex_dispatch()
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='company-gw', max_tokens=None)
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=dispatching)
+
+        other = self._codex_dispatch_task()
+        claimed_cap = self._developer_assignment(provider='codex', max_tokens=64)
+        other['developer'] = claimed_cap
+        with self.assertRaises(LLMToolError):
+            self.store.create(other)
 
     def test_owner_private_creation_and_second_store_read(self):
         value = record()

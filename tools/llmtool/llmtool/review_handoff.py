@@ -18,6 +18,7 @@ from typing import Optional
 from .action_contract import ContractValue, _hex, _identifier, _integer, _typed
 from .authorization_ledger import ReceiptLedger
 from .errors import LLMToolError
+from . import worker_dispatch
 from .review_authority import (
     HostPin,
     ProductionReviewIssuer,
@@ -179,7 +180,7 @@ def _classify_execution_status(code, provider_calls, ledger_status, cleanup_conf
     return 'UNKNOWN'
 
 
-def dispatch_review_handoff(issuer, ledger, *, budget):
+def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
     """Execute one non-interactive Claude Reviewer handoff without manual Enter.
 
     Wraps the existing `run_foreground_review(issuer, ledger, budget=budget)`
@@ -210,7 +211,26 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     redeem_run_id = issuer.redeem_run_id
 
     try:
+        if dispatch_store is None:
+            from .task_store import TaskStore
+            dispatch_store = TaskStore()
+        worker_dispatch.authorize_dispatch(
+            dispatch_store, task_id, 'claude-reviewer', 'REVIEWER_HANDOFF')
         raw = run_foreground_review(issuer, ledger, budget=budget)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        raw = {
+            'schema_version': 1,
+            'code': exc.dispatch_code,
+            'status': 'BLOCKED',
+            'authorized': False,
+            'provider_calls': 0,
+            'invocation_status': 'NOT_CALLED',
+            'verdict_validation': 'NOT_VERIFIED',
+            'review_authority': 'WORKER_DATA_ONLY',
+            'execution_disposition': 'STOP_NO_EXECUTION_AUTHORITY',
+            'input_tokens': None,
+            'output_tokens': None,
+        }
     except LLMToolError as exc:
         code = getattr(exc, 'review_code', None) or 'REVIEW_HOST_SERVICES_INVALID'
         raw = {
@@ -358,7 +378,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget):
     return receipt, raw
 
 
-def task_completion_adapter(issuer, ledger, *, budget):
+def task_completion_adapter(issuer, ledger, *, budget, dispatch_store=None):
     """Bind the existing one-shot Host handoff to a task-completion callback.
 
     This factory is deliberately opt-in: callers must already possess the
@@ -407,7 +427,8 @@ def task_completion_adapter(issuer, ledger, *, budget):
         except Exception:
             reject('REVIEW_HOST_SERVICES_INVALID')
 
-        handoff, raw = dispatch_review_handoff(issuer, ledger, budget=budget)
+        handoff, raw = dispatch_review_handoff(
+            issuer, ledger, budget=budget, dispatch_store=dispatch_store)
         severity = {'APPROVE': 'PASS', 'CHANGES_REQUIRED': 'FAIL',
                     'BLOCKED': 'BLOCKED'}
         status = handoff.execution_status
