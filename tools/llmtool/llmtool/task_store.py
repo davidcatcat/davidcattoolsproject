@@ -5,13 +5,14 @@ ledger. A task's logical PM session is an llmtool identifier; it is not a claim
 that the selected provider exposes a resumable native session.
 """
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -83,6 +84,33 @@ _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'a
 _PM_PROVENANCE_FIELDS = frozenset((
     'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
     'session_restored', 'automatic_callback',
+))
+
+# R5 technical observations live inside the existing TaskStore root. They are
+# evidence only: this registry is deliberately separate from worker-dispatch.json
+# and never participates in dispatch authorization.
+WORKER_AVAILABILITY_SCHEMA_VERSION = 1
+WORKER_AVAILABILITY_NAME = '.worker-availability.json'
+WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
+WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
+WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
+WORKER_KEYS = frozenset((
+    'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
+    'company-gw', 'claude-reviewer',
+))
+WORKER_LAYERS = frozenset((
+    'runtime', 'endpoint', 'authentication', 'inference', 'task_acceptance',
+))
+WORKER_OBSERVATION_STATUSES = frozenset(('PASS', 'FAIL', 'UNKNOWN'))
+WORKER_OBSERVATION_SOURCES = frozenset((
+    'LOCAL_OBSERVATION', 'AUTHORIZED_OPERATION', 'TEST_FIXTURE',
+))
+_WORKER_OBSERVATION_FIELDS = frozenset((
+    'worker_key', 'layer', 'status', 'observed_at', 'fresh_until', 'source',
+    'evidence_sha256',
+))
+_WORKER_AVAILABILITY_FIELDS = frozenset((
+    'schema_version', 'observations', 'record_sha256',
 ))
 
 
@@ -1106,6 +1134,237 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    @staticmethod
+    def _worker_timestamp(value, *, now=None, allow_future=False):
+        if type(value) is not str:
+            _fail('WORKER_AVAILABILITY_INVALID')
+        try:
+            parsed = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ').replace(
+                tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            _fail('WORKER_AVAILABILITY_INVALID')
+        if parsed.strftime('%Y-%m-%dT%H:%M:%SZ') != value:
+            _fail('WORKER_AVAILABILITY_INVALID')
+        if not allow_future and parsed > (now or datetime.now(timezone.utc)):
+            _fail('WORKER_AVAILABILITY_INVALID')
+        return parsed
+
+    @classmethod
+    def _validate_worker_availability(cls, record, *, now=None):
+        if (type(record) is not dict or set(record) != _WORKER_AVAILABILITY_FIELDS or
+                type(record.get('schema_version')) is not int or
+                record['schema_version'] != WORKER_AVAILABILITY_SCHEMA_VERSION or
+                type(record.get('observations')) is not list or
+                len(record['observations']) > len(WORKER_KEYS) * len(WORKER_LAYERS)):
+            _fail('WORKER_AVAILABILITY_INVALID')
+        seen = set()
+        for observation in record['observations']:
+            if (type(observation) is not dict or
+                    set(observation) != _WORKER_OBSERVATION_FIELDS or
+                    type(observation.get('worker_key')) is not str or
+                    observation['worker_key'] not in WORKER_KEYS or
+                    type(observation.get('layer')) is not str or
+                    observation['layer'] not in WORKER_LAYERS or
+                    type(observation.get('status')) is not str or
+                    observation['status'] not in WORKER_OBSERVATION_STATUSES or
+                    type(observation.get('source')) is not str or
+                    observation['source'] not in WORKER_OBSERVATION_SOURCES or
+                    type(observation.get('evidence_sha256')) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', observation['evidence_sha256']) is None):
+                _fail('WORKER_AVAILABILITY_INVALID')
+            key = (observation['worker_key'], observation['layer'])
+            if key in seen:
+                _fail('WORKER_AVAILABILITY_INVALID')
+            seen.add(key)
+            observed_at = cls._worker_timestamp(observation['observed_at'], now=now)
+            fresh_until = cls._worker_timestamp(observation['fresh_until'], now=now,
+                                                allow_future=True)
+            if (fresh_until <= observed_at or
+                    fresh_until - observed_at > timedelta(
+                        days=WORKER_AVAILABILITY_MAX_AGE_DAYS)):
+                _fail('WORKER_AVAILABILITY_INVALID')
+        expected_digest = _digest(record)
+        if (type(record.get('record_sha256')) is not str or
+                record['record_sha256'] != expected_digest):
+            _fail('WORKER_AVAILABILITY_INVALID')
+        return record
+
+    def _read_worker_availability_at(self, directory):
+        try:
+            fd = os.open(WORKER_AVAILABILITY_NAME,
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         dir_fd=directory)
+        except FileNotFoundError:
+            return {'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                    'observations': [], 'record_sha256': None}
+        except OSError:
+            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
+        try:
+            before = os.fstat(fd)
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                    stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                    before.st_size > WORKER_AVAILABILITY_MAX_BYTES):
+                os.close(fd)
+                fd = None
+                _fail('WORKER_AVAILABILITY_INVALID')
+            with os.fdopen(fd, 'rb') as stream:
+                fd = None
+                raw = stream.read(WORKER_AVAILABILITY_MAX_BYTES + 1)
+                after = os.fstat(stream.fileno())
+            current = os.stat(WORKER_AVAILABILITY_NAME, dir_fd=directory,
+                              follow_symlinks=False)
+            if (len(raw) > WORKER_AVAILABILITY_MAX_BYTES or
+                    _identity(before) != _identity(after) or
+                    _identity(before) != _identity(current)):
+                _fail('WORKER_AVAILABILITY_CHANGED')
+            record = json.loads(raw.decode('utf-8'),
+                                object_pairs_hook=self._unique_pairs,
+                                parse_constant=lambda _: _fail(
+                                    'WORKER_AVAILABILITY_INVALID'))
+            return self._validate_worker_availability(record)
+        except LLMToolError:
+            raise
+        except Exception:
+            _fail('WORKER_AVAILABILITY_INVALID')
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    @staticmethod
+    def _lock_worker_availability(directory, *, exclusive):
+        try:
+            lock_fd = os.open(WORKER_AVAILABILITY_LOCK_NAME,
+                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                              0o600, dir_fd=directory)
+            info = os.fstat(lock_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                os.close(lock_fd)
+                _fail('WORKER_AVAILABILITY_INVALID')
+            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            return lock_fd
+        except LLMToolError:
+            raise
+        except OSError:
+            if 'lock_fd' in locals():
+                os.close(lock_fd)
+            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
+
+    def _write_worker_availability_at(self, directory, record):
+        value = dict(record)
+        value.pop('record_sha256', None)
+        value['record_sha256'] = _digest(value)
+        self._validate_worker_availability(value)
+        raw = _json_bytes(value)
+        if len(raw) > WORKER_AVAILABILITY_MAX_BYTES:
+            _fail('WORKER_AVAILABILITY_LIMIT')
+        temporary = WORKER_AVAILABILITY_NAME + '.' + uuid.uuid4().hex + '.tmp'
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, WORKER_AVAILABILITY_NAME,
+                       src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        except LLMToolError:
+            raise
+        except OSError:
+            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+        return value
+
+    @staticmethod
+    def _worker_availability_view(record, *, now=None):
+        now = now or datetime.now(timezone.utc)
+        persisted = {(item['worker_key'], item['layer']): dict(item)
+                     for item in record['observations']}
+        result = {}
+        for worker_key in sorted(WORKER_KEYS):
+            result[worker_key] = {}
+            for layer in sorted(WORKER_LAYERS):
+                item = persisted.get((worker_key, layer))
+                if item is None:
+                    result[worker_key][layer] = {
+                        'status': 'UNKNOWN', 'observed_at': None,
+                        'fresh_until': None, 'source': None,
+                        'evidence_sha256': None,
+                    }
+                    continue
+                expiry = TaskStore._worker_timestamp(
+                    item['fresh_until'], allow_future=True)
+                if expiry <= now:
+                    item['status'] = 'UNKNOWN'
+                del item['worker_key']
+                del item['layer']
+                result[worker_key][layer] = item
+        return result
+
+    def record_worker_observation(self, *, worker_key, layer, status,
+                                  observed_at, fresh_until, source,
+                                  evidence_sha256):
+        """Persist one bounded technical observation without granting authority."""
+        candidate = {
+            'worker_key': worker_key, 'layer': layer, 'status': status,
+            'observed_at': observed_at, 'fresh_until': fresh_until,
+            'source': source, 'evidence_sha256': evidence_sha256,
+        }
+        # Validate the public input before acquiring the shared metadata lock.
+        now = datetime.now(timezone.utc)
+        self._validate_worker_availability({
+            'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+            'observations': [candidate],
+            'record_sha256': _digest({
+                'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                'observations': [candidate],
+            }),
+        }, now=now)
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_worker_availability(directory, exclusive=True)
+            record = self._read_worker_availability_at(directory)
+            observations = [item for item in record['observations']
+                            if (item['worker_key'], item['layer']) !=
+                            (worker_key, layer)]
+            observations.append(candidate)
+            observations.sort(key=lambda item: (item['worker_key'], item['layer']))
+            saved = self._write_worker_availability_at(directory, {
+                'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                'observations': observations,
+            })
+            result = self._worker_availability_view(saved)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            os.close(directory)
+        return result
+
+    def get_worker_observations(self):
+        """Read a complete worker/layer view; absent or expired results are UNKNOWN."""
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_worker_availability(directory, exclusive=False)
+            record = self._read_worker_availability_at(directory)
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            os.close(directory)
+        return self._worker_availability_view(record)
 
     def append_dispatch_audit(self, task_id, entry, *, expected=None):
         """Append one bounded gate result using the existing TaskStore CAS lock."""
