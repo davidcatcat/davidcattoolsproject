@@ -1404,6 +1404,55 @@ def _jsonl_tail(path: str) -> list:
     return out
 
 
+TURN_MARKERS = ("task_started", "task_complete", "turn_aborted")
+OFFICE_TURN_SCAN = 64 << 20   # how far before the tail a Codex turn marker is looked for
+_turn_cache: dict = {}        # {path: (scanned up to, marker)} for the part before the tail
+
+
+def _newest_turn_marker(handle, low: int, high: int):
+    """The newest turn marker in whole lines inside [low, high) of a record."""
+    carry = b""
+    while high > low:
+        start = max(low, high - (4 << 20))
+        handle.seek(start)
+        lines = (handle.read(high - start) + carry).split(b"\n")
+        carry, high = (lines.pop(0) if start > low else b""), start
+        for raw in reversed(lines):
+            if b'"event_msg"' not in raw or not any(m.encode() in raw for m in TURN_MARKERS):
+                continue
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            inner = item.get("payload") if type(item) is dict else None
+            if (item.get("type") == "event_msg" and type(inner) is dict
+                    and inner.get("type") in TURN_MARKERS):
+                return inner["type"]
+    return None
+
+
+def _codex_turn_marker(path: str):
+    """The newest turn marker before the tail of a long Codex record: one turn
+    can outgrow the tail. Only the part that left the tail since the last look
+    is read again."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            end = max(0, size - OFFICE_TAIL)
+            # Start on a line boundary: the tail's cut first line belongs here.
+            handle.seek(end)
+            end += len(handle.readline(OFFICE_TAIL)) if end else 0
+            seen, marker = _turn_cache.get(path, (None, None))
+            if seen is None or seen > end:
+                seen, marker = max(0, end - OFFICE_TURN_SCAN), None
+            # A marker that left the tail since the last look is newer.
+            marker = _newest_turn_marker(handle, seen, end) or marker
+    except OSError:
+        return None
+    _turn_cache[path] = (end, marker)
+    return marker
+
+
 def _label(text, limit: int = 40) -> str:
     line = _headline(text) if type(text) is str else ""
     return line[:limit] + ("…" if len(line) > limit else "")
@@ -1506,9 +1555,10 @@ def _codex_row(path: str, now: float, canonical: str):
     for item in tail:
         inner = item.get("payload")
         kind = inner.get("type") if type(inner) is dict else None
-        if item.get("type") == "event_msg" and kind in ("task_started", "task_complete",
-                                                       "turn_aborted"):
+        if item.get("type") == "event_msg" and kind in TURN_MARKERS:
             last = kind
+    if last is None:
+        last = _codex_turn_marker(path)
     subagent = payload.get("thread_source") == "subagent"
     if last in ("task_complete", "turn_aborted"):
         state = DONE if subagent else IDLE

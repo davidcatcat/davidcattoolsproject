@@ -1003,6 +1003,23 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
                             for line in mon.office_lines(self.rows())))
 
+    def test_codex_turn_longer_than_the_tail_is_still_working(self):
+        meta = {"id": "T1", "cwd": self.canonical, "thread_source": "user"}
+        filler = {"type": "response_item", "payload": {"type": "reasoning", "x": "y" * 1000}}
+        path = self._codex("pm", meta, ["task_started"], age=200)
+        def grow(*markers):
+            with open(path, "a", encoding="utf-8") as handle:
+                for kind in markers:
+                    handle.write(json.dumps({"type": "event_msg", "payload": {"type": kind}}) + "\n")
+                handle.writelines(json.dumps(filler) + "\n"
+                                  for _ in range(mon.OFFICE_TAIL // 1000 + 10))
+            os.utime(path, (self.NOW - 200, self.NOW - 200))
+            return self.by_name(self.rows())["codex 主對話"].state
+        mon._turn_cache.clear()
+        self.assertEqual(grow(), mon.WORKING)   # the start marker is now before the tail
+        self.assertEqual(grow("task_complete"), mon.IDLE)
+        self.assertEqual(grow("task_started"), mon.WORKING)
+
     def test_codex_main_shows_what_it_is_doing(self):
         item = lambda payload: {"type": "event_msg", "payload": payload}
         call = lambda name, **kw: {"type": "response_item",
