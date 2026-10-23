@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only macOS/Linux process monitor for local AI agent jobs.
 
-Shows OpenCode, Claude Code, Codex and llmtool processes, and the progress of
+Shows OpenCode, Kilo, Claude Code, Codex and llmtool processes, and the progress of
 recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
 repository mutation, credentials, or daemon. Network access is off unless --github
@@ -9,6 +9,15 @@ is explicitly supplied for read-only Activity headlines. This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions. Its Activity view is limited to local task
 evidence and does not invent cross-session dispatch, delivery, review or acceptance.
+
+The office view (default screen, key 5) lists every Codex PM / developer /
+reviewer / subagent and Claude session / subagent working in this repository,
+plus each Worker's dispatch switch, one row each with a live state such as
+工作中, 待命, 完成, 暫停中 or 停工. It parses local session files but shows only
+labels, titles and verdict words (see the office view section); a role is
+named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
+and finished subagent work for 30 minutes; office data is rebuilt at most every
+5 seconds.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -19,7 +28,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import os
 import re
@@ -39,7 +48,7 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 # Python options that consume the next argument (-c ends option parsing).
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
-NO_EXPAND = frozenset({"Claude Desktop"})
+NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
 
 
 @dataclass(frozen=True)
@@ -107,11 +116,22 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
         if "run" in words:
             return "OpenCode CLIENT"
         return "OpenCode CLI"
+    if exe in ("kilo", ".kilo", "kilocode", "kilo.exe"):
+        # Kilo CLI is an OpenCode fork; the npm launcher starts a ".kilo" binary.
+        if "serve" in words:
+            return "Kilo SERVER"
+        if "run" in words:
+            return "Kilo CLIENT"
+        return "Kilo CLI"
     if exe == "claude":
         return "Claude Code CLI"
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".
         return None if "Helper" in command else "Claude Desktop"
+    if exe == "agy":
+        return "AGY CLI"
+    if exe == "Antigravity":
+        return None if "Helper" in command else "Antigravity App (AGY)"
     if exe == "codex-code-mode-host":
         return "Codex code-mode host"
     if exe == "codex":
@@ -254,7 +274,7 @@ def collect(remembered: dict | None = None) -> Snapshot:
 
 
 def family(role: str) -> str:
-    for name in ("OpenCode", "Claude", "Codex", "llmtool", "ai-loop"):
+    for name in ("OpenCode", "Kilo", "Claude", "Codex", "llmtool", "ai-loop"):
         if name in role:
             return name
     return "other"
@@ -283,7 +303,7 @@ def summary(processes: list[Process], lingering: list) -> str:
     for p in processes:
         if not p.role.startswith(" "):
             counts[family(p.role)] = counts.get(family(p.role), 0) + 1
-    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "llmtool", "ai-loop", "other")
+    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "other")
                      if k in counts) or "no agent process"
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
@@ -328,6 +348,11 @@ class Monitor:
         self.task_map: dict = {}
         self.task_baseline = False   # a successful task scan has adopted the starting point
         self.github = None   # GitHubSource for the Activity view; None means no network at all
+        self.office: list = []
+        self.office_state: dict = {}
+        self.office_error: str | None = None   # why the office view could not be built
+        self.office_due = 0.0   # monotonic time of the next office rebuild
+        self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -401,6 +426,24 @@ class Monitor:
             new.append((stamp, "i", f"{len(tasks)} recent llmtool task(s); latest {latest.task_id}"
                                     + (f": {last.name} {stage_state(last)}" if last else ": not started")))
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
+        self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
+        new += [(stamp, "i", text) for text in ended]
+        if time.monotonic() >= self.office_due:
+            # Session scans, tails, sqlite and AGY lookups are the costly part of a
+            # poll; they run at most every OFFICE_EVERY seconds, not every tick.
+            self.office_due = time.monotonic() + OFFICE_EVERY
+            try:
+                office = office_rows(result.processes, finished_runs=finished)
+            except Exception as exc:  # never break process monitoring, but never show stale rows
+                message = type(exc).__name__
+                if message != self.office_error:
+                    new.append((stamp, "?", f"office view unavailable: {message}"))
+                # A fresh baseline after the error, so recovery is not logged as changes.
+                self.office, self.office_state, self.office_error = [], {}, message
+            else:
+                state, changes = office_events(self.office_state, office)
+                new += [(stamp, kind, text) for kind, text in changes]
+                self.office, self.office_state, self.office_error = office, state, None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1126,6 +1169,1383 @@ def activity_lines(tasks: list[Task], limit: int = 60,
     return render_activity(activity_events(tasks), limit, github)
 
 
+# ---------------------------------------------------------------- office view
+# One row per worker / agent / subagent, like looking across an office floor:
+# who is working, idle, paused or stopped, and on what. Local and read-only.
+#
+# What is read: the tail of each recent Codex and Claude session file is loaded
+# into memory and parsed (it contains prompts, model text and tool calls), and
+# the recent part of a Codex thread is scanned for `claude --print` calls and
+# their results. What is kept and shown is limited to:
+#   - Codex: cwd (as a place label), originator, thread ids, subagent nickname
+#     and the "/root/<name>" agent path, task_started/complete event types;
+#   - Claude: cwd, the model-written `ai-title`, subagent `.meta.json`
+#     description, and the `description` field of the newest tool call;
+#   - one-shot reviews: the PR number and head named in the PM's call, and the
+#     verdict word on its own line in the call's result;
+#   - OpenCode/Kilo session titles and timestamps, typed error codes;
+#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes.
+# Titles and descriptions are model- or prompt-derived text: they are passed
+# through the same redaction as Activity headlines and shortened. Prompts, other
+# model text, reasoning, commands and tool output are never shown; private paths
+# are never shown. A role is named only when a record binds it (a D6 registry
+# root or session_ref, or a PM call naming a PR and head); otherwise no role is
+# claimed and the row says only who it is.
+import unicodedata
+
+CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
+OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
+OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
+OFFICE_STALL = 15 * 60         # started but silent for longer: 無回應
+OFFICE_EVERY = 5.0             # seconds between office rebuilds (process polling stays faster)
+OFFICE_HEAD = 1 << 20
+OFFICE_TAIL = 512 << 10
+AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")
+NICKNAME = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,23}")
+WORKING, IDLE, DONE, STALLED, PAUSED, STOPPED, UNCHECKED, ATTENTION, CLOSED = (
+    "工作中", "待命", "完成", "無回應", "暫停中", "停工", "未確認", "需注意", "已關閉")
+
+
+@dataclass(frozen=True)
+class OfficeRow:
+    name: str
+    state: str
+    detail: str
+    age: float | None   # seconds since last observed activity; None = not observed
+    order: int
+    key: str = ""       # identity other rows can name as their group
+    group: str = ""     # key of the agent that started this one ("" = top level)
+    kind: str = "agent"   # agent | subagent | worker
+    tui: bool = False     # a Codex thread opened from the terminal CLI
+    # What is known about the member, kept apart from the display text:
+    role: str = ""        # developer | reviewer, only when a record binds it; "" = not claimed
+    main: bool = False    # a Codex main thread in the canonical checkout (D6 Integrator's place)
+    task: str = ""        # bound work, e.g. "PR #284 @c40c80a" or "task <id>"; "" = unbound
+    evidence: str = ""    # where the row comes from (codex 紀錄, claude 紀錄, 程序, 派工檔, ...)
+    authority: str = ""   # who set a dispatch switch: Owner | PM
+    outcome: str = ""     # a finished one-shot review: verdict word or why it has none
+    alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
+
+
+def _who(agent: str, role: str, nick: str = "") -> str:
+    """Display name. A role is named only when a record binds it (Owner
+    2026-10-23: no guessed roles); otherwise just who it is."""
+    return " ".join(part for part in (agent, role or "subagent", nick) if part)
+
+
+def canonical_root(start: str = SCRIPT_ROOT) -> str:
+    """The canonical checkout, also when the monitor runs from a linked worktree."""
+    marker = os.path.join(start, ".git")
+    try:
+        if os.path.isfile(marker):
+            with open(marker, encoding="utf-8") as handle:
+                found = re.match(r"gitdir:\s*(.+)", handle.read(4096))
+            if found:
+                common = os.path.realpath(os.path.join(start, found.group(1).strip()))
+                # <canonical>/.git/worktrees/<name> -> <canonical>
+                return os.path.dirname(os.path.dirname(os.path.dirname(common)))
+    except OSError:
+        pass
+    return os.path.realpath(start)
+
+
+D6_GONE_STATES = frozenset({"REMOVED"})
+_registry_cache: dict = {}
+
+
+def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
+    """{task id: (registered root, session_ref)} from the D6 registry, read-only.
+
+    A record counts only when the registry and the record are the user's own,
+    owner-only, not symlinks, name the same task, give an exact real root, and
+    the worktree is still LOCKED and not removed. Anything else grants nothing."""
+    registry = os.path.join(canonical, ".git", "llmtool-worktrees")
+    try:
+        st = os.lstat(registry)
+    except OSError:
+        return {}
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022:
+        return {}
+    stamp = (st.st_ino, st.st_mtime_ns)   # an atomic record replace changes the dir mtime
+    cached = _registry_cache.get(registry)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    found: dict[str, tuple[str, str]] = {}
+    try:
+        names = os.listdir(registry)
+    except OSError:
+        names = []
+    for name in names:
+        task_id = name[:-len(".json")]
+        if not name.endswith(".json") or not AGENT_PATH.fullmatch(task_id):
+            continue
+        path = os.path.join(registry, name)
+        try:
+            file_st = os.lstat(path)
+            if (not stat.S_ISREG(file_st.st_mode) or file_st.st_uid != os.getuid()
+                    or file_st.st_mode & 0o077 or file_st.st_size > 64 << 10):
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(64 << 10))
+        except (OSError, ValueError):
+            continue
+        root = record.get("root_realpath") if type(record) is dict else None
+        if (type(root) is not str or not os.path.isabs(root) or os.path.realpath(root) != root
+                or record.get("task_id") != task_id or record.get("lock_state") != "LOCKED"
+                or record.get("state") in D6_GONE_STATES):
+            continue
+        ref = record.get("session_ref")
+        found[task_id] = (root, ref if type(ref) is str else "")
+    _registry_cache.clear()
+    _registry_cache[registry] = (stamp, found)
+    return found
+
+
+def _place(cwd, canonical: str) -> tuple[str, str] | None:
+    """Where a session works: ('pm', '') for the canonical checkout, ('task', id)
+    for a registered D6 root, ('unregistered', name) for a folder that only looks
+    like a task root, else None (not this repository)."""
+    if type(cwd) is not str or not cwd:
+        return None
+    real = os.path.realpath(cwd)
+    if real == canonical or real.startswith(canonical + os.sep):
+        return "pm", ""
+    for task_id, (root, _) in registered_tasks(canonical).items():
+        if real == root or real.startswith(root + os.sep):
+            return "task", task_id
+    parts = real.split(os.sep)
+    name = os.path.basename(canonical)
+    for i in range(len(parts) - 2):
+        if parts[i] == "llmtool-dev-workspaces" and parts[i + 1] == name:
+            rest = parts[i + 2:]
+            if len(rest) >= 2 and rest[0] == "tasks" and AGENT_PATH.fullmatch(rest[1]):
+                return "unregistered", rest[1]
+            if rest and AGENT_PATH.fullmatch(rest[0]):
+                return "unregistered", rest[0]
+    return None
+
+
+def _place_label(place: tuple[str, str]) -> str:
+    return {"pm": "本 repo", "task": f"task {place[1]}",
+            "unregistered": f"未登記資料夾 {place[1]}"}[place[0]]
+
+
+META_FIELDS = ("id", "timestamp", "cwd", "originator", "thread_source", "parent_thread_id",
+               "agent_nickname", "agent_path")
+
+
+def _jsonl_head(path: str):
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.readline(OFFICE_HEAD)
+    except OSError:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError:
+        pass
+    # An oversized first line (long base instructions) is cut off. Codex writes
+    # the small identity fields before the instructions, so take the first
+    # occurrence of each and nothing else.
+    payload = {}
+    for field in META_FIELDS:
+        found = re.search(rb'"' + field.encode() + rb'"\s*:\s*"((?:[^"\\]|\\.){0,4096})"', raw)
+        if found:
+            try:
+                payload[field] = json.loads(b'"' + found.group(1) + b'"')
+            except ValueError:
+                pass
+    return {"type": "session_meta", "payload": payload} if "cwd" in payload else None
+
+
+def _first_entrypoint(path: str, lines: int = 64):
+    """How a Claude session was first started ("cli" or "sdk-cli")."""
+    try:
+        with open(path, "rb") as handle:
+            for _ in range(lines):
+                raw = handle.readline(OFFICE_HEAD)
+                if not raw:
+                    break
+                try:
+                    item = json.loads(raw)
+                except ValueError:
+                    continue
+                if type(item) is dict and type(item.get("entrypoint")) is str:
+                    return item["entrypoint"]
+    except OSError:
+        pass
+    return None
+
+
+def _jsonl_tail(path: str) -> list:
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as handle:
+            handle.seek(max(0, size - OFFICE_TAIL))
+            data = handle.read(OFFICE_TAIL)
+    except OSError:
+        return []
+    lines = data.split(b"\n")
+    if size > OFFICE_TAIL:
+        lines = lines[1:]   # the first line is cut
+    out = []
+    for raw in lines:
+        if raw.strip():
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            if type(item) is dict:
+                out.append(item)
+    return out
+
+
+def _label(text, limit: int = 40) -> str:
+    line = _headline(text) if type(text) is str else ""
+    return line[:limit] + ("…" if len(line) > limit else "")
+
+
+def _last_action(tail: list) -> str:
+    """The `description` of the newest Claude tool call: the short summary Claude
+    Code writes for people (e.g. "Run monitor tests"). Only that one field is
+    read; the command, file contents and every other tool input are ignored."""
+    for item in reversed(tail):
+        message = item.get("message") if item.get("type") == "assistant" else None
+        content = message.get("content") if type(message) is dict else None
+        if type(content) is not list:
+            continue
+        for block in reversed(content):
+            if type(block) is dict and block.get("type") == "tool_use":
+                tool_input = block.get("input")
+                text = tool_input.get("description") if type(tool_input) is dict else None
+                if type(text) is str and text.strip():
+                    return _label(text)
+    return ""
+
+
+def _humanize(path_stem: str) -> str:
+    return " ".join(path_stem.replace("-", "_").split("_"))
+
+
+def _codex_row(path: str, now: float, canonical: str):
+    meta = _jsonl_head(path)
+    payload = meta.get("payload") if type(meta) is dict else None
+    if type(payload) is not dict:
+        return None
+    place = _place(payload.get("cwd"), canonical)
+    if place is None:
+        return None
+    try:
+        age = max(0.0, now - os.path.getmtime(path))
+    except OSError:
+        return None
+    last = None
+    for item in _jsonl_tail(path):
+        inner = item.get("payload")
+        kind = inner.get("type") if type(inner) is dict else None
+        if item.get("type") == "event_msg" and kind in ("task_started", "task_complete",
+                                                       "turn_aborted"):
+            last = kind
+    subagent = payload.get("thread_source") == "subagent"
+    if last in ("task_complete", "turn_aborted"):
+        state = DONE if subagent else IDLE
+    elif last == "task_started":
+        state = WORKING if age <= OFFICE_STALL else STALLED
+    else:
+        state = WORKING if age <= OFFICE_BUSY else IDLE
+    if subagent:
+        # Codex names a spawned agent "/root/<short_task_name>"; anything else
+        # could carry a private path, so it is shown as unnamed.
+        found = re.fullmatch(r"/root/([A-Za-z0-9_-]{1,48})", str(payload.get("agent_path") or ""))
+        stem = found.group(1) if found else ""
+        nick = payload.get("agent_nickname")
+        nick = nick if type(nick) is str and NICKNAME.fullmatch(nick) else ""
+        if state == DONE and age > OFFICE_DONE_WINDOW:
+            return None
+        # A D6 record whose session_ref names this agent binds it to that task;
+        # otherwise no role is claimed: the work name says what it does.
+        task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
+                     if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
+                    "")
+        role = "developer" if task else ""
+        return ("sub", payload.get("parent_thread_id"),
+                OfficeRow(_who("codex", role, nick), state,
+                          (_humanize(stem) if stem else "（未命名工作）") +
+                          (f"（task {task}）" if task else ""), age, 20,
+                          key=f"codex:{payload.get('id')}",
+                          group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
+                          role=role, task=f"task {task}" if task else "",
+                          evidence="codex 紀錄"))
+    key = f"codex:{payload.get('id')}"
+    started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
+    since = f"（{time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）" if started else ""
+    tui = payload.get("originator") == "codex-tui"
+    if place[0] == "task":   # a registered D6 root belongs to its one Developer
+        return ("main", payload.get("id"),
+                OfficeRow("codex developer", state, _place_label(place), age, 10, key=key,
+                          tui=tui, role="developer", task=f"task {place[1]}",
+                          evidence="codex 紀錄"))
+    if place[0] == "unregistered":
+        return ("main", payload.get("id"),
+                OfficeRow("codex 對話", state, _place_label(place),
+                          age, 10, key=key, tui=tui, evidence="codex 紀錄"))
+    # The canonical checkout is the Integrator's under D6, but nothing records
+    # which thread holds that role, so none is claimed.
+    return ("main", payload.get("id"),
+            OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
+                      evidence="codex 紀錄"))
+
+
+# One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
+# head come from the call itself (the dispatch), and only that call's own
+# result is used (directly, or via write_stdin polls of its exec session), never
+# other tool output, so a verdict quoted from GitHub cannot be mistaken for one.
+# Just the PR number, reviewed head and verdict word are extracted from the first
+# part of the result; nothing else is kept.
+# `claude` must start a command (line start, after ; && || "| " $( or an
+# opening quote of an argv/cmd string) and --print must be in that same
+# command, so a search pattern such as `pgrep -f 'x|claude --print'` is not one.
+CLAUDE_CALL = re.compile(
+    r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\()\s*(?:[\w./~-]*/)?claude\b"
+    r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
+STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
+# A verdict counts only as its own line ("**Verdict: FAIL**"), not inside a
+# sentence quoting an earlier one.
+REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*verdict\b\W{0,8}(PASS|FAIL|REVISE|BLOCKED)\b")
+REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
+REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
+REVIEW_SCAN = 6 << 20
+# PM poll scripts report a still-running exec session as JSON "session_id":N or
+# as a line such as "SESSION N" / "SESSION_ID=N", and an exit as "exit_code",
+# "EXIT N" or "EXIT=N".
+RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION(?: |_ID=)(\d{1,9})$', re.M)
+EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT[ =]-?\d{1,3}$',
+                    re.M)
+CONTROL_LINE = re.compile(
+    r"\s*(?:SESSION(?: |_ID=)\d{1,9}|EXIT[ =]-?\d{1,3}|exit_code=\S*)\s*")
+OVER_BUDGET = re.compile(r"^Error: Exceeded USD budget\b", re.M)
+NO_VERDICT, OVER_BUDGET_TEXT = "結束但沒有判定（可能呼叫失敗）", "超過預算上限，沒有判定"
+AMBIGUOUS = "結果無法對應（同一次輸出裡有多個指令的結果）"
+MISMATCH = "回覆的 PR／版本跟呼叫時不同"
+_review_cache: dict = {}
+
+
+def _review_target(text: str) -> tuple[str, str]:
+    pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
+    return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
+
+
+def _result_text(text: str) -> str:
+    """The command's own output from one exec result: a JSON result object's
+    "output" string (also inside a Promise.allSettled "value"), else the text."""
+    if text.lstrip().startswith("{"):
+        try:
+            item = json.loads(text)
+        except ValueError:
+            return text
+        if type(item) is dict and type(item.get("value")) is dict:
+            item = item["value"]
+        if type(item) is dict and type(item.get("output")) is str:
+            return item["output"]
+    return text
+
+
+def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None:
+    """Verdict word or a reason it has none; None while there is no result yet.
+    A direct call that reports no running session has already finished (for
+    example a CLI usage error); a poll needs an exit marker or a verdict."""
+    results = [text for text in parts
+               if text.strip() and not text.startswith("Script completed")
+               and not CONTROL_LINE.fullmatch(text)]
+    if not direct and not any(EXITED.search(text) for text in parts) and not any(
+            REVIEW_VERDICT.search(text) for text in results):
+        return None
+    if len(results) > 1:
+        return AMBIGUOUS
+    head = _result_text(results[0])[:1500] if results else ""
+    verdict = REVIEW_VERDICT.search(head)
+    if verdict is None:
+        return OVER_BUDGET_TEXT if any(map(OVER_BUDGET.search, parts)) else NO_VERDICT
+    pr, sha = _review_target(head)
+    if (pr and origin[1] and pr != origin[1]) or (sha and origin[2] and
+                                                  not (sha.startswith(origin[2]) or
+                                                       origin[2].startswith(sha))):
+        return MISMATCH
+    return verdict.group(1).upper()
+
+
+def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
+    """[(time, pr, head7, outcome or None)] for `claude --print` calls in one
+    Codex thread, oldest first; outcome None = no result returned yet. PR and
+    head are the ones the call named."""
+    now = time.time() if now is None else now
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    cache = _review_cache.get(path)
+    if cache is None or size < cache["offset"]:
+        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": {}, "polls": {},
+                 "sessions": {}, "done": [], "carry": b""}
+        _review_cache[path] = cache
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(cache["offset"])
+            data = cache["carry"] + handle.read(size - cache["offset"])
+    except OSError:
+        return []
+    first = cache["offset"] == max(0, size - REVIEW_SCAN) and not cache["done"] and not cache["calls"]
+    cache["offset"] = size
+    lines = data.split(b"\n")
+    cache["carry"] = lines.pop()   # an unfinished last line is read again next time
+    if first and data and not data.startswith(b"{"):
+        lines = lines[1:]
+    for raw in lines:
+        try:
+            item = json.loads(raw)
+        except ValueError:
+            continue
+        payload = item.get("payload") if type(item) is dict else None
+        if type(payload) is not dict:
+            continue
+        when = _github_time(str(item.get("timestamp") or "")[:19] + "Z")
+        kind, call = payload.get("type"), payload.get("call_id")
+        if kind == "custom_tool_call":
+            text = str(payload.get("input") or "")
+            if CLAUDE_CALL.search(text):
+                cache["calls"][call] = (when,) + _review_target(text)
+            found = STDIN_POLL.search(text)
+            if found:
+                cache["polls"][call] = int(found.group(1))
+        elif kind == "custom_tool_call_output":
+            origin = cache["calls"].get(call)
+            polled = cache["polls"].pop(call, None)
+            if origin is None:
+                origin = cache["sessions"].get(polled)
+            if origin is None:
+                continue
+            parts = [part.get("text", "") if type(part) is dict else ""
+                     for part in payload.get("output") or []]
+            # A still-running exec session is reported as JSON "session_id":N or,
+            # by some PM poll scripts, as a plain "SESSION N" line.
+            running = {int(a or b) for text in parts
+                       for a, b in RUNNING_SESSION.findall(text)}
+            if polled is not None and polled in running:
+                continue   # still running; an exit code here belongs to a parallel command
+            if polled is None and running:
+                for session in running:
+                    cache["sessions"][session] = origin
+                continue
+            outcome = _review_outcome(origin, parts, direct=polled is None)
+            if outcome is None:
+                continue   # no result yet
+            cache["done"].append((when, origin[1], origin[2], outcome))
+            for key in [k for k, v in cache["calls"].items() if v is origin]:
+                cache["calls"].pop(key)
+            for key in [k for k, v in cache["sessions"].items() if v is origin]:
+                cache["sessions"].pop(key)
+    cache["done"] = cache["done"][-20:]
+    # A call that never reports back is dropped once it is older than the office window.
+    for table in ("calls", "sessions"):
+        cache[table] = {k: v for k, v in cache[table].items()
+                        if v[0] is not None and now - v[0] <= OFFICE_WINDOW}
+    # A call and the exec session it opened share one origin: list it once.
+    origins = {id(origin): origin for origin in
+               list(cache["calls"].values()) + list(cache["sessions"].values())}
+    pending = [(when, pr, sha, None) for when, pr, sha in origins.values()]
+    return sorted(cache["done"] + pending, key=lambda item: item[0] or 0.0)
+
+
+def forget_reviews(paths) -> None:
+    """Drop cached review state for threads no longer scanned."""
+    for path in [path for path in _review_cache if path not in paths]:
+        _review_cache.pop(path, None)
+
+
+def _review_label(pr: str, sha: str) -> str:
+    target = f"PR #{pr}" if pr else "（PR 未知）"
+    return f"審 {target}" + (f" @{sha}" if sha else "")
+
+
+CODEX_DAYS = 7   # a long-running thread lives in the folder of the day it started
+
+
+def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
+    """One row per recent `claude --print` call a Codex thread made. A call that
+    names a PR and head is a Reviewer bound to that dispatch; any other call is
+    an unbound one-shot run."""
+    rows = []
+    for when, pr, sha, outcome in codex_reviews(path, now):
+        age = max(0.0, now - when) if when else None
+        if age is None or age > (OFFICE_STALL if outcome is None else OFFICE_DONE_WINDOW):
+            continue
+        bound = bool(pr and sha)
+        task = f"PR #{pr} @{sha}" if bound else ""
+        label = _review_label(pr, sha) if bound else "單次呼叫（呼叫裡沒寫 PR 和版本）"
+        rows.append(OfficeRow("claude reviewer" if bound else "claude 單次呼叫",
+                              WORKING if outcome is None else DONE,
+                              f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
+                              age, 30, kind="subagent", group=parent.key, key="review",
+                              role="reviewer" if bound else "", task=task,
+                              evidence="codex 紀錄（呼叫與結果）", outcome=outcome or ""))
+    return rows
+
+
+def codex_rows(now: float, root: str | None = None,
+               canonical: str | None = None) -> list[OfficeRow]:
+    root = CODEX_SESSIONS if root is None else root
+    canonical = canonical or canonical_root()
+    days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
+            for d in range(CODEX_DAYS)}
+    paths = []
+    for day in days:
+        paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
+    mains, subs, scanned = {}, [], set()
+    for path in sorted(paths):
+        try:
+            if now - os.path.getmtime(path) > OFFICE_WINDOW:
+                continue
+        except OSError:
+            continue
+        found = _codex_row(path, now, canonical)
+        if found is None:
+            continue
+        scanned.add(path)
+        kind, key, row = found
+        if kind == "main":
+            mains[key] = row
+        else:
+            subs.append((key, row))
+        reviews = _review_rows(path, now, row)
+        subs += [(key if kind == "main" else None, review) for review in reviews]
+    forget_reviews(scanned)
+    rows = []
+    for key, row in mains.items():
+        if row.main:
+            busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
+            detail = (f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
+                      else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
+            row = replace(row, state=WORKING if busy else row.state, detail=detail)
+        rows.append(row)
+    return rows + [row for _, row in subs]
+
+
+def claude_rows(now: float, root: str | None = None,
+                canonical: str | None = None) -> list[OfficeRow]:
+    root = CLAUDE_PROJECTS if root is None else root
+    canonical = canonical or canonical_root()
+    rows = []
+    for path in sorted(glob.glob(os.path.join(root, "*", "*.jsonl"))):
+        try:
+            age = max(0.0, now - os.path.getmtime(path))
+        except OSError:
+            continue
+        if age > OFFICE_WINDOW:
+            continue
+        tail = _jsonl_tail(path)
+        cwd = next((item.get("cwd") for item in reversed(tail)
+                    if type(item.get("cwd")) is str), None)
+        place = _place(cwd, canonical)
+        if place is None:
+            continue
+        title = next((item.get("aiTitle") for item in reversed(tail)
+                      if item.get("type") == "ai-title"), None)
+        detail = _label(title) or (_place_label(place) if place[0] != "pm" else "（無標題）")
+        # A registered D6 root belongs to its one Developer; elsewhere nothing
+        # records the role, so none is claimed.
+        role, task = ("developer", f"task {place[1]}") if place[0] == "task" else ("", "")
+        action = _last_action(tail) if age <= OFFICE_BUSY else ""
+        if action:
+            detail = action   # what it is doing right now beats the session title
+        key = f"claude:{os.path.basename(path)}"
+        # An interactive session another agent pings with `claude --resume -p`
+        # gains sdk-cli entries but is still the interactive member.
+        first = _first_entrypoint(path)
+        one_shot = first == "sdk-cli" or first is None and any(
+            item.get("entrypoint") == "sdk-cli" for item in tail)
+        if one_shot:
+            # A `claude -p` run: it exits when its one task is done. The session
+            # does not say who started it, so it is not hung under anyone.
+            state = WORKING if age <= OFFICE_BUSY else DONE
+            if state == DONE and age > OFFICE_DONE_WINDOW:
+                continue
+            rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
+                                  kind="subagent", task=task, evidence="claude 紀錄"))
+            continue
+        rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
+                              WORKING if age <= OFFICE_BUSY else IDLE, detail,
+                              age, 30 if place[0] == "pm" else 10, key=key, role=role,
+                              task=task, evidence="claude 紀錄"))
+        session_dir = path[:-len(".jsonl")]
+        for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
+                                                       "agent-*.meta.json"))):
+            log_path = meta_path[:-len(".meta.json")] + ".jsonl"
+            try:
+                sub_age = max(0.0, now - os.path.getmtime(log_path))
+                with open(meta_path, "rb") as handle:
+                    meta = json.loads(handle.read(64 << 10))
+            except (OSError, ValueError):
+                continue
+            if type(meta) is not dict:
+                continue
+            if sub_age <= OFFICE_BUSY:
+                state = WORKING
+            elif meta.get("finished") is True:
+                state = DONE
+            else:
+                state = WORKING if sub_age <= OFFICE_STALL else STALLED
+            if (state == DONE and sub_age > OFFICE_DONE_WINDOW) or sub_age > OFFICE_WINDOW:
+                continue
+            sub_detail = _label(meta.get("description")) or "（未命名工作）"
+            if state == WORKING:
+                doing = _last_action(_jsonl_tail(log_path))
+                sub_detail = f"{sub_detail}：{doing}" if doing else sub_detail
+            rows.append(OfficeRow("claude subagent", state, sub_detail,
+                                  sub_age, 40, group=key, kind="subagent",
+                                  evidence="claude 紀錄"))
+    return rows
+
+
+OPENCODE_DB = os.path.expanduser("~/.local/share/opencode/opencode.db")
+# Only these session columns are read; the database's account/credential tables
+# are never queried.
+OPENCODE_SESSIONS_SQL = ("SELECT directory, title, time_updated, time_idle FROM session_v2 "
+                         "WHERE parent_id IS NULL AND time_updated >= ? "
+                         "ORDER BY time_updated DESC LIMIT 200")
+# Outcome of the newest finished top-level session: only the typed error code
+# and HTTP status are extracted, never the error message or any content.
+OPENCODE_OUTCOME_SQL = (
+    "SELECT s.time_updated, s.idle_outcome, "
+    "(SELECT json_extract(m.data, '$.error.type') FROM session_message m "
+    " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1), "
+    "(SELECT json_extract(m.data, '$.error.status') FROM session_message m "
+    " WHERE m.session_id = s.id AND m.type = 'idle' ORDER BY m.seq DESC LIMIT 1) "
+    ", s.directory "
+    "FROM session_v2 s WHERE s.parent_id IS NULL AND s.time_idle IS NOT NULL "
+    "ORDER BY s.time_updated DESC LIMIT 50")
+OPENCODE_EVIDENCE_WINDOW = 24 * 3600
+ERROR_TYPE = re.compile(r"[a-z][a-z0-9._-]{0,47}")
+OPENCODE_ROLES = ("OpenCode CLIENT", "OpenCode CLI")
+_cwd_cache: dict = {}
+
+
+def process_cwd(pid: int) -> str | None:
+    """Current directory of one process (lsof, read-only), cached per PID."""
+    if pid in _cwd_cache:
+        return _cwd_cache[pid]
+    found = None
+    try:
+        lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+        out = subprocess.run([lsof, "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                             capture_output=True, text=True, timeout=2, check=False).stdout
+        found = next((line[1:] for line in out.splitlines() if line.startswith("n/")), None)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _cwd_cache[pid] = found
+    return found
+
+
+def opencode_sessions(now: float, db: str | None = None) -> list[tuple]:
+    """[(directory, title, updated_s, idle_s | None)] for recent top-level sessions."""
+    db = OPENCODE_DB if db is None else db
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(OPENCODE_SESSIONS_SQL, (int((now - OFFICE_WINDOW) * 1000),)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for directory, title, updated, idle in rows:
+        if type(directory) is str and type(updated) is int:
+            out.append((directory, title, updated / 1000,
+                        idle / 1000 if type(idle) is int else None))
+    return out
+
+
+def opencode_outcome(now: float, db: str | None = None, canonical: str | None = None):
+    """(state, detail, age) from the newest finished OpenCode session that worked
+    in this repository (canonical checkout or a task root), or None."""
+    db = OPENCODE_DB if db is None else db
+    canonical = canonical or canonical_root()
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = conn.execute(OPENCODE_OUTCOME_SQL).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    row = next((row for row in rows if _place(row[4], canonical) is not None), None)
+    if not row or type(row[0]) is not int:
+        return None
+    age = max(0.0, now - row[0] / 1000)
+    if age > OPENCODE_EVIDENCE_WINDOW:
+        return None
+    kind = row[2] if type(row[2]) is str and ERROR_TYPE.fullmatch(row[2]) else None
+    status = row[3] if type(row[3]) is int and 100 <= row[3] <= 599 else None
+    if kind is None and status is None:
+        return (IDLE, "最近一次執行沒有錯誤", age) if row[1] != "failed" else (
+            UNCHECKED, "最近一次執行失敗（原因不明）", age)
+    if kind == "provider.quota" or status == 429:
+        return STOPPED, "最近一次：免費額度用完（429）", age
+    if kind == "provider.auth" or status in (401, 403):
+        return STOPPED, f"最近一次：認證失敗（{status or kind}），需要重新登入", age
+    return STOPPED, f"最近一次執行失敗（{kind or status}）", age
+
+
+def _where(cwd, canonical: str) -> str:
+    place = _place(cwd, canonical)
+    if place is None:
+        return "其他資料夾" if cwd else "位置不明"
+    return _place_label(place)
+
+
+def _elapsed_seconds(text: str) -> float | None:
+    found = re.fullmatch(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)", text or "")
+    if not found:
+        return None
+    days, hours, minutes, seconds = (int(part or 0) for part in found.groups())
+    return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
+
+
+def _forget_cwds(processes: list[Process]) -> None:
+    alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + KILO_ROLES + ("AGY CLI",)}
+    for pid in [pid for pid in _cwd_cache if pid not in alive]:
+        _cwd_cache.pop(pid, None)
+
+
+def opencode_rows(processes: list[Process], now: float, canonical: str,
+                  db: str | None = None, cwd_of=process_cwd) -> list[OfficeRow]:
+    """One row per running OpenCode CLI/TUI or `run` client."""
+    procs = sorted((p for p in processes if p.role in OPENCODE_ROLES), key=lambda p: p.pid)
+    if not procs:
+        return []
+    return _cli_rows(procs, opencode_sessions(now, db), now, canonical, cwd_of,
+                     "opencode", "OpenCode CLIENT", 50, "")
+
+
+KILO_DB = os.path.expanduser("~/.local/share/kilo/kilo.db")
+KILO_ROLES = ("Kilo CLIENT", "Kilo CLI")
+# Kilo keeps the older OpenCode schema (`session` + `message`, no idle column).
+# Only these columns and the newest message's role/completion time are read;
+# message content, parts and the account/credential tables are never queried.
+KILO_SESSIONS_SQL = (
+    "SELECT s.directory, s.title, s.time_updated, "
+    "(SELECT json_extract(m.data, '$.role') FROM message m WHERE m.session_id = s.id "
+    " ORDER BY m.time_created DESC LIMIT 1), "
+    "(SELECT json_extract(m.data, '$.time.completed') FROM message m WHERE m.session_id = s.id "
+    " ORDER BY m.time_created DESC LIMIT 1), "
+    "(SELECT count(*) FROM message m WHERE m.session_id = s.id) "
+    "FROM session s WHERE s.parent_id IS NULL AND s.time_updated >= ? "
+    "ORDER BY s.time_updated DESC LIMIT 200")
+
+
+def kilo_sessions(now: float, db: str | None = None) -> list[tuple]:
+    """Same shape as opencode_sessions(): a session is idle once its newest
+    message is a completed assistant reply (or it has no message yet)."""
+    db = KILO_DB if db is None else db
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(KILO_SESSIONS_SQL, (int((now - OFFICE_WINDOW) * 1000),)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for directory, title, updated, role, completed, count in rows:
+        if type(directory) is not str or type(updated) is not int:
+            continue
+        if count == 0:
+            idle = updated
+        elif role == "assistant" and type(completed) is int:
+            idle = completed
+        else:
+            idle = None
+        out.append((directory, title, updated / 1000, idle / 1000 if idle is not None else None))
+    return out
+
+
+def kilo_rows(processes: list[Process], now: float, canonical: str,
+              db: str | None = None, cwd_of=process_cwd) -> list[OfficeRow]:
+    """One row per running Kilo CLI. Kilo is not a Worker in the dispatch file,
+    so its rows say so: an open Kilo is the Owner's own session, not dispatch."""
+    procs = sorted((p for p in processes if p.role in KILO_ROLES), key=lambda p: p.pid)
+    if not procs:
+        return []
+    return _cli_rows(procs, kilo_sessions(now, db), now, canonical, cwd_of,
+                     "kilo", "Kilo CLIENT", 75, "（未列入派工）")
+
+
+def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical: str,
+              cwd_of, prefix: str, client_role: str, base: int, note: str) -> list[OfficeRow]:
+    rows = []
+    for number, proc in enumerate(procs, 1):
+        cwd = cwd_of(proc.pid)
+        real = os.path.realpath(cwd) if cwd else None
+        latest = next((item for item in sessions if real and os.path.realpath(item[0]) == real),
+                      None)
+        busy = (latest is not None and now - latest[2] <= OFFICE_STALL and
+                (latest[3] is None or latest[2] - latest[3] > 2.0))
+        where = _where(cwd, canonical)
+        name = f"{prefix} {'worker' if proc.role == client_role else 'cli'} #{number}"
+        if busy:
+            detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
+            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), base + number,
+                                  kind="worker"))
+        else:
+            opened = _elapsed_seconds(proc.elapsed)
+            since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
+            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}{note}",
+                                  opened if opened is not None else 0.0, base + number,
+                                  kind="worker"))
+    return rows
+
+
+AGY_BUSY_CPU = 3.0   # %CPU at or above which an open AGY CLI is treated as working
+
+
+def process_cpu(pid: int) -> float | None:
+    try:
+        out = subprocess.run(["/bin/ps", "-o", "%cpu=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=2, check=False).stdout.strip()
+        return float(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
+             cpu_of=process_cpu) -> list[OfficeRow]:
+    """One row per open AGY CLI. AGY keeps no local activity record we can read,
+    so busy/idle is estimated from CPU use and labelled as such."""
+    rows = []
+    procs = sorted((p for p in processes if p.role == "AGY CLI"), key=lambda p: p.pid)
+    for number, proc in enumerate(procs, 1):
+        where = _where(cwd_of(proc.pid), canonical)
+        cpu = cpu_of(proc.pid)
+        opened = _elapsed_seconds(proc.elapsed)
+        if cpu is None:
+            state, note = UNCHECKED, "CLI 已開啟，無法判斷是否在工作"
+        elif cpu >= AGY_BUSY_CPU:
+            state, note = WORKING, f"CLI 執行中（依 CPU {cpu:.0f}% 推算）"
+        else:
+            state, note = IDLE, "CLI 已開啟，閒置（依 CPU 推算）"
+        rows.append(OfficeRow(f"agy cli #{number}", state, f"{where}：{note}",
+                              opened if opened is not None else 0.0, 60 + number, kind="worker"))
+    return rows
+
+
+LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
+LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
+PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
+DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
+    "DEVELOPER_RESPONDED": "成功回應",
+    "DEVELOPER_OUTPUT_INVALID_DIFF": "輸出被拒（diff 格式錯誤）",
+    "DEVELOPER_OUTPUT_INVALID_ENVELOPE": "輸出被拒（回應格式錯誤）",
+    "DEVELOPER_OUTPUT_REJECTED": "輸出被拒",
+    "DEVELOPER_PROVIDER_UNAVAILABLE": "連不上服務",
+    "DEVELOPER_UNAVAILABLE": "無法使用",
+    "DEVELOPER_OUTCOME_UNKNOWN": "結果不明",
+}
+
+
+def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
+    """{developer profile: (age, total, succeeded, latest words)} from llmtool's
+    local task records. Only the developer route's profile, state and error
+    code are read; requests, responses, prompts and diffs are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    found: dict = {}
+    for path in glob.glob(os.path.join(root, "*.json")):
+        try:
+            age = max(0.0, now - os.path.getmtime(path))
+            if age > LLMTOOL_EVIDENCE_WINDOW:
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(1 << 20))
+        except (OSError, ValueError):
+            continue
+        developer = record.get("developer") if type(record) is dict else None
+        if type(developer) is not dict:
+            continue
+        profile, state, code = (developer.get("provider_profile"), developer.get("state"),
+                                developer.get("error_code"))
+        if type(profile) is not str or not PROFILE.fullmatch(profile):
+            continue
+        if type(state) is not str or not CODE_TEXT.fullmatch(state):
+            continue
+        code = code if type(code) is str and CODE_TEXT.fullmatch(code) else None
+        words = (DEVELOPER_RESULTS.get(code) or DEVELOPER_RESULTS.get(state)
+                 or code or state)
+        age_, total, ok, latest = found.get(profile, (None, 0, 0, ""))
+        newer = age_ is None or age < age_
+        found[profile] = (age if newer else age_, total + 1,
+                          ok + (state == "DEVELOPER_RESPONDED"), words if newer else latest)
+    return found
+
+
+# Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
+# subagents itself (Owner 2026-10-23), and those appear under the PM.
+WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
+    ("opencode developer", "opencode-developer", 50),
+    ("agy", "agy", 60),
+    ("公司 gw", "company-gw", 70),
+)
+# Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
+# from live technical state. A PAUSED switch holds until the Owner changes it,
+# whatever quota, login or app state is observed. Without a readable, valid
+# switch the monitor says it cannot tell; it never falls back to other text.
+DISPATCH_RELATIVE = os.path.join("tools", "llmtool", "worker-dispatch.json")
+DISPATCH_REFS = ("origin/main", "main")   # local refs only; the monitor never fetches
+DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
+DECIDERS = frozenset({"Owner", "PM"})
+DISPATCH_TTL = 30.0
+_dispatch_cache: dict = {}
+
+
+def load_dispatch(canonical: str, path: str | None = None) -> tuple[bytes | None, str]:
+    """(file bytes or None, where they came from). The checkout's file wins;
+    without it, the newest local main ref that has it (possibly behind GitHub)."""
+    candidates = [path] if path is not None else [os.path.join(canonical, DISPATCH_RELATIVE)]
+    for candidate in candidates:
+        try:
+            with open(candidate, "rb") as handle:
+                return handle.read(256 << 10), "派工檔"
+        except OSError:
+            pass
+    if path is not None:
+        return None, ""
+    cached = _dispatch_cache.get(canonical)
+    if cached is not None and time.monotonic() - cached[0] < DISPATCH_TTL:
+        return cached[1]
+    found: tuple[bytes | None, str] = (None, "")
+    for ref in DISPATCH_REFS:
+        try:
+            result = subprocess.run(["git", "-C", canonical, "cat-file", "blob",
+                                     f"{ref}:tools/llmtool/worker-dispatch.json"],
+                                    capture_output=True, timeout=2, check=False)
+        except (OSError, subprocess.SubprocessError):
+            break
+        if result.returncode == 0 and len(result.stdout) <= 256 << 10:
+            found = (result.stdout, f"本機 {ref} 的派工檔（可能不是最新）")
+            break
+    _dispatch_cache[canonical] = (time.monotonic(), found)
+    return found
+
+
+def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
+    """({worker key: (dispatch, decided_by, MM-DD)}, problem). problem is "" when
+    the file is valid, else why nothing can be read from it. An entry that is
+    present but invalid maps to ("INVALID", "", "")."""
+    if raw is None:
+        return {}, "missing"
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}, "invalid"
+    workers = data.get("workers") if type(data) is dict and data.get("schema_version") == 1 else None
+    if type(workers) is not dict:
+        return {}, "invalid"
+    found = {}
+    for key, item in workers.items():
+        if type(key) is not str:
+            continue
+        dispatch, who, when = ((item.get("dispatch"), item.get("decided_by"), item.get("decided_at"))
+                               if type(item) is dict else (None, None, None))
+        if (dispatch in DISPATCH_VALUES and who in DECIDERS and type(when) is str and
+                re.fullmatch(r"\d{4}-\d{2}-\d{2}", when)):
+            found[key] = (dispatch, who, when[5:])
+        else:
+            found[key] = ("INVALID", "", "")
+    return found, ""
+
+
+DISPATCH_PROBLEMS = {
+    "missing": "讀不到派工檔，無法判斷能否派工",
+    "invalid": "派工檔格式錯誤，無法判斷能否派工",
+    "absent": "派工檔沒有這個 worker，無法判斷能否派工",
+    "entry": "派工檔裡這個 worker 的設定無效，無法判斷能否派工",
+}
+
+
+def track_one_shot(state: dict, processes: list[Process], now: float):
+    """Remember short `claude -p` runs started by Codex after they exit.
+
+    They leave no session file and often last under a minute, so without this
+    a run is visible only while it happens to be running. Returns the new
+    state, [(duration_s, seconds_since_end)] for runs that ended within the
+    done window, and one log line per run that just ended. Memory only."""
+    state = {pid: list(item) for pid, item in state.items()}
+    live = {p.pid: p for p in processes
+            if p.role == "Claude Code CLI" and p.owner.startswith("Codex")}
+    for pid, proc in live.items():
+        if pid not in state or state[pid][2] is not None:   # new, or a reused PID
+            state[pid] = [now - (_elapsed_seconds(proc.elapsed) or 0.0), now, None]
+        state[pid][1] = now
+    ended = []
+    for pid, item in state.items():
+        if pid not in live and item[2] is None:
+            item[2] = now
+            ended.append(f"claude 單次呼叫（由 Codex 啟動）結束（約 {max(1, int(item[1] - item[0]))} 秒）")
+    state = {pid: item for pid, item in state.items()
+             if item[2] is None or now - item[2] <= OFFICE_DONE_WINDOW}
+    finished = [(item[1] - item[0], now - item[2]) for item in state.values() if item[2] is not None]
+    return state, finished, ended
+
+
+def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
+    """A thread opened from the Codex CLI keeps its record open in the
+    app-server daemon after the CLI exits or moves on to a new thread. With N
+    CLIs running, the N most recently active CLI threads are taken as the
+    attached ones; any other shows as closed for a while, then leaves with
+    what it started."""
+    tui = sorted((row for row in rows if row.tui),
+                 key=lambda row: row.age if row.age is not None else 1e12)
+    attached = {row.key for row in tui[:clis]}
+    gone, out = set(), []
+    for row in rows:
+        if not row.tui or row.key in attached:
+            out.append(row)
+        elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
+            gone.add(row.key)
+        else:
+            out.append(replace(row, state=CLOSED, detail="推測 Codex CLI 已關閉" + (
+                row.detail[row.detail.rfind("（"):] if row.detail.endswith("開始）") else "")))
+    return [row for row in out if row.group not in gone]
+
+
+def office_rows(processes: list[Process], now: float | None = None, *,
+                codex_root: str | None = None, claude_root: str | None = None,
+                canonical: str | None = None,
+                opencode_db: str | None = None, kilo_db: str | None = None,
+                cwd_of=process_cwd,
+                cpu_of=process_cpu, dispatch: str | None = None,
+                llmtool_tasks: str | None = None,
+                finished_runs: list | None = None) -> list[OfficeRow]:
+    now = time.time() if now is None else now
+    canonical = canonical or canonical_root()
+    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
+    # Each running CLI is attached to one thread; with npm, the launcher and
+    # its binary are one CLI.
+    clis = sum(p.role == "Codex CLI" for p in processes) or sum(
+        p.role == "Codex CLI (node launcher)" for p in processes)
+    rows = _closed_codex_cli(rows, clis)
+    # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
+    # client is.
+    _forget_cwds(processes)
+    opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
+    rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
+    agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
+    # `claude -p --no-session-persistence` started by Codex leaves no session
+    # file. Calls a Codex record already shows are not repeated; any further
+    # process is listed on its own, since nothing says which thread started it.
+    recorded = [row for row in rows if row.key == "review"]
+    running = sorted((p for p in processes if p.role == "Claude Code CLI"
+                      and p.owner.startswith("Codex")), key=lambda p: p.pid)
+    for proc in running[sum(row.state == WORKING for row in recorded):]:
+        rows.append(OfficeRow("claude 單次呼叫", WORKING,
+                              "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",
+                              _elapsed_seconds(proc.elapsed) or 0.0, 30, kind="subagent",
+                              evidence="程序"))
+    for duration, since_end in (finished_runs or [])[sum(row.state == DONE for row in recorded):]:
+        rows.append(OfficeRow("claude 單次呼叫", DONE,
+                              f"由 Codex 啟動，已結束（跑了約 {max(1, int(duration))} 秒，"
+                              "看不出在做什麼）", since_end, 30, kind="subagent", evidence="程序"))
+    agy = agy_rows(processes, canonical, cwd_of, cpu_of)
+    rows += agy
+    raw, source = load_dispatch(canonical, dispatch)
+    switches, problem = worker_dispatch(raw)
+    for name, key, order in WORKER_ROSTER:
+        live = opencode if name == "opencode developer" else agy if name == "agy" else []
+        switch = switches.get(key)
+        trouble = problem or ("absent" if switch is None else
+                              "entry" if switch[0] == "INVALID" else "")
+        paused = not trouble and switch[0] == "PAUSED"
+        if live and not trouble and not paused:
+            continue   # the live CLI rows say everything
+        notes, state, age, alert = [], None, None, ""
+        if name == "opencode developer" and not live:
+            outcome = opencode_outcome(now, opencode_db, canonical)
+            if outcome is not None:
+                state, age = outcome[0], outcome[2]
+                notes.append("本 repo " + outcome[1])
+                if state == STOPPED:   # kept even when the dispatch state is unknown
+                    alert = "本 repo " + outcome[1]
+        if name == "agy" and agy_open and not live:
+            notes.append("App 開著")
+        if name == "公司 gw":
+            gw = llmtool_route_outcomes(now, llmtool_tasks).get("company-gw")
+            if gw is not None:
+                age = gw[0]
+                if gw[2] == 0:
+                    state = ATTENTION   # reachable on paper, but every recent llmtool run failed
+                    alert = f"近 7 天 {gw[1]} 次都沒成功，最近一次：{gw[3]}"
+                notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
+                             f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
+        if live:
+            notes.append(f"有 {len(live)} 個 CLI 開著（非派工）")
+        if trouble:
+            label, state, authority = DISPATCH_PROBLEMS[trouble], UNCHECKED, ""
+        else:
+            label = {"PAUSED": f"{switch[1]} 暫停派工（{switch[2]}）",
+                     "OWNER_ASSIGNMENT_ONLY": "僅 Owner 指定時派工",
+                     "ALLOWED": "可派工"}[switch[0]]
+            if source != "派工檔":
+                label += f"（{source}）"
+            authority = switch[1]
+            if paused:
+                state, age = PAUSED, None
+            elif state is None:
+                state = IDLE
+        if paused:
+            alert = ""   # the Owner already stopped dispatch; a fault is not news
+        rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
+                              kind="worker", evidence=source or "派工檔", authority=authority,
+                              alert=alert))
+    return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
+                                         row.name))
+
+
+def _width(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - _width(text))
+
+
+def _ago(age: float | None) -> str:
+    if age is None:
+        return "無即時紀錄"
+    if age < 60:
+        return "剛剛"
+    if age < 3600:
+        return f"{int(age // 60)} 分鐘前"
+    return f"{int(age // 3600)} 小時前"
+
+
+LIVE_SECTION = "即時（讀得到 session 紀錄）"
+STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
+
+
+def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
+    """(prefix, row) in display order: each agent followed by what it started."""
+    keys = {row.key for row in rows if row.key}
+    children: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        if row.group in keys:
+            children.setdefault(row.group, []).append(row)
+    out: list[tuple[str, OfficeRow]] = []
+    if any(row.kind != "worker" or row.group in keys for row in rows):
+        out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
+
+    def walk(row: OfficeRow, depth: int) -> None:
+        out.append(("  " * (depth - 1) + "└ " if depth else "", row))
+        for child in children.get(row.key, []) if row.key and depth < 3 else []:
+            walk(child, depth + 1)
+
+    for row in rows:
+        if row.group not in keys and row.kind != "worker":
+            walk(row, 0)
+    workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
+    if workers:
+        out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
+        out += [("", row) for row in workers]
+    return out
+
+
+RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
+REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH})
+ALERT_STATES = (STALLED, STOPPED, ATTENTION)
+
+
+def _short_ago(age: float | None) -> str:
+    """The time column: short, and kept clear of the cut-off detail."""
+    if age is None:
+        return ""
+    if age < 60:
+        return "剛剛"
+    if age < 3600:
+        return f"{int(age // 60)} 分前"
+    return f"{int(age // 3600)} 小時前"
+
+
+def _review_alerts(rows: list[OfficeRow]) -> list[str]:
+    """One line per PR whose one-shot reviews ended without a verdict more than
+    once: repeated calls on one PR read as one problem, not as separate rows."""
+    by_pr: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        if row.key == "review" and row.task.startswith("PR #"):
+            by_pr.setdefault(row.task.split()[1], []).append(row)
+    out = []
+    for pr, items in by_pr.items():
+        missing = sum(row.outcome in REVIEW_NO_VERDICT for row in items)
+        if missing < 2:
+            continue
+        parts = [f"{missing} 次沒有判定"]
+        fails = sum(row.outcome == "FAIL" for row in items)
+        if fails:
+            parts.append(f"{fails} 次 FAIL")
+        running = [row for row in items if row.state == WORKING]
+        tail = (f"；目前執行中 {running[0].task.split()[-1]}" if running
+                else "；目前沒有在跑")
+        out.append(f"{pr} reviewer：" + "、".join(parts) + tail)
+    return out
+
+
+def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
+    """Finished subagent work older than RECENT_DONE becomes one line per parent.
+    The newest finished review of each PR stays, so its verdict is not hidden."""
+    keys = {row.key for row in rows if row.key}
+    newest: dict[str, OfficeRow] = {}
+    for row in rows:
+        if row.key == "review" and row.state == DONE and row.task:
+            held = newest.get(row.task.split()[1])
+            if held is None or (row.age or 0.0) < (held.age or 0.0):
+                newest[row.task.split()[1]] = row
+    kept, folded = [], {}
+    for row in rows:
+        if (row.state == DONE and row.group in keys and row.age is not None
+                and row.age > RECENT_DONE and row not in newest.values()):
+            folded[row.group] = folded.get(row.group, 0) + 1
+        else:
+            kept.append(row)
+    for group, count in folded.items():
+        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成；按 a 展開"
+        kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
+                              group=group, kind="subagent"))
+    return kept
+
+
+DETAIL_COLS = 44   # detail width when the screen width is not known
+DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
+BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
+NO_LINE_START = "）」』】，。、；：！？)]}"
+
+
+def _wrap(text: str, cols: int) -> list[str]:
+    """text split into lines of at most cols display columns (at least one),
+    broken after ；，、 or a space where possible, never before a closing mark."""
+    pieces = []
+    while _width(text) > cols:
+        fit = 0
+        while _width(text[:fit + 1]) <= cols:
+            fit += 1
+        cut = max((i + 1 for i in range(fit) if text[i] in BREAK_AFTER), default=0)
+        if cut < fit // 2:   # no good break point in the second half: break anywhere
+            cut = fit
+            while 1 < cut and text[cut] in NO_LINE_START:
+                cut -= 1
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    return pieces + [text]
+
+
+def _row_style(state: str) -> str:
+    """Working rows stand out, problems are yellow, everything else is dimmed."""
+    return "+" if state == WORKING else "!" if state in ALERT_STATES else "dim"
+
+
+def office_view(rows: list[OfficeRow], error: str | None = None,
+                width: int | None = None, expand: bool = False) -> list[tuple[str, str]]:
+    """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
+    With a screen width, each detail is cut so the time column stays visible.
+    expand lists older finished work too instead of folding it into one line."""
+    working = sum(row.state == WORKING for row in rows)
+    out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
+    if error:
+        return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
+    if not rows:
+        return out + [("目前沒有觀察到任何 agent 或 worker。", "dim")]
+    mains = sum(row.main and row.state != CLOSED for row in rows)
+    if mains > 1:
+        out.append((f"⚠ 有 {mains} 個 Codex 主對話都開在主 repo："
+                    "可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）", "!"))
+    # The same dispatch problem on several Workers is said once, not per row.
+    notes = []
+    shared: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        label = next((text for text in DISPATCH_PROBLEMS.values()
+                      if row.kind == "worker" and row.detail.startswith(text)), None)
+        if label:
+            shared.setdefault(label, []).append(row)
+    shared = {label: items for label, items in shared.items() if len(items) > 1}
+    for label, items in shared.items():
+        notes.append(f"ℹ {label}：" + "、".join(row.name for row in items))
+    trimmed = {id(row): row.detail[len(label):].lstrip("；") or "沒有其他紀錄"
+               for label, items in shared.items() for row in items}
+    rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
+            for row in rows]
+    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…"),
+    # which goes to the dimmed legend at the bottom.
+    legend = []
+    for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
+        note = f"（{source}）"
+        if source and sum(note in row.detail for row in rows) > 1:
+            legend.append(f"派工狀態讀自{source}")
+            rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
+    alerts = _review_alerts(rows)
+    alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
+    alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
+               if row.state in ALERT_STATES and not row.alert]
+    for text in [f"⚠ {text}" for text in alerts] + notes:
+        out += [(("  " if i else "") + piece, "!") for i, piece in
+                enumerate(_wrap(text, width - 2) if width else [text])]
+    tree = _tree(rows if expand else _fold_done(rows))
+    name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    # The detail column is as wide as the longest detail, up to DETAIL_MAX and
+    # what the screen leaves, so the time stays near its text on a wide screen.
+    longest = max([_width(row.detail) for _, row in tree if row.detail] or [0])
+    detail_cols = (DETAIL_COLS if width is None else
+                   max(12, min(longest, DETAIL_MAX, width - name_cols - 8 - 11)))
+    for prefix, row in tree:
+        if prefix == "—":
+            if row.name == STATUS_SECTION:
+                out.append(("", ""))   # a blank line sets the Worker list apart
+            out.append((f"── {row.name} ──", "section"))
+            continue
+        # In the TUI a long detail continues on the next lines under itself.
+        pieces = [row.detail] if width is None else _wrap(row.detail, detail_cols)
+        when = _short_ago(row.age)
+        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{pieces[0]}"
+        if when:
+            line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
+        out.append((line.rstrip(), _row_style(row.state)))
+        out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
+    legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
+    text = "；".join(legend)
+    out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
+    return out
+
+
+def office_lines(rows: list[OfficeRow], error: str | None = None,
+                 width: int | None = None, expand: bool = False) -> list[str]:
+    return [line for line, _ in office_view(rows, error, width, expand)]
+
+
+def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
+    """Log lines for members whose state changed since the previous poll."""
+    new = {f"{row.name}|{row.detail}": row.state for row in rows}
+    events = []
+    for key, state in new.items():
+        before = old.get(key)
+        if before is not None and before != state:
+            name, detail = key.split("|", 1)
+            kind = "+" if state == WORKING else "!" if state in (STALLED, STOPPED, ATTENTION) else "i"
+            events.append((kind, f"{name}「{detail}」：{before} → {state}"))
+    return new, events
+
+
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
 FOOTNOTE = "running != model generating; gone != task done"
 FOLLOW_VIEWS = frozenset({"log", "activity"})   # newest at the bottom; offset counts back
@@ -1138,6 +2558,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
+    print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
+    print()
     print("\n".join(table_lines(mon.processes)))
     print("\nRECENT LLMTOOL TASKS")
     print("\n".join(task_lines(mon.tasks, 3)))
@@ -1175,7 +2597,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                                        ("■", curses.COLOR_GREEN)), start=1):
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
-    view, offset, next_poll = "log", 0, 0.0
+    view, offset, next_poll = "office", 0, 0.0
+    expanded = False   # office view: also list older finished work (key a)
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -1207,7 +2630,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             end = len(entries) - offset
             for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
                 put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
@@ -1220,7 +2643,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
                     attr |= colors.get("!", 0)
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         elif view == "activity":
             lines = activity_lines(mon.tasks, github=mon.github, background=True)
             offset = max(0, min(offset, len(lines) - body))
@@ -1228,25 +2651,36 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             for row, line in enumerate(lines[max(0, end - body):end]):
                 attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
                 put(3 + row, line, attr)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
+        elif view == "office":
+            lines = office_view(mon.office, mon.office_error, w - 1, expanded)
+            offset = max(0, min(offset, len(lines) - body))
+            styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
+                      "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
+            for row, (line, style) in enumerate(lines[offset:offset + body]):
+                put(3 + row, line, styles.get(style, 0))
+            hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
+                    f"a: {'收起' if expanded else '展開'}已完成  q: quit")
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-            hint = "Tab/1/2/3/4: log·tasks·processes·Activity  ↑↓ PgUp/PgDn: scroll  q: quit"
+            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
         put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
         stdscr.refresh()
         key = stdscr.getch()
         if key in (ord("q"), ord("Q"), 27):
             return
-        views = ("log", "tasks", "table", "activity")
-        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity
+        views = ("log", "tasks", "table", "activity", "office")
+        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity -> office
             view, offset = views[(views.index(view) + 1) % len(views)], 0
-        elif key in (ord("1"), ord("2"), ord("3"), ord("4")):
+        elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
             view, offset = views[key - ord("1")], 0
+        elif key in (ord("a"), ord("A")) and view == "office":
+            expanded = not expanded
         elif key == curses.KEY_UP:
             offset += 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_DOWN:
@@ -1265,7 +2699,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=1.0,
                         help="seconds between snapshots (default 1; minimum 0.5)")
     parser.add_argument("--once", action="store_true",
-                        help="print one process table, task list and Activity view, then exit")
+                        help="print the office roster, process table, task list and Activity view, then exit")
     parser.add_argument("--plain", action="store_true",
                         help="append-only event lines instead of the interactive screen")
     parser.add_argument("--no-color", action="store_true", help="disable colors")

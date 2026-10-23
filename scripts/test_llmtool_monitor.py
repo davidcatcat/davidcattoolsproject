@@ -22,6 +22,20 @@ SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUT
            "RAW-ARGV-SECRET", "CREDENTIAL-SECRET", "token=abc", "/Users/davidsun")
 
 
+_ISOLATED = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # Never let a test read the developer's real agent sessions: a live session
+    # changing state mid-test would add office events to unrelated assertions.
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+        setattr(mon, name, os.path.join(_ISOLATED.name, name))
+
+
+def tearDownModule():
+    _ISOLATED.cleanup()
+
+
 def ps(*rows):
     return "\n".join(rows)
 
@@ -32,8 +46,14 @@ class ClassifyTests(unittest.TestCase):
             "/u/lib/node_modules/@opencode/cli/bin/opencode.exe serve --service": "OpenCode SERVER",
             "/u/bin/opencode.exe run --agent a": "OpenCode CLIENT",
             "(opencode.exe)": "OpenCode CLI",
+            "node /u/.nvm/versions/node/v24/bin/kilo": "Kilo CLI (node launcher)",
+            "/u/lib/node_modules/@kilocode/cli/bin/.kilo": "Kilo CLI",
+            "/u/.kilo/bin/kilo run --agent a": "Kilo CLIENT",
             "claude": "Claude Code CLI",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
+            "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
+            "/Users/x/.local/bin/agy": "AGY CLI",
+            "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper": None,
             "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=gpu": None,
             "/u/bin/codex app-server --listen": "Codex APP-SERVER",
             "/u/bin/codex app-server daemon pid-update-loop": "Codex daemon",
@@ -259,6 +279,30 @@ class MonitorTaskBaselineTests(unittest.TestCase):
     def poll_without_process_table(self):
         with patch.object(mon, "collect", side_effect=RuntimeError("ps unavailable")):
             return self.monitor.poll()
+
+    def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
+        self.monitor.office = [mon.OfficeRow("codex 主對話", mon.WORKING, "old", 1.0, 0)]
+        with patch.object(mon, "office_rows", side_effect=TypeError("boom")):
+            new = self.poll([])
+        self.assertEqual(self.monitor.office, [])
+        self.assertIn(("?", "office view unavailable: TypeError"),
+                      [(kind, text) for _, kind, text in new])
+        self.assertEqual(self.monitor.office_state, {})   # recovery starts from a fresh baseline
+        lines = mon.office_lines(self.monitor.office, self.monitor.office_error)
+        self.assertTrue(lines[1].startswith("⚠ 辦公室資料讀取失敗（TypeError）"))
+        self.monitor.office_due = 0.0
+        with patch.object(mon, "office_rows", return_value=[]):
+            self.poll([])
+        self.assertIsNone(self.monitor.office_error)
+
+    def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
+        with patch.object(mon, "office_rows", return_value=[]) as rows:
+            self.poll([])
+            self.poll([])
+            self.assertEqual(rows.call_count, 1)   # the second tick reuses the office
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertEqual(rows.call_count, 2)
 
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
@@ -741,6 +785,848 @@ class GitHubActivityTests(unittest.TestCase):
         old = (datetime.now() - timedelta(days=2)).timestamp()
         self.assertRegex(mon._when(old), r"^\d{2}/\d{2} \d{2}:\d{2}$")
         self.assertRegex(mon._when(datetime.now().timestamp()), r"^\d{2}:\d{2}:\d{2}$")
+
+
+DISPATCH = {   # the Owner's switches as of 2026-10-23
+    "opencode-developer": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+    "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+    "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+}
+
+
+class OfficeViewTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.canonical = os.path.realpath(str(base / "repo" / "davidcattoolsproject"))
+        os.makedirs(self.canonical)
+        self.task = base / "llmtool-dev-workspaces" / "davidcattoolsproject" / "tasks" / "wp-1"
+        os.makedirs(self.task)
+        self.codex = base / "codex"
+        self.claude = base / "claude"
+        self._write_dispatch(DISPATCH)
+        self._register("wp-1", str(self.task))
+
+    def _write_dispatch(self, workers, raw=None):
+        path = Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw if raw is not None else
+                        json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        return path
+
+    def _register(self, task_id, root, **fields):
+        registry = Path(self.canonical) / ".git" / "llmtool-worktrees"
+        registry.mkdir(parents=True, exist_ok=True)
+        os.chmod(registry, 0o700)
+        record = {"task_id": task_id, "root_realpath": os.path.realpath(root),
+                  "lock_state": "LOCKED", "state": "ACTIVE", "session_ref": ""}
+        record.update(fields)
+        path = registry / f"{task_id}.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(path, 0o600)
+        mon._registry_cache.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, path: Path, items, age: float) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(item) + "\n" for item in items), encoding="utf-8")
+        os.utime(path, (self.NOW - age, self.NOW - age))
+        return path
+
+    def _codex(self, name, meta, events, age):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": meta}]
+        items += [{"type": "response_item", "payload": {"type": "message",
+                   "content": "PROMPT-SECRET MODEL-OUTPUT-SECRET /Users/davidsun/x"}}]
+        items += [{"type": "event_msg", "payload": {"type": kind}} for kind in events]
+        return self._write(self.codex / day / f"rollout-{name}.jsonl", items, age)
+
+    def rows(self, processes=()):
+        return mon.office_rows(list(processes), self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude),
+                               canonical=self.canonical)
+
+    def by_name(self, rows):
+        return {row.name: row for row in rows}
+
+    def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                           "originator": "codex-tui"}, ["task_started", "task_complete"], age=180)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Bacon",
+                            "originator": "codex-tui", "agent_path": "/root/issue289_runtime_dev"},
+                    ["task_started", "task_complete"], age=420)
+        self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
+                            "originator": "codex_vscode"}, ["task_complete"], age=60)
+        cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
+        self.assertEqual(self.by_name(self.rows([cli]))["codex 主對話"].state, mon.IDLE)
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex 主對話"].state, mon.CLOSED)
+        self.assertTrue(rows["codex 主對話"].detail.startswith("推測 Codex CLI 已關閉"))
+        self.assertEqual(rows["codex subagent Bacon"].state, mon.DONE)
+        self.assertEqual(rows["codex developer"].state, mon.IDLE)   # not opened from the CLI
+        self.assertEqual((rows["codex developer"].task, rows["codex developer"].role),
+                         ("task wp-1", "developer"))   # a registered D6 root binds the role
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                           "originator": "codex-tui"}, ["task_complete"],
+                    age=mon.OFFICE_DONE_WINDOW + 60)
+        rows = self.by_name(self.rows())
+        self.assertNotIn("codex 主對話", rows)
+        self.assertNotIn("codex subagent Bacon", rows)   # leaves with the PM that started it
+
+    def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
+        self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started", "turn_aborted"], age=90)
+        self._codex("new", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started", "task_complete"], age=10)
+        cli = [mon.Process(8, 7, 8, "01:14", "S+", "Codex CLI", "codex", "Codex CLI (node launcher) 7"),
+               mon.Process(7, 1, 7, "01:14", "S+", "Codex CLI (node launcher)", "node", "")]
+        pms = [row for row in self.rows(cli) if row.name == "codex 主對話"]
+        self.assertEqual(sorted(row.state for row in pms), sorted([mon.IDLE, mon.CLOSED]))
+        self.assertEqual(next(row for row in pms if row.state == mon.IDLE).age, 10.0)
+        self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows(cli))))
+
+    def test_only_a_registered_d6_root_counts_as_a_task(self):
+        loose = Path(self.tmp.name) / "llmtool-dev-workspaces" / "davidcattoolsproject" / "tasks" / "stray"
+        os.makedirs(loose)
+        self.assertEqual(mon._place(str(self.task), self.canonical), ("task", "wp-1"))
+        self.assertEqual(mon._place(str(loose), self.canonical), ("unregistered", "stray"))
+        self._register("stray", str(loose))
+        os.chmod(Path(self.canonical) / ".git" / "llmtool-worktrees" / "stray.json", 0o644)
+        mon._registry_cache.clear()
+        self.assertEqual(mon._place(str(loose), self.canonical)[0], "unregistered")   # not owner-only
+        self._register("stray", str(loose), lock_state="UNLOCKED")
+        self.assertEqual(mon._place(str(loose), self.canonical)[0], "unregistered")
+        self._codex("dev", {"id": "T9", "cwd": str(loose), "thread_source": "user"},
+                    ["task_started"], age=5)
+        row = self.by_name(self.rows())["codex 對話"]
+        self.assertEqual((row.detail, row.role, row.task), ("未登記資料夾 stray", "", ""))
+
+    def test_a_subagent_named_by_a_d6_session_ref_is_a_bound_developer(self):
+        self._register("wp-1", str(self.task), session_ref="collaboration:/root/env2_flow_integration")
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Huygens",
+                            "agent_path": "/root/env2_flow_integration"}, ["task_started"], age=5)
+        self._codex("rev", {"id": "S2", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Locke",
+                            "agent_path": "/root/env2_flow"}, ["task_started"], age=5)
+        rows = self.by_name(self.rows())
+        dev = rows["codex developer Huygens"]
+        self.assertEqual((dev.role, dev.task), ("developer", "task wp-1"))
+        self.assertIn("（task wp-1）", dev.detail)
+        self.assertIn("codex subagent Locke", rows)   # a name prefix is not a match
+
+    def test_long_first_line_and_a_thread_started_days_ago_are_still_shown(self):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW - 3 * 86400))
+        meta = {"type": "session_meta", "payload": {
+            "id": "T1", "timestamp": "2026-10-20T01:00:00.000Z", "cwd": self.canonical,
+            "thread_source": "user", "base_instructions": "x" * (mon.OFFICE_HEAD + 10)}}
+        path = self.codex / day / "rollout-old.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta) + "\n" + json.dumps(
+            {"type": "event_msg", "payload": {"type": "task_started"}}) + "\n", encoding="utf-8")
+        os.utime(path, (self.NOW - 5, self.NOW - 5))
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex 主對話"].state, mon.WORKING)
+
+    def test_review_records_without_timestamps_do_not_break_sorting(self):
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        self._write(self.codex / day / "rollout-pm.jsonl", [
+            {"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                 "thread_source": "user"}},
+            {"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "a",
+                                                  "input": "claude -p 'Review PR #1 head 1234567'"}},
+            {"timestamp": "2026-10-23T00:00:00Z", "type": "response_item",
+             "payload": {"type": "custom_tool_call", "call_id": "b",
+                         "input": "claude -p 'Review PR #2 head 7654321'"}}], age=5)
+        found = mon.codex_reviews(str(self.codex / day / "rollout-pm.jsonl"), self.NOW)
+        self.assertEqual(found, [])   # undated calls are dropped; dated ones expire
+        mon.forget_reviews(set())
+        self.assertEqual(mon._review_cache, {})
+
+    def test_codex_pm_and_subagents_show_role_task_and_state(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started", "task_complete"], age=400)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Huygens",
+                            "agent_path": "/root/env2_flow_integration"},
+                    ["task_started"], age=30)
+        self._codex("rev", {"id": "S2", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Locke",
+                            "agent_path": "/root/formal_review_pr285"},
+                    ["task_started", "task_complete"], age=120)
+        self._codex("old", {"id": "S3", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Old",
+                            "agent_path": "/root/old_review"},
+                    ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
+        self._codex("elsewhere", {"id": "X", "cwd": "/somewhere/else"}, ["task_started"], age=1)
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex 主對話"].state, mon.WORKING)
+        self.assertIn("env2 flow integration", rows["codex 主對話"].detail)
+        self.assertEqual(rows["codex subagent Huygens"].state, mon.WORKING)
+        self.assertEqual(rows["codex subagent Locke"].state, mon.DONE)
+        self.assertNotIn("codex subagent Old", rows)
+        self.assertEqual(sum(name.startswith("codex") for name in rows), 3)
+        self.assertEqual((rows["codex 主對話"].role, rows["codex 主對話"].main), ("", True))
+        # no role is guessed from a name or folder, so nothing is marked "?"
+        self.assertFalse(any("?" in name for name in rows))
+        self.assertNotIn("推測", mon.office_lines(list(rows.values()))[-1])
+        self.assertNotIn("codex reviewer agent", rows)
+
+    def test_started_but_silent_subagent_is_reported_as_unresponsive(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_complete"], age=10_000)
+        self._codex("dev", {"id": "S1", "cwd": str(self.task), "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Slow",
+                            "agent_path": "/root/slow_dev"},
+                    ["task_started"], age=mon.OFFICE_STALL + 5)
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["codex subagent Slow"].state, mon.STALLED)
+        self.assertEqual(rows["codex 主對話"].state, mon.IDLE)
+        self.assertEqual(rows["codex 主對話"].detail, "等待下一個指示")
+
+    def test_two_codex_main_threads_in_the_canonical_root_are_dated_and_flagged(self):
+        self._codex("pm1", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                            "timestamp": "2026-10-22T11:23:25.316Z"}, ["task_started"], age=5)
+        self._codex("pm2", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                            "timestamp": "2026-10-22T21:49:41.000Z"}, ["task_started"], age=5)
+        rows = [row for row in self.rows() if row.name == "codex 主對話"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all("開始）" in row.detail for row in rows))
+        self.assertNotEqual(rows[0].detail, rows[1].detail)
+        self.assertTrue(any(line.startswith("⚠ 有 2 個 Codex 主對話")
+                            for line in mon.office_lines(self.rows())))
+
+    def test_claude_session_title_and_subagents(self):
+        project = self.claude / "proj"
+        self._write(project / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "message": "PROMPT-SECRET"},
+            {"type": "ai-title", "aiTitle": "Review PR 285 token=abc"},
+        ], age=10)
+        sub = project / "s1" / "subagents"
+        self._write(sub / "agent-a1.jsonl", [{"type": "user", "message": "PROMPT-SECRET"}], age=20)
+        (sub / "agent-a1.meta.json").write_text(json.dumps(
+            {"description": "Fix PR 273 review", "finished": False}), encoding="utf-8")
+        self._write(sub / "agent-a2.jsonl", [{}], age=600)
+        (sub / "agent-a2.meta.json").write_text(json.dumps(
+            {"description": "Old audit", "finished": True}), encoding="utf-8")
+        self._write(self.claude / "dev" / "s2.jsonl", [
+            {"type": "user", "cwd": str(self.task)}, {"type": "ai-title", "aiTitle": "Build env cache"},
+        ], age=4000)
+        self._write(self.claude / "other" / "s3.jsonl", [{"cwd": "/elsewhere"}], age=1)
+        rows = self.rows()
+        names = [row.name for row in rows]
+        self.assertEqual(names.count("claude subagent"), 2)
+        reviewer = self.by_name(rows)["claude 互動"]
+        self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
+        self.assertNotIn("token=abc", reviewer.detail)
+        developer = self.by_name(rows)["claude developer（互動）"]
+        self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
+        subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
+        self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
+
+    def test_working_claude_shows_its_latest_action_description_only(self):
+        call = lambda description: {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "MODEL-OUTPUT-SECRET"},
+            {"type": "tool_use", "name": "Bash", "input": {
+                "command": "echo RAW-ARGV-SECRET /Users/davidsun", "description": description}}]}}
+        project = self.claude / "proj"
+        self._write(project / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "Old title"},
+            call("Run monitor tests"), call("Open Issue for gw failures token=abc"),
+            {"type": "user", "message": {"content": [{"type": "tool_result",
+                                                       "content": "TOOL-OUTPUT-SECRET"}]}},
+        ], age=5)
+        sub = project / "s1" / "subagents"
+        self._write(sub / "agent-a1.jsonl", [call("Fix flaky test")], age=5)
+        (sub / "agent-a1.meta.json").write_text(json.dumps(
+            {"description": "PR 288 repair", "finished": False}), encoding="utf-8")
+        self._write(self.claude / "idle" / "s2.jsonl", [
+            {"type": "user", "cwd": self.canonical}, {"type": "ai-title", "aiTitle": "Idle chat"},
+            call("Something long ago")], age=600)
+        rows = self.rows()
+        details = {row.detail for row in rows}
+        self.assertIn("Open Issue for gw failures [已遮蔽]", details)
+        self.assertIn("PR 288 repair：Fix flaky test", details)
+        self.assertIn("Idle chat", details)   # idle sessions keep their title
+        text = "\n".join(mon.office_lines(rows))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def test_one_shot_claude_runs_finish_and_are_not_guessed_onto_a_pm(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "Franklin",
+                            "agent_path": "/root/tui_dev"}, ["task_started"], age=5)
+        self._write(self.claude / "a" / "run1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"},
+            {"type": "ai-title", "aiTitle": "Review PR 284"}], age=300)
+        self._write(self.claude / "a" / "run2.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}],
+            age=mon.OFFICE_DONE_WINDOW + 60)
+        # an interactive session the PM pinged with `claude --resume <id> -p`
+        self._write(self.claude / "a" / "live.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "Owner chat"},
+            {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"}], age=500)
+        rows = self.rows()
+        run = next(row for row in rows if row.detail == "Review PR 284")
+        # the session does not say who started it, and its title binds no role
+        self.assertEqual((run.name, run.state, run.kind, run.group, run.role),
+                         ("claude 單次呼叫", mon.DONE, "subagent", "", ""))
+        self.assertEqual(sum(row.name == "claude 單次呼叫" for row in rows), 1)   # run2 hidden
+        live = next(row for row in rows if row.detail == "Owner chat")
+        self.assertEqual((live.name, live.state, live.kind, live.group),
+                         ("claude 互動", mon.IDLE, "agent", ""))
+        lines = mon.office_lines(rows)
+        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
+        live = lines.index(f"── {mon.LIVE_SECTION} ──")
+        pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
+        self.assertLess(live, pm)
+        self.assertIn("└ codex subagent Franklin", lines[pm + 1])
+        self.assertTrue(any("claude 單次呼叫" in line for line in lines))
+        self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
+        self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
+                        next(i for i, line in enumerate(lines) if line.startswith("agy")))
+
+    def test_unpersisted_claude_run_started_by_codex_is_shown_from_its_process(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        run = mon.Process(40, 5718, 40, "02:10", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        mine = mon.Process(41, 1, 41, "13:00:00", "S+", "Claude Code CLI", "claude", "")
+        rows = self.rows([run, mine])
+        runs = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual(len(runs), 1)
+        self.assertEqual((runs[0].state, runs[0].kind, runs[0].age, runs[0].group, runs[0].evidence),
+                         (mon.WORKING, "subagent", 130.0, "", "程序"))
+        self.assertIn("看不出是哪個對話", runs[0].detail)
+
+    def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
+        run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        state, finished, ended = mon.track_one_shot({}, [run], 1000.0)
+        self.assertEqual((finished, ended), ([], []))
+        state, finished, ended = mon.track_one_shot(state, [run], 1012.0)
+        state, finished, ended = mon.track_one_shot(state, [], 1013.0)
+        self.assertEqual(ended, ["claude 單次呼叫（由 Codex 啟動）結束（約 17 秒）"])
+        self.assertEqual(finished, [(17.0, 0.0)])
+        state, finished, ended = mon.track_one_shot(state, [], 1013.0 + 60)
+        self.assertEqual((finished, ended), ([(17.0, 60.0)], []))
+        state, finished, _ = mon.track_one_shot(state, [], 1013.0 + mon.OFFICE_DONE_WINDOW + 1)
+        self.assertEqual((state, finished), ({}, []))
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        rows = mon.office_rows([], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+                               canonical=self.canonical,
+                               opencode_db="/nonexistent", cwd_of=lambda pid: None,
+                               finished_runs=[(45.0, 120.0)])
+        done = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual(len(done), 1)
+        self.assertEqual((done[0].state, done[0].age, done[0].group), (mon.DONE, 120.0, ""))
+        self.assertIn("跑了約 45 秒", done[0].detail)
+
+    def test_one_shot_review_shows_pr_head_and_verdict_from_the_pm_record_only(self):
+        ts = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%S.000Z", mon.time.gmtime(self.NOW - age))
+        out = lambda text: {"type": "custom_tool_call_output", "call_id": None,
+                            "output": [{"type": "input_text", "text": text}]}
+        def call(cid, text):
+            return {"type": "custom_tool_call", "call_id": cid, "name": "exec", "input": text}
+        result = ('{"exit_code":0,"output":"# Formal review PR #283\\n**Verdict: FAIL** at head '
+                  '`18538d569d94fa7e5a06605dadf3a7305407b4de`\\nPROMPT-SECRET details"}')
+        events = [
+            (900, call("c1", 'gh pr diff 283 | claude --print --tools "" "Review PR #283 head '
+                             '18538d569d94fa7e5a06605dadf3a7305407b4de"')),
+            (899, dict(out('{"session_id":70614,"output":""}'), call_id="c1")),
+            # polled together with another command that finished: still running
+            (890, call("c2p", "Promise.allSettled([tools.write_stdin({session_id:70614}), "
+                              "tools.exec_command({cmd:'git status'})])")),
+            (889, {"type": "custom_tool_call_output", "call_id": "c2p", "output": [
+                {"type": "input_text", "text": '{"status":"fulfilled","value":{"session_id":70614}}'},
+                {"type": "input_text", "text": '{"status":"fulfilled","value":{"exit_code":0,'
+                                               '"output":"clean"}}'}]}),
+            (880, call("c2", "const r=await tools.write_stdin({session_id:70614,yield_time_ms:30000});")),
+            (860, dict(out(result), call_id="c2")),
+            # a verdict quoted by gh, not from a claude call, must be ignored
+            (850, call("c3", "gh pr view 283 --json comments")),
+            (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
+                       call_id="c3")),
+            # a plain-text poll format: "SESSION N" while running, raw output at the end
+            (800, call("p1", "claude -p --tools \"\" --no-session-persistence 'Review PR #285 head "
+                             "c40c80acae77147190684a1ea8b66d744378ff41'")),
+            (799, dict(out("SESSION 81"), call_id="p1")),
+            (790, call("p2", "const r=await tools.write_stdin({session_id:81});text(r.output);"
+                             "if(r.session_id)text(\"SESSION \"+r.session_id)")),
+            (789, {"type": "custom_tool_call_output", "call_id": "p2", "output": [
+                {"type": "input_text", "text": ""}, {"type": "input_text", "text": "SESSION 81"}]}),
+            (780, call("p3", "const r=await tools.write_stdin({session_id:81});text(r.output)")),
+            (779, dict(out("# Formal Review: PR #285 at c40c80a\n\n**Verdict: PASS**\n- head "
+                           "c40c80acae77147190684a1ea8b66d744378ff41"), call_id="p3")),
+            (60, call("b1", "claude --resume abc -p 'status of PR #286'")),
+            (59, dict(out("SESSION 82"), call_id="b1")),
+            (58, call("b2", "const r=await tools.write_stdin({session_id:82});text(r.output)")),
+            (57, {"type": "custom_tool_call_output", "call_id": "b2", "output": [
+                {"type": "input_text", "text": "Error: Exceeded USD budget (0.25)"},
+                {"type": "input_text", "text": "EXIT 1"}]}),
+            # the reply names another PR than the call did
+            (700, call("m1", "claude -p 'Review PR #287 head 1111111aaaa'")),
+            (699, dict(out('{"exit_code":0,"output":"# Review PR #290 head 2222222\\n**Verdict: PASS**"}'),
+                       call_id="m1")),
+            # a verdict only quoted inside a sentence is not this review's verdict
+            (690, call("q1", "claude -p 'Review PR #289 head 3333333bbbb'")),
+            (689, dict(out('{"exit_code":1,"output":"The earlier verdict: FAIL was stale."}'),
+                       call_id="q1")),
+            # a call that fails at once (bad CLI option) is finished, not running
+            (680, call("e1", "git diff a...b | claude --print --bad-flag 'Review PR #291 head 4444444cccc'")),
+            (679, dict(out("error: unknown option '--bad-flag'"), call_id="e1")),
+            # SESSION_ID= / EXIT= poll format
+            (670, call("f1", "claude --print 'Review PR #292 head 5555555dddd'")),
+            (669, dict(out("SESSION_ID=91"), call_id="f1")),
+            (660, call("f2", "const r=await tools.write_stdin({session_id:91});text(r.output);"
+                             "if(r.session_id)text(`SESSION_ID=${r.session_id}`);"
+                             "if(r.exit_code!==undefined)text(`EXIT=${r.exit_code}`)")),
+            (659, {"type": "custom_tool_call_output", "call_id": "f2", "output": [
+                {"type": "input_text", "text": "# Review\n**Verdict: FAIL**"},
+                {"type": "input_text", "text": "EXIT=0"}]}),
+            # prose quoting the command is not a call
+            (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
+            # searching for running reviews is not a review
+            (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf "
+                            "'(^|/)codex|claude -p|claude --print|claude$' | head -40")),
+            (30, call("c4", "claude -p 'Review PR #284 head 1ee2f21c8caca7c66dc497268759dc8c308adebf'")),
+            (29, dict(out('{"session_id":70615,"output":""}'), call_id="c4")),
+        ]
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                      "thread_source": "user"}}]
+        items += [{"type": "event_msg", "payload": {"type": "task_started"}}]
+        items += [{"timestamp": ts(age), "type": "response_item", "payload": payload}
+                  for age, payload in events]
+        self._write(self.codex / day / "rollout-pm.jsonl", items, age=5)
+        run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        rows = self.rows([run])
+        reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
+        self.assertEqual(reviews, {"審 PR #283 @18538d5：FAIL": mon.DONE,
+                                   "審 PR #285 @c40c80a：PASS": mon.DONE,
+                                   f"審 PR #287 @1111111：{mon.MISMATCH}": mon.DONE,
+                                   f"審 PR #289 @3333333：{mon.NO_VERDICT}": mon.DONE,
+                                   f"審 PR #291 @4444444：{mon.NO_VERDICT}": mon.DONE,
+                                   "審 PR #292 @5555555：FAIL": mon.DONE,
+                                   "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
+        self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
+                            for row in rows if row.name == "claude reviewer"))
+        # a status question names no head: it is a one-shot call, not a Reviewer
+        unbound = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual([(row.detail, row.role) for row in unbound],
+                         [("單次呼叫（呼叫裡沒寫 PR 和版本）：超過預算上限，沒有判定", "")])
+        text = "\n".join(mon.office_lines(rows))
+        self.assertNotIn("PR #999", text)
+        self.assertNotIn("PROMPT-SECRET", text)
+        self.assertNotIn("單次呼叫執行中（不留 session 紀錄）", text)   # PM record explains the process
+
+    def test_worker_rows_come_from_the_dispatch_switches(self):
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail,
+                          rows["opencode developer"].authority),
+                         (mon.PAUSED, "Owner 暫停派工（10-22）", "Owner"))
+        self.assertNotIn("codex reviewer agent", rows)   # spawned by the PM, not a standing Worker
+        app = mon.Process(5, 1, 5, "2-00:00:00", "S", "Antigravity App (AGY)", "Antigravity", "")
+        agy = self.by_name(self.rows([app]))["agy"]
+        self.assertEqual((agy.state, agy.detail), (mon.PAUSED, "Owner 暫停派工（10-22）；App 開著"))
+        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
+        self.assertIsNone(rows["agy"].age)
+
+    def test_missing_or_invalid_dispatch_says_it_cannot_tell_and_never_falls_back(self):
+        (Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json").unlink()
+        mon._dispatch_cache.clear()
+        rows = self.by_name(self.rows())
+        for name in ("opencode developer", "agy", "公司 gw"):
+            self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
+                             (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["missing"]))
+        self._write_dispatch({}, raw="{not json")
+        rows = self.by_name(self.rows())
+        self.assertEqual(rows["agy"].detail, mon.DISPATCH_PROBLEMS["invalid"])
+        self._write_dispatch({"agy": {"dispatch": "MAYBE", "decided_by": "Owner",
+                                      "decided_at": "2026-10-22"},
+                              "company-gw": DISPATCH["company-gw"]})
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["agy"].state, rows["agy"].detail),
+                         (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["entry"]))
+        self.assertEqual(rows["opencode developer"].detail, mon.DISPATCH_PROBLEMS["absent"])
+        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
+
+    def _opencode_db(self, sessions, messages=()):
+        db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "opencode.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE session_v2 (id TEXT, parent_id TEXT, directory TEXT, "
+                     "title TEXT, time_updated INTEGER, time_idle INTEGER, idle_outcome TEXT)")
+        conn.execute("CREATE TABLE session_message (session_id TEXT, type TEXT, seq INTEGER, "
+                     "data TEXT)")
+        conn.executemany("INSERT INTO session_message VALUES (?,?,?,?)", messages)
+        conn.execute("CREATE TABLE credential (secret TEXT)")
+        conn.execute("INSERT INTO credential VALUES ('CREDENTIAL-SECRET')")
+        conn.executemany("INSERT INTO session_v2 VALUES (?,?,?,?,?,?,?)",
+                         [tuple(row) + (None,) * (7 - len(row)) for row in sessions])
+        conn.commit()
+        conn.close()
+        return str(db)
+
+    def test_opencode_server_alone_is_not_a_member_and_dispatch_row_stays(self):
+        server = mon.Process(1, 0, 1, "1:00", "S", "OpenCode SERVER", "opencode.exe", "")
+        rows = self.by_name(mon.office_rows([server], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None))
+        self.assertEqual(rows["opencode developer"].state, mon.PAUSED)
+        self.assertFalse(any(name.startswith("opencode cli") for name in rows))
+
+    def test_latest_opencode_outcome_in_this_repo_without_message_text(self):
+        self._write_dispatch(dict(DISPATCH, **{"opencode-developer": DISPATCH["company-gw"]}))
+        ms = lambda age: int((self.NOW - age) * 1000)
+        error = lambda kind, status: json.dumps({"error": {
+            "type": kind, "status": status, "message": "PROMPT-SECRET token=abc"}})
+        db = self._opencode_db(
+            [("s1", None, self.canonical, "t", ms(3000), ms(3000), "failed"),
+             ("s2", None, str(self.task), "t", ms(600), ms(600), "failed"),
+             ("s3", None, "/other/project", "t", ms(100), ms(100), "failed")],
+            [("s1", "idle", 1, error("provider.quota", 429)),
+             ("s2", "idle", 1, error("provider.auth", 401)),
+             ("s3", "idle", 1, error("provider.quota", 429))])
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=lambda pid: None))
+        row = rows["opencode developer"]   # another project's newer 429 does not count
+        self.assertEqual((row.state, row.detail, row.age),
+                         (mon.STOPPED, "可派工；本 repo 最近一次：認證失敗（401），需要重新登入", 600.0))
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        self.assertNotIn("PROMPT-SECRET", text)
+        self.assertNotIn("token=abc", text)
+        old = self._opencode_db([("s1", None, self.canonical, "t", ms(90_000), ms(90_000), "failed")],
+                                [("s1", "idle", 1, error("provider.quota", 429))])
+        self.assertIsNone(mon.opencode_outcome(self.NOW, old, self.canonical))
+
+    def _dispatch(self, workers):
+        path = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "worker-dispatch.json"
+        path.write_text(json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        return str(path)
+
+    def test_owner_pause_switch_wins_over_live_evidence(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        db = self._opencode_db([("s1", None, self.canonical, "t", ms(600), ms(600), "failed")],
+                               [("s1", "idle", 1, json.dumps(
+                                   {"error": {"type": "provider.auth", "status": 401}}))])
+        switches = self._dispatch({
+            "opencode-developer": {"dispatch": "PAUSED", "decided_by": "Owner",
+                                   "decided_at": "2026-10-22", "reason": "quota"},
+            "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+            "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
+            "codex-reviewer-agent": {"dispatch": "bogus", "decided_by": "Owner",
+                                     "decided_at": "2026-10-22"},
+        })
+        tui = mon.Process(30, 1, 30, "05:00", "S+", "OpenCode CLI", "opencode", "")
+        rows = self.by_name(mon.office_rows([tui], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=lambda pid: None, cpu_of=lambda pid: 0.0,
+                                            dispatch=switches))
+        self.assertEqual((rows["opencode developer"].state, rows["opencode developer"].detail),
+                         (mon.PAUSED, "Owner 暫停派工（10-22）；有 1 個 CLI 開著（非派工）"))
+        self.assertIn("opencode cli #1", rows)
+        self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
+        self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
+        self.assertNotIn("codex reviewer agent", rows)   # an invalid extra entry names no row
+        no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                              claude_root=str(self.claude),
+                                              canonical=self.canonical,
+                                              opencode_db=db, cwd_of=lambda pid: None,
+                                              dispatch=switches))
+        self.assertEqual(no_cli["opencode developer"].detail,
+                         "Owner 暫停派工（10-22）；本 repo 最近一次：認證失敗（401），需要重新登入")
+        self.assertEqual(no_cli["opencode developer"].state, mon.PAUSED)
+
+    def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
+        tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        def task(name, age, state, code):
+            path = tasks / f"{name}.json"
+            path.write_text(json.dumps({
+                "request": "PROMPT-SECRET", "response": "MODEL-OUTPUT-SECRET",
+                "developer": {"provider_profile": "company-gw", "state": state,
+                              "error_code": code, "artifact": "TOOL-OUTPUT-SECRET"}}),
+                encoding="utf-8")
+            os.utime(path, (self.NOW - age, self.NOW - age))
+        task("a", 7200, "DEVELOPER_OUTPUT_REJECTED", "DEVELOPER_OUTPUT_INVALID_DIFF")
+        task("b", 3600, "DEVELOPER_OUTPUT_REJECTED", "DEVELOPER_OUTPUT_INVALID_ENVELOPE")
+        task("c", 9 * 86400, "DEVELOPER_RESPONDED", None)   # outside the window
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, llmtool_tasks=str(tasks)))
+        gw = rows["公司 gw"]
+        self.assertEqual(gw.detail, "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒"
+                                    "（回應格式錯誤）（近 7 天 2 次，成功 0 次）")
+        self.assertEqual((gw.age, gw.state), (3600.0, mon.ATTENTION))
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
+        procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
+                 mon.Process(21, 1, 21, "02:00", "S+", "AGY CLI", "agy", ""),
+                 mon.Process(22, 1, 22, "03:00", "S+", "AGY CLI", "agy", "")]
+        cpu = {20: 12.0, 21: 0.0, 22: None}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of={20: self.canonical}.get, cpu_of=cpu.get))
+        # paused by the Owner, so the switch row stays beside the open CLIs
+        self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）；有 3 個 CLI 開著（非派工）")
+        self.assertEqual(rows["agy cli #1"].state, mon.WORKING)
+        self.assertEqual(rows["agy cli #1"].detail, "本 repo：CLI 執行中（依 CPU 12% 推算）")
+        self.assertEqual(rows["agy cli #2"].state, mon.IDLE)
+        self.assertTrue(rows["agy cli #2"].detail.startswith("位置不明："))
+        self.assertEqual(rows["agy cli #3"].state, mon.UNCHECKED)
+
+    def test_each_opencode_cli_gets_its_own_row_with_place_and_state(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        db = self._opencode_db([
+            ("s1", None, self.canonical, "Fix monitor token=abc", ms(5), ms(400)),
+            ("s2", None, str(self.task), "Old work", ms(3000), ms(3000)),
+            ("s3", "s1", self.canonical, "child", ms(1), None),
+        ])
+        procs = [mon.Process(10, 1, 10, "05:00", "S+", "OpenCode CLI", "opencode", ""),
+                 mon.Process(11, 1, 11, "01:02:00", "S+", "OpenCode CLI", "opencode", ""),
+                 mon.Process(12, 1, 12, "00:10", "S+", "OpenCode CLI", "opencode", "")]
+        cwd = {10: self.canonical, 11: str(self.task), 12: "/Users/davidsun"}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db=db,
+                                            cwd_of=cwd.get))
+        self.assertEqual(rows["opencode developer"].state, mon.PAUSED)
+        self.assertEqual(rows["opencode cli #1"].state, mon.WORKING)
+        self.assertTrue(rows["opencode cli #1"].detail.startswith("本 repo："))
+        self.assertNotIn("token=abc", rows["opencode cli #1"].detail)
+        self.assertEqual(rows["opencode cli #2"].state, mon.IDLE)
+        self.assertIn("task wp-1", rows["opencode cli #2"].detail)
+        self.assertIn("已開 1 小時", rows["opencode cli #2"].detail)
+        self.assertEqual(rows["opencode cli #3"].detail, "其他資料夾：已開啟，沒有執行中的任務")
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def _kilo_db(self, sessions, messages=()):
+        db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "kilo.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE session (id TEXT, parent_id TEXT, directory TEXT, "
+                     "title TEXT, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, "
+                     "data TEXT)")
+        conn.execute("CREATE TABLE credential (secret TEXT)")
+        conn.execute("INSERT INTO credential VALUES ('CREDENTIAL-SECRET')")
+        conn.executemany("INSERT INTO session VALUES (?,?,?,?,?)", sessions)
+        conn.executemany("INSERT INTO message VALUES (?,?,?,?)", messages)
+        conn.commit()
+        conn.close()
+        return str(db)
+
+    def test_each_kilo_cli_gets_its_own_row_marked_as_not_dispatched(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        done = json.dumps({"role": "assistant", "time": {"completed": ms(300)},
+                           "text": "MODEL-OUTPUT-SECRET"})
+        asked = json.dumps({"role": "user", "content": "PROMPT-SECRET"})
+        db = self._kilo_db(
+            [("k1", None, self.canonical, "Review token=abc", ms(4)),
+             ("k2", None, str(self.task), "Finished", ms(300)),
+             ("k3", "k1", str(self.task), "child", ms(1))],
+            [("m1", "k1", ms(600), done), ("m2", "k1", ms(4), asked),
+             ("m3", "k2", ms(400), asked), ("m4", "k2", ms(310), done)])
+        procs = [mon.Process(20, 1, 20, "05:00", "S+", "Kilo CLI", ".kilo", ""),
+                 mon.Process(21, 1, 21, "07:37:41", "S+", "Kilo CLI", ".kilo", ""),
+                 mon.Process(22, 1, 22, "07:37:41", "S+", "Kilo CLI (node launcher)", "node", "")]
+        cwd = {20: self.canonical, 21: str(self.task), 22: self.canonical}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, kilo_db=db,
+                                            cwd_of=cwd.get))
+        self.assertNotIn("kilo cli #3", rows)   # the npm launcher is not a second Kilo
+        self.assertEqual(rows["kilo cli #1"].state, mon.WORKING)
+        self.assertTrue(rows["kilo cli #1"].detail.startswith("本 repo："))
+        self.assertTrue(rows["kilo cli #1"].detail.endswith("（未列入派工）"))
+        self.assertEqual(rows["kilo cli #2"].state, mon.IDLE)
+        self.assertIn("task wp-1", rows["kilo cli #2"].detail)
+        self.assertIn("已開 7 小時", rows["kilo cli #2"].detail)
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def _review(self, sha, outcome, age):
+        label = f"審 PR #288 @{sha}"
+        return mon.OfficeRow("claude reviewer", mon.WORKING if outcome is None else mon.DONE,
+                             f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
+                             age, 30, kind="subagent", group="T1", key="review",
+                             role="reviewer", task=f"PR #288 @{sha}", outcome=outcome or "")
+
+    def test_office_lines_put_repeated_review_failures_and_alerts_first(self):
+        missing = mon.DISPATCH_PROBLEMS["missing"]
+        rows = [
+            mon.OfficeRow("codex 主對話", mon.WORKING, "指揮", 5, 10, key="T1", main=True),
+            self._review("71db418", None, 10),
+            self._review("3f86dc6", mon.NO_VERDICT, 180),
+            self._review("3f86dc6", mon.NO_VERDICT, 400),
+            self._review("d4ed21d", mon.NO_VERDICT, 1500),
+            self._review("d4ed21d", "FAIL", 1620),
+            mon.OfficeRow("codex subagent Dewey", mon.DONE, "audit 284 release", 600, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("codex subagent Huygens", mon.DONE, "audit r4 handoff", 20, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("opencode developer", mon.UNCHECKED,
+                          f"{missing}；本 repo 最近一次：認證失敗（401），需要重新登入", 7200, 50,
+                          kind="worker", alert="本 repo 最近一次：認證失敗（401），需要重新登入"),
+            mon.OfficeRow("agy", mon.UNCHECKED, f"{missing}；App 開著", None, 60, kind="worker"),
+            mon.OfficeRow("公司 gw", mon.UNCHECKED, missing, None, 70, kind="worker"),
+        ]
+        lines = mon.office_lines(rows)
+        text = "\n".join(lines)
+        self.assertEqual(lines[1], "⚠ #288 reviewer：3 次沒有判定、1 次 FAIL；目前執行中 @71db418")
+        self.assertEqual(lines[2], "⚠ opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
+        # one dispatch line instead of the same words on every Worker row
+        self.assertEqual(lines[3], f"ℹ {missing}：opencode developer、agy、公司 gw")
+        self.assertEqual(text.count(missing), 1)
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertTrue(gw.endswith("沒有其他紀錄"))
+        # name first, then state; the time is last and only where there is one
+        review = next(line for line in lines if "@71db418（" in line)
+        self.assertTrue(review.startswith("└ claude reviewer"))
+        self.assertTrue(review.endswith("  剛剛"))
+        self.assertTrue(next(line for line in lines if line.startswith("agy")).endswith("App 開著"))
+        # older finished work is folded; the newest verdict of each review target stays
+        self.assertNotIn("audit 284 release", text)
+        self.assertNotIn("FAIL」", text)
+        self.assertIn("audit r4 handoff", text)
+        self.assertIn("@3f86dc6：結束但沒有判定", text)
+        self.assertEqual(text.count("@3f86dc6："), 1)
+        folded = next(line for line in lines if "└ … 另 4 項已完成" in line)
+        self.assertTrue(folded.endswith("5–30 分鐘前完成；按 a 展開"))
+        # expanded (key a in the TUI, always in --once) lists every finished item
+        full = "\n".join(mon.office_lines(rows, expand=True))
+        self.assertIn("audit 284 release", full)
+        self.assertEqual(full.count("@3f86dc6："), 2)
+        self.assertNotIn("另 4 項已完成", full)
+
+    def test_office_lines_say_nothing_extra_when_all_is_well(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),
+                self._review("71db418", "PASS", 60),
+                mon.OfficeRow("agy", mon.IDLE, "可派工", None, 60, kind="worker")]
+        lines = mon.office_lines(rows)
+        self.assertFalse(any(line.startswith(("⚠", "ℹ")) for line in lines))
+        self.assertFalse(any("已收起" in line for line in lines))
+
+    def test_office_lines_name_a_shared_dispatch_source_once(self):
+        source = "本機 origin/main 的派工檔（可能不是最新）"
+        rows = [mon.OfficeRow("opencode developer", mon.PAUSED,
+                              f"Owner 暫停派工（10-22）（{source}）；App 開著", None, 50,
+                              kind="worker", evidence=source),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, f"可派工（{source}）", 34 * 3600, 70,
+                              kind="worker", evidence=source)]
+        lines = mon.office_lines(rows)
+        self.assertTrue(lines[-1].startswith(f"派工狀態讀自{source}；"))   # dimmed legend
+        self.assertEqual("\n".join(lines).count(source), 1)
+        gw = next(line for line in lines if line.startswith("公司 gw"))
+        self.assertIn("可派工 ", gw)
+        self.assertTrue(gw.endswith("  34 小時前"))   # the time stays in its own column
+
+    def test_office_view_colors_by_state_and_wraps_detail_to_keep_the_time(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.WORKING, "x" * 200, 5, 10, key="T1"),
+                mon.OfficeRow("codex subagent A", mon.STALLED, "audit", 1000, 20, group="T1",
+                              kind="subagent"),
+                mon.OfficeRow("agy", mon.PAUSED, "Owner 暫停派工（10-22）", None, 60,
+                              kind="worker")]
+        listed = mon.office_view(rows, width=80)
+        view = dict(listed)
+        line = next(text for text in view if text.startswith("codex 主對話"))
+        self.assertEqual(view[line], "+")
+        self.assertTrue(all(mon._width(text) <= 80 for text, _ in listed))
+        self.assertTrue(line.endswith("x  剛剛"))
+        # a long detail wraps under itself instead of being cut
+        at = [text for text, _ in listed].index(line)
+        rest = [text for text, _ in listed[at + 1:at + 10] if text.startswith(" ")]
+        self.assertEqual(sum(text.count("x") for text in rest) + line.count("x") - 1, 200)   # 1 = "codex"
+        self.assertTrue(all(view[text] == "+" for text in rest))
+        # a blank line sits above the Worker section
+        texts = [text for text, _ in listed]
+        self.assertEqual(texts[texts.index(f"── {mon.STATUS_SECTION} ──") - 1], "")
+        # on a wide screen the time stays near its text
+        wide = next(text for text, _ in mon.office_view(rows, width=240)
+                    if text.startswith("agy"))
+        self.assertTrue(wide.startswith("agy ") and wide.endswith("暫停中  Owner 暫停派工（10-22）"))
+        stalled = next(text for text, _ in mon.office_view(rows, width=240)
+                       if text.startswith("└ codex subagent A"))
+        self.assertIn("  audit  ", stalled)
+        self.assertTrue(stalled.endswith("  16 分前"))
+        self.assertLessEqual(mon._width(stalled), mon._width("└ codex subagent A") + 2 + 8 + mon.DETAIL_MAX + 2 + 7)
+        self.assertEqual(view[next(t for t in view if t.startswith("└ codex subagent A"))], "!")
+        self.assertEqual(view[next(t for t in view if t.startswith("agy"))], "dim")
+        self.assertEqual(view[next(t for t in view if t.startswith("⚠ codex subagent A"))], "!")
+        self.assertEqual(view[next(iter(view))], "title")
+        # without a width (--once) nothing is cut
+        self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
+
+    def test_wrap_breaks_at_punctuation_and_never_starts_with_a_closing_mark(self):
+        text = "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒（回應格式錯誤）"
+        for cols in range(8, 40):
+            pieces = mon._wrap(text, cols)
+            self.assertEqual("".join(pieces).replace(" ", ""), text.replace(" ", ""))
+            self.assertTrue(all(mon._width(piece) <= cols for piece in pieces))
+            self.assertFalse(any(piece[:1] in mon.NO_LINE_START for piece in pieces))
+        self.assertEqual(mon._wrap(text, 30)[0], "可派工；本機 llmtool")   # at the space
+        self.assertEqual(mon._wrap("短", 10), ["短"])
+
+    def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
+        stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)
+        with patch.object(mon, "opencode_outcome", return_value=stopped):
+            unknown = self.by_name(mon.office_rows(
+                [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+                canonical=self.canonical, dispatch=str(Path(self.tmp.name) / "no-such-dispatch.json")))
+            paused = self.by_name(self.rows())
+        self.assertEqual(unknown["opencode developer"].state, mon.UNCHECKED)
+        self.assertEqual(unknown["opencode developer"].alert, "本 repo 最近一次：免費額度用完（429）")
+        self.assertEqual(paused["opencode developer"].state, mon.PAUSED)
+        self.assertEqual(paused["opencode developer"].alert, "")
+
+    def test_rendered_office_never_shows_secrets_or_private_paths(self):
+        self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                    ["task_started"], age=5)
+        self._codex("bad", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
+                            "parent_thread_id": "T1", "agent_nickname": "x/../y",
+                            "agent_path": "/root/rm -rf /Users/davidsun"}, ["task_started"], age=5)
+        text = "\n".join(mon.office_lines(self.rows()))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+        self.assertIn("（未命名工作）", text)
+
+    def test_state_changes_become_log_events_once(self):
+        first = [mon.OfficeRow("codex developer A", mon.WORKING, "wp 1", 1.0, 20)]
+        state, events = mon.office_events({}, first)
+        self.assertEqual(events, [])
+        later = [mon.OfficeRow("codex developer A", mon.DONE, "wp 1", 1.0, 20)]
+        state, events = mon.office_events(state, later)
+        self.assertEqual(events, [("i", "codex developer A「wp 1」：工作中 → 完成")])
+        self.assertEqual(mon.office_events(state, later)[1], [])
+
+    def test_canonical_root_resolves_through_a_linked_worktree(self):
+        common = Path(self.canonical) / ".git" / "worktrees" / "wp-1"
+        common.mkdir(parents=True)
+        (self.task / ".git").write_text(f"gitdir: {common}\n", encoding="utf-8")
+        self.assertEqual(mon.canonical_root(str(self.task)), self.canonical)
 
 
 if __name__ == "__main__":
