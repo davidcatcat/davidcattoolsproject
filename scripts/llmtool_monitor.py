@@ -15,7 +15,9 @@ reviewer / subagent and Claude session / subagent working in this repository,
 plus each Worker's dispatch switch, one row each with a live state such as
 工作中, 待命, 完成, 暫停中 or 停工. It parses local session files but shows only
 labels, titles and verdict words (see the office view section); roles that no
-record binds are marked as guessed.
+record binds are marked as guessed. A session untouched for 6 hours is left out,
+and finished subagent work for 30 minutes; office data is rebuilt at most every
+5 seconds.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -349,6 +351,7 @@ class Monitor:
         self.office: list = []
         self.office_state: dict = {}
         self.office_error: str | None = None   # why the office view could not be built
+        self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
@@ -425,17 +428,22 @@ class Monitor:
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
         self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
         new += [(stamp, "i", text) for text in ended]
-        try:
-            office = office_rows(result.processes, finished_runs=finished)
-        except Exception as exc:  # never break process monitoring, but never show stale rows
-            message = type(exc).__name__
-            if message != self.office_error:
-                new.append((stamp, "?", f"office view unavailable: {message}"))
-            self.office, self.office_error = [], message
-        else:
-            state, changes = office_events(self.office_state, office)
-            new += [(stamp, kind, text) for kind, text in changes]
-            self.office, self.office_state, self.office_error = office, state, None
+        if time.monotonic() >= self.office_due:
+            # Session scans, tails, sqlite and AGY lookups are the costly part of a
+            # poll; they run at most every OFFICE_EVERY seconds, not every tick.
+            self.office_due = time.monotonic() + OFFICE_EVERY
+            try:
+                office = office_rows(result.processes, finished_runs=finished)
+            except Exception as exc:  # never break process monitoring, but never show stale rows
+                message = type(exc).__name__
+                if message != self.office_error:
+                    new.append((stamp, "?", f"office view unavailable: {message}"))
+                # A fresh baseline after the error, so recovery is not logged as changes.
+                self.office, self.office_state, self.office_error = [], {}, message
+            else:
+                state, changes = office_events(self.office_state, office)
+                new += [(stamp, kind, text) for kind, text in changes]
+                self.office, self.office_state, self.office_error = office, state, None
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1192,6 +1200,7 @@ OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
 OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
 OFFICE_STALL = 15 * 60         # started but silent for longer: 無回應
+OFFICE_EVERY = 5.0             # seconds between office rebuilds (process polling stays faster)
 OFFICE_HEAD = 1 << 20
 OFFICE_TAIL = 512 << 10
 AGENT_PATH = re.compile(r"[A-Za-z0-9_-]{1,48}")

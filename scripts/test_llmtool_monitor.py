@@ -287,11 +287,22 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         self.assertEqual(self.monitor.office, [])
         self.assertIn(("?", "office view unavailable: TypeError"),
                       [(kind, text) for _, kind, text in new])
+        self.assertEqual(self.monitor.office_state, {})   # recovery starts from a fresh baseline
         lines = mon.office_lines(self.monitor.office, self.monitor.office_error)
         self.assertTrue(lines[1].startswith("⚠ 辦公室資料讀取失敗（TypeError）"))
+        self.monitor.office_due = 0.0
         with patch.object(mon, "office_rows", return_value=[]):
             self.poll([])
         self.assertIsNone(self.monitor.office_error)
+
+    def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
+        with patch.object(mon, "office_rows", return_value=[]) as rows:
+            self.poll([])
+            self.poll([])
+            self.assertEqual(rows.call_count, 1)   # the second tick reuses the office
+            self.monitor.office_due = 0.0
+            self.poll([])
+            self.assertEqual(rows.call_count, 2)
 
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
