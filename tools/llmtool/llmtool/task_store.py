@@ -147,7 +147,8 @@ def _validate(record):
                     type(entry['worker_key']) is not str or
                     re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
                     entry['action'] not in (
-                        'DISPATCH', 'RETRY', 'REASSIGN', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
+                        'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
+                        'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
                     entry['decision'] not in ('ALLOWED', 'BLOCKED') or
                     type(entry['reason_code']) is not str or
                     re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or
@@ -332,9 +333,14 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            if type(developer) is not dict or set(developer) not in (
-                    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
-                    _DEVELOPER_CALLBACK_FIELDS):
+            assignment_shapes = (
+                _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
+                _DEVELOPER_CALLBACK_FIELDS,
+                _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+                _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+                _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+            )
+            if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -342,7 +348,7 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] not in ('company-gw', 'opencode') or
+                    developer['provider_profile'] not in ('company-gw', 'opencode', 'claude') or
                     developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
@@ -364,6 +370,12 @@ def _validate(record):
                     developer['artifact_format'] != 'unified_diff' or
                     type(developer['created_at']) is not str):
                 _fail()
+            if 'owner_assignment_ref' in developer:
+                from .worker_dispatch import _OWNER_COMMENT_REF
+                ref = developer['owner_assignment_ref']
+                if (developer['provider_profile'] != 'claude' or
+                        type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
+                    _fail()
             if (developer['provider_profile'] == 'company-gw' and
                     (developer['provider_type'] not in (None, 'openai-compatible') or
                      developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED')):
@@ -372,6 +384,12 @@ def _validate(record):
                     (developer['provider_type'] not in (None, 'opencode-cli') or
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if (developer['provider_profile'] == 'claude' and
+                    (developer['provider_type'] is not None or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['state'] != 'DEVELOPER_PENDING' or
+                     'owner_assignment_ref' not in developer)):
                 _fail()
             if 'execution' in developer:
                 execution = developer['execution']
@@ -1026,7 +1044,8 @@ class TaskStore:
                 {'developer': None, 'dispatch_audit': []}, {'developer': developer})
             if attempt is not None:
                 worker_key, action = attempt
-                decision = worker_dispatch.evaluate(worker_key)
+                decision = worker_dispatch.evaluate(
+                    worker_key, developer.get('owner_assignment_ref'), record['task_id'])
                 record['dispatch_audit'] = [worker_dispatch.audit_entry(decision, action)]
                 if not decision.allowed:
                     record['developer'] = None
@@ -1056,17 +1075,20 @@ class TaskStore:
 
     def append_dispatch_audit(self, task_id, entry, *, expected=None):
         """Append one bounded gate result using the existing TaskStore CAS lock."""
+        if expected is not None and type(expected) is not dict:
+            _fail()
+        expected_fields = {} if expected is None else {
+            key: value for key, value in expected.items() if key != 'dispatch_audit'}
         for _ in range(4):
             current = self.get(task_id)
             audit = list(current.get('dispatch_audit', []))
             if len(audit) >= 64:
                 _fail('WORKER_DISPATCH_AUDIT_LIMIT')
             next_audit = audit + [entry]
-            preconditions = {'dispatch_audit': current.get('dispatch_audit')}
-            if expected is not None:
-                if type(expected) is not dict:
-                    _fail()
-                preconditions.update(expected)
+            # Audit appends compare against the freshest list every time; other
+            # caller preconditions (such as the assignment) stay bound.
+            preconditions = dict(expected_fields)
+            preconditions['dispatch_audit'] = current.get('dispatch_audit')
             try:
                 return self._update(task_id, expected=preconditions,
                     changes={'dispatch_audit': next_audit},

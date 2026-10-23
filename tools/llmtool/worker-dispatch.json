@@ -1,47 +1,47 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "workers": {
     "codex-developer": {
       "dispatch": "ALLOWED",
-      "decided_by": "Owner",
       "decided_at": "2026-10-22",
       "reason": "normal Developer route",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848",
+      "owner_assignments": []
     },
     "claude-developer": {
       "dispatch": "OWNER_ASSIGNMENT_ONLY",
-      "decided_by": "Owner",
       "decided_at": "2026-10-23",
       "reason": "use only when explicitly assigned by the Owner",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289",
+      "owner_assignments": []
     },
     "opencode-developer": {
       "dispatch": "PAUSED",
-      "decided_by": "Owner",
       "decided_at": "2026-10-22",
       "reason": "Owner paused dispatch (free quota exhausted)",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848",
+      "owner_assignments": []
     },
     "agy": {
       "dispatch": "PAUSED",
-      "decided_by": "Owner",
       "decided_at": "2026-10-22",
       "reason": "Owner paused dispatch",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848",
+      "owner_assignments": []
     },
     "company-gw": {
       "dispatch": "ALLOWED",
-      "decided_by": "Owner",
       "decided_at": "2026-10-22",
       "reason": "low-risk bounded tasks via llmtool only",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289",
+      "owner_assignments": []
     },
     "claude-reviewer": {
       "dispatch": "ALLOWED",
-      "decided_by": "Owner",
       "decided_at": "2026-10-23",
       "reason": "fixed formal Reviewer; use a separate read-only context",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848",
+      "owner_assignments": []
     }
   }
 }

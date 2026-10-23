@@ -1,7 +1,13 @@
 import hashlib
+import importlib.resources
 import json
+import os
+import subprocess
+import sys
+import tarfile
 import tempfile
 import unittest
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -75,6 +81,125 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
                          'OWNER_PAUSED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
+
+    def test_owner_assignment_requires_exact_task_reference_and_policy_allowlist(self):
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
+        task_id = self.task['task_id']
+        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref, task_id).reason_code,
+                         'OWNER_ASSIGNMENT_REQUIRED')
+        assignment = {'task_id': task_id, 'owner_assignment_ref': ref}
+        self.policy['workers']['claude-developer']['owner_assignments'] = [assignment]
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertTrue(worker_dispatch.evaluate('claude-developer', ref, task_id).allowed)
+        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref, 'a' * 32).reason_code,
+                         'OWNER_ASSIGNMENT_REQUIRED')
+        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref + '0', task_id).reason_code,
+                         'OWNER_ASSIGNMENT_REQUIRED')
+        for suffix in ('?query=1', '/extra', '#fragment'):
+            self.assertEqual(worker_dispatch.evaluate(
+                'claude-developer', ref + suffix, task_id).reason_code,
+                'OWNER_ASSIGNMENT_REQUIRED')
+        self.policy['workers']['opencode-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(worker_dispatch.evaluate('opencode-developer', ref, task_id).reason_code,
+                         'OWNER_ASSIGNMENT_REQUIRED')
+
+    def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
+        assignments = [{'task_id': self.task['task_id'], 'owner_assignment_ref': ref}]
+        self.policy['workers']['claude-developer']['owner_assignments'] = assignments + assignments
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(worker_dispatch.evaluate('claude-developer').reason_code,
+                         'WORKER_POLICY_INVALID')
+
+    def test_taskstore_persists_explicit_owner_assignment_reference(self):
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
+        record = self._task()
+        developer = self.developer(provider='claude')
+        developer['owner_assignment_ref'] = ref
+        record['developer'] = developer
+        self.policy['workers']['claude-developer']['owner_assignments'] = [{
+            'task_id': record['task_id'], 'owner_assignment_ref': ref}]
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        saved = self.store.create(record)
+        self.assertEqual(saved['developer']['owner_assignment_ref'], ref)
+        self.assertEqual(saved['dispatch_audit'][0]['worker_key'], 'claude-developer')
+        self.assertEqual(saved['dispatch_audit'][0]['reason_code'], 'OWNER_ASSIGNMENT_MATCHED')
+
+    def test_policy_evidence_is_canonical_and_does_not_accept_self_asserted_owner(self):
+        self.policy['workers']['company-gw']['evidence'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/2890')
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
+                         'WORKER_POLICY_INVALID')
+        self.policy['workers']['company-gw']['evidence'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289')
+        self.policy['workers']['company-gw']['decided_by'] = 'Owner'
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
+                         'WORKER_POLICY_INVALID')
+
+    def test_source_policy_resolves_to_the_single_canonical_repository_file(self):
+        canonical = Path(__file__).resolve().parents[1] / 'worker-dispatch.json'
+        self.assertTrue(os.path.samefile(worker_dispatch._policy_path(), canonical))
+        self.assertFalse((Path(worker_dispatch.__file__).parent / 'worker-dispatch.json').exists())
+
+    def test_policy_is_packaged_once_and_resolves_from_installed_wheel_and_sdist(self):
+        import setuptools.build_meta
+
+        project_root = Path(__file__).resolve().parents[1]
+        expected_policy = (project_root / 'worker-dispatch.json').read_bytes()
+        previous = os.getcwd()
+        os.chdir(project_root)
+        try:
+            with tempfile.TemporaryDirectory() as output:
+                output = Path(output)
+                wheel_dir = output / 'wheel'
+                install_dir = output / 'installed'
+                sdist_dir = output / 'sdist'
+                isolated_cwd = output / 'cwd'
+                for directory in (wheel_dir, install_dir, sdist_dir, isolated_cwd):
+                    directory.mkdir()
+
+                built = subprocess.run(
+                    [sys.executable, '-B', '-m', 'pip', 'wheel', '--no-deps',
+                     '--no-build-isolation', '--wheel-dir', str(wheel_dir), '.'],
+                    cwd=project_root, check=False, capture_output=True, text=True, timeout=60)
+                self.assertEqual(built.returncode, 0, built.stderr)
+                wheel = next(wheel_dir.glob('*.whl'))
+                with zipfile.ZipFile(wheel) as archive:
+                    members = [name for name in archive.namelist()
+                               if name.endswith('.data/data/llmtool/worker-dispatch.json')]
+                    self.assertEqual(len(members), 1)
+                    self.assertEqual(archive.read(members[0]), expected_policy)
+
+                installed = subprocess.run(
+                    [sys.executable, '-B', '-m', 'pip', 'install', '--no-deps',
+                     '--target', str(install_dir), str(wheel)],
+                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                lookup_script = (
+                    "import importlib.resources as r, json, pathlib, sys; "
+                    "sys.path.insert(0, sys.argv[1]); "
+                    "from llmtool import worker_dispatch as w; "
+                    "p=r.files('llmtool').joinpath('worker-dispatch.json'); "
+                    "assert p.is_file(); "
+                    "assert json.loads(p.read_text(encoding='utf-8'))['schema_version'] == 2; "
+                    "assert w._POLICY_PATH.resolve() == pathlib.Path(p).resolve(); "
+                    "assert w.evaluate('codex-developer').allowed")
+                lookup = subprocess.run(
+                    [sys.executable, '-B', '-c', lookup_script, str(install_dir)],
+                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=10)
+                self.assertEqual(lookup.returncode, 0, lookup.stderr)
+
+                sdist_name = setuptools.build_meta.build_sdist(str(sdist_dir))
+                with tarfile.open(sdist_dir / sdist_name, 'r:gz') as archive:
+                    members = [name for name in archive.getnames()
+                               if name.endswith('/worker-dispatch.json')]
+                    self.assertEqual(len(members), 1)
+                    self.assertEqual(archive.extractfile(members[0]).read(), expected_policy)
+        finally:
+            os.chdir(previous)
 
     def test_policy_is_reloaded_after_each_change(self):
         self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed is False)
@@ -189,6 +314,87 @@ class WorkerDispatchTests(unittest.TestCase):
     def test_audit_cannot_be_forged_by_generic_taskstore_update(self):
         with self.assertRaises(LLMToolError):
             self.store.update(self.task['task_id'], dispatch_audit=[])
+
+    def test_unknown_audit_action_is_rejected_instead_of_coerced(self):
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            worker_dispatch.audit_entry(
+                worker_dispatch.PolicyDecision('company-gw', True,
+                                               'OWNER_POLICY_ALLOWED', 'a' * 64),
+                'SOME_NEW_ACTION')
+        self.assertEqual(caught.exception.dispatch_code, 'WORKER_DISPATCH_ACTION_INVALID')
+
+    def test_recovery_and_repair_are_distinct_gated_actions(self):
+        developer = self.developer(state='DEVELOPER_UNAVAILABLE')
+        recovery = {**developer, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        self.assertEqual(worker_dispatch.task_store_attempt(
+            {'developer': developer}, {'developer': recovery}), ('company-gw', 'RECOVERY'))
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            {'developer': developer, 'dispatch_audit': []}, {'developer': recovery}))
+        recovery_reassigned = {**recovery, 'assignment_id': 'b' * 32}
+        self.assertEqual(worker_dispatch.task_store_attempt(
+            {'developer': developer}, {'developer': recovery_reassigned}),
+            ('company-gw', 'RECOVERY'))
+
+        responded = self.developer(state='DEVELOPER_RESPONDED')
+        responded['direct_result_callback'] = {
+            'review_return': {'state': 'RETURNED',
+                              'next_step': 'RETURN_TO_DEVELOPER_ONCE'}}
+        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING',
+                  'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        self.assertEqual(worker_dispatch.task_store_attempt(
+            {'developer': responded}, {'developer': repair}), ('company-gw', 'REPAIR'))
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            {'developer': responded, 'dispatch_audit': []}, {'developer': repair}))
+        repair_reassigned = {**repair, 'assignment_id': 'b' * 32}
+        self.assertEqual(worker_dispatch.task_store_attempt(
+            {'developer': responded}, {'developer': repair_reassigned}),
+            ('company-gw', 'REPAIR'))
+
+    def test_repair_requires_a_persisted_failed_review_decision(self):
+        responded = self.developer(state='DEVELOPER_RESPONDED')
+        repair = {**responded, 'state': 'DEVELOPER_DISPATCHING',
+                  'provider_type': 'openai-compatible', 'model': 'gw-model'}
+        denied = worker_dispatch.authorize_task_store_change(
+            {'developer': responded, 'dispatch_audit': []}, {'developer': repair})
+        self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
+        self.assertEqual(denied.dispatch_code, 'WORKER_REPAIR_NOT_AUTHORIZED')
+        repair_reassigned = {**repair, 'assignment_id': 'b' * 32}
+        denied = worker_dispatch.authorize_task_store_change(
+            {'developer': responded, 'dispatch_audit': []},
+            {'developer': repair_reassigned})
+        self.assertIsInstance(denied, worker_dispatch.WorkerDispatchDenied)
+        self.assertEqual(denied.dispatch_code, 'WORKER_REPAIR_NOT_AUTHORIZED')
+
+    def test_audit_append_retries_against_latest_concurrent_audit(self):
+        developer = self.developer()
+        self.store.compare_and_update(
+            self.task['task_id'], expected={'developer': None}, developer=developer)
+        before = self.store.get(self.task['task_id'])
+        first = worker_dispatch.audit_entry(
+            worker_dispatch.PolicyDecision('company-gw', True,
+                                           'OWNER_POLICY_ALLOWED', 'a' * 64), 'DISPATCH')
+        concurrent = worker_dispatch.audit_entry(
+            worker_dispatch.PolicyDecision('company-gw', True,
+                                           'OWNER_POLICY_ALLOWED', 'a' * 64), 'RECOVERY')
+        original_update = self.store._update
+        injected = {'done': False}
+
+        def race(task_id, *, expected, changes, trusted_dispatch_audit=False):
+            if not injected['done']:
+                injected['done'] = True
+                self.store.append_dispatch_audit(task_id, concurrent)
+            return original_update(task_id, expected=expected, changes=changes,
+                                   trusted_dispatch_audit=trusted_dispatch_audit)
+
+        with patch.object(self.store, '_update', side_effect=race):
+            saved = self.store.append_dispatch_audit(
+                self.task['task_id'], first,
+                expected={'developer': before['developer'],
+                          'dispatch_audit': before['dispatch_audit']})
+        self.assertEqual([entry['attempt_id'] for entry in saved['dispatch_audit']],
+                         [entry['attempt_id'] for entry in before['dispatch_audit']] +
+                         [concurrent['attempt_id'], first['attempt_id']])
 
 
 if __name__ == '__main__':
