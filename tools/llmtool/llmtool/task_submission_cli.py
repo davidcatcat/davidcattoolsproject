@@ -353,8 +353,9 @@ def add_task_submission_parsers(actions):
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
-    delegate.add_argument('--provider', required=True, choices=('company-gw', 'opencode'),
-                          help='explicit Developer route; OpenCode uses the configured local CLI auth')
+    delegate.add_argument('--provider', required=True,
+                          choices=('company-gw', 'codex', 'opencode'),
+                          help='explicit Developer route; Codex returns a text diff proposal')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -363,7 +364,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--context-stdin', action='store_true',
-                          help='company-gw only: read bounded, sensitive-screened context from stdin')
+                          help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
     complete.add_argument('task_id', help='existing durable Task ID')
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
@@ -489,16 +490,20 @@ def _developer_output_rejection(value, write_paths):
     return None
 
 
-def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context, pm_goal):
+def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
+                      pm_goal, developer_route='company-gw'):
     packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'pm_session_id': task['pm_session_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
         'source_sha': source_sha, 'read_paths': read_paths,
         'write_paths': write_paths, 'acceptance': acceptance, 'context': context,
         'pm_selected_goal': pm_goal,
     }
+    if developer_route not in ('company-gw', 'codex-cli'):
+        raise LLMToolError('unsupported text Developer route')
     system = (
-        'You are a company-gw code Developer. Return only a plain-text unified diff '
+        'You are a ' + developer_route + ' code Developer. Return only a plain-text unified diff '
         'that changes files within write_paths. Do not use Markdown fences and do not '
         'include prose before or after the diff. Exact minimal format example:\n'
         'diff --git a/example.py b/example.py\n'
@@ -842,8 +847,10 @@ def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if args.provider == 'opencode':
         return run_task_opencode_delegate(args, store=store)
+    if args.provider not in ('company-gw', 'codex'):
+        raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):
-        raise LLMToolError('company-gw delegation requires explicit --context-stdin')
+        raise LLMToolError('text Developer delegation requires explicit --context-stdin')
     task = store.get(args.task_id)
     if task['state'] != 'PM_RESPONDED' or not task['response']:
         raise LLMToolError('task has no successful PM response')
@@ -852,13 +859,18 @@ def run_task_delegate(args, *, store=None):
     if task['developer'] is not None:
         # A pending or ambiguous provider call is never replayed.
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
-    if args.provider != 'company-gw':
-        raise LLMToolError('this task route only supports the explicitly selected company-gw profile')
+    if args.provider == 'codex':
+        binding = task.get('task_binding')
+        contract_digest = (binding.get('contract_digest')
+                           if type(binding) is dict else None)
+        task_completion.validate_task_binding(
+            stored_binding=binding, task_id=task.get('task_id'),
+            run_id=task.get('run_id'), contract_digest=contract_digest)
     pm_assignment = task['pm_assignment']
     if args.selection_source == 'PM':
-        if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'company-gw' or
+        if (type(pm_assignment) is not dict or pm_assignment.get('route') != args.provider or
                 pm_assignment.get('risk') != 'LOW'):
-            raise LLMToolError('no validated low-risk company-gw recommendation from the selected PM')
+            raise LLMToolError('no validated low-risk recommendation from the selected PM route')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
     snapshot = task_completion.collect_git_snapshot(os.getcwd())
@@ -877,14 +889,15 @@ def run_task_delegate(args, *, store=None):
     messages = _developer_prompt(
         task, source_sha=source_sha, read_paths=read_paths, write_paths=write_paths,
         acceptance=acceptance, context=context,
-        pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM' else task['request']))
+        pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM' else task['request']),
+        developer_route=('codex-cli' if args.provider == 'codex' else 'company-gw'))
     input_bytes = len(json.dumps(messages, ensure_ascii=True, sort_keys=True,
                                  separators=(',', ':')).encode('utf-8'))
     if input_bytes > REQUEST_LIMIT:
         raise LLMToolError('developer request exceeds the supported size')
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
-        'state': 'DEVELOPER_PENDING', 'provider_profile': 'company-gw',
+        'state': 'DEVELOPER_PENDING', 'provider_profile': args.provider,
         'provider_type': None, 'model': None,
         'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
         'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
@@ -931,15 +944,25 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
-        config = resolve_profile_config('company-gw', require_configured=True)
+        profile = 'company-gw' if args.provider == 'company-gw' else 'codex-pm'
+        config = resolve_profile_config(profile, require_configured=True)
         provider = selected_provider(config)
-        if provider.get('type') != 'openai-compatible':
-            raise LLMToolError('company-gw profile is not an openai-compatible route')
-        credential = api_key(config)
-        client = create_client(config, credential)
-        max_tokens = config['generation']['max_tokens']
-        if type(max_tokens) is not int or not 1 <= max_tokens <= 1_000_000:
-            raise LLMToolError('company-gw output budget is invalid')
+        if args.provider == 'company-gw':
+            if provider.get('type') != 'openai-compatible':
+                raise LLMToolError('company-gw profile is not an openai-compatible route')
+            credential = api_key(config)
+            client = create_client(config, credential)
+            max_tokens = config['generation']['max_tokens']
+            if type(max_tokens) is not int or not 1 <= max_tokens <= 1_000_000:
+                raise LLMToolError('company-gw output budget is invalid')
+        else:
+            if provider.get('type') != 'codex-cli':
+                raise LLMToolError('codex profile is not a codex-cli route')
+            # CodexCLIProvider owns an isolated, read-only process with a fixed
+            # output ceiling and configured timeout. It returns a proposal only;
+            # this host never grants it file, shell, Git, or network access.
+            client = create_client(config)
+            max_tokens = None
     except Exception as exc:
         code = _provider_error_code(exc).replace('PM_', 'DEVELOPER_', 1)
         developer.update(state='DEVELOPER_UNAVAILABLE', error_code=code)
@@ -947,7 +970,7 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     developer['state'] = 'DEVELOPER_DISPATCHING'
-    developer['provider_type'] = 'openai-compatible'
+    developer['provider_type'] = provider.get('type')
     developer['model'] = provider.get('model')
     developer['max_tokens'] = max_tokens
     try:
@@ -959,7 +982,9 @@ def run_task_delegate(args, *, store=None):
         return 1
     try:
         worker_dispatch.authorize_dispatch(
-            store, task['task_id'], 'company-gw', 'DISPATCH')
+            store, task['task_id'],
+            'company-gw' if args.provider == 'company-gw' else 'codex-developer',
+            'DISPATCH')
     except worker_dispatch.WorkerDispatchDenied as exc:
         developer.update(state='DEVELOPER_UNAVAILABLE', error_code=exc.dispatch_code)
         saved = store.update(task['task_id'], developer=developer)

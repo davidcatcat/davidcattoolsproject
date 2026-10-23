@@ -348,8 +348,9 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] not in ('company-gw', 'opencode', 'claude') or
-                    developer['provider_type'] not in (None, 'openai-compatible', 'opencode-cli') or
+                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude') or
+                    developer['provider_type'] not in (
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -384,6 +385,11 @@ def _validate(record):
                     (developer['provider_type'] not in (None, 'opencode-cli') or
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                _fail()
+            if (developer['provider_profile'] == 'codex' and
+                    (developer['provider_type'] not in (None, 'codex-cli') or
+                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['max_tokens'] is not None)):
                 _fail()
             if (developer['provider_profile'] == 'claude' and
                     (developer['provider_type'] is not None or
@@ -489,9 +495,14 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
-            expected_provider = ('openai-compatible' if
-                                 developer['provider_profile'] == 'company-gw' else
-                                 'opencode-cli')
+            expected_provider = {
+                'company-gw': 'openai-compatible',
+                'codex': 'codex-cli',
+                'opencode': 'opencode-cli',
+            }.get(developer['provider_profile'])
+            token_cap_required = not (
+                developer['provider_profile'] == 'codex' and
+                developer['provider_type'] == 'codex-cli')
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
@@ -499,7 +510,7 @@ def _validate(record):
             if dev_state == 'DEVELOPER_DISPATCHING' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
-                    developer['max_tokens'] is None):
+                    (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if dev_state == 'DEVELOPER_UNAVAILABLE' and (
                     artifact is not None or usage is not None or
@@ -511,7 +522,8 @@ def _validate(record):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
-                    developer['error_code'] is not None or developer['max_tokens'] is None):
+                    developer['error_code'] is not None or
+                    (token_cap_required and developer['max_tokens'] is None)):
                 _fail()
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
