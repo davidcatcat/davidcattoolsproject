@@ -1966,19 +1966,9 @@ def _resume_reviewer_handoff(store, task, developer, callback, reviewer_adapter=
             _active_review_dispatches.discard(dispatch_id)
         _print(_task_view(current))
         return 1
-    try:
-        worker_dispatch.authorize_dispatch(
-            store, task['task_id'], 'claude-reviewer', 'REVIEWER_HANDOFF')
-    except worker_dispatch.WorkerDispatchDenied as exc:
-        pending = task_completion.review_handoff_pending(dispatching['intent'])
-        try:
-            saved = _persist_review_handoff(
-                store, task, developer, callback, dispatching, pending)
-            task = saved
-        except Exception:
-            task = store.get(task['task_id'])
-        _print(_task_view(task))
-        return 1
+    # The trusted Reviewer adapter owns the one final dispatch authorization
+    # immediately at its provider boundary. Do not consume the same one-shot
+    # TaskStore authorization here before entering that adapter.
     try:
         receipt = adapter(dispatching['intent'])
     except BaseException as exc:
