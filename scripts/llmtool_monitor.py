@@ -1217,6 +1217,8 @@ class OfficeRow:
     task: str = ""        # bound work, e.g. "PR #284 @c40c80a" or "task <id>"; "" = unbound
     evidence: str = ""    # where the row comes from (codex 紀錄, claude 紀錄, 程序, 派工檔, ...)
     authority: str = ""   # who set a dispatch switch: Owner | PM
+    outcome: str = ""     # a finished one-shot review: verdict word or why it has none
+    alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
 
 
 GUESSED = "推測"
@@ -1688,7 +1690,7 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
                               f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
                               age, 30, kind="subagent", group=parent.key, key="review",
                               role="reviewer" if bound else "", task=task,
-                              evidence="codex 紀錄（呼叫與結果）"))
+                              evidence="codex 紀錄（呼叫與結果）", outcome=outcome or ""))
     return rows
 
 
@@ -1724,7 +1726,7 @@ def codex_rows(now: float, root: str | None = None,
     for key, row in mains.items():
         if row.role == "PM":
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
-            detail = (f"指揮 {len(busy)} 個 subagent：" + "、".join(busy[:3]) if busy
+            detail = (f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                       else "處理中" if row.state == WORKING else "等待下一個指示") + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
@@ -2273,12 +2275,14 @@ def office_rows(processes: list[Process], now: float | None = None, *,
         paused = not trouble and switch[0] == "PAUSED"
         if live and not trouble and not paused:
             continue   # the live CLI rows say everything
-        notes, state, age = [], None, None
+        notes, state, age, alert = [], None, None, ""
         if name == "opencode developer" and not live:
             outcome = opencode_outcome(now, opencode_db, canonical)
             if outcome is not None:
                 state, age = outcome[0], outcome[2]
                 notes.append("本 repo " + outcome[1])
+                if state == STOPPED:   # kept even when the dispatch state is unknown
+                    alert = "本 repo " + outcome[1]
         if name == "agy" and agy_open and not live:
             notes.append("App 開著")
         if name == "公司 gw":
@@ -2287,6 +2291,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 age = gw[0]
                 if gw[2] == 0:
                     state = ATTENTION   # reachable on paper, but every recent llmtool run failed
+                    alert = f"近 7 天 {gw[1]} 次都沒成功，最近一次：{gw[3]}"
                 notes.append(f"本機 llmtool 紀錄（不分 repo）最近一次：{gw[3]}"
                              f"（近 7 天 {gw[1]} 次，成功 {gw[2]} 次）")
         if live:
@@ -2304,8 +2309,11 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 state, age = PAUSED, None
             elif state is None:
                 state = IDLE
+        if paused:
+            alert = ""   # the Owner already stopped dispatch; a fault is not news
         rows.append(OfficeRow(name, state, "；".join([label] + notes), age, order,
-                              kind="worker", evidence=source or "派工檔", authority=authority))
+                              kind="worker", evidence=source or "派工檔", authority=authority,
+                              alert=alert))
     return sorted(rows, key=lambda row: (row.order, row.age if row.age is not None else 1e12,
                                          row.name))
 
@@ -2358,11 +2366,74 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
     return out
 
 
+RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
+REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH})
+ALERT_STATES = (STALLED, STOPPED, ATTENTION)
+
+
+def _short_ago(age: float | None) -> str:
+    """The time column: short and fixed-width, so it is never cut off."""
+    if age is None:
+        return "—"
+    if age < 60:
+        return "剛剛"
+    if age < 3600:
+        return f"{int(age // 60)} 分前"
+    return f"{int(age // 3600)} 小時前"
+
+
+def _review_alerts(rows: list[OfficeRow]) -> list[str]:
+    """One line per PR whose one-shot reviews ended without a verdict more than
+    once: repeated calls on one PR read as one problem, not as separate rows."""
+    by_pr: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        if row.key == "review" and row.task.startswith("PR #"):
+            by_pr.setdefault(row.task.split()[1], []).append(row)
+    out = []
+    for pr, items in by_pr.items():
+        missing = sum(row.outcome in REVIEW_NO_VERDICT for row in items)
+        if missing < 2:
+            continue
+        parts = [f"{missing} 次沒有判定"]
+        fails = sum(row.outcome == "FAIL" for row in items)
+        if fails:
+            parts.append(f"{fails} 次 FAIL")
+        running = [row for row in items if row.state == WORKING]
+        tail = (f"；目前執行中 {running[0].task.split()[-1]}" if running
+                else "；目前沒有在跑")
+        out.append(f"{pr} reviewer：" + "、".join(parts) + tail)
+    return out
+
+
+def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
+    """Finished subagent work older than RECENT_DONE becomes one line per parent.
+    The newest finished review of each PR stays, so its verdict is not hidden."""
+    keys = {row.key for row in rows if row.key}
+    newest: dict[str, OfficeRow] = {}
+    for row in rows:
+        if row.key == "review" and row.state == DONE and row.task:
+            held = newest.get(row.task.split()[1])
+            if held is None or (row.age or 0.0) < (held.age or 0.0):
+                newest[row.task.split()[1]] = row
+    kept, folded = [], {}
+    for row in rows:
+        if (row.state == DONE and row.group in keys and row.age is not None
+                and row.age > RECENT_DONE and row not in newest.values()):
+            folded[row.group] = folded.get(row.group, 0) + 1
+        else:
+            kept.append(row)
+    for group, count in folded.items():
+        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成，已收起"
+        kept.append(OfficeRow(f"另 {count} 項已完成", "", when, None, 10 ** 6,
+                              group=group, kind="subagent"))
+    return kept
+
+
 def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
     working = sum(row.state == WORKING for row in rows)
     counts = {kind: sum(row.kind == kind for row in rows) for kind in ("agent", "subagent", "worker")}
-    lines = [f"辦公室 · agent {counts['agent']} · subagent {counts['subagent']} · "
-             f"只看得到狀態 {counts['worker']} · {working} 位工作中"]
+    lines = [f"辦公室 · 工作中 {working} · 共 {len(rows)}（agent {counts['agent']}、"
+             f"subagent {counts['subagent']}、只看得到狀態 {counts['worker']}）"]
     if error:
         return lines + [f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。"]
     if not rows:
@@ -2371,15 +2442,44 @@ def office_lines(rows: list[OfficeRow], error: str | None = None) -> list[str]:
     if pms > 1:
         lines.append(f"⚠ 有 {pms} 個 Codex 主對話都開在主 repo：都被標成 PM，"
                      "也可能同時寫入主 repo（D6 只允許一個 Integrator 寫入）")
-    tree = _tree(rows)
+    # The same dispatch problem on several Workers is said once, not per row.
+    notes = []
+    shared: dict[str, list[OfficeRow]] = {}
+    for row in rows:
+        label = next((text for text in DISPATCH_PROBLEMS.values()
+                      if row.kind == "worker" and row.detail.startswith(text)), None)
+        if label:
+            shared.setdefault(label, []).append(row)
+    shared = {label: items for label, items in shared.items() if len(items) > 1}
+    for label, items in shared.items():
+        notes.append(f"ℹ {label}：" + "、".join(row.name for row in items))
+    trimmed = {id(row): row.detail[len(label):].lstrip("；") or "沒有其他紀錄"
+               for label, items in shared.items() for row in items}
+    rows = [replace(row, detail=trimmed[id(row)]) if id(row) in trimmed else row
+            for row in rows]
+    # Likewise a fallback source of the dispatch file ("本機 origin/main 的派工檔…").
+    for source in sorted({row.evidence for row in rows if row.kind == "worker"}):
+        note = f"（{source}）"
+        if source and sum(note in row.detail for row in rows) > 1:
+            notes.append(f"ℹ 派工狀態讀自{source}")
+            rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
+    alerts = _review_alerts(rows)
+    alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
+    alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
+               if row.state in ALERT_STATES and not row.alert]
+    if alerts:
+        lines.append("⚠ 需要注意")
+        lines += [f"  {text}" for text in alerts]
+    lines += notes
+    tree = _tree(_fold_done(rows))
     width = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
     for prefix, row in tree:
         if prefix == "—":
             lines.append(f"── {row.name} ──")
             continue
         detail = f"「{row.detail}」" if row.detail else ""
-        lines.append(f"{_pad(prefix + row.name, width)}{_pad(f'({row.state})', 9)}"
-                     f"{_pad(detail, 46)} · {_ago(row.age)}")
+        lines.append(f"{_pad(_short_ago(row.age), 10)}{_pad(row.state, 8)}"
+                     f"{_pad(prefix + row.name, width)}{detail}")
     if any(row.basis == GUESSED for row in rows):
         lines.append("名稱帶 ? 的角色是依資料夾或名稱推測的，沒有派工紀錄可以確認。")
     lines.append("狀態依本機紀錄推算：工作中 = 最近有動作，不代表模型正在產生內容。")

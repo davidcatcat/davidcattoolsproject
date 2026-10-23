@@ -1075,14 +1075,15 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude reviewer?（互動）", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertIn("agent 2 · subagent 2 · 只看得到狀態 3", lines[0])
-        self.assertEqual(lines[1], f"── {mon.LIVE_SECTION} ──")
-        pm = next(i for i, line in enumerate(lines) if line.startswith("codex PM?"))
-        self.assertTrue(lines[pm + 1].startswith("└ codex developer? Franklin"))
-        self.assertTrue(any(line.startswith("claude 單次呼叫") for line in lines))
+        self.assertIn("共 7（agent 2、subagent 2、只看得到狀態 3）", lines[0])
+        live = lines.index(f"── {mon.LIVE_SECTION} ──")
+        pm = next(i for i, line in enumerate(lines) if "codex PM?" in line)
+        self.assertLess(live, pm)
+        self.assertIn("└ codex developer? Franklin", lines[pm + 1])
+        self.assertTrue(any("claude 單次呼叫" in line for line in lines))
         self.assertIn(f"── {mon.STATUS_SECTION} ──", lines)
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
-                        next(i for i, line in enumerate(lines) if line.startswith("agy")))
+                        next(i for i, line in enumerate(lines) if " agy" in line))
 
     def test_unpersisted_claude_run_started_by_codex_is_shown_from_its_process(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
@@ -1454,6 +1455,88 @@ class OfficeViewTests(unittest.TestCase):
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)
+
+    def _review(self, sha, outcome, age):
+        label = f"審 PR #288 @{sha}"
+        return mon.OfficeRow("claude reviewer", mon.WORKING if outcome is None else mon.DONE,
+                             f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
+                             age, 30, kind="subagent", group="T1", key="review",
+                             role="reviewer", task=f"PR #288 @{sha}", outcome=outcome or "")
+
+    def test_office_lines_put_repeated_review_failures_and_alerts_first(self):
+        missing = mon.DISPATCH_PROBLEMS["missing"]
+        rows = [
+            mon.OfficeRow("codex PM?", mon.WORKING, "指揮", 5, 10, key="T1", role="PM"),
+            self._review("71db418", None, 10),
+            self._review("3f86dc6", mon.NO_VERDICT, 180),
+            self._review("3f86dc6", mon.NO_VERDICT, 400),
+            self._review("d4ed21d", mon.NO_VERDICT, 1500),
+            self._review("d4ed21d", "FAIL", 1620),
+            mon.OfficeRow("codex 稽核? Dewey", mon.DONE, "audit 284 release", 600, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("codex 稽核? Huygens", mon.DONE, "audit r4 handoff", 20, 20,
+                          group="T1", kind="subagent"),
+            mon.OfficeRow("opencode developer", mon.UNCHECKED,
+                          f"{missing}；本 repo 最近一次：認證失敗（401），需要重新登入", 7200, 50,
+                          kind="worker", alert="本 repo 最近一次：認證失敗（401），需要重新登入"),
+            mon.OfficeRow("agy", mon.UNCHECKED, f"{missing}；App 開著", None, 60, kind="worker"),
+            mon.OfficeRow("公司 gw", mon.UNCHECKED, missing, None, 70, kind="worker"),
+        ]
+        lines = mon.office_lines(rows)
+        text = "\n".join(lines)
+        self.assertEqual(lines[1], "⚠ 需要注意")
+        self.assertEqual(lines[2], "  #288 reviewer：3 次沒有判定、1 次 FAIL；目前執行中 @71db418")
+        self.assertEqual(lines[3], "  opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
+        # one dispatch line instead of the same words on every Worker row
+        self.assertEqual(lines[4], f"ℹ {missing}：opencode developer、agy、公司 gw")
+        self.assertEqual(text.count(missing), 1)
+        gw = next(line for line in lines if "公司 gw" in line and "ℹ" not in line)
+        self.assertIn("「沒有其他紀錄」", gw)
+        # time and state lead each row, so a cut-off detail never hides them
+        review = next(line for line in lines if "@71db418（" in line)
+        self.assertTrue(review.startswith("剛剛      工作中  "))
+        self.assertTrue(next(line for line in lines if " agy " in line).startswith("—"))
+        # older finished work is folded; the newest verdict of each review target stays
+        self.assertNotIn("audit 284 release", text)
+        self.assertNotIn("FAIL」", text)
+        self.assertIn("audit r4 handoff", text)
+        self.assertIn("@3f86dc6：結束但沒有判定", text)
+        self.assertEqual(text.count("@3f86dc6："), 1)
+        folded = next(line for line in lines if "└ 另 4 項已完成" in line)
+        self.assertTrue(folded.endswith("「5–30 分鐘前完成，已收起」"))
+
+    def test_office_lines_say_nothing_extra_when_all_is_well(self):
+        rows = [mon.OfficeRow("codex PM?", mon.IDLE, "等待下一個指示", 30, 10, key="T1"),
+                self._review("71db418", "PASS", 60),
+                mon.OfficeRow("agy", mon.IDLE, "可派工", None, 60, kind="worker")]
+        lines = mon.office_lines(rows)
+        self.assertFalse(any(line.startswith(("⚠", "ℹ")) for line in lines))
+        self.assertFalse(any("已收起" in line for line in lines))
+
+    def test_office_lines_name_a_shared_dispatch_source_once(self):
+        source = "本機 origin/main 的派工檔（可能不是最新）"
+        rows = [mon.OfficeRow("opencode developer", mon.PAUSED,
+                              f"Owner 暫停派工（10-22）（{source}）；App 開著", None, 50,
+                              kind="worker", evidence=source),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, f"可派工（{source}）", 34 * 3600, 70,
+                              kind="worker", evidence=source)]
+        lines = mon.office_lines(rows)
+        self.assertIn(f"ℹ 派工狀態讀自{source}", lines)
+        self.assertEqual("\n".join(lines).count(source), 1)
+        gw = next(line for line in lines if line.endswith("「可派工」"))
+        self.assertTrue(gw.startswith("34 小時前 "))   # the time column never runs into the state
+
+    def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
+        stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)
+        with patch.object(mon, "opencode_outcome", return_value=stopped):
+            unknown = self.by_name(mon.office_rows(
+                [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+                canonical=self.canonical, dispatch=str(Path(self.tmp.name) / "no-such-dispatch.json")))
+            paused = self.by_name(self.rows())
+        self.assertEqual(unknown["opencode developer"].state, mon.UNCHECKED)
+        self.assertEqual(unknown["opencode developer"].alert, "本 repo 最近一次：免費額度用完（429）")
+        self.assertEqual(paused["opencode developer"].state, mon.PAUSED)
+        self.assertEqual(paused["opencode developer"].alert, "")
 
     def test_rendered_office_never_shows_secrets_or_private_paths(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
