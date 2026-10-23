@@ -28,7 +28,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -46,6 +46,9 @@ class ClassifyTests(unittest.TestCase):
             "/u/lib/node_modules/@opencode/cli/bin/opencode.exe serve --service": "OpenCode SERVER",
             "/u/bin/opencode.exe run --agent a": "OpenCode CLIENT",
             "(opencode.exe)": "OpenCode CLI",
+            "node /u/.nvm/versions/node/v24/bin/kilo": "Kilo CLI (node launcher)",
+            "/u/lib/node_modules/@kilocode/cli/bin/.kilo": "Kilo CLI",
+            "/u/.kilo/bin/kilo run --agent a": "Kilo CLIENT",
             "claude": "Claude Code CLI",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
             "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
@@ -1000,6 +1003,13 @@ class OfficeViewTests(unittest.TestCase):
             (900, call("c1", 'gh pr diff 283 | claude --print --tools "" "Review PR #283 head '
                              '18538d569d94fa7e5a06605dadf3a7305407b4de"')),
             (899, dict(out('{"session_id":70614,"output":""}'), call_id="c1")),
+            # polled together with another command that finished: still running
+            (890, call("c2p", "Promise.allSettled([tools.write_stdin({session_id:70614}), "
+                              "tools.exec_command({cmd:'git status'})])")),
+            (889, {"type": "custom_tool_call_output", "call_id": "c2p", "output": [
+                {"type": "input_text", "text": '{"status":"fulfilled","value":{"session_id":70614}}'},
+                {"type": "input_text", "text": '{"status":"fulfilled","value":{"exit_code":0,'
+                                               '"output":"clean"}}'}]}),
             (880, call("c2", "const r=await tools.write_stdin({session_id:70614,yield_time_ms:30000});")),
             (860, dict(out(result), call_id="c2")),
             # a verdict quoted by gh, not from a claude call, must be ignored
@@ -1007,6 +1017,7 @@ class OfficeViewTests(unittest.TestCase):
             (849, dict(out('{"exit_code":0,"output":"**Verdict: PASS** PR #999 head abcdef1"}'),
                        call_id="c3")),
             (30, call("c4", "claude -p 'Review PR #284 head 1ee2f21c8caca7c66dc497268759dc8c308adebf'")),
+            (29, dict(out('{"session_id":70615,"output":""}'), call_id="c4")),
         ]
         day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
         items = [{"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
@@ -1018,6 +1029,7 @@ class OfficeViewTests(unittest.TestCase):
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
         rows = self.rows([run])
+        self.assertEqual(sum(row.name == "claude reviewer" for row in rows), 2)
         reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
         self.assertEqual(reviews, {"審 PR #283 @18538d5：FAIL": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
@@ -1189,6 +1201,51 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("task wp-1", rows["opencode cli #2"].detail)
         self.assertIn("已開 1 小時", rows["opencode cli #2"].detail)
         self.assertEqual(rows["opencode cli #3"].detail, "其他資料夾：已開啟，沒有執行中的任務")
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def _kilo_db(self, sessions, messages=()):
+        db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "kilo.db"
+        conn = sqlite3.connect(db)
+        conn.execute("CREATE TABLE session (id TEXT, parent_id TEXT, directory TEXT, "
+                     "title TEXT, time_updated INTEGER)")
+        conn.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, "
+                     "data TEXT)")
+        conn.execute("CREATE TABLE credential (secret TEXT)")
+        conn.execute("INSERT INTO credential VALUES ('CREDENTIAL-SECRET')")
+        conn.executemany("INSERT INTO session VALUES (?,?,?,?,?)", sessions)
+        conn.executemany("INSERT INTO message VALUES (?,?,?,?)", messages)
+        conn.commit()
+        conn.close()
+        return str(db)
+
+    def test_each_kilo_cli_gets_its_own_row_marked_as_not_dispatched(self):
+        ms = lambda age: int((self.NOW - age) * 1000)
+        done = json.dumps({"role": "assistant", "time": {"completed": ms(300)},
+                           "text": "MODEL-OUTPUT-SECRET"})
+        asked = json.dumps({"role": "user", "content": "PROMPT-SECRET"})
+        db = self._kilo_db(
+            [("k1", None, self.canonical, "Review token=abc", ms(4)),
+             ("k2", None, str(self.task), "Finished", ms(300)),
+             ("k3", "k1", str(self.task), "child", ms(1))],
+            [("m1", "k1", ms(600), done), ("m2", "k1", ms(4), asked),
+             ("m3", "k2", ms(400), asked), ("m4", "k2", ms(310), done)])
+        procs = [mon.Process(20, 1, 20, "05:00", "S+", "Kilo CLI", ".kilo", ""),
+                 mon.Process(21, 1, 21, "07:37:41", "S+", "Kilo CLI", ".kilo", ""),
+                 mon.Process(22, 1, 22, "07:37:41", "S+", "Kilo CLI (node launcher)", "node", "")]
+        cwd = {20: self.canonical, 21: str(self.task), 22: self.canonical}
+        rows = self.by_name(mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude), roadmap=str(self.roadmap),
+                                            canonical=self.canonical, kilo_db=db,
+                                            cwd_of=cwd.get))
+        self.assertNotIn("kilo cli #3", rows)   # the npm launcher is not a second Kilo
+        self.assertEqual(rows["kilo cli #1"].state, mon.WORKING)
+        self.assertTrue(rows["kilo cli #1"].detail.startswith("本 repo："))
+        self.assertTrue(rows["kilo cli #1"].detail.endswith("（未列入派工）"))
+        self.assertEqual(rows["kilo cli #2"].state, mon.IDLE)
+        self.assertIn("task wp-1", rows["kilo cli #2"].detail)
+        self.assertIn("已開 7 小時", rows["kilo cli #2"].detail)
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)

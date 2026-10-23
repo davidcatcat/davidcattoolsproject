@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only macOS/Linux process monitor for local AI agent jobs.
 
-Shows OpenCode, Claude Code, Codex and llmtool processes, and the progress of
+Shows OpenCode, Kilo, Claude Code, Codex and llmtool processes, and the progress of
 recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
 repository mutation, credentials, or daemon. Network access is off unless --github
@@ -113,6 +113,13 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
         if "run" in words:
             return "OpenCode CLIENT"
         return "OpenCode CLI"
+    if exe in ("kilo", ".kilo", "kilocode", "kilo.exe"):
+        # Kilo CLI is an OpenCode fork; the npm launcher starts a ".kilo" binary.
+        if "serve" in words:
+            return "Kilo SERVER"
+        if "run" in words:
+            return "Kilo CLIENT"
+        return "Kilo CLI"
     if exe == "claude":
         return "Claude Code CLI"
     if exe == "Claude":
@@ -264,7 +271,7 @@ def collect(remembered: dict | None = None) -> Snapshot:
 
 
 def family(role: str) -> str:
-    for name in ("OpenCode", "Claude", "Codex", "llmtool", "ai-loop"):
+    for name in ("OpenCode", "Kilo", "Claude", "Codex", "llmtool", "ai-loop"):
         if name in role:
             return name
     return "other"
@@ -293,7 +300,7 @@ def summary(processes: list[Process], lingering: list) -> str:
     for p in processes:
         if not p.role.startswith(" "):
             counts[family(p.role)] = counts.get(family(p.role), 0) + 1
-    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "llmtool", "ai-loop", "other")
+    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "other")
                      if k in counts) or "no agent process"
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
@@ -1392,12 +1399,17 @@ def codex_reviews(path: str) -> list[tuple]:
                 cache["polls"][call] = int(found.group(1))
         elif kind == "custom_tool_call_output":
             origin = cache["calls"].get(call)
+            polled = cache["polls"].get(call)
             if origin is None:
-                origin = cache["sessions"].get(cache["polls"].get(call))
+                origin = cache["sessions"].get(polled)
             if origin is None:
                 continue
-            for part in payload.get("output") or []:
-                text = part.get("text", "") if type(part) is dict else ""
+            parts = [part.get("text", "") if type(part) is dict else ""
+                     for part in payload.get("output") or []]
+            if polled is not None and any(re.search(rf'"session_id":{polled}\b', text)
+                                          for text in parts):
+                continue   # still running; an exit code here belongs to a parallel command
+            for text in parts:
                 session = re.search(r'"session_id":(\d{1,9})', text)
                 if session and '"exit_code"' not in text:
                     cache["sessions"][int(session.group(1))] = origin
@@ -1414,8 +1426,10 @@ def codex_reviews(path: str) -> list[tuple]:
                     for key in [k for k, v in cache["sessions"].items() if v is origin]:
                         cache["sessions"].pop(key)
     cache["done"] = cache["done"][-20:]
-    pending = [(when, pr, sha, None) for when, pr, sha in cache["calls"].values()]
-    pending += [(when, pr, sha, None) for when, pr, sha in set(cache["sessions"].values())]
+    # A call and the exec session it opened share one origin: list it once.
+    origins = {id(origin): origin for origin in
+               list(cache["calls"].values()) + list(cache["sessions"].values())}
+    pending = [(when, pr, sha, None) for when, pr, sha in origins.values()]
     return sorted(cache["done"] + pending)
 
 
@@ -1641,16 +1655,79 @@ def _elapsed_seconds(text: str) -> float | None:
     return float(((days * 24 + hours) * 60 + minutes) * 60 + seconds)
 
 
+def _forget_cwds(processes: list[Process]) -> None:
+    alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + KILO_ROLES + ("AGY CLI",)}
+    for pid in [pid for pid in _cwd_cache if pid not in alive]:
+        _cwd_cache.pop(pid, None)
+
+
 def opencode_rows(processes: list[Process], now: float, canonical: str,
                   db: str | None = None, cwd_of=process_cwd) -> list[OfficeRow]:
     """One row per running OpenCode CLI/TUI or `run` client."""
     procs = sorted((p for p in processes if p.role in OPENCODE_ROLES), key=lambda p: p.pid)
-    alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + ("AGY CLI",)}
-    for pid in [pid for pid in _cwd_cache if pid not in alive]:
-        _cwd_cache.pop(pid, None)
     if not procs:
         return []
-    sessions = opencode_sessions(now, db)
+    return _cli_rows(procs, opencode_sessions(now, db), now, canonical, cwd_of,
+                     "opencode", "OpenCode CLIENT", 50, "")
+
+
+KILO_DB = os.path.expanduser("~/.local/share/kilo/kilo.db")
+KILO_ROLES = ("Kilo CLIENT", "Kilo CLI")
+# Kilo keeps the older OpenCode schema (`session` + `message`, no idle column).
+# Only these columns and the newest message's role/completion time are read;
+# message content, parts and the account/credential tables are never queried.
+KILO_SESSIONS_SQL = (
+    "SELECT s.directory, s.title, s.time_updated, "
+    "(SELECT json_extract(m.data, '$.role') FROM message m WHERE m.session_id = s.id "
+    " ORDER BY m.time_created DESC LIMIT 1), "
+    "(SELECT json_extract(m.data, '$.time.completed') FROM message m WHERE m.session_id = s.id "
+    " ORDER BY m.time_created DESC LIMIT 1), "
+    "(SELECT count(*) FROM message m WHERE m.session_id = s.id) "
+    "FROM session s WHERE s.parent_id IS NULL AND s.time_updated >= ? "
+    "ORDER BY s.time_updated DESC LIMIT 200")
+
+
+def kilo_sessions(now: float, db: str | None = None) -> list[tuple]:
+    """Same shape as opencode_sessions(): a session is idle once its newest
+    message is a completed assistant reply (or it has no message yet)."""
+    db = KILO_DB if db is None else db
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=0.5)
+    except sqlite3.Error:
+        return []
+    try:
+        rows = conn.execute(KILO_SESSIONS_SQL, (int((now - OFFICE_WINDOW) * 1000),)).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        conn.close()
+    out = []
+    for directory, title, updated, role, completed, count in rows:
+        if type(directory) is not str or type(updated) is not int:
+            continue
+        if count == 0:
+            idle = updated
+        elif role == "assistant" and type(completed) is int:
+            idle = completed
+        else:
+            idle = None
+        out.append((directory, title, updated / 1000, idle / 1000 if idle is not None else None))
+    return out
+
+
+def kilo_rows(processes: list[Process], now: float, canonical: str,
+              db: str | None = None, cwd_of=process_cwd) -> list[OfficeRow]:
+    """One row per running Kilo CLI. Kilo is not a Worker in the dispatch file,
+    so its rows say so: an open Kilo is the Owner's own session, not dispatch."""
+    procs = sorted((p for p in processes if p.role in KILO_ROLES), key=lambda p: p.pid)
+    if not procs:
+        return []
+    return _cli_rows(procs, kilo_sessions(now, db), now, canonical, cwd_of,
+                     "kilo", "Kilo CLIENT", 75, "（未列入派工）")
+
+
+def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical: str,
+              cwd_of, prefix: str, client_role: str, base: int, note: str) -> list[OfficeRow]:
     rows = []
     for number, proc in enumerate(procs, 1):
         cwd = cwd_of(proc.pid)
@@ -1660,16 +1737,16 @@ def opencode_rows(processes: list[Process], now: float, canonical: str,
         busy = (latest is not None and now - latest[2] <= OFFICE_STALL and
                 (latest[3] is None or latest[2] - latest[3] > 2.0))
         where = _where(cwd, canonical)
-        name = f"opencode {'worker' if proc.role == 'OpenCode CLIENT' else 'cli'} #{number}"
+        name = f"{prefix} {'worker' if proc.role == client_role else 'cli'} #{number}"
         if busy:
-            detail = f"{where}：{_label(latest[1], 28) or '執行中'}"
-            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), 50 + number,
+            detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
+            rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), base + number,
                                   kind="worker"))
         else:
             opened = _elapsed_seconds(proc.elapsed)
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
-            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}",
-                                  opened if opened is not None else 0.0, 50 + number,
+            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}{note}",
+                                  opened if opened is not None else 0.0, base + number,
                                   kind="worker"))
     return rows
 
@@ -1864,7 +1941,8 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root: str | None = None,
                 roadmap: str | None = None, canonical: str | None = None,
-                opencode_db: str | None = None, cwd_of=process_cwd,
+                opencode_db: str | None = None, kilo_db: str | None = None,
+                cwd_of=process_cwd,
                 cpu_of=process_cpu, dispatch: str | None = None,
                 llmtool_tasks: str | None = None,
                 finished_runs: list | None = None) -> list[OfficeRow]:
@@ -1873,8 +1951,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is. Without any, the Roadmap row says why OpenCode is not here.
+    _forget_cwds(processes)
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
-    rows += opencode
+    rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     # `claude -p --no-session-persistence` started by Codex leaves no session
     # file; while its process runs, it is still a member at work.
