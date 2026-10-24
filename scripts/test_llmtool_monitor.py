@@ -336,6 +336,13 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         with patch.object(mon, "collect", side_effect=RuntimeError("ps unavailable")):
             return self.monitor.poll()
 
+    def test_office_is_never_built_from_an_unread_process_table(self):
+        # office_rows treats an empty list as "nothing running"; that is only
+        # true because a failed ps read never reaches it.
+        with patch.object(mon, "office_rows", side_effect=AssertionError("office built")):
+            self.poll_without_process_table()
+        self.assertTrue(self.monitor.error)
+
     def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
         self.monitor.office = [mon.OfficeRow("codex 主對話", mon.WORKING, "old", 1.0, 0)]
         with patch.object(mon, "office_rows", side_effect=TypeError("boom")):
@@ -712,11 +719,22 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 2)
         self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
         self.assertIn("只讀了最新 500 則", source.status)
+        self.assertEqual(len(source.events), 500)   # the probe's item (#900) never lands
+        self.assertNotIn("#900", [e.reference for e in source.events])
+        failed = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (1, b""), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=failed, clock=lambda: NOW)
+            source.refresh()
+        self.assertIn("只讀了最新 500 則", source.status)   # unknown: stay conservative
+        self.assertNotIn("讀取失敗", source.status)
+        self.assertEqual(len(source.events), 500)
         exact = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
             source.refresh()
         self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
+        self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 2)
+        self.assertIn("per_page=1&page=501", exact.calls[mon.GITHUB_PAGES][0][4])
 
     def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
         first = [comment(1, NOW - 30, "a")]
@@ -932,6 +950,7 @@ class _GateMixin:
         cls.gate = staticmethod(worker_dispatch._parse_policy)
         cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
             worker_dispatch._read_policy_file(Path(path))))
+
 
 class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
     """The monitor's reading of worker-dispatch.json must match the llmtool

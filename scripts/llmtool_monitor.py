@@ -1119,11 +1119,15 @@ class GitHubSource:
                 if len(batch) < GITHUB_PAGE:
                     break
             else:
-                # Every page was full: say so only if there really is more.
-                probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                  f"&sort=created&direction=desc&per_page=1"
-                                  f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
-                more = type(probe) is list and bool(probe)
+                # Every page was full: say so unless a probe shows nothing is
+                # left. An unanswered probe keeps the warning and the pages.
+                try:
+                    probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                      f"&sort=created&direction=desc&per_page=1"
+                                      f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    probe = None
+                more = not (type(probe) is list and not probe)
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=30")
             # A comment posted between page reads shifts the pages: list it once.
