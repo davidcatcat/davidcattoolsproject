@@ -33,11 +33,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
     },
     "agy": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-22",
-      "reason": "Owner paused dispatch",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "decided_at": "2026-10-24",
+      "reason": "Owner restored AGY direct Developer dispatch eligibility only; runtime, model, tools, D6 and llmtool Task adapter remain unverified",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6385495329"
     },
     "company-gw": {
       "dispatch": "ALLOWED",
