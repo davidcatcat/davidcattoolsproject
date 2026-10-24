@@ -108,6 +108,10 @@ def _python_target(args: list[str]) -> tuple[str, str] | None:
     return None
 
 
+CLAUDE_COMMANDS = frozenset({"agents", "mcp", "config", "doctor", "update", "install",
+                             "plugin", "auth", "setup-token", "migrate-installer"})
+
+
 def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     words = set(args)
     if exe in ("opencode", "opencode.exe"):
@@ -124,6 +128,10 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
             return "Kilo CLIENT"
         return "Kilo CLI"
     if exe == "claude":
+        # `claude agents --json`, `claude --version`, ...: a quick management
+        # command that starts no model session (a PM polls `agents` often).
+        if args and (args[0] in CLAUDE_COMMANDS or args[0] in ("--version", "-v", "--help", "-h")):
+            return "Claude Code CLI command"
         return "Claude Code CLI"
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".

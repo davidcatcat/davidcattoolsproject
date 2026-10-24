@@ -1302,6 +1302,17 @@ class OfficeViewTests(unittest.TestCase):
         state, finished, ended = mon.track_one_shot(state, [], 1010.0, str(sessions))
         self.assertEqual((len(finished), len(ended)), (1, 1))   # only the -p run ended
 
+    def test_claude_management_command_is_not_a_model_run(self):
+        self.assertEqual(mon.classify("claude agents --json"), "Claude Code CLI command")
+        self.assertEqual(mon.classify("/usr/local/bin/claude --version"), "Claude Code CLI command")
+        self.assertEqual(mon.classify("claude -p --model sonnet review"), "Claude Code CLI")
+        self.assertEqual(mon.classify("claude"), "Claude Code CLI")
+        query = mon.Process(40, 5718, 40, "00:01", "S", "Claude Code CLI command", "claude",
+                            "Codex APP-SERVER 5718")
+        self.assertFalse(any(row.name == "claude 單次呼叫" for row in self.rows([query])))
+        state, _, _ = mon.track_one_shot({}, [query], 1000.0)
+        self.assertEqual(state, {})
+
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
