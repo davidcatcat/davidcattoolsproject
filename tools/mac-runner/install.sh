@@ -36,6 +36,9 @@ REAL_HOME=$home
 ACTIONS_RUNNER_HOOK_JOB_STARTED=$root/isolation/job-started.sh
 EOF
 echo /usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin > .path
+# Fill the account-wide xcrun cache, which jobs may read but not write.
+/usr/bin/git --version >/dev/null || fail "/usr/bin/git does not run"
+/usr/bin/python3 -c '' || fail "/usr/bin/python3 does not run"
 
 # The service script is the runner's own template with the listener started
 # under the sandbox; every job is a child of the listener.

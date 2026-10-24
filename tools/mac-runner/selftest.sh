@@ -20,7 +20,7 @@ check() {  # check <label> <expected exit: 0|1> <command...>
   fi
 }
 sbx() {
-  REAL_HOME=$home /usr/bin/sandbox-exec -D REAL_HOME="$home" -D RUNNER_ROOT="$root" -f "$root/isolation/runner.sb" "$@"
+  REAL_HOME=$home HOME="$root/_home" /usr/bin/sandbox-exec -D REAL_HOME="$home" -D RUNNER_ROOT="$root" -f "$root/isolation/runner.sb" "$@"
 }
 event() { printf '%s' "$1" > "$root/_work/event.json"; }
 hook() {  # hook <event> <actor> [VAR=value...]
@@ -58,6 +58,14 @@ check "Agent folder in /private/tmp unreadable" 1 sbx /bin/ls "/private/tmp/clau
 check "write to /usr/local blocked" 1 sbx /usr/bin/touch /usr/local/.selftest
 check "write to the runner bin blocked" 1 sbx /usr/bin/touch "$root/isolation/x"
 check "work folder writable" 0 sbx /usr/bin/touch "$root/_work/x"
+user_temp=$(getconf DARWIN_USER_TEMP_DIR)
+check "account-wide xcrun cache not writable" 1 sbx /usr/bin/touch "${user_temp}xcrun_db"
+/usr/bin/git --version >/dev/null  # fill the xcrun cache, as install.sh does
+check "git runs without stderr, scrubbed environment" 0 sbx /usr/bin/env -i PATH=/usr/bin:/bin \
+  /bin/bash -c 'test -z "$(/usr/bin/git --version 2>&1 >/dev/null)"'
+for socket in /private/var/run/com.docker.vmnetd.sock /private/var/run/ovpnhelper_service.sock; do
+  test -S "$socket" && check "root helper socket $socket closed" 1 sbx /usr/bin/nc -U -w 1 "$socket" </dev/null
+done
 check "terminals of the account closed" 1 sbx /usr/bin/python3 -I -c 'import pty; pty.openpty()'
 check "HTTPS to GitHub works" 0 sbx /usr/bin/curl -fsS -o /dev/null https://api.github.com
 event "$same"

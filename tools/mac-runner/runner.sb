@@ -23,8 +23,13 @@
 ; llmtool and its tests make their own folders directly in /tmp and /var/tmp
 ; (fixed paths, not TMPDIR). Only names Python's tempfile or llmtool create
 ; are reachable; the Agents' folders there (e.g. claude-501) are not.
-(define temp-own #"^/private/(var/)?tmp/(tmp|llmtool-)[^/]+(/|$)")
+(define temp-own #"^/private/(var/)?tmp/(tmp|llmtool-)[^/]+(/.*)?$")
 (allow file-read* (regex temp-own))
+; /usr/bin/git and the other Xcode shims read the account-wide xcrun cache,
+; including with a scrubbed environment. Read only: the Owner's own git uses
+; it, so writing it would run a job's code outside the sandbox (#335 H1).
+; install.sh creates it before the runner starts.
+(allow file-read* (regex #"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db$"))
 ; llmtool's path checks open each directory on the way (openat walk), so the
 ; two temp roots can be opened and listed; their other entries stay closed.
 (allow file-read-data (literal "/private/tmp") (literal "/private/var/tmp"))
@@ -35,12 +40,7 @@
 ; Write: only the runner's work, log, home and temp folders, so a job cannot
 ; change the runner, this profile, Homebrew tools or anything run later.
 (deny file-write* (subpath "/"))
-; /usr/bin/git and other Xcode shims write an xcrun cache file to the
-; account's temp folder (not TMPDIR); only that file name is allowed.
-(define xcrun-cache #"^/private/var/folders/[^/]+/[^/]+/T/xcrun_db")
-(allow file-read* (regex xcrun-cache))
 (allow file-write*
-  (regex xcrun-cache)
   (regex temp-own)
   (subpath (string-append (param "RUNNER_ROOT") "/_work"))
   (subpath (string-append (param "RUNNER_ROOT") "/_diag"))
@@ -57,9 +57,12 @@
 
 ; Sockets of the account's own services (ssh-agent, Docker, Agent servers).
 (deny network-outbound
+  (remote unix-socket (subpath "/private/var/run"))
   (remote unix-socket (subpath "/Users"))
   (remote unix-socket (subpath "/private/tmp"))
   (remote unix-socket (subpath "/private/var/folders")))
+; Name resolution goes through this socket.
+(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))
 
 ; Keychain, clipboard, and ways to start a process outside the sandbox:
 ; LaunchServices (open), Apple Events (Terminal/Finder scripting), launchd.

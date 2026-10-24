@@ -41,7 +41,11 @@ then run the **Mac Runner Smoke Test** workflow and check the job log shows
 - Writing anywhere except the runner's `_work`, `_diag`, `_home`, `_tmp` and
   those `tmp*`/`llmtool-*` folders.
 - The keychain (SecurityServer), clipboard, unix sockets under those folders
-  (ssh-agent, Docker, Agent servers).
+  and `/private/var/run` (ssh-agent, the user's Docker socket, Agent
+  servers, root service helpers such as Docker's vmnetd).
+- Writing the account-wide xcrun cache in the user temp folder: the Owner's
+  own `git` reads it, so a job writing it could run code outside the sandbox
+  (review finding H1 on #335). Jobs may read it; `install.sh` fills it.
 - Starting processes outside the sandbox: `launchctl`, `open`/LaunchServices,
   Apple Events, `osascript`.
 - Terminals (`/dev/ttys*`, new pseudo-terminals): a job could otherwise read
@@ -66,6 +70,10 @@ then run the **Mac Runner Smoke Test** workflow and check the job log shows
   separate account. The stronger fix is a dedicated non-admin macOS user
   for the runner (needs sudo, so an Owner decision), with this profile kept
   on top.
+- File metadata (stat: size, times, existence) anywhere, and the entry names
+  of `/tmp`, `/var/tmp` and the runner folder's ancestors; never contents.
+- Loopback services of other programs (e.g. Agent servers on 127.0.0.1)
+  are reachable like any network address; they must authenticate callers.
 - A `tmp*` or `llmtool-*` folder another program of the account made in
   `/tmp` or `/var/tmp` is reachable. The Agents keep their data elsewhere
   (e.g. `/tmp/claude-501`, `/var/folders`), which stays blocked.
