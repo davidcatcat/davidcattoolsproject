@@ -13,6 +13,7 @@ import time
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 _PATH = Path(__file__).with_name("llmtool_monitor.py")
@@ -56,6 +57,8 @@ class ClassifyTests(unittest.TestCase):
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
             "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
             "/Users/x/.local/bin/agy": "AGY CLI",
+            "/Users/x/git/actions-runner/bin/Runner.Listener run": "Actions runner",
+            "/Users/x/git/actions-runner/bin/Runner.Worker spawnclient 10 13": "Actions runner job",
             "/Applications/Antigravity.app/Contents/Frameworks/Antigravity Helper.app/Contents/MacOS/Antigravity Helper": None,
             "/Applications/Claude.app/Contents/Frameworks/Claude Helper.app/Contents/MacOS/Claude Helper --type=gpu": None,
             "/u/bin/codex app-server --listen": "Codex APP-SERVER",
@@ -530,6 +533,7 @@ class ActivityViewTests(unittest.TestCase):
             raise AssertionError("--once must not use network")
         with patch.object(mon, "collect", return_value=snapshot), \
              patch.object(mon, "scan_tasks", return_value=[task]), \
+             patch.object(mon, "RUNNER_ROOT", "/nonexistent"), \
              patch("socket.socket.connect", side_effect=no_network), \
              patch("urllib.request.urlopen", side_effect=no_network), \
              patch("sys.stdout", output):
@@ -2457,6 +2461,67 @@ class OfficeViewTests(unittest.TestCase):
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)
+
+    def _runner(self, *logs):
+        root = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (root / ".runner").write_text("{}")
+        (root / "_diag").mkdir()
+        for name, lines in logs:
+            (root / "_diag" / name).write_text("".join(
+                f"[x INFO Terminal] WRITE LINE: {when}Z: {text}\n" for when, text in lines))
+        return str(root)
+
+    def test_runner_row_shows_job_sandbox_restarts_and_logs(self):
+        now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        root = self._runner(
+            ("Runner_20261024-090000-utc.log", [("2026-10-24 09:00:05", "Listening for Jobs")]),
+            ("Runner_20261025-110000-utc.log", [
+                ("2026-10-25 11:00:05", "Listening for Jobs"),
+                ("2026-10-25 11:10:00", "Running job: check (macOS 3.13)"),
+                ("2026-10-25 11:20:00", "Job check (macOS 3.13) completed with result: Failed"),
+                ("2026-10-25 11:50:00", "Running job: Mac Runner Connectivity")]),
+            ("Worker_20261025-111000-utc.log", [("2026-10-25 11:10:00", "Running job: other")]))
+        listener = mon.Process(30, 1, 30, "01:00:00", "S", "Actions runner", "Runner.Listener")
+        worker = mon.Process(31, 30, 30, "10:00", "S", "Actions runner job", "Runner.Worker")
+        inside = {30: True}.get
+        busy, = mon.runner_rows([listener, worker], now, None, {30: root}.get, inside)
+        self.assertEqual((busy.name, busy.state, busy.age, busy.alert),
+                         ("mac ci runner", mon.WORKING, 3600.0, ""))
+        self.assertEqual(busy.detail, f"執行中：Mac Runner Connectivity（10 分鐘）；已開 1 小時；"
+                                      f"日誌：{root}/_diag")
+        idle, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
+        self.assertEqual(idle.state, mon.IDLE)
+        # A start more than a day old is not counted; the Worker log is not a runner log.
+        self.assertEqual(idle.detail, "閒置，等工作；已開 1 小時；上一個工作：check (macOS 3.13) 失敗"
+                                      f"（40 分鐘前）；日誌：{root}/_diag")
+        self.assertNotIn("啟動", idle.detail)
+
+    def test_runner_restarts_unsandboxed_and_stopped_are_flagged(self):
+        now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        root = self._runner(("Runner_20261025-100000-utc.log", [
+            ("2026-10-25 10:00:05", "Listening for Jobs"), ("2026-10-25 11:00:05", "Listening for Jobs")]))
+        listener = mon.Process(30, 1, 30, "30:00", "S", "Actions runner", "Runner.Listener")
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
+        self.assertIn("不在沙箱裡", row.detail)
+        self.assertIn("近 24 小時啟動 2 次", row.detail)
+        self.assertEqual(row.alert, "CI runner 不在沙箱裡（可能是手動 ./run.sh）：CI 工作沒有隔離")
+        os.makedirs(os.path.join(root, "isolation"))
+        Path(root, "isolation", "job-started.sh").write_text("")
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
+        self.assertTrue(row.alert.endswith("每個 CI 工作都會被拒"))
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: None}.get)
+        self.assertIn("無法確認是否在沙箱裡", row.detail)
+        self.assertEqual(row.alert, "")
+        stopped, = mon.runner_rows([], now, root)
+        self.assertEqual((stopped.state, stopped.age, stopped.alert),
+                         (mon.STOPPED, None, "CI runner 沒在跑"))
+        self.assertTrue(stopped.detail.startswith("沒在跑（GitHub 上的 CI 會排隊等它）"))
+        # No runner configured, or no place given: no row (the office tests stay hermetic).
+        self.assertEqual(mon.runner_rows([], now, self.tmp.name), [])
+        self.assertEqual(mon.runner_rows([], now, None), [])
+        with patch.object(os.path, "expanduser", return_value=os.path.dirname(root)):
+            row, = mon.runner_rows([], now, root)
+        self.assertTrue(row.detail.endswith(f"日誌：~/{os.path.basename(root)}/_diag"))
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
