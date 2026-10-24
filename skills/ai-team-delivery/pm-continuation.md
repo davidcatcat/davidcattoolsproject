@@ -10,7 +10,7 @@ When the PM receives PASS, FAIL or BLOCKED for a Task, it records the next decis
 | --- | --- |
 | Developer PASS | Send the exact-SHA candidate to the independent Reviewer for that Task. |
 | Reviewer FAIL | Return the bounded findings to the original Developer inside the same Task Contract, then request rereview of the affected scope. A Reviewer FAIL is a repair step for that Task. It does not stop the whole flow. |
-| Reviewer PASS | Hand off to the Integrator for exact-head CI, any required Mac/runtime gate and the merge decision under [safe-git](../safe-git/SKILL.md). |
+| Reviewer PASS | Hand off to the Integrator for exact-head CI for code/config/product changes, or the exact-head documentation gate for eligible static docs, plus any required Mac/runtime gate and the merge decision under [safe-git](../safe-git/SKILL.md). |
 | Test or CI FAIL | Make a bounded repair and rerun the check inside the original Task Contract, within the [repair bounds](defect-triage.md). |
 | BLOCKED | Diagnose the block first (next section). Then retry, reassign or isolate the Task. |
 | Work package complete | Check the queue and pick the next executable, authorized work package (see "Queue and IDLE"). |
