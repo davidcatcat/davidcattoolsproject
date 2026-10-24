@@ -23,6 +23,7 @@ This repository currently provides:
 - `ai-team-delivery` — coordinate delegated AI product delivery, independent reviews, Mac operator handoffs, technical decisions, and safe merges without treating the requirements owner as the PM.
 - `validate-runtime` — validate provider/runtime connectivity and end-to-end evidence with isolated test state.
 - `company-llm-delegation` — route deterministic work away from LLMs and delegate only bounded permitted triage through llmtool to the configured company provider.
+- `artifact-verification` — verify JSON schemas, path constraints, role constants, external IDs and evidence labels before publishing reports, runbooks or handoff artifacts.
 
 Each skill is stored at:
 
@@ -49,6 +50,8 @@ The installer symlinks the skills into:
 Because they are symlinks, updating this repository with `git pull` also updates the installed skill contents.
 
 The installer will not overwrite a real directory that already exists at a destination path.
+Run from a linked worktree, it still links the canonical checkout, so the links
+survive when the worktree is removed.
 
 After adding a **new** skill directory, run the installer again on the Mac to create
 its new links. An existing symlink tracks future repo updates; `git pull` alone
