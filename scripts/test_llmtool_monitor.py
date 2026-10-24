@@ -2097,10 +2097,11 @@ class OfficeViewTests(unittest.TestCase):
         ended = {"審 PR #9 @abc1234：已結束（沒讀 GitHub，不知道結論）": mon.DONE,
                  "審 PR #8 @abc1234：已結束（沒讀 GitHub，不知道結論）": mon.DONE}
         self.assertEqual(self._calls([a, b], [])[0], ended)              # nothing running
-        # An ended call shows the newest verdict posted on GitHub for its PR and head
-        # since the call started; none posted is said plainly.
-        verdicts = {("9", "abc1234"): [(self.NOW - 400, "PASS"), (self.NOW - 100, "CHANGES_REQUIRED")],
-                    ("8", "abc1234"): [(self.NOW - 900, "PASS")]}   # older than the call
+        # An ended call shows the first verdict posted on GitHub for its PR and head
+        # after the call started; none posted is said plainly.
+        head = frozenset({"abc1234"})
+        verdicts = {"9": [(self.NOW - 400, "PASS", head), (self.NOW - 100, "CHANGES_REQUIRED", head)],
+                    "8": [(self.NOW - 900, "PASS", head)]}   # older than the call
         self.assertEqual(self._calls([a, b], [], verdicts)[0],
                          {"審 PR #9 @abc1234：CHANGES_REQUIRED": mon.DONE,
                           f"審 PR #8 @abc1234：{mon.NO_VERDICT}": mon.DONE})
@@ -2235,23 +2236,27 @@ class OfficeViewTests(unittest.TestCase):
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
             comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
-        verdicts_281 = verdicts.pop(("281", "281818a"))
-        self.assertEqual(verdicts, {("283", "18538d5"): [(self.NOW - 850, "PASS")],
-                                    ("999", "18538d5"): [(self.NOW - 820, "FAIL")]})
-        # one head per verdict: the first commit id in the comment, never the old side
-        # of a range nor an all-digit run id; a later mention of an earlier round is not it
-        self.assertEqual(mon.review_verdicts([
-            comment(283, 9, "**Verdict: PASS** at head 18538d5, delta `349c6f5..18538d5`"),
-            comment(284, 9, "Re-review of 4949c6f..28538d5 (run 40108628981)\n**Verdict: FAIL**"),
-            comment(273, 9, "## Review — PR #273 @ `71b2408`\n**Verdict: PASS**\nRound 1 was FIX on `e1685bd`"),
-        ]), {("283", "18538d5"): [(self.NOW - 9, "PASS")], ("284", "28538d5"): [(self.NOW - 9, "FAIL")],
-             ("273", "71b2408"): [(self.NOW - 9, "PASS")]})
-        # the head may be named anywhere in the comment, in any wording
-        self.assertIn(("311", "ec73d4d"), mon.review_verdicts([comment(
-            311, 10, "**Verdict: PASS**\nExact head submitted: `ec73d4d1a2b3c4d5`")]))
-        # an edited comment counts from its last edit
+        self.assertEqual(sorted(verdicts), ["281", "283", "999"])
+
+        # a call's verdict is the first one posted on its PR after it started that
+        # names its head, however the comment is worded
+        def outcome(pr, head, started, *posts):
+            row = mon.OfficeRow("claude reviewer", mon.WORKING, f"審 PR #{pr} @{head}（單次呼叫執行中）",
+                                started, 30, key="review")
+            return mon._review_result(row, pr, head, self.NOW - started,
+                                      mon.review_verdicts(list(posts)), self.NOW).outcome
+        own = comment(283, 500, "**Verdict: FAIL** at head 349c6f5")
+        delta = comment(283, 100, "**Verdict: PASS** at head 18538d5, delta `349c6f5..18538d5`")
+        self.assertEqual(outcome("283", "349c6f5", 900, own, delta), "FAIL")   # its own, not the next round
+        self.assertEqual(outcome("283", "18538d5", 300, own, delta), "PASS")
+        self.assertEqual(outcome("310", "c349854", 300, comment(   # a task id and a base come first
+            310, 100, "Review Task 8cbb958d-4c4a base `a8f628f` → head `c349854`\n**Verdict: FAIL**")), "FAIL")
+        self.assertEqual(outcome("311", "ec73d4d", 300, comment(
+            311, 10, "**Verdict: PASS**\nExact head submitted: `ec73d4d1a2b3c4d5`")), "PASS")
+        self.assertEqual(outcome("283", "18538d5", 300, comment(283, 400, "**Verdict: FAIL** head 18538d5")),
+                         mon.NO_VERDICT)   # posted before the call started
         edited = dict(comment(283, 850, "**Verdict: FAIL** head 18538d5"), updated_at=stamp(100))
-        self.assertEqual(mon.review_verdicts([edited]), {("283", "18538d5"): [(self.NOW - 100, "FAIL")]})
+        self.assertEqual(outcome("283", "18538d5", 300, edited), "FAIL")   # counts from its last edit
         # a forked subagent starts with a copy of the PM's history, its turns included,
         # stamped with the fork time: only calls from its own first turn on are its own
         started = lambda turn: {"timestamp": ts(50), "type": "event_msg",
@@ -2267,7 +2272,6 @@ class OfficeViewTests(unittest.TestCase):
             str(self.codex / day / "rollout-fork.jsonl"), self.NOW)], [("287", "2222222")])
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
-        verdicts[("281", "281818a")] = verdicts_281
         with patch.object(mon, "_one_shot_runs", return_value=[run]):
             rows = mon.office_rows([run], self.NOW, codex_root=str(self.codex),
                                    claude_root=str(self.claude), canonical=self.canonical,

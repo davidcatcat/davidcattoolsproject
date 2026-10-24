@@ -2233,26 +2233,23 @@ def forget_reviews(paths) -> None:
         _review_cache.pop(path, None)
 
 
-# A commit id has a hex letter (run ids and dates are all digits) and is not the
-# old side of an `old..new` range.
-COMMIT_ID = re.compile(r"\b(?=[0-9]*[a-fA-F])[0-9a-fA-F]{7,40}\b(?!\.\.)")
+COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 
 
 def review_verdicts(comments) -> dict:
-    """{(pr, head7): [(time, verdict)]} from verdicts trusted accounts posted on
-    PRs: a verdict line, for the first commit id the comment names (its heading
-    or verdict line names the reviewed head before any other), timed by the
-    comment's last edit. Pure; no I/O."""
+    """{pr: [(time, verdict, ids)]} from verdicts trusted accounts posted on
+    PRs: a verdict line, the 7-character prefixes of every commit-like id the
+    comment names, and the comment's last-edit time. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
             continue
         body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
         verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
-        head = verdict and COMMIT_ID.search(body)
-        if head:
+        if verdict:
             when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
-            found.setdefault((number, head.group(0)[:7].lower()), []).append((when, verdict.group(1)))
+            ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
+            found.setdefault(number, []).append((when, verdict.group(1), ids))
     return found
 
 
@@ -2283,15 +2280,17 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[tuple]:
 
 
 def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts, now: float) -> OfficeRow:
-    """An ended call shows the newest verdict posted on GitHub for its PR and
-    head since the call started, aged from that verdict; every Reviewer route
-    is read the same way."""
+    """An ended call shows the first verdict posted on its PR after it started
+    that names its head, aged from that verdict. The call knows its own head,
+    so no comment has to be read for which head it is about; later rounds that
+    mention this head come after its own verdict. Every Reviewer route is read
+    the same way."""
     if not pr:
         return replace(row, state=DONE, detail=row.detail.replace("（單次呼叫執行中）", "：已結束"))
-    posted = sorted(item for item in (verdicts or {}).get((pr, sha.lower()), [])
-                    if item[0] >= when - CALL_SLACK)
-    outcome = posted[-1][1] if posted else UNREAD_VERDICT if verdicts is None else NO_VERDICT
-    age = max(0.0, now - posted[-1][0]) if posted else row.age
+    posted = sorted(item[:2] for item in (verdicts or {}).get(pr, [])
+                    if item[0] >= when - CALL_SLACK and sha.lower() in item[2])
+    outcome = posted[0][1] if posted else UNREAD_VERDICT if verdicts is None else NO_VERDICT
+    age = max(0.0, now - posted[0][0]) if posted else row.age
     return replace(row, state=DONE, outcome=outcome, age=min(age, row.age),
                    detail=row.detail.replace("（單次呼叫執行中）", f"：{outcome}"),
                    evidence="codex 紀錄（呼叫）＋GitHub 結論" if posted else row.evidence)
