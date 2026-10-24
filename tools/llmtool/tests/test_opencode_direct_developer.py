@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 import os
 import signal
 import tempfile
@@ -23,8 +24,9 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         (self.root / 'source.py').write_text('VALUE = 1\n')
 
     def run_with_valid_binding(self, **kwargs):
+        store = kwargs.pop('dispatch_store', object())
         with patch('llmtool.opencode_direct_developer.worker_dispatch.authorize_dispatch'):
-            return run(**kwargs, dispatch_store=object(), dispatch_task_id='a' * 32,
+            return run(**kwargs, dispatch_store=store, dispatch_task_id='a' * 32,
                        prelaunch_validate=lambda: True)
 
     def test_direct_adapter_cannot_run_without_dispatch_context(self):
@@ -160,10 +162,71 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             with self.subTest(raw=raw), self.assertRaises(DirectOpenCodeError):
                 parse_json_events(raw)
 
+    def test_structured_tool_refusal_is_typed_without_exposing_output(self):
+        denied = self.event('tool_use', part={
+            'state': {'status': 'error', 'error': {'code': 'PERMISSION_DENIED',
+                                                'message': 'FAKE_SECRET_12345678'}}})
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((denied + '\n').encode())
+        self.assertEqual(caught.exception.direct_opencode_code, 'TOOL_DENIED')
+        self.assertNotIn('FAKE_SECRET_12345678', str(caught.exception))
+        # Free-form model text cannot manufacture a permission verdict.
+        sid, text, _ = parse_json_events((self.event(
+            'text', text='PERMISSION_DENIED FAKE_SECRET_12345678') + '\n').encode())
+        self.assertEqual(sid, 'ses_Abc123')
+        self.assertIn('PERMISSION_DENIED', text)
+        # Malformed structured values are untrusted data, never an exception leak.
+        with self.assertRaises(DirectOpenCodeError) as malformed:
+            parse_json_events((self.event('error', error={'code': ['PERMISSION_DENIED']})
+                               + '\n').encode())
+        self.assertEqual(malformed.exception.direct_opencode_code,
+                         'OPENCODE_PROVIDER_FAILED')
+
+    def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
+        task_id, run_id = 'a' * 32, 'b' * 32
+
+        class Store:
+            def get(self, selected):
+                return {'task_id': selected, 'run_id': run_id}
+
+        body = '\n'.join((
+            self.event('step_start'),
+            self.event('error', error={'code': 'PERMISSION_DENIED',
+                                       'message': 'FAKE_SECRET_12345678'}),
+        )) + '\n'
+        cli = self.fake_cli(body, exit_code=7)
+        with patch('llmtool.opencode_direct_developer.worker_dispatch.authorize_dispatch'):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                    dispatch_store=Store(), dispatch_task_id=task_id,
+                    timeout_seconds=5, executable=cli)
+        error = caught.exception
+        self.assertEqual(error.direct_opencode_code, 'TOOL_DENIED')
+        self.assertEqual((error.task_id, error.run_id, error.native_session_id),
+                         (task_id, run_id, 'ses_Abc123'))
+        self.assertLessEqual(datetime.fromisoformat(error.started_at.replace('Z', '+00:00')),
+                             datetime.fromisoformat(error.ended_at.replace('Z', '+00:00')))
+        self.assertNotIn('FAKE_SECRET_12345678', str(error))
+        self.assertNotIn('FAKE_SECRET_12345678', repr(error.__dict__))
+
+    def test_permission_request_stops_live_noninteractive_child_promptly(self):
+        body = self.event('permission.asked') + '\n'
+        cli = self.fake_cli(body, post_output_delay=10)
+        began = time.monotonic()
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'TOOL_DENIED')
+        self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
+        self.assertLess(time.monotonic() - began, 3)
+
     def fake_cli(self, body, *, exit_code=0, delay=0, invocation_marker=None,
                  version_output='opencode v2.0.32\n',
                  version_descendant_marker=None, run_descendant_marker=None,
-                 version_mutate_path=None, run_invocation_marker=None):
+                 version_mutate_path=None, run_invocation_marker=None,
+                 post_output_delay=0):
         marker_code = (f"open({str(invocation_marker)!r}, 'a').write('called\\n')\n"
                        if invocation_marker else '')
         mutation_code = (f"    open({str(version_mutate_path)!r}, 'w').write('CHANGED\\n')\n"
@@ -226,6 +289,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             f'time.sleep({delay!r})\n'
             f'sys.stdout.write({body!r})\n'
             'sys.stdout.flush()\n'
+            f'time.sleep({post_output_delay!r})\n'
             f'raise SystemExit({exit_code})\n'
         )
         cli.write_text(script)
@@ -233,6 +297,10 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         return str(cli)
 
     def test_run_uses_noninteractive_json_cli_and_returns_real_exit_metadata(self):
+        class Store:
+            def get(self, selected):
+                return {'task_id': selected, 'run_id': 'b' * 32}
+
         body = '\n'.join((
             self.event('step_start'),
             self.event('text', part={'text': 'fixture result'}),
@@ -240,7 +308,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         )) + '\n'
         result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                      prompt='bounded task prompt', timeout_seconds=5,
-                     executable=self.fake_cli(body))
+                     executable=self.fake_cli(body), dispatch_store=Store())
         self.assertEqual(result.exit_code, 0)
         self.assertEqual(result.session_id, 'ses_Abc123')
         self.assertEqual(result.text, 'fixture result')
@@ -252,6 +320,9 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(result.source_file_count, 1)
         self.assertEqual(len(result.source_manifest_sha256), 64)
         self.assertEqual(len(result.stdout_sha256), 64)
+        self.assertEqual((result.task_id, result.run_id), ('a' * 32, 'b' * 32))
+        self.assertLessEqual(datetime.fromisoformat(result.started_at.replace('Z', '+00:00')),
+                             datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
 
     def test_private_key_source_is_rejected_before_any_cli_launch(self):
         (self.root / 'source.py').write_text(
@@ -411,6 +482,11 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(error.cleanup_status, 'CONFIRMED')
         self.assertEqual(len(error.stdout_sha256), 64)
         self.assertGreaterEqual(error.elapsed_ms, 0)
+        self.assertEqual(error.task_id, 'a' * 32)
+        self.assertIsNone(error.run_id)
+        self.assertEqual(error.native_session_id, 'ses_Abc123')
+        self.assertIsNotNone(error.started_at)
+        self.assertIsNotNone(error.ended_at)
 
     def test_run_rejects_out_of_root_and_symlinked_paths(self):
         outside = self.root.parent / 'outside-source.py'
