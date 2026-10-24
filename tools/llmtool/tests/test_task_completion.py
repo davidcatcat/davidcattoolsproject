@@ -2327,6 +2327,44 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(caught.exception.completion_code,
                          'REVIEW_REPAIR_BINDING_MISMATCH')
 
+        bad_digest = dict(repair_intent, state='CONSUMED')
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                bad_digest, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_DIGEST_MISMATCH')
+
+        forged_id = dict(repair_intent, repair_intent_id='0' * 64)
+        forged_id.pop('intent_sha256')
+        forged_id['intent_sha256'] = hashlib.sha256(json.dumps(
+            forged_id, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                forged_id, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        unserializable = dict(repair_intent, schema_version=object())
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                unserializable, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
+        pending_return = task_completion.review_return_record(failed_handoff)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, pending_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+        stopped_return = task_completion.review_return_record(failed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped the repair.'})
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, stopped_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
         blocked_handoff = task_completion.review_handoff_record(intent, blocked)
         repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
         for other_handoff, other_return in (
@@ -2342,8 +2380,10 @@ class TaskCompletionTests(unittest.TestCase):
         ):
             with self.subTest(verdict=other_handoff['receipt']['verdict'],
                               repair_round=other_handoff['intent']['repair_round']):
-                with self.assertRaises(LLMToolError):
+                with self.assertRaises(LLMToolError) as caught:
                     task_completion.review_repair_intent(other_handoff, other_return)
+                self.assertEqual(caught.exception.completion_code,
+                                 'REVIEW_REPAIR_BINDING_INVALID')
         self.assertEqual(task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'STOP', 'summary': 'PM stopped after the failure.'

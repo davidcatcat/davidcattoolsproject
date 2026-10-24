@@ -321,12 +321,12 @@ def review_repair_intent(handoff, review_return):
             'state': 'REQUESTED',
         }
         canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True,
-                               separators=(',', ':')).encode('utf-8')
+                               separators=(',', ':'), allow_nan=False).encode('utf-8')
         payload['repair_intent_id'] = hashlib.sha256(
             b'llmtool/review-repair-intent/v1\0' + canonical).hexdigest()
         payload['intent_sha256'] = hashlib.sha256(json.dumps(
             payload, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':')).encode('utf-8')).hexdigest()
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
         return payload
     except (KeyError, TypeError, UnicodeError, AttributeError):
         _stop('REVIEW_REPAIR_BINDING_INVALID')
@@ -345,9 +345,14 @@ def validate_review_repair_intent(repair_intent, handoff, review_return):
         _stop('REVIEW_REPAIR_BINDING_INVALID')
     value = dict(repair_intent)
     claimed_digest = value.pop('intent_sha256')
-    actual_digest = hashlib.sha256(json.dumps(
-        value, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode('utf-8')).hexdigest()
+    if type(claimed_digest) is not str or _HEX64.fullmatch(claimed_digest) is None:
+        _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
+    try:
+        actual_digest = hashlib.sha256(json.dumps(
+            value, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
     if claimed_digest != actual_digest:
         _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
     expected = review_repair_intent(handoff, review_return)
