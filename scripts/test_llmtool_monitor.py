@@ -339,9 +339,10 @@ class MonitorTaskBaselineTests(unittest.TestCase):
     def test_office_is_never_built_from_an_unread_process_table(self):
         # office_rows treats an empty list as "nothing running"; that is only
         # true because a failed ps read never reaches it.
-        with patch.object(mon, "office_rows", side_effect=AssertionError("office built")):
+        with patch.object(mon, "office_rows") as office:
             self.poll_without_process_table()
-        self.assertTrue(self.monitor.error)
+        office.assert_not_called()
+        self.assertIn("ps unavailable", self.monitor.error)
 
     def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
         self.monitor.office = [mon.OfficeRow("codex 主對話", mon.WORKING, "old", 1.0, 0)]
