@@ -29,7 +29,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -489,7 +489,7 @@ class ActivityViewTests(unittest.TestCase):
         self.assertIn("審查未通過", lines[positions[1]])
         self.assertIn("卡住，等你決定", lines[positions[3]])
         self.assertIn("失敗：模型呼叫失敗", lines[positions[4]])
-        self.assertIn("GitHub 動態未啟用", lines[-1])
+        self.assertIn("GitHub 動態已關閉", lines[-1])
         self.assertFalse(any("已送達" in line for line in lines))
 
     def test_production_events_come_only_from_local_stage_evidence(self):
@@ -728,16 +728,21 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.shutil, "which", side_effect=AssertionError("gh used with --no-github")), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--no-github"]), 0)
-        self.assertIn("GitHub 動態未啟用", out.getvalue())
+        self.assertIn("GitHub 動態已關閉", out.getvalue())
 
-    def test_once_keeps_github_off_by_default(self):
+    def test_once_reads_github_by_default(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
+        run = FakeRun((0, []), (0, []))
         with patch.object(mon, "collect", return_value=snapshot), \
              patch.object(mon, "scan_tasks", return_value=[]), \
-             patch.object(mon.shutil, "which", side_effect=AssertionError("GitHub must be opt-in")), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.subprocess, "run", run), \
+             patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once"]), 0)
-        self.assertIn("GitHub 動態未啟用", out.getvalue())
+        self.assertTrue(run.calls)
+        self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
+        self.assertNotIn("GitHub 動態已關閉", out.getvalue())
 
     def test_github_opt_in_uses_read_only_get_only(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
@@ -906,6 +911,214 @@ class OfficeViewTests(unittest.TestCase):
 
     def by_name(self, rows):
         return {row.name: row for row in rows}
+
+    def test_malformed_d6_fields_keep_the_task_placed(self):
+        future = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(mon.time.time() + 86400))
+        for value in (12, ["x"], future, None):
+            with self.subTest(value=value):
+                self._register("wp-1", str(self.task), last_verified_at=value, state=7,
+                               trusted_agent_id={"x": 1})
+                self.assertIn("wp-1", mon.registered_tasks(self.canonical))
+                state, agent, _, _ = mon.registry_details(self.canonical)["wp-1"]
+                self.assertEqual((state, agent), ("?", ""))
+                lines = mon.d6_task_lines(self.canonical, [], mon.time.time())
+                self.assertEqual(len(lines), 1)   # placed by its write time
+
+    def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
+        stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
+        other = Path(self.tmp.name) / "wp-2"
+        other.mkdir()
+        self._register("wp-1", str(self.task), state="REVIEW_PENDING", last_verified_at=stamp(600),
+                       trusted_agent_id="claude-ui-agent", disposition="DISPOSITION-SECRET")
+        self._register("wp-2", str(other), state="ACTIVE", last_verified_at=stamp(60))
+        self._register("old", str(other), last_verified_at=stamp(2 * 86400))
+        rows = [mon.OfficeRow("claude developer（互動）", mon.ATTENTION, "x", 1.0, 10, task="task wp-1"),
+                mon.OfficeRow("claude 互動", mon.CLOSED, "y", 1.0, 10, task="task wp-2")]
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("wp-2  進行中  →  沒有 session 在跑  （未綁定 agent）", lines[0])
+        self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
+        self.assertNotIn("SECRET", "\n".join(lines))
+
+    def _turn_db(self, turns, name="history.sqlite"):
+        """A real WAL database kept open by a writer, as Codex keeps its own."""
+        path = self.codex.parent / name
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
+        db.execute("pragma journal_mode=wal")
+        db.execute("create table thread_turns(thread_id, turn_id, rollout_ordinal, status, "
+                   "error_json, started_at, completed_at)")
+        db.executemany("insert into thread_turns values(?, ?, ?, ?, 'ERROR-SECRET', ?, ?)", turns)
+        db.commit()
+        return path
+
+    def _office(self, db_path, processes=()):
+        with patch.object(mon, "CODEX_HISTORY", str(db_path)):
+            return self.rows(processes)
+
+    def _rollout(self, sid, markers, age=5, **meta):
+        """markers: [(kind, seconds before NOW or None for untimed)]."""
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        items = [{"type": "session_meta", "payload": {"id": sid, "cwd": self.canonical,
+                                                      "thread_source": "user",
+                                                      "timestamp": "2026-10-24T01:46:00.000Z", **meta}}]
+        for kind, ago in markers:
+            item = {"type": "event_msg", "payload": {"type": kind}}
+            if ago is not None:
+                item["timestamp"] = mon.time.strftime("%Y-%m-%dT%H:%M:%S.123Z",
+                                                      mon.time.gmtime(self.NOW - ago))
+            items.append(item)
+        return self._write(self.codex / day / f"rollout-{sid}.jsonl", items, age)
+
+    def test_codex_turn_record_beats_session_markers(self):
+        clock = lambda seconds: mon.time.strftime("%H:%M", mon.time.localtime(seconds))
+        now = int(self.NOW)
+        done = [("task_started", 3000), ("task_complete", 1200)]
+        cases = (
+            ("inProgress", now - 600, None, [("task_started", 600)], 5,
+             (mon.WORKING, f"（這輪 {clock(now - 600)} 起）", 5.0)),
+            ("completed", now - 3000, now - 1200, done, 1200,
+             (mon.IDLE, f"等待下一個指示（上一輪 {clock(now - 1200)} 結束）", 1200.0)),
+            ("failed", now - 3000, now - 1200, done, 1200,
+             (mon.ATTENTION, f"上一輪失敗，要看 Codex 畫面（上一輪 {clock(now - 1200)} 失敗）", 1200.0)),
+            ("interrupted", now - 3000, now - 1200, [("task_started", 3000), ("turn_aborted", 1200)], 1200,
+             (mon.IDLE, f"等待下一個指示（上一輪 {clock(now - 1200)} 被中斷）", 1200.0)),
+            # The terminal marker 0-2 s after the recorded end: the same turn.
+            ("failed", now - 3000, now - 1200, [("task_started", 3000), ("task_complete", 1199)], 1199,
+             (mon.ATTENTION, "失敗）", 1200.0)),
+            ("failed", now - 3000, now - 1200, [("task_started", 3000), ("task_complete", 1198)], 1198,
+             (mon.ATTENTION, "失敗）", 1200.0)),
+            # Written well after the turn ended: the fresher file age stays.
+            ("completed", now - 3000, now - 1200, done, 60, (mon.IDLE, "結束）", 60.0)),
+            ("completed", now - 3000, 10 ** 15, done, 5,   # out of range: no crash, no fake time
+             (mon.IDLE, "等待下一個指示（上一輪結束）", 5.0)),
+            ("unknownStatus", now - 3000, now - 1200, done, 5,   # not a Codex status: markers decide
+             (mon.IDLE, "等待下一個指示（對話 ", 5.0)),
+        )
+        for n, (status, began, ended, markers, age, want) in enumerate(cases):
+            with self.subTest(f"{n} {status}"):
+                db_path = self._turn_db([("T1", "u", 0, status, began, ended)], f"h{n}.sqlite")
+                self._rollout("T1", markers, age)
+                row = self.by_name(self._office(db_path))["codex 主對話"]
+                self.assertEqual(row.state, want[0], row.detail)
+                self.assertIn(want[1], row.detail)
+                self.assertEqual(row.age, want[2])
+                self.assertNotIn("SECRET", row.detail)
+
+    def test_newer_session_marker_beats_a_lagging_turn_record(self):
+        now = int(self.NOW)
+        cases = (
+            # A new turn started after the recorded one ended.
+            ("completed", now - 3000, now - 1200, [("task_complete", 1200), ("task_started", 60)], mon.WORKING),
+            # The running turn ended before the record caught up.
+            ("inProgress", now - 600, None, [("task_started", 600), ("task_complete", 30)], mon.IDLE),
+            # Untimed marker beyond the tail: bounded by the file's write time.
+            ("completed", now - 3000, now - 1200, [("task_started", None)], mon.WORKING),
+        )
+        for n, (status, began, ended, markers, want) in enumerate(cases):
+            with self.subTest(n):
+                db_path = self._turn_db([("T1", "u", 0, status, began, ended)], f"lag{n}.sqlite")
+                self._rollout("T1", markers, age=30)
+                self.assertEqual(self.by_name(self._office(db_path))["codex 主對話"].state, want)
+
+    def test_malformed_marker_time_does_not_break_the_roster(self):
+        db_path = self._turn_db([("T1", "u", 0, "completed", 100, 200)])
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        self._write(self.codex / day / "rollout-T1.jsonl", [
+            {"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical}},
+            {"type": "event_msg", "timestamp": 12, "payload": {"type": "task_started"}},
+            {"type": "event_msg", "timestamp": "9999-99-99T99", "payload": {"type": "task_complete"}}], 5)
+        self.assertIn("codex 主對話", self.by_name(self._office(db_path)))
+
+    def test_turn_history_failure_is_dropped_for_the_rest_of_the_refresh(self):
+        class Broken:
+            calls = 0
+            closed = False
+
+            def execute(self, *args):
+                Broken.calls += 1
+                raise sqlite3.OperationalError("database is locked")
+
+            def close(self):
+                Broken.closed = True
+
+        history = {"db": Broken()}
+        self.assertIsNone(mon.codex_turn(history, "T1"))
+        self.assertIsNone(mon.codex_turn(history, "T2"))
+        self.assertEqual((Broken.calls, Broken.closed, history["db"]), (1, True, None))
+
+    def test_failed_subagent_turn_needs_a_look(self):
+        now = int(self.NOW)
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600),
+                                 ("S2", "u", 0, "interrupted", now - 900, now - 600)])
+        for sid in ("S1", "S2"):
+            self._rollout(sid, [("task_started", 900), ("task_complete", 600)], 600,
+                          thread_source="subagent", parent_thread_id="T1",
+                          agent_path=f"/root/job_{sid}")
+        subs = {row.detail: row.state for row in self._office(db_path) if row.kind == "subagent"}
+        self.assertEqual(subs, {"job S1（上一輪失敗）": mon.ATTENTION,
+                                "job S2（上一輪被中斷）": mon.DONE})
+
+    def test_turn_history_opens_only_the_users_regular_files(self):
+        self.assertEqual([c.strip() for c in mon.CODEX_TURN_SQL.split("FROM")[0][6:].split(",")],
+                         ["status", "started_at", "completed_at"])
+        real = self._turn_db([("T1", "u", 0, "completed", 1, 2)], "odd ?#% name.sqlite")
+        before = sorted(os.listdir(self.codex.parent))
+        db = mon.open_codex_history(str(real))
+        self.assertIsNotNone(db)   # special characters are URI-encoded
+        self.assertEqual(mon.codex_turn({"db": db}, "T1"), ("completed", 1, 2))
+        db.close()
+        self.assertEqual(sorted(os.listdir(self.codex.parent)), before)   # no side files made
+        link = self.codex.parent / "link.sqlite"
+        os.symlink(real, link)
+        for suffix in ("-wal", "-shm"):
+            os.symlink(str(real) + suffix, str(link) + suffix)
+        self.assertIsNone(mon.open_codex_history(str(link)))
+        # Codex closed it: a WAL database checkpointed into its main file.
+        closed = self.codex.parent / "closed.sqlite"
+        writer = sqlite3.connect(closed)
+        writer.execute("pragma journal_mode=wal")
+        writer.execute("create table thread_turns(thread_id, turn_id, rollout_ordinal, status, "
+                       "error_json, started_at, completed_at)")
+        writer.execute("insert into thread_turns values('T1', 'u', 0, 'failed', '', 5, 6)")
+        writer.commit()
+        writer.close()
+        listing = sorted(os.listdir(self.codex.parent))
+        self.assertNotIn("closed.sqlite-wal", listing)
+        db = mon.open_codex_history(str(closed))
+        self.assertEqual(mon.codex_turn({"db": db}, "T1"), ("failed", 5, 6))
+        db.close()
+        self.assertEqual(sorted(os.listdir(self.codex.parent)), listing)   # opened immutable
+        Path(str(closed) + "-wal").write_bytes(b"")   # only one side file: skipped
+        self.assertIsNone(mon.open_codex_history(str(closed)))
+        fifo = self.codex.parent / "fifo.sqlite"
+        os.mkfifo(fifo)
+        for suffix in ("-wal", "-shm"):
+            Path(str(fifo) + suffix).write_bytes(b"")
+        import signal
+        def timeout(*_):
+            raise TimeoutError("open_codex_history blocked on a FIFO")
+        previous = signal.signal(signal.SIGALRM, timeout)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        signal.alarm(2)
+        try:
+            self.assertIsNone(mon.open_codex_history(str(fifo)))
+        finally:
+            signal.alarm(0)
+
+    def test_closed_codex_row_keeps_only_its_time_label(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, label, 60.0, 0, key=f"k{n}", tui=True)
+                for n, label in enumerate(("等待下一個指示（上一輪 12:16 結束）",
+                                           "等待下一個指示（對話 10-24 01:46 開始）",
+                                           "讀 a.py（task wp-1）"))]
+        closed = [row.detail for row in mon._closed_codex_cli(rows, 0)]
+        self.assertEqual(closed, ["推測 Codex CLI 已關閉（上一輪 12:16 結束）",
+                                  "推測 Codex CLI 已關閉（對話 10-24 01:46 開始）",
+                                  "推測 Codex CLI 已關閉"])
+
+    def test_unknown_process_owner_does_not_break_the_roster(self):
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", None)
+        self.assertIsInstance(self.rows([cli]), list)
 
     def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
@@ -1144,7 +1357,7 @@ class OfficeViewTests(unittest.TestCase):
         sessions = self.claude.parent / "sessions"
         sessions.mkdir()
         cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
-        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限（task wp-1）", 1200.0)),
+        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限，要你回（task wp-1）", 1200.0)),
                                       ("idle", None, (mon.IDLE, "task wp-1", 1200.0)),
                                       ("busy", None, (mon.WORKING, "等模型回覆（task wp-1）", 300.0))):
             with self.subTest(status):
@@ -1156,6 +1369,13 @@ class OfficeViewTests(unittest.TestCase):
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
                 self.assertEqual((row.state, row.detail, row.age),
                                  (want[0], want[1] + "｜session s dev-r4", want[2]))
+        driven = mon.Process(41, 5718, 41, "05:00", "Ss+", "Claude Code CLI", "claude",
+                             "Codex APP-SERVER 5718")
+        (sessions / "41.json").write_text(json.dumps(
+            {"pid": 41, "sessionId": "s", "status": "waiting", "waitingFor": "permission prompt"}),
+            encoding="utf-8")
+        row = self.by_name(self.rows([driven]))["claude developer（互動）"]
+        self.assertTrue(row.detail.startswith("等人確認權限，要PM（Codex）回"), row.detail)
 
     def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
