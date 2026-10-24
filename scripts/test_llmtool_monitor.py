@@ -1444,9 +1444,50 @@ class OfficeViewTests(unittest.TestCase):
             self._rollout(sid, [("task_started", 900), ("task_complete", 600)], 600,
                           thread_source="subagent", parent_thread_id="T1",
                           agent_path=f"/root/job_{sid}")
-        subs = {row.detail: row.state for row in self._office(db_path) if row.kind == "subagent"}
-        self.assertEqual(subs, {"job S1（上一輪失敗）": mon.ATTENTION,
-                                "job S2（上一輪被中斷）": mon.DONE})
+        subs = {row.detail: row for row in self._office(db_path) if row.kind == "subagent"}
+        failed = next(row for detail, row in subs.items() if "job S1" in detail)
+        interrupted = next(row for detail, row in subs.items() if "job S2" in detail)
+        self.assertEqual(failed.state, mon.ATTENTION)
+        self.assertIn("（上一輪失敗）", failed.detail)
+        self.assertIn("失敗提醒最多顯示至", failed.detail)
+        self.assertIn("不代表程序仍在執行", failed.detail)
+        self.assertEqual(interrupted.state, mon.DONE)
+        self.assertEqual(interrupted.detail, "job S2（上一輪被中斷）")
+
+    def test_failed_subagent_expiry_uses_exact_codex_file_mtime_cutoff(self):
+        now = int(self.NOW)
+        file_age = 4 * 3600
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600)])
+        path = self._rollout("S1", [("task_started", 900), ("task_complete", 600)], file_age,
+                             thread_source="subagent", parent_thread_id="T1",
+                             agent_path="/root/turing")
+
+        row = next(row for row in self._office(db_path) if row.kind == "subagent")
+        expiry = self.NOW - file_age + mon.OFFICE_WINDOW
+        expiry_label = mon.time.strftime("%m-%d %H:%M", mon.time.localtime(expiry))
+        self.assertEqual(row.state, mon.ATTENTION)
+        self.assertIn(f"失敗提醒最多顯示至 {expiry_label}", row.detail)
+        self.assertIn("約 2 小時後隱藏", row.detail)
+        self.assertIn("不代表程序仍在執行", row.detail)
+
+    def test_failed_subagent_near_expiry_and_after_cutoff(self):
+        now = int(self.NOW)
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600),
+                                 ("S2", "u", 0, "failed", now - 900, now - 600)])
+        near = self._rollout("S1", [("task_started", 900), ("task_complete", 600)],
+                             mon.OFFICE_WINDOW - 30, thread_source="subagent",
+                             parent_thread_id="T1", agent_path="/root/near_expiry")
+        row = next(row for row in self._office(db_path) if "near expiry" in row.detail or
+                   "near_expiry" in row.detail)
+        self.assertEqual(row.state, mon.ATTENTION)
+        self.assertIn("約 1 分後隱藏", row.detail)
+        near.unlink()
+
+        self._rollout("S2", [("task_started", 900), ("task_complete", 600)],
+                      mon.OFFICE_WINDOW + 1, thread_source="subagent",
+                      parent_thread_id="T1", agent_path="/root/expired")
+        rows = self._office(db_path)
+        self.assertFalse(any(row.kind == "subagent" for row in rows))
 
     def test_turn_history_opens_only_the_users_regular_files(self):
         self.assertEqual([c.strip() for c in mon.CODEX_TURN_SQL.split("FROM")[0][6:].split(",")],
