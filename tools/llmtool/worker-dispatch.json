@@ -13,7 +13,17 @@
       "decided_by": "Owner",
       "decided_at": "2026-10-23",
       "reason": "use only when explicitly assigned by the Owner",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289",
+      "owner_assignments": [
+        {
+          "task_id": "5fd1be3ee96e42678fe1dac75a9b697a",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6373198827"
+        },
+        {
+          "task_id": "7c6a9d2e4f0b4819a3e65d1b8c20f947",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6373522518"
+        }
+      ]
     },
     "opencode-developer": {
       "dispatch": "PAUSED",
