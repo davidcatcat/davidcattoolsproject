@@ -2009,14 +2009,16 @@ def claude_rows(now: float, root: str | None = None,
             # Stopped at a prompt only a person or its driving agent can answer.
             state = ATTENTION
             detail = ("等人確認權限" if waiting == "permission prompt" else "等人回覆") + suffix
-            if type(since) in (int, float) and 0 < since / 1000 <= now:
-                age = now - since / 1000   # how long it has waited, not the last write
         elif status == "busy":
             state = WORKING
             if age > OFFICE_BUSY and _awaiting_model(tail):
                 detail = "等模型回覆" + suffix
         elif status == "idle":
             state = IDLE
+        if status in ("waiting", "idle") and type(since) in (int, float) and 0 < since / 1000 <= now:
+            # How long it has waited or sat idle: the file can be touched
+            # later by metadata writes that are not work.
+            age = now - since / 1000
         elif state == IDLE and _awaiting_model(tail):
             # No registry to ask: an unanswered tool result means the request
             # is still with the model, not idle.
@@ -2026,7 +2028,8 @@ def claude_rows(now: float, root: str | None = None,
             # The name and id its launcher gave it: what a PM looks for to
             # find the window that needs an answer.
             name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
-            detail += f"｜session {name + ' ' if name else ''}{sid[:8]}"
+            # Short id first: it survives when a narrow screen cuts the line.
+            detail += f"｜session {sid[:8]}{' ' + name if name else ''}"
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
