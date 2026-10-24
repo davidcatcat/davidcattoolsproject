@@ -2285,15 +2285,69 @@ class TaskCompletionTests(unittest.TestCase):
                 'decision': 'STOP', 'summary': 'PM stopped the workflow.'
             })['next_step'], 'STOP')
         failed_handoff = task_completion.review_handoff_record(failed_intent, failed)
-        self.assertEqual(task_completion.review_return_record(failed_handoff,
+        failed_return = task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'
-            })['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+            })
+        self.assertEqual(failed_return['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+        with patch.object(task_completion.subprocess, 'Popen',
+                          side_effect=AssertionError('repair intent must not launch')):
+            repair_intent = task_completion.review_repair_intent(
+                failed_handoff, failed_return)
+            self.assertEqual(task_completion.review_repair_intent(
+                failed_handoff, failed_return), repair_intent)
+            self.assertIs(task_completion.validate_review_repair_intent(
+                repair_intent, failed_handoff, failed_return), repair_intent)
+        self.assertEqual(repair_intent['task_id'], failed_intent['task_id'])
+        self.assertEqual(repair_intent['run_id'], failed_intent['run_id'])
+        self.assertEqual(repair_intent['contract_digest'], failed_intent['contract_digest'])
+        self.assertEqual(repair_intent['source_sha'], failed_intent['source_sha'])
+        self.assertEqual(repair_intent['result_head'], failed_intent['result_head'])
+        self.assertEqual(repair_intent['diff_sha256'], failed_intent['diff_sha256'])
+        self.assertEqual(repair_intent['changed_paths'], failed_intent['changed_paths'])
+        self.assertEqual(repair_intent['developer_task_id'], failed_intent['developer_task_id'])
+        self.assertEqual(repair_intent['developer_identity'], failed_intent['developer_identity'])
+        self.assertEqual(repair_intent['developer_session_ref'],
+                         failed_intent['developer_session_ref'])
+        self.assertEqual(repair_intent['review_dispatch_id'], failed_intent['dispatch_id'])
+        self.assertEqual(repair_intent['review_receipt_sha256'], failed['receipt_sha256'])
+        self.assertEqual((repair_intent['prior_repair_round'], repair_intent['repair_round']),
+                         (0, 1))
+        self.assertEqual(repair_intent['decision'], 'RETURN_TO_DEVELOPER')
+        self.assertEqual(repair_intent['state'], 'REQUESTED')
+
+        stale = dict(repair_intent, source_sha='8' * 40)
+        stale.pop('intent_sha256')
+        stale['intent_sha256'] = hashlib.sha256(json.dumps(
+            stale, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        with self.assertRaisesRegex(LLMToolError, 'details omitted') as caught:
+            task_completion.validate_review_repair_intent(
+                stale, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
+        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
+        for other_handoff, other_return in (
+                (passed_handoff, task_completion.review_return_record(
+                    passed_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'No repair.'})),
+                (repaired_handoff, task_completion.review_return_record(
+                    repaired_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'Repair limit reached.'})),
+                (blocked_handoff, task_completion.review_return_record(
+                    blocked_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'WAIT_FOR_REVIEWER', 'summary': 'No review result.'})),
+        ):
+            with self.subTest(verdict=other_handoff['receipt']['verdict'],
+                              repair_round=other_handoff['intent']['repair_round']):
+                with self.assertRaises(LLMToolError):
+                    task_completion.review_repair_intent(other_handoff, other_return)
         self.assertEqual(task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'STOP', 'summary': 'PM stopped after the failure.'
             })['next_step'], 'STOP')
-        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
         self.assertEqual(task_completion.review_return_record(blocked_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Reviewer is blocked.'
@@ -2316,7 +2370,6 @@ class TaskCompletionTests(unittest.TestCase):
             reject(passed_handoff, decision)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'WAIT_FOR_REVIEWER'):
             reject(failed_handoff, decision)
-        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
                          'WAIT_FOR_REVIEWER'):
             reject(repaired_handoff, decision)

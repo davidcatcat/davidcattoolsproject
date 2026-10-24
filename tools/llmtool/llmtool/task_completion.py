@@ -272,6 +272,90 @@ def validate_review_return_record(record, handoff):
     return record
 
 
+def review_repair_intent(handoff, review_return):
+    """Build a deterministic, source-bound request for the one allowed repair.
+
+    This pure value is an idempotency envelope, not a Worker dispatch. A
+    caller must separately enforce at-most-once consumption and recheck the
+    original Task/Worker authority before any future execution.
+    """
+    try:
+        if type(handoff) is not dict or set(handoff) != {
+                'intent', 'dispatch_state', 'receipt', 'next_step', 'error_code'}:
+            _stop('REVIEW_REPAIR_BINDING_INVALID')
+        expected_handoff = review_handoff_record(handoff['intent'], handoff['receipt'])
+        if expected_handoff != handoff:
+            _stop('REVIEW_REPAIR_BINDING_INVALID')
+        validate_review_return_record(review_return, handoff)
+        intent = handoff['intent']
+        receipt = handoff['receipt']
+        recommendation = review_return['pm_recommendation']
+        if (review_return['state'] != 'RETURNED' or
+                review_return['pm_dispatch'] != 'RETURNED' or
+                review_return['next_step'] != 'RETURN_TO_DEVELOPER_ONCE' or
+                type(recommendation) is not dict or
+                set(recommendation) != {'decision', 'summary'} or
+                recommendation.get('decision') != 'RETURN_TO_DEVELOPER' or
+                type(recommendation.get('summary')) is not str or
+                not recommendation['summary'] or
+                len(recommendation['summary'].encode('utf-8')) > 2048 or
+                intent['repair_round'] != 0 or receipt['verdict'] != 'FAIL'):
+            _stop('REVIEW_REPAIR_BINDING_INVALID')
+        payload = {
+            'schema_version': 1,
+            'task_id': intent['task_id'],
+            'run_id': intent['run_id'],
+            'contract_digest': intent['contract_digest'],
+            'source_sha': intent['source_sha'],
+            'result_head': intent['result_head'],
+            'diff_sha256': intent['diff_sha256'],
+            'changed_paths': list(intent['changed_paths']),
+            'developer_task_id': intent['developer_task_id'],
+            'developer_identity': intent['developer_identity'],
+            'developer_session_ref': intent['developer_session_ref'],
+            'review_dispatch_id': intent['dispatch_id'],
+            'review_receipt_sha256': receipt['receipt_sha256'],
+            'prior_repair_round': 0,
+            'repair_round': 1,
+            'decision': 'RETURN_TO_DEVELOPER',
+            'state': 'REQUESTED',
+        }
+        canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True,
+                               separators=(',', ':')).encode('utf-8')
+        payload['repair_intent_id'] = hashlib.sha256(
+            b'llmtool/review-repair-intent/v1\0' + canonical).hexdigest()
+        payload['intent_sha256'] = hashlib.sha256(json.dumps(
+            payload, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        return payload
+    except (KeyError, TypeError, UnicodeError, AttributeError):
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+
+
+def validate_review_repair_intent(repair_intent, handoff, review_return):
+    """Validate an envelope against its exact persisted Reviewer/PM inputs."""
+    fields = {
+        'schema_version', 'task_id', 'run_id', 'contract_digest', 'source_sha',
+        'result_head', 'diff_sha256', 'changed_paths', 'developer_task_id',
+        'developer_identity', 'developer_session_ref', 'review_dispatch_id',
+        'review_receipt_sha256', 'prior_repair_round', 'repair_round',
+        'decision', 'state', 'repair_intent_id', 'intent_sha256',
+    }
+    if type(repair_intent) is not dict or set(repair_intent) != fields:
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    value = dict(repair_intent)
+    claimed_digest = value.pop('intent_sha256')
+    actual_digest = hashlib.sha256(json.dumps(
+        value, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+    if claimed_digest != actual_digest:
+        _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
+    expected = review_repair_intent(handoff, review_return)
+    if expected != repair_intent:
+        _stop('REVIEW_REPAIR_BINDING_MISMATCH')
+    return repair_intent
+
+
 def review_handoff_pending(intent):
     validate_review_dispatch_intent(intent)
     return {'intent': intent, 'dispatch_state': 'PENDING', 'receipt': None,
