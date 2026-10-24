@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -28,7 +29,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -194,6 +195,28 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertIn("RUNNING", text)
         self.assertFalse(any(secret in text for secret in SECRETS))
 
+    def test_old_task_in_a_recently_touched_directory_is_not_recent(self):
+        # The daily /tmp cleaner deleting files bumps the directory's mtime.
+        self.attempt("red", "")
+        old = time.time() - 4 * 86400
+        for name in os.listdir(self.evidence):
+            os.utime(os.path.join(self.evidence, name), (old, old))
+        os.utime(self.evidence, None)
+        self.assertEqual(mon.scan_tasks(self.pattern, 12.0), [])
+
+    def test_returned_stage_whose_edits_all_failed_says_so(self):
+        tools = (mon.Tool("1", "read", "a.py", "completed"), mon.Tool("2", "edit", "a.py", "error"),
+                 mon.Tool("3", "edit", "?", "error"))
+        stage = mon.Stage("fix", "deepseek", 1000.0, "OPENCODE_OUTPUT_RETURNED", "ok", 3, 1, 1,
+                          "", tools, result_at=1010.0)
+        task = mon.Task("/tmp/llmtool-x", "t1", "b", (stage,))
+        self.assertIn("OPENCODE_OUTPUT_RETURNED（改檔 2 次全部失敗）", "\n".join(mon.task_lines([task])))
+        self.assertIn("有輸出，但改檔全部失敗", "\n".join(mon.activity_lines([task])))
+        partly = mon.Stage("fix", "deepseek", 1000.0, "OPENCODE_OUTPUT_RETURNED", "ok", 3, 1, 1,
+                           "", tools + (mon.Tool("4", "write", "b.py", "completed"),), result_at=1010.0)
+        lines = "\n".join(mon.task_lines([mon.Task("/tmp/llmtool-x", "t1", "b", (partly,))]))
+        self.assertIn("（改檔 2/3 次失敗）", lines)
+
     def test_absolute_tool_path_outside_evidence_root_is_not_rendered(self):
         self.assertEqual(mon._relative("/Users/davidsun/private/secret.py", self.base), "?")
 
@@ -224,6 +247,37 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertEqual(stage.tokens_out, 12)
         self.assertEqual(spy.call_count, 1)
         self.assertIn("mode=ro", spy.call_args[0][0])
+
+
+class TaskRecordTests(unittest.TestCase):
+    def test_recent_records_show_route_and_result_in_words_without_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            now = time.time()
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 600))
+            records = {
+                "a": {"task_id": "ab12cd34" * 4, "updated_at": stamp, "state": "PM_RESPONDED",
+                      "request": "REQUEST-SECRET", "pm_assignment": {"route": "company-gw"},
+                      "developer": {"provider_profile": "company-gw", "state": "DEVELOPER_OUTPUT_REJECTED",
+                                    "error_code": "DEVELOPER_OUTPUT_INVALID_ENVELOPE",
+                                    "artifact": "DIFF-SECRET"},
+                      "completion": {"state": "WAITING_EXECUTOR", "executor_task_id": "issue-9-dev"}},
+                "b": {"task_id": "ef56" * 8, "updated_at": stamp, "state": "PM_RESPONDED"},
+                "old": {"task_id": "00" * 16, "updated_at": "2026-10-01T00:00:00Z",
+                        "state": "PM_RESPONDED"},
+            }
+            for name, record in records.items():
+                with open(os.path.join(root, f"{name}.json"), "w") as handle:
+                    json.dump(record, handle)
+            lines = [line for _, line in mon.llmtool_task_records(now, root)]
+        self.assertEqual(len(lines), 2)
+        text = "\n".join(lines)
+        self.assertIn("issue-9-dev", text)
+        self.assertIn("派給 company-gw", text)
+        self.assertIn("輸出被拒（回應格式錯誤）；等執行者接手", text)
+        self.assertIn("ef56ef56", text)
+        self.assertIn("PM 已規劃，還沒派給 developer", text)
+        self.assertNotIn("派給 None", text)
+        self.assertNotIn("SECRET", text)
 
 
 class TaskEventTests(unittest.TestCase):
@@ -471,7 +525,7 @@ class ActivityViewTests(unittest.TestCase):
              patch("sys.stdout", output):
             self.assertEqual(mon.run_once(), 0)
         rendered = output.getvalue()
-        self.assertIn("RECENT ACTIVITY", rendered)
+        self.assertIn("\n最近動態\n", rendered)
         self.assertIn("llmtool → 任務 task-1", rendered)
         self.assertIn("失敗：模型呼叫失敗", rendered)
         self.assertNotIn("/Users/davidsun", rendered)
@@ -768,7 +822,7 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.shutil, "which", return_value="/opt/gh"), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.run_once(source), 0)
-        activity = out.getvalue().split("RECENT ACTIVITY", 1)[1].splitlines()
+        activity = out.getvalue().split("\n最近動態\n", 1)[1].splitlines()
         order = [next(i for i, l in enumerate(activity) if marker in l)
                  for marker in ("開始一次執行嘗試", "PM → Claude：派出審查任務（#5・自述） — 請審查 PR 5",
                                 "完成，已拿到輸出；程序已清乾淨")]
@@ -1084,6 +1138,40 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_claude_cli_registry_status_beats_the_session_file_guess(self):
+        result = {"type": "user", "cwd": str(self.task), "message": {"content": [
+            {"type": "tool_result", "content": "x"}]}}
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限（task wp-1）", 1200.0)),
+                                      ("idle", None, (mon.IDLE, "task wp-1", 1200.0)),
+                                      ("busy", None, (mon.WORKING, "等模型回覆（task wp-1）", 300.0))):
+            with self.subTest(status):
+                self._write(self.claude / "dev" / "s.jsonl", [result], age=300)
+                (sessions / "41.json").write_text(json.dumps(
+                    {"pid": 41, "sessionId": "s", "status": status, "waitingFor": waiting,
+                     "statusUpdatedAt": (self.NOW - 1200) * 1000, "name": "dev-r4"}),
+                    encoding="utf-8")
+                row = self.by_name(self.rows([cli]))["claude developer（互動）"]
+                self.assertEqual((row.state, row.detail, row.age),
+                                 (want[0], want[1] + "｜session s dev-r4", want[2]))
+
+    def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
+        result = {"type": "user", "cwd": str(self.task), "message": {"content": [
+            {"type": "tool_result", "content": "FILE-SECRET"}]}}
+        answered = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+        for name, entries, age, want in (
+                ("wait", [result], 300, (mon.WORKING, "等模型回覆")),
+                ("hung", [result], mon.OFFICE_STALL + 60, (mon.STALLED, "等模型回覆超過 15 分鐘")),
+                ("idle", [result, answered], 300, (mon.IDLE, "task wp"))):
+            with self.subTest(name):
+                path = self.claude / "dev" / "s.jsonl"
+                self._write(path, entries, age=age)
+                row = self.by_name(self.rows())["claude developer（互動）"]
+                self.assertEqual((row.state, row.detail[:len(want[1])]), want)
+                self.assertNotIn("FILE-SECRET", row.detail)
+
     def test_claude_cli_sessions_show_closed_after_the_cli_exits_then_leave(self):
         for sid, age in (("live", 300), ("recent", 200), ("old", 3 * 3600)):
             self._write(self.claude / "proj" / f"{sid}.jsonl", [
@@ -1195,6 +1283,35 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((runs[0].state, runs[0].kind, runs[0].age, runs[0].group, runs[0].evidence),
                          (mon.WORKING, "subagent", 130.0, "", "程序"))
         self.assertIn("看不出是哪個對話", runs[0].detail)
+
+    def test_interactive_claude_session_started_by_codex_is_not_a_one_shot_run(self):
+        # Codex can drive an interactive Claude TUI; it registers its session
+        # and is shown from that record, so it must not also appear as a run.
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "40.json").write_text(json.dumps({"pid": 40, "sessionId": "dev"}),
+                                          encoding="utf-8")
+        tui = mon.Process(40, 5718, 40, "07:00:00", "Ss+", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        run = mon.Process(42, 5718, 42, "00:30", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        rows = self.rows([tui, run])
+        runs = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual([row.age for row in runs], [30.0])
+        state, _, _ = mon.track_one_shot({}, [tui, run], 1000.0, str(sessions))
+        state, finished, ended = mon.track_one_shot(state, [], 1010.0, str(sessions))
+        self.assertEqual((len(finished), len(ended)), (1, 1))   # only the -p run ended
+
+    def test_claude_management_command_is_not_a_model_run(self):
+        self.assertEqual(mon.classify("claude agents --json"), "Claude Code CLI command")
+        self.assertEqual(mon.classify("/usr/local/bin/claude --version"), "Claude Code CLI command")
+        self.assertEqual(mon.classify("claude -p --model sonnet review"), "Claude Code CLI")
+        self.assertEqual(mon.classify("claude"), "Claude Code CLI")
+        query = mon.Process(40, 5718, 40, "00:01", "S", "Claude Code CLI command", "claude",
+                            "Codex APP-SERVER 5718")
+        self.assertFalse(any(row.name == "claude 單次呼叫" for row in self.rows([query])))
+        state, _, _ = mon.track_one_shot({}, [query], 1000.0)
+        self.assertEqual(state, {})
 
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",

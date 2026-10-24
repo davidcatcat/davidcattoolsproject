@@ -108,6 +108,10 @@ def _python_target(args: list[str]) -> tuple[str, str] | None:
     return None
 
 
+CLAUDE_COMMANDS = frozenset({"agents", "mcp", "config", "doctor", "update", "install",
+                             "plugin", "auth", "setup-token", "migrate-installer"})
+
+
 def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     words = set(args)
     if exe in ("opencode", "opencode.exe"):
@@ -124,6 +128,10 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
             return "Kilo CLIENT"
         return "Kilo CLI"
     if exe == "claude":
+        # `claude agents --json`, `claude --version`, ...: a quick management
+        # command that starts no model session (a PM polls `agents` often).
+        if args and (args[0] in CLAUDE_COMMANDS or args[0] in ("--version", "-v", "--help", "-h")):
+            return "Claude Code CLI command"
         return "Claude Code CLI"
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".
@@ -353,6 +361,7 @@ class Monitor:
         self.office_error: str | None = None   # why the office view could not be built
         self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
+        self.records: list = []   # llmtool task-record lines, refreshed with the office view
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -432,6 +441,10 @@ class Monitor:
             # Session scans, tails, sqlite and AGY lookups are the costly part of a
             # poll; they run at most every OFFICE_EVERY seconds, not every tick.
             self.office_due = time.monotonic() + OFFICE_EVERY
+            try:
+                self.records = [line for _, line in llmtool_task_records(time.time())]
+            except Exception:  # optional, like task evidence
+                pass
             try:
                 office = office_rows(result.processes, finished_runs=finished)
             except Exception as exc:  # never break process monitoring, but never show stale rows
@@ -623,10 +636,16 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
     tasks = []
     for directory in glob.glob(pattern):
         manifest_path = os.path.join(directory, "manifest.json")
+        # Not the directory's own mtime: the daily /tmp cleaner deleting old
+        # files inside it makes a days-old task look new.
         try:
-            if not os.path.isfile(manifest_path) or os.path.getmtime(directory) < cutoff:
-                continue
-        except OSError:
+            newest = max(os.path.getmtime(os.path.join(directory, name))
+                         for name in os.listdir(directory)
+                         if name == "manifest.json" or STAGE_FILE.match(name)
+                         or name.endswith("-result.json"))
+        except (OSError, ValueError):
+            continue
+        if not os.path.isfile(manifest_path) or newest < cutoff:
             continue
         manifest = _read_json(manifest_path) or {}
         root = str(manifest.get("root") or "")
@@ -704,26 +723,39 @@ def task_events(old: dict, new: list[Task], *, initial: bool = False) -> list[tu
     return out
 
 
+EDIT_TOOLS = frozenset({"edit", "write", "patch", "multiedit", "apply_patch"})
+
+
+def edit_failures(stage: Stage) -> tuple[int, int]:
+    """(failed, finished) file-changing tool calls of a stage."""
+    edits = [tool for tool in stage.tools if tool.name in EDIT_TOOLS and tool.status in FINAL_TOOL]
+    return sum(tool.status == "error" for tool in edits), len(edits)
+
+
 def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
     if not tasks:
-        return ["No recent llmtool task evidence under /private/tmp/llmtool-* (last 12 h)."]
+        return ["近 12 小時沒有 OpenCode 執行紀錄（/private/tmp/llmtool-*）。"]
     lines = []
     for task in tasks[:limit]:
-        lines.append(f"TASK {task.task_id}   branch {task.branch or '-'}")
+        lines.append(f"任務 {task.task_id}   分支 {task.branch or '-'}")
         if not task.stages:
-            lines.append("    (prepared, no model stage started yet)")
+            lines.append("    （已準備，還沒開始執行）")
         for stage in task.stages:
-            when = datetime.fromtimestamp(stage.started).strftime("%H:%M:%S") if stage.started else "--:--:--"
-            lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage):<28} "
-                         f"cleanup {stage.cleanup or '-':<7} steps {stage.steps:<3} "
-                         f"{stage.tokens_in / 1000:.1f}k in / {stage.tokens_out / 1000:.1f}k out")
+            when = (datetime.fromtimestamp(stage.started).strftime("%m-%d %H:%M")
+                    if stage.started else "--- --:--")
+            failed, edits = edit_failures(stage)
+            note = (f"（改檔 {edits} 次全部失敗）" if failed and failed == edits
+                    else f"（改檔 {failed}/{edits} 次失敗）" if failed else "")
+            lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage)}{note}  "
+                         f"清理 {stage.cleanup or '-'}  步數 {stage.steps}  "
+                         f"輸入 {stage.tokens_in / 1000:.1f}k / 輸出 {stage.tokens_out / 1000:.1f}k")
             if stage.meta not in ("ok", "none"):
-                lines.append(f"        task metadata {stage.meta}")
+                lines.append(f"        任務資料 {stage.meta}")
             for tool in stage.tools[-6:]:
                 mark = "✓" if tool.status == "completed" else tool.status
                 lines.append(f"        {tool.name:<6} {_safe_relative_reference(tool.path)}  {mark}")
             if len(stage.tools) > 6:
-                lines.append(f"        … {len(stage.tools) - 6} earlier tool calls")
+                lines.append(f"        … 另有 {len(stage.tools) - 6} 次較早的工具呼叫")
         lines.append("")
     return lines
 
@@ -771,10 +803,11 @@ ACTIVITY_RESULT_CODES = frozenset({
     "OPENCODE_RUNTIME_UNKNOWN", "OPENCODE_SOURCE_UNKNOWN", "OPENCODE_BUDGET_BLOCKED",
     "OPENCODE_AUTH_REQUIRED", "OPENCODE_NOT_AUTHORIZED", "OPENCODE_TIMEOUT",
     "OPENCODE_OUTPUT_INCOMPLETE", "OPENCODE_OUTPUT_INVALID", "OPENCODE_USAGE_UNKNOWN",
-    "RETURNED", "FAILED", "BLOCKED", "UNKNOWN",
+    "RETURNED", "FAILED", "BLOCKED", "UNKNOWN", "OPENCODE_EDITS_FAILED",
 })
 ACTIVITY_RESULT_LABELS = {
     "OPENCODE_OUTPUT_RETURNED": "完成，已拿到輸出",
+    "OPENCODE_EDITS_FAILED": "有輸出，但改檔全部失敗",
     "OPENCODE_PROVIDER_FAILED": "失敗：模型呼叫失敗",
     "OPENCODE_CLEANUP_UNKNOWN": "結果未知：程序清理沒確認",
     "OPENCODE_RUNTIME_UNKNOWN": "結果未知：執行狀態沒確認",
@@ -813,9 +846,12 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
                 events.append(ActivityEvent(stage.started, "stage_attempt", task_id,
                                             stage_name, "OBSERVED", reference))
             if stage.result and stage.result_at:
+                failed, edits = edit_failures(stage)
+                code = stage.result if stage.result in ACTIVITY_RESULT_CODES else "UNKNOWN"
+                if code == "OPENCODE_OUTPUT_RETURNED" and failed and failed == edits:
+                    code = "OPENCODE_EDITS_FAILED"
                 events.append(ActivityEvent(stage.result_at, "worker_result", task_id,
-                                            stage_name,
-                                            stage.result if stage.result in ACTIVITY_RESULT_CODES else "UNKNOWN",
+                                            stage_name, code,
                                             reference,
                                             stage.cleanup if stage.cleanup in ("ok", "UNKNOWN") else "UNKNOWN"))
             elif not stage.result:
@@ -1195,6 +1231,7 @@ import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
@@ -1474,6 +1511,21 @@ def _last_action(tail: list) -> str:
                 if type(text) is str and text.strip():
                     return _label(text)
     return ""
+
+
+def _awaiting_model(tail: list) -> bool:
+    """True when the newest exchanged message is a tool result the model has
+    not answered yet: the request is out and the session waits on the model.
+    Only the block types are read, never their content."""
+    for item in reversed(tail):
+        if item.get("type") not in ("user", "assistant"):
+            continue
+        if item["type"] == "assistant":
+            return False
+        content = (item.get("message") or {}).get("content") if type(item.get("message")) is dict else None
+        return type(content) is list and any(
+            type(block) is dict and block.get("type") == "tool_result" for block in content)
+    return False
 
 
 def _humanize(path_stem: str) -> str:
@@ -1910,8 +1962,13 @@ def codex_rows(now: float, root: str | None = None,
     return rows + [row for _, row in subs]
 
 
+SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def claude_rows(now: float, root: str | None = None,
-                canonical: str | None = None) -> list[OfficeRow]:
+                canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
+    """live: {session id: (status, waitingFor, since ms, name)} that running CLIs report in
+    their own registry; it beats any guess from the session file."""
     root = CLAUDE_PROJECTS if root is None else root
     canonical = canonical or canonical_root()
     rows = []
@@ -1952,8 +2009,37 @@ def claude_rows(now: float, root: str | None = None,
             rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
+        state = WORKING if age <= OFFICE_BUSY else IDLE
+        sid = os.path.basename(path)[:-len(".jsonl")]
+        status, waiting, since, name = (live or {}).get(sid, (None, None, None, None))
+        suffix = f"（{task}）" if task else ""
+        if status == "waiting":
+            # Stopped at a prompt only a person or its driving agent can answer.
+            state = ATTENTION
+            detail = ("等人確認權限" if waiting == "permission prompt" else "等人回覆") + suffix
+        elif status == "busy":
+            state = WORKING
+            if age > OFFICE_BUSY and _awaiting_model(tail):
+                detail = "等模型回覆" + suffix
+        elif status == "idle":
+            state = IDLE
+        if status in ("waiting", "idle") and type(since) in (int, float) and 0 < since / 1000 <= now:
+            # How long it has waited or sat idle: the file can be touched
+            # later by metadata writes that are not work.
+            age = now - since / 1000
+        elif state == IDLE and _awaiting_model(tail):
+            # No registry to ask: an unanswered tool result means the request
+            # is still with the model, not idle.
+            state = WORKING if age <= OFFICE_STALL else STALLED
+            detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
+        if status is not None:
+            # The name and id its launcher gave it: what a PM looks for to
+            # find the window that needs an answer.
+            name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
+            # Short id first: it survives when a narrow screen cuts the line.
+            detail += f"｜session {sid[:8]}{' ' + name if name else ''}"
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
-                              WORKING if age <= OFFICE_BUSY else IDLE, detail,
+                              state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
                               task=task, evidence="claude 紀錄", cli=first == "cli"))
         session_dir = path[:-len(".jsonl")]
@@ -2271,6 +2357,64 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
     return found
 
 
+RECORD_STATES = {   # llmtool task / completion state -> plain words
+    "PM_RESPONDED": "PM 已規劃，還沒派給 developer",
+    "PM_UNAVAILABLE": "PM 無法使用",
+    "WAITING_EXECUTOR": "等執行者接手",
+    "WAITING_PM": "等 PM",
+}
+LLMTOOL_RECORD_WINDOW = 12 * 3600
+
+
+def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[float, str]]:
+    """[(updated, line)] newest first for llmtool task records updated in the
+    last 12 hours. Only ids, routes, states and error codes are read; requests,
+    responses, contracts and diffs are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    found = []
+    for path in glob.glob(os.path.join(root, "*.json")):
+        try:
+            if now - os.path.getmtime(path) > LLMTOOL_RECORD_WINDOW:
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(1 << 20))
+        except (OSError, ValueError):
+            continue
+        if type(record) is not dict:
+            continue
+        updated = _github_time(record.get("updated_at")) or os.path.getmtime(path)
+        if now - updated > LLMTOOL_RECORD_WINDOW:
+            continue
+        developer = record.get("developer") if type(record.get("developer")) is dict else {}
+        completion = record.get("completion") if type(record.get("completion")) is dict else {}
+        assignment = record.get("pm_assignment") if type(record.get("pm_assignment")) is dict else {}
+
+        def code(value):
+            return value if type(value) is str and CODE_TEXT.fullmatch(value) else None
+
+        name = completion.get("executor_task_id")
+        name = name if type(name) is str and TASK_ID.fullmatch(name) else (
+            str(record.get("task_id") or "")[:8] if re.fullmatch(r"[0-9a-f]{8,64}",
+                                                             str(record.get("task_id") or "")) else "?")
+        route = next((value for value in (developer.get("provider_profile"), assignment.get("route"))
+                      if type(value) is str and PROFILE.fullmatch(value)), "")
+        dev_state, dev_code = code(developer.get("state")), code(developer.get("error_code"))
+        if dev_state:
+            result = DEVELOPER_RESULTS.get(dev_code) or DEVELOPER_RESULTS.get(dev_state) or dev_state
+            result += f"（{dev_code}）" if dev_code and dev_code not in DEVELOPER_RESULTS else ""
+        else:
+            top = code(record.get("state"))
+            result = RECORD_STATES.get(top, top or "狀態不明")
+        after = code(completion.get("state"))
+        if dev_state and after:
+            result += f"；{RECORD_STATES.get(after, after)}"
+        when = time.strftime("%m-%d %H:%M", time.localtime(updated))
+        # Without a developer record the route is only the PM's plan.
+        via = (("派給 " if dev_state else "PM 建議 ") + route) if route else "未指定路線"
+        found.append((updated, f"{when}  {name:<36} {via:<18} {result}"))
+    return sorted(found, reverse=True)
+
+
 # Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
 # subagents itself (Owner 2026-10-23), and those appear under the PM.
 WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
@@ -2355,7 +2499,8 @@ DISPATCH_PROBLEMS = {
 }
 
 
-def track_one_shot(state: dict, processes: list[Process], now: float):
+def track_one_shot(state: dict, processes: list[Process], now: float,
+                   sessions: str | None = None):
     """Remember short `claude -p` runs started by Codex after they exit.
 
     They leave no session file and often last under a minute, so without this
@@ -2363,8 +2508,7 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
     state, [(duration_s, seconds_since_end)] for runs that ended within the
     done window, and one log line per run that just ended. Memory only."""
     state = {pid: list(item) for pid, item in state.items()}
-    live = {p.pid: p for p in processes
-            if p.role == "Claude Code CLI" and p.owner.startswith("Codex")}
+    live = {p.pid: p for p in _one_shot_runs(processes, sessions or CLAUDE_SESSIONS)}
     for pid, proc in live.items():
         if pid not in state or state[pid][2] is not None:   # new, or a reused PID
             state[pid] = [now - (_elapsed_seconds(proc.elapsed) or 0.0), now, None]
@@ -2401,17 +2545,16 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     return [row for row in out if row.group not in gone]
 
 
-def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
-    """Session ids of running Claude CLIs, from the CLI's own <pid>.json
-    registry, plus how many running CLIs have no readable entry. None when
-    there is no registry to read, so nothing is judged closed."""
+def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, dict] | None:
+    """Registry entry of each running Claude CLI that names its session in the
+    CLI's own <pid>.json file. None when there is no registry to read."""
     try:
         names = os.listdir(sessions)
     except OSError:
         return None
     pids = {p.pid for p in processes
             if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
-    live = set()
+    found = {}
     for name in names:
         pid = name[:-len(".json")]
         if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
@@ -2422,9 +2565,28 @@ def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set,
         except (OSError, ValueError):
             continue
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
-            live.add(entry["sessionId"])
-            pids.discard(int(pid))
-    return live, len(pids)
+            found[int(pid)] = entry
+    return found
+
+
+def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
+    """Session ids of running Claude CLIs, from the CLI's own <pid>.json
+    registry, plus how many running CLIs have no readable entry. None when
+    there is no registry to read, so nothing is judged closed."""
+    found = _claude_registered(sessions, processes)
+    if found is None:
+        return None
+    pids = {p.pid for p in processes
+            if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
+    return {entry["sessionId"] for entry in found.values()}, len(pids - set(found))
+
+
+def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
+    """Claude CLIs started by Codex that keep no session: an interactive
+    session Codex drives registers itself and is shown from its own record."""
+    registered = _claude_registered(sessions, processes) or {}
+    return [p for p in processes if p.role == "Claude Code CLI"
+            and p.owner.startswith("Codex") and p.pid not in registered]
 
 
 def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
@@ -2463,14 +2625,18 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 finished_runs: list | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
-    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
+    sessions = os.path.join(os.path.dirname(
+        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
+    live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
+                                 entry.get("statusUpdatedAt"), entry.get("name"))
+            for entry in (_claude_registered(sessions, processes) or {}).values()}
+    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
         p.role == "Codex CLI (node launcher)" for p in processes)
     rows = _closed_codex_cli(rows, clis)
-    rows = _closed_claude_cli(rows, os.path.join(os.path.dirname(
-        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions"), processes)
+    rows = _closed_claude_cli(rows, sessions, processes)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
@@ -2481,8 +2647,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # file. Calls a Codex record already shows are not repeated; any further
     # process is listed on its own, since nothing says which thread started it.
     recorded = [row for row in rows if row.key == "review"]
-    running = sorted((p for p in processes if p.role == "Claude Code CLI"
-                      and p.owner.startswith("Codex")), key=lambda p: p.pid)
+    running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     for proc in running[sum(row.state == WORKING for row in recorded):]:
         rows.append(OfficeRow("claude 單次呼叫", WORKING,
                               "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",
@@ -2730,8 +2895,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
             rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
     alerts = _review_alerts(rows)
     alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
-    alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
-               if row.state in ALERT_STATES and not row.alert]
+    # In full (wrapped, not cut): the session name at the end is how a PM
+    # finds the window that needs an answer.
+    alerts += [f"{row.name}（{row.state}，{_short_ago(row.age)}）{row.detail}"
+               for row in rows if row.state in ALERT_STATES and not row.alert]
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
@@ -2781,8 +2948,13 @@ def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[st
 
 
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
-FOOTNOTE = "running != model generating; gone != task done"
+FOOTNOTE = "工作中 ≠ 模型正在產生內容；程序消失 ≠ 任務完成"
 FOLLOW_VIEWS = frozenset({"log", "activity"})   # newest at the bottom; offset counts back
+
+
+def record_lines(records: list[str]) -> list[str]:
+    head = "llmtool 任務紀錄（近 12 小時，最新在上）"
+    return [head, *(records[:8] or ["近 12 小時沒有更新的任務紀錄。"])]
 
 
 def run_once(github: "GitHubSource | None" = None) -> int:
@@ -2795,11 +2967,10 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
     print()
     print("\n".join(table_lines(mon.processes)))
-    print("\nRECENT LLMTOOL TASKS")
-    print("\n".join(task_lines(mon.tasks, 3)))
-    print("\nRECENT ACTIVITY")
+    print("\n".join(["", *record_lines(mon.records), "", *task_lines(mon.tasks, 3)]))
+    print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
-    print(f"Note: {FOOTNOTE}.")
+    print(f"說明：{FOOTNOTE}。")
     return 0
 
 
@@ -2868,10 +3039,10 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
-            lines = task_lines(mon.tasks)
+            lines = record_lines(mon.records) + [""] + task_lines(mon.tasks)
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if line.startswith("TASK") else 0
+                attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄")) else 0
                 if "RUNNING" in line:
                     attr |= colors.get("+", 0)
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
