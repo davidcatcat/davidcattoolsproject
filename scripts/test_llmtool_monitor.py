@@ -693,6 +693,24 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual([e.reference for e in source.events], ["#3"])
         self.assertIn("讀取失敗", mon.render_activity([], github=source)[-1])
 
+    def test_source_reads_every_comment_page_up_to_a_limit(self):
+        page = lambda start, size: [comment(start + i, NOW - 30, "c") for i in range(size)]
+        run = FakeRun((0, page(100, 100)), (0, page(300, 24)), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual([argv[4].rsplit("&page=", 1)[-1] for argv, _ in run.calls[:2]], ["1", "2"])
+        self.assertTrue(all("per_page=100" in argv[4] for argv, _ in run.calls[:2]))
+        self.assertIn("/pulls?", run.calls[2][0][4])
+        self.assertEqual(len(source.events), 124)
+        self.assertNotIn("留言太多", source.status)
+        full = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=full, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 1)
+        self.assertIn("只讀了最新 500 則", source.status)
+
     def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
         import threading
         gate = threading.Event()
@@ -852,6 +870,101 @@ DISPATCH = {   # the Owner's switches as of 2026-10-23
     "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
     "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
 }
+POLICY_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+
+
+def policy(workers):
+    """A whole worker-dispatch.json the llmtool gate accepts: every Worker
+    present with reason and evidence; `workers` overrides entries (None drops one)."""
+    entry = {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22",
+             "reason": "test", "evidence": POLICY_EVIDENCE}
+    full = {key: dict(entry) for key in sorted(mon.DISPATCH_WORKERS)}
+    for key, item in workers.items():
+        if item is None:
+            full.pop(key, None)
+        elif type(item) is dict and key in full:
+            full[key] = {**full[key], **item}
+        else:
+            full[key] = item
+    return {"schema_version": 1, "workers": full}
+
+
+class DispatchGateAgreementTests(unittest.TestCase):
+    """The monitor's reading of worker-dispatch.json must match the llmtool
+    gate it describes: whatever the gate refuses, the monitor never shows as
+    a usable switch."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool")
+        sys.path.insert(0, root)
+        try:
+            from llmtool import worker_dispatch
+        finally:
+            sys.path.remove(root)
+        cls.gate = staticmethod(worker_dispatch._parse_policy)
+
+    def agree(self, raw: bytes):
+        try:
+            self.gate(raw)
+            accepted = True
+        except Exception:
+            accepted = False
+        switches, problem = mon.worker_dispatch(raw)
+        self.assertEqual(problem == "", accepted, raw[:200])
+        return accepted
+
+    def test_repository_policy_is_accepted_by_both(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool", "worker-dispatch.json")
+        with open(path, "rb") as handle:
+            self.assertTrue(self.agree(handle.read()))
+
+    def test_every_mutation_is_judged_the_same_way(self):
+        ref = POLICY_EVIDENCE + "#issuecomment-6373198827"
+        good = {"task_id": "5fd1be3ee96e42678fe1dac75a9b697a", "owner_assignment_ref": ref}
+        cases = {
+            "valid": {},
+            "decided_by PM": {"agy": {"decided_by": "PM"}},
+            "unknown switch": {"agy": {"dispatch": "MAYBE"}},
+            "lower-case switch": {"agy": {"dispatch": "allowed"}},
+            "evidence not #289": {"company-gw": {"evidence": "https://example.com/x"}},
+            "evidence PR 283": {"company-gw": {"evidence": "https://github.com/davidcatcat/davidcattoolsproject/pull/283"}},
+            "missing worker": {"agy": None},
+            "extra worker": {"codex-reviewer-agent": {"dispatch": "ALLOWED", "decided_by": "Owner",
+                                                      "decided_at": "2026-10-22", "reason": "r",
+                                                      "evidence": POLICY_EVIDENCE}},
+            "empty reason": {"agy": {"reason": ""}},
+            "long reason": {"agy": {"reason": "x" * 513}},
+            "bad date": {"agy": {"decided_at": "2026-02-30"}},
+            "short date": {"agy": {"decided_at": "2026-1-2"}},
+            "extra field": {"agy": {"note": "x"}},
+            "assignment ok": {"claude-developer": {"owner_assignments": [good]}},
+            "assignment bad id": {"claude-developer": {"owner_assignments": [dict(good, task_id="x")]}},
+            "assignment bad ref": {"claude-developer": {"owner_assignments": [
+                dict(good, owner_assignment_ref=POLICY_EVIDENCE)]}},
+            "assignment duplicate": {"claude-developer": {"owner_assignments": [good, good]}},
+            "assignments not a list": {"claude-developer": {"owner_assignments": {}}},
+        }
+        for label, change in cases.items():
+            with self.subTest(label):
+                self.agree(json.dumps(policy(change)).encode())
+        whole = json.dumps(policy({}))
+        raws = {
+            "duplicate key": whole.replace('"workers": {', '"workers": {"agy": {}, ', 1),
+            "schema 2": whole.replace('"schema_version": 1', '"schema_version": 2'),
+            "schema true": whole.replace('"schema_version": 1', '"schema_version": true'),
+            "extra top key": whole[:-1] + ', "x": 1}',
+            "NaN": whole.replace('"schema_version": 1', '"schema_version": NaN'),
+            "not json": "{not json",
+            "empty": "",
+            "too big": whole[:-1] + ', "pad": "' + "x" * (64 * 1024) + '"}',
+        }
+        for label, raw in raws.items():
+            with self.subTest(label):
+                self.agree(raw.encode())
+        self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
 
 
 class OfficeViewTests(unittest.TestCase):
@@ -872,8 +985,7 @@ class OfficeViewTests(unittest.TestCase):
     def _write_dispatch(self, workers, raw=None):
         path = Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(raw if raw is not None else
-                        json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        path.write_text(raw if raw is not None else json.dumps(policy(workers)), encoding="utf-8")
         return path
 
     def _register(self, task_id, root, **fields):
@@ -1900,14 +2012,15 @@ class OfficeViewTests(unittest.TestCase):
         self._write_dispatch({}, raw="{not json")
         rows = self.by_name(self.rows())
         self.assertEqual(rows["agy"].detail, mon.DISPATCH_PROBLEMS["invalid"])
-        self._write_dispatch({"agy": {"dispatch": "MAYBE", "decided_by": "Owner",
-                                      "decided_at": "2026-10-22"},
-                              "company-gw": DISPATCH["company-gw"]})
-        rows = self.by_name(self.rows())
-        self.assertEqual((rows["agy"].state, rows["agy"].detail),
-                         (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["entry"]))
-        self.assertEqual(rows["opencode developer"].detail, mon.DISPATCH_PROBLEMS["absent"])
-        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
+        # The llmtool gate is all or nothing: one bad entry refuses every Worker.
+        for bad in ({"agy": {"dispatch": "MAYBE"}}, {"agy": {"decided_by": "PM"}},
+                    {"opencode-developer": None}, {"codex-reviewer-agent": DISPATCH["agy"]}):
+            with self.subTest(bad=bad):
+                self._write_dispatch(bad)
+                rows = self.by_name(self.rows())
+                for name in ("opencode developer", "agy", "公司 gw"):
+                    self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
+                                     (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["rejected"]))
 
     def _opencode_db(self, sessions, messages=()):
         db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "opencode.db"
@@ -1962,7 +2075,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def _dispatch(self, workers):
         path = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "worker-dispatch.json"
-        path.write_text(json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        path.write_text(json.dumps(policy(workers)), encoding="utf-8")
         return str(path)
 
     def test_owner_pause_switch_wins_over_live_evidence(self):
@@ -1975,8 +2088,6 @@ class OfficeViewTests(unittest.TestCase):
                                    "decided_at": "2026-10-22", "reason": "quota"},
             "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
             "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
-            "codex-reviewer-agent": {"dispatch": "bogus", "decided_by": "Owner",
-                                     "decided_at": "2026-10-22"},
         })
         tui = mon.Process(30, 1, 30, "05:00", "S+", "OpenCode CLI", "opencode", "")
         rows = self.by_name(mon.office_rows([tui], self.NOW, codex_root=str(self.codex),
@@ -1989,7 +2100,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertNotIn("codex reviewer agent", rows)   # an invalid extra entry names no row
+        self.assertNotIn("codex-developer", rows)   # only the roster's Workers get a row
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
                                               canonical=self.canonical,

@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import os
 import re
 import shutil
@@ -942,6 +942,8 @@ GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
 GITHUB_LIMIT = 4 << 20
+GITHUB_PAGE = 100    # comments per request (the API maximum)
+GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
 
 
 def _github_time(value) -> float:
@@ -1107,13 +1109,23 @@ class GitHubSource:
         since = self.clock() - self.window
         stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
-            comments = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
-                                 "&sort=created&direction=desc&per_page=50")
+            comments, more = [], False
+            for page in range(1, GITHUB_PAGES + 1):
+                batch = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                  f"&sort=created&direction=desc&per_page={GITHUB_PAGE}&page={page}")
+                if type(batch) is not list:
+                    break
+                comments += batch
+                if len(batch) < GITHUB_PAGE:
+                    break
+            else:
+                more = True
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=30")
             self.events = github_events(comments, pulls, since)   # one atomic swap
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
-                           f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）")
+                           f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
+                           + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
@@ -2713,7 +2725,20 @@ WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
 DISPATCH_RELATIVE = os.path.join("tools", "llmtool", "worker-dispatch.json")
 DISPATCH_REFS = ("origin/main", "main")   # local refs only; the monitor never fetches
 DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
-DECIDERS = frozenset({"Owner", "PM"})
+# The llmtool gate (tools/llmtool/llmtool/worker_dispatch.py, _parse_policy and
+# _read_policy_file) is all or nothing: one invalid entry refuses every
+# Worker. The monitor applies the same rules so it never shows a switch the
+# gate would refuse; a test checks both agree.
+DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
+                              "company-gw", "claude-reviewer"})
+DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
+                   frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
+                              "owner_assignments"}))
+DISPATCH_MAX = 64 * 1024
+_REPO_URL = r"https://github\.com/davidcatcat/davidcattoolsproject/"
+DISPATCH_EVIDENCE = re.compile(_REPO_URL + r"(?:issues/289|pull/283)(?:#issuecomment-[1-9][0-9]*)?")
+DISPATCH_ASSIGNMENT_REF = re.compile(_REPO_URL + r"issues/289#issuecomment-[1-9][0-9]*")
+DISPATCH_TASK_ID = re.compile(r"[0-9a-f]{32}")
 DISPATCH_TTL = 30.0
 _dispatch_cache: dict = {}
 
@@ -2724,6 +2749,8 @@ def load_dispatch(canonical: str, path: str | None = None) -> tuple[bytes | None
     candidates = [path] if path is not None else [os.path.join(canonical, DISPATCH_RELATIVE)]
     for candidate in candidates:
         try:
+            if os.path.islink(candidate):
+                return b"", "派工檔"   # the gate refuses a symlinked policy
             with open(candidate, "rb") as handle:
                 return handle.read(256 << 10), "派工檔"
         except OSError:
@@ -2748,38 +2775,68 @@ def load_dispatch(canonical: str, path: str | None = None) -> tuple[bytes | None
     return found
 
 
+def _unique_keys(pairs):
+    found = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError("duplicate key")
+        found[key] = value
+    return found
+
+
+def _dispatch_entry_ok(item) -> bool:
+    if type(item) is not dict or frozenset(item) not in DISPATCH_FIELDS:
+        return False
+    assignments = item.get("owner_assignments", [])
+    reason, evidence, when = item.get("reason"), item.get("evidence"), item.get("decided_at")
+    if (item.get("decided_by") != "Owner" or item.get("dispatch") not in DISPATCH_VALUES or
+            type(when) is not str or type(reason) is not str or not reason or len(reason) > 512 or
+            type(evidence) is not str or DISPATCH_EVIDENCE.fullmatch(evidence) is None or
+            type(assignments) is not list):
+        return False
+    seen = set()
+    for assignment in assignments:
+        if (type(assignment) is not dict or set(assignment) != {"task_id", "owner_assignment_ref"} or
+                type(assignment["task_id"]) is not str or
+                DISPATCH_TASK_ID.fullmatch(assignment["task_id"]) is None or
+                type(assignment["owner_assignment_ref"]) is not str or
+                DISPATCH_ASSIGNMENT_REF.fullmatch(assignment["owner_assignment_ref"]) is None):
+            return False
+        seen.add((assignment["task_id"], assignment["owner_assignment_ref"]))
+    if len(seen) != len(assignments):
+        return False
+    try:
+        return date.fromisoformat(when).isoformat() == when
+    except ValueError:
+        return False
+
+
 def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
     """({worker key: (dispatch, decided_by, MM-DD)}, problem). problem is "" when
-    the file is valid, else why nothing can be read from it. An entry that is
-    present but invalid maps to ("INVALID", "", "")."""
+    the llmtool gate would accept the file, else why every Worker is refused."""
     if raw is None:
         return {}, "missing"
     try:
-        data = json.loads(raw)
-    except ValueError:
+        if not 2 <= len(raw) <= DISPATCH_MAX:
+            raise ValueError("size")
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys,
+                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return {}, "invalid"
-    workers = data.get("workers") if type(data) is dict and data.get("schema_version") == 1 else None
-    if type(workers) is not dict:
-        return {}, "invalid"
-    found = {}
-    for key, item in workers.items():
-        if type(key) is not str:
-            continue
-        dispatch, who, when = ((item.get("dispatch"), item.get("decided_by"), item.get("decided_at"))
-                               if type(item) is dict else (None, None, None))
-        if (dispatch in DISPATCH_VALUES and who in DECIDERS and type(when) is str and
-                re.fullmatch(r"\d{4}-\d{2}-\d{2}", when)):
-            found[key] = (dispatch, who, when[5:])
-        else:
-            found[key] = ("INVALID", "", "")
-    return found, ""
+    workers = data.get("workers") if type(data) is dict else None
+    if (type(data) is not dict or set(data) != {"schema_version", "workers"} or
+            type(data["schema_version"]) is not int or data["schema_version"] != 1 or
+            type(workers) is not dict or set(workers) != DISPATCH_WORKERS or
+            not all(_dispatch_entry_ok(item) for item in workers.values())):
+        return {}, "rejected"
+    return {key: (item["dispatch"], item["decided_by"], item["decided_at"][5:])
+            for key, item in workers.items()}, ""
 
 
 DISPATCH_PROBLEMS = {
     "missing": "讀不到派工檔，無法判斷能否派工",
-    "invalid": "派工檔格式錯誤，無法判斷能否派工",
-    "absent": "派工檔沒有這個 worker，無法判斷能否派工",
-    "entry": "派工檔裡這個 worker 的設定無效，無法判斷能否派工",
+    "invalid": "派工檔格式錯誤：llmtool 會拒絕所有派工",
+    "rejected": "派工檔有不合規的地方：llmtool 會拒絕所有派工",
 }
 
 
@@ -2965,8 +3022,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     for name, key, order in WORKER_ROSTER:
         live = opencode if name == "opencode developer" else agy if name == "agy" else []
         switch = switches.get(key)
-        trouble = problem or ("absent" if switch is None else
-                              "entry" if switch[0] == "INVALID" else "")
+        trouble = problem
         paused = not trouble and switch[0] == "PAUSED"
         if live and not trouble and not paused:
             continue   # the live CLI rows say everything
