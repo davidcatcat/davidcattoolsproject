@@ -58,6 +58,12 @@ def _stop(code):
     raise LifecycleError(code)
 
 
+# A git lock or a stuck filesystem must not hang the lifecycle forever. The
+# environment bootstrap itself (a venv and wheel install) is not timed: it
+# can legitimately take minutes and a kill would leave it half done.
+GIT_TIMEOUT_SECONDS = 120
+
+
 def _run_git(cwd, *args, check=True):
     env = {
         "PATH": "/usr/bin:/bin",
@@ -75,8 +81,9 @@ def _run_git(cwd, *args, check=True):
             ["/usr/bin/git", *args], cwd=str(cwd), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=False, text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         _stop("D6_GIT_UNAVAILABLE")
     if check and result.returncode:
         _stop("D6_GIT_REJECTED")
@@ -216,15 +223,18 @@ def _trusted_dispatcher_git():
     }
 
     def git(*args, input_data=None):
-        result = subprocess.run(
-            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
-             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-             "-C", str(dispatcher_root), *args],
-            env=git_env, input=input_data, stdin=(None if input_data is not None
-                                                 else subprocess.DEVNULL),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                 "-C", str(dispatcher_root), *args],
+                env=git_env, input=input_data, stdin=(None if input_data is not None
+                                                     else subprocess.DEVNULL),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _stop("ENV_BOOTSTRAP_UNAVAILABLE")
         if result.returncode or result.stderr:
             _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
         return result.stdout
