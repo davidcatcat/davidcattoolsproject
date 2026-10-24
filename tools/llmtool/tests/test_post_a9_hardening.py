@@ -94,16 +94,21 @@ class InputProbeTests(unittest.TestCase):
 
     def test_real_terminal_and_regular_fd_sources(self):
         import pty
-        master, slave = pty.openpty()
-        self.addCleanup(os.close, master)
-        with os.fdopen(slave, 'rb', buffering=0) as tty:
-            self.assertEqual(read_input('task', None, tty), 'task')
         with tempfile.TemporaryFile() as file:
             file.write(b'data')
             file.seek(0)
             self.assertEqual(read_input('task', None, file), 'task')
             file.seek(4)
             self.assertEqual(read_input('task', None, file), 'task')
+        try:
+            master, slave = pty.openpty()
+        except OSError:
+            # The sandboxed Mac CI closes terminals (Issue #99); reported as a
+            # skip, so the terminal case is NOT_RUN there, never PASS.
+            self.skipTest('no pseudo-terminal available (sandboxed CI)')
+        self.addCleanup(os.close, master)
+        with os.fdopen(slave, 'rb', buffering=0) as tty:
+            self.assertEqual(read_input('task', None, tty), 'task')
 
     def test_memory_stream_and_unsupported_stream_preserve_explicit_input(self):
         self.assertEqual(read_input('task', None, io.StringIO('data')), 'task')

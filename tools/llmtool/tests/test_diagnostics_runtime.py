@@ -570,7 +570,12 @@ class AskTests(unittest.TestCase):
                            'tempfile.TemporaryDirectory', 'tempfile.mkstemp', 'socket.socket',
                            'subprocess.Popen'):
                 stack.enter_context(patch(target, side_effect=AssertionError('no diagnostics I/O')))
-            stack.enter_context(patch('os.environ', GuardedEnvironment(LLMTOOL_HOME='/must/not/access')))
+            environment = GuardedEnvironment(LLMTOOL_HOME='/must/not/access')
+            # Keep HOME: without it the user config path falls back to the
+            # account's real home, which a sandboxed CI job cannot read (#99).
+            if 'HOME' in os.environ:
+                environment['HOME'] = os.environ['HOME']
+            stack.enter_context(patch('os.environ', environment))
             status, out, err, client, *_ = self.invoke(['ask', PROMPT, '--debug'])
         self.assertEqual((status, out), (0, CONTENT + '\n'))
         self.assertNotIn('/must/not/access', err)
