@@ -2138,8 +2138,13 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
     return rows
 
 
+CALL_GRACE = 15.0   # seconds a recorded one-shot call may run before its process is seen
+
+
 def codex_rows(now: float, root: str | None = None,
-               canonical: str | None = None) -> list[OfficeRow]:
+               canonical: str | None = None, live_calls: int | None = None) -> list[OfficeRow]:
+    """live_calls: Codex-started one-shot claude processes running now, or
+    None when the process table was not read."""
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
@@ -2150,13 +2155,15 @@ def codex_rows(now: float, root: str | None = None,
     mains, subs, scanned, actions = {}, [], set(), {}
     history = {"db": open_codex_history(CODEX_HISTORY)}
     try:
-        return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions)
+        return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions,
+                           live_calls)
     finally:
         if history["db"] is not None:
             history["db"].close()
 
 
-def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions) -> list[OfficeRow]:
+def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
+                live_calls=None) -> list[OfficeRow]:
     for path in paths:
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
@@ -2176,6 +2183,18 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions) -
         reviews = _review_rows(path, now, row)
         subs += [(key if kind == "main" else None, review) for review in reviews]
     forget_reviews(scanned)
+    if live_calls is not None:
+        # A call the record still shows running, with no matching process
+        # alive, has ended; the PM just never read its result. The oldest go
+        # first, and a call younger than CALL_GRACE may not have spawned yet.
+        busy = sorted((sub for _, sub in subs if sub.key == "review" and sub.state == WORKING
+                       and (sub.age or 0.0) > CALL_GRACE), key=lambda sub: -(sub.age or 0.0))
+        young = sum(sub.key == "review" and sub.state == WORKING and (sub.age or 0.0) <= CALL_GRACE
+                    for _, sub in subs)
+        ended = {id(sub) for sub in busy[:max(0, len(busy) - max(0, live_calls - young))]}
+        subs = [(parent, replace(sub, state=DONE, detail=sub.detail.replace(
+                    "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果")) if id(sub) in ended else sub)
+                for parent, sub in subs]
     rows = []
     for key, row in mains.items():
         if row.main:
@@ -2873,7 +2892,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                                  entry.get("statusUpdatedAt"), entry.get("name"),
                                  answerer(owners.get(pid, "")))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
-    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
+    calls = len(_one_shot_runs(processes, sessions)) if processes else None
+    rows = codex_rows(now, codex_root, canonical, calls) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
@@ -2891,16 +2911,6 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # process is listed on its own, since nothing says which thread started it.
     recorded = [row for row in rows if row.key == "review"]
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
-    if processes:
-        # A call the Codex record still shows running, with no matching process
-        # alive, has ended; the PM just never read its result. The oldest go first.
-        busy = sorted((row for row in recorded if row.state == WORKING),
-                      key=lambda row: -(row.age or 0.0))
-        ended = {id(row) for row in busy[:max(0, len(busy) - len(running))]}
-        rows = [replace(row, state=DONE, detail=row.detail.replace(
-                    "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果"))
-                if id(row) in ended else row for row in rows]
-        recorded = [row for row in rows if row.key == "review"]
     for proc in running[sum(row.state == WORKING for row in recorded):]:
         rows.append(OfficeRow("claude 單次呼叫", WORKING,
                               "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",

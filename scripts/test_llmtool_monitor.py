@@ -1538,15 +1538,20 @@ class OfficeViewTests(unittest.TestCase):
         review = mon.OfficeRow("claude 單次呼叫", mon.WORKING, "審 PR #9 @abc1234（單次呼叫執行中）",
                                360.0, 30, key="review", kind="subagent")
         newer = replace(review, age=30.0, detail="審 PR #8 @def5678（單次呼叫執行中）")
-        live = mon.Process(40, 5718, 40, "00:30", "S", "Claude Code CLI", "claude",
-                           "Codex APP-SERVER 5718")
-        other = mon.Process(7, 1, 7, "01:00", "S", "Codex APP-SERVER", "codex", "")
-        with patch.object(mon, "codex_rows", return_value=[review, newer]):
-            rows = self.rows([live, other])
+        young = replace(review, age=5.0, detail="審 PR #7 @0123456（單次呼叫執行中）")
+        main = mon.OfficeRow("codex 主對話", mon.WORKING, "", 1.0, 0, key="codex:T1", main=True)
+        with patch.object(mon, "_codex_row", return_value=("main", "T1", main, "")), \
+             patch.object(mon, "_review_rows", return_value=[review, newer, young]), \
+             patch.object(mon.glob, "glob", side_effect=lambda pattern: [pattern] if "rollout" in pattern else []), \
+             patch.object(mon.os.path, "getmtime", return_value=self.NOW):
+            rows = mon.codex_rows(self.NOW, str(self.codex), self.canonical, live_calls=1)
         calls = {row.detail: row.state for row in rows if row.key == "review"}
+        # One live process, taken by the call too young to judge: both older ones ended.
         self.assertEqual(calls, {"審 PR #9 @abc1234：程序已結束，PM 沒讀結果": mon.DONE,
-                                 "審 PR #8 @def5678（單次呼叫執行中）": mon.WORKING})
-        self.assertFalse(any("看不出是哪個對話" in row.detail for row in rows))
+                                 "審 PR #8 @def5678：程序已結束，PM 沒讀結果": mon.DONE,
+                                 "審 PR #7 @0123456（單次呼叫執行中）": mon.WORKING})
+        boss = next(row for row in rows if row.main)
+        self.assertNotIn("PR #9", boss.detail)   # an ended call is not counted as in progress
 
     def test_monitor_names_its_version_and_notices_new_code(self):
         self.assertTrue(mon.monitor_version())
