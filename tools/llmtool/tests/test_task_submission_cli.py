@@ -21,7 +21,8 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
-                                         _provider_route_binding, run_task_delegate,
+                                         _provider_route_binding, run_task_complete,
+                                         run_task_delegate,
                                          run_task_opencode_delegate,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
@@ -1579,6 +1580,64 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(len(client.calls), 1)
         saved = backing.get(task['task_id'])
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+
+    def test_interrupted_after_durable_claim_is_not_completed_or_replayed(self):
+        task = self._pm_task_with_assignment()
+        backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+        class InterruptAfterClaimStore:
+            def get(self, task_id):
+                return backing.get(task_id)
+
+            def compare_and_update(self, task_id, **kwargs):
+                result = backing.compare_and_update(task_id, **kwargs)
+                if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
+                    # Model a process interruption at the exact durable-claim boundary,
+                    # before config resolution, client creation, or provider execution.
+                    raise SystemExit(77)
+                return result
+
+            def update(self, task_id, **kwargs):
+                return backing.update(task_id, **kwargs)
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                return backing.append_dispatch_audit(task_id, entry, expected=expected)
+
+        args = self._delegate_args(task)
+        client = FakeClient(Reply('unused', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client) as factory:
+            with self.assertRaises(SystemExit) as interrupted:
+                run_task_delegate(args, store=InterruptAfterClaimStore())
+            self.assertEqual(interrupted.exception.code, 77)
+            pending = backing.get(task['task_id'])
+            self.assertEqual(pending['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(pending['completion']['state'], 'WAITING_EXECUTOR')
+            factory.assert_not_called()
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+            # The ambiguous claim cannot be completed either: the completion
+            # path refuses (it records only the missing gate), never calls the
+            # PM, and the claim stays pending, so a later dispatch is still refused.
+            complete = Namespace(task_id=task['task_id'], executor_task=args.executor_task,
+                                 reviewer_task=None, pr=None)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run_task_complete(complete, store=backing), 1)
+            after = backing.get(task['task_id'])
+            self.assertEqual(after['state'], 'PM_RESPONDED')
+            self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+            self.assertEqual(after['completion']['pm_dispatch'], 'NOT_STARTED')
+            self.assertIsNone(after['completion']['pm_response'])
+            self.assertTrue(after['completion']['missing_gates'])
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+        self.assertEqual(client.calls, [])
 
     def test_mismatched_diff_headers_and_fake_empty_diff_are_rejected(self):
         task_target = 'tools/llmtool/tests/test_task_submission_cli.py'
