@@ -89,6 +89,14 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
                 "headers": {k.lower(): v for k, v in self.headers.items()}})
         self.close_connection = True
         mode = server.mode
+        if mode == "early-hints-then-terminal":
+            payload = usage_event()
+            wire = (b"HTTP/1.1 103 Early Hints\r\nLink: </ignored>\r\n\r\n"
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(payload))
+            self.wfile.write(wire + payload)
+            self.wfile.flush()
+            return
         if mode == "disconnect":
             self.connection.shutdown(socket.SHUT_RDWR)
             return
@@ -176,6 +184,11 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         if mode == "terminal-bad-chunk-crlf":
             payload = usage_event()
             self.wfile.write(b"%x\r\n" % len(payload) + payload + b"XX0\r\n\r\n")
+            self.wfile.flush()
+            return
+        if mode == "unhashable-sse-type":
+            self._send(sse([], response={"usage": {"input_tokens": 7, "output_tokens": 5}}))
+            self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
             return
         if mode == "terminal-truncate":
@@ -835,6 +848,25 @@ class ToolIdentityTests(ProxyTestCase):
 
 
 class FormalReviewRepairTests(ProxyTestCase):
+    def test_103_then_terminal_response_is_unknown_and_never_retried(self):
+        self.upstream.mode = "early-hints-then-terminal"
+        status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (502, "UPSTREAM_OUTCOME_UNKNOWN"))
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (429, "USAGE_UNKNOWN"))
+        self.assertEqual(self.upstream.count(), 1)
+        self.assertNotIn("HANDLER_FAILURE", self.proxy.rejected)
+
+    def test_unhashable_sse_type_uses_unknown_path_without_handler_failure(self):
+        self.upstream.mode = "unhashable-sse-type"
+        self.assertEqual(self.post()[0], 200)
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (429, "USAGE_UNKNOWN"))
+        self.assertEqual(self.upstream.count(), 1)
+        self.assertNotIn("HANDLER_FAILURE", self.proxy.rejected)
+
     def test_unreviewed_request_fields_are_refused_before_admission(self):
         for name, value in (("background", True), ("previous_response_id", "prior"),
                             ("store", False), ("include", []), ("future_field", {})):
@@ -1026,7 +1058,10 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((parser.terminal, parser.usage), (True, (3, 4)))
 
     def test_sse_usage_ignores_invalid_usage_and_junk(self):
-        for data in (b"data: {not json}\n\n", b": comment\n\n", sse("response.completed",
+        for data in (b"data: {not json}\n\n", b": comment\n\n",
+                     sse([], response={"usage": {"input_tokens": 1, "output_tokens": 1}}),
+                     sse({}, response={"usage": {"input_tokens": 1, "output_tokens": 1}}),
+                     sse("response.completed",
                      response={"usage": {"input_tokens": True, "output_tokens": 1}}),
                      sse("response.completed", response={"usage": {"input_tokens": -1,
                                                                     "output_tokens": 1}})):

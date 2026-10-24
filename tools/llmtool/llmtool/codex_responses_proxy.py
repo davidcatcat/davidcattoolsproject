@@ -139,7 +139,8 @@ class SSEUsage:
             message = json.loads(data.decode("utf-8"), parse_constant=_no_constant)
         except (UnicodeError, ValueError, RecursionError):
             return
-        if type(message) is not dict or message.get("type") not in _TERMINAL_EVENTS:
+        if (type(message) is not dict or type(message.get("type")) is not str
+                or message["type"] not in _TERMINAL_EVENTS):
             return
         self.terminal = True
         response = message.get("response")
@@ -459,6 +460,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "Authorization": proxy.authorization, "Connection": "close"})
             arm()
             upstream = connection.getresponse()
+            # HTTPResponse consumes 100 Continue itself. Any other interim response
+            # returned here does not establish the final upstream outcome or usage.
+            if 100 <= upstream.status < 200:
+                raise _Abort()
             if not 200 <= upstream.status < 300:    # includes 3xx: redirects are never followed
                 total_error = 0
                 while True:

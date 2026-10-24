@@ -14,31 +14,36 @@ exhausted. This report records implementation evidence, not acceptance or merge 
 - Branch: `feat/a11c-r4-codex-high-20261024`.
 - Original task base: `cf6eb6d92100dc684d49f1f28434d4fd053f3eb6`.
 - Published parent and checkout HEAD during repair validation:
-  `6bebf52a9a45dc578500be03e27b85f844a430e3`. Its original 11-file candidate was
-  committed/pushed and Draft PR #314 was created; earlier wording saying no
-  publication occurred is superseded.
-- Tests below ran with that parent HEAD plus the ten source/test modifications
+  `237948f6781bbd0a22a08753b9b6a9f929793afa`. The initial adapter and first formal-review
+  repair are published on Draft PR #314. This new bounded M1/L1/L2 repair has not
+  been committed or pushed.
+- Tests below ran with that parent HEAD plus the four current source/test modifications
   bound by the frozen manifest below. This is a pre-publication evidence snapshot:
-  the enclosing repair commit / updated PR head supplies the final publication SHA.
-  The report does not attempt to include its own circular commit/hash value.
+  a later authorized repair commit / PR head would supply its publication SHA.
+  No published SHA or independent acceptance is claimed for these new changes.
 - Reviewed B-min implementation SHA-256:
   `8ba9acbdaa42b2bf96de8c43af25c5572532267e919edab712ac8769a81f14ab`.
   Re-ran the PM-reviewed exact-parent baseline before source edits: exit 0,
   `PASS: read-only preflight`. Private inventory paths and contents stay local.
 
-[Formal Claude review on parent HEAD](https://github.com/davidcatcat/davidcattoolsproject/pull/314#issuecomment-6381046305)
-returned **CHANGES_REQUIRED**. The prior advisory PASS and 197/197 result apply
-only to the older source manifest; neither accepts this repaired candidate.
+[Formal Claude review on parent HEAD](https://github.com/davidcatcat/davidcattoolsproject/pull/314#issuecomment-6382095331)
+returned **CHANGES_REQUIRED** for M1/L1/L2 on exact published parent `237948f`.
+That review records Python 3.9/3.14 CI PASS (run `40078045729`) for the parent;
+it is not CI evidence for these new changes. Prior advisory and test results
+likewise do not accept the repaired manifest.
 Fresh exact-head formal Claude review is required after these changes.
 
 ## Finding disposition and focused coverage
 
 | Finding | Repair and regression evidence | Remaining boundary |
 | --- | --- | --- |
+| M1 / S4 follow-up | Treat any returned 1xx as an unproven interim outcome before the final non-2xx branch; 100 Continue is consumed by the HTTP client. Deterministic 103 then terminal-response fixture proves UNKNOWN, retry denied and exactly one upstream request. | A later terminal response does not retroactively authorize retry. |
+| L1 | Type-check SSE event `type` before set membership. List/dict values no longer raise raw TypeError. End-to-end regression proves the intended UNKNOWN/no-replay path and absence of HANDLER_FAILURE. | No new event types are enabled. |
+| L2 | Type-check App-server turn `status` before set membership. Regression covers list, dict, None, bool and integer statuses with the fixed LLMToolError instead of raw TypeError. | Known status handling is unchanged. |
 | S1 | Explicit item and notification allowlists; unknown methods/types, including non-string/unhashable types, fail closed. Reported error events abort with fixed text. Text-only items and known informational notifications remain supported. | Installed 0.163.0 event compatibility still unverified. |
 | S2 / F1 | Persist actual usage as `CAP_EXCEEDED` when output exceeds the reservation. Never record it SUCCEEDED; deny further upstream admission. Proxy records `OUTPUT_CAP_EXCEEDED`; strategy raises `MODEL_RESPONSE_TOO_LARGE`. Tests cover 200 vs 128 and 5 vs a lowered cap of 4. | Reported usage is retained as observed, not silently clamped. |
 | S3 | Match exact `(type, name)` identities. Reject same-name/different-kind tools, missing names and conflicting nested function names; execution-capable kinds remain forbidden even if listed. | Empty tool allowlist remains default. |
-| S4 | Non-2xx replies become FAILED only after bounded, complete framing. Short fixed/chunked bodies and timeout become UNKNOWN and deny replay. Existing complete failure/redirect cases remain tested. | No redirects followed. |
+| S4 | Only final non-2xx replies with bounded, complete framing become FAILED. Returned interim 1xx (including 103), short fixed/chunked bodies and timeout remain UNKNOWN and deny replay. Existing complete failure/redirect cases remain tested. | No redirects followed; interim status is never zero-usage FAILED. |
 | S5 | Explicit request-field allowlist before reservation/forwarding. Reject `background`, `previous_response_id`, `store`, `include` and unknown fields. Reject `Expect: 100-continue` before body read or interim success. | Native request compatibility is not inferred. |
 | F2 | Sanitize home/stderr/listener/provider errors; guard cleanup and report/snapshot failures. Retain fixed phase/reason telemetry without raw exception/request contents. Tests include startup ledger shape, invalid snapshot return, setup, cleanup and observation failures. | Old Gate 8 failure data cannot be reconstructed. |
 | F3 | Start settling before forwarding terminal event bytes; wait for actual framing/ledger completion. Explicit settling timeout returns 503 without new reservation/forwarding. Both timing paths are tested. | In-flight unknown transport never becomes retryable. |
@@ -75,6 +80,15 @@ retroactively establish it. Strict-config acceptance, built-in tool compatibilit
 and actual Codex 0.163.0 viability are not verified. This repair made **zero**
 installed Codex/App-server launches and authorizes none.
 
+## Non-blocking advisory L3–L6
+
+Reviewed the corresponding source and the formal review summary. These remain
+recorded advisory items, unchanged in this three-fix round: L3 process-group
+PermissionError behavior; L4 version-pin regex; L5 byte/aggregate message bounds;
+L6 broad exception sanitation. Their process-ownership, compatibility, cumulative
+accounting and diagnostic changes need separate bounded work. No PASS or broader
+fix is claimed for them, and they do not change S6/S7/Q4's native gate limitations.
+
 ## Validation and self-review
 
 All commands ran in this same registered D6 tree using its own venv/import.
@@ -88,21 +102,24 @@ used. Fake ledgers do not consume the installed App-server launch allowance.
 | Proxy slice, intermediate | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p test_codex_responses_proxy.py -v` | exit 0; 74 tests, 74.151s |
 | Runtime slice, intermediate | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p test_codex_app_server_runtime.py -v` | exit 0; 42 tests, 52.759s |
 | Combined before final malformed-shape guards, superseded | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p 'test_codex_*.py' -v` | exit 0; 227 tests, 141.185s; intermediate |
-| **Final combined frozen candidate** | `./.venv/bin/python -B -m unittest discover -s tests -p 'test_codex_*.py' -v`, cwd `tools/llmtool` | **exit 0; 228 tests, 140.804s; PASS** |
+| Previous published-parent candidate, superseded for this manifest | `./.venv/bin/python -B -m unittest discover -s tests -p 'test_codex_*.py' -v`, cwd `tools/llmtool` | exit 0; 228 tests, 140.804s; historical |
+| M1 regression RED → GREEN | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p test_codex_responses_proxy.py -k test_103_then_terminal -v` | RED: exit 1, 1 test, 0.520s (UPSTREAM_FAILED); GREEN: exit 0, 1 test, 1.010s |
+| L1 regression RED → GREEN | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p test_codex_responses_proxy.py -k test_unhashable_sse_type -v` | RED: exit 1, 1 test, 1.010s (HANDLER_FAILURE); GREEN: exit 0, 1 test, 1.012s |
+| L2 regression RED → GREEN | `./tools/llmtool/.venv/bin/python -B -m unittest discover -s tools/llmtool/tests -p test_codex_app_server.py -k test_non_string_turn_status -v` | RED: exit 1, 1 test, 0.003s (2 raw TypeError subcases); GREEN: exit 0, 1 test, 0.003s |
+| **Final combined frozen M1/L1/L2 candidate** | `./.venv/bin/python -B -m unittest discover -s tests -p 'test_codex_*.py' -v`, cwd `tools/llmtool` | **exit 0; 231 tests, 144.621s; PASS** |
 | Source and documentation validation | `git diff --check`; Python AST, whitespace, exact allowlist and SHA-256 manifest checks | PASS |
 
-The final pattern selects exactly the five contracted test modules (37 protocol,
-28 ledger, 45 runtime, 44 provider and 74 proxy tests). The former 197/197 result
-and earlier 227/227 run are superseded for this manifest. No full suite or Actions
+The final pattern selects exactly the five contracted test modules (38 protocol,
+28 ledger, 45 runtime, 44 provider and 76 proxy tests). The former 197/197,
+227/227 and published-parent 228/228 results are superseded for this manifest. No full suite or Actions
 was requested during repair.
 
-In a separate read-only self-review pass, checked the complete scoped source diff,
-error/finalization ordering, known versus unknown usage, field/tool admission,
-settling behavior, durability, cleanup limits and regression changes. That pass
-found and fixed unhashable-item and malformed-snapshot edges before the final
-run. No additional reproducible in-scope blocker was found; S6/S7/Q4 remain
-explicit native blockers. Self-review is not formal acceptance. The original
-CHANGES_REQUIRED verdict is not cleared without a fresh independent review.
+In a separate read-only self-review pass, checked the complete four-file diff,
+interim-response accounting before final failure classification, SSE type guards,
+turn-status guards and RED/GREEN regression assertions. All three required code
+repairs are complete and focused checks pass; fresh independent review is still
+required. No advisory L3–L6 implementation was added. S6/S7/Q4 remain explicit
+native blockers. Self-review does not clear the formal CHANGES_REQUIRED verdict.
 
 Developer model/session: `gpt-6.1-sol` High / `/root/r4_high_developer`.
 Actual Developer token/cost telemetry: **UNKNOWN**. No savings claim. No real
@@ -111,21 +128,29 @@ ownership change occurred.
 
 ## Exact changed paths and frozen hashes
 
-Only these ten source/test files plus this report are changed. Source/test SHA-256:
+This round changes exactly these four files plus this report:
+
+- `tools/llmtool/llmtool/codex_app_server.py`
+- `tools/llmtool/llmtool/codex_responses_proxy.py`
+- `tools/llmtool/tests/test_codex_app_server.py`
+- `tools/llmtool/tests/test_codex_responses_proxy.py`
+
+The following ten-file manifest binds the cumulative candidate; the other six
+source/test files are byte-identical to published parent `237948f`. SHA-256:
 
 | Path | SHA-256 |
 | --- | --- |
-| `tools/llmtool/llmtool/codex_app_server.py` | `5f43422d038b4ab123b86da3ff39a3afa3900d5dd1c7fb67626895e830920ea4` |
+| `tools/llmtool/llmtool/codex_app_server.py` | `0979b95ba3988740f0cedbd77f11e6852fa3d3ceb5f0a35998cd49cfe2c05583` |
 | `tools/llmtool/llmtool/codex_app_server_budget.py` | `29c82d48275814add83cbe1ec41d06902e05af6caa0405bb076a428a50696251` |
 | `tools/llmtool/llmtool/codex_app_server_runtime.py` | `275bc5bfc28affc7bbcfb4e967f9035ba656063766273fbfbc478761e51405c2` |
-| `tools/llmtool/llmtool/codex_responses_proxy.py` | `119f2746feabc56057f486948b07175d22077a5f9d18f9103b479deb3ff44c2d` |
+| `tools/llmtool/llmtool/codex_responses_proxy.py` | `1d2c8e95152a41854968c2eecb147a4954f6026275199a3affa87d33a2438a05` |
 | `tools/llmtool/llmtool/providers/codex_cli.py` | `f712d857039b008328fc69f2a4b8bd31e8709eb454c79d238191e5a1a055236e` |
-| `tools/llmtool/tests/test_codex_app_server.py` | `f72dd1fcc31a0af28554d875e69b379b2be46eb59cf81429234c146c7239dba0` |
+| `tools/llmtool/tests/test_codex_app_server.py` | `f75d111a720e231d98da164419d9282e174e4778f41a9f0eb8ca3716241264c2` |
 | `tools/llmtool/tests/test_codex_app_server_budget.py` | `6cb4812618acaa52f2db25a563e57ba753d587a8c17f853249fa6020f771cc53` |
 | `tools/llmtool/tests/test_codex_app_server_runtime.py` | `48d57724b9730a4f383f38ef3cbed13f02d70725e02bea64843c80bd1253c566` |
-| `tools/llmtool/tests/test_codex_responses_proxy.py` | `1f562417968def0bbfcd90d72a875c97f6e64947a5ddd1bdcc670de1ae70c572` |
+| `tools/llmtool/tests/test_codex_responses_proxy.py` | `680e1a9c6877c10ed9f5f4190df39301f27eb290c0ca021647663147e94c1aee` |
 | `tools/llmtool/tests/test_codex_cli_provider.py` | `49d4db69578ebd61bd5da8bb8bb6b34e2a151c08db31c3e4eb78f73cfb205371` |
 
-Source/test manifest SHA-256: `6aeda99d15c07b938a9bcd7e07ee2ca14c2a08fc207cff58b31b123f5a2d2c9b`.
+Source/test manifest SHA-256: `84b87103bbe605e1e35a8b4cb8ab8834aa35c94a58314bf6328804f3bf91e621`.
 Encoding: lexicographically sorted UTF-8 records of relative path, NUL, lowercase
 file SHA-256, newline. Report excluded to avoid a recursive hash.

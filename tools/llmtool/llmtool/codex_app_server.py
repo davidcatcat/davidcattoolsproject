@@ -253,7 +253,7 @@ class AppServerClient:
                 if turn.get("id") not in (None, turn_id):
                     continue
                 status = turn.get("status")
-                if status not in _TURN_STATUSES:
+                if type(status) is not str or status not in _TURN_STATUSES:
                     raise _invalid()
                 if status != "completed":
                     raise LLMToolError("app-server turn " + status)

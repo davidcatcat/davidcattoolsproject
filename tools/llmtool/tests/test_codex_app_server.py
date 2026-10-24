@@ -336,6 +336,16 @@ class RunTurnTests(ClientTestCase):
                 with self.assertRaisesRegex(LLMToolError, "turn " + status):
                     peer.client.run_turn("p", "/c")
 
+    def test_non_string_turn_status_is_rejected_without_raw_typeerror(self):
+        for status in ([], {}, None, True, 7):
+            with self.subTest(status=status):
+                peer = Peer()
+                self.addCleanup(peer.close)
+                peer.say(response(1, thread={"id": "t1"}), response(2, turn={"id": "u1"}),
+                         turn_done(status))
+                with self.assertRaisesRegex(LLMToolError, "^app-server message invalid$"):
+                    peer.client.run_turn("p", "/c")
+
     def test_unknown_turn_status_is_invalid(self):
         self.script(turn_done("weird"))
         with self.assertRaises(LLMToolError):
