@@ -43,10 +43,12 @@ _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
 _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
-_REQUIRED_CHECKS = frozenset(('check (3.9)', 'check (3.14)'))
+_REQUIRED_CHECKS = frozenset(('check (macOS 3.13)',))
+_NOT_RUN_CHECKS = ('Linux Python 3.9', 'Linux Python 3.14', 'Windows CI')
+_CI_RUNNER_NAME = 'davidproject-self-action'
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
-_CI_WORKFLOW_PATH = '.github/workflows/llmtool-ci.yml'
-_CI_WORKFLOW_NAME = 'llmtool CI'
+_CI_WORKFLOW_PATH = '.github/workflows/llmtool-mac-ci.yml'
+_CI_WORKFLOW_NAME = 'llmtool Mac CI'
 _GITHUB_ACTIONS_APP_ID = 15368
 _TEST_PATH = re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z')
 _REVIEW_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
@@ -1459,7 +1461,7 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
 
 
 def _collect_ci_evidence(*, pr_number, result_sha):
-    workflow = _github_get('actions/workflows/llmtool-ci.yml')
+    workflow = _github_get('actions/workflows/llmtool-mac-ci.yml')
     if (type(workflow) is not dict or type(workflow.get('id')) is not int or
             workflow['id'] <= 0 or workflow.get('path') != _CI_WORKFLOW_PATH or
             workflow.get('name') != _CI_WORKFLOW_NAME or workflow.get('state') != 'active'):
@@ -1511,6 +1513,7 @@ def _collect_ci_evidence(*, pr_number, result_sha):
             r'https://api\.github\.com/repos/davidcatcat/davidcattoolsproject/'
             r'check-runs/([1-9][0-9]{0,18})', check_url))
         if (name in required_jobs or job.get('run_id') != run_id or
+                job.get('runner_name') != _CI_RUNNER_NAME or
                 type(job.get('id')) is not int or job['id'] <= 0 or
                 check_id_match is None):
             _stop('CI_WORKFLOW_JOBS_INVALID')
@@ -1671,6 +1674,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'review_binding_verified': review_binding_verified,
             'required_checks': sorted(_REQUIRED_CHECKS),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
+            'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
+                               for name in _NOT_RUN_CHECKS],
             'ci_workflow_path': _CI_WORKFLOW_PATH,
             'ci_workflow_name': _CI_WORKFLOW_NAME,
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],

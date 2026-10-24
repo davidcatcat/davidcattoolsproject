@@ -1,9 +1,11 @@
-name: llmtool CI
+name: llmtool Mac CI
 
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
 # main keeps its post-merge run; workflow_dispatch is the manual check for a
-# ref without a PR.
+# ref without a PR. Keep this workflow disabled until the Mac runner has a
+# dedicated unprivileged account and the isolation audit has passed. The
+# MAC_CI_ENABLED repository variable is a second, fail-closed admission gate.
 on:
   push:
     branches:
@@ -12,13 +14,13 @@ on:
       - 'tools/llmtool/**'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
-      - '.github/workflows/llmtool-ci.yml'
+      - '.github/workflows/llmtool-mac-ci.yml'
   pull_request:
     paths:
       - 'tools/llmtool/**'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
-      - '.github/workflows/llmtool-ci.yml'
+      - '.github/workflows/llmtool-mac-ci.yml'
   workflow_dispatch:
 
 permissions:
@@ -30,12 +32,10 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.14']
+    name: check (macOS 3.13)
+    if: vars.MAC_CI_ENABLED == 'true'
+    runs-on: [self-hosted, macOS, X64, local-mac-ci]
+    timeout-minutes: 30
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
@@ -69,38 +69,33 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
-      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
-        with:
-          python-version: ${{ matrix.python-version }}
-      # The trusted-runtime check (wire.file_hash) refuses an interpreter that
-      # group/other can rewrite; some runner-image tool caches ship 0777. Run
-      # on a job-owned copy instead of weakening the check or chmod-ing the
-      # shared tool cache, and prove the copy is byte-identical.
+      # Use the Mac's Python 3.13 in a job-owned venv with a copied executable.
+      # The trusted-runtime check refuses a group/other-writable interpreter;
+      # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
         run: |
-          src="$(python -c 'import sys; print(sys.base_prefix)')"
-          src_exe="$(python -c 'import os,sys; print(os.path.realpath(sys.executable))')"
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
+          src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
           dst="$RUNNER_TEMP/job-python"
-          cp -a "$src" "$dst"
+          python3 -m venv --copies "$dst"
           chmod -R go-w "$dst"
-          exe="$dst/${src_exe#"$src"/}"
+          exe="$dst/bin/python3"
           fail() { echo "::error::job-owned Python check failed: $1"; exit 1; }
           { test -f "$exe" && test ! -L "$exe"; } || fail "interpreter is not a regular file"
-          test "$(stat -c %u "$exe")" = "$(id -u)" || fail "interpreter not owned by job user"
-          test $(( 0$(stat -c %a "$exe") & 022 )) -eq 0 || fail "interpreter group/other writable"
-          # Scan physical entries only; external symlink targets are not checked.
-          # setup-python/cache libraries (including LD_LIBRARY_PATH) remain trusted;
-          # executable verification does not prove full relocated runtime integrity.
+          test "$(stat -f %u "$exe")" = "$(id -u)" || fail "interpreter not owned by job user"
+          test $(( 0$(stat -f %Lp "$exe") & 022 )) -eq 0 || fail "interpreter group/other writable"
+          # Scan physical entries only; the shared base runtime and libraries
+          # remain part of the audited Mac runner trust boundary.
           # BEGIN status-checked verification
-          inventory=$(find "$dst" ! -type l -perm /022 -print -quit) || fail "cannot scan copy"
+          inventory=$(find "$dst" ! -type l \( -perm -020 -o -perm -002 \) -print -quit) || fail "cannot scan copy"
           test -z "$inventory" || fail "writable file left in copy"
-          copy_hash=$(sha256sum < "$exe") || fail "cannot hash copy"
-          source_hash=$(sha256sum < "$src_exe") || fail "cannot hash source"
+          copy_hash=$(shasum -a 256 < "$exe") || fail "cannot hash copy"
+          source_hash=$(shasum -a 256 < "$src_exe") || fail "cannot hash source"
           [[ "$copy_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid copy hash"
           [[ "$source_hash" =~ ^[0-9a-f]{64}[[:space:]][[:space:]]-$ ]] || fail "invalid source hash"
           test "$copy_hash" = "$source_hash" || fail "interpreter bytes differ"
           # END status-checked verification
-          "$exe" -c 'import os,sys; assert os.path.realpath(sys.executable).startswith(os.environ["RUNNER_TEMP"])' \
+          "$exe" -c 'import os,sys; root=os.path.realpath(os.environ["RUNNER_TEMP"]); assert os.path.commonpath((root,os.path.realpath(sys.executable)))==root' \
             || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
@@ -116,26 +111,26 @@ jobs:
           import tempfile
           import yaml
 
-          workflow = yaml.safe_load(Path('.github/workflows/llmtool-ci.yml').read_text())
+          workflow = yaml.safe_load(Path('.github/workflows/llmtool-mac-ci.yml').read_text())
           step = next(s for s in workflow['jobs']['check']['steps']
                       if s.get('name') == 'Job-owned verified Python')['run']
           guard = step.split('# BEGIN status-checked verification\n', 1)[1].split(
               '# END status-checked verification', 1)[0]
           fail = next(line for line in step.splitlines() if line.startswith('fail()'))
           # Run the actual guard, not a second implementation of its checks.
-          second_hash_error = ('sha256sum() { if test -e "$dst/hash-called"; then return 2; '
-                               'fi; : > "$dst/hash-called"; command sha256sum; }')
-          second_hash_empty = ('sha256sum() { if test -e "$dst/hash-called"; then return 0; '
-                               'fi; : > "$dst/hash-called"; command sha256sum; }')
+          second_hash_error = ('shasum() { if test -e "$dst/hash-called"; then return 2; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
+          second_hash_empty = ('shasum() { if test -e "$dst/hash-called"; then return 0; '
+                               'fi; : > "$dst/hash-called"; command shasum "$@"; }')
           cases = [
               ('regular flow', '', None, None),
               ('find error with empty stdout', 'find() { return 2; }', None, 'cannot scan copy'),
               ('writable entry', '', 'writable', 'writable file left in copy'),
-              ('both hash tools fail', 'sha256sum() { return 2; }', None, 'cannot hash copy'),
+              ('both hash tools fail', 'shasum() { return 2; }', None, 'cannot hash copy'),
               ('source hash tool fails', second_hash_error, None, 'cannot hash source'),
-              ('copy hash empty success', 'sha256sum() { return 0; }', None, 'invalid copy hash'),
+              ('copy hash empty success', 'shasum() { return 0; }', None, 'invalid copy hash'),
               ('source hash empty success', second_hash_empty, None, 'invalid source hash'),
-              ('malformed hash', "sha256sum() { printf 'invalid\\n'; }", None, 'invalid copy hash'),
+              ('malformed hash', "shasum() { printf 'invalid\\n'; }", None, 'invalid copy hash'),
               ('different bytes', '', 'different', 'interpreter bytes differ'),
               ('copy unreadable', '', 'copy unreadable', 'cannot hash copy'),
               ('source unreadable', '', 'source unreadable', 'cannot hash source'),
