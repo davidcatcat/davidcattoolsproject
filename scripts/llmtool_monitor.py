@@ -1195,6 +1195,7 @@ import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
+CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
@@ -2355,7 +2356,8 @@ DISPATCH_PROBLEMS = {
 }
 
 
-def track_one_shot(state: dict, processes: list[Process], now: float):
+def track_one_shot(state: dict, processes: list[Process], now: float,
+                   sessions: str | None = None):
     """Remember short `claude -p` runs started by Codex after they exit.
 
     They leave no session file and often last under a minute, so without this
@@ -2363,8 +2365,7 @@ def track_one_shot(state: dict, processes: list[Process], now: float):
     state, [(duration_s, seconds_since_end)] for runs that ended within the
     done window, and one log line per run that just ended. Memory only."""
     state = {pid: list(item) for pid, item in state.items()}
-    live = {p.pid: p for p in processes
-            if p.role == "Claude Code CLI" and p.owner.startswith("Codex")}
+    live = {p.pid: p for p in _one_shot_runs(processes, sessions or CLAUDE_SESSIONS)}
     for pid, proc in live.items():
         if pid not in state or state[pid][2] is not None:   # new, or a reused PID
             state[pid] = [now - (_elapsed_seconds(proc.elapsed) or 0.0), now, None]
@@ -2401,17 +2402,16 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     return [row for row in out if row.group not in gone]
 
 
-def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
-    """Session ids of running Claude CLIs, from the CLI's own <pid>.json
-    registry, plus how many running CLIs have no readable entry. None when
-    there is no registry to read, so nothing is judged closed."""
+def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, str] | None:
+    """Session id of each running Claude CLI that names one in the CLI's own
+    <pid>.json registry. None when there is no registry to read."""
     try:
         names = os.listdir(sessions)
     except OSError:
         return None
     pids = {p.pid for p in processes
             if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
-    live = set()
+    found = {}
     for name in names:
         pid = name[:-len(".json")]
         if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
@@ -2422,9 +2422,28 @@ def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set,
         except (OSError, ValueError):
             continue
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
-            live.add(entry["sessionId"])
-            pids.discard(int(pid))
-    return live, len(pids)
+            found[int(pid)] = entry["sessionId"]
+    return found
+
+
+def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
+    """Session ids of running Claude CLIs, from the CLI's own <pid>.json
+    registry, plus how many running CLIs have no readable entry. None when
+    there is no registry to read, so nothing is judged closed."""
+    found = _claude_registered(sessions, processes)
+    if found is None:
+        return None
+    pids = {p.pid for p in processes
+            if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
+    return set(found.values()), len(pids - set(found))
+
+
+def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
+    """Claude CLIs started by Codex that keep no session: an interactive
+    session Codex drives registers itself and is shown from its own record."""
+    registered = _claude_registered(sessions, processes) or {}
+    return [p for p in processes if p.role == "Claude Code CLI"
+            and p.owner.startswith("Codex") and p.pid not in registered]
 
 
 def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
@@ -2469,8 +2488,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
         p.role == "Codex CLI (node launcher)" for p in processes)
     rows = _closed_codex_cli(rows, clis)
-    rows = _closed_claude_cli(rows, os.path.join(os.path.dirname(
-        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions"), processes)
+    sessions = os.path.join(os.path.dirname(
+        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
+    rows = _closed_claude_cli(rows, sessions, processes)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
@@ -2481,8 +2501,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # file. Calls a Codex record already shows are not repeated; any further
     # process is listed on its own, since nothing says which thread started it.
     recorded = [row for row in rows if row.key == "review"]
-    running = sorted((p for p in processes if p.role == "Claude Code CLI"
-                      and p.owner.startswith("Codex")), key=lambda p: p.pid)
+    running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     for proc in running[sum(row.state == WORKING for row in recorded):]:
         rows.append(OfficeRow("claude 單次呼叫", WORKING,
                               "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",

@@ -28,7 +28,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -1195,6 +1195,24 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((runs[0].state, runs[0].kind, runs[0].age, runs[0].group, runs[0].evidence),
                          (mon.WORKING, "subagent", 130.0, "", "程序"))
         self.assertIn("看不出是哪個對話", runs[0].detail)
+
+    def test_interactive_claude_session_started_by_codex_is_not_a_one_shot_run(self):
+        # Codex can drive an interactive Claude TUI; it registers its session
+        # and is shown from that record, so it must not also appear as a run.
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "40.json").write_text(json.dumps({"pid": 40, "sessionId": "dev"}),
+                                          encoding="utf-8")
+        tui = mon.Process(40, 5718, 40, "07:00:00", "Ss+", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        run = mon.Process(42, 5718, 42, "00:30", "S", "Claude Code CLI", "claude",
+                          "Codex APP-SERVER 5718")
+        rows = self.rows([tui, run])
+        runs = [row for row in rows if row.name == "claude 單次呼叫"]
+        self.assertEqual([row.age for row in runs], [30.0])
+        state, _, _ = mon.track_one_shot({}, [tui, run], 1000.0, str(sessions))
+        state, finished, ended = mon.track_one_shot(state, [], 1010.0, str(sessions))
+        self.assertEqual((len(finished), len(ended)), (1, 1))   # only the -p run ended
 
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
