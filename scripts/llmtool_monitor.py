@@ -472,7 +472,8 @@ class Monitor:
                     self.stale = True
                     new.append((stamp, "!", f"監控程式已更新，這個畫面還是舊版（{self.version}），請按 q 後重開"))
                 try:
-                    self.d6 = d6_task_lines(canonical_root(), office, time.time())
+                    self.d6 = d6_task_lines(canonical_root(), office, time.time(),
+                                            self.github.branch_prs if self.github else None)
                 except Exception:  # optional, like task evidence; never show a stale list
                     self.d6 = []
         if self.short_lived and now - self.last_summary >= self.summary_every:
@@ -1064,6 +1065,95 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
     return events
 
 
+# Anything a marker addresses to the Owner is a decision the Owner owes, whatever
+# type the PM chose (repair_gate, waiting_owner, ...). Fields are read loosely
+# here (a target may be a long task name); only trusted, leading marker lines
+# count. A later marker on the same thread with actor=Owner, or a resolved
+# status, or the PR closing, settles it.
+# A field starts after whitespace or right after "activity:", so a value such
+# as note=actor=Owner is never read as a field of its own.
+OWNER_FIELD = re.compile(r"(?:(?<=\s)|(?<=activity:))(type|actor|target|status)="
+                         r"([A-Za-z0-9_.#-]{1,64})(?![\w.#=-])")
+OWNER_SETTLED = frozenset({"APPROVED", "DECLINED", "DENIED", "GRANTED", "REJECTED", "ANSWERED",
+                           "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN", "AUTHORIZED",
+                           "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED"})
+OWNER_SHOWN = 5   # at most this many ★ lines; the rest are counted
+
+
+@dataclass(frozen=True)
+class OwnerPending:
+    when: float
+    reference: str   # "#310"
+    status: str
+    summary: str
+
+
+def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
+    """Requests addressed to the Owner that nothing later has settled (pure).
+    earlier: requests still open at the previous read; they stay open until
+    something in this read settles them, so a request older than the window
+    the comments cover does not silently drop out."""
+    marked = []
+    for comment in comments if type(comments) is list else []:
+        if type(comment) is not dict:
+            continue
+        association = comment.get("author_association")
+        number = _issue_number(comment.get("issue_url"))
+        body = comment.get("body")
+        if not (type(association) is str and association in TRUSTED_ASSOCIATION and number
+                and type(body) is str):
+            continue
+        for line in body.splitlines()[:MAX_MARKERS]:
+            if MARKER.fullmatch(line) is None:   # leading, column-zero marker lines only
+                break
+            fields = {}
+            for key, value in OWNER_FIELD.findall(line):
+                value = value.rstrip("-")   # "status=APPROVED-->" written without a space
+                fields.setdefault(key, value.casefold() if key in ("actor", "target") else value.upper())
+            order = comment.get("id") if type(comment.get("id")) is int else 0
+            marked.append((_github_time(comment.get("created_at")), order, number, fields, body))
+    closed = {}
+    for pull in pulls if type(pulls) is list else []:
+        if type(pull) is dict and type(pull.get("number")) is int:
+            closed[str(pull["number"])] = max(_github_time(pull.get("merged_at")),
+                                             _github_time(pull.get("closed_at")))
+    # One open request per thread (the latest); an Owner marker settles the thread.
+    open_requests = {item.reference[1:]: item for item in earlier}
+    for when, _, number, fields, body in sorted(marked, key=lambda item: item[:2]):
+        status = fields.get("status", "")
+        held = open_requests.get(number)
+        if held is not None and when < held.when:
+            continue   # older than the open request: neither asks nor settles again
+        if fields.get("actor") == "owner" or (fields.get("target") == "owner"
+                                              and status in OWNER_SETTLED):
+            open_requests.pop(number, None)
+        elif fields.get("target") == "owner" and when:
+            open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body))
+    return sorted((item for number, item in open_requests.items()
+                   if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
+
+
+def branch_prs(pulls, repo: str | None = None) -> dict[str, tuple[int, str]]:
+    """{head branch: (PR number, MERGED/CLOSED/OPEN)} from a pulls listing; the
+    newest PR wins when a branch was reused. With repo, PRs from forks (whose
+    branch may share a name with ours) are left out."""
+    found: dict[str, tuple[int, str]] = {}
+    for pull in sorted((p for p in pulls if type(p) is dict) if type(pulls) is list else [],
+                       key=lambda p: p.get("number") if type(p.get("number")) is int else 0):
+        head = pull.get("head")
+        ref = head.get("ref") if type(head) is dict else None
+        source = head.get("repo") if type(head) is dict else None
+        if repo is not None and (type(source) is not dict or type(source.get("full_name")) is not str
+                                 or source["full_name"].casefold() != repo.casefold()):
+            continue
+        if type(pull.get("number")) is not int or type(ref) is not str or not BRANCH.fullmatch(ref):
+            continue
+        state = ("MERGED" if pull.get("merged_at") else
+                 "CLOSED" if pull.get("state") == "closed" else "OPEN")
+        found[ref] = (pull["number"], state)
+    return found
+
+
 class GitHubSource:
     """Rate-limited, read-only GitHub activity. Failures become a status line."""
 
@@ -1074,6 +1164,9 @@ class GitHubSource:
         self.runner = runner or subprocess.run
         self.clock = clock
         self.events: list[ActivityEvent] = []
+        self.pending: list[OwnerPending] = []
+        self.scope = ""   # what the ★ list could see, said next to it
+        self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.status = "GitHub：尚未讀取"
         self.fetched = None   # monotonic time of the last attempt
 
@@ -1129,7 +1222,7 @@ class GitHubSource:
                     probe = None
                 more = not (type(probe) is list and not probe)
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
-                              "&direction=desc&per_page=30")
+                              "&direction=desc&per_page=100")
             # A comment posted between page reads shifts the pages: list it once.
             seen, unique = set(), []
             for item in comments:
@@ -1137,7 +1230,13 @@ class GitHubSource:
                 if key is None or (type(key) is int and key not in seen):
                     seen.add(key)
                     unique.append(item)
-            self.events = github_events(unique, pulls, since)   # one atomic swap
+            events = github_events(unique, pulls, since)
+            pending = owner_pending(unique, pulls, self.pending)
+            prs = branch_prs(pulls, self.repo)
+            scope = (f"等你決定：看最近 {int(self.window // 3600)} 小時的 GitHub 留言"
+                     + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
+                     + "；監控開著時，更早還沒回覆的也會留著")
+            self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
@@ -1427,17 +1526,21 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
     return found
 
 
-def _d6_detail(record: dict, written: float) -> tuple[str, str, float, float]:
-    """(state, bound agent id, recorded update, file write) for the task list;
-    malformed fields fall back, so a bad record never drops the task's placement."""
-    state, agent = record.get("state"), record.get("trusted_agent_id")
+BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+
+
+def _d6_detail(record: dict, written: float) -> tuple[str, str, float, float, str]:
+    """(state, bound agent id, recorded update, file write, branch) for the task
+    list; malformed fields fall back, so a bad record never drops the task's placement."""
+    state, agent, branch = record.get("state"), record.get("trusted_agent_id"), record.get("branch")
     try:
         verified = _github_time(record.get("last_verified_at"))
     except (OverflowError, OSError, ValueError):
         verified = 0.0
     return (state if type(state) is str and CODE_TEXT.fullmatch(state) else "?",
             agent if type(agent) is str and AGENT_ID.fullmatch(agent) else "",
-            verified or written, written)
+            verified or written, written,
+            branch if type(branch) is str and BRANCH.fullmatch(branch) else "")
 
 
 def registry_details(canonical: str) -> dict:
@@ -1453,34 +1556,55 @@ D6_STATES = {   # D6 record state -> plain words
     "RETAIN_BLOCKED": "保留待處置", "RETIRE_READY": "已驗收，可收尾",
 }
 D6_WINDOW = 24 * 3600
+D6_OPEN_STATES = frozenset({"ACTIVE", "REPAIR", "REVIEW_PENDING"})
+D6_STALE_HEAD = "⚠ 另有 "
+PR_DONE_WORDS = {"MERGED": "已合併", "CLOSED": "已關閉"}
 AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
 
 
-def d6_task_lines(canonical: str, office: list, now: float) -> list[str]:
+def d6_task_lines(canonical: str, office: list, now: float,
+                  prs: dict[str, tuple[int, str]] | None = None) -> list[str]:
     """Locked D6 tasks whose record changed in the last 24 hours, newest first,
     each with the live session working in its root, if any. Only the task id,
-    state, bound agent id and time are read; free-text dispositions are not."""
+    state, bound agent id, branch and time are read; free-text dispositions are
+    not. prs (branch -> PR state, from GitHub) flags records still in progress
+    whose PR has already merged or closed, including older ones, in one line."""
     details = registry_details(canonical)
+    prs = prs or {}
+
+    def stale(state, branch):
+        found = prs.get(branch) if state in D6_OPEN_STATES and branch else None
+        return found if found and found[1] in PR_DONE_WORDS else None
     live = {}
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
     # A recorded time in the future would pin a task on top: use the write time.
-    stamped = ((task_id, state, agent, verified if verified <= now + 300 else written)
-               for task_id, (state, agent, verified, written) in details.items())
+    stamped = ((task_id, state, agent, verified if verified <= now + 300 else written, branch)
+               for task_id, (state, agent, verified, written, branch) in details.items())
     recent = sorted((item for item in stamped if now - item[3] <= D6_WINDOW),
                     key=lambda item: -item[3])
     width = max((len(item[0]) for item in recent), default=0)
     lines = []
-    for task_id, state, agent, when in recent:
+    for task_id, state, agent, when, branch in recent:
         who = "、".join(live.get(task_id, [])) or "沒有 session 在跑"
+        done = stale(state, branch)
+        note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
-                     f"{D6_STATES.get(state, state)}  →  {who}  （{agent or '未綁定 agent'}）")
+                     f"{D6_STATES.get(state, state)}  →  {who}  （{agent or '未綁定 agent'}）{note}")
+    older = sorted(task_id for task_id, (state, _, _, written, branch) in details.items()
+                   if stale(state, branch) and task_id not in {item[0] for item in recent})
+    if older:
+        lines.append(D6_STALE_HEAD + f"{len(older)} 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉："
+                     + "、".join(older[:6]) + ("…" if len(older) > 6 else ""))
     return lines
 
 
 def d6_lines(lines: list[str]) -> list[str]:
-    return ["D6 任務（近 24 小時有更新，最新在上）", *(lines[:15] or ["近 24 小時沒有更新的 D6 任務。"])]
+    tasks = [line for line in lines if not line.startswith(D6_STALE_HEAD)]
+    summary = [line for line in lines if line.startswith(D6_STALE_HEAD)]   # never cut off
+    return ["D6 任務（近 24 小時有更新，最新在上）",
+            *(tasks[:15] or ["近 24 小時沒有更新的 D6 任務。"]), *summary]
 
 
 def _place(cwd, canonical: str) -> tuple[str, str] | None:
@@ -3263,12 +3387,25 @@ def _row_style(state: str) -> str:
 
 
 def office_view(rows: list[OfficeRow], error: str | None = None,
-                width: int | None = None, expand: bool = False) -> list[tuple[str, str]]:
+                width: int | None = None, expand: bool = False,
+                pending: list[OwnerPending] | None = None,
+                now: float | None = None, scope: str = "") -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
-    expand lists older finished work too instead of folding it into one line."""
+    expand lists older finished work too instead of folding it into one line.
+    pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
     out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
+    now = time.time() if now is None else now
+    pending = list(pending or [])
+    texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
+             + (f" — {item.summary}" if item.summary else "")
+             for item in pending[-OWNER_SHOWN:]]
+    if len(pending) > OWNER_SHOWN:
+        texts.append(f"★ …另有 {len(pending) - OWNER_SHOWN} 筆較早的等你決定")
+    for text in texts:
+        out += [(("  " if i else "") + piece, "!") for i, piece in
+                enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
     if error:
         return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
@@ -3331,14 +3468,17 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         out.append((line.rstrip(), _row_style(row.state)))
         out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
+    if scope:
+        legend.append(scope)
     text = "；".join(legend)
     out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
     return out
 
 
 def office_lines(rows: list[OfficeRow], error: str | None = None,
-                 width: int | None = None, expand: bool = False) -> list[str]:
-    return [line for line, _ in office_view(rows, error, width, expand)]
+                 width: int | None = None, expand: bool = False,
+                 pending: list[OwnerPending] | None = None, scope: str = "") -> list[str]:
+    return [line for line, _ in office_view(rows, error, width, expand, pending, scope=scope)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -3366,13 +3506,18 @@ def record_lines(records: list[str]) -> list[str]:
 
 def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
+    if github is not None:
+        github.refresh()   # before the poll, so the D6 list can see PR states
+        mon.github = github
     mon.poll()
     print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
           f"{summary(mon.processes, mon.lingering)}")
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
-    print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
+    print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
+                                 pending=github.pending if github is not None else None,
+                                 scope=github.scope if github is not None else "")))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -3473,7 +3618,9 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
-            lines = office_view(mon.office, mon.office_error, w - 1, expanded)
+            lines = office_view(mon.office, mon.office_error, w - 1, expanded,
+                                pending=mon.github.pending if mon.github is not None else None,
+                                scope=mon.github.scope if mon.github is not None else "")
             offset = max(0, min(offset, len(lines) - body))
             styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                       "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}

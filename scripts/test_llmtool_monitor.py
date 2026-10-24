@@ -755,6 +755,97 @@ class GitHubActivityTests(unittest.TestCase):
             source.refresh(force=True)
         self.assertEqual(len(source.events), 103)
 
+    def test_requests_addressed_to_the_owner_wait_until_settled(self):
+        ask = lambda n, t, status="AUTHORIZATION_REQUESTED", kind="repair_gate": comment(
+            n, NOW - t, f"<!-- activity: type={kind} actor=PM target=Owner status={status} -->\n"
+                        f"## Need a decision on {n}")
+        settled_by_owner = comment(11, NOW - 100,
+                                   "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->")
+        comments = [
+            ask(10, 500),                                   # open
+            ask(11, 400), settled_by_owner,                 # answered later by the Owner
+            ask(12, 300, status="APPROVED"),                # already settled status
+            ask(13, 300, kind="owner_decision_request_for_a_long_task_name_20261024"),   # any type, long name
+            comment(14, NOW - 300, "see\n<!-- activity: type=x actor=PM target=Owner status=WAITING -->"),  # not leading
+            comment(15, NOW - 300, ask(15, 300)["body"], association="NONE"),               # untrusted
+            comment(16, NOW - 300, "<!-- activity: type=x actor=PM target=PM status=WAITING -->"),  # not the Owner
+            ask(17, 300, kind="repair_gate", status="WAITING"),   # its PR closed afterwards
+        ]
+        pulls = [{"number": 17, "title": "x", "created_at": iso(NOW - 900),
+                  "closed_at": iso(NOW - 50), "merged_at": None}]
+        pending = mon.owner_pending(comments, pulls)
+        self.assertEqual([item.reference for item in pending], ["#10", "#13"])
+        self.assertEqual(pending[0].status, "AUTHORIZATION_REQUESTED")
+        self.assertEqual(pending[0].summary, "Need a decision on 10")
+        lines = mon.office_lines([], pending=pending[:1])
+        self.assertTrue(lines[1].startswith("★ 等你決定：GitHub #10"))
+        self.assertIn("Need a decision on 10", lines[1])
+
+    def test_owner_marker_parsing_order_and_display_edges(self):
+        mark = lambda n, t, fields, text="ask": comment(n, NOW - t, f"<!-- activity: {fields} -->\n{text} {n}")
+        comments = [
+            mark(20, 50, "type=x actor=PM target=PM note=actor=Owner status=WAITING"),   # nested: no field
+            mark(20, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(21, 50, "type=x actor=PM target=PM reason=target=Owner status=WAITING"),  # nested: not a request
+            mark(22, 60, "type=x actor=pm target=owner status=waiting"),                  # case: still a request
+            mark(23, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(23, 40, "type=y actor=OWNER target=R2 status=approved"),                 # case: settles
+            mark(24, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(24, 50, "type=x actor=PM target=Owner status=Approved"),                  # settled status, any case
+            mark(25, 90, "type=y actor=Owner target=R2 status=APPROVED"),                 # before the ask: no effect
+            mark(25, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(26, 60, "type=x actor=PM target=Owner status=WAITING", "first"),
+            mark(26, 30, "type=x actor=PM target=Owner status=BLOCKED", "second"),         # latest on a thread wins
+            mark(27, 60, "type=x actor=PM target=Owner status=WAITING"),                  # PR closed before the ask
+            mark(28, 60, "type=x actor=PM target=Owner status=WAITING"),
+            comment(28, NOW - 50, "<!-- activity: type=x actor=PM target=Owner status=APPROVED-->"),  # no space
+            mark(29, 60, "type=x actor=PM target=Owner target=PM status=WAITING"),        # first field counts
+        ]
+        pulls = [{"number": 27, "closed_at": iso(NOW - 999), "merged_at": None}]
+        pending = {item.reference: item for item in mon.owner_pending(comments, pulls)}
+        self.assertEqual(sorted(pending), ["#20", "#22", "#25", "#26", "#27", "#29"])
+        self.assertEqual((pending["#26"].status, pending["#26"].summary), ("BLOCKED", "second 26"))
+        many = [mon.OwnerPending(NOW - i, f"#{i}", "WAITING", "x") for i in range(7, 0, -1)]
+        lines = mon.office_lines([], pending=many)
+        self.assertEqual(sum(line.startswith("★") for line in lines), mon.OWNER_SHOWN + 1)
+        self.assertIn("…另有 2 筆", lines[mon.OWNER_SHOWN + 1])
+        narrow = mon.office_view([], width=3, pending=many[:1])
+        self.assertTrue(narrow[1][0].startswith("★"))
+
+    def test_owner_requests_outlive_the_comment_window_until_settled(self):
+        ask = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
+        answer = "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->\nok"
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=FakeRun((0, [comment(9, NOW - 30, ask)]), (0, [])),
+                                      clock=lambda: NOW)
+            source.refresh()
+            self.assertEqual([item.reference for item in source.pending], ["#9"])
+            self.assertIn("等你決定：看最近 12 小時", source.scope)
+            source.runner = FakeRun((0, []), (0, []))       # the ask has aged out of the window
+            source.refresh(force=True)
+            self.assertEqual([item.reference for item in source.pending], ["#9"])
+            source.runner = FakeRun((0, [comment(9, NOW - 5, answer)]), (0, []))
+            source.refresh(force=True)
+            self.assertEqual(source.pending, [])
+        row = mon.OfficeRow("codex 主對話", mon.IDLE, "x", 1.0, 0, key="codex:T1", main=True)
+        self.assertIn(source.scope, mon.office_lines([row], pending=[], scope=source.scope)[-1])
+
+    def test_branch_prs_leave_out_forks(self):
+        pulls = [{"number": 1, "head": {"ref": "fix/a", "repo": {"full_name": "o/r"}}, "state": "open"},
+                 {"number": 2, "head": {"ref": "fix/a", "repo": {"full_name": "fork/r"}},
+                  "state": "closed", "merged_at": None},
+                 {"number": 3, "head": {"ref": "fix/b", "repo": None}, "state": "closed", "merged_at": None}]
+        self.assertEqual(mon.branch_prs(pulls, "o/r"), {"fix/a": (1, "OPEN")})
+        self.assertEqual(mon.branch_prs(pulls, "O/R"), {"fix/a": (1, "OPEN")})   # names compare case-insensitively
+
+    def test_source_keeps_owner_pending_with_its_events(self):
+        body = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
+        run = FakeRun((0, [comment(9, NOW - 30, body)]), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual([item.reference for item in source.pending], ["#9"])
+
     def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
         import threading
         gate = threading.Event()
@@ -1181,10 +1272,46 @@ class OfficeViewTests(unittest.TestCase):
                 self._register("wp-1", str(self.task), last_verified_at=value, state=7,
                                trusted_agent_id={"x": 1})
                 self.assertIn("wp-1", mon.registered_tasks(self.canonical))
-                state, agent, _, _ = mon.registry_details(self.canonical)["wp-1"]
+                state, agent, _, _, _ = mon.registry_details(self.canonical)["wp-1"]
                 self.assertEqual((state, agent), ("?", ""))
                 lines = mon.d6_task_lines(self.canonical, [], mon.time.time())
                 self.assertEqual(len(lines), 1)   # placed by its write time
+
+    def test_d6_records_still_in_progress_after_their_pr_ended_are_flagged(self):
+        stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
+        roots = {}
+        for name in ("recent-merged", "recent-open", "recent-retired", "old-closed", "old-plain"):
+            roots[name] = Path(self.tmp.name) / name
+            roots[name].mkdir()
+        self._register("recent-merged", str(roots["recent-merged"]), branch="fix/a",
+                       last_verified_at=stamp(60))
+        self._register("recent-open", str(roots["recent-open"]), branch="fix/b",
+                       state="REVIEW_PENDING", last_verified_at=stamp(60))
+        self._register("recent-retired", str(roots["recent-retired"]), branch="fix/c",
+                       state="RETIRE_READY", last_verified_at=stamp(60))
+        self._register("old-closed", str(roots["old-closed"]), branch="docs/d",
+                       state="REPAIR", last_verified_at=stamp(3 * 86400))
+        self._register("old-plain", str(roots["old-plain"]), branch="docs/e",
+                       last_verified_at=stamp(3 * 86400))
+        pulls = [{"number": 211, "head": {"ref": "fix/a"}, "merged_at": iso(self.NOW - 999), "state": "closed"},
+                 {"number": 212, "head": {"ref": "fix/b"}, "merged_at": None, "state": "open"},
+                 {"number": 213, "head": {"ref": "fix/c"}, "merged_at": iso(self.NOW - 999), "state": "closed"},
+                 {"number": 214, "head": {"ref": "docs/d"}, "merged_at": None, "state": "closed"},
+                 {"number": "x", "head": {"ref": "docs/e"}, "state": "closed"},
+                 {"number": 215, "head": {"ref": "bad ref; rm"}, "state": "closed"}]
+        prs = mon.branch_prs(pulls)
+        self.assertEqual(prs, {"fix/a": (211, "MERGED"), "fix/b": (212, "OPEN"),
+                               "fix/c": (213, "MERGED"), "docs/d": (214, "CLOSED")})
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs)
+        by_task = {next(t for t in roots if f"  {t} " in line): line for line in lines if not line.startswith("⚠")}
+        self.assertIn("⚠ PR #211 已合併，登記還是進行中", by_task["recent-merged"])
+        self.assertNotIn("⚠", by_task["recent-open"])      # its PR is still open
+        self.assertNotIn("⚠", by_task["recent-retired"])   # not an in-progress state
+        self.assertEqual(lines[-1], "⚠ 另有 1 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉：old-closed")
+        shown = mon.d6_lines([f"line {i}" for i in range(20)] + [lines[-1]])
+        self.assertEqual((len(shown), shown[-1]), (17, lines[-1]))   # 15 tasks, then the summary
+        # Without GitHub nothing is flagged.
+        self.assertFalse(any("⚠" in line for line in mon.d6_task_lines(self.canonical, [], self.NOW)))
 
     def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
