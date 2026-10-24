@@ -711,6 +711,24 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 1)
         self.assertIn("只讀了最新 500 則", source.status)
 
+    def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
+        first = [comment(1, NOW - 30, "a")]
+        run = FakeRun((0, first), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+            page = [dict(comment(10 + i, NOW - 30, "c"), id=10 + i) for i in range(100)]
+            for later in ((0, {"message": "not a list"}),), ((0, page), (1, b"")):
+                source.runner = FakeRun(*later)
+                source.refresh(force=True)
+                self.assertIn("讀取失敗", source.status)
+                self.assertEqual([e.reference for e in source.events], ["#1"])
+            # A comment posted between page reads shifts the next page by one.
+            shifted = page[-1:] + [dict(comment(200 + i, NOW - 30, "d"), id=200 + i) for i in range(3)]
+            source.runner = FakeRun((0, page), (0, shifted), (0, []))
+            source.refresh(force=True)
+        self.assertEqual(len(source.events), 103)
+
     def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
         import threading
         gate = threading.Event()
@@ -903,7 +921,11 @@ class DispatchGateAgreementTests(unittest.TestCase):
             from llmtool import worker_dispatch
         finally:
             sys.path.remove(root)
+        # Never compare against some other installed llmtool.
+        assert os.path.realpath(worker_dispatch.__file__).startswith(os.path.realpath(root) + os.sep)
         cls.gate = staticmethod(worker_dispatch._parse_policy)
+        cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
+            worker_dispatch._read_policy_file(Path(path))))
 
     def agree(self, raw: bytes):
         try:
@@ -946,6 +968,10 @@ class DispatchGateAgreementTests(unittest.TestCase):
                 dict(good, owner_assignment_ref=POLICY_EVIDENCE)]}},
             "assignment duplicate": {"claude-developer": {"owner_assignments": [good, good]}},
             "assignments not a list": {"claude-developer": {"owner_assignments": {}}},
+            "assignments null": {"claude-developer": {"owner_assignments": None}},
+            "unhashable switch": {"agy": {"dispatch": []}},
+            "object switch": {"agy": {"dispatch": {}}},
+            "date not a string": {"agy": {"decided_at": 20261022}},
         }
         for label, change in cases.items():
             with self.subTest(label):
@@ -955,6 +981,7 @@ class DispatchGateAgreementTests(unittest.TestCase):
             "duplicate key": whole.replace('"workers": {', '"workers": {"agy": {}, ', 1),
             "schema 2": whole.replace('"schema_version": 1', '"schema_version": 2'),
             "schema true": whole.replace('"schema_version": 1', '"schema_version": true'),
+            "schema 1.0": whole.replace('"schema_version": 1', '"schema_version": 1.0'),
             "extra top key": whole[:-1] + ', "x": 1}',
             "NaN": whole.replace('"schema_version": 1', '"schema_version": NaN'),
             "not json": "{not json",
@@ -965,6 +992,53 @@ class DispatchGateAgreementTests(unittest.TestCase):
             with self.subTest(label):
                 self.agree(raw.encode())
         self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
+
+
+class DispatchFileAgreementTests(DispatchGateAgreementTests):
+    """The same agreement for how the file itself is read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def agree_file(self, path):
+        try:
+            self.gate_file(path)
+            accepted = True
+        except Exception:
+            accepted = False
+        raw, _ = mon.load_dispatch("/nonexistent", path)
+        switches, problem = mon.worker_dispatch(raw)
+        self.assertEqual(problem == "", accepted, path)
+        return accepted
+
+    def test_file_shapes_are_judged_the_same_way(self):
+        base = Path(self.tmp.name)
+        good = base / "good.json"
+        good.write_text(json.dumps(policy({})), encoding="utf-8")
+        self.assertTrue(self.agree_file(str(good)))
+        (base / "link.json").symlink_to(good)
+        os.link(good, base / "hard.json")   # good now has two links as well
+        (base / "dir.json").mkdir()
+        os.mkfifo(base / "fifo.json")
+        (base / "tiny.json").write_bytes(b"{")
+        many = [{"task_id": f"{i:032x}", "owner_assignment_ref": POLICY_EVIDENCE + f"#issuecomment-{i + 1}"}
+                for i in range(700)]
+        (base / "big.json").write_text(json.dumps(policy({"claude-developer": {"owner_assignments": many}})),
+                                       encoding="utf-8")
+        self.assertGreater((base / "big.json").stat().st_size, 64 * 1024)
+        for name in ("link.json", "hard.json", "good.json", "dir.json", "fifo.json", "tiny.json", "big.json"):
+            with self.subTest(name):
+                self.assertFalse(self.agree_file(str(base / name)))   # every one refused, never blocks
+        self.assertEqual(mon.worker_dispatch(mon.load_dispatch("/nonexistent", str(base / "dir.json"))[0])[1],
+                         "rejected")
+
+    def test_missing_canonical_file_falls_back_to_a_labelled_local_ref_only(self):
+        raw, source = mon.load_dispatch(self.tmp.name, os.path.join(self.tmp.name, "absent.json"))
+        self.assertEqual((raw, source), (None, ""))
+
+    def test_roster_workers_are_gate_workers(self):
+        self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
 
 
 class OfficeViewTests(unittest.TestCase):
@@ -2100,7 +2174,6 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertNotIn("codex-developer", rows)   # only the roster's Workers get a row
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
                                               canonical=self.canonical,

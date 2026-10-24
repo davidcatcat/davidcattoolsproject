@@ -941,7 +941,7 @@ MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
-GITHUB_LIMIT = 4 << 20
+GITHUB_LIMIT = 16 << 20   # one page of 100 long comments stays well inside
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
 
@@ -1114,7 +1114,7 @@ class GitHubSource:
                 batch = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
                                   f"&sort=created&direction=desc&per_page={GITHUB_PAGE}&page={page}")
                 if type(batch) is not list:
-                    break
+                    raise ValueError("comments page")
                 comments += batch
                 if len(batch) < GITHUB_PAGE:
                     break
@@ -1122,7 +1122,14 @@ class GitHubSource:
                 more = True
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=30")
-            self.events = github_events(comments, pulls, since)   # one atomic swap
+            # A comment posted between page reads shifts the pages: list it once.
+            seen, unique = set(), []
+            for item in comments:
+                key = item.get("id") if type(item) is dict else None
+                if key is None or (type(key) is int and key not in seen):
+                    seen.add(key)
+                    unique.append(item)
+            self.events = github_events(unique, pulls, since)   # one atomic swap
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
@@ -2743,18 +2750,45 @@ DISPATCH_TTL = 30.0
 _dispatch_cache: dict = {}
 
 
+DISPATCH_REFUSED = b""   # a file the gate's reader refuses outright
+
+
+def _read_dispatch_file(path: str) -> bytes:
+    """The policy file as the gate's _read_policy_file accepts it: a regular,
+    single-link, non-symlink file of a sane size that did not change while
+    read. Never blocks (a FIFO is refused). FileNotFoundError passes up; any
+    other refusal returns DISPATCH_REFUSED."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise
+    except OSError:
+        return DISPATCH_REFUSED
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                not 2 <= before.st_size <= DISPATCH_MAX):
+            return DISPATCH_REFUSED
+        raw = os.read(fd, DISPATCH_MAX + 1)
+        after = os.fstat(fd)
+    except OSError:
+        return DISPATCH_REFUSED
+    finally:
+        os.close(fd)
+    identity = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                             info.st_ctime_ns, info.st_nlink)
+    return raw if identity(before) == identity(after) and len(raw) == before.st_size \
+        else DISPATCH_REFUSED
+
+
 def load_dispatch(canonical: str, path: str | None = None) -> tuple[bytes | None, str]:
-    """(file bytes or None, where they came from). The checkout's file wins;
-    without it, the newest local main ref that has it (possibly behind GitHub)."""
-    candidates = [path] if path is not None else [os.path.join(canonical, DISPATCH_RELATIVE)]
-    for candidate in candidates:
-        try:
-            if os.path.islink(candidate):
-                return b"", "派工檔"   # the gate refuses a symlinked policy
-            with open(candidate, "rb") as handle:
-                return handle.read(256 << 10), "派工檔"
-        except OSError:
-            pass
+    """(file bytes or None, where they came from). The checkout's file wins,
+    read the way the gate reads it; only when it does not exist at all, the
+    newest local main ref that has it (possibly behind GitHub)."""
+    try:
+        return _read_dispatch_file(path or os.path.join(canonical, DISPATCH_RELATIVE)), "派工檔"
+    except FileNotFoundError:
+        pass
     if path is not None:
         return None, ""
     cached = _dispatch_cache.get(canonical)
@@ -2789,7 +2823,8 @@ def _dispatch_entry_ok(item) -> bool:
         return False
     assignments = item.get("owner_assignments", [])
     reason, evidence, when = item.get("reason"), item.get("evidence"), item.get("decided_at")
-    if (item.get("decided_by") != "Owner" or item.get("dispatch") not in DISPATCH_VALUES or
+    if (item.get("decided_by") != "Owner" or type(item.get("dispatch")) is not str or
+            item.get("dispatch") not in DISPATCH_VALUES or
             type(when) is not str or type(reason) is not str or not reason or len(reason) > 512 or
             type(evidence) is not str or DISPATCH_EVIDENCE.fullmatch(evidence) is None or
             type(assignments) is not list):
@@ -2816,6 +2851,8 @@ def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
     the llmtool gate would accept the file, else why every Worker is refused."""
     if raw is None:
         return {}, "missing"
+    if raw == DISPATCH_REFUSED:
+        return {}, "rejected"
     try:
         if not 2 <= len(raw) <= DISPATCH_MAX:
             raise ValueError("size")
@@ -2824,10 +2861,14 @@ def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
     except (ValueError, UnicodeDecodeError, RecursionError):
         return {}, "invalid"
     workers = data.get("workers") if type(data) is dict else None
-    if (type(data) is not dict or set(data) != {"schema_version", "workers"} or
-            type(data["schema_version"]) is not int or data["schema_version"] != 1 or
-            type(workers) is not dict or set(workers) != DISPATCH_WORKERS or
-            not all(_dispatch_entry_ok(item) for item in workers.values())):
+    try:
+        ok = (type(data) is dict and set(data) == {"schema_version", "workers"} and
+              type(data["schema_version"]) is int and data["schema_version"] == 1 and
+              type(workers) is dict and set(workers) == DISPATCH_WORKERS and
+              all(_dispatch_entry_ok(item) for item in workers.values()))
+    except (TypeError, ValueError):   # e.g. an unhashable value where a name belongs
+        ok = False
+    if not ok:
         return {}, "rejected"
     return {key: (item["dispatch"], item["decided_by"], item["decided_at"][5:])
             for key, item in workers.items()}, ""
