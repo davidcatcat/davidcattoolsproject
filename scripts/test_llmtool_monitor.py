@@ -1222,6 +1222,20 @@ class OfficeViewTests(unittest.TestCase):
         self._write_dispatch(DISPATCH)
         self._register("wp-1", str(self.task))
 
+    def _set_timezone(self, zone):
+        previous = os.environ.get("TZ")
+        os.environ["TZ"] = zone
+        mon.time.tzset()
+
+        def restore():
+            if previous is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous
+            mon.time.tzset()
+
+        self.addCleanup(restore)
+
     def _write_dispatch(self, workers, raw=None):
         path = Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1444,9 +1458,93 @@ class OfficeViewTests(unittest.TestCase):
             self._rollout(sid, [("task_started", 900), ("task_complete", 600)], 600,
                           thread_source="subagent", parent_thread_id="T1",
                           agent_path=f"/root/job_{sid}")
-        subs = {row.detail: row.state for row in self._office(db_path) if row.kind == "subagent"}
-        self.assertEqual(subs, {"job S1（上一輪失敗）": mon.ATTENTION,
-                                "job S2（上一輪被中斷）": mon.DONE})
+        subs = {row.detail: row for row in self._office(db_path) if row.kind == "subagent"}
+        failed = next(row for detail, row in subs.items() if "job S1" in detail)
+        interrupted = next(row for detail, row in subs.items() if "job S2" in detail)
+        self.assertEqual(failed.state, mon.ATTENTION)
+        self.assertIn("（上一輪失敗）", failed.detail)
+        self.assertIn("失敗提醒最多顯示至", failed.detail)
+        self.assertIn("不代表程序仍在執行", failed.detail)
+        self.assertEqual(interrupted.state, mon.DONE)
+        self.assertEqual(interrupted.detail, "job S2（上一輪被中斷）")
+
+    def test_failed_subagent_expiry_uses_exact_codex_file_mtime_cutoff(self):
+        self._set_timezone("PST8")
+        now = int(self.NOW)
+        file_age = 4 * 3600
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600)])
+        path = self._rollout("S1", [("task_started", 900), ("task_complete", 600)], file_age,
+                             thread_source="subagent", parent_thread_id="T1",
+                             agent_path="/root/turing")
+
+        row = next(row for row in self._office(db_path) if row.kind == "subagent")
+        self.assertEqual(row.state, mon.ATTENTION)
+        self.assertIn("失敗提醒最多顯示至 2027-01-15 02:00:00", row.detail)
+        self.assertIn("約 2 小時後隱藏", row.detail)
+        self.assertIn("不代表程序仍在執行", row.detail)
+
+    def test_failed_subagent_cutoff_includes_exact_six_hours_and_excludes_after(self):
+        self._set_timezone("PST8")
+        now = int(self.NOW)
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600),
+                                 ("S2", "u", 0, "failed", now - 900, now - 600),
+                                 ("S3", "u", 0, "failed", now - 900, now - 600)])
+        self._rollout("S2", [("task_started", 900), ("task_complete", 600)],
+                      mon.OFFICE_WINDOW, thread_source="subagent",
+                      parent_thread_id="T1", agent_path="/root/exact_cutoff")
+        rows = self._office(db_path)
+        exact = next(row for row in rows if row.kind == "subagent")
+        self.assertEqual(exact.state, mon.ATTENTION)
+        self.assertIn("失敗提醒最多顯示至 2027-01-15 00:00:00", exact.detail)
+        self.assertIn("已到顯示期限", exact.detail)
+
+        self._rollout("S3", [("task_started", 900), ("task_complete", 600)],
+                      mon.OFFICE_WINDOW + 1, thread_source="subagent",
+                      parent_thread_id="T1", agent_path="/root/after_cutoff")
+        rows = self._office(db_path)
+        self.assertEqual(sum(row.kind == "subagent" for row in rows), 1)
+
+    def test_failed_subagent_expiry_minute_rounding_boundaries(self):
+        self._set_timezone("PST8")
+        cases = (
+            (59, "2027-01-15 00:00:59", "約 1 分後隱藏"),
+            (60, "2027-01-15 00:01:00", "約 1 分後隱藏"),
+            (61, "2027-01-15 00:01:01", "約 2 分後隱藏"),
+            (3599, "2027-01-15 00:59:59", "約 1 小時後隱藏"),
+            (3600, "2027-01-15 01:00:00", "約 1 小時後隱藏"),
+            (3601, "2027-01-15 01:00:01", "約 1 小時 1 分後隱藏"),
+        )
+        for remaining, absolute, relative in cases:
+            with self.subTest(remaining=remaining):
+                file_mtime = self.NOW - mon.OFFICE_WINDOW + remaining
+                detail = mon._codex_failure_expiry_detail(file_mtime, self.NOW)
+                self.assertEqual(
+                    detail,
+                    f"（失敗提醒最多顯示至 {absolute}；{relative}；"
+                    "不代表程序仍在執行）")
+
+    def test_failed_subagent_invalid_or_future_mtime_has_no_expiry_claim(self):
+        now = int(self.NOW)
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600)])
+        path = self._rollout("S1", [("task_started", 900), ("task_complete", 600)], 600,
+                             thread_source="subagent", parent_thread_id="T1",
+                             agent_path="/root/future_mtime")
+        db = mon.open_codex_history(str(db_path))
+        self.addCleanup(db.close)
+        for mtime in (float("nan"), float("inf"), float("-inf"), -1.0,
+                      self.NOW + 1, 1e300, -1e300):
+            with self.subTest(mtime=mtime):
+                with patch.object(mon.os.path, "getmtime", return_value=mtime):
+                    result = mon._codex_row(str(path), self.NOW, self.canonical,
+                                            {"db": db})
+                self.assertIsNotNone(result)
+                row = result[2]
+                self.assertEqual(row.state, mon.ATTENTION)
+                self.assertIn("（上一輪失敗）", row.detail)
+                self.assertNotIn("最多顯示至", row.detail)
+
+        bounded = mon._codex_failure_expiry_detail(self.NOW, self.NOW)
+        self.assertIn("約 6 小時後隱藏", bounded)
 
     def test_turn_history_opens_only_the_users_regular_files(self):
         self.assertEqual([c.strip() for c in mon.CODEX_TURN_SQL.split("FROM")[0][6:].split(",")],

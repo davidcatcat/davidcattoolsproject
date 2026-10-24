@@ -31,6 +31,7 @@ import argparse
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+import math
 import os
 import re
 import shutil
@@ -1934,6 +1935,46 @@ def _clock(seconds: float) -> str:
         return "--:--"
 
 
+def _codex_failure_expiry_detail(file_mtime, now):
+    """Describe the stale failed-subagent row's existing file-age cutoff.
+
+    Return None when the mtime cannot establish a safe deadline. The displayed
+    wall-clock second is rounded upward, and the countdown uses that same
+    second so the absolute label cannot precede the claimed remaining time.
+    """
+    try:
+        file_mtime, now = float(file_mtime), float(now)
+        if (not math.isfinite(file_mtime) or not math.isfinite(now) or
+                file_mtime < 0 or now < 0 or file_mtime > now):
+            return None
+        raw_expiry = file_mtime + OFFICE_WINDOW
+        if not math.isfinite(raw_expiry):
+            return None
+        expiry_second = math.ceil(raw_expiry)
+        # With a non-future mtime, ceiling to the next displayed second can
+        # add less than one second beyond OFFICE_WINDOW.
+        remaining = min(float(OFFICE_WINDOW + 1),
+                        max(0.0, expiry_second - now))
+        expiry_label = time.strftime(
+            "%Y-%m-%d %H:%M:%S", time.localtime(expiry_second))
+    except (OverflowError, OSError, TypeError, ValueError):
+        return None
+
+    if remaining <= 0:
+        duration = "已到顯示期限"
+    else:
+        minutes = math.ceil(remaining / 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours and minutes:
+            duration = f"約 {hours} 小時 {minutes} 分後隱藏"
+        elif hours:
+            duration = f"約 {hours} 小時後隱藏"
+        else:
+            duration = f"約 {minutes} 分後隱藏"
+    return (f"（失敗提醒最多顯示至 {expiry_label}；{duration}；"
+            "不代表程序仍在執行）")
+
+
 def _codex_row(path: str, now: float, canonical: str, history: dict | None = None):
     meta = _jsonl_head(path)
     payload = meta.get("payload") if type(meta) is dict else None
@@ -1943,7 +1984,8 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     if place is None:
         return None
     try:
-        age = max(0.0, now - os.path.getmtime(path))
+        file_mtime = os.path.getmtime(path)
+        age = max(0.0, now - file_mtime)
     except OSError:
         return None
     last, marked = None, 0.0
@@ -2005,11 +2047,22 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
                      if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
                     "")
         role = "developer" if task else ""
+        detail = (_humanize(stem) if stem else "（未命名工作）")
+        if task:
+            detail += f"（task {task}）"
+        if failed:
+            detail += "（上一輪失敗）"
+        elif interrupted:
+            detail += "（上一輪被中斷）"
+        if failed:
+            # The Codex office scan itself drops session files once their mtime
+            # is older than OFFICE_WINDOW. Surface that stale-record cutoff so
+            # the failure reminder is not mistaken for a live process.
+            expiry_detail = _codex_failure_expiry_detail(file_mtime, now)
+            if expiry_detail:
+                detail += expiry_detail
         return ("sub", payload.get("parent_thread_id"),
-                OfficeRow(_who("codex", role, nick), state,
-                          (_humanize(stem) if stem else "（未命名工作）") +
-                          (f"（task {task}）" if task else "") + ("（上一輪失敗）" if failed else
-                                                          "（上一輪被中斷）" if interrupted else ""),
+                OfficeRow(_who("codex", role, nick), state, detail,
                           age, 20,
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",

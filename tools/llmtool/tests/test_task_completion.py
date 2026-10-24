@@ -2285,15 +2285,109 @@ class TaskCompletionTests(unittest.TestCase):
                 'decision': 'STOP', 'summary': 'PM stopped the workflow.'
             })['next_step'], 'STOP')
         failed_handoff = task_completion.review_handoff_record(failed_intent, failed)
-        self.assertEqual(task_completion.review_return_record(failed_handoff,
+        failed_return = task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'
-            })['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+            })
+        self.assertEqual(failed_return['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+        with patch.object(task_completion.subprocess, 'Popen',
+                          side_effect=AssertionError('repair intent must not launch')):
+            repair_intent = task_completion.review_repair_intent(
+                failed_handoff, failed_return)
+            self.assertEqual(task_completion.review_repair_intent(
+                failed_handoff, failed_return), repair_intent)
+            self.assertIs(task_completion.validate_review_repair_intent(
+                repair_intent, failed_handoff, failed_return), repair_intent)
+        self.assertEqual(repair_intent['task_id'], failed_intent['task_id'])
+        self.assertEqual(repair_intent['run_id'], failed_intent['run_id'])
+        self.assertEqual(repair_intent['contract_digest'], failed_intent['contract_digest'])
+        self.assertEqual(repair_intent['source_sha'], failed_intent['source_sha'])
+        self.assertEqual(repair_intent['result_head'], failed_intent['result_head'])
+        self.assertEqual(repair_intent['diff_sha256'], failed_intent['diff_sha256'])
+        self.assertEqual(repair_intent['changed_paths'], failed_intent['changed_paths'])
+        self.assertEqual(repair_intent['developer_task_id'], failed_intent['developer_task_id'])
+        self.assertEqual(repair_intent['developer_identity'], failed_intent['developer_identity'])
+        self.assertEqual(repair_intent['developer_session_ref'],
+                         failed_intent['developer_session_ref'])
+        self.assertEqual(repair_intent['review_dispatch_id'], failed_intent['dispatch_id'])
+        self.assertEqual(repair_intent['review_receipt_sha256'], failed['receipt_sha256'])
+        self.assertEqual((repair_intent['prior_repair_round'], repair_intent['repair_round']),
+                         (0, 1))
+        self.assertEqual(repair_intent['decision'], 'RETURN_TO_DEVELOPER')
+        self.assertEqual(repair_intent['state'], 'REQUESTED')
+
+        stale = dict(repair_intent, source_sha='8' * 40)
+        stale.pop('intent_sha256')
+        stale['intent_sha256'] = hashlib.sha256(json.dumps(
+            stale, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        with self.assertRaisesRegex(LLMToolError, 'details omitted') as caught:
+            task_completion.validate_review_repair_intent(
+                stale, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        bad_digest = dict(repair_intent, state='CONSUMED')
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                bad_digest, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_DIGEST_MISMATCH')
+
+        forged_id = dict(repair_intent, repair_intent_id='0' * 64)
+        forged_id.pop('intent_sha256')
+        forged_id['intent_sha256'] = hashlib.sha256(json.dumps(
+            forged_id, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                forged_id, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        unserializable = dict(repair_intent, schema_version=object())
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                unserializable, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
+        pending_return = task_completion.review_return_record(failed_handoff)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, pending_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+        stopped_return = task_completion.review_return_record(failed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped the repair.'})
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, stopped_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
+        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
+        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
+        for other_handoff, other_return in (
+                (passed_handoff, task_completion.review_return_record(
+                    passed_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'No repair.'})),
+                (repaired_handoff, task_completion.review_return_record(
+                    repaired_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'Repair limit reached.'})),
+                (blocked_handoff, task_completion.review_return_record(
+                    blocked_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'WAIT_FOR_REVIEWER', 'summary': 'No review result.'})),
+        ):
+            with self.subTest(verdict=other_handoff['receipt']['verdict'],
+                              repair_round=other_handoff['intent']['repair_round']):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_completion.review_repair_intent(other_handoff, other_return)
+                self.assertEqual(caught.exception.completion_code,
+                                 'REVIEW_REPAIR_BINDING_INVALID')
         self.assertEqual(task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'STOP', 'summary': 'PM stopped after the failure.'
             })['next_step'], 'STOP')
-        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
         self.assertEqual(task_completion.review_return_record(blocked_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Reviewer is blocked.'
@@ -2316,7 +2410,6 @@ class TaskCompletionTests(unittest.TestCase):
             reject(passed_handoff, decision)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'WAIT_FOR_REVIEWER'):
             reject(failed_handoff, decision)
-        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
                          'WAIT_FOR_REVIEWER'):
             reject(repaired_handoff, decision)
@@ -2347,6 +2440,136 @@ class TaskCompletionTests(unittest.TestCase):
             separators=(',', ':')).encode()).hexdigest()
         with self.assertRaises(LLMToolError):
             task_completion.validate_review_dispatch_receipt(passed_intent, forged)
+
+    def test_malformed_circular_and_deep_handoff_return_inputs_have_stable_errors(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        blocked = task_completion.review_dispatch_blocked(intent)
+
+        circular_intent = dict(intent)
+        circular_intent['developer_identity'] = circular_intent
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_intent(circular_intent)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_DISPATCH_BINDING_INVALID')
+
+        deep_value = []
+        cursor = deep_value
+        for _ in range(65):
+            nested = []
+            cursor.append(nested)
+            cursor = nested
+        deep_receipt = dict(blocked, reviewer_identity=deep_value)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_receipt(intent, deep_receipt)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        handoff = task_completion.review_handoff_record(intent, blocked)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record({'dispatch_state': 'RECEIVED'})
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record(handoff, state=[])
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_return_record({'state': 'RETURNED'}, handoff)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        cyclic_usage = {}
+        cyclic_usage['self'] = cyclic_usage
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record(
+                handoff, state='RETURNED', response='{}',
+                recommendation={'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+                usage=cyclic_usage)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        circular_return = {
+            'state': 'RETURNED', 'receipt_sha256': blocked['receipt_sha256'],
+            'next_step': 'WAIT_FOR_REVIEWER', 'pm_dispatch': 'RETURNED',
+            'pm_response': '{}',
+            'pm_recommendation': {'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+            'pm_usage': None,
+            'pm_error_code': None,
+        }
+        circular_return['pm_recommendation']['self'] = circular_return
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_return_record(circular_return, handoff)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        cyclic_handoff = dict(handoff)
+        cyclic_handoff['intent'] = cyclic_handoff
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(cyclic_handoff, {})
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_DISPATCH_BINDING_INVALID')
+
+    def test_json_boundary_maps_only_expected_serialization_errors(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        for exception in (TypeError, ValueError, OverflowError, RecursionError,
+                          UnicodeError):
+            with self.subTest(exception=exception.__name__):
+                with patch.object(task_completion.json, 'dumps', side_effect=exception):
+                    with self.assertRaises(LLMToolError) as caught:
+                        task_completion.validate_review_dispatch_intent(intent)
+                self.assertEqual(caught.exception.completion_code,
+                                 'REVIEW_DISPATCH_BINDING_INVALID')
+
+        with patch.object(task_completion.json, 'dumps',
+                          side_effect=AssertionError('unexpected encoder failure')):
+            with self.assertRaisesRegex(AssertionError, 'unexpected encoder failure'):
+                task_completion.validate_review_dispatch_intent(intent)
+
+    def test_repair_intent_rejects_numeric_type_confusion_and_bad_digest_shape(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        receipt = {
+            'schema_version': 2, 'dispatch_id': intent['dispatch_id'],
+            'task_id': intent['task_id'], 'run_id': intent['run_id'],
+            'contract_digest': intent['contract_digest'], 'source_sha': intent['source_sha'],
+            'result_head': intent['result_head'], 'diff_sha256': intent['diff_sha256'],
+            'developer_task_id': intent['developer_task_id'],
+            'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
+            'reviewer_session_ref': 'reviewer-session', 'review_packet_digest': '6' * 64,
+            'verdict': 'FAIL', 'security': 'PASS', 'functional': 'FAIL',
+            'execution_status': 'SUCCEEDED', 'code': 'REVIEW_COMPLETED',
+            'findings_sha256': '7' * 64, 'provenance': 'TRUSTED_REVIEW_ADAPTER',
+        }
+        receipt['receipt_sha256'] = hashlib.sha256(json.dumps(
+            receipt, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        handoff = task_completion.review_handoff_record(intent, receipt)
+        review_return = task_completion.review_return_record(
+            handoff, state='RETURNED', response='{}', recommendation={
+                'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'})
+        repair_intent = task_completion.review_repair_intent(handoff, review_return)
+
+        noncanonical = dict(repair_intent, schema_version=True)
+        noncanonical.pop('intent_sha256')
+        noncanonical['intent_sha256'] = hashlib.sha256(json.dumps(
+            noncanonical, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                noncanonical, handoff, review_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        bad_digest = dict(repair_intent, intent_sha256=True)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(bad_digest, handoff, review_return)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_REPAIR_DIGEST_MISMATCH')
 
 
 if __name__ == '__main__':
