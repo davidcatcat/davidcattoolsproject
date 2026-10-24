@@ -33,9 +33,11 @@ dst=$home/actions-runner
 if test "${1:-}" = --uninstall; then
   launchctl bootout system "$daemon" 2>/dev/null || true
   launchctl bootout system "$pf_daemon" 2>/dev/null || true
-  rm -f "$daemon" "$pf_daemon"
+  rm -f "$daemon" "$pf_daemon" "$rules"
   pfctl -a "$anchor" -F all 2>/dev/null || true
-  echo "uninstalled the ghrunner service and pf rules; account and $dst kept"
+  echo "uninstalled the ghrunner service and pf rules (pf itself stays on with macOS's"
+  echo "default rules until reboot); the account and $dst are kept. To go back to the"
+  echo "old runner: cd ~/git/actions-runner && ./svc.sh install && ./svc.sh start"
   exit 0
 fi
 
@@ -71,9 +73,8 @@ if ! dscl . -read "/Users/$account" >/dev/null 2>&1; then
   dscl . -create "/Users/$account" Password '*'
 fi
 for group in admin staff; do
-  if dsmemberutil checkmembership -U "$account" -G "$group" | grep -q 'is a member'; then
-    fail "$account is a member of $group"
-  fi
+  dsmemberutil checkmembership -U "$account" -G "$group" | grep -q 'is not a member' ||
+    fail "$account is (or may be) a member of $group"
 done
 install -d -m 0700 -o "$account" -g "$account" "$home"
 
@@ -83,27 +84,23 @@ if sudo -u "$account" ls "$owner_home" >/dev/null 2>&1; then
   fail "$account can still read $owner_home"
 fi
 
-# 3. Stop the Owner's runner service; one registration, one listener.
-launchctl bootout "gui/$owner_uid/$label" 2>/dev/null || true
-rm -f "$owner_home/Library/LaunchAgents/$label.plist"
-launchctl bootout system "$daemon" 2>/dev/null || true
-for _ in $(seq 1 30); do pgrep -f 'Runner.Listener' >/dev/null || break; sleep 1; done
-if pgrep -f 'Runner.Listener' >/dev/null; then fail "a Runner.Listener is still running"; fi
-
 # 4. The runner copy: root-owned, so jobs cannot change it or the hook.
 install -d -m 0755 -o root -g wheel "$dst"
 rsync -a --delete --exclude '/_work' --exclude '/_diag' --exclude '/_home' --exclude '/_tmp' \
   --exclude '/isolation' --exclude '/*.tar.gz' --exclude '/runsvc.sh' --exclude '/.env' \
   --exclude '/.path' --exclude '/.service' "$src/" "$dst/"
 cp "$src/bin/runsvc.sh" "$dst/runsvc.sh"   # the runner's own, unchanged template
-chown -R root:wheel "$dst"
-chmod -R go-w "$dst"
+# Root owns everything except ghrunner's own folders (kept on a re-run).
+find "$dst" \( -path "$dst/_work" -o -path "$dst/_tmp" -o -path "$dst/_diag" \) -prune -o \
+  -exec chown root:wheel {} + -exec chmod go-w {} +
 chmod 0755 "$dst/runsvc.sh"
 for file in .runner .credentials .credentials_rsaparams; do
   if test -f "$dst/$file"; then chown "$account:$account" "$dst/$file"; chmod 0600 "$dst/$file"; fi
 done
 install -d -m 0700 -o "$account" -g "$account" "$dst/_work" "$dst/_tmp"
 install -d -m 0750 -o "$account" -g admin "$dst/_diag"   # the Owner (admin) reads logs
+chown -R "$account:$account" "$dst/_work" "$dst/_tmp"
+chown -R "$account:admin" "$dst/_diag"
 install -d -m 0755 -o root -g wheel "$dst/isolation"
 install -m 0555 -o root -g wheel "$here/probe.sh" "$here/job-started.sh" "$dst/isolation/"
 lang=$(sed -n 's/^LANG=//p' "$src/.env" 2>/dev/null | head -n 1)
@@ -166,7 +163,14 @@ sudo -u "$account" env HOME="$home" /usr/bin/curl -fsS -o /dev/null https://api.
 # 6. The isolation check, as the account, before any job.
 sudo -u "$account" env OWNER_HOME="$owner_home" "$dst/isolation/probe.sh"
 
-# 7. The service.
+# 7. Stop the Owner's runner service (one registration, one listener), then
+# start the ghrunner one. Everything above is checked first, so a failure
+# leaves the old runner running.
+launchctl bootout "gui/$owner_uid/$label" 2>/dev/null || true
+rm -f "$owner_home/Library/LaunchAgents/$label.plist"
+launchctl bootout system "$daemon" 2>/dev/null || true
+for _ in $(seq 1 30); do pgrep -f 'Runner.Listener' >/dev/null || break; sleep 1; done
+if pgrep -f 'Runner.Listener' >/dev/null; then fail "a Runner.Listener is still running"; fi
 cat > "$daemon" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
