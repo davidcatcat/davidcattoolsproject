@@ -1309,7 +1309,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         system_prompt = client.calls[0][0]['content']
         self.assertIn('Do not use Markdown fences', system_prompt)
         self.assertIn('diff --git a/example.py b/example.py', system_prompt)
-        self.assertIn('@@ -1 +1 @@\n-old\n+new', system_prompt)
+        self.assertIn('@@ -1,3 +1,3 @@\n unchanged line\n-old\n+new\n unchanged line', system_prompt)
+        self.assertIn('creating, deleting or renaming files is not supported', system_prompt)
         developer_packet = json.loads(client.calls[0][1]['content'])
         self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
         self.assertEqual(developer_packet['acceptance'], ['new test passes'])
@@ -1608,6 +1609,45 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
                 self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
                 self.assertIsNone(result['developer']['artifact'])
+
+
+class DeveloperOutputShapeMatrixTests(unittest.TestCase):
+    """#290 / #315 P2-2: the local verdict for common model output shapes,
+    pinned offline (no provider call). Any later relaxation of the strict
+    validator must change this table deliberately."""
+
+    def test_common_output_shapes(self):
+        rejection = submission_cli._developer_output_rejection
+        target = 'tools/llmtool/example.py'
+        header = f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
+        good = header + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n'
+        shapes = {
+            'git diff': (good, None),
+            'leading blank line': ('\n' + good, 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'markdown fence': ('```diff\n' + good + '```\n', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'no diff --git header': (good[len(header.split('\n')[0]) + 1:],
+                                     'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'blank context without its space': (
+                header + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'hunk count off by one': (
+                header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                         f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
+                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
+        }
+        for label, (text, expected) in shapes.items():
+            with self.subTest(label):
+                self.assertEqual(rejection(text, [target]), expected)
+
+    def test_prompt_example_itself_passes_the_validator(self):
+        task = {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'pm_session_id': 'pm-x',
+                'task_binding': {'contract_digest': 'c' * 64}}
+        system = submission_cli._developer_prompt(
+            task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
+            acceptance=['ok'], context='', pm_goal='g')[0]['content']
+        example = system.split('Exact format example:\n', 1)[1]
+        example = example[:example.index('Every hunk header')]
+        self.assertIsNone(submission_cli._developer_output_rejection(example, ['example.py']))
 
 
 if __name__ == '__main__':
