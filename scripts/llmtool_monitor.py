@@ -2054,7 +2054,7 @@ STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
 # A verdict counts only as its own line ("**Verdict: FAIL**", "## Review Verdict:
 # PASS"), not inside a sentence quoting an earlier one.
 REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*(?:(?:formal\s+)?review\s+)?verdict\b\W{0,8}"
-                            r"(PASS|FAIL|REVISE|BLOCKED)\b")
+                            r"(PASS|FAIL|REVISE|BLOCKED|CHANGES_REQUIRED)\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
 REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
 REVIEW_SCAN = 6 << 20
@@ -2111,6 +2111,12 @@ def _file_reply(path: str, since: float | None) -> str | None:
         return raw
     if type(item) is not dict:
         return raw
+    return _claude_reply(item)
+
+
+def _claude_reply(item: dict) -> str:
+    """The `--output-format json` reply's "result" text, or a reason when that
+    run reports an error."""
     if item.get("subtype") == "error_max_budget_usd":
         return OVER_BUDGET_TEXT
     if item.get("is_error") is True:
@@ -2142,7 +2148,8 @@ def _review_target(text: str) -> tuple[str, str]:
 
 def _result_text(text: str) -> str:
     """The command's own output from one exec result: a JSON result object's
-    "output" string (also inside a Promise.allSettled "value"), else the text."""
+    "output" string (also inside a Promise.allSettled "value"), the reply of a
+    `claude --print --output-format json` the PM polled to its end, else the text."""
     if text.lstrip().startswith("{"):
         try:
             item = json.loads(text)
@@ -2152,7 +2159,23 @@ def _result_text(text: str) -> str:
             item = item["value"]
         if type(item) is dict and type(item.get("output")) is str:
             return item["output"]
+        if _is_claude_reply(item):
+            return _claude_reply(item)
     return text
+
+
+def _json_object(text: str):
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
+def _is_claude_reply(item) -> bool:
+    return type(item) is dict and item.get("type") == "result" and type(
+        item.get("session_id")) is str and ("result" in item or "is_error" in item)
 
 
 def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None:
@@ -2162,14 +2185,19 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     results = [text for text in parts
                if text.strip() and not text.startswith("Script completed")
                and not CONTROL_LINE.fullmatch(text)]
+    # A polled `--output-format json` reply has no exit marker: the reply itself
+    # shows the run ended.
     if not direct and not any(EXITED.search(text) for text in parts) and not any(
-            REVIEW_VERDICT.search(text) for text in results):
+            REVIEW_VERDICT.search(text) or _is_claude_reply(_json_object(text))
+            for text in results):
         return None
     if any(text.startswith("Script failed") for text in parts):
         return SCRIPT_FAILED   # the PM's exec script broke before claude answered
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
+    if head in (OVER_BUDGET_TEXT, NO_VERDICT):
+        return head
     if not head.strip() and len(origin) > 3 and origin[3] and not any(
             map(TIMED_OUT.search, parts)):
         reply = _file_reply(origin[3], origin[0])

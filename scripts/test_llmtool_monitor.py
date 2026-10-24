@@ -2186,6 +2186,30 @@ class OfficeViewTests(unittest.TestCase):
             (609, {"type": "custom_tool_call_output", "call_id": "s1", "output": [
                 {"type": "input_text", "text": "Script failed"},
                 {"type": "input_text", "text": "Script error: x is not defined"}]}),
+            # `cd` into a scratch dir, then poll the `--output-format json` reply to its
+            # end: the reply has no exit marker and its verdict sits in "result"
+            (600, call("j1", 'const r = await tools.exec_command({cmd:"review_dir=$(mktemp -d)\\n'
+                             'cd \\"$review_dir\\"\\ngh pr diff 297 | claude -p --output-format json '
+                             '\'Review PR #297, head aaaaaaa1111.\'"}); text(r.output)')),
+            (599, dict(out('{"session_id":57018,"output":""}'), call_id="j1")),
+            (590, call("j2", "const r = await tools.write_stdin({session_id:57018}); text(r.output)")),
+            (589, dict(out(""), call_id="j2")),
+            (580, call("j3", "const r = await tools.write_stdin({session_id:57018}); text(r.output)")),
+            (579, dict(out(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                       "session_id": "fc0a1502-fa14", "total_cost_usd": 0.11,
+                                       "result": "# Review of PR #297\n**HEAD reviewed:** "
+                                                 "`aaaaaaa1111`\n## Verdict: CHANGES_REQUIRED\n"})),
+                       call_id="j3")),
+            # the PM stopped the json run with Ctrl-C: ended without a verdict
+            (570, call("a1", 'const r = await tools.exec_command({cmd:"gh pr diff 298 | claude -p '
+                             '--output-format json \'Review PR #298, head bbbbbbb2222.\'"})')),
+            (569, dict(out('{"session_id":5829,"output":"failed to run git"}'), call_id="a1")),
+            (568, call("a2", 'const r = await tools.write_stdin({session_id:5829,chars:"\\u0003"}); '
+                             "text(r.output)")),
+            (567, dict(out(json.dumps({"type": "result", "session_id": "f289db83", "stop_reason": None,
+                                       "total_cost_usd": 0, "is_error": True,
+                                       "subtype": "error_during_execution"})),
+                       call_id="a2")),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
             (44, call("c7", "const note=`see claude --print in the docs`;")),
@@ -2216,6 +2240,8 @@ class OfficeViewTests(unittest.TestCase):
                                    "審 PR #294 @7777777：PASS": mon.DONE,
                                    f"審 PR #295 @8888888：{mon.TIMED_OUT_TEXT}": mon.DONE,
                                    f"審 PR #296 @9999999：{mon.SCRIPT_FAILED}": mon.DONE,
+                                   "審 PR #297 @aaaaaaa：CHANGES_REQUIRED": mon.DONE,
+                                   f"審 PR #298 @bbbbbbb：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))
