@@ -353,6 +353,7 @@ class Monitor:
         self.office_error: str | None = None   # why the office view could not be built
         self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
+        self.records: list = []   # llmtool task-record lines, refreshed with the office view
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -432,6 +433,10 @@ class Monitor:
             # Session scans, tails, sqlite and AGY lookups are the costly part of a
             # poll; they run at most every OFFICE_EVERY seconds, not every tick.
             self.office_due = time.monotonic() + OFFICE_EVERY
+            try:
+                self.records = [line for _, line in llmtool_task_records(time.time())]
+            except Exception:  # optional, like task evidence
+                pass
             try:
                 office = office_rows(result.processes, finished_runs=finished)
             except Exception as exc:  # never break process monitoring, but never show stale rows
@@ -623,10 +628,16 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
     tasks = []
     for directory in glob.glob(pattern):
         manifest_path = os.path.join(directory, "manifest.json")
+        # Not the directory's own mtime: the daily /tmp cleaner deleting old
+        # files inside it makes a days-old task look new.
         try:
-            if not os.path.isfile(manifest_path) or os.path.getmtime(directory) < cutoff:
-                continue
-        except OSError:
+            newest = max(os.path.getmtime(os.path.join(directory, name))
+                         for name in os.listdir(directory)
+                         if name == "manifest.json" or STAGE_FILE.match(name)
+                         or name.endswith("-result.json"))
+        except (OSError, ValueError):
+            continue
+        if not os.path.isfile(manifest_path) or newest < cutoff:
             continue
         manifest = _read_json(manifest_path) or {}
         root = str(manifest.get("root") or "")
@@ -704,26 +715,39 @@ def task_events(old: dict, new: list[Task], *, initial: bool = False) -> list[tu
     return out
 
 
+EDIT_TOOLS = frozenset({"edit", "write", "patch", "multiedit", "apply_patch"})
+
+
+def edit_failures(stage: Stage) -> tuple[int, int]:
+    """(failed, finished) file-changing tool calls of a stage."""
+    edits = [tool for tool in stage.tools if tool.name in EDIT_TOOLS and tool.status in FINAL_TOOL]
+    return sum(tool.status == "error" for tool in edits), len(edits)
+
+
 def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
     if not tasks:
-        return ["No recent llmtool task evidence under /private/tmp/llmtool-* (last 12 h)."]
+        return ["近 12 小時沒有 OpenCode 執行紀錄（/private/tmp/llmtool-*）。"]
     lines = []
     for task in tasks[:limit]:
-        lines.append(f"TASK {task.task_id}   branch {task.branch or '-'}")
+        lines.append(f"任務 {task.task_id}   分支 {task.branch or '-'}")
         if not task.stages:
-            lines.append("    (prepared, no model stage started yet)")
+            lines.append("    （已準備，還沒開始執行）")
         for stage in task.stages:
-            when = datetime.fromtimestamp(stage.started).strftime("%H:%M:%S") if stage.started else "--:--:--"
-            lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage):<28} "
-                         f"cleanup {stage.cleanup or '-':<7} steps {stage.steps:<3} "
-                         f"{stage.tokens_in / 1000:.1f}k in / {stage.tokens_out / 1000:.1f}k out")
+            when = (datetime.fromtimestamp(stage.started).strftime("%m-%d %H:%M")
+                    if stage.started else "--- --:--")
+            failed, edits = edit_failures(stage)
+            note = (f"（改檔 {edits} 次全部失敗）" if failed and failed == edits
+                    else f"（改檔 {failed}/{edits} 次失敗）" if failed else "")
+            lines.append(f"    {when}  {stage.name:<8} {stage.model:<9} {stage_state(stage)}{note}  "
+                         f"清理 {stage.cleanup or '-'}  步數 {stage.steps}  "
+                         f"輸入 {stage.tokens_in / 1000:.1f}k / 輸出 {stage.tokens_out / 1000:.1f}k")
             if stage.meta not in ("ok", "none"):
-                lines.append(f"        task metadata {stage.meta}")
+                lines.append(f"        任務資料 {stage.meta}")
             for tool in stage.tools[-6:]:
                 mark = "✓" if tool.status == "completed" else tool.status
                 lines.append(f"        {tool.name:<6} {_safe_relative_reference(tool.path)}  {mark}")
             if len(stage.tools) > 6:
-                lines.append(f"        … {len(stage.tools) - 6} earlier tool calls")
+                lines.append(f"        … 另有 {len(stage.tools) - 6} 次較早的工具呼叫")
         lines.append("")
     return lines
 
@@ -771,10 +795,11 @@ ACTIVITY_RESULT_CODES = frozenset({
     "OPENCODE_RUNTIME_UNKNOWN", "OPENCODE_SOURCE_UNKNOWN", "OPENCODE_BUDGET_BLOCKED",
     "OPENCODE_AUTH_REQUIRED", "OPENCODE_NOT_AUTHORIZED", "OPENCODE_TIMEOUT",
     "OPENCODE_OUTPUT_INCOMPLETE", "OPENCODE_OUTPUT_INVALID", "OPENCODE_USAGE_UNKNOWN",
-    "RETURNED", "FAILED", "BLOCKED", "UNKNOWN",
+    "RETURNED", "FAILED", "BLOCKED", "UNKNOWN", "OPENCODE_EDITS_FAILED",
 })
 ACTIVITY_RESULT_LABELS = {
     "OPENCODE_OUTPUT_RETURNED": "完成，已拿到輸出",
+    "OPENCODE_EDITS_FAILED": "有輸出，但改檔全部失敗",
     "OPENCODE_PROVIDER_FAILED": "失敗：模型呼叫失敗",
     "OPENCODE_CLEANUP_UNKNOWN": "結果未知：程序清理沒確認",
     "OPENCODE_RUNTIME_UNKNOWN": "結果未知：執行狀態沒確認",
@@ -813,9 +838,12 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
                 events.append(ActivityEvent(stage.started, "stage_attempt", task_id,
                                             stage_name, "OBSERVED", reference))
             if stage.result and stage.result_at:
+                failed, edits = edit_failures(stage)
+                code = stage.result if stage.result in ACTIVITY_RESULT_CODES else "UNKNOWN"
+                if code == "OPENCODE_OUTPUT_RETURNED" and failed and failed == edits:
+                    code = "OPENCODE_EDITS_FAILED"
                 events.append(ActivityEvent(stage.result_at, "worker_result", task_id,
-                                            stage_name,
-                                            stage.result if stage.result in ACTIVITY_RESULT_CODES else "UNKNOWN",
+                                            stage_name, code,
                                             reference,
                                             stage.cleanup if stage.cleanup in ("ok", "UNKNOWN") else "UNKNOWN"))
             elif not stage.result:
@@ -2293,6 +2321,64 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
     return found
 
 
+RECORD_STATES = {   # llmtool task / completion state -> plain words
+    "PM_RESPONDED": "PM 已規劃，還沒派給 developer",
+    "PM_UNAVAILABLE": "PM 無法使用",
+    "WAITING_EXECUTOR": "等執行者接手",
+    "WAITING_PM": "等 PM",
+}
+LLMTOOL_RECORD_WINDOW = 12 * 3600
+
+
+def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[float, str]]:
+    """[(updated, line)] newest first for llmtool task records updated in the
+    last 12 hours. Only ids, routes, states and error codes are read; requests,
+    responses, contracts and diffs are never touched."""
+    root = LLMTOOL_TASKS if root is None else root
+    found = []
+    for path in glob.glob(os.path.join(root, "*.json")):
+        try:
+            if now - os.path.getmtime(path) > LLMTOOL_RECORD_WINDOW:
+                continue
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(1 << 20))
+        except (OSError, ValueError):
+            continue
+        if type(record) is not dict:
+            continue
+        updated = _github_time(record.get("updated_at")) or os.path.getmtime(path)
+        if now - updated > LLMTOOL_RECORD_WINDOW:
+            continue
+        developer = record.get("developer") if type(record.get("developer")) is dict else {}
+        completion = record.get("completion") if type(record.get("completion")) is dict else {}
+        assignment = record.get("pm_assignment") if type(record.get("pm_assignment")) is dict else {}
+
+        def code(value):
+            return value if type(value) is str and CODE_TEXT.fullmatch(value) else None
+
+        name = completion.get("executor_task_id")
+        name = name if type(name) is str and TASK_ID.fullmatch(name) else (
+            str(record.get("task_id") or "")[:8] if re.fullmatch(r"[0-9a-f]{8,64}",
+                                                             str(record.get("task_id") or "")) else "?")
+        route = next((value for value in (developer.get("provider_profile"), assignment.get("route"))
+                      if type(value) is str and PROFILE.fullmatch(value)), "")
+        dev_state, dev_code = code(developer.get("state")), code(developer.get("error_code"))
+        if dev_state:
+            result = DEVELOPER_RESULTS.get(dev_code) or DEVELOPER_RESULTS.get(dev_state) or dev_state
+            result += f"（{dev_code}）" if dev_code and dev_code not in DEVELOPER_RESULTS else ""
+        else:
+            top = code(record.get("state"))
+            result = RECORD_STATES.get(top, top or "狀態不明")
+        after = code(completion.get("state"))
+        if dev_state and after:
+            result += f"；{RECORD_STATES.get(after, after)}"
+        when = time.strftime("%m-%d %H:%M", time.localtime(updated))
+        # Without a developer record the route is only the PM's plan.
+        via = (("派給 " if dev_state else "PM 建議 ") + route) if route else "未指定路線"
+        found.append((updated, f"{when}  {name:<36} {via:<18} {result}"))
+    return sorted(found, reverse=True)
+
+
 # Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
 # subagents itself (Owner 2026-10-23), and those appear under the PM.
 WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
@@ -2821,8 +2907,13 @@ def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[st
 
 
 MARK = {"+": "+", "-": "-", "!": "!", "ok": "✓", "?": "?", "i": "·", "▶": "▶", "→": "→", "■": "■"}
-FOOTNOTE = "running != model generating; gone != task done"
+FOOTNOTE = "工作中 ≠ 模型正在產生內容；程序消失 ≠ 任務完成"
 FOLLOW_VIEWS = frozenset({"log", "activity"})   # newest at the bottom; offset counts back
+
+
+def record_lines(records: list[str]) -> list[str]:
+    head = "llmtool 任務紀錄（近 12 小時，最新在上）"
+    return [head, *(records[:8] or ["近 12 小時沒有更新的任務紀錄。"])]
 
 
 def run_once(github: "GitHubSource | None" = None) -> int:
@@ -2835,11 +2926,10 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
     print()
     print("\n".join(table_lines(mon.processes)))
-    print("\nRECENT LLMTOOL TASKS")
-    print("\n".join(task_lines(mon.tasks, 3)))
-    print("\nRECENT ACTIVITY")
+    print("\n".join(["", *record_lines(mon.records), "", *task_lines(mon.tasks, 3)]))
+    print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
-    print(f"Note: {FOOTNOTE}.")
+    print(f"說明：{FOOTNOTE}。")
     return 0
 
 
@@ -2908,10 +2998,10 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
-            lines = task_lines(mon.tasks)
+            lines = record_lines(mon.records) + [""] + task_lines(mon.tasks)
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if line.startswith("TASK") else 0
+                attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄")) else 0
                 if "RUNNING" in line:
                     attr |= colors.get("+", 0)
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:

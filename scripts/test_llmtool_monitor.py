@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -194,6 +195,28 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertIn("RUNNING", text)
         self.assertFalse(any(secret in text for secret in SECRETS))
 
+    def test_old_task_in_a_recently_touched_directory_is_not_recent(self):
+        # The daily /tmp cleaner deleting files bumps the directory's mtime.
+        self.attempt("red", "")
+        old = time.time() - 4 * 86400
+        for name in os.listdir(self.evidence):
+            os.utime(os.path.join(self.evidence, name), (old, old))
+        os.utime(self.evidence, None)
+        self.assertEqual(mon.scan_tasks(self.pattern, 12.0), [])
+
+    def test_returned_stage_whose_edits_all_failed_says_so(self):
+        tools = (mon.Tool("1", "read", "a.py", "completed"), mon.Tool("2", "edit", "a.py", "error"),
+                 mon.Tool("3", "edit", "?", "error"))
+        stage = mon.Stage("fix", "deepseek", 1000.0, "OPENCODE_OUTPUT_RETURNED", "ok", 3, 1, 1,
+                          "", tools, result_at=1010.0)
+        task = mon.Task("/tmp/llmtool-x", "t1", "b", (stage,))
+        self.assertIn("OPENCODE_OUTPUT_RETURNED（改檔 2 次全部失敗）", "\n".join(mon.task_lines([task])))
+        self.assertIn("有輸出，但改檔全部失敗", "\n".join(mon.activity_lines([task])))
+        partly = mon.Stage("fix", "deepseek", 1000.0, "OPENCODE_OUTPUT_RETURNED", "ok", 3, 1, 1,
+                           "", tools + (mon.Tool("4", "write", "b.py", "completed"),), result_at=1010.0)
+        lines = "\n".join(mon.task_lines([mon.Task("/tmp/llmtool-x", "t1", "b", (partly,))]))
+        self.assertIn("（改檔 2/3 次失敗）", lines)
+
     def test_absolute_tool_path_outside_evidence_root_is_not_rendered(self):
         self.assertEqual(mon._relative("/Users/davidsun/private/secret.py", self.base), "?")
 
@@ -224,6 +247,37 @@ class TaskEvidenceTests(unittest.TestCase):
         self.assertEqual(stage.tokens_out, 12)
         self.assertEqual(spy.call_count, 1)
         self.assertIn("mode=ro", spy.call_args[0][0])
+
+
+class TaskRecordTests(unittest.TestCase):
+    def test_recent_records_show_route_and_result_in_words_without_content(self):
+        with tempfile.TemporaryDirectory() as root:
+            now = time.time()
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 600))
+            records = {
+                "a": {"task_id": "ab12cd34" * 4, "updated_at": stamp, "state": "PM_RESPONDED",
+                      "request": "REQUEST-SECRET", "pm_assignment": {"route": "company-gw"},
+                      "developer": {"provider_profile": "company-gw", "state": "DEVELOPER_OUTPUT_REJECTED",
+                                    "error_code": "DEVELOPER_OUTPUT_INVALID_ENVELOPE",
+                                    "artifact": "DIFF-SECRET"},
+                      "completion": {"state": "WAITING_EXECUTOR", "executor_task_id": "issue-9-dev"}},
+                "b": {"task_id": "ef56" * 8, "updated_at": stamp, "state": "PM_RESPONDED"},
+                "old": {"task_id": "00" * 16, "updated_at": "2026-10-01T00:00:00Z",
+                        "state": "PM_RESPONDED"},
+            }
+            for name, record in records.items():
+                with open(os.path.join(root, f"{name}.json"), "w") as handle:
+                    json.dump(record, handle)
+            lines = [line for _, line in mon.llmtool_task_records(now, root)]
+        self.assertEqual(len(lines), 2)
+        text = "\n".join(lines)
+        self.assertIn("issue-9-dev", text)
+        self.assertIn("派給 company-gw", text)
+        self.assertIn("輸出被拒（回應格式錯誤）；等執行者接手", text)
+        self.assertIn("ef56ef56", text)
+        self.assertIn("PM 已規劃，還沒派給 developer", text)
+        self.assertNotIn("派給 None", text)
+        self.assertNotIn("SECRET", text)
 
 
 class TaskEventTests(unittest.TestCase):
@@ -471,7 +525,7 @@ class ActivityViewTests(unittest.TestCase):
              patch("sys.stdout", output):
             self.assertEqual(mon.run_once(), 0)
         rendered = output.getvalue()
-        self.assertIn("RECENT ACTIVITY", rendered)
+        self.assertIn("\n最近動態\n", rendered)
         self.assertIn("llmtool → 任務 task-1", rendered)
         self.assertIn("失敗：模型呼叫失敗", rendered)
         self.assertNotIn("/Users/davidsun", rendered)
@@ -768,7 +822,7 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.shutil, "which", return_value="/opt/gh"), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.run_once(source), 0)
-        activity = out.getvalue().split("RECENT ACTIVITY", 1)[1].splitlines()
+        activity = out.getvalue().split("\n最近動態\n", 1)[1].splitlines()
         order = [next(i for i, l in enumerate(activity) if marker in l)
                  for marker in ("開始一次執行嘗試", "PM → Claude：派出審查任務（#5・自述） — 請審查 PR 5",
                                 "完成，已拿到輸出；程序已清乾淨")]
