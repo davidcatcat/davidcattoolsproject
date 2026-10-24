@@ -36,6 +36,8 @@ import re
 import shutil
 import stat
 import urllib.parse
+import functools
+import hashlib
 import subprocess
 import sys
 import threading
@@ -365,6 +367,9 @@ class Monitor:
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
         self.d6: list = []   # D6 task lines, refreshed with the office view
+        self.version = monitor_version()   # the code this process loaded
+        self.digest = script_digest()
+        self.stale = False   # the file on disk changed since start: a restart is needed
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -460,6 +465,9 @@ class Monitor:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
                 self.office, self.office_state, self.office_error = office, state, None
+                if not self.stale and script_digest() not in (self.digest, "?"):
+                    self.stale = True
+                    new.append((stamp, "!", f"監控程式已更新，這個畫面還是舊版（{self.version}），請按 q 後重開"))
                 try:
                     self.d6 = d6_task_lines(canonical_root(), office, time.time())
                 except Exception:  # optional, like task evidence; never show a stale list
@@ -1241,6 +1249,42 @@ CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_PATH = os.path.abspath(__file__)
+
+
+def script_digest() -> str:
+    """Short sha256 of this file as it is on disk now."""
+    try:
+        with open(SCRIPT_PATH, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()[:7]
+    except OSError:
+        return "?"
+
+
+_GIT_RUN = subprocess.run   # bound at import: GitHub source tests fake subprocess.run
+
+
+@functools.lru_cache(maxsize=1)
+def monitor_version() -> str:
+    """Which code this process runs, for the title line: the last commit that
+    changed this file when the file matches that checkout, else "本機修改" plus
+    the file's own digest. Read-only git plumbing only (no index refresh)."""
+    rel = os.path.relpath(SCRIPT_PATH, SCRIPT_ROOT)
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+
+    def git(*args):
+        found = _GIT_RUN(["git", "-C", SCRIPT_ROOT, *args], capture_output=True,
+                               text=True, timeout=2, env=env)
+        return found.stdout.strip() if found.returncode == 0 else ""
+
+    try:
+        same = git("hash-object", "--", SCRIPT_PATH) == git("rev-parse", f"HEAD:{rel}")
+        commit = git("log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M", "--", rel)
+    except (OSError, subprocess.SubprocessError):
+        same, commit = False, ""
+    if same and commit:
+        return commit
+    return f"本機修改 {script_digest()}"
 OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
 OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
@@ -2847,6 +2891,16 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # process is listed on its own, since nothing says which thread started it.
     recorded = [row for row in rows if row.key == "review"]
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
+    if processes:
+        # A call the Codex record still shows running, with no matching process
+        # alive, has ended; the PM just never read its result. The oldest go first.
+        busy = sorted((row for row in recorded if row.state == WORKING),
+                      key=lambda row: -(row.age or 0.0))
+        ended = {id(row) for row in busy[:max(0, len(busy) - len(running))]}
+        rows = [replace(row, state=DONE, detail=row.detail.replace(
+                    "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果"))
+                if id(row) in ended else row for row in rows]
+        recorded = [row for row in rows if row.key == "review"]
     for proc in running[sum(row.state == WORKING for row in recorded):]:
         rows.append(OfficeRow("claude 單次呼叫", WORKING,
                               "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",
@@ -3159,7 +3213,8 @@ def record_lines(records: list[str]) -> list[str]:
 def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
     mon.poll()
-    print(f"AI agents · {datetime.now():%Y-%m-%d %H:%M:%S} · {summary(mon.processes, mon.lingering)}")
+    print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
+          f"{summary(mon.processes, mon.lingering)}")
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -3176,7 +3231,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
 
 def run_plain(interval: float, mon: "Monitor") -> int:
     """Append-only stream: one line per change, never a repainted screen."""
-    print(f"AI agents · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit", flush=True)
+    print(f"AI agents · 監控版本 {mon.version} · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit",
+          flush=True)
     try:
         while True:
             for stamp, kind, text in mon.poll():
@@ -3222,8 +3278,11 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         h, w = stdscr.getmaxyx()
         body = max(1, h - 4)
         stdscr.erase()
-        put(0, f"AI agents · read-only process monitor · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+        put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
             colors.get("title", 0) | curses.A_BOLD)
+        if mon.stale:
+            put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
+                colors.get("!", 0) | curses.A_BOLD)
         status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
                   else summary(mon.processes, mon.lingering))
         running = running_stages(mon.tasks)
