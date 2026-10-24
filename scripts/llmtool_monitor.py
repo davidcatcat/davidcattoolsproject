@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import stat
+import urllib.parse
 import subprocess
 import sys
 import threading
@@ -1643,6 +1644,35 @@ CODEX_TURN_SQL = ("SELECT status, started_at, completed_at FROM thread_turns "
 TURN_STATES = frozenset({"inProgress", "completed", "failed", "interrupted"})
 
 
+TURN_TIME_MAX = 1 << 32   # seconds; anything later is not a real turn time
+
+
+def open_codex_history(path: str):
+    """Read-only connection to Codex's turn history, or None.
+
+    Only the user's own regular file is opened (no symlink, FIFO or device,
+    which could redirect the read or block open() past SQLite's timeout).
+    Codex keeps the database in WAL mode; it is opened only while its -shm
+    file exists (Codex running), so a read-only open never has to create
+    state files in ~/.codex."""
+    try:
+        info = os.lstat(path)
+        shm = os.lstat(path + "-shm")
+    except OSError:
+        return None
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or not stat.S_ISREG(shm.st_mode) or shm.st_uid != os.getuid()):
+        return None
+    try:
+        return sqlite3.connect(f"file:{urllib.parse.quote(path)}?mode=ro", uri=True, timeout=0.2)
+    except sqlite3.Error:
+        return None
+
+
+def _turn_time(value) -> int | None:
+    return value if type(value) is int and 0 < value < TURN_TIME_MAX else None
+
+
 def codex_turn(db, thread_id) -> tuple | None:
     """(status, started, completed) of a thread's newest turn, or None."""
     if db is None or type(thread_id) is not str:
@@ -1654,12 +1684,14 @@ def codex_turn(db, thread_id) -> tuple | None:
     if not found or found[0] not in TURN_STATES:
         return None
     status, started, completed = found
-    return (status, started if type(started) is int else None,
-            completed if type(completed) is int else None)
+    return status, _turn_time(started), _turn_time(completed)
 
 
 def _clock(seconds: float) -> str:
-    return time.strftime("%H:%M", time.localtime(seconds))
+    try:
+        return time.strftime("%H:%M", time.localtime(seconds))
+    except (OverflowError, OSError, ValueError):
+        return "--:--"
 
 
 def _codex_row(path: str, now: float, canonical: str, db=None):
@@ -1674,13 +1706,13 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
         age = max(0.0, now - os.path.getmtime(path))
     except OSError:
         return None
-    last = None
+    last, marked = None, 0.0
     tail = _jsonl_tail(path)
     for item in tail:
         inner = item.get("payload")
         kind = inner.get("type") if type(inner) is dict else None
         if item.get("type") == "event_msg" and kind in TURN_MARKERS:
-            last = kind
+            last, marked = kind, _github_time(str(item.get("timestamp") or "")[:19] + "Z")
     if last is None:
         last = _codex_turn_marker(path)
     subagent = payload.get("thread_source") == "subagent"
@@ -1691,15 +1723,23 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
     else:
         state = WORKING if age <= OFFICE_BUSY else IDLE
     turn = codex_turn(db, payload.get("id"))
-    since = ""
+    since, failed = "", False
     if turn is not None:
-        # Codex's own turn record beats the guess from session-file markers.
         status, began, ended = turn
+        # Codex's own turn record beats the session-file markers, unless the
+        # file holds a timed marker newer than that record (the DB lags).
+        recorded = (began if status == "inProgress" else ended) or 0
+        if marked > recorded:
+            turn = None
+    if turn is not None:
         if status == "inProgress":
             state = WORKING if age <= OFFICE_STALL else STALLED
             since = f"（這輪 {_clock(began)} 起）" if began else ""
         else:
-            state = DONE if subagent else ATTENTION if status == "failed" else IDLE
+            failed = status == "failed"
+            # A failed turn needs a look even in a subagent; an interrupted
+            # one was stopped on purpose.
+            state = ATTENTION if failed else DONE if subagent else IDLE
             if ended and ended <= now:
                 age = now - ended
             word = {"completed": "結束", "failed": "失敗", "interrupted": "被中斷"}[status]
@@ -1722,7 +1762,8 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
         return ("sub", payload.get("parent_thread_id"),
                 OfficeRow(_who("codex", role, nick), state,
                           (_humanize(stem) if stem else "（未命名工作）") +
-                          (f"（task {task}）" if task else ""), age, 20,
+                          (f"（task {task}）" if task else "") + ("（上一輪失敗）" if failed else ""),
+                          age, 20,
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
                           role=role, task=f"task {task}" if task else "",
@@ -1746,7 +1787,8 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
     return ("main", payload.get("id"),
             OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
                       evidence="codex 紀錄"),
-            _codex_action(tail, canonical) if state == WORKING else "")
+            _codex_action(tail, canonical) if state == WORKING
+            else "上一輪失敗，要看 Codex 畫面" if failed else "")
 
 
 # One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
@@ -2017,10 +2059,7 @@ def codex_rows(now: float, root: str | None = None,
     for day in days:
         paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
     mains, subs, scanned, actions = {}, [], set(), {}
-    try:
-        db = sqlite3.connect(f"file:{CODEX_HISTORY}?mode=ro", uri=True, timeout=0.2)
-    except sqlite3.Error:
-        db = None
+    db = open_codex_history(CODEX_HISTORY)
     try:
         return _codex_rows(now, sorted(paths), canonical, db, mains, subs, scanned, actions)
     finally:
@@ -2055,8 +2094,7 @@ def _codex_rows(now, paths, canonical, db, mains, subs, scanned, actions) -> lis
             detail = (
                 f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                 else (actions.get(key) or "處理中") if row.state in (WORKING, STALLED)
-                else "上一輪失敗，要看 Codex 畫面" if row.state == ATTENTION
-                else "等待下一個指示") + row.detail
+                else actions.get(key) or "等待下一個指示") + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
@@ -2625,6 +2663,11 @@ def track_one_shot(state: dict, processes: list[Process], now: float,
     return state, finished, ended
 
 
+# The time label a Codex row ends with; only this carries over to a closed row.
+TURN_LABEL = re.compile(r"（(?:對話 \d\d-\d\d \d\d:\d\d 開始|這輪 \d\d:\d\d 起|"
+                        r"上一輪(?: \d\d:\d\d)? ?(?:結束|失敗|被中斷))）$")
+
+
 def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     """A thread opened from the Codex CLI keeps its record open in the
     app-server daemon after the CLI exits or moves on to a new thread. With N
@@ -2641,8 +2684,9 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
         elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
             gone.add(row.key)
         else:
-            out.append(replace(row, state=CLOSED, detail="推測 Codex CLI 已關閉" + (
-                row.detail[row.detail.rfind("（"):] if row.detail.endswith("）") else "")))
+            found = TURN_LABEL.search(row.detail)
+            out.append(replace(row, state=CLOSED,
+                               detail="推測 Codex CLI 已關閉" + (found.group(0) if found else "")))
     return [row for row in out if row.group not in gone]
 
 
@@ -2687,7 +2731,7 @@ def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
     session Codex drives registers itself and is shown from its own record."""
     registered = _claude_registered(sessions, processes) or {}
     return [p for p in processes if p.role == "Claude Code CLI"
-            and p.owner.startswith("Codex") and p.pid not in registered]
+            and str(p.owner or "").startswith("Codex") and p.pid not in registered]
 
 
 def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
@@ -2728,7 +2772,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     canonical = canonical or canonical_root()
     sessions = os.path.join(os.path.dirname(
         CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
-    owners = {p.pid: p.owner for p in processes}
+    owners = {p.pid: p.owner if type(p.owner) is str else "" for p in processes}
     # Who must answer a waiting CLI: the Codex PM that launched it, else the
     # person at its terminal.
     live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),

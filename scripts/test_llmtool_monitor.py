@@ -928,35 +928,109 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
-    def test_codex_turn_record_beats_session_markers(self):
-        db_path = self.codex.parent / "history.sqlite"
-        db = sqlite3.connect(db_path)
+    def _turn_db(self, turns, name="history.sqlite"):
+        path = self.codex.parent / name
+        db = sqlite3.connect(path)
+        self.addCleanup(db.close)
         db.execute("create table thread_turns(thread_id, turn_id, rollout_ordinal, status, "
                    "error_json, started_at, completed_at)")
+        db.executemany("insert into thread_turns values(?, ?, ?, ?, 'ERROR-SECRET', ?, ?)", turns)
         db.commit()
+        Path(str(path) + "-shm").write_bytes(b"")   # Codex running keeps this file
+        return path
+
+    def _office(self, db_path, processes=()):
+        with patch.object(mon, "CODEX_HISTORY", str(db_path)):
+            return self.rows(processes)
+
+    def test_codex_turn_record_beats_session_markers(self):
         clock = lambda seconds: mon.time.strftime("%H:%M", mon.time.localtime(seconds))
+        now = int(self.NOW)
         cases = (
-            ("inProgress", int(self.NOW) - 600, None,
-             (mon.WORKING, f"（這輪 {clock(self.NOW - 600)} 起）", 5.0)),
-            ("completed", int(self.NOW) - 3000, int(self.NOW) - 1200,
-             (mon.IDLE, f"等待下一個指示（上一輪 {clock(self.NOW - 1200)} 結束）", 1200.0)),
-            ("failed", int(self.NOW) - 3000, int(self.NOW) - 1200,
-             (mon.ATTENTION, f"上一輪失敗，要看 Codex 畫面（上一輪 {clock(self.NOW - 1200)} 失敗）", 1200.0)),
+            ("inProgress", now - 600, None, (mon.WORKING, f"（這輪 {clock(now - 600)} 起）", 5.0)),
+            ("completed", now - 3000, now - 1200,
+             (mon.IDLE, f"等待下一個指示（上一輪 {clock(now - 1200)} 結束）", 1200.0)),
+            ("failed", now - 3000, now - 1200,
+             (mon.ATTENTION, f"上一輪失敗，要看 Codex 畫面（上一輪 {clock(now - 1200)} 失敗）", 1200.0)),
+            ("interrupted", now - 3000, now - 1200,
+             (mon.IDLE, f"等待下一個指示（上一輪 {clock(now - 1200)} 被中斷）", 1200.0)),
+            ("completed", now - 3000, 10 ** 15,   # out of range: no crash, no fake time
+             (mon.IDLE, "等待下一個指示（上一輪結束）", 5.0)),
+            ("unknownStatus", now - 3000, now - 1200,   # not a Codex status: markers decide
+             (mon.IDLE, "等待下一個指示（對話 ", 5.0)),
         )
-        for ordinal, (status, began, ended, want) in enumerate(cases):
-            with self.subTest(status):
-                db.execute("insert into thread_turns values('T1', ?, ?, ?, 'ERROR-SECRET', ?, ?)",
-                           (f"u{ordinal}", ordinal, status, began, ended))
-                db.commit()
-                self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+        for n, (status, began, ended, want) in enumerate(cases):
+            with self.subTest(f"{n} {status}"):
+                db_path = self._turn_db([("T1", "u", 0, status, began, ended)], f"h{n}.sqlite")
+                self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                                   "timestamp": "2026-10-24T01:46:00.000Z"},
                             ["task_started", "task_complete"], age=5)
-                with patch.object(mon, "CODEX_HISTORY", str(db_path)):
-                    row = self.by_name(self.rows())["codex 主對話"]
+                row = self.by_name(self._office(db_path))["codex 主對話"]
                 self.assertEqual(row.state, want[0])
-                self.assertTrue(row.detail.endswith(want[1]), row.detail)
+                self.assertIn(want[1], row.detail)
                 self.assertEqual(row.age, want[2])
                 self.assertNotIn("SECRET", row.detail)
+
+    def test_newer_session_marker_beats_a_lagging_turn_record(self):
+        now = int(self.NOW)
+        db_path = self._turn_db([("T1", "u", 0, "completed", now - 3000, now - 1200)])
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%S.000Z", mon.time.gmtime(now - 60))
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        self._write(self.codex / day / "rollout-pm.jsonl", [
+            {"type": "session_meta", "payload": {"id": "T1", "cwd": self.canonical,
+                                                 "thread_source": "user"}},
+            {"type": "event_msg", "timestamp": stamp, "payload": {"type": "task_started"}}], age=30)
+        row = self.by_name(self._office(db_path))["codex 主對話"]
+        self.assertEqual(row.state, mon.WORKING)
+
+    def test_failed_subagent_turn_needs_a_look(self):
+        now = int(self.NOW)
+        db_path = self._turn_db([("S1", "u", 0, "failed", now - 900, now - 600),
+                                 ("S2", "u", 0, "interrupted", now - 900, now - 600)])
+        for sid in ("S1", "S2"):
+            self._codex(sid, {"id": sid, "cwd": self.canonical, "thread_source": "subagent",
+                              "parent_thread_id": "T1", "agent_path": f"/root/job_{sid}"},
+                        ["task_started"], age=5)
+        subs = {row.detail: row.state for row in self._office(db_path) if row.kind == "subagent"}
+        self.assertEqual(subs, {"job S1（上一輪失敗）": mon.ATTENTION, "job S2": mon.DONE})
+
+    def test_turn_history_opens_only_the_users_regular_file(self):
+        self.assertEqual([c.strip() for c in mon.CODEX_TURN_SQL.split("FROM")[0][6:].split(",")],
+                         ["status", "started_at", "completed_at"])
+        real = self._turn_db([("T1", "u", 0, "completed", 1, 2)], "odd ?#% name.sqlite")
+        db = mon.open_codex_history(str(real))
+        self.assertIsNotNone(db)   # special characters are URI-encoded
         db.close()
+        link = self.codex.parent / "link.sqlite"
+        os.symlink(real, link)
+        Path(str(link) + "-shm").write_bytes(b"")
+        self.assertIsNone(mon.open_codex_history(str(link)))
+        no_shm = self.codex.parent / "no-shm.sqlite"
+        sqlite3.connect(no_shm).close()
+        self.assertIsNone(mon.open_codex_history(str(no_shm)))
+        fifo = self.codex.parent / "fifo.sqlite"
+        os.mkfifo(fifo)
+        Path(str(fifo) + "-shm").write_bytes(b"")
+        done = []
+        worker = __import__("threading").Thread(
+            target=lambda: done.append(mon.open_codex_history(str(fifo))), daemon=True)
+        worker.start()
+        worker.join(2)
+        self.assertEqual(done, [None])   # returned at once, never blocked in open()
+
+    def test_closed_codex_row_keeps_only_its_time_label(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, label, 60.0, 0, key=f"k{n}", tui=True)
+                for n, label in enumerate(("等待下一個指示（上一輪 12:16 結束）",
+                                           "等待下一個指示（對話 10-24 01:46 開始）",
+                                           "讀 a.py（task wp-1）"))]
+        closed = [row.detail for row in mon._closed_codex_cli(rows, 0)]
+        self.assertEqual(closed, ["推測 Codex CLI 已關閉（上一輪 12:16 結束）",
+                                  "推測 Codex CLI 已關閉（對話 10-24 01:46 開始）",
+                                  "推測 Codex CLI 已關閉"])
+
+    def test_unknown_process_owner_does_not_break_the_roster(self):
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", None)
+        self.assertIsInstance(self.rows([cli]), list)
 
     def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
