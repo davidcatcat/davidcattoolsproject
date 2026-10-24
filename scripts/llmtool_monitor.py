@@ -1119,7 +1119,15 @@ class GitHubSource:
                 if len(batch) < GITHUB_PAGE:
                     break
             else:
-                more = True
+                # Every page was full: say so unless a probe shows nothing is
+                # left. An unanswered probe keeps the warning and the pages.
+                try:
+                    probe = self._get(f"repos/{self.repo}/issues/comments?since={stamp}"
+                                      f"&sort=created&direction=desc&per_page=1"
+                                      f"&page={GITHUB_PAGE * GITHUB_PAGES + 1}")
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    probe = None
+                more = not (type(probe) is list and not probe)
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=30")
             # A comment posted between page reads shifts the pages: list it once.
@@ -3027,8 +3035,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                                  entry.get("statusUpdatedAt"), entry.get("name"),
                                  answerer(owners.get(pid, "")))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
-    calls = ([-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
-             if processes else None)
+    # Monitor.poll builds the office only after the process table was read,
+    # so an empty list means nothing is running, not "unknown".
+    calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
     rows = codex_rows(now, codex_root, canonical, calls) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
