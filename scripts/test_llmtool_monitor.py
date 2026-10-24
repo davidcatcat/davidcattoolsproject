@@ -2463,6 +2463,9 @@ class OfficeViewTests(unittest.TestCase):
             self.assertNotIn(secret, text)
 
     def _runner(self, *logs):
+        # The log path is shown with the home as "~"; a temp folder can sit in
+        # the home (the Mac CI's does), so pin the home away from it.
+        self.enterContext(patch.object(os.path, "expanduser", return_value="/nonexistent-home"))
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (root / ".runner").write_text("{}")
         (root / "_diag").mkdir()
