@@ -455,7 +455,8 @@ class Monitor:
             except Exception:  # optional, like task evidence
                 pass
             try:
-                office = office_rows(result.processes, finished_runs=finished)
+                office = office_rows(result.processes, finished_runs=finished,
+                                     verdicts=self.github.verdicts if self.github else None)
             except Exception as exc:  # never break process monitoring, but never show stale rows
                 message = type(exc).__name__
                 if message != self.office_error:
@@ -1168,6 +1169,7 @@ class GitHubSource:
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
+        self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
         self.status = "GitHub：尚未讀取"
         self.fetched = None   # monotonic time of the last attempt
 
@@ -1238,6 +1240,7 @@ class GitHubSource:
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
+            self.verdicts = review_verdicts(unique)
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
@@ -2088,12 +2091,11 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
             else "上一輪失敗，要看 Codex 畫面" if failed else "")
 
 
-# One-shot Claude reviews a Codex thread runs with `claude --print`. The PR and
-# head come from the call itself (the dispatch), and only that call's own
-# result is used (directly, or via write_stdin polls of its exec session), never
-# other tool output, so a verdict quoted from GitHub cannot be mistaken for one.
-# Just the PR number, reviewed head and verdict word are extracted from the first
-# part of the result; nothing else is kept.
+# One-shot Claude reviews a Codex thread runs with `claude --print`. The call
+# says which PR and head it reviews. Its verdict is read from one place for
+# every Reviewer route: the exact-head verdict posted on that PR (Owner rule
+# 2026-10-24). The call's own output is never parsed, whatever shape the PM's
+# script gives it, so a new script shape needs no new parser.
 # `claude` must start a command (line start, after ; && || "| " $( or an
 # opening quote of an argv/cmd string, or a JS template assigned with =`...`),
 # optionally behind `timeout N`, and --print must be in that same command, so a
@@ -2103,72 +2105,31 @@ CLAUDE_CALL = re.compile(
     r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\(|=\s*`)\s*(?:timeout\s+\d+[smhd]?\s+)?"
     r"(?:[\w./~-]*/)?claude\b"
     r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
-STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
+# `claude -p --help` / `--version` only prints usage: it is not a call.
+CLAUDE_INFO = re.compile(r"\s(?:--help|-h|--version|-v)(?=[\s\"'|;&)]|$)")
+
+
+def _claude_call(text: str):
+    """The first `claude --print` call in text, skipping usage lookups."""
+    for found in CLAUDE_CALL.finditer(text):
+        command = re.split(r"[|;&\n]|\\n", text[found.end():found.end() + 400], maxsplit=1)[0]
+        call = text[found.start():found.end()]
+        flags = re.split(r"[\"'`]", call[call.find("claude"):] + command, maxsplit=1)[0]
+        if not CLAUDE_INFO.search(flags):   # a -v or -h inside the prompt is not a flag
+            return found
+    return None
+
+
 # A verdict counts only as its own line ("**Verdict: FAIL**", "## Review Verdict:
-# PASS"), not inside a sentence quoting an earlier one.
+# PASS"), not inside a sentence quoting an earlier one; the word is upper case.
 REVIEW_VERDICT = re.compile(r"(?im)^[\s>*#_`-]*(?:(?:formal\s+)?review\s+)?verdict\b\W{0,8}"
-                            r"(PASS|FAIL|REVISE|BLOCKED)\b")
+                            r"(?-i:([A-Z][A-Z_]{2,30}))\b")
 REVIEW_PR = re.compile(r"PR #(\d{1,6})\b")
 REVIEW_HEAD = re.compile(r"(?i)\bhead\b\W{0,8}([0-9a-f]{7,40})\b")
 REVIEW_SCAN = 6 << 20
-# PM poll scripts report a still-running exec session as JSON "session_id":N,
-# as a line such as "SESSION N" / "SESSION_ID=N" or as a trailer such as
-# "exit_code=running session_id=N", and an exit as "exit_code", "EXIT N" or "EXIT=N".
-RUNNING_SESSION = re.compile(r'"session_id":(\d{1,9})|^SESSION(?: |_ID=)(\d{1,9})$'
-                             r'|^exit_code=\S* session_id=(\d{1,9})$', re.M)
-EXITED = re.compile(r'"exit_code"|\bexit_code\W{0,3}-?\d|^Process exited|^EXIT[ =]-?\d{1,3}$',
-                    re.M)
-CONTROL_LINE = re.compile(
-    r"\s*(?:SESSION(?: |_ID=)\d{1,9}|EXIT[ =]-?\d{1,3}|exit_code=\S*(?: session_id=\d*)?)\s*")
-OVER_BUDGET = re.compile(r"^Error: Exceeded USD budget\b", re.M)
-TIMED_OUT = re.compile(r'"exit_code":124\b|\bexit_code=124\b|^EXIT[ =]124$', re.M)   # `timeout` killed it
-NO_VERDICT, OVER_BUDGET_TEXT = "結束但沒有判定（可能呼叫失敗）", "超過預算上限，沒有判定"
-AMBIGUOUS = "結果無法對應（同一次輸出裡有多個指令的結果）"
-TIMED_OUT_TEXT = "逾時被中止，沒有判定"
-SCRIPT_FAILED = "PM 的呼叫腳本出錯，claude 沒有回覆"
-MISMATCH = "回覆的 PR／版本跟呼叫時不同"
+NO_VERDICT = "已結束，GitHub 上沒有這個版本的結論"
+UNREAD_VERDICT = "已結束（沒讀 GitHub，不知道結論）"
 _review_cache: dict = {}
-
-
-# `claude --print ... > /tmp/x.json`: the reply went to a file, not the exec
-# output. Only that file's verdict line is read, like the exec output's.
-RESULT_FILE = re.compile(r"(?<![\d&>])>\s*(/[\w./+-]{1,200})")
-
-
-def _review_file(text: str) -> str:
-    found = CLAUDE_CALL.search(text)
-    if found is None:
-        return ""
-    command = re.split(r"\n|\\n", text[found.start():found.start() + 4096], maxsplit=1)[0]
-    target = RESULT_FILE.search(command)
-    return target.group(1) if target else ""
-
-
-def _file_reply(path: str, since: float | None) -> str | None:
-    """The reply a call wrote to its result file: the `--output-format json`
-    "result" text, a reason when that run reports an error, or None when the
-    file is missing, too large, or older than the call."""
-    try:
-        info = os.stat(path)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 1 << 20:
-            return None
-        if since is not None and info.st_mtime < since - 5:
-            return None   # left over from an earlier run
-        with open(path, "rb") as handle:
-            raw = handle.read(1 << 20).decode("utf-8", "replace")
-    except OSError:
-        return None
-    try:
-        item = json.loads(raw)
-    except ValueError:
-        return raw
-    if type(item) is not dict:
-        return raw
-    if item.get("subtype") == "error_max_budget_usd":
-        return OVER_BUDGET_TEXT
-    if item.get("is_error") is True:
-        return NO_VERDICT
-    return item["result"] if type(item.get("result")) is str else ""
 
 
 # A review call usually fetches the diff itself, e.g. `gh -R owner/repo pr
@@ -2193,63 +2154,9 @@ def _review_target(text: str) -> tuple[str, str]:
     return (number or (pr.group(1) if pr else ""), head.group(1)[:7] if head else "")
 
 
-def _result_text(text: str) -> str:
-    """The command's own output from one exec result: a JSON result object's
-    "output" string (also inside a Promise.allSettled "value"), else the text."""
-    if text.lstrip().startswith("{"):
-        try:
-            item = json.loads(text)
-        except ValueError:
-            return text
-        if type(item) is dict and type(item.get("value")) is dict:
-            item = item["value"]
-        if type(item) is dict and type(item.get("output")) is str:
-            return item["output"]
-    return text
-
-
-def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None:
-    """Verdict word or a reason it has none; None while there is no result yet.
-    A direct call that reports no running session has already finished (for
-    example a CLI usage error); a poll needs an exit marker or a verdict."""
-    results = [text for text in parts
-               if text.strip() and not text.startswith("Script completed")
-               and not CONTROL_LINE.fullmatch(text)]
-    if not direct and not any(EXITED.search(text) for text in parts) and not any(
-            REVIEW_VERDICT.search(text) for text in results):
-        return None
-    if any(text.startswith("Script failed") for text in parts):
-        return SCRIPT_FAILED   # the PM's exec script broke before claude answered
-    if len(results) > 1:
-        return AMBIGUOUS
-    head = _result_text(results[0])[:1500] if results else ""
-    if not head.strip() and len(origin) > 3 and origin[3] and not any(
-            map(TIMED_OUT.search, parts)):
-        reply = _file_reply(origin[3], origin[0])
-        if reply in (OVER_BUDGET_TEXT, NO_VERDICT):
-            return reply
-        head = (reply or "")[:1500]
-    verdict = REVIEW_VERDICT.search(head)
-    if verdict is None:
-        if any(map(OVER_BUDGET.search, parts)):
-            return OVER_BUDGET_TEXT
-        return TIMED_OUT_TEXT if any(map(TIMED_OUT.search, parts)) else NO_VERDICT
-    # A delta review names the old head too: the reply matches when the PR and
-    # head the call named are among those it mentions.
-    prs = REVIEW_PR.findall(head)
-    heads = [sha.lower() for sha in REVIEW_HEAD.findall(head)]
-    want = origin[2].lower() if origin[2] else ""
-    if (prs and origin[1] and origin[1] not in prs) or (
-            heads and want and not any(sha.startswith(want) or want.startswith(sha)
-                                       for sha in heads)):
-        return MISMATCH
-    return verdict.group(1).upper()
-
-
 def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
-    """[(time, pr, head7, outcome or None)] for `claude --print` calls in one
-    Codex thread, oldest first; outcome None = no result returned yet. PR and
-    head are the ones the call named."""
+    """[(time, pr, head7)] for `claude --print` calls in one Codex thread,
+    oldest first. PR and head are the ones the call named."""
     now = time.time() if now is None else now
     try:
         size = os.path.getsize(path)
@@ -2257,8 +2164,11 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         return []
     cache = _review_cache.get(path)
     if cache is None or size < cache["offset"]:
-        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": {}, "polls": {},
-                 "sessions": {}, "done": [], "carry": b""}
+        # A forked thread (a subagent) starts with a copy of its parent's history,
+        # parent turns included, all stamped with the fork time. Turn ids grow with
+        # time, so its own work starts at the first turn not older than the thread.
+        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": [], "carry": b"",
+                 "copied": _forked(path)}
         _review_cache[path] = cache
     try:
         with open(path, "rb") as handle:
@@ -2266,72 +2176,81 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
             data = cache["carry"] + handle.read(size - cache["offset"])
     except OSError:
         return []
-    first = cache["offset"] == max(0, size - REVIEW_SCAN) and not cache["done"] and not cache["calls"]
+    first = cache["offset"] == max(0, size - REVIEW_SCAN) and not cache["calls"]
     cache["offset"] = size
     lines = data.split(b"\n")
     cache["carry"] = lines.pop()   # an unfinished last line is read again next time
     if first and data and not data.startswith(b"{"):
         lines = lines[1:]
     for raw in lines:
+        if cache["copied"]:
+            if b'"task_started"' in raw:
+                cache["copied"] = _turn_id(raw) < cache["copied"] and cache["copied"]
+            continue
+        if b"custom_tool_call" not in raw:
+            continue
         try:
             item = json.loads(raw)
         except ValueError:
             continue
         payload = item.get("payload") if type(item) is dict else None
-        if type(payload) is not dict:
+        if type(payload) is not dict or payload.get("type") != "custom_tool_call":
             continue
-        when = _github_time(str(item.get("timestamp") or "")[:19] + "Z")
-        kind, call = payload.get("type"), payload.get("call_id")
-        if kind == "custom_tool_call":
-            text = str(payload.get("input") or "")
-            if CLAUDE_CALL.search(text):
-                cache["calls"][call] = (when,) + _review_target(text) + (_review_file(text),)
-            found = STDIN_POLL.search(text)
-            if found:
-                cache["polls"][call] = int(found.group(1))
-        elif kind == "custom_tool_call_output":
-            origin = cache["calls"].get(call)
-            polled = cache["polls"].pop(call, None)
-            if origin is None:
-                origin = cache["sessions"].get(polled)
-            if origin is None:
-                continue
-            parts = [part.get("text", "") if type(part) is dict else ""
-                     for part in payload.get("output") or []]
-            # A still-running exec session is reported as JSON "session_id":N or,
-            # by some PM poll scripts, as a plain line (see RUNNING_SESSION).
-            running = {int(next(group for group in found if group)) for text in parts
-                       for found in RUNNING_SESSION.findall(text)}
-            if polled is not None and polled in running:
-                continue   # still running; an exit code here belongs to a parallel command
-            if polled is None and running:
-                for session in running:
-                    cache["sessions"][session] = origin
-                continue
-            outcome = _review_outcome(origin, parts, direct=polled is None)
-            if outcome is None:
-                continue   # no result yet
-            cache["done"].append((when, origin[1], origin[2], outcome))
-            for key in [k for k, v in cache["calls"].items() if v is origin]:
-                cache["calls"].pop(key)
-            for key in [k for k, v in cache["sessions"].items() if v is origin]:
-                cache["sessions"].pop(key)
-    cache["done"] = cache["done"][-20:]
-    # A call that never reports back is dropped once it is older than the office window.
-    for table in ("calls", "sessions"):
-        cache[table] = {k: v for k, v in cache[table].items()
-                        if v[0] is not None and now - v[0] <= OFFICE_WINDOW}
-    # A call and the exec session it opened share one origin: list it once.
-    origins = {id(origin): origin for origin in
-               list(cache["calls"].values()) + list(cache["sessions"].values())}
-    pending = [(origin[0], origin[1], origin[2], None) for origin in origins.values()]
-    return sorted(cache["done"] + pending, key=lambda item: item[0] or 0.0)
+        text = str(payload.get("input") or "")
+        if _claude_call(text):
+            when = _github_time(str(item.get("timestamp") or "")[:19] + "Z")
+            cache["calls"].append((when,) + _review_target(text))
+    # Undated calls and calls older than the office window are dropped.
+    cache["calls"] = [call for call in cache["calls"]
+                      if call[0] and now - call[0] <= OFFICE_WINDOW]
+    return list(cache["calls"])
+
+
+def _forked(path: str) -> str:
+    """The thread's own id when it was forked from another thread, else ""."""
+    try:
+        with open(path, "rb") as handle:
+            meta = json.loads(handle.readline(1 << 20))
+    except (OSError, ValueError):
+        return ""
+    payload = meta.get("payload") if type(meta) is dict else None
+    if type(payload) is not dict or not payload.get("forked_from_id"):
+        return ""
+    return str(payload.get("id") or "") or "~"   # no own id: treat everything as copied
+
+
+def _turn_id(raw: bytes) -> str:
+    try:
+        payload = json.loads(raw).get("payload")
+    except (ValueError, AttributeError):
+        return ""
+    return str(payload.get("turn_id") or "") if type(payload) is dict else ""
 
 
 def forget_reviews(paths) -> None:
     """Drop cached review state for threads no longer scanned."""
     for path in [path for path in _review_cache if path not in paths]:
         _review_cache.pop(path, None)
+
+
+COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
+
+
+def review_verdicts(comments) -> dict:
+    """{pr: [(time, verdict, ids)]} from verdicts trusted accounts posted on
+    PRs: a verdict line, the 7-character prefixes of every commit-like id the
+    comment names, and the comment's last-edit time. Pure; no I/O."""
+    found: dict = {}
+    for comment in comments if type(comments) is list else []:
+        if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
+            continue
+        body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
+        verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
+        if verdict:
+            when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
+            ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
+            found.setdefault(number, []).append((when, verdict.group(1), ids))
+    return found
 
 
 def _review_label(pr: str, sha: str) -> str:
@@ -2342,25 +2261,42 @@ def _review_label(pr: str, sha: str) -> str:
 CODEX_DAYS = 7   # a long-running thread lives in the folder of the day it started
 
 
-def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
-    """One row per recent `claude --print` call a Codex thread made. A call that
-    names a PR and head is a Reviewer bound to that dispatch; any other call is
-    an unbound one-shot run."""
+def _review_rows(path: str, now: float, parent: OfficeRow) -> list[tuple]:
+    """(row, pr, head, time) per recent `claude --print` call a Codex thread
+    made, shown running until _review_result finds it ended. A call that names
+    a PR and head is a Reviewer bound to that dispatch; any other call is an
+    unbound one-shot run."""
     rows = []
-    for when, pr, sha, outcome in codex_reviews(path, now):
-        age = max(0.0, now - when) if when else None
-        if age is None or age > (OFFICE_STALL if outcome is None else OFFICE_DONE_WINDOW):
-            continue
+    for when, pr, sha in codex_reviews(path, now):
+        age = max(0.0, now - when)
         bound = bool(pr and sha)
-        task = f"PR #{pr} @{sha}" if bound else ""
         label = _review_label(pr, sha) if bound else "單次呼叫（呼叫裡沒寫 PR 和版本）"
-        rows.append(OfficeRow("claude reviewer" if bound else "claude 單次呼叫",
-                              WORKING if outcome is None else DONE,
-                              f"{label}（單次呼叫執行中）" if outcome is None else f"{label}：{outcome}",
-                              age, 30, kind="subagent", group=parent.key, key="review",
-                              role="reviewer" if bound else "", task=task,
-                              evidence="codex 紀錄（呼叫與結果）", outcome=outcome or ""))
+        rows.append((OfficeRow("claude reviewer" if bound else "claude 單次呼叫", WORKING,
+                               f"{label}（單次呼叫執行中）", age, 30, kind="subagent",
+                               group=parent.key, key="review", role="reviewer" if bound else "",
+                               task=f"PR #{pr} @{sha}" if bound else "", evidence="codex 紀錄（呼叫）"),
+                     pr if bound else "", sha, when))
     return rows
+
+
+def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts, now: float,
+                   until: float | None = None) -> OfficeRow:
+    """An ended call shows the first verdict posted on its PR after it started,
+    and before the next call for the same PR and head started (until), that
+    names its head, aged from that verdict. The call knows its own head, so no
+    comment has to be read for which head it is about; later rounds that
+    mention this head come after its own verdict, and a retry's verdict belongs
+    to the retry. Every Reviewer route is read the same way."""
+    if not pr:
+        return replace(row, state=DONE, detail=row.detail.replace("（單次呼叫執行中）", "：已結束"))
+    posted = sorted(item[:2] for item in (verdicts or {}).get(pr, [])
+                    if item[0] >= when - CALL_SLACK and (until is None or item[0] < until)
+                    and sha.lower() in item[2])
+    outcome = posted[0][1] if posted else UNREAD_VERDICT if verdicts is None else NO_VERDICT
+    age = max(0.0, now - posted[0][0]) if posted else row.age
+    return replace(row, state=DONE, outcome=outcome, age=min(age, row.age),
+                   detail=row.detail.replace("（單次呼叫執行中）", f"：{outcome}"),
+                   evidence="codex 紀錄（呼叫）＋GitHub 結論" if posted else row.evidence)
 
 
 CALL_GRACE = 15.0   # seconds a recorded one-shot call may run before its process is seen
@@ -2389,10 +2325,11 @@ def _ended_calls(subs, live_calls) -> set:
 
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None,
-               live_calls: list[float] | None = None) -> list[OfficeRow]:
+               live_calls: list[float] | None = None, verdicts: dict | None = None) -> list[OfficeRow]:
     """live_calls: how many seconds ago each Codex-started one-shot claude
     process now running started (as negative offsets from now), or None when
-    the process table was not read."""
+    the process table was not read. verdicts: review_verdicts() of the GitHub
+    comments read, or None when GitHub was not read."""
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
@@ -2404,14 +2341,15 @@ def codex_rows(now: float, root: str | None = None,
     history = {"db": open_codex_history(CODEX_HISTORY)}
     try:
         return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions,
-                           live_calls)
+                           live_calls, verdicts)
     finally:
         if history["db"] is not None:
             history["db"].close()
 
 
 def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
-                live_calls=None) -> list[OfficeRow]:
+                live_calls=None, verdicts=None) -> list[OfficeRow]:
+    calls = {}   # id(review row) -> (pr, head, time)
     for path in paths:
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
@@ -2428,14 +2366,23 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             actions[key] = found[3] if len(found) > 3 else ""
         else:
             subs.append((key, row))
-        reviews = _review_rows(path, now, row)
-        subs += [(key if kind == "main" else None, review) for review in reviews]
+        for review, pr, sha, when in _review_rows(path, now, row):
+            calls[id(review)] = (pr, sha, when)
+            subs.append((key if kind == "main" else None, review))
     forget_reviews(scanned)
-    if live_calls is not None:
-        ended = _ended_calls(subs, live_calls)
-        subs = [(parent, replace(sub, state=DONE, detail=sub.detail.replace(
-                    "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果")) if id(sub) in ended else sub)
-                for parent, sub in subs]
+    # A call has ended once its process is gone; without the process table it
+    # is shown running until it is too old to matter.
+    ended = _ended_calls(subs, live_calls) if live_calls is not None else set()
+    starts: dict = {}
+    for pr, sha, when in calls.values():
+        starts.setdefault((pr, sha), []).append(when)
+
+    def until(pr, sha, when):   # when the next call for this PR and head started
+        return min((start for start in starts[(pr, sha)] if start > when), default=None)
+    subs = [(parent, _review_result(sub, *calls[id(sub)], verdicts, now, until(*calls[id(sub)]))
+             if id(sub) in ended else sub) for parent, sub in subs]
+    subs = [(parent, sub) for parent, sub in subs if sub.key != "review"
+            or (sub.age or 0.0) <= (OFFICE_STALL if sub.state == WORKING else OFFICE_DONE_WINDOW)]
     rows = []
     for key, row in mains.items():
         if row.main:
@@ -3195,7 +3142,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 cwd_of=process_cwd,
                 cpu_of=process_cpu, dispatch: str | None = None,
                 llmtool_tasks: str | None = None,
-                finished_runs: list | None = None) -> list[OfficeRow]:
+                finished_runs: list | None = None,
+                verdicts: dict | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     sessions = os.path.join(os.path.dirname(
@@ -3215,7 +3163,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # Monitor.poll builds the office only after the process table was read,
     # so an empty list means nothing is running, not "unknown".
     calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
-    rows = codex_rows(now, codex_root, canonical, calls) + claude_rows(now, claude_root, canonical, live)
+    rows = (codex_rows(now, codex_root, canonical, calls, verdicts)
+            + claude_rows(now, claude_root, canonical, live))
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
@@ -3345,8 +3294,7 @@ def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
 
 
 RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
-REVIEW_NO_VERDICT = frozenset({NO_VERDICT, OVER_BUDGET_TEXT, AMBIGUOUS, MISMATCH,
-                               TIMED_OUT_TEXT, SCRIPT_FAILED})
+REVIEW_NO_VERDICT = frozenset({NO_VERDICT})
 ALERT_STATES = (STALLED, STOPPED, ATTENTION)
 
 
@@ -3376,7 +3324,7 @@ def _review_alerts(rows: list[OfficeRow]) -> list[str]:
                       key=lambda row: row.age if row.age is not None else 1e12)
         if missing < 2 or (done and not running and done[0].outcome not in REVIEW_NO_VERDICT):
             continue   # fine, or the newest review did reach a verdict
-        parts = [f"{missing} 次沒有判定"]
+        parts = [f"{missing} 次結束後 GitHub 沒有結論"]
         fails = sum(row.outcome == "FAIL" for row in items)
         if fails:
             parts.append(f"{fails} 次 FAIL")
