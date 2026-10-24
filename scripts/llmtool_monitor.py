@@ -1106,9 +1106,12 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
         for line in body.splitlines()[:MAX_MARKERS]:
             if MARKER.fullmatch(line) is None:   # leading, column-zero marker lines only
                 break
-            fields = {key: value.casefold() if key in ("actor", "target") else value.upper()
-                      for key, value in OWNER_FIELD.findall(line)}
-            marked.append((_github_time(comment.get("created_at")), number, fields, body))
+            fields = {}
+            for key, value in OWNER_FIELD.findall(line):
+                value = value.rstrip("-")   # "status=APPROVED-->" written without a space
+                fields.setdefault(key, value.casefold() if key in ("actor", "target") else value.upper())
+            order = comment.get("id") if type(comment.get("id")) is int else 0
+            marked.append((_github_time(comment.get("created_at")), order, number, fields, body))
     closed = {}
     for pull in pulls if type(pulls) is list else []:
         if type(pull) is dict and type(pull.get("number")) is int:
@@ -1116,7 +1119,7 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
                                              _github_time(pull.get("closed_at")))
     # One open request per thread (the latest); an Owner marker settles the thread.
     open_requests = {item.reference[1:]: item for item in earlier}
-    for when, number, fields, body in sorted(marked, key=lambda item: item[0]):
+    for when, _, number, fields, body in sorted(marked, key=lambda item: item[:2]):
         status = fields.get("status", "")
         held = open_requests.get(number)
         if held is not None and when < held.when:
@@ -1140,7 +1143,8 @@ def branch_prs(pulls, repo: str | None = None) -> dict[str, tuple[int, str]]:
         head = pull.get("head")
         ref = head.get("ref") if type(head) is dict else None
         source = head.get("repo") if type(head) is dict else None
-        if repo is not None and (type(source) is not dict or source.get("full_name") != repo):
+        if repo is not None and (type(source) is not dict or type(source.get("full_name")) is not str
+                                 or source["full_name"].casefold() != repo.casefold()):
             continue
         if type(pull.get("number")) is not int or type(ref) is not str or not BRANCH.fullmatch(ref):
             continue
@@ -1229,10 +1233,10 @@ class GitHubSource:
             events = github_events(unique, pulls, since)
             pending = owner_pending(unique, pulls, self.pending)
             prs = branch_prs(pulls, self.repo)
-            self.events, self.pending, self.branch_prs = events, pending, prs   # one swap
-            self.scope = (f"等你決定：看最近 {int(self.window // 3600)} 小時的 GitHub 留言"
-                          + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
-                          + "；監控開著時，更早還沒回覆的也會留著")
+            scope = (f"等你決定：看最近 {int(self.window // 3600)} 小時的 GitHub 留言"
+                     + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
+                     + "；監控開著時，更早還沒回覆的也會留著")
+            self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))

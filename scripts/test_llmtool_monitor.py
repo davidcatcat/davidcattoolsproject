@@ -797,10 +797,13 @@ class GitHubActivityTests(unittest.TestCase):
             mark(26, 60, "type=x actor=PM target=Owner status=WAITING", "first"),
             mark(26, 30, "type=x actor=PM target=Owner status=BLOCKED", "second"),         # latest on a thread wins
             mark(27, 60, "type=x actor=PM target=Owner status=WAITING"),                  # PR closed before the ask
+            mark(28, 60, "type=x actor=PM target=Owner status=WAITING"),
+            comment(28, NOW - 50, "<!-- activity: type=x actor=PM target=Owner status=APPROVED-->"),  # no space
+            mark(29, 60, "type=x actor=PM target=Owner target=PM status=WAITING"),        # first field counts
         ]
         pulls = [{"number": 27, "closed_at": iso(NOW - 999), "merged_at": None}]
         pending = {item.reference: item for item in mon.owner_pending(comments, pulls)}
-        self.assertEqual(sorted(pending), ["#20", "#22", "#25", "#26", "#27"])
+        self.assertEqual(sorted(pending), ["#20", "#22", "#25", "#26", "#27", "#29"])
         self.assertEqual((pending["#26"].status, pending["#26"].summary), ("BLOCKED", "second 26"))
         many = [mon.OwnerPending(NOW - i, f"#{i}", "WAITING", "x") for i in range(7, 0, -1)]
         lines = mon.office_lines([], pending=many)
@@ -833,6 +836,7 @@ class GitHubActivityTests(unittest.TestCase):
                   "state": "closed", "merged_at": None},
                  {"number": 3, "head": {"ref": "fix/b", "repo": None}, "state": "closed", "merged_at": None}]
         self.assertEqual(mon.branch_prs(pulls, "o/r"), {"fix/a": (1, "OPEN")})
+        self.assertEqual(mon.branch_prs(pulls, "O/R"), {"fix/a": (1, "OPEN")})   # names compare case-insensitively
 
     def test_source_keeps_owner_pending_with_its_events(self):
         body = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
