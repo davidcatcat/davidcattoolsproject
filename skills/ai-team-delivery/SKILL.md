@@ -15,7 +15,7 @@ Before dispatch, record:
 - base SHA and repository/worktree identity;
 - intended behavior, writable files and prohibited actions;
 - assigned Developer, model and provider route;
-- deterministic checks and independent review required; exact-head CI for code/config/product changes, or the documentation-only gate below for pure documentation changes;
+- deterministic checks and independent review required; code/config/product changes use exact-head CI, and eligible pure static documentation uses the exact-head documentation-only gate below;
 - provider output cap, native retry stop, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
@@ -29,18 +29,29 @@ The Developer implements the bounded packet, runs relevant deterministic checks,
 
 Submit one consolidated exact-SHA candidate to the fixed Claude formal Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. Use a separate read-only Reviewer Session/context, distinct from the Developer; a Claude Developer Agent must not formally review its own changes. Codex Reviewer output may provide advisory/pre-review feedback only and does not replace the Claude formal gate under current authority. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
 
-After the applicable exact-head validation and independent review pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
+After the applicable exact-head validation and independent review pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). Any changed HEAD invalidates the validation record and review; reassess and rerun affected gates.
 
 ## Documentation-only merge gate
 
-A PR qualifies only when every changed file is static documentation (for example Markdown) and it changes no executable source, tests, workflow/CI configuration, dependencies, packaging, generated/product Skills, dispatch data, permissions or security/runtime boundary. Mixed-scope PRs use the normal code gates. For a documentation-only PR:
+This is the sole normative documentation-only policy. Other repository guidance links here rather than restating eligibility or validation rules.
 
-- obtain a separate, read-only Claude formal review bound to the exact PR HEAD; retain any Owner/Coordinator approval required by the document's authority;
-- publish a docs-validation record bound to the exact HEAD and changed-path list, covering Markdown structure, local links and anchors, references to moved sections, and any applicable documentation-specific checks;
-- keep all checks that actually run as required gates; when path filters intentionally schedule no code CI, do not launch the full Python matrix solely to simulate a code change;
-- preserve all required security, privacy, native/runtime and product-acceptance gates when the documentation makes claims about those outcomes. Documentation validation never proves runtime acceptance.
+A PR qualifies only when its complete changed-path list is exactly a subset of these two paths:
 
-Any change to executable examples that alters implementation behavior, workflow or CI configuration, packaged Skills, or normative rules for dispatch, permissions, security, evidence, review, validation or merge gates is not eligible for this reduced docs-only validation and retains exact-head CI plus applicable specialist gates. The PR that defines or changes this documentation-only gate is itself excluded and requires exact-head CI and independent Claude review.
+- `tools/llmtool/README.md`
+- `tools/llmtool/ROADMAP.md`
+
+Every changed path must be a modified, tracked regular UTF-8 Markdown file with mode `100644`. Any added, deleted, renamed, copied, symlinked, mode-changed, binary, generated, packaged or otherwise unlisted path makes the PR ineligible. `WORKFLOW.md`, governance/policy documents, Markdown consumed by code, prompts or the monitor, and any documentation that changes dispatch, permissions, security, runtime, evidence, review, validation or merge authority are excluded. Mixed-scope or excluded changes retain the normal exact-head CI and specialist gates.
+
+For every eligible PR:
+
+- A non-author Integrator publishes a validation record on the PR bound to the exact HEAD. It includes the base and HEAD SHAs; the complete changed-path list with Git status and file mode; the exact commands, tool names/versions and exit results; and any unavailable check with its reason. The minimum checks are `git diff --check <base>...<head>`, a Markdown parser, local link/anchor validation for each changed document, and a repository-wide inbound-reference check for headings or anchors moved or removed. Path/status/mode eligibility is separately verified from Git metadata, not inferred from file extensions. Missing minimum checks mean the docs gate has not passed.
+- A separate read-only Claude formal Reviewer examines the exact HEAD and validation record. The verdict must explicitly say that eligibility classification was confirmed against the complete changed-path/status/mode list at that HEAD. A PR author cannot supply the independent classification confirmation.
+- Every CI/check run that exists for that HEAD and every branch-protection-required check remains a merge gate and must pass. A path-filtered absence of the Python matrix does not require launching it solely for a documentation change; it does not waive a required check or turn a pending required status into success.
+- Existing security, privacy, native/runtime, product-acceptance and Owner/Coordinator approval gates remain in force regardless of whether the text makes an explicit claim. This docs gate cannot establish runtime acceptance or relax any such gate.
+
+The gate definition itself, any change to this eligibility policy, and every excluded policy/governance change are ineligible and require exact-head CI plus independent Claude review; existing Owner/Coordinator approval requirements also apply. A push, rebase or reconciliation that changes HEAD invalidates the validation record and review. Rebind the record and repeat every affected check and review before merge.
+
+For this gate-definition PR, the Integrator also records a repository-wide search of applicable merge-gate guidance and the disposition of every result. Duplicate normative statements must point here; no stale statement may silently preserve the old rule.
 
 **Company LLM Developer route:** the PM may assign `gw` through llmtool to small, low-risk tasks with clear deterministic acceptance. It can propose code, tests and self-review, but cannot edit files, run Shell/tests, use Git or approve its output. The authorized Developer/Integrator execution environment applies a chosen patch and runs the task checks. Use a task-specific non-sensitive input/egress basis, redact secrets/private data/logs first, bound usage and repairs, record token/retry/result evidence or UNKNOWN, and obtain the same independent formal Reviewer and CI gates. VPN/provider unavailability is nonblocking for other work. Do not claim quality or net savings from one trial.
 
