@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from dataclasses import replace
 from pathlib import Path
 
 _PATH = Path(__file__).with_name("llmtool_monitor.py")
@@ -1532,6 +1533,153 @@ class OfficeViewTests(unittest.TestCase):
         self.assertFalse(any(row.name == "claude 單次呼叫" for row in self.rows([query])))
         state, _, _ = mon.track_one_shot({}, [query], 1000.0)
         self.assertEqual(state, {})
+
+    def test_review_target_reads_the_pr_a_call_fetches(self):
+        self.assertEqual(mon._review_target('review_diff="$(gh -R o/r pr diff 309)" claude --print'),
+                         ("309", ""))
+        self.assertEqual(mon._review_target("gh --repo o/r pr diff 41"), ("41", ""))
+        self.assertEqual(mon._review_target("gh pr diff --repo=o/r 42"), ("42", ""))
+        self.assertEqual(mon._review_target("gh pr view #12 --json files; head abc1234"), ("12", "abc1234"))
+        self.assertEqual(mon._review_target("gh pr view https://github.com/o/r/pull/77 --json files"), ("77", ""))
+        self.assertEqual(mon._review_target("gh api repos/o/r/pulls/78/files"), ("78", ""))
+        # The prompt may cite other PRs; the fetched one is under review.
+        self.assertEqual(mon._review_target("context: PR #298 merged. gh pr diff 309"), ("309", ""))
+        self.assertEqual(mon._review_target("Review PR #5 at head abc1234"), ("5", "abc1234"))
+        self.assertEqual(mon._review_target("gh issue view 289"), ("", ""))
+
+    def test_review_target_ignores_cited_urls_and_inlined_diffs(self):
+        # A cited URL is not a fetch.
+        self.assertEqual(mon._review_target("Review PR #312 head abc1234; related https://github.com/o/r/pull/298"),
+                         ("312", "abc1234"))
+        # An inlined diff is the material under review, even when it mentions fetches.
+        prompt = ("Review PR #312 head abc1234\n=== DIFF ===\ndiff --git a/x b/x\n"
+                  "+# `gh -R owner/repo pr diff 309`\n+see /pull/77\n")
+        self.assertEqual(mon._review_target(prompt), ("312", "abc1234"))
+        # Only fetches are cut at the diff; a head named after it still counts.
+        self.assertEqual(mon._review_target("Review PR #312\ndiff --git a/x b/x\n+x\nExact head: abc1234"),
+                         ("312", "abc1234"))
+        # Fetches that disagree fall back to the prompt's own PR.
+        self.assertEqual(mon._review_target("PR #5: gh pr diff 6; gh pr diff 7"), ("5", ""))
+        self.assertEqual(mon._review_target("gh pr diff 6; gh pr view 6 --json headRefOid"), ("6", ""))
+
+    def _calls(self, subs, live_calls):
+        main = mon.OfficeRow("codex 主對話", mon.WORKING, "", 1.0, 0, key="codex:T1", main=True)
+        listed = []   # one rollout file in all, though codex_rows lists CODEX_DAYS folders
+
+        def glob(pattern):
+            if "rollout" not in pattern or listed:
+                return []
+            listed.append(pattern)
+            return [pattern]
+        with patch.object(mon, "_codex_row", return_value=("main", "T1", main, "")), \
+             patch.object(mon, "_review_rows", return_value=subs), \
+             patch.object(mon.glob, "glob", side_effect=glob), \
+             patch.object(mon.os.path, "getmtime", return_value=self.NOW):
+            rows = mon.codex_rows(self.NOW, str(self.codex), self.canonical, live_calls=live_calls)
+        return {row.detail: row.state for row in rows if row.key == "review"}, next(row for row in rows if row.main)
+
+    def _call(self, pr, age):
+        return mon.OfficeRow("claude 單次呼叫", mon.WORKING, f"審 PR #{pr} @abc1234（單次呼叫執行中）",
+                             age, 30, key="review", kind="subagent")
+
+    def test_review_call_without_a_live_process_has_ended(self):
+        old, newer, young = self._call(9, 360.0), self._call(8, 30.0), self._call(7, 5.0)
+        # One live process started 4s ago: only the young call can own it.
+        calls, boss = self._calls([old, newer, young], [-4.0])
+        self.assertEqual(calls, {"審 PR #9 @abc1234：程序已結束，PM 沒讀結果": mon.DONE,
+                                 "審 PR #8 @abc1234：程序已結束，PM 沒讀結果": mon.DONE,
+                                 "審 PR #7 @abc1234（單次呼叫執行中）": mon.WORKING})
+        self.assertNotIn("PR #9", boss.detail)   # an ended call is not counted as in progress
+
+    def test_review_calls_that_finish_out_of_order(self):
+        # A (old, long review) still runs; B (newer) finished and was never read.
+        a, b = self._call(9, 360.0), self._call(8, 300.0)
+        calls, boss = self._calls([a, b], [-359.0])
+        self.assertEqual(calls, {"審 PR #9 @abc1234（單次呼叫執行中）": mon.WORKING,
+                                 "審 PR #8 @abc1234：程序已結束，PM 沒讀結果": mon.DONE})
+        self.assertIn("PR #9", boss.detail)
+
+    def test_review_call_reconciliation_edges(self):
+        a, b = self._call(9, 360.0), self._call(8, 300.0)
+        running = {"審 PR #9 @abc1234（單次呼叫執行中）": mon.WORKING,
+                   "審 PR #8 @abc1234（單次呼叫執行中）": mon.WORKING}
+        self.assertEqual(self._calls([a, b], None)[0], running)          # process table unread
+        self.assertEqual(self._calls([a, b], [-359.0, -299.0, -10.0])[0], running)   # more processes than calls
+        # A process started late (e.g. after a prompt was built) still belongs to its call.
+        self.assertEqual(self._calls([a, b], [-200.0, -100.0])[0], running)
+        ended = {"審 PR #9 @abc1234：程序已結束，PM 沒讀結果": mon.DONE,
+                 "審 PR #8 @abc1234：程序已結束，PM 沒讀結果": mon.DONE}
+        self.assertEqual(self._calls([a, b], [])[0], ended)              # nothing running
+        # Finished calls and other subagents are never touched.
+        done = replace(a, state=mon.DONE, detail="審 PR #9 @abc1234：PASS")
+        other = replace(a, key="T2", name="codex subagent", detail="寫測試")
+        self.assertEqual(self._calls([done, other], [])[0], {"審 PR #9 @abc1234：PASS": mon.DONE})
+
+    def test_office_rows_reads_live_call_start_times(self):
+        run = mon.Process(40, 5718, 40, "01:00", "S", "Claude Code CLI", "claude", "Codex APP-SERVER 5718")
+        seen = {}
+
+        def fake(now, root=None, canonical=None, live_calls=None):
+            seen["calls"] = live_calls
+            return []
+        with patch.object(mon, "codex_rows", side_effect=fake):
+            self.rows([run])
+            self.assertEqual(seen["calls"], [-60.0])
+            self.rows([])
+            self.assertIsNone(seen["calls"])
+
+    def test_monitor_version_from_git(self):
+        def run(results):
+            calls = iter(results)
+            return lambda *a, **k: mon.subprocess.CompletedProcess(a, *next(calls))
+        cases = [
+            ([(0, "blob1\n"), (0, "blob1\n"), (0, "abc1234 10-24 13:50\n")], "abc1234 10-24 13:50"),
+            ([(0, "blob2\n"), (0, "blob1\n"), (0, "abc1234 10-24 13:50\n")], "本機修改 fffffff"),
+            ([(128, ""), (128, ""), (128, "")], "本機修改 fffffff"),
+            # Both lookups failing is not a match, even when the log still answers.
+            ([(128, ""), (128, ""), (0, "abc1234 10-24 13:50\n")], "本機修改 fffffff"),
+        ]
+        for results, expected in cases:
+            mon.monitor_version.cache_clear()
+            with patch.object(mon, "_GIT_RUN", side_effect=run(results)) as git, \
+                 patch.object(mon, "script_digest", return_value="fffffff"):
+                self.assertEqual(mon.monitor_version(), expected)
+            self.assertIn("--no-filters", git.call_args_list[0].args[0])
+        with patch.object(mon, "_GIT_RUN", side_effect=OSError("no git")):
+            mon.monitor_version.cache_clear()
+            self.assertTrue(mon.monitor_version().startswith("本機修改 "))
+        mon.monitor_version.cache_clear()
+
+    def test_monitor_notices_new_code_once(self):
+        digests = iter(["aaaaaaa", "aaaaaaa", "?", "bbbbbbb", "ccccccc"])
+        with patch.object(mon, "script_digest", side_effect=lambda: next(digests)), \
+             patch.object(mon, "monitor_version", return_value="abc1234 10-24 13:50"), \
+             patch.object(mon, "collect", return_value=mon.Snapshot([], {}, [], frozenset())), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]), \
+             patch.object(mon, "d6_task_lines", return_value=[]):
+            monitor = mon.Monitor()
+            warnings = []
+            for _ in range(4):
+                monitor.office_due = 0.0
+                warnings.append(sum("監控程式已更新" in text for _, _, text in monitor.poll()))
+                warnings[-1] = (warnings[-1], monitor.stale)
+        # unchanged, unreadable, changed (warn once), changed again (no repeat)
+        self.assertEqual(warnings, [(0, False), (0, False), (1, True), (0, True)])
+
+    def test_unreadable_script_at_start_is_not_a_change(self):
+        digests = iter(["?", "aaaaaaa", "aaaaaaa"])
+        with patch.object(mon, "script_digest", side_effect=lambda: next(digests)), \
+             patch.object(mon, "monitor_version", return_value="abc1234 10-24 13:50"), \
+             patch.object(mon, "collect", return_value=mon.Snapshot([], {}, [], frozenset())), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]), \
+             patch.object(mon, "d6_task_lines", return_value=[]):
+            monitor = mon.Monitor()
+            for _ in range(2):
+                monitor.office_due = 0.0
+                monitor.poll()
+        self.assertEqual((monitor.digest, monitor.stale), ("aaaaaaa", False))
 
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",

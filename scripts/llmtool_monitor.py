@@ -36,6 +36,8 @@ import re
 import shutil
 import stat
 import urllib.parse
+import functools
+import hashlib
 import subprocess
 import sys
 import threading
@@ -365,6 +367,9 @@ class Monitor:
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
         self.d6: list = []   # D6 task lines, refreshed with the office view
+        self.version = monitor_version()   # the code this process loaded
+        self.digest = script_digest()
+        self.stale = False   # the file on disk changed since start: a restart is needed
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -460,6 +465,12 @@ class Monitor:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
                 self.office, self.office_state, self.office_error = office, state, None
+                digest = script_digest()
+                if self.digest == "?":
+                    self.digest = digest   # unreadable at start: the first real read is the baseline
+                elif not self.stale and digest not in (self.digest, "?"):
+                    self.stale = True
+                    new.append((stamp, "!", f"監控程式已更新，這個畫面還是舊版（{self.version}），請按 q 後重開"))
                 try:
                     self.d6 = d6_task_lines(canonical_root(), office, time.time())
                 except Exception:  # optional, like task evidence; never show a stale list
@@ -1241,6 +1252,43 @@ CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_PATH = os.path.abspath(__file__)
+
+
+def script_digest() -> str:
+    """Short sha256 of this file as it is on disk now."""
+    try:
+        with open(SCRIPT_PATH, "rb") as handle:
+            return hashlib.sha256(handle.read()).hexdigest()[:7]
+    except OSError:
+        return "?"
+
+
+_GIT_RUN = subprocess.run   # bound at import: GitHub source tests fake subprocess.run
+
+
+@functools.lru_cache(maxsize=1)
+def monitor_version() -> str:
+    """Which code this process runs, for the title line: the last commit that
+    changed this file when the file matches that checkout, else "本機修改" plus
+    the file's own digest. Read-only git plumbing only (no index refresh)."""
+    rel = os.path.relpath(SCRIPT_PATH, SCRIPT_ROOT)
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
+
+    def git(*args):
+        found = _GIT_RUN(["git", "-C", SCRIPT_ROOT, *args], capture_output=True,
+                         text=True, timeout=2, env=env)
+        return found.stdout.strip() if found.returncode == 0 else ""
+
+    try:
+        blob, committed = git("hash-object", "--no-filters", "--", SCRIPT_PATH), git("rev-parse", f"HEAD:{rel}")
+        same = bool(blob) and blob == committed
+        commit = git("log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M", "--", rel)
+    except (OSError, subprocess.SubprocessError):
+        same, commit = False, ""
+    if same and commit:
+        return commit
+    return f"本機修改 {script_digest()}"
 OFFICE_WINDOW = 6 * 3600       # sessions untouched for longer are left out
 OFFICE_DONE_WINDOW = 30 * 60   # finished subagent work stays visible this long
 OFFICE_BUSY = 90.0             # seconds since the last write that still mean "working"
@@ -1919,9 +1967,26 @@ def _file_reply(path: str, since: float | None) -> str | None:
     return item["result"] if type(item.get("result")) is str else ""
 
 
+# A review call usually fetches the diff itself, e.g. `gh -R owner/repo pr
+# diff 309`, `gh pr view https://github.com/o/r/pull/309` or `gh api
+# repos/o/r/pulls/309`. A bare URL is only a citation, not a fetch.
+REVIEW_PR_FETCH = re.compile(
+    r"\bgh\b[^\n]*?\bpr\s+(?:diff|view|checkout)\s+(?:(?:-R|--repo)[=\s]+\S+\s+)?"
+    r"(?:\S*/pull/)?#?(\d{1,6})\b"
+    r"|\bgh\s+api\s+\S*/pulls/(\d{1,6})\b")
+EMBEDDED_DIFF = re.compile(r"^diff --git ", re.M)
+
+
 def _review_target(text: str) -> tuple[str, str]:
+    """The PR the call fetches wins over one its prompt merely mentions.
+    Fetch commands inside an inlined diff do not count, and fetches that
+    disagree fall back to the prompt's own "PR #N"."""
+    cut = EMBEDDED_DIFF.search(text)
     pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
-    return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
+    fetched = {next(group for group in found if group)
+               for found in REVIEW_PR_FETCH.findall(text[:cut.start()] if cut else text)}
+    number = fetched.pop() if len(fetched) == 1 else ""
+    return (number or (pr.group(1) if pr else ""), head.group(1)[:7] if head else "")
 
 
 def _result_text(text: str) -> str:
@@ -2094,8 +2159,36 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
     return rows
 
 
+CALL_GRACE = 15.0   # seconds a recorded one-shot call may run before its process is seen
+CALL_SLACK = 5.0    # process start times are whole seconds; the call is recorded first
+
+
+def _ended_calls(subs, live_calls) -> set:
+    """Review rows the record shows running whose process is gone. Each row,
+    newest first, claims the unclaimed live call that started closest after
+    it; a call cannot have started before its own record, so a row with
+    nothing left to claim has ended (the PM never read its result). A row
+    younger than CALL_GRACE may not have spawned yet and is left alone."""
+    starts = sorted(live_calls)
+    ended = set()
+    rows = sorted((sub for _, sub in subs if sub.key == "review" and sub.state == WORKING
+                   and sub.age is not None), key=lambda sub: sub.age)
+    for sub in rows:
+        began = -sub.age   # relative to now, like the process starts
+        match = next((start for start in starts if start >= began - CALL_SLACK), None)
+        if match is not None:
+            starts.remove(match)
+        elif sub.age > CALL_GRACE:
+            ended.add(id(sub))
+    return ended
+
+
 def codex_rows(now: float, root: str | None = None,
-               canonical: str | None = None) -> list[OfficeRow]:
+               canonical: str | None = None,
+               live_calls: list[float] | None = None) -> list[OfficeRow]:
+    """live_calls: how many seconds ago each Codex-started one-shot claude
+    process now running started (as negative offsets from now), or None when
+    the process table was not read."""
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
@@ -2106,13 +2199,15 @@ def codex_rows(now: float, root: str | None = None,
     mains, subs, scanned, actions = {}, [], set(), {}
     history = {"db": open_codex_history(CODEX_HISTORY)}
     try:
-        return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions)
+        return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions,
+                           live_calls)
     finally:
         if history["db"] is not None:
             history["db"].close()
 
 
-def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions) -> list[OfficeRow]:
+def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
+                live_calls=None) -> list[OfficeRow]:
     for path in paths:
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
@@ -2132,6 +2227,11 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions) -
         reviews = _review_rows(path, now, row)
         subs += [(key if kind == "main" else None, review) for review in reviews]
     forget_reviews(scanned)
+    if live_calls is not None:
+        ended = _ended_calls(subs, live_calls)
+        subs = [(parent, replace(sub, state=DONE, detail=sub.detail.replace(
+                    "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果")) if id(sub) in ended else sub)
+                for parent, sub in subs]
     rows = []
     for key, row in mains.items():
         if row.main:
@@ -2829,7 +2929,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                                  entry.get("statusUpdatedAt"), entry.get("name"),
                                  answerer(owners.get(pid, "")))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
-    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
+    calls = ([-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
+             if processes else None)
+    rows = codex_rows(now, codex_root, canonical, calls) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
@@ -3159,7 +3261,8 @@ def record_lines(records: list[str]) -> list[str]:
 def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
     mon.poll()
-    print(f"AI agents · {datetime.now():%Y-%m-%d %H:%M:%S} · {summary(mon.processes, mon.lingering)}")
+    print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
+          f"{summary(mon.processes, mon.lingering)}")
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -3176,7 +3279,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
 
 def run_plain(interval: float, mon: "Monitor") -> int:
     """Append-only stream: one line per change, never a repainted screen."""
-    print(f"AI agents · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit", flush=True)
+    print(f"AI agents · 監控版本 {mon.version} · read-only process monitor · {FOOTNOTE} · Ctrl+C to quit",
+          flush=True)
     try:
         while True:
             for stamp, kind, text in mon.poll():
@@ -3222,8 +3326,11 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         h, w = stdscr.getmaxyx()
         body = max(1, h - 4)
         stdscr.erase()
-        put(0, f"AI agents · read-only process monitor · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+        put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
             colors.get("title", 0) | curses.A_BOLD)
+        if mon.stale:
+            put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
+                colors.get("!", 0) | curses.A_BOLD)
         status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
                   else summary(mon.processes, mon.lingering))
         running = running_stages(mon.tasks)
