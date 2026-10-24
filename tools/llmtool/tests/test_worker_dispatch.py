@@ -79,7 +79,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.evaluate('claude-developer').reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
-                         'OWNER_PAUSED')
+                         'OWNER_POLICY_ALLOWED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
 
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
@@ -256,11 +256,11 @@ class WorkerDispatchTests(unittest.TestCase):
             os.chdir(previous)
 
     def test_policy_is_reloaded_after_each_change(self):
-        self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed is False)
-        self._set_state('opencode-developer', 'ALLOWED')
         self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed)
         self._set_state('opencode-developer', 'PAUSED')
         self.assertFalse(worker_dispatch.evaluate('opencode-developer').allowed)
+        self._set_state('opencode-developer', 'ALLOWED')
+        self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed)
 
     def test_missing_malformed_duplicate_and_unknown_policy_fail_closed(self):
         self.policy_path.unlink()
@@ -393,7 +393,10 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(caught.exception.dispatch_code,
                          'WORKER_REASSIGN_NEW_ASSIGNMENT_REQUIRED')
         replacement = {**developer, 'assignment_id': 'e' * 32,
-                       'provider_profile': 'opencode'}
+                       'provider_profile': 'opencode',
+                       'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                       'execution': None}
+        self._set_state('opencode-developer', 'PAUSED')
         with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
             self.store.compare_and_update(
                 self.task['task_id'], expected={'developer': developer},
@@ -403,6 +406,18 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(saved['developer']['provider_profile'], 'company-gw')
         self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'opencode-developer')
         self.assertEqual(saved['dispatch_audit'][-1]['action'], 'REASSIGN')
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
+
+        self._set_state('opencode-developer', 'ALLOWED')
+        saved = self.store.compare_and_update(
+            self.task['task_id'], expected={'developer': developer},
+            developer=replacement)
+        self.assertEqual(saved['developer']['provider_profile'], 'opencode')
+        saved = self.store.get(self.task['task_id'])
+        self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'opencode-developer')
+        self.assertEqual(saved['dispatch_audit'][-1]['action'], 'REASSIGN')
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
 
     def test_audit_cannot_be_forged_by_generic_taskstore_update(self):
         with self.assertRaises(LLMToolError):
