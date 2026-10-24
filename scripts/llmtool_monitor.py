@@ -2826,7 +2826,10 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
             notes.insert(0, "閒置，等工作")
         if age is not None and age >= 60:
             notes.append(f"已開 {_ago(age)[:-1]}")
-    if ends and state != WORKING:
+    busy = state == WORKING
+    if alert and listener is not None:
+        state = ATTENTION   # like 公司 gw: a row with a problem never looks idle
+    if ends and not busy:
         when, name, result = ends[-1]
         notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
     if starts > 1:
