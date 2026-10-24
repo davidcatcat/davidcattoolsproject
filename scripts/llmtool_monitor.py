@@ -1070,9 +1070,14 @@ def github_events(comments, pulls, since: float) -> list[ActivityEvent]:
 # here (a target may be a long task name); only trusted, leading marker lines
 # count. A later marker on the same thread with actor=Owner, or a resolved
 # status, or the PR closing, settles it.
-OWNER_FIELD = re.compile(r"(?<![\w-])(type|actor|target|status)=([A-Za-z0-9_.#-]{1,64})(?![\w.#-])")
+# A field starts after whitespace or right after "activity:", so a value such
+# as note=actor=Owner is never read as a field of its own.
+OWNER_FIELD = re.compile(r"(?:(?<=\s)|(?<=activity:))(type|actor|target|status)="
+                         r"([A-Za-z0-9_.#-]{1,64})(?![\w.#=-])")
 OWNER_SETTLED = frozenset({"APPROVED", "DECLINED", "DENIED", "GRANTED", "REJECTED", "ANSWERED",
-                           "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN"})
+                           "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN", "AUTHORIZED",
+                           "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED"})
+OWNER_SHOWN = 5   # at most this many ★ lines; the rest are counted
 
 
 @dataclass(frozen=True)
@@ -1083,8 +1088,11 @@ class OwnerPending:
     summary: str
 
 
-def owner_pending(comments, pulls) -> list[OwnerPending]:
-    """Requests addressed to the Owner that nothing later has settled (pure)."""
+def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
+    """Requests addressed to the Owner that nothing later has settled (pure).
+    earlier: requests still open at the previous read; they stay open until
+    something in this read settles them, so a request older than the window
+    the comments cover does not silently drop out."""
     marked = []
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict:
@@ -1098,33 +1106,42 @@ def owner_pending(comments, pulls) -> list[OwnerPending]:
         for line in body.splitlines()[:MAX_MARKERS]:
             if MARKER.fullmatch(line) is None:   # leading, column-zero marker lines only
                 break
-            fields = dict(OWNER_FIELD.findall(line))
+            fields = {key: value.casefold() if key in ("actor", "target") else value.upper()
+                      for key, value in OWNER_FIELD.findall(line)}
             marked.append((_github_time(comment.get("created_at")), number, fields, body))
     closed = {}
     for pull in pulls if type(pulls) is list else []:
         if type(pull) is dict and type(pull.get("number")) is int:
             closed[str(pull["number"])] = max(_github_time(pull.get("merged_at")),
                                              _github_time(pull.get("closed_at")))
-    open_requests: dict[str, OwnerPending] = {}
+    # One open request per thread (the latest); an Owner marker settles the thread.
+    open_requests = {item.reference[1:]: item for item in earlier}
     for when, number, fields, body in sorted(marked, key=lambda item: item[0]):
         status = fields.get("status", "")
-        if fields.get("actor") == "Owner" or (fields.get("target") == "Owner"
+        held = open_requests.get(number)
+        if held is not None and when < held.when:
+            continue   # older than the open request: neither asks nor settles again
+        if fields.get("actor") == "owner" or (fields.get("target") == "owner"
                                               and status in OWNER_SETTLED):
             open_requests.pop(number, None)
-        elif fields.get("target") == "Owner" and when:
+        elif fields.get("target") == "owner" and when:
             open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body))
     return sorted((item for number, item in open_requests.items()
                    if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
 
 
-def branch_prs(pulls) -> dict[str, tuple[int, str]]:
+def branch_prs(pulls, repo: str | None = None) -> dict[str, tuple[int, str]]:
     """{head branch: (PR number, MERGED/CLOSED/OPEN)} from a pulls listing; the
-    newest PR wins when a branch was reused."""
+    newest PR wins when a branch was reused. With repo, PRs from forks (whose
+    branch may share a name with ours) are left out."""
     found: dict[str, tuple[int, str]] = {}
     for pull in sorted((p for p in pulls if type(p) is dict) if type(pulls) is list else [],
                        key=lambda p: p.get("number") if type(p.get("number")) is int else 0):
         head = pull.get("head")
         ref = head.get("ref") if type(head) is dict else None
+        source = head.get("repo") if type(head) is dict else None
+        if repo is not None and (type(source) is not dict or source.get("full_name") != repo):
+            continue
         if type(pull.get("number")) is not int or type(ref) is not str or not BRANCH.fullmatch(ref):
             continue
         state = ("MERGED" if pull.get("merged_at") else
@@ -1144,6 +1161,7 @@ class GitHubSource:
         self.clock = clock
         self.events: list[ActivityEvent] = []
         self.pending: list[OwnerPending] = []
+        self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.status = "GitHub：尚未讀取"
         self.fetched = None   # monotonic time of the last attempt
@@ -1208,9 +1226,13 @@ class GitHubSource:
                 if key is None or (type(key) is int and key not in seen):
                     seen.add(key)
                     unique.append(item)
-            self.events = github_events(unique, pulls, since)   # one atomic swap
-            self.pending = owner_pending(unique, pulls)
-            self.branch_prs = branch_prs(pulls)
+            events = github_events(unique, pulls, since)
+            pending = owner_pending(unique, pulls, self.pending)
+            prs = branch_prs(pulls, self.repo)
+            self.events, self.pending, self.branch_prs = events, pending, prs   # one swap
+            self.scope = (f"等你決定：看最近 {int(self.window // 3600)} 小時的 GitHub 留言"
+                          + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
+                          + "；監控開著時，更早還沒回覆的也會留著")
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
@@ -3363,7 +3385,7 @@ def _row_style(state: str) -> str:
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
-                now: float | None = None) -> list[tuple[str, str]]:
+                now: float | None = None, scope: str = "") -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
     expand lists older finished work too instead of folding it into one line.
@@ -3371,11 +3393,15 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     working = sum(row.state == WORKING for row in rows)
     out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
     now = time.time() if now is None else now
-    for item in pending or []:
-        text = (f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
-                + (f" — {item.summary}" if item.summary else ""))
+    pending = list(pending or [])
+    texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
+             + (f" — {item.summary}" if item.summary else "")
+             for item in pending[-OWNER_SHOWN:]]
+    if len(pending) > OWNER_SHOWN:
+        texts.append(f"★ …另有 {len(pending) - OWNER_SHOWN} 筆較早的等你決定")
+    for text in texts:
         out += [(("  " if i else "") + piece, "!") for i, piece in
-                enumerate(_wrap(text, width - 2) if width else [text])]
+                enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
     if error:
         return out + [(f"⚠ 辦公室資料讀取失敗（{error}），目前無法判斷誰在做什麼。", "!")]
     if not rows:
@@ -3438,6 +3464,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         out.append((line.rstrip(), _row_style(row.state)))
         out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
+    if scope:
+        legend.append(scope)
     text = "；".join(legend)
     out += [(piece, "dim") for piece in (_wrap(text, width) if width else [text])]
     return out
@@ -3445,8 +3473,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
 
 def office_lines(rows: list[OfficeRow], error: str | None = None,
                  width: int | None = None, expand: bool = False,
-                 pending: list[OwnerPending] | None = None) -> list[str]:
-    return [line for line, _ in office_view(rows, error, width, expand, pending)]
+                 pending: list[OwnerPending] | None = None, scope: str = "") -> list[str]:
+    return [line for line, _ in office_view(rows, error, width, expand, pending, scope=scope)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -3484,7 +3512,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
-                                 pending=github.pending if github is not None else None)))
+                                 pending=github.pending if github is not None else None,
+                                 scope=github.scope if github is not None else "")))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -3586,7 +3615,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "office":
             lines = office_view(mon.office, mon.office_error, w - 1, expanded,
-                                pending=mon.github.pending if mon.github is not None else None)
+                                pending=mon.github.pending if mon.github is not None else None,
+                                scope=mon.github.scope if mon.github is not None else "")
             offset = max(0, min(offset, len(lines) - body))
             styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                       "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
