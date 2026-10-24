@@ -399,6 +399,63 @@ else:
             with self.assertRaisesRegex(LLMToolError, "^Codex CLI isolated working directory is not available$"):
                 self.complete()
 
+    def test_app_server_seam_is_off_by_default_everywhere(self):
+        self.assertIsNone(self.client()._app_server)
+        registry = create_client({"providers": {"local": self.provider},
+                                  "active_provider": "local", "generation": {}})
+        self.assertIsNone(registry._app_server)
+        self.assertEqual(self.complete().content, "CODEX_FINAL")      # still `codex exec`
+        self.assertIn("exec", self.captured()["argv"])
+
+    def test_no_provider_field_or_option_can_enable_the_app_server(self):
+        for options in ({"app_server": True}, {"app_server": {"upstream": "http://127.0.0.1:1"}},
+                        {"strategy": "app-server"}):
+            with self.subTest(options=options), self.assertRaisesRegex(
+                    LLMToolError, "unsupported codex-cli provider_options"):
+                CodexCLIProvider.validate_options(options)
+        for field in ("app_server", "app-server", "strategy"):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    LLMToolError, "forbidden or unsupported field"):
+                CodexCLIProvider.validate_config({**self.provider, field: True})
+
+    def test_injected_strategy_replaces_exec_and_reuses_reply_metadata(self):
+        calls = []
+
+        class Strategy:
+            def run(self, executable, prompt, timeout_seconds):
+                calls.append((executable, prompt, timeout_seconds))
+                return "FROM_APP_SERVER", 0.25
+
+        client = CodexCLIProvider(self.provider, {}, app_server=Strategy())
+        with patch("llmtool.providers.codex_cli.subprocess.Popen",
+                   side_effect=AssertionError("codex exec must not run")):
+            reply = client.complete([{"role": "user", "content": "private prompt"}])
+        self.assertEqual(reply.content, "FROM_APP_SERVER")
+        self.assertEqual(reply.metadata, {"elapsed_seconds": 0.25, "model": "test-model"})
+        self.assertEqual(calls, [(str(self.executable), "USER:\nprivate prompt", 5)])
+        self.assertFalse(self.capture.exists())
+
+    def test_strategy_failures_propagate_unchanged_and_are_not_retried(self):
+        failure = LLMToolError("strategy failed")
+        strategy = Mock()
+        strategy.run.side_effect = failure
+        client = CodexCLIProvider(self.provider, {}, app_server=strategy)
+        with self.assertRaises(LLMToolError) as caught:
+            client.complete([{"role": "user", "content": "x"}])
+        self.assertIs(caught.exception, failure)
+        self.assertEqual(strategy.run.call_count, 1)
+
+    def test_input_validation_still_runs_before_the_strategy(self):
+        strategy = Mock()
+        client = CodexCLIProvider(self.provider, {}, app_server=strategy)
+        with self.assertRaisesRegex(LLMToolError, "invalid conversation input"):
+            client.complete([])
+        strategy.run.assert_not_called()
+        with patch("llmtool.providers.codex_cli.shutil.which", return_value=None), \
+                self.assertRaises(LLMToolError):
+            client.complete([{"role": "user", "content": "x"}])
+        strategy.run.assert_not_called()
+
 
 class CodexCLIConfigTests(unittest.TestCase):
     def setUp(self):

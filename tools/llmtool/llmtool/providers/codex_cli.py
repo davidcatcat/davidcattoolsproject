@@ -50,8 +50,12 @@ class CodexCLIProvider:
         # Codex CLI chooses its default model when no explicit model is configured.
         return None
 
-    def __init__(self, provider, generation, key=None):
+    def __init__(self, provider, generation, key=None, app_server=None):
         self.provider = provider
+        # Default-off App-server strategy. It is only ever set by code that constructs the
+        # provider directly; no provider field or option can enable it (validate_options
+        # still rejects everything), so the registry path always runs `codex exec`.
+        self._app_server = app_server
 
     @staticmethod
     def _prompt(messages):
@@ -306,6 +310,10 @@ class CodexCLIProvider:
                 user_action_required=True,
             )
         prompt = self._prompt(messages)
+        if self._app_server is not None:
+            content, elapsed = self._app_server.run(
+                executable, prompt, self.provider["timeout_seconds"])
+            return self._reply(content, elapsed)
         try:
             with CLIProcessLifecycle(self.TYPE) as lifecycle:
                 with self._temporary_directory() as directory:
@@ -319,6 +327,9 @@ class CodexCLIProvider:
                 'PROVIDER_RUNTIME_ERROR',
                 'provider.codex-cli',
             ) from None
+        return self._reply(content, elapsed)
+
+    def _reply(self, content, elapsed):
         metadata = {"elapsed_seconds": round(elapsed, 3)}
         model = self.provider.get("model")
         if isinstance(model, str) and model and all(
