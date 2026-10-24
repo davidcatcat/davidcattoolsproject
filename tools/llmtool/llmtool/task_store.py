@@ -5,12 +5,14 @@ ledger. A task's logical PM session is an llmtool identifier; it is not a claim
 that the selected provider exposes a resumable native session.
 """
 
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -94,6 +96,8 @@ WORKER_AVAILABILITY_NAME = '.worker-availability.json'
 WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
 WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
+TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
+TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'claude-reviewer',
@@ -115,11 +119,29 @@ _WORKER_AVAILABILITY_FIELDS = frozenset((
 
 
 def _fail(code='TASK_STORE_INVALID'):
-    raise LLMToolError('task store unavailable; details omitted') from None
+    safe_code = code if (type(code) is str and
+                         re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)) else 'TASK_STORE_INVALID'
+    if safe_code == 'TASK_STORE_BUSY':
+        category = 'BUSY'
+    elif safe_code == 'TASK_STORE_CONFLICT':
+        category = 'CONFLICT'
+    elif safe_code.endswith('UNAVAILABLE'):
+        category = 'UNAVAILABLE'
+    else:
+        category = 'INVALID'
+    error = LLMToolError('task store unavailable; details omitted')
+    error.task_store_code = category
+    error.task_store_error_code = safe_code
+    raise error from None
 
 
 class TaskStoreConflict(LLMToolError):
     """A compare-and-update precondition lost to another task writer."""
+
+    def __init__(self, message='developer assignment already exists; duplicate dispatch refused'):
+        super().__init__(message)
+        self.task_store_code = 'CONFLICT'
+        self.task_store_error_code = 'TASK_STORE_CONFLICT'
 
 
 def new_id():
@@ -1395,23 +1417,53 @@ class TaskStore:
             _fail()
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
+        lock_fd = None
         locked = False
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
             try:
-                lock_fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                  0o600, dir_fd=directory)
-            except FileExistsError:
-                if expected is not None:
-                    raise TaskStoreConflict(
-                        'developer assignment already exists; duplicate dispatch refused') from None
-                _fail('TASK_STORE_BUSY')
-            os.close(lock_fd)
-            locked = True
+                while True:
+                    try:
+                        lock_fd = os.open(
+                            lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            0o600, dir_fd=directory)
+                        break
+                    except FileNotFoundError:
+                        # macOS can fail an openat(O_CREAT) with ENOENT while
+                        # another process creates the same name; the next
+                        # attempt opens that file. Bounded by the lock wait.
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                info = os.fstat(lock_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                        stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                    _fail('TASK_STORE_INVALID')
+            except LLMToolError:
+                raise
+            except OSError as exc:
+                # A symlink, directory or other non-file at the lock path is
+                # planted state, not an unavailable store.
+                code = ('TASK_STORE_INVALID'
+                        if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO, errno.EOPNOTSUPP)
+                        else 'TASK_STORE_UNAVAILABLE')
+                _fail(code)
+
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _fail('TASK_STORE_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                except OSError:
+                    _fail('TASK_STORE_UNAVAILABLE')
             current = self._read_at(directory, task_id)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
-                raise TaskStoreConflict(
-                    'developer assignment already exists; duplicate dispatch refused')
+                raise TaskStoreConflict() from None
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 prior_audit = list(current.get('dispatch_audit', []))
@@ -1479,9 +1531,15 @@ class TaskStore:
             current['record_sha256'] = _digest(current)
             return self._write(current, create=False)
         finally:
-            if locked:
+            try:
+                if locked:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+            finally:
                 try:
-                    os.unlink(lock, dir_fd=directory)
-                except OSError:
-                    pass
-            os.close(directory)
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+                finally:
+                    os.close(directory)
