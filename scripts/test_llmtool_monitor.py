@@ -907,6 +907,22 @@ class OfficeViewTests(unittest.TestCase):
     def by_name(self, rows):
         return {row.name: row for row in rows}
 
+    def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
+        stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
+        other = Path(self.tmp.name) / "wp-2"
+        other.mkdir()
+        self._register("wp-1", str(self.task), state="REVIEW_PENDING", last_verified_at=stamp(600),
+                       trusted_agent_id="claude-ui-agent", disposition="DISPOSITION-SECRET")
+        self._register("wp-2", str(other), state="ACTIVE", last_verified_at=stamp(60))
+        self._register("old", str(other), last_verified_at=stamp(2 * 86400))
+        rows = [mon.OfficeRow("claude developer（互動）", mon.ATTENTION, "x", 1.0, 10, task="task wp-1"),
+                mon.OfficeRow("claude 互動", mon.CLOSED, "y", 1.0, 10, task="task wp-2")]
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+        self.assertEqual(len(lines), 2)
+        self.assertIn("wp-2  進行中  →  沒有 session 在跑  （未綁定 agent）", lines[0])
+        self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
+        self.assertNotIn("SECRET", "\n".join(lines))
+
     def test_codex_turn_record_beats_session_markers(self):
         db_path = self.codex.parent / "history.sqlite"
         db = sqlite3.connect(db_path)

@@ -362,6 +362,7 @@ class Monitor:
         self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
+        self.d6: list = []   # D6 task lines, refreshed with the office view
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -457,6 +458,10 @@ class Monitor:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
                 self.office, self.office_state, self.office_error = office, state, None
+                try:
+                    self.d6 = d6_task_lines(canonical_root(), office, time.time())
+                except Exception:  # optional, like task evidence
+                    pass
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1313,6 +1318,7 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
     if cached is not None and cached[0] == stamp:
         return cached[1]
     found: dict[str, tuple[str, str]] = {}
+    details: dict[str, tuple[str, str, float]] = {}
     try:
         names = os.listdir(registry)
     except OSError:
@@ -1338,9 +1344,47 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
             continue
         ref = record.get("session_ref")
         found[task_id] = (root, ref if type(ref) is str else "")
+        state, agent = record.get("state"), record.get("trusted_agent_id")
+        details[task_id] = (state if type(state) is str and CODE_TEXT.fullmatch(state) else "?",
+                            agent if type(agent) is str and AGENT_ID.fullmatch(agent) else "",
+                            _github_time(record.get("last_verified_at")) or file_st.st_mtime)
     _registry_cache.clear()
-    _registry_cache[registry] = (stamp, found)
+    _registry_cache[registry] = (stamp, found, details)
     return found
+
+
+D6_STATES = {   # D6 record state -> plain words
+    "ACTIVE": "進行中", "REPAIR": "修復中", "REVIEW_PENDING": "等審查",
+    "RETAIN_BLOCKED": "保留待處置", "RETIRE_READY": "已驗收，可收尾",
+}
+D6_WINDOW = 24 * 3600
+AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
+
+
+def d6_task_lines(canonical: str, office: list, now: float) -> list[str]:
+    """Locked D6 tasks whose record changed in the last 24 hours, newest first,
+    each with the live session working in its root, if any. Only the task id,
+    state, bound agent id and time are read; free-text dispositions are not."""
+    registered_tasks(canonical)
+    cached = next(iter(_registry_cache.values()), None)
+    details = cached[2] if cached else {}
+    live = {}
+    for row in office:
+        if row.task.startswith("task ") and row.state != CLOSED:
+            live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
+    recent = sorted(((task_id, *info) for task_id, info in details.items()
+                     if now - info[2] <= D6_WINDOW), key=lambda item: -item[3])
+    width = max((len(item[0]) for item in recent), default=0)
+    lines = []
+    for task_id, state, agent, when in recent:
+        who = "、".join(live.get(task_id, [])) or "沒有 session 在跑"
+        lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
+                     f"{D6_STATES.get(state, state)}  →  {who}  （{agent or '未綁定 agent'}）")
+    return lines
+
+
+def d6_lines(lines: list[str]) -> list[str]:
+    return ["D6 任務（近 24 小時有更新，最新在上）", *(lines[:15] or ["近 24 小時沒有更新的 D6 任務。"])]
 
 
 def _place(cwd, canonical: str) -> tuple[str, str] | None:
@@ -3027,7 +3071,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True)))
     print()
     print("\n".join(table_lines(mon.processes)))
-    print("\n".join(["", *record_lines(mon.records), "", *task_lines(mon.tasks, 3)]))
+    print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
+                     *task_lines(mon.tasks, 3)]))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
@@ -3099,10 +3144,10 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if offset:
                 hint = f"[scrolled back {offset}]  " + hint
         elif view == "tasks":
-            lines = record_lines(mon.records) + [""] + task_lines(mon.tasks)
+            lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks)
             offset = max(0, min(offset, len(lines) - body))
             for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄")) else 0
+                attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
                 if "RUNNING" in line:
                     attr |= colors.get("+", 0)
                 elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
