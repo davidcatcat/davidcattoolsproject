@@ -153,6 +153,10 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
         return "Codex CLI"
     if exe == "llmtool":
         return "llmtool CLI"
+    if exe == "Runner.Listener":
+        return "Actions runner"
+    if exe == "Runner.Worker":
+        return "Actions runner job"
     return None
 
 
@@ -287,7 +291,7 @@ def collect(remembered: dict | None = None) -> Snapshot:
 
 
 def family(role: str) -> str:
-    for name in ("OpenCode", "Kilo", "Claude", "Codex", "llmtool", "ai-loop"):
+    for name in ("OpenCode", "Kilo", "Claude", "Codex", "llmtool", "ai-loop", "Actions runner"):
         if name in role:
             return name
     return "other"
@@ -316,8 +320,8 @@ def summary(processes: list[Process], lingering: list) -> str:
     for p in processes:
         if not p.role.startswith(" "):
             counts[family(p.role)] = counts.get(family(p.role), 0) + 1
-    text = "  ".join(f"{k} {counts[k]}" for k in ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "other")
-                     if k in counts) or "no agent process"
+    order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "Actions runner", "other")
+    text = "  ".join(f"{k} {counts[k]}" for k in order if k in counts) or "no agent process"
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
 
@@ -456,7 +460,8 @@ class Monitor:
                 pass
             try:
                 office = office_rows(result.processes, finished_runs=finished,
-                                     verdicts=self.github.verdicts if self.github else None)
+                                     verdicts=self.github.verdicts if self.github else None,
+                                     runner_root=RUNNER_ROOT)
             except Exception as exc:  # never break process monitoring, but never show stale rows
                 message = type(exc).__name__
                 if message != self.office_error:
@@ -2744,6 +2749,94 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
     return rows
 
 
+RUNNER_ROOT = os.path.expanduser("~/git/actions-runner")   # tools/mac-runner default
+RUNNER_LOG = re.compile(r"WRITE LINE: (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z: (.+)")
+RUNNER_RESULTS = {"Succeeded": "成功", "Failed": "失敗", "Canceled": "取消"}
+RUNNER_LOGS = re.compile(r"Runner_\d{8}-\d{6}-utc\.log")
+
+
+def process_sandboxed(pid: int) -> bool | None:
+    """Whether macOS runs the process in a sandbox (sandbox_check); None = unknown."""
+    try:
+        import ctypes
+        check = ctypes.CDLL("/usr/lib/libSystem.B.dylib").sandbox_check
+        check.argtypes, check.restype = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int), ctypes.c_int
+        return {0: False, 1: True}.get(check(pid, None, 0))
+    except (OSError, AttributeError):
+        return None
+
+
+def _runner_log(root: str) -> list:
+    """The runner's own console lines (time, text), oldest first, from its
+    newest _diag/Runner_*.log files (one per start or configuration)."""
+    try:
+        names = sorted(n for n in os.listdir(os.path.join(root, "_diag")) if RUNNER_LOGS.fullmatch(n))
+    except OSError:
+        return []
+    lines = []
+    for name in names[-10:]:
+        try:
+            with open(os.path.join(root, "_diag", name), "rb") as handle:
+                handle.seek(max(0, os.fstat(handle.fileno()).st_size - OFFICE_TAIL))
+                text = handle.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for found in RUNNER_LOG.finditer(text):
+            when = datetime.strptime(found.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            lines.append((when.timestamp(), found.group(2).strip()))
+    return lines
+
+
+def runner_rows(processes: list[Process], now: float, root: str | None = None,
+                cwd_of=process_cwd, sandboxed=process_sandboxed) -> list[OfficeRow]:
+    """The self-hosted GitHub Actions runner (Issue #99): running or not, inside
+    the tools/mac-runner sandbox or not, its current or last job, restarts and
+    where its logs are. A stopped runner is looked for only in `root`; nothing
+    is shown without a running or configured runner."""
+    listener = next((p for p in processes if p.role == "Actions runner"), None)
+    root = (cwd_of(listener.pid) if listener else None) or root
+    if root is None or (listener is None and not os.path.isfile(os.path.join(root, ".runner"))):
+        return []
+    lines = _runner_log(root)
+    starts = sum(text == "Listening for Jobs" and now - when < 86400 for when, text in lines)
+    jobs = [(when, text[len("Running job: "):]) for when, text in lines if text.startswith("Running job: ")]
+    ends = [(when, found.group(1), found.group(2)) for when, text in lines
+            if (found := re.fullmatch(r"Job (.+) completed with result: (\w+)", text))]
+    notes, alert = [], ""
+    if listener is None:
+        state, age = STOPPED, None
+        notes.append("沒在跑（GitHub 上的 CI 會排隊等它）")
+        alert = "CI runner 沒在跑"
+    else:
+        age = _elapsed_seconds(listener.elapsed)
+        inside = sandboxed(listener.pid)
+        if inside is False:
+            hooked = os.path.isfile(os.path.join(root, "isolation", "job-started.sh"))
+            alert = ("CI runner 不在沙箱裡（可能是手動 ./run.sh）："
+                     + ("每個 CI 工作都會被拒" if hooked else "CI 工作沒有隔離"))
+            notes.append("不在沙箱裡")
+        elif inside is None:
+            notes.append("無法確認是否在沙箱裡")
+        if any(p.role == "Actions runner job" for p in processes) and jobs:
+            state = WORKING
+            when, name = jobs[-1]
+            notes.insert(0, f"執行中：{name}（{max(1, int((now - when) // 60))} 分鐘）")
+        else:
+            state = IDLE
+            notes.insert(0, "閒置，等工作")
+        if age is not None and age >= 60:
+            notes.append(f"已開 {_ago(age)[:-1]}")
+    if ends and state != WORKING:
+        when, name, result = ends[-1]
+        notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
+    if starts > 1:
+        notes.append(f"近 24 小時啟動 {starts} 次")
+    logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
+    notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs))
+    return [OfficeRow("mac ci runner", state, "；".join(notes), age, 80, kind="worker",
+                      evidence="程序", alert=alert)]
+
+
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
 LLMTOOL_EVIDENCE_WINDOW = 7 * 86400
 PROFILE = re.compile(r"[a-z0-9][a-z0-9_-]{0,47}")
@@ -3143,7 +3236,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 cpu_of=process_cpu, dispatch: str | None = None,
                 llmtool_tasks: str | None = None,
                 finished_runs: list | None = None,
-                verdicts: dict | None = None) -> list[OfficeRow]:
+                verdicts: dict | None = None,
+                runner_root: str | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     sessions = os.path.join(os.path.dirname(
@@ -3192,7 +3286,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                               f"由 Codex 啟動，已結束（跑了約 {max(1, int(duration))} 秒，"
                               "看不出在做什麼）", since_end, 30, kind="subagent", evidence="程序"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
-    rows += agy
+    rows += agy + runner_rows(processes, now, runner_root, cwd_of)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
