@@ -1954,9 +1954,12 @@ def codex_rows(now: float, root: str | None = None,
     return rows + [row for _, row in subs]
 
 
+SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+
+
 def claude_rows(now: float, root: str | None = None,
                 canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
-    """live: {session id: (status, waitingFor, since ms)} that running CLIs report in
+    """live: {session id: (status, waitingFor, since ms, name)} that running CLIs report in
     their own registry; it beats any guess from the session file."""
     root = CLAUDE_PROJECTS if root is None else root
     canonical = canonical or canonical_root()
@@ -1999,8 +2002,8 @@ def claude_rows(now: float, root: str | None = None,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
         state = WORKING if age <= OFFICE_BUSY else IDLE
-        status, waiting, since = (live or {}).get(os.path.basename(path)[:-len(".jsonl")],
-                                                  (None, None, None))
+        sid = os.path.basename(path)[:-len(".jsonl")]
+        status, waiting, since, name = (live or {}).get(sid, (None, None, None, None))
         suffix = f"（{task}）" if task else ""
         if status == "waiting":
             # Stopped at a prompt only a person or its driving agent can answer.
@@ -2019,6 +2022,11 @@ def claude_rows(now: float, root: str | None = None,
             # is still with the model, not idle.
             state = WORKING if age <= OFFICE_STALL else STALLED
             detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
+        if status is not None:
+            # The name and id its launcher gave it: what a PM looks for to
+            # find the window that needs an answer.
+            name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
+            detail += f"｜session {name + ' ' if name else ''}{sid[:8]}"
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
@@ -2609,7 +2617,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     sessions = os.path.join(os.path.dirname(
         CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
     live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
-                                 entry.get("statusUpdatedAt"))
+                                 entry.get("statusUpdatedAt"), entry.get("name"))
             for entry in (_claude_registered(sessions, processes) or {}).values()}
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
@@ -2876,8 +2884,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
             rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
     alerts = _review_alerts(rows)
     alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
-    alerts += [f"{row.name}（{row.state}）{_label(row.detail, 40)}" for row in rows
-               if row.state in ALERT_STATES and not row.alert]
+    # In full (wrapped, not cut): the session name at the end is how a PM
+    # finds the window that needs an answer.
+    alerts += [f"{row.name}（{row.state}，{_short_ago(row.age)}）{row.detail}"
+               for row in rows if row.state in ALERT_STATES and not row.alert]
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]

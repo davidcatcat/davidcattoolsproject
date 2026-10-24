@@ -1151,9 +1151,11 @@ class OfficeViewTests(unittest.TestCase):
                 self._write(self.claude / "dev" / "s.jsonl", [result], age=300)
                 (sessions / "41.json").write_text(json.dumps(
                     {"pid": 41, "sessionId": "s", "status": status, "waitingFor": waiting,
-                     "statusUpdatedAt": (self.NOW - 1200) * 1000}), encoding="utf-8")
+                     "statusUpdatedAt": (self.NOW - 1200) * 1000, "name": "dev-r4"}),
+                    encoding="utf-8")
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
-                self.assertEqual((row.state, row.detail, row.age), want)
+                self.assertEqual((row.state, row.detail, row.age),
+                                 (want[0], want[1] + "｜session dev-r4 s", want[2]))
 
     def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
