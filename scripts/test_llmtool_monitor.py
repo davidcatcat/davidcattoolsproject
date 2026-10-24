@@ -2463,6 +2463,9 @@ class OfficeViewTests(unittest.TestCase):
             self.assertNotIn(secret, text)
 
     def _runner(self, *logs):
+        # The log path is shown with the home as "~"; a temp folder can sit in
+        # the home (the Mac CI's does), so pin the home away from it.
+        self.enterContext(patch.object(os.path, "expanduser", return_value="/nonexistent-home"))
         root = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (root / ".runner").write_text("{}")
         (root / "_diag").mkdir()
@@ -2503,6 +2506,7 @@ class OfficeViewTests(unittest.TestCase):
         listener = mon.Process(30, 1, 30, "30:00", "S", "Actions runner", "Runner.Listener")
         row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
         self.assertIn("不在沙箱裡", row.detail)
+        self.assertEqual(row.state, mon.ATTENTION)
         self.assertIn("近 24 小時啟動 2 次", row.detail)
         self.assertEqual(row.alert, "CI runner 不在沙箱裡（可能是手動 ./run.sh）：CI 工作沒有隔離")
         os.makedirs(os.path.join(root, "isolation"))
@@ -2511,6 +2515,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(row.alert.endswith("每個 CI 工作都會被拒"))
         row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: None}.get)
         self.assertIn("無法確認是否在沙箱裡", row.detail)
+        self.assertEqual(row.state, mon.IDLE)
         self.assertEqual(row.alert, "")
         stopped, = mon.runner_rows([], now, root)
         self.assertEqual((stopped.state, stopped.age, stopped.alert),
