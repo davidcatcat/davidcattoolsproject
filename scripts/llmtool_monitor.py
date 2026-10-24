@@ -1281,8 +1281,8 @@ def monitor_version() -> str:
         return found.stdout.strip() if found.returncode == 0 else ""
 
     try:
-        blob = git("hash-object", "--no-filters", "--", SCRIPT_PATH)
-        same = bool(blob) and blob == git("rev-parse", f"HEAD:{rel}")
+        blob, committed = git("hash-object", "--no-filters", "--", SCRIPT_PATH), git("rev-parse", f"HEAD:{rel}")
+        same = bool(blob) and blob == committed
         commit = git("log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M", "--", rel)
     except (OSError, subprocess.SubprocessError):
         same, commit = False, ""
@@ -1978,9 +1978,9 @@ EMBEDDED_DIFF = re.compile(r"^diff --git ", re.M)
 
 
 def _review_target(text: str) -> tuple[str, str]:
-    """The PR the call fetches wins over one its prompt merely mentions. An
-    inlined diff is the material under review, so nothing in it counts, and
-    fetches that disagree fall back to the prompt's own "PR #N"."""
+    """The PR the call fetches wins over one its prompt merely mentions.
+    Fetch commands inside an inlined diff do not count, and fetches that
+    disagree fall back to the prompt's own "PR #N"."""
     cut = EMBEDDED_DIFF.search(text)
     pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
     fetched = {next(group for group in found if group)
