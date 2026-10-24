@@ -396,6 +396,20 @@ class WorkerDispatchTests(unittest.TestCase):
                        'provider_profile': 'opencode',
                        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                        'execution': None}
+        self._set_state('opencode-developer', 'PAUSED')
+        with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as caught:
+            self.store.compare_and_update(
+                self.task['task_id'], expected={'developer': developer},
+                developer=replacement)
+        self.assertEqual(caught.exception.dispatch_code, 'OWNER_PAUSED')
+        saved = self.store.get(self.task['task_id'])
+        self.assertEqual(saved['developer']['provider_profile'], 'company-gw')
+        self.assertEqual(saved['dispatch_audit'][-1]['worker_key'], 'opencode-developer')
+        self.assertEqual(saved['dispatch_audit'][-1]['action'], 'REASSIGN')
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_PAUSED')
+
+        self._set_state('opencode-developer', 'ALLOWED')
         saved = self.store.compare_and_update(
             self.task['task_id'], expected={'developer': developer},
             developer=replacement)
