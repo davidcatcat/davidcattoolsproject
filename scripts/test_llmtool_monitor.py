@@ -1138,6 +1138,23 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_claude_cli_registry_status_beats_the_session_file_guess(self):
+        result = {"type": "user", "cwd": str(self.task), "message": {"content": [
+            {"type": "tool_result", "content": "x"}]}}
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限（task wp-1）", 1200.0)),
+                                      ("idle", None, (mon.IDLE, "task wp-1", 300.0)),
+                                      ("busy", None, (mon.WORKING, "等模型回覆（task wp-1）", 300.0))):
+            with self.subTest(status):
+                self._write(self.claude / "dev" / "s.jsonl", [result], age=300)
+                (sessions / "41.json").write_text(json.dumps(
+                    {"pid": 41, "sessionId": "s", "status": status, "waitingFor": waiting,
+                     "statusUpdatedAt": (self.NOW - 1200) * 1000}), encoding="utf-8")
+                row = self.by_name(self.rows([cli]))["claude developer（互動）"]
+                self.assertEqual((row.state, row.detail, row.age), want)
+
     def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
             {"type": "tool_result", "content": "FILE-SECRET"}]}}

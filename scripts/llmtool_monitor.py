@@ -1955,7 +1955,9 @@ def codex_rows(now: float, root: str | None = None,
 
 
 def claude_rows(now: float, root: str | None = None,
-                canonical: str | None = None) -> list[OfficeRow]:
+                canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
+    """live: {session id: (status, waitingFor, since ms)} that running CLIs report in
+    their own registry; it beats any guess from the session file."""
     root = CLAUDE_PROJECTS if root is None else root
     canonical = canonical or canonical_root()
     rows = []
@@ -1997,11 +1999,26 @@ def claude_rows(now: float, root: str | None = None,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
         state = WORKING if age <= OFFICE_BUSY else IDLE
-        if state == IDLE and _awaiting_model(tail):
-            # Quiet because its request is still with the model, not idle.
+        status, waiting, since = (live or {}).get(os.path.basename(path)[:-len(".jsonl")],
+                                                  (None, None, None))
+        suffix = f"（{task}）" if task else ""
+        if status == "waiting":
+            # Stopped at a prompt only a person or its driving agent can answer.
+            state = ATTENTION
+            detail = ("等人確認權限" if waiting == "permission prompt" else "等人回覆") + suffix
+            if type(since) in (int, float) and 0 < since / 1000 <= now:
+                age = now - since / 1000   # how long it has waited, not the last write
+        elif status == "busy":
+            state = WORKING
+            if age > OFFICE_BUSY and _awaiting_model(tail):
+                detail = "等模型回覆" + suffix
+        elif status == "idle":
+            state = IDLE
+        elif state == IDLE and _awaiting_model(tail):
+            # No registry to ask: an unanswered tool result means the request
+            # is still with the model, not idle.
             state = WORKING if age <= OFFICE_STALL else STALLED
-            detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + (
-                f"（{task}）" if task else "")
+            detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
@@ -2509,9 +2526,9 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     return [row for row in out if row.group not in gone]
 
 
-def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, str] | None:
-    """Session id of each running Claude CLI that names one in the CLI's own
-    <pid>.json registry. None when there is no registry to read."""
+def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, dict] | None:
+    """Registry entry of each running Claude CLI that names its session in the
+    CLI's own <pid>.json file. None when there is no registry to read."""
     try:
         names = os.listdir(sessions)
     except OSError:
@@ -2529,7 +2546,7 @@ def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, str
         except (OSError, ValueError):
             continue
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
-            found[int(pid)] = entry["sessionId"]
+            found[int(pid)] = entry
     return found
 
 
@@ -2542,7 +2559,7 @@ def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set,
         return None
     pids = {p.pid for p in processes
             if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
-    return set(found.values()), len(pids - set(found))
+    return {entry["sessionId"] for entry in found.values()}, len(pids - set(found))
 
 
 def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
@@ -2589,14 +2606,17 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 finished_runs: list | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
-    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical)
+    sessions = os.path.join(os.path.dirname(
+        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
+    live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
+                                 entry.get("statusUpdatedAt"))
+            for entry in (_claude_registered(sessions, processes) or {}).values()}
+    rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
     clis = sum(p.role == "Codex CLI" for p in processes) or sum(
         p.role == "Codex CLI (node launcher)" for p in processes)
     rows = _closed_codex_cli(rows, clis)
-    sessions = os.path.join(os.path.dirname(
-        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
     rows = _closed_claude_cli(rows, sessions, processes)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
