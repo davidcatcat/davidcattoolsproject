@@ -240,6 +240,15 @@ class WriteDeadlineTests(unittest.TestCase):
         self.assertEqual(json.loads(bytes(received).decode()),
                          {"id": 1, "method": "big", "params": {"blob": blob}})
 
+    def test_owned_lifecycle_cancellation_is_checked_before_writing(self):
+        peer = self.peer(5)
+        def cancel():
+            raise LLMToolError("owned lifecycle cancelled")
+        peer.client._check = cancel
+        with self.assertRaisesRegex(LLMToolError, "^owned lifecycle cancelled$"):
+            peer.client.notify("should-not-send")
+        self.assertEqual(peer.heard(), [])
+
     def test_deadline_already_passed_writes_nothing_and_leaves_the_stream_usable(self):
         peer = self.peer(0)
         with self.assertRaises(AppServerTimeout):
@@ -265,6 +274,38 @@ class RunTurnTests(ClientTestCase):
         self.assertEqual(sent[1], {"id": 2, "method": "turn/start", "params": {
             "threadId": "t1", "input": [{"type": "text", "text": "say hi"}]}})
         self.assertEqual(len(sent), 2)                  # exactly one thread and one turn
+
+    def test_unknown_item_types_are_refused_before_any_success(self):
+        for kind in ("futureTool", "futureMessage", None, 123, [], {}):
+            for method in ("item/started", "item/completed"):
+                with self.subTest(kind=kind, method=method):
+                    peer = Peer()
+                    self.addCleanup(peer.close)
+                    peer.say(response(1, thread={"id": "t1"}), response(2, turn={"id": "u1"}),
+                             event(method, item={"type": kind}), turn_done())
+                    with self.assertRaisesRegex(LLMToolError, "item type unsupported"):
+                        peer.client.run_turn("p", "/c")
+
+    def test_unknown_notification_methods_are_refused(self):
+        for method in ("item/futureTool/delta", "item/unknown", "future/notice"):
+            with self.subTest(method=method):
+                peer = Peer()
+                self.addCleanup(peer.close)
+                peer.say(response(1, thread={"id": "t1"}), response(2, turn={"id": "u1"}),
+                         event(method), turn_done())
+                with self.assertRaisesRegex(LLMToolError, "event type unsupported"):
+                    peer.client.run_turn("p", "/c")
+
+    def test_allowlisted_text_items_and_informational_events_remain_supported(self):
+        self.script(event("item/started", item={"type": "userMessage"}),
+                    event("item/completed", item={"type": "reasoning"}),
+                    event("turn/started"), agent_done("answer"), turn_done())
+        self.assertEqual(self.client.run_turn("p", "/c"), "answer")
+
+    def test_reported_error_is_sanitized_and_never_success(self):
+        self.script(event("error", message="PRIVATE_ERROR"), turn_done())
+        with self.assertRaisesRegex(LLMToolError, "^app-server reported an error$"):
+            self.client.run_turn("p", "/c")
 
     def test_events_that_arrive_before_the_turn_response_are_not_lost(self):
         self.peer.say(response(1, thread={"id": "t1"}), agent_done("early"), turn_done(),

@@ -435,6 +435,14 @@ else:
         self.assertEqual(calls, [(str(self.executable), "USER:\nprivate prompt", 5)])
         self.assertFalse(self.capture.exists())
 
+    def test_strategy_oserror_is_sanitized_and_not_retried(self):
+        strategy = Mock()
+        strategy.run.side_effect = OSError("PRIVATE_STRATEGY")
+        client = CodexCLIProvider(self.provider, {}, app_server=strategy)
+        with self.assertRaisesRegex(LLMToolError, "^Codex App-server runtime unavailable$"):
+            client.complete([{"role": "user", "content": "x"}])
+        self.assertEqual(strategy.run.call_count, 1)
+
     def test_strategy_failures_propagate_unchanged_and_are_not_retried(self):
         failure = LLMToolError("strategy failed")
         strategy = Mock()

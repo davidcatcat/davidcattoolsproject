@@ -1,11 +1,10 @@
 """Isolated synthetic CODEX_HOME and child-process lifecycle for the Codex App-server.
 
-Verified against codex-cli 0.163.0: a minimal CODEX_HOME with the plugin, apps,
-hooks and skill-discovery features off starts no plugin/git sync, and MCP servers
-configured at inherited locations (HOME/.codex, an untrusted <cwd>/.codex) are not
-spawned at initialize or thread/start. This module never reads or copies a host
-Codex home or credential: auth.json holds only a random synthetic key, and HOME,
-CODEX_HOME and TMPDIR all point inside a fresh temporary directory.
+Configuration and proxy environment restrict this synthetic experiment, but do not
+provide OS-level network or descendant containment. Native enforcement and socket
+proof remain NOT_VERIFIED. No host Codex home or credential is read or copied:
+auth.json holds a random synthetic key, and HOME, CODEX_HOME and TMPDIR point
+inside a fresh temporary directory.
 """
 
 import json
@@ -20,6 +19,7 @@ from urllib.parse import urlsplit
 
 from .codex_app_server import AppServerClient, AppServerTimeout
 from .errors import LLMToolError, coded_error
+from .providers.cli_lifecycle import CLIProcessLifecycle
 
 DEAD_ENDPOINT = "http://127.0.0.1:9"
 DISABLED_FEATURES = ("unified_exec", "shell_tool", "shell_snapshot")
@@ -64,6 +64,14 @@ def new_synthetic_token():
 
 
 def build_isolated_home(root, endpoint=DEAD_ENDPOINT, token=None):
+    """Build a synthetic home with content-free filesystem errors."""
+    try:
+        return _build_isolated_home(root, endpoint, token)
+    except OSError:
+        raise LLMToolError("app-server isolated home unavailable") from None
+
+
+def _build_isolated_home(root, endpoint=DEAD_ENDPOINT, token=None):
     """Create the synthetic tree under an existing empty directory *root*.
 
     A caller that also builds the Responses proxy passes the same synthetic token to
@@ -97,7 +105,7 @@ def build_isolated_home(root, endpoint=DEAD_ENDPOINT, token=None):
 
 
 def child_environment(isolated):
-    """Allowlisted environment; unexpected helper egress hits a dead loopback proxy."""
+    """Allowlisted proxy environment; this is not OS-level egress enforcement."""
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(isolated.home),
@@ -158,12 +166,13 @@ def _wait_group_gone(pgid, seconds):
 class AppServerProcess:
     """One counted launch of the App-server child; owns and sweeps its process group."""
 
-    def __init__(self, executable, isolated, ledger, deadline_seconds=None):
+    def __init__(self, executable, isolated, ledger, deadline_seconds=None, lifecycle=None):
         if not isinstance(executable, str) or not os.path.isabs(executable):
             raise LLMToolError("app-server executable must be an absolute path")
         self._executable = executable
         self._isolated = isolated
         self._ledger = ledger
+        self._lifecycle = lifecycle
         seconds = ledger.remaining_seconds()
         if deadline_seconds is not None:
             seconds = min(seconds, deadline_seconds)
@@ -189,19 +198,27 @@ class AppServerProcess:
             raise coded_error(
                 "App-server launch budget exhausted", 'PROVIDER_RUNTIME_ERROR',
                 'provider.codex-cli')
-        self._stderr = open(str(self._isolated.tmp_dir / "app-server.stderr"), "wb")
         try:
+            self._stderr = open(str(self._isolated.tmp_dir / "app-server.stderr"), "wb")
             self._process = subprocess.Popen(
                 child_argv(self._executable), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=self._stderr, shell=False, close_fds=True, start_new_session=True,
                 cwd=str(self._isolated.run_dir), env=child_environment(self._isolated))
-        except OSError:
-            self._stderr.close()
+        except (OSError, ValueError):
+            if self._stderr is not None:
+                try:
+                    self._stderr.close()
+                except OSError:
+                    pass
             raise coded_error(
                 "App-server could not be started", 'PROVIDER_RUNTIME_ERROR',
                 'provider.codex-cli') from None
         self._pgid = self._process.pid      # start_new_session makes the child its own leader
-        self.client = AppServerClient(self._process.stdin, self._process.stdout, self._deadline)
+        if self._lifecycle is not None:
+            self._lifecycle.own(self._process)
+        self.client = AppServerClient(
+            self._process.stdin, self._process.stdout, self._deadline,
+            self._lifecycle.check if self._lifecycle is not None else None)
         return self.client
 
     def stderr_text(self, limit=2048):
@@ -214,14 +231,52 @@ class AppServerProcess:
         return data.decode("utf-8", "replace").replace(root, "<isolated>")
 
     def shutdown(self, grace=GRACE_SECONDS):
-        """Close stdin, wait, then sweep the whole group. Never raises; reports outcome.
+        """Close stdin and sweep the owned group; this is not OS descendant containment.
 
         CLEAN: the leader exited on stdin close and no group member remained.
         SWEPT: a signal was required for the leader or for leftover descendants.
         UNKNOWN: group members still existed after SIGKILL and the sweep window.
         """
+        try:
+            return self._shutdown(grace)
+        except Exception:
+            # Observation/report failures must not skip teardown of the owned,
+            # still-unreaped child. Never acquire authority over escaped PIDs.
+            if self._process is not None and self._process.returncode is None:
+                try:
+                    self._signal_group_until_reaped()
+                except Exception:
+                    pass
+            self.shutdown_report = {"returncode": None, "outcome": "UNKNOWN",
+                                    "group_empty": False, "descendant_cleanup": "UNKNOWN",
+                                    "escaped_descendants": None}
+            return self.shutdown_report
+        finally:
+            if self._stderr is not None:
+                try:
+                    self._stderr.close()
+                except OSError:
+                    pass
+
+    def _shutdown(self, grace):
         if self.shutdown_report is not None or self._process is None:
             return self.shutdown_report
+        # A bounded snapshot can reveal a setsid escape while the leader is still
+        # its parent. Absence is not proof: exited/reparented descendants may evade it.
+        observed = True
+        try:
+            rows = process_table()
+        except (OSError, ValueError):
+            rows = []
+            observed = False
+        descendants = {self._process.pid}
+        while True:
+            found = {pid for pid, ppid, _, _ in rows if ppid in descendants}
+            if found <= descendants:
+                break
+            descendants.update(found)
+        escaped = sum(1 for pid, _, pgid, _ in rows
+                      if pid in descendants and pgid != self._pgid)
         signalled = False
         if self.client is not None:
             self.client.close()
@@ -240,9 +295,11 @@ class AppServerProcess:
             self._kill_group(signal.SIGKILL)
         gone = _wait_group_gone(self._pgid, SWEEP_SECONDS)
         self._stderr.close()
-        outcome = "UNKNOWN" if not gone else ("SWEPT" if signalled else "CLEAN")
+        outcome = ("UNKNOWN" if not gone or escaped or not observed
+                   else ("SWEPT" if signalled else "CLEAN"))
         self.shutdown_report = {"returncode": returncode, "outcome": outcome,
-                                "group_empty": gone}
+                                "group_empty": gone, "descendant_cleanup": "UNKNOWN",
+                                "escaped_descendants": escaped if observed else None}
         return self.shutdown_report
 
     def _kill_group(self, signum):
@@ -316,7 +373,10 @@ class CodexAppServerStrategy:
     def __init__(self, ledger, upstream, allowed_tools=()):
         self._ledger = ledger
         self._upstream = validate_loopback_endpoint(upstream)
-        self._allowed_tools = tuple(allowed_tools)
+        try:
+            self._allowed_tools = tuple(allowed_tools)
+        except TypeError:
+            raise LLMToolError("app-server tool allowlist invalid") from None
         self.last_report = None
 
     @staticmethod
@@ -330,37 +390,74 @@ class CodexAppServerStrategy:
         from .codex_responses_proxy import ResponsesProxy
         from .providers.codex_cli import CodexCLIProvider
         started = time.monotonic()
-        directory = CodexCLIProvider._temporary_directory()
-        proxy = process = None
+        directory = proxy = process = None
         content = failure = shutdown = None
-        try:
-            token = new_synthetic_token()
-            proxy = ResponsesProxy(self._ledger, self._upstream, token, self._allowed_tools)
-            proxy.start()
-            isolated = build_isolated_home(directory.name, proxy.endpoint, token)
-            process = AppServerProcess(executable, isolated, self._ledger, timeout_seconds)
-            client = process.start()
-            client.initialize(expected_codex_home=str(isolated.codex_home))
-            content = client.run_turn(prompt, str(isolated.run_dir))
-        except AppServerTimeout:
-            failure = coded_error("Codex App-server timed out", 'PROVIDER_TIMEOUT',
-                                  'provider.codex-cli')     # not retryable: outcome UNKNOWN
-        except LLMToolError as exc:
-            failure = self._failure(exc)
-        finally:
-            if process is not None:
-                shutdown = process.shutdown()
-            if proxy is not None:
-                proxy.close()
-            directory.cleanup()
-            self.last_report = {
-                "shutdown": shutdown, "ledger": self._ledger.snapshot(),
-                "forwarded": proxy.forwarded if proxy else [],
-                "rejected": proxy.rejected if proxy else [],
-                "rejected_tools": proxy.rejected_tools if proxy else []}
+        phase = "lifecycle"
+        self.last_report = {"phase": phase, "reason": "UNKNOWN"}
+        with CLIProcessLifecycle('codex-cli') as lifecycle:
+            try:
+                phase = "temporary_directory"
+                directory = CodexCLIProvider._temporary_directory()
+                token = new_synthetic_token()
+                phase = "proxy_start"
+                proxy = ResponsesProxy(self._ledger, self._upstream, token, self._allowed_tools)
+                proxy.start()
+                phase = "isolated_home"
+                isolated = build_isolated_home(directory.name, proxy.endpoint, token)
+                phase = "process_start"
+                process = AppServerProcess(
+                    executable, isolated, self._ledger, timeout_seconds, lifecycle=lifecycle)
+                client = process.start()
+                phase = "initialize"
+                client.initialize(expected_codex_home=str(isolated.codex_home))
+                phase = "turn"
+                content = client.run_turn(prompt, str(isolated.run_dir))
+            except AppServerTimeout:
+                failure = coded_error("Codex App-server timed out", 'PROVIDER_TIMEOUT',
+                                      'provider.codex-cli')
+            except (LLMToolError, OSError, ValueError, TypeError, RuntimeError) as exc:
+                failure = self._failure(exc)
+            finally:
+                cleanup_errors = []
+                for name, action in (
+                        ("process", process.shutdown if process is not None else None),
+                        ("proxy", proxy.close if proxy is not None else None),
+                        ("directory", directory.cleanup if directory is not None else None)):
+                    if action is None:
+                        continue
+                    try:
+                        value = action()
+                        if name == "process":
+                            shutdown = value
+                    except Exception:
+                        cleanup_errors.append(name)
+                try:
+                    snapshot = self._ledger.snapshot()
+                    if type(snapshot) is not dict or type(snapshot.get('states', [])) is not list:
+                        raise ValueError
+                except Exception:
+                    snapshot = {"status": "UNKNOWN"}
+                    if failure is None:
+                        failure = self._failure(None)
+                observations = {}
+                for name in ("forwarded", "rejected", "rejected_tools"):
+                    try:
+                        observations[name] = getattr(proxy, name) if proxy is not None else []
+                    except Exception:
+                        observations[name] = []
+                        cleanup_errors.append("report_" + name)
+                if 'CAP_EXCEEDED' in snapshot.get('states', []):
+                    failure = coded_error("Codex App-server output cap exceeded",
+                                          'MODEL_RESPONSE_TOO_LARGE', 'provider.codex-cli')
+                if cleanup_errors or (shutdown is not None and shutdown.get("outcome") == "UNKNOWN"):
+                    if failure is None:
+                        failure = coded_error("Codex App-server cleanup could not be confirmed",
+                                              'PROVIDER_RUNTIME_ERROR', 'provider.codex-cli')
+                diagnostic = getattr(failure, "diagnostic", None)
+                self.last_report = dict(observations, shutdown=shutdown, ledger=snapshot,
+                    phase=phase, reason=diagnostic.code.value if diagnostic else
+                    ("RUNTIME_ERROR" if failure else "COMPLETED"), cleanup_errors=cleanup_errors,
+                    containment={"os_egress": "NOT_VERIFIED", "descendants": "UNKNOWN"})
         if failure is not None:
             raise failure
-        if shutdown is not None and shutdown["outcome"] == "UNKNOWN":
-            raise coded_error("Codex App-server cleanup could not be confirmed",
-                              'PROVIDER_RUNTIME_ERROR', 'provider.codex-cli')
         return content, time.monotonic() - started

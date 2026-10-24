@@ -27,7 +27,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .codex_app_server_budget import Denial
+from .codex_app_server_budget import Denial, OutputCapExceeded
 from .codex_app_server_runtime import validate_loopback_endpoint
 from .errors import LLMToolError
 
@@ -41,6 +41,9 @@ UPSTREAM_IDLE_SECONDS = 30.0
 MAX_RECORDS = 1000
 MAX_TOOL_LABELS = 64
 SETTLE_SECONDS = 2.0
+REQUEST_FIELDS = frozenset((
+    "model", "input", "instructions", "stream", "max_output_tokens", "tools",
+    "tool_choice", "parallel_tool_calls", "reasoning", "text"))
 _LABEL = re.compile(r"[A-Za-z0-9_.:/-]{1,64}")
 _TERMINAL_EVENTS = frozenset(
     ("response.completed", "response.incomplete", "response.failed"))
@@ -62,6 +65,11 @@ def tool_identity(tool):
     kind = tool.get("type")
     name = tool.get("name")
     function = tool.get("function")
+    if function is not None:
+        if type(function) is not dict or kind != "function":
+            return None
+        if name is not None and function.get("name") not in (None, name):
+            return None
     if name is None and type(function) is dict:
         name = function.get("name")
     if type(kind) is not str or (name is not None and type(name) is not str):
@@ -102,7 +110,7 @@ def check_tools(tools, allowed):
     # Severity does not depend on list order: execution-capable beats merely unlisted.
     if any(_EXECUTION_TOOL.search(kind + " " + (name or "")) for kind, name in identities):
         return "TOOL_EXECUTION_FORBIDDEN"
-    if any((name or kind) not in allowed for kind, name in identities):
+    if any((kind, name) not in allowed for kind, name in identities):
         return "TOOLS_NOT_ALLOWED"
     return None
 
@@ -162,6 +170,27 @@ class _StrictHTTPResponse(http.client.HTTPResponse):
                 self._trailers_complete = True
                 return
 
+    def _get_chunk_left(self):
+        # HTTPResponse otherwise discards two bytes after a chunk without checking
+        # CRLF. Never count malformed chunk separators as complete framing.
+        left = self.chunk_left
+        if not left:
+            if left is not None and self._safe_read(2) != b"\r\n":
+                raise http.client.IncompleteRead(b"")
+            line = self.fp.readline(65537)
+            if len(line) > 65536:
+                raise http.client.LineTooLong("chunk size")
+            size = line.split(b";", 1)[0].strip()
+            if not line.endswith(b"\r\n") or re.fullmatch(b"[0-9A-Fa-f]+", size) is None:
+                raise http.client.IncompleteRead(b"")
+            left = int(size, 16)
+            if left == 0:
+                self._read_and_discard_trailer()
+                self._close_conn()
+                left = None
+            self.chunk_left = left
+        return left
+
     def framing_complete(self):
         if self.chunked:
             return self._trailers_complete and self.chunk_left is None and self.isclosed()
@@ -180,6 +209,10 @@ class _Server(ThreadingHTTPServer):
     block_on_close = True
     request_queue_size = 16
 
+    def handle_error(self, request, client_address):
+        # Never emit traceback/request data from an unexpected handler failure.
+        self.proxy._record_rejection("HANDLER_FAILURE")
+
 
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -189,6 +222,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *_):
         pass
+
+    def handle_expect_100(self):
+        self._reject(417, "EXPECT_NOT_ALLOWED")
+        return False
 
     def setup(self):
         super().setup()
@@ -226,6 +263,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _common_checks(self):
         proxy = self.server.proxy
+        if self.headers.get("Expect") is not None:
+            self._reject(417, "EXPECT_NOT_ALLOWED")
+            return False
         if self._upgrade_requested():
             self._reject(426, "UPGRADE_NOT_ALLOWED")
             return False
@@ -292,6 +332,9 @@ class _Handler(BaseHTTPRequestHandler):
         if type(body) is not dict or body.get("stream") is not True:
             self._reject(400, "REQUEST_INVALID")
             return
+        if set(body) - REQUEST_FIELDS:
+            self._reject(400, "REQUEST_FIELDS_NOT_ALLOWED")
+            return
         labels = describe_tools(body.get("tools"))
         problem = check_tools(body.get("tools"), proxy.allowed_tools)
         if problem is not None:
@@ -303,7 +346,9 @@ class _Handler(BaseHTTPRequestHandler):
         if requested is not None and (type(requested) is not int or requested <= 0):
             self._reject(400, "OUTPUT_CAP_INVALID")
             return
-        proxy._wait_settled()           # let a just-finished stream finalize its entry first
+        if not proxy._wait_settled():
+            self._reject(503, "STREAM_SETTLING_TIMEOUT")
+            return
         try:
             reservation = proxy.ledger.reserve_request(requested)
         except (LLMToolError, OSError):
@@ -336,7 +381,8 @@ class _Handler(BaseHTTPRequestHandler):
     def _forward(self, proxy, reservation, payload):
         # result: unknown | failed | complete. downstream goes False on write/flush failure or
         # a client that left before the final framing; SUCCEEDED needs it True.
-        state = {"result": "unknown", "downstream": True}
+        # Until request() is entered no upstream bytes could have been sent.
+        state = {"result": "failed", "downstream": True}
         parser = SSEUsage()
         connection = None
         started_reply = False
@@ -355,7 +401,9 @@ class _Handler(BaseHTTPRequestHandler):
             # on the settling gate so they never observe the entry half-finished.
             if not finalized:
                 finalized.append(True)
-                self._finalize(proxy.ledger, reservation, state, parser)
+                problem = self._finalize(proxy.ledger, reservation, state, parser)
+                if problem is not None:
+                    proxy._record_rejection(problem)
 
         def expire():
             # Hard wall: unblock whatever upstream read/send is in progress.
@@ -405,17 +453,24 @@ class _Handler(BaseHTTPRequestHandler):
                 self._reply(502, "UPSTREAM_UNREACHABLE")
                 return
             arm()
+            state["result"] = "unknown"  # request() may send partially before raising
             connection.request("POST", RESPONSES_PATH, body=payload, headers={
                 "Content-Type": "application/json", "Accept": "text/event-stream",
                 "Authorization": proxy.authorization, "Connection": "close"})
             arm()
             upstream = connection.getresponse()
             if not 200 <= upstream.status < 300:    # includes 3xx: redirects are never followed
-                try:
+                total_error = 0
+                while True:
                     arm()
-                    upstream.read(MAX_ERROR_BYTES)
-                except (OSError, http.client.HTTPException, _Abort):
-                    pass
+                    chunk = upstream.read1(8192)
+                    if not chunk:
+                        if not upstream.framing_complete():
+                            raise _Abort()
+                        break
+                    total_error += len(chunk)
+                    if total_error > MAX_ERROR_BYTES:
+                        raise _Abort()
                 state["result"] = "failed"
                 finish()
                 self._reply(502, "UPSTREAM_REDIRECT_BLOCKED" if 300 <= upstream.status < 400
@@ -446,21 +501,28 @@ class _Handler(BaseHTTPRequestHandler):
                 if total > MAX_STREAM_BYTES:
                     raise _Abort()
                 parser.feed(chunk)
+                if parser.usage is not None and parser.usage[1] > reservation.max_output_tokens:
+                    raise _Abort()    # finalize retains the actual overrun and blocks replay
+                if parser.terminal and not settling:
+                    proxy._settle_begin()
+                    settling = True   # before terminal bytes can reach a follow-up caller
                 down(b"%x\r\n" % len(chunk) + chunk + b"\r\n")
             # The upstream stream ended cleanly. The entry may only become SUCCEEDED once
             # the final framing is written and flushed to a client that is still there.
             if not self._downstream_open():
                 state["downstream"] = False
-            proxy._settle_begin()
-            settling = True
+            if not settling:
+                proxy._settle_begin()
+                settling = True
             if state["downstream"]:
                 down(b"0\r\n\r\n")                  # only a fully relayed stream is terminated
                 state["result"] = "complete"        # usage alone never proves delivery
             finish()
         except (OSError, http.client.HTTPException, ValueError, _Abort):
             finish()
-            if not started_reply and state["result"] != "failed":
-                self._reply(502, "UPSTREAM_OUTCOME_UNKNOWN")
+            if not started_reply:
+                self._reply(502, "UPSTREAM_NOT_SENT" if state["result"] == "failed"
+                            else "UPSTREAM_OUTCOME_UNKNOWN")
             self.close_connection = True
         finally:
             timer.cancel()
@@ -474,15 +536,20 @@ class _Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _finalize(ledger, reservation, state, parser):
         try:
-            if state["result"] == "failed":
+            if parser.usage is not None and parser.usage[1] > reservation.max_output_tokens:
+                ledger.complete(reservation, *parser.usage)
+            elif state["result"] == "failed":
                 ledger.fail(reservation)
             elif (state["result"] == "complete" and parser.usage is not None
                   and state["downstream"]):
                 ledger.complete(reservation, *parser.usage)
             else:
                 ledger.unknown(reservation)
+        except OutputCapExceeded:
+            return "OUTPUT_CAP_EXCEEDED"
         except Exception:                           # an unfinalized entry reads as UNKNOWN
-            pass
+            return "LEDGER_UNAVAILABLE"
+        return None
 
 
 class ResponsesProxy:
@@ -499,7 +566,14 @@ class ResponsesProxy:
         self.upstream_host = "127.0.0.1"
         self.upstream_port = int(origin.rsplit(":", 1)[1])
         self.authorization = "Bearer " + bearer_token
-        self.allowed_tools = frozenset(allowed_tools)
+        try:
+            identities = tuple(allowed_tools)
+            if any(type(item) is not tuple or len(item) != 2 or type(item[0]) is not str
+                   or (item[1] is not None and type(item[1]) is not str) for item in identities):
+                raise ValueError
+            self.allowed_tools = frozenset(identities)
+        except (TypeError, ValueError):
+            raise LLMToolError("proxy tool allowlist invalid") from None
         self.idle_timeout = idle_timeout
         self.port = None
         self._lock = threading.Lock()
@@ -555,7 +629,7 @@ class ResponsesProxy:
 
     def _wait_settled(self):
         with self._settle:
-            self._settle.wait_for(lambda: self._settling == 0, SETTLE_SECONDS)
+            return self._settle.wait_for(lambda: self._settling == 0, SETTLE_SECONDS)
 
     def _track_client(self, connection, add):
         with self._lock:
@@ -569,12 +643,21 @@ class ResponsesProxy:
     def start(self):
         if self._server is not None:
             raise LLMToolError("proxy already started")
-        self._server = _Server(("127.0.0.1", 0), _Handler)
-        self._server.proxy = self
-        self.port = self._server.server_address[1]
-        self._thread = threading.Thread(
-            target=self._server.serve_forever, name="codex-responses-proxy", daemon=True)
-        self._thread.start()
+        try:
+            self._server = _Server(("127.0.0.1", 0), _Handler)
+            self._server.proxy = self
+            self.port = self._server.server_address[1]
+            self._thread = threading.Thread(
+                target=self._server.serve_forever, name="codex-responses-proxy", daemon=True)
+            self._thread.start()
+        except (OSError, RuntimeError):
+            if self._server is not None:
+                try:
+                    self._server.server_close()
+                except OSError:
+                    pass
+                self._server = None
+            raise LLMToolError("proxy listener unavailable") from None
         return self
 
     @property

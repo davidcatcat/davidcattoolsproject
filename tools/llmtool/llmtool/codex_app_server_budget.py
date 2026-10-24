@@ -9,6 +9,7 @@ usage, which admit_next denies, so an UNKNOWN transport is never replayed.
 
 import fcntl
 import json
+import math
 import os
 import tempfile
 import time
@@ -35,6 +36,11 @@ class EntryState(str, Enum):
     SUCCEEDED = 'SUCCEEDED'
     FAILED = 'FAILED'
     UNKNOWN = 'UNKNOWN'
+    CAP_EXCEEDED = 'CAP_EXCEEDED'
+
+
+class OutputCapExceeded(LLMToolError):
+    """Actual usage exceeded the persisted per-request cap; never retry."""
 
 
 def default_budget():
@@ -78,7 +84,10 @@ class RunLedger:
         self._max_launches = max_launches
         self._clock = clock
         root = Path(directory)
-        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError:
+            raise LLMToolError("app-server run ledger unavailable") from None
         self._path = root / (run_id + '.ledger.json')
         self._lock_path = root / (run_id + '.ledger.lock')
 
@@ -96,6 +105,8 @@ class RunLedger:
     def _unlock(handle):
         try:
             fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            raise LLMToolError("app-server run ledger unavailable") from None
         finally:
             os.close(handle)
 
@@ -106,19 +117,54 @@ class RunLedger:
             now = self._clock()
             return {'schema': _SCHEMA, 'started': now, 'last': now, 'launches': 0,
                     'denied': 0, 'entries': []}
+        except OSError:
+            raise LLMToolError("app-server run ledger unreadable") from None
         try:
             state = json.loads(raw.decode('utf-8'))
-            if (type(state) is not dict or state.get('schema') != _SCHEMA
-                    or type(state.get('entries')) is not list
-                    or type(state.get('launches')) is not int
-                    or type(state.get('denied')) is not int
-                    or type(state.get('started')) not in (int, float)
-                    or type(state.get('last')) not in (int, float)):
-                raise ValueError
+            self._validate(state)
             return state
-        except (UnicodeError, ValueError):
+        except (UnicodeError, ValueError, TypeError, KeyError, OverflowError, RecursionError):
             # A corrupt ledger must deny, not silently reset admission.
             raise LLMToolError("app-server run ledger unreadable") from None
+
+    @staticmethod
+    def _validate(state):
+        def count(value, minimum=0, maximum=None):
+            return (type(value) is int and value >= minimum
+                    and (maximum is None or value <= maximum))
+
+        if (type(state) is not dict or set(state) != {
+                'schema', 'started', 'last', 'launches', 'denied', 'entries'}
+                or type(state['schema']) is not int or state['schema'] != _SCHEMA
+                or not count(state['launches'], maximum=MAX_LAUNCHES)
+                or not count(state['denied']) or type(state['entries']) is not list
+                or len(state['entries']) > MAX_UPSTREAM_REQUESTS):
+            raise ValueError
+        if any(type(state[key]) not in (int, float) or not math.isfinite(state[key])
+               or state[key] < 0 for key in ('started', 'last')):
+            raise ValueError
+        if state['last'] < state['started']:
+            raise ValueError
+        for sequence, entry in enumerate(state['entries']):
+            if (type(entry) is not dict or set(entry) != {
+                    'sequence', 'phase', 'state', 'max_output_tokens',
+                    'input_tokens', 'output_tokens'}
+                    or not count(entry['sequence']) or entry['sequence'] != sequence
+                    or entry['phase'] != (CallPhase.PRIMARY.value if sequence == 0
+                                          else CallPhase.RETRY.value)
+                    or type(entry['state']) is not str
+                    or entry['state'] not in {value.value for value in EntryState}
+                    or not count(entry['max_output_tokens'], 1, MAX_OUTPUT_TOKENS_PER_REQUEST)):
+                raise ValueError
+            known = entry['state'] in (EntryState.SUCCEEDED.value, EntryState.CAP_EXCEEDED.value)
+            if known:
+                if not count(entry['input_tokens']) or not count(entry['output_tokens']):
+                    raise ValueError
+                exceeded = entry['output_tokens'] > entry['max_output_tokens']
+                if exceeded != (entry['state'] == EntryState.CAP_EXCEEDED.value):
+                    raise ValueError
+            elif entry['input_tokens'] is not None or entry['output_tokens'] is not None:
+                raise ValueError
 
     def _store(self, state):
         encoded = json.dumps(state, separators=(',', ':')).encode('utf-8')
@@ -129,6 +175,11 @@ class RunLedger:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temp, str(self._path))
+            directory = os.open(str(self._path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         except BaseException:
             try:
                 os.unlink(temp)
@@ -137,23 +188,32 @@ class RunLedger:
             raise
 
     def _mutate(self, change):
-        handle = self._locked()
+        handle = None
         try:
+            handle = self._locked()
             state = self._load()
             # A clock stepping backwards must never hand back wall-clock budget.
             state['last'] = max(state['last'], self._clock())
             result = change(state)
+            self._validate(state)
             self._store(state)
             return result
+        except (OSError, ValueError, TypeError, OverflowError):
+            raise LLMToolError("app-server run ledger unavailable") from None
         finally:
-            self._unlock(handle)
+            if handle is not None:
+                self._unlock(handle)
 
     def _read(self):
-        handle = self._locked()
+        handle = None
         try:
+            handle = self._locked()
             return self._load()
+        except OSError:
+            raise LLMToolError("app-server run ledger unavailable") from None
         finally:
-            self._unlock(handle)
+            if handle is not None:
+                self._unlock(handle)
 
     # -- derived views -------------------------------------------------------
     @staticmethod
@@ -183,6 +243,8 @@ class RunLedger:
             'denied': state['denied'],
             'states': [e['state'] for e in state['entries']],
             'caps': [e['max_output_tokens'] for e in state['entries']],
+            'usage': [{'input_tokens': e['input_tokens'], 'output_tokens': e['output_tokens']}
+                      for e in state['entries']],
         }
 
     def remaining_seconds(self):
@@ -207,6 +269,9 @@ class RunLedger:
     def reserve_request(self, requested_cap=None):
         """Admit and persist one upstream request before it is forwarded."""
         def change(state):
+            if any(e['state'] == EntryState.CAP_EXCEEDED.value for e in state['entries']):
+                state['denied'] += 1
+                return Denial(BudgetCode.TOKEN_BUDGET_EXCEEDED)
             usage = self._usage_ledger(state)
             phase = CallPhase.PRIMARY if not state['entries'] else CallPhase.RETRY
             code = admit_next(self._budget, usage, phase)
@@ -231,14 +296,26 @@ class RunLedger:
 
     def _finish(self, reservation, new_state, input_tokens=None, output_tokens=None):
         def change(state):
+            if (type(reservation) is not Reservation or type(reservation.sequence) is not int
+                    or type(reservation.phase) is not CallPhase
+                    or type(reservation.max_output_tokens) is not int
+                    or not 0 <= reservation.sequence < len(state['entries'])):
+                raise LLMToolError("app-server reservation invalid")
             entry = state['entries'][reservation.sequence]
+            if (reservation.phase.value != entry['phase']
+                    or reservation.max_output_tokens != entry['max_output_tokens']):
+                raise LLMToolError("app-server reservation invalid")
             if entry['state'] != EntryState.RESERVED.value:
                 return False        # a finished entry is never rewritten
-            entry['state'] = new_state.value
+            entry['state'] = (EntryState.CAP_EXCEEDED.value if new_state is EntryState.SUCCEEDED
+                              and output_tokens > entry['max_output_tokens'] else new_state.value)
             entry['input_tokens'] = input_tokens
             entry['output_tokens'] = output_tokens
-            return True
-        return self._mutate(change)
+            return entry['state']
+        result = self._mutate(change)
+        if result == EntryState.CAP_EXCEEDED.value:
+            raise OutputCapExceeded("app-server output cap exceeded")
+        return bool(result)
 
     def complete(self, reservation, input_tokens, output_tokens):
         if (type(input_tokens) is not int or type(output_tokens) is not int

@@ -311,8 +311,12 @@ class CodexCLIProvider:
             )
         prompt = self._prompt(messages)
         if self._app_server is not None:
-            content, elapsed = self._app_server.run(
-                executable, prompt, self.provider["timeout_seconds"])
+            try:
+                content, elapsed = self._app_server.run(
+                    executable, prompt, self.provider["timeout_seconds"])
+            except (OSError, TypeError, ValueError):
+                raise coded_error("Codex App-server runtime unavailable", 'PROVIDER_RUNTIME_ERROR',
+                                  'provider.codex-cli') from None
             return self._reply(content, elapsed)
         try:
             with CLIProcessLifecycle(self.TYPE) as lifecycle:

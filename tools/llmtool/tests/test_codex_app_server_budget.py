@@ -1,12 +1,16 @@
 import json
+import os
+import stat
 import tempfile
 import threading
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from llmtool.codex_app_server_budget import (
-    MAX_LAUNCHES, MAX_WALL_CLOCK_SECONDS, Denial, Reservation, RunLedger, default_budget)
+    MAX_LAUNCHES, MAX_WALL_CLOCK_SECONDS, Denial, OutputCapExceeded, Reservation,
+    RunLedger, default_budget)
 from llmtool.errors import LLMToolError
 from llmtool.run_budget import BudgetCode, CallPhase
 
@@ -83,15 +87,58 @@ class RunLedgerTests(unittest.TestCase):
         self.ledger("run-a").reserve_request()
         self.assertIsInstance(self.ledger("run-b").reserve_request(), Reservation)
 
-    def test_output_cap_shrinks_to_the_remaining_run_budget(self):
+    def test_usage_above_reserved_cap_is_recorded_and_stops_admission(self):
         ledger = self.ledger()
-        self.assertTrue(ledger.complete(ledger.reserve_request(), 10, 200))
-        self.assertEqual(ledger.reserve_request().max_output_tokens, 56)
+        with self.assertRaisesRegex(OutputCapExceeded, "^app-server output cap exceeded$"):
+            ledger.complete(ledger.reserve_request(), 10, 200)
+        self.assertEqual(ledger.snapshot()['states'], ['CAP_EXCEEDED'])
+        self.assertEqual(ledger.snapshot()['usage'], [{'input_tokens': 10, 'output_tokens': 200}])
+        self.assertEqual(self.ledger().reserve_request().code, BudgetCode.TOKEN_BUDGET_EXCEEDED)
 
     def test_exhausted_output_budget_is_denied(self):
-        ledger = self.ledger()
-        self.assertTrue(ledger.complete(ledger.reserve_request(), 10, 256))
+        ledger = self.ledger(budget=replace(default_budget(), max_output_tokens=32))
+        self.assertTrue(ledger.complete(ledger.reserve_request(), 10, 32))
         self.assertEqual(ledger.reserve_request().code, BudgetCode.TOKEN_BUDGET_EXCEEDED)
+
+    def test_overrun_of_a_lower_requested_cap_also_blocks(self):
+        ledger = self.ledger()
+        with self.assertRaises(OutputCapExceeded):
+            ledger.complete(ledger.reserve_request(4), 1, 5)
+        self.assertEqual(ledger.reserve_request().code, BudgetCode.TOKEN_BUDGET_EXCEEDED)
+
+    def test_malformed_persisted_entry_fields_are_sanitized_and_never_reset(self):
+        self.ledger().reserve_request()
+        path = self.root / 'run-1.ledger.json'
+        original = json.loads(path.read_text())
+        cases = [None, {}, {**original['entries'][0], 'phase': 'PRIVATE_PHASE'},
+                 {**original['entries'][0], 'state': 'PRIVATE_STATE'},
+                 {**original['entries'][0], 'sequence': -1},
+                 {**original['entries'][0], 'max_output_tokens': True},
+                 {**original['entries'][0], 'input_tokens': 1}]
+        for entry in cases:
+            state = dict(original, entries=[entry])
+            data = json.dumps(state)
+            path.write_text(data)
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(LLMToolError, '^app-server run ledger unreadable$'):
+                    self.ledger().reserve_request()
+                self.assertEqual(path.read_text(), data)
+        for key, value in (('schema', True), ('started', float('nan')), ('last', -1),
+                           ('denied', -1), ('launches', 9), ('entries', [original['entries'][0]] * 3)):
+            path.write_text(json.dumps(dict(original, **{key: value})))
+            with self.subTest(key=key), self.assertRaises(LLMToolError):
+                self.ledger().snapshot()
+
+    def test_atomic_ledger_replace_fsyncs_file_and_parent_directory(self):
+        modes = []
+        real_fsync = os.fsync
+        def observe(fd):
+            modes.append(os.fstat(fd).st_mode)
+            return real_fsync(fd)
+        with patch('llmtool.codex_app_server_budget.os.fsync', side_effect=observe):
+            self.ledger().reserve_request()
+        self.assertTrue(any(stat.S_ISREG(mode) for mode in modes))
+        self.assertTrue(any(stat.S_ISDIR(mode) for mode in modes))
 
     def test_finished_entries_are_never_rewritten(self):
         ledger = self.ledger()

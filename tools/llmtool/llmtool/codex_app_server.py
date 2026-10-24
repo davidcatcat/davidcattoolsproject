@@ -23,6 +23,10 @@ _READ_SIZE = 65536
 _USER_AGENT = re.compile(r"[^\s/]+/(\d+\.\d+\.\d+)(?:[\s(;-]|$)")
 _EVENTS = frozenset((
     "turn/completed", "item/started", "item/completed", "item/agentMessage/delta", "error"))
+_INFORMATIONAL_EVENTS = frozenset((
+    "thread/started", "turn/started", "thread/tokenUsage/updated", "thread/status/changed",
+    "remoteControl/status/changed", "account/rateLimits/updated"))
+_TEXT_ITEMS = frozenset(("agentMessage", "userMessage", "reasoning"))
 # Item kinds that mean something other than model text happened or was attempted.
 _TOOL_ITEMS = frozenset((
     "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall",
@@ -45,10 +49,11 @@ def _invalid(detail="app-server message invalid"):
 class AppServerClient:
     """Line-oriented client over the child's stdin/stdout file objects."""
 
-    def __init__(self, stdin, stdout, deadline):
+    def __init__(self, stdin, stdout, deadline, check=None):
         self._stdin = stdin
         self._stdout = stdout
         self._deadline = deadline
+        self._check = check or (lambda: None)
         self._buffer = bytearray()
         self._next_id = 1
         self._selector = selectors.DefaultSelector()
@@ -79,6 +84,7 @@ class AppServerClient:
             self._broken = True
             raise AppServerClosed("app-server connection closed") from None
         while view:
+            self._check()
             remaining = self._deadline - time.monotonic()
             if remaining <= 0:
                 # A partly written line would corrupt the stream, so it is never reused.
@@ -102,6 +108,7 @@ class AppServerClient:
 
     def _read_message(self):
         while True:
+            self._check()
             newline = self._buffer.find(b"\n")
             if newline >= 0:
                 if newline > MAX_LINE_BYTES:
@@ -112,7 +119,7 @@ class AppServerClient:
                     continue
                 try:
                     message = json.loads(line.decode("utf-8"))
-                except (UnicodeError, ValueError):
+                except (UnicodeError, ValueError, RecursionError):
                     raise _invalid() from None
                 if type(message) is not dict:
                     raise _invalid()
@@ -143,7 +150,20 @@ class AppServerClient:
             self._send({"id": message["id"], "error": {"code": -32601, "message": "not supported"}})
             return
         self.notifications += 1
-        if message["method"] in _EVENTS:
+        method = message["method"]
+        if method not in _EVENTS and method not in _INFORMATIONAL_EVENTS:
+            raise _invalid("app-server event type unsupported")
+        if method in ("item/started", "item/completed"):
+            params = message.get("params")
+            item = params.get("item") if type(params) is dict else None
+            kind = item.get("type") if type(item) is dict else None
+            if type(kind) is str and kind in _TOOL_ITEMS:
+                raise LLMToolError("app-server reported a tool item; refusing")
+            if type(kind) is not str or kind not in _TEXT_ITEMS:
+                raise _invalid("app-server item type unsupported")
+        if method == "error":
+            raise _invalid("app-server reported an error")
+        if method in _EVENTS:
             if len(self._events) < MAX_EVENTS:
                 self._events.append(message)
             else:

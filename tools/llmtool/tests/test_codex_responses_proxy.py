@@ -10,6 +10,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from llmtool.codex_app_server_budget import RunLedger
 from llmtool.codex_responses_proxy import (
@@ -100,6 +101,23 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if mode in ("status500-short", "status500-chunked-short", "status500-hang"):
+            payload = b'{"error":"PRIVATE_UPSTREAM"}'
+            self.send_response(500)
+            if mode == "status500-chunked-short":
+                self.send_header("Transfer-Encoding", "chunked")
+            else:
+                self.send_header("Content-Length", str(len(payload) + 100))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            if mode == "status500-chunked-short":
+                self._send(payload)
+            else:
+                self.wfile.write(payload)
+            self.wfile.flush()
+            if mode == "status500-hang":
+                server.release.wait(10)
+            return
         if mode == "status500":
             payload = b'{"error":"boom"}'
             self.send_response(500)
@@ -153,6 +171,11 @@ class _UpstreamHandler(BaseHTTPRequestHandler):
         if mode == "terminal-missing-trailer":
             self._send(usage_event(output_tokens=server.out_tokens))
             self.wfile.write(b"0\r\n")               # no required trailer terminator
+            self.wfile.flush()
+            return
+        if mode == "terminal-bad-chunk-crlf":
+            payload = usage_event()
+            self.wfile.write(b"%x\r\n" % len(payload) + payload + b"XX0\r\n\r\n")
             self.wfile.flush()
             return
         if mode == "terminal-truncate":
@@ -339,12 +362,16 @@ class ForwardingTests(ProxyTestCase):
         self.assertEqual([r["phase"] for r in self.proxy.forwarded], ["PRIMARY", "RETRY"])
         self.assertEqual(self.settle(), ["FAILED", "SUCCEEDED"])
 
-    def test_cap_shrinks_after_a_large_response(self):
+    def test_cap_overrun_records_actual_usage_and_blocks_replay(self):
         self.upstream.out_tokens = 200
-        self.assertEqual(self.post()[0], 200)
-        self.settle()
-        self.assertEqual(self.post()[0], 200)
-        self.assertEqual([self.sent_body(i)["max_output_tokens"] for i in (0, 1)], [128, 56])
+        self.assertEqual(self.post()[0], 200)  # headers may already be delivered
+        self.assertEqual(self.settle(), ["CAP_EXCEEDED"])
+        self.assertEqual(self.ledger.snapshot()["usage"], [
+            {"input_tokens": 7, "output_tokens": 200}])
+        status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (429, "TOKEN_BUDGET_EXCEEDED"))
+        self.assertIn("OUTPUT_CAP_EXCEEDED", self.proxy.rejected)
+        self.assertEqual(self.upstream.count(), 1)
 
     def test_incomplete_terminal_event_with_usage_counts(self):
         self.upstream.mode = "incomplete"
@@ -623,7 +650,7 @@ class BypassTests(ProxyTestCase):
             {"type": "computer_use_preview"}, {"type": "function", "function": {"name": "bash"}},
             {"type": "function", "name": "view_file"},
         ]
-        names = {t.get("name") or (t.get("function") or {}).get("name") or t["type"]
+        names = {(t["type"], t.get("name") or (t.get("function") or {}).get("name"))
                  for t in forbidden}
         proxy = self.make_proxy(allowed_tools=names)
         for tool in forbidden:
@@ -634,14 +661,14 @@ class BypassTests(ProxyTestCase):
         self.assert_nothing_forwarded()
 
     def test_explicitly_allowed_non_executing_tool_is_forwarded_and_recorded(self):
-        proxy = self.make_proxy(allowed_tools=("update_plan",))
+        proxy = self.make_proxy(allowed_tools=(("function", "update_plan"),))
         tools = [{"type": "function", "name": "update_plan", "parameters": {}}]
         self.assertEqual(self.post(body_for(tools=tools), proxy=proxy)[0], 200)
         self.assertEqual(proxy.forwarded[0]["tools"], ["function:update_plan"])
         self.assertEqual(self.sent_body()["tools"], tools)
 
     def test_one_forbidden_tool_among_allowed_ones_rejects_the_request(self):
-        proxy = self.make_proxy(allowed_tools=("update_plan",))
+        proxy = self.make_proxy(allowed_tools=(("function", "update_plan"),))
         tools = [{"type": "function", "name": "update_plan"}, {"type": "local_shell"}]
         status, data = self.post(body_for(tools=tools), proxy=proxy)
         self.assertEqual((status, self.error_code(data)), (403, "TOOL_EXECUTION_FORBIDDEN"))
@@ -795,7 +822,7 @@ class ToolIdentityTests(ProxyTestCase):
                          [("TOOLS_INVALID", None, []), ("TOOLS_INVALID", 2, [])])
 
     def test_forwarded_requests_record_the_transmitted_tool_identities(self):
-        proxy = self.make_proxy(allowed_tools=("update_plan", "web_search"))
+        proxy = self.make_proxy(allowed_tools=(("function", "update_plan"), ("web_search", None)))
         tools = [{"type": "function", "name": "update_plan"}, {"type": "web_search"}]
         self.assertEqual(self.post(body_for(tools=tools), proxy=proxy)[0], 200)
         self.assertEqual(proxy.forwarded[0]["tools"], ["function:update_plan", "web_search"])
@@ -805,6 +832,128 @@ class ToolIdentityTests(ProxyTestCase):
         self.assertEqual(self.post()[0], 200)
         self.assertEqual(self.proxy.forwarded[0]["tools"], [])
         self.assertEqual(self.proxy.rejected_tools, [])
+
+
+class FormalReviewRepairTests(ProxyTestCase):
+    def test_unreviewed_request_fields_are_refused_before_admission(self):
+        for name, value in (("background", True), ("previous_response_id", "prior"),
+                            ("store", False), ("include", []), ("future_field", {})):
+            with self.subTest(name=name):
+                status, data = self.post(body_for(**{name: value}))
+                self.assertEqual((status, self.error_code(data)), (400, "REQUEST_FIELDS_NOT_ALLOWED"))
+        self.assert_nothing_forwarded()
+
+    def test_expect_continue_is_refused_without_reading_body_or_interim_success(self):
+        status, data = self.raw((
+            "POST /v1/responses HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+            "Authorization: Bearer %s\r\nExpect: 100-continue\r\n"
+            "Content-Length: 2\r\n\r\n" % (self.proxy.port, TOKEN)).encode())
+        self.assertEqual((status, self.error_code(data)), (417, "EXPECT_NOT_ALLOWED"))
+        self.assert_nothing_forwarded()
+
+    def test_tool_kind_and_name_must_both_match(self):
+        allowed = (("function", "update_plan"),)
+        for tool, expected in (({"type": "function", "name": "update_plan"}, None),
+                               ({"type": "custom", "name": "update_plan"}, "TOOLS_NOT_ALLOWED"),
+                               ({"type": "future", "name": "update_plan"}, "TOOLS_NOT_ALLOWED"),
+                               ({"type": "function"}, "TOOLS_NOT_ALLOWED"),
+                               ({"type": "function", "name": "update_plan",
+                                 "function": {"name": "shell"}}, "TOOLS_INVALID"),
+                               ({"type": "local_shell", "name": "update_plan"},
+                                "TOOL_EXECUTION_FORBIDDEN")):
+            with self.subTest(tool=tool):
+                self.assertEqual(check_tools([tool], allowed), expected)
+
+    def test_incomplete_non_2xx_fixed_body_is_unknown_and_not_retried(self):
+        self.upstream.mode = "status500-short"
+        self.assertEqual(self.post()[0], 502)
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        self.assertEqual(self.post()[0], 429)
+        self.assertEqual(self.upstream.count(), 1)
+
+    def test_incomplete_non_2xx_chunked_body_is_unknown_and_not_retried(self):
+        self.upstream.mode = "status500-chunked-short"
+        self.assertEqual(self.post()[0], 502)
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        self.assertEqual(self.post()[0], 429)
+        self.assertEqual(self.upstream.count(), 1)
+
+    def test_timeout_in_non_2xx_body_is_unknown(self):
+        self.upstream.mode = "status500-hang"
+        proxy = self.make_proxy(idle_timeout=0.2)
+        self.assertEqual(self.post(proxy=proxy)[0], 502)
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        self.assertEqual(self.post(proxy=proxy)[0], 429)
+        self.assertEqual(self.upstream.count(), 1)
+
+    def test_bad_chunk_separator_after_terminal_usage_cannot_succeed(self):
+        self.upstream.mode = "terminal-bad-chunk-crlf"
+        self.assertEqual(self.post()[0], 200)
+        self.assertEqual(self.settle(), ["UNKNOWN"])
+        self.assertEqual(self.post()[0], 429)
+        self.assertEqual(self.upstream.count(), 1)
+
+    def terminal_connection(self):
+        self.upstream.mode = "terminal-hold"
+        connection = http.client.HTTPConnection("127.0.0.1", self.proxy.port, timeout=5)
+        self.addCleanup(connection.close)
+        connection.request("POST", RESPONSES_PATH, body=json.dumps(body_for()),
+                           headers={"Authorization": "Bearer " + TOKEN})
+        response = connection.getresponse()
+        data = b""
+        while b"response.completed" not in data:
+            data += response.read1(8192)
+        return response
+
+    def test_followup_after_terminal_waits_until_actual_stream_finalization(self):
+        response = self.terminal_connection()
+        result = []
+        worker = threading.Thread(target=lambda: result.append(self.post()))
+        worker.start()
+        try:
+            time.sleep(0.05)
+            self.assertTrue(worker.is_alive())
+            self.assertEqual(self.upstream.count(), 1)
+            self.upstream.mode = "ok"
+            self.upstream.release.set()
+            response.read()
+        finally:
+            self.upstream.release.set()
+            worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0][0], 200)
+        self.assertEqual(self.settle(), ["SUCCEEDED", "SUCCEEDED"])
+
+    def test_settling_timeout_is_explicit_and_does_not_reserve_or_forward(self):
+        response = self.terminal_connection()
+        with patch("llmtool.codex_responses_proxy.SETTLE_SECONDS", 0.05):
+            status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (503, "STREAM_SETTLING_TIMEOUT"))
+        self.assertEqual(self.ledger.snapshot()["requests"], 1)
+        self.assertEqual(self.upstream.count(), 1)
+        self.upstream.release.set()
+        response.read()
+        self.assertEqual(self.settle(), ["SUCCEEDED"])
+
+    def test_expiry_before_connect_is_known_not_sent_not_unknown(self):
+        with patch.object(self.ledger, "remaining_seconds", return_value=0):
+            status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (502, "UPSTREAM_NOT_SENT"))
+        self.assertEqual(self.settle(), ["FAILED"])
+        self.assertEqual(self.upstream.count(), 0)
+
+    def test_corrupt_ledger_becomes_sanitized_503_without_forwarding(self):
+        self.ledger.reserve_launch()
+        Path(self.temp.name, "run-1.ledger.json").write_text('{"PRIVATE_STATE":true}')
+        status, data = self.post()
+        self.assertEqual((status, self.error_code(data)), (503, "LEDGER_UNAVAILABLE"))
+        self.assertEqual(self.upstream.count(), 0)
+
+    def test_listener_oserror_is_sanitized(self):
+        proxy = ResponsesProxy(self.ledger, self.upstream.endpoint, TOKEN)
+        with patch("llmtool.codex_responses_proxy._Server", side_effect=OSError("PRIVATE_PATH")):
+            with self.assertRaisesRegex(LLMToolError, "^proxy listener unavailable$"):
+                proxy.start()
 
 
 class ConstructionTests(ProxyTestCase):

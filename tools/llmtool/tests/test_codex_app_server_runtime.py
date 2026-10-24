@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import socket
 import stat
 import sys
@@ -19,6 +20,7 @@ from llmtool.codex_app_server_runtime import (
     validate_loopback_endpoint)
 from llmtool.errors import LLMToolError
 from llmtool.providers.codex_cli import CodexCLIProvider
+from llmtool.providers.cli_lifecycle import CLIProcessLifecycle
 
 # A stand-in child speaking just enough of the 0.163.0 initialize protocol. It never
 # touches the network and is the only "server" these tests start (no real codex).
@@ -32,8 +34,9 @@ with open(DUMP, "w") as dump:
     json.dump({"env": dict(os.environ), "cwd": os.getcwd(), "argv": sys.argv}, dump)
 if BEHAVIOR == "mute":
     time.sleep(60)          # never reads stdin: a write larger than the pipe buffer must stall
-if BEHAVIOR == "orphan":
-    child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"])
+if BEHAVIOR in ("orphan", "escaped"):
+    child = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+                             start_new_session=BEHAVIOR == "escaped")
     with open(PIDFILE, "w") as pids:
         pids.write(str(child.pid))
 if BEHAVIOR == "deaf":
@@ -153,7 +156,8 @@ class AppServerProcessTests(RuntimeTestCase):
             self.assertEqual(pgid, session.process.pid)
             self.assertNotEqual(pgid, os.getpgrp())
         report = session.process.shutdown_report
-        self.assertEqual(report, {"returncode": 0, "outcome": "CLEAN", "group_empty": True})
+        self.assertEqual(report, {"returncode": 0, "outcome": "CLEAN", "group_empty": True,
+                                  "descendant_cleanup": "UNKNOWN", "escaped_descendants": 0})
         self.assertEqual(group_members(pgid), [])
         self.assertFalse(home.home.parent.exists())
         self.assertEqual(self.ledger.snapshot()["launches"], 1)
@@ -203,6 +207,40 @@ class AppServerProcessTests(RuntimeTestCase):
         self.assertTrue(report["group_empty"])
         self.assertEqual(group_members(pgid), [])
         self.assertFalse(self.alive(orphan))
+
+    def test_setsid_descendant_is_not_mistaken_for_complete_cleanup(self):
+        process = AppServerProcess(self.fake("escaped"), self.isolated(), self.ledger)
+        process.start()
+        self.addCleanup(process.shutdown)
+        process.client.initialize()
+        escaped = int(self.pidfile.read_text())
+        def cleanup_owned_fixture():
+            try:
+                os.kill(escaped, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            deadline = time.monotonic() + 3
+            while self.alive(escaped) and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self.addCleanup(cleanup_owned_fixture)
+        report = process.shutdown()
+        self.assertTrue(report["group_empty"])
+        self.assertEqual(report["outcome"], "UNKNOWN")
+        self.assertEqual(report["descendant_cleanup"], "UNKNOWN")
+        self.assertGreaterEqual(report["escaped_descendants"], 1)
+        self.assertTrue(self.alive(escaped))  # only the test owns out-of-group teardown
+
+    def test_process_observation_error_does_not_skip_owned_group_teardown(self):
+        process = AppServerProcess(self.fake(), self.isolated(), self.ledger)
+        process.start()
+        process.client.initialize()
+        with patch("llmtool.codex_app_server_runtime.process_table",
+                   side_effect=OSError("PRIVATE_PROCESS_TABLE")):
+            report = process.shutdown()
+        self.assertEqual(report["outcome"], "UNKNOWN")
+        self.assertTrue(report["group_empty"])
+        self.assertEqual(report["descendant_cleanup"], "UNKNOWN")
+        self.assertFalse(self.alive(process.pid))
 
     def test_child_that_ignores_stdin_close_is_terminated_by_group(self):
         process = AppServerProcess(self.fake("stubborn"), self.isolated(), self.ledger)
@@ -401,13 +439,14 @@ class _StrategyUpstreamHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         events = [{"type": "response.created", "response": {"id": "r"}}]
-        if self.server.mode == "ok":
+        if self.server.mode in ("ok", "overcap"):
             events.append({"type": "response.completed", "response": {
-                "id": "r", "usage": {"input_tokens": 4, "output_tokens": 2}}})
+                "id": "r", "usage": {"input_tokens": 4,
+                "output_tokens": 129 if self.server.mode == "overcap" else 2}}})
         for event in events:
             data = ("event: %s\ndata: %s\n\n" % (event["type"], json.dumps(event))).encode()
             self.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
-        if self.server.mode == "ok":
+        if self.server.mode in ("ok", "overcap"):
             self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
 
@@ -506,7 +545,7 @@ class StrategyTests(RuntimeTestCase):
 
     def test_execution_tool_is_denied_even_when_allowlisted(self):
         with self.assertRaises(LLMToolError):
-            self.run_provider("exec-tool", allowed=("local_shell",))
+            self.run_provider("exec-tool", allowed=(("local_shell", None),))
         self.assertEqual(self.fake_results()["statuses"], [403])
         self.assertEqual(self.upstream.requests, [])
         self.assertEqual(self.strategy.last_report["rejected_tools"][0]["code"],
@@ -514,7 +553,7 @@ class StrategyTests(RuntimeTestCase):
         self.assert_cleaned_up()
 
     def test_explicitly_allowed_benign_tool_is_forwarded(self):
-        self.assertEqual(self.run_provider("tools", allowed=("update_plan",)).content, "FAKE_ANSWER")
+        self.assertEqual(self.run_provider("tools", allowed=(("function", "update_plan"),)).content, "FAKE_ANSWER")
         self.assertEqual(self.upstream.requests[0]["tools"],
                          [{"type": "function", "name": "update_plan"}])
 
@@ -622,6 +661,93 @@ class StrategyTests(RuntimeTestCase):
         self.assertEqual(self.upstream.requests, [])
         snapshot = self.ledger.snapshot()
         self.assertEqual((snapshot["launches"], snapshot["requests"]), (1, 0))
+
+    def test_strategy_uses_existing_signal_lifecycle(self):
+        events = []
+        class ObservedLifecycle(CLIProcessLifecycle):
+            def __enter__(self):
+                events.append("enter")
+                return super().__enter__()
+            def own(self, process):
+                events.append("own")
+                return super().own(process)
+            def __exit__(self, *args):
+                events.append("exit")
+                return super().__exit__(*args)
+        with patch("llmtool.codex_app_server_runtime.CLIProcessLifecycle", ObservedLifecycle):
+            self.assertEqual(self.run_provider("ok").content, "FAKE_ANSWER")
+        self.assertEqual(events, ["enter", "own", "exit"])
+        self.assertEqual(self.strategy.last_report["containment"],
+                         {"os_egress": "NOT_VERIFIED", "descendants": "UNKNOWN"})
+        self.assert_cleaned_up()
+
+    def test_actual_output_overrun_is_a_distinct_failure_with_no_more_admission(self):
+        self.upstream.mode = "overcap"
+        with self.assertRaises(LLMToolError) as caught:
+            self.run_provider("ok")
+        self.assert_code(caught, "MODEL_RESPONSE_TOO_LARGE")
+        self.assertEqual(self.ledger.snapshot()["states"], ["CAP_EXCEEDED"])
+        self.assertEqual(self.ledger.snapshot()["usage"], [
+            {"input_tokens": 4, "output_tokens": 129}])
+        self.assertEqual(len(self.upstream.requests), 1)
+        self.assert_cleaned_up()
+
+    def test_isolated_home_oserror_is_sanitized_and_phase_reported(self):
+        with patch("llmtool.codex_app_server_runtime.build_isolated_home",
+                   side_effect=OSError("PRIVATE_HOME")):
+            with self.assertRaisesRegex(LLMToolError, "^Codex App-server turn failed$"):
+                self.run_provider("ok")
+        self.assertEqual(self.strategy.last_report["phase"], "isolated_home")
+        self.assertNotIn("PRIVATE_HOME", json.dumps(self.strategy.last_report))
+        self.assertTrue(all(not os.path.exists(path) for path in self.dirs))
+
+    def test_stderr_open_oserror_is_sanitized_and_phase_reported(self):
+        with patch("llmtool.codex_app_server_runtime.open", create=True,
+                   side_effect=OSError("PRIVATE_STDERR")):
+            with self.assertRaisesRegex(LLMToolError, "^App-server could not be started$"):
+                self.run_provider("ok")
+        self.assertEqual(self.strategy.last_report["phase"], "process_start")
+        self.assertNotIn("PRIVATE_STDERR", json.dumps(self.strategy.last_report))
+        self.assertTrue(all(not os.path.exists(path) for path in self.dirs))
+
+    def test_malformed_ledger_during_startup_is_sanitized_and_reported_unknown(self):
+        self.ledger.reserve_launch()
+        (self.root / "ledger" / "run-1.ledger.json").write_text('{"PRIVATE_STATE":true}')
+        with self.assertRaisesRegex(LLMToolError, "^Codex App-server turn failed$"):
+            self.run_provider("ok")
+        self.assertEqual(self.strategy.last_report["phase"], "process_start")
+        self.assertEqual(self.strategy.last_report["ledger"], {"status": "UNKNOWN"})
+        self.assertNotIn("PRIVATE_STATE", json.dumps(self.strategy.last_report))
+        self.assertTrue(all(not os.path.exists(path) for path in self.dirs))
+
+    def test_report_snapshot_failure_cannot_leak_or_mask_the_primary_error(self):
+        with patch.object(self.ledger, "snapshot", side_effect=KeyError("PRIVATE_LEDGER")):
+            with self.assertRaisesRegex(LLMToolError, "^Codex App-server turn failed$"):
+                self.run_provider("die")
+        self.assertEqual(self.strategy.last_report["ledger"], {"status": "UNKNOWN"})
+        self.assertEqual(self.strategy.last_report["phase"], "turn")
+        self.assertNotIn("PRIVATE_LEDGER", json.dumps(self.strategy.last_report))
+        self.assert_cleaned_up()
+
+    def test_malformed_snapshot_result_cannot_turn_success_into_a_raw_exception(self):
+        with patch.object(self.ledger, "snapshot", return_value=[]):
+            with self.assertRaisesRegex(LLMToolError, "^Codex App-server turn failed$"):
+                self.run_provider("ok")
+        self.assertEqual(self.strategy.last_report["ledger"], {"status": "UNKNOWN"})
+        self.assert_cleaned_up()
+
+    def test_cleanup_exception_is_sanitized_after_actual_proxy_teardown(self):
+        from llmtool.codex_responses_proxy import ResponsesProxy
+        original = ResponsesProxy.close
+        def fail_after_close(proxy):
+            original(proxy)
+            raise OSError("PRIVATE_CLEANUP")
+        with patch.object(ResponsesProxy, "close", fail_after_close):
+            with self.assertRaisesRegex(LLMToolError, "^Codex App-server cleanup could not be confirmed$"):
+                self.run_provider("ok")
+        self.assertEqual(self.strategy.last_report["cleanup_errors"], ["proxy"])
+        self.assertNotIn("PRIVATE_CLEANUP", json.dumps(self.strategy.last_report))
+        self.assert_cleaned_up()
 
     def test_synthetic_token_helpers(self):
         token = new_synthetic_token()
