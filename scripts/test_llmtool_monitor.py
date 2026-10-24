@@ -1084,6 +1084,21 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
+        result = {"type": "user", "cwd": str(self.task), "message": {"content": [
+            {"type": "tool_result", "content": "FILE-SECRET"}]}}
+        answered = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+        for name, entries, age, want in (
+                ("wait", [result], 300, (mon.WORKING, "等模型回覆")),
+                ("hung", [result], mon.OFFICE_STALL + 60, (mon.STALLED, "等模型回覆超過 15 分鐘")),
+                ("idle", [result, answered], 300, (mon.IDLE, "task wp"))):
+            with self.subTest(name):
+                path = self.claude / "dev" / "s.jsonl"
+                self._write(path, entries, age=age)
+                row = self.by_name(self.rows())["claude developer（互動）"]
+                self.assertEqual((row.state, row.detail[:len(want[1])]), want)
+                self.assertNotIn("FILE-SECRET", row.detail)
+
     def test_claude_cli_sessions_show_closed_after_the_cli_exits_then_leave(self):
         for sid, age in (("live", 300), ("recent", 200), ("old", 3 * 3600)):
             self._write(self.claude / "proj" / f"{sid}.jsonl", [

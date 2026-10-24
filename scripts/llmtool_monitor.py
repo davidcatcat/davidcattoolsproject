@@ -1477,6 +1477,21 @@ def _last_action(tail: list) -> str:
     return ""
 
 
+def _awaiting_model(tail: list) -> bool:
+    """True when the newest exchanged message is a tool result the model has
+    not answered yet: the request is out and the session waits on the model.
+    Only the block types are read, never their content."""
+    for item in reversed(tail):
+        if item.get("type") not in ("user", "assistant"):
+            continue
+        if item["type"] == "assistant":
+            return False
+        content = (item.get("message") or {}).get("content") if type(item.get("message")) is dict else None
+        return type(content) is list and any(
+            type(block) is dict and block.get("type") == "tool_result" for block in content)
+    return False
+
+
 def _humanize(path_stem: str) -> str:
     return " ".join(path_stem.replace("-", "_").split("_"))
 
@@ -1953,8 +1968,14 @@ def claude_rows(now: float, root: str | None = None,
             rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
                                   kind="subagent", task=task, evidence="claude 紀錄"))
             continue
+        state = WORKING if age <= OFFICE_BUSY else IDLE
+        if state == IDLE and _awaiting_model(tail):
+            # Quiet because its request is still with the model, not idle.
+            state = WORKING if age <= OFFICE_STALL else STALLED
+            detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + (
+                f"（{task}）" if task else "")
         rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
-                              WORKING if age <= OFFICE_BUSY else IDLE, detail,
+                              state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
                               task=task, evidence="claude 紀錄", cli=first == "cli"))
         session_dir = path[:-len(".jsonl")]
