@@ -58,7 +58,14 @@ def _stop(code):
     raise LifecycleError(code)
 
 
-def _run_git(cwd, *args, check=True):
+# A git lock or a stuck filesystem must not hang a read-only lookup forever.
+# Commands that change the repository (worktree add/lock) and the environment
+# bootstrap (a venv and wheel install) are not timed: they can legitimately
+# take minutes, and a kill would leave a lock or a half-built tree behind.
+GIT_TIMEOUT_SECONDS = 120
+
+
+def _run_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": os.path.expanduser("~"),
@@ -75,8 +82,9 @@ def _run_git(cwd, *args, check=True):
             ["/usr/bin/git", *args], cwd=str(cwd), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=False, text=True,
+            timeout=timeout,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         _stop("D6_GIT_UNAVAILABLE")
     if check and result.returncode:
         _stop("D6_GIT_REJECTED")
@@ -216,15 +224,18 @@ def _trusted_dispatcher_git():
     }
 
     def git(*args, input_data=None):
-        result = subprocess.run(
-            ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
-             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-             "-C", str(dispatcher_root), *args],
-            env=git_env, input=input_data, stdin=(None if input_data is not None
-                                                 else subprocess.DEVNULL),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ["/usr/bin/git", "--no-optional-locks", "--no-replace-objects",
+                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+                 "-C", str(dispatcher_root), *args],
+                env=git_env, input=input_data, stdin=(None if input_data is not None
+                                                     else subprocess.DEVNULL),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            _stop("ENV_BOOTSTRAP_UNAVAILABLE")
         if result.returncode or result.stderr:
             _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
         return result.stdout
@@ -429,7 +440,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
         if root.exists() or root.is_symlink() or record_path.exists() or record_path.is_symlink():
             _stop("D6_TASK_ALREADY_EXISTS")
         subprocess_result = _run_git(canonical_root, "worktree", "add", "-b", branch,
-                                     str(root), base_sha, check=False)
+                                     str(root), base_sha, check=False, timeout=None)
         if subprocess_result.returncode:
             _stop("D6_WORKTREE_CREATE_FAILED")
         try:
@@ -465,7 +476,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             }
             _atomic_record(record_path, record)
             lock_result = _run_git(canonical_root, "worktree", "lock", str(root),
-                                   check=False)
+                                   check=False, timeout=None)
             if lock_result.returncode:
                 _stop("D6_WORKTREE_LOCK_FAILED")
             record["state"] = "ACTIVE"
