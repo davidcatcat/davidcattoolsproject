@@ -1555,6 +1555,9 @@ class OfficeViewTests(unittest.TestCase):
         prompt = ("Review PR #312 head abc1234\n=== DIFF ===\ndiff --git a/x b/x\n"
                   "+# `gh -R owner/repo pr diff 309`\n+see /pull/77\n")
         self.assertEqual(mon._review_target(prompt), ("312", "abc1234"))
+        # Only fetches are cut at the diff; a head named after it still counts.
+        self.assertEqual(mon._review_target("Review PR #312\ndiff --git a/x b/x\n+x\nExact head: abc1234"),
+                         ("312", "abc1234"))
         # Fetches that disagree fall back to the prompt's own PR.
         self.assertEqual(mon._review_target("PR #5: gh pr diff 6; gh pr diff 7"), ("5", ""))
         self.assertEqual(mon._review_target("gh pr diff 6; gh pr view 6 --json headRefOid"), ("6", ""))
@@ -1633,6 +1636,8 @@ class OfficeViewTests(unittest.TestCase):
             ([(0, "blob1\n"), (0, "blob1\n"), (0, "abc1234 10-24 13:50\n")], "abc1234 10-24 13:50"),
             ([(0, "blob2\n"), (0, "blob1\n"), (0, "abc1234 10-24 13:50\n")], "本機修改 fffffff"),
             ([(128, ""), (128, ""), (128, "")], "本機修改 fffffff"),
+            # Both lookups failing is not a match, even when the log still answers.
+            ([(128, ""), (128, ""), (0, "abc1234 10-24 13:50\n")], "本機修改 fffffff"),
         ]
         for results, expected in cases:
             mon.monitor_version.cache_clear()

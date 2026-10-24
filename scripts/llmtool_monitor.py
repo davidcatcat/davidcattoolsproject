@@ -1277,11 +1277,12 @@ def monitor_version() -> str:
 
     def git(*args):
         found = _GIT_RUN(["git", "-C", SCRIPT_ROOT, *args], capture_output=True,
-                               text=True, timeout=2, env=env)
+                         text=True, timeout=2, env=env)
         return found.stdout.strip() if found.returncode == 0 else ""
 
     try:
-        same = git("hash-object", "--no-filters", "--", SCRIPT_PATH) == git("rev-parse", f"HEAD:{rel}")
+        blob = git("hash-object", "--no-filters", "--", SCRIPT_PATH)
+        same = bool(blob) and blob == git("rev-parse", f"HEAD:{rel}")
         commit = git("log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M", "--", rel)
     except (OSError, subprocess.SubprocessError):
         same, commit = False, ""
@@ -1981,9 +1982,9 @@ def _review_target(text: str) -> tuple[str, str]:
     inlined diff is the material under review, so nothing in it counts, and
     fetches that disagree fall back to the prompt's own "PR #N"."""
     cut = EMBEDDED_DIFF.search(text)
-    text = text[:cut.start()] if cut else text
     pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
-    fetched = {next(group for group in found if group) for found in REVIEW_PR_FETCH.findall(text)}
+    fetched = {next(group for group in found if group)
+               for found in REVIEW_PR_FETCH.findall(text[:cut.start()] if cut else text)}
     number = fetched.pop() if len(fetched) == 1 else ""
     return (number or (pr.group(1) if pr else ""), head.group(1)[:7] if head else "")
 
