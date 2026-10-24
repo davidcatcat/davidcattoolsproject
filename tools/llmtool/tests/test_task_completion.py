@@ -2441,6 +2441,63 @@ class TaskCompletionTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             task_completion.validate_review_dispatch_receipt(passed_intent, forged)
 
+    def test_malformed_circular_and_deep_handoff_return_inputs_have_stable_errors(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        blocked = task_completion.review_dispatch_blocked(intent)
+
+        circular_intent = dict(intent)
+        circular_intent['developer_identity'] = circular_intent
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_intent(circular_intent)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_DISPATCH_BINDING_INVALID')
+
+        deep_value = []
+        cursor = deep_value
+        for _ in range(11000):
+            nested = []
+            cursor.append(nested)
+            cursor = nested
+        deep_receipt = dict(blocked, reviewer_identity=deep_value)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_receipt(intent, deep_receipt)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        handoff = task_completion.review_handoff_record(intent, blocked)
+        cyclic_usage = {}
+        cyclic_usage['self'] = cyclic_usage
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record(
+                handoff, state='RETURNED', response='{}',
+                recommendation={'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+                usage=cyclic_usage)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        circular_return = {
+            'state': 'RETURNED', 'receipt_sha256': blocked['receipt_sha256'],
+            'next_step': 'WAIT_FOR_REVIEWER', 'pm_dispatch': 'RETURNED',
+            'pm_response': '{}',
+            'pm_recommendation': {'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+            'pm_usage': None,
+            'pm_error_code': None,
+        }
+        circular_return['pm_recommendation']['self'] = circular_return
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_return_record(circular_return, handoff)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        cyclic_handoff = dict(handoff)
+        cyclic_handoff['intent'] = cyclic_handoff
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(cyclic_handoff, {})
+        self.assertIn(caught.exception.completion_code, {
+            'REVIEW_REPAIR_BINDING_INVALID', 'REVIEW_DISPATCH_BINDING_INVALID',
+        })
+
 
 if __name__ == '__main__':
     unittest.main()

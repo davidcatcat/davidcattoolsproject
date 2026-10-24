@@ -7,6 +7,7 @@ cooperative local provenance source; it is not a same-UID security boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
 import hashlib
 import json
 import os
@@ -48,6 +49,27 @@ def _stop(code):
     error = LLMToolError('Executor completion evidence is unavailable; details omitted')
     error.completion_code = code
     raise error from None
+
+
+_EXPECTED_VALIDATION_ERRORS = (
+    AttributeError, KeyError, OverflowError, RecursionError, TypeError,
+    UnicodeError, ValueError,
+)
+
+
+def _stable_errors(code):
+    """Map expected malformed-value failures to a stable public error code."""
+    def decorate(function):
+        @wraps(function)
+        def checked(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except LLMToolError:
+                raise
+            except _EXPECTED_VALIDATION_ERRORS:
+                _stop(code)
+        return checked
+    return decorate
 
 
 def _unique_pairs(pairs):
@@ -108,6 +130,7 @@ def review_dispatch_intent(*, task_id, run_id, contract_digest, developer_task_i
     return value
 
 
+@_stable_errors('REVIEW_DISPATCH_BINDING_INVALID')
 def validate_review_dispatch_intent(intent):
     fields = {
         'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
@@ -170,6 +193,7 @@ def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
     return receipt
 
 
+@_stable_errors('REVIEW_RECEIPT_INVALID')
 def review_handoff_record(intent, receipt):
     """Build a received Reviewer outcome and deterministic PM next step."""
     validate_review_dispatch_receipt(intent, receipt)
@@ -201,6 +225,7 @@ def review_return_decision_allowed(verdict, repair_round, decision):
     return decision in allowed
 
 
+@_stable_errors('REVIEW_RECEIPT_INVALID')
 def review_return_record(handoff, *, state='PENDING', response=None,
                          recommendation=None, usage=None, error_code=None):
     """Build the durable, bounded return of a source-bound receipt to its PM."""
@@ -250,14 +275,18 @@ def review_return_record(handoff, *, state='PENDING', response=None,
             next_step = 'WAIT_FOR_REVIEWER'
         else:
             next_step = 'STOP'
-    return {
+    record = {
         'state': state, 'receipt_sha256': receipt['receipt_sha256'],
         'next_step': next_step, 'pm_dispatch': dispatch,
         'pm_response': response, 'pm_recommendation': recommendation,
         'pm_usage': usage, 'pm_error_code': expected_error,
     }
+    json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(',', ':'),
+               allow_nan=False)
+    return record
 
 
+@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_return_record(record, handoff):
     if type(record) is not dict or set(record) != {
             'state', 'receipt_sha256', 'next_step', 'pm_dispatch', 'pm_response',
@@ -272,6 +301,7 @@ def validate_review_return_record(record, handoff):
     return record
 
 
+@_stable_errors('REVIEW_REPAIR_BINDING_INVALID')
 def review_repair_intent(handoff, review_return):
     """Build a deterministic, source-bound request for the one allowed repair.
 
@@ -332,6 +362,7 @@ def review_repair_intent(handoff, review_return):
         _stop('REVIEW_REPAIR_BINDING_INVALID')
 
 
+@_stable_errors('REVIEW_REPAIR_BINDING_INVALID')
 def validate_review_repair_intent(repair_intent, handoff, review_return):
     """Validate an envelope against its exact persisted Reviewer/PM inputs."""
     fields = {
@@ -389,6 +420,7 @@ def review_handoff_not_dispatched(intent, receipt):
             'next_step': 'WAIT_FOR_REVIEWER', 'error_code': None}
 
 
+@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_handoff_record(record, *, task_id, run_id, contract_digest,
                                    developer_task_id, developer_identity,
                                    developer_session_ref, source_sha, result_head,
@@ -444,6 +476,7 @@ def normalize_review_handoff_record(record, **binding):
     return review_handoff_record(record['intent'], receipt)
 
 
+@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_dispatch_receipt(intent, receipt):
     """Validate a typed-in-process Reviewer adapter result against the intent.
 
