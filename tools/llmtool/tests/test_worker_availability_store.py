@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import json
 import os
@@ -157,6 +158,56 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
         self.assertEqual(len(opened), 1)
         with self.assertRaises(OSError):
             os.fstat(opened[0])
+
+    def test_concurrent_lock_create_enoent_is_retried(self):
+        original_open = os.open
+        attempts = []
+
+        def lose_first_create(name, flags, *args, **kwargs):
+            if name == '.worker-availability.lock':
+                attempts.append(flags)
+                if len(attempts) == 1:
+                    raise FileNotFoundError(errno.ENOENT, 'private filesystem detail')
+            return original_open(name, flags, *args, **kwargs)
+
+        with patch('llmtool.task_store.os.open', side_effect=lose_first_create):
+            saved = self._observation()
+        self.assertEqual(saved['codex-developer']['runtime']['status'], 'PASS')
+        self.assertEqual(len(attempts), 2)
+        self.assertTrue(all(flags & os.O_CREAT and flags & os.O_NOFOLLOW
+                            for flags in attempts))
+
+    def test_persistent_lock_create_enoent_is_bounded_and_unavailable(self):
+        original_open = os.open
+        attempts = []
+
+        def always_enoent(name, flags, *args, **kwargs):
+            if name == '.worker-availability.lock':
+                attempts.append(name)
+                raise FileNotFoundError(errno.ENOENT, 'private filesystem detail')
+            return original_open(name, flags, *args, **kwargs)
+
+        clock = [0.0]
+
+        def monotonic():
+            return clock[0]
+
+        def advance_sleep(seconds):
+            clock[0] += seconds
+
+        with patch('llmtool.task_store.TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.1), \
+                patch('llmtool.task_store.time.monotonic', side_effect=monotonic), \
+                patch('llmtool.task_store.time.sleep', side_effect=advance_sleep), \
+                patch('llmtool.task_store.os.open', side_effect=always_enoent):
+            with self.assertRaises(LLMToolError) as caught:
+                self._observation()
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'WORKER_AVAILABILITY_UNAVAILABLE')
+        self.assertNotIn('private filesystem detail', str(caught.exception))
+        self.assertGreater(len(attempts), 1)
+        self.assertLessEqual(len(attempts), 12)
+        self.assertGreaterEqual(clock[0], 0.1)
+        self.assertLess(clock[0], 0.12)
 
     def test_duplicate_observation_keys_rejected(self):
         self._observation()

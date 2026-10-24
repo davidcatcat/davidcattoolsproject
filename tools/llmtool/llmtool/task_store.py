@@ -1255,10 +1255,22 @@ class TaskStore:
 
     @staticmethod
     def _lock_worker_availability(directory, *, exclusive):
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
-            lock_fd = os.open(WORKER_AVAILABILITY_LOCK_NAME,
-                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                              0o600, dir_fd=directory)
+            while True:
+                try:
+                    lock_fd = os.open(
+                        WORKER_AVAILABILITY_LOCK_NAME,
+                        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        0o600, dir_fd=directory)
+                    break
+                except FileNotFoundError:
+                    # macOS can report ENOENT when concurrent openat(O_CREAT)
+                    # calls create this lock. Retry only within the same
+                    # bounded wait used for TaskStore update locks.
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             info = os.fstat(lock_fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                     stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
