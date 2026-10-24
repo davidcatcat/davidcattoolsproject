@@ -59,7 +59,7 @@ For GitHub API documentation edits, pin reads and the change branch to a known b
 
 ## PR review and merge
 
-Before merge, verify current base/head, exact-head CI, formal non-author review and every Task Contract-required Security/QA/runtime gate. A changed head invalidates affected evidence. Merge only when delegated authority covers the PR and all required gates pass; verify the resulting commit. Do not use paid fallback or force operations.
+Before merge, verify current base/head, the applicable exact-head validation, formal non-author review and every Task Contract-required Security/QA/runtime gate. Code/config/product changes require exact-head CI. Eligible static-documentation PRs follow the sole [documentation-only gate](../ai-team-delivery/SKILL.md#documentation-only-merge-gate); all other PRs retain normal exact-head CI. A changed head invalidates affected evidence. Merge only when delegated authority covers the PR and all required gates pass; verify the resulting commit. Do not use paid fallback or force operations.
 
 ## Cloud and evidence
 
