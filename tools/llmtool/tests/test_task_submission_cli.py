@@ -1610,5 +1610,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertIsNone(result['developer']['artifact'])
 
 
+class DispatcherGitTimeoutTests(unittest.TestCase):
+    def test_dispatcher_git_preflight_timeout_is_a_preflight_failure(self):
+        def timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired('git', kwargs.get('timeout'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            trusted = root / 'tools' / 'llmtool' / 'llmtool' / 'task_submission_cli.py'
+            with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', root), \
+                    patch.object(submission_cli, '__file__', str(trusted)), \
+                    patch.object(submission_cli.subprocess, 'run', side_effect=timeout) as run:
+                with self.assertRaisesRegex(ValueError, 'dispatcher Git preflight failed'):
+                    submission_cli._trusted_d6_helper_source()
+        self.assertEqual(run.call_args.kwargs['timeout'], 120)
+
+
 if __name__ == '__main__':
     unittest.main()

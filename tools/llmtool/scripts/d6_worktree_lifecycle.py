@@ -58,13 +58,14 @@ def _stop(code):
     raise LifecycleError(code)
 
 
-# A git lock or a stuck filesystem must not hang the lifecycle forever. The
-# environment bootstrap itself (a venv and wheel install) is not timed: it
-# can legitimately take minutes and a kill would leave it half done.
+# A git lock or a stuck filesystem must not hang a read-only lookup forever.
+# Commands that change the repository (worktree add/lock) and the environment
+# bootstrap (a venv and wheel install) are not timed: they can legitimately
+# take minutes, and a kill would leave a lock or a half-built tree behind.
 GIT_TIMEOUT_SECONDS = 120
 
 
-def _run_git(cwd, *args, check=True):
+def _run_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": os.path.expanduser("~"),
@@ -81,7 +82,7 @@ def _run_git(cwd, *args, check=True):
             ["/usr/bin/git", *args], cwd=str(cwd), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, check=False, text=True,
-            timeout=GIT_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         _stop("D6_GIT_UNAVAILABLE")
@@ -439,7 +440,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
         if root.exists() or root.is_symlink() or record_path.exists() or record_path.is_symlink():
             _stop("D6_TASK_ALREADY_EXISTS")
         subprocess_result = _run_git(canonical_root, "worktree", "add", "-b", branch,
-                                     str(root), base_sha, check=False)
+                                     str(root), base_sha, check=False, timeout=None)
         if subprocess_result.returncode:
             _stop("D6_WORKTREE_CREATE_FAILED")
         try:
@@ -475,7 +476,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             }
             _atomic_record(record_path, record)
             lock_result = _run_git(canonical_root, "worktree", "lock", str(root),
-                                   check=False)
+                                   check=False, timeout=None)
             if lock_result.returncode:
                 _stop("D6_WORKTREE_LOCK_FAILED")
             record["state"] = "ACTIVE"

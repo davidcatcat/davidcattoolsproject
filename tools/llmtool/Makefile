@@ -8,6 +8,7 @@ syntax:
 	$(PYTHON) -m compileall -q llmtool llmtool.py tests scripts
 
 test:
+	@$(PYTHON) -c '' || { echo 'cannot run PYTHON=$(PYTHON)' >&2; exit 2; }
 	@$(PYTHON) -c 'import yaml' 2>/dev/null || { echo 'llmtool tests need PyYAML: install tools/llmtool/requirements-ci.txt into this Python first' >&2; exit 2; }
 	$(PYTHON) -m unittest discover -s tests -v
 
