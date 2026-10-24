@@ -4,8 +4,9 @@
 Shows OpenCode, Kilo, Claude Code, Codex and llmtool processes, and the progress of
 recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
-repository mutation, credentials, or daemon. Network access is off unless --github
-is explicitly supplied for read-only Activity headlines. This prototype
+repository mutation, credentials, or daemon. The only network access is read-only
+`gh api` GETs for Activity headlines (on by default since Owner 2026-10-24;
+--no-github turns it off). This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions. Its Activity view is limited to local task
 evidence and does not invent cross-session dispatch, delivery, review or acceptance.
@@ -874,7 +875,7 @@ def activity_events(tasks: list[Task]) -> list[ActivityEvent]:
 
 
 # ------------------------------------------------------------ GitHub source
-# Opt-in with --github. Used only by Activity/--once. Read-only `gh api` GETs of recent issue/PR comments
+# On by default (Owner 2026-10-24); --no-github turns it off. Used only by Activity/--once. Read-only `gh api` GETs of recent issue/PR comments
 # and pull requests; nothing is posted, cached on disk or sent anywhere else.
 # Only a sanitized first line (or PR title) is kept, never a comment body.
 # Cross-session events are typed ONLY from explicit marker lines an agent writes
@@ -1197,7 +1198,7 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
     if not lines:
         lines.append("目前沒有可顯示的動態。")
     if github is None:
-        lines.append("GitHub 動態未啟用（預設零網路；加 --github 才讀取），跨工作階段的標記沒有顯示。")
+        lines.append("GitHub 動態已關閉（--no-github），跨工作階段的標記沒有顯示。")
     else:
         lines.append(github.status + "；「自述」= 有權限的發文者自己標記，未經驗證。")
     return lines
@@ -3218,13 +3219,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-age", type=float, default=3.0,
                         help="seconds a helper must live before it is logged (default 3)")
     parser.add_argument("--github", action="store_true",
-                        help=f"opt in to read-only gh api Activity on {DEFAULT_GITHUB_REPO}")
+                        help="compatibility option; GitHub Activity is already on by default")
     parser.add_argument("--no-github", action="store_true",
-                        help="compatibility option; GitHub Activity is already off by default")
+                        help=f"turn off the read-only gh api Activity on {DEFAULT_GITHUB_REPO} (no network)")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
-    github = GitHubSource(DEFAULT_GITHUB_REPO) if args.github and not args.no_github else None
+    github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO)
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)

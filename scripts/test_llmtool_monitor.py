@@ -489,7 +489,7 @@ class ActivityViewTests(unittest.TestCase):
         self.assertIn("審查未通過", lines[positions[1]])
         self.assertIn("卡住，等你決定", lines[positions[3]])
         self.assertIn("失敗：模型呼叫失敗", lines[positions[4]])
-        self.assertIn("GitHub 動態未啟用", lines[-1])
+        self.assertIn("GitHub 動態已關閉", lines[-1])
         self.assertFalse(any("已送達" in line for line in lines))
 
     def test_production_events_come_only_from_local_stage_evidence(self):
@@ -728,16 +728,21 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.shutil, "which", side_effect=AssertionError("gh used with --no-github")), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--no-github"]), 0)
-        self.assertIn("GitHub 動態未啟用", out.getvalue())
+        self.assertIn("GitHub 動態已關閉", out.getvalue())
 
-    def test_once_keeps_github_off_by_default(self):
+    def test_once_reads_github_by_default(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
+        run = FakeRun((0, []), (0, []))
         with patch.object(mon, "collect", return_value=snapshot), \
              patch.object(mon, "scan_tasks", return_value=[]), \
-             patch.object(mon.shutil, "which", side_effect=AssertionError("GitHub must be opt-in")), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.subprocess, "run", run), \
+             patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once"]), 0)
-        self.assertIn("GitHub 動態未啟用", out.getvalue())
+        self.assertTrue(run.calls)
+        self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
+        self.assertNotIn("GitHub 動態已關閉", out.getvalue())
 
     def test_github_opt_in_uses_read_only_get_only(self):
         snapshot = mon.Snapshot([], {}, [], frozenset())
