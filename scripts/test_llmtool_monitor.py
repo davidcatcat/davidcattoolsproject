@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -334,6 +335,14 @@ class MonitorTaskBaselineTests(unittest.TestCase):
     def poll_without_process_table(self):
         with patch.object(mon, "collect", side_effect=RuntimeError("ps unavailable")):
             return self.monitor.poll()
+
+    def test_office_is_never_built_from_an_unread_process_table(self):
+        # office_rows treats an empty list as "nothing running"; that is only
+        # true because a failed ps read never reaches it.
+        with patch.object(mon, "office_rows") as office:
+            self.poll_without_process_table()
+        office.assert_not_called()
+        self.assertIn("ps unavailable", self.monitor.error)
 
     def test_office_failure_is_reported_and_no_stale_rows_are_kept(self):
         self.monitor.office = [mon.OfficeRow("codex 主對話", mon.WORKING, "old", 1.0, 0)]
@@ -693,6 +702,150 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual([e.reference for e in source.events], ["#3"])
         self.assertIn("讀取失敗", mon.render_activity([], github=source)[-1])
 
+    def test_source_reads_every_comment_page_up_to_a_limit(self):
+        page = lambda start, size: [comment(start + i, NOW - 30, "c") for i in range(size)]
+        run = FakeRun((0, page(100, 100)), (0, page(300, 24)), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual([argv[4].rsplit("&page=", 1)[-1] for argv, _ in run.calls[:2]], ["1", "2"])
+        self.assertTrue(all("per_page=100" in argv[4] for argv, _ in run.calls[:2]))
+        self.assertIn("/pulls?", run.calls[2][0][4])
+        self.assertEqual(len(source.events), 124)
+        self.assertNotIn("留言太多", source.status)
+        full = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, page(900, 1)), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=full, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 2)
+        self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
+        self.assertIn("只讀了最新 500 則", source.status)
+        self.assertEqual(len(source.events), 500)   # the probe's item (#900) never lands
+        self.assertNotIn("#900", [e.reference for e in source.events])
+        failed = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (1, b""), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=failed, clock=lambda: NOW)
+            source.refresh()
+        self.assertIn("只讀了最新 500 則", source.status)   # unknown: stay conservative
+        self.assertNotIn("讀取失敗", source.status)
+        self.assertEqual(len(source.events), 500)
+        exact = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
+            source.refresh()
+        self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
+        self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 2)
+        self.assertIn("per_page=1&page=501", exact.calls[mon.GITHUB_PAGES][0][4])
+
+    def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
+        first = [comment(1, NOW - 30, "a")]
+        run = FakeRun((0, first), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+            page = [dict(comment(10 + i, NOW - 30, "c"), id=10 + i) for i in range(100)]
+            for later in ((0, {"message": "not a list"}),), ((0, page), (1, b"")):
+                source.runner = FakeRun(*later)
+                source.refresh(force=True)
+                self.assertIn("讀取失敗", source.status)
+                self.assertEqual([e.reference for e in source.events], ["#1"])
+            # A comment posted between page reads shifts the next page by one.
+            shifted = page[-1:] + [dict(comment(200 + i, NOW - 30, "d"), id=200 + i) for i in range(3)]
+            source.runner = FakeRun((0, page), (0, shifted), (0, []))
+            source.refresh(force=True)
+        self.assertEqual(len(source.events), 103)
+
+    def test_requests_addressed_to_the_owner_wait_until_settled(self):
+        ask = lambda n, t, status="AUTHORIZATION_REQUESTED", kind="repair_gate": comment(
+            n, NOW - t, f"<!-- activity: type={kind} actor=PM target=Owner status={status} -->\n"
+                        f"## Need a decision on {n}")
+        settled_by_owner = comment(11, NOW - 100,
+                                   "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->")
+        comments = [
+            ask(10, 500),                                   # open
+            ask(11, 400), settled_by_owner,                 # answered later by the Owner
+            ask(12, 300, status="APPROVED"),                # already settled status
+            ask(13, 300, kind="owner_decision_request_for_a_long_task_name_20261024"),   # any type, long name
+            comment(14, NOW - 300, "see\n<!-- activity: type=x actor=PM target=Owner status=WAITING -->"),  # not leading
+            comment(15, NOW - 300, ask(15, 300)["body"], association="NONE"),               # untrusted
+            comment(16, NOW - 300, "<!-- activity: type=x actor=PM target=PM status=WAITING -->"),  # not the Owner
+            ask(17, 300, kind="repair_gate", status="WAITING"),   # its PR closed afterwards
+        ]
+        pulls = [{"number": 17, "title": "x", "created_at": iso(NOW - 900),
+                  "closed_at": iso(NOW - 50), "merged_at": None}]
+        pending = mon.owner_pending(comments, pulls)
+        self.assertEqual([item.reference for item in pending], ["#10", "#13"])
+        self.assertEqual(pending[0].status, "AUTHORIZATION_REQUESTED")
+        self.assertEqual(pending[0].summary, "Need a decision on 10")
+        lines = mon.office_lines([], pending=pending[:1])
+        self.assertTrue(lines[1].startswith("★ 等你決定：GitHub #10"))
+        self.assertIn("Need a decision on 10", lines[1])
+
+    def test_owner_marker_parsing_order_and_display_edges(self):
+        mark = lambda n, t, fields, text="ask": comment(n, NOW - t, f"<!-- activity: {fields} -->\n{text} {n}")
+        comments = [
+            mark(20, 50, "type=x actor=PM target=PM note=actor=Owner status=WAITING"),   # nested: no field
+            mark(20, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(21, 50, "type=x actor=PM target=PM reason=target=Owner status=WAITING"),  # nested: not a request
+            mark(22, 60, "type=x actor=pm target=owner status=waiting"),                  # case: still a request
+            mark(23, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(23, 40, "type=y actor=OWNER target=R2 status=approved"),                 # case: settles
+            mark(24, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(24, 50, "type=x actor=PM target=Owner status=Approved"),                  # settled status, any case
+            mark(25, 90, "type=y actor=Owner target=R2 status=APPROVED"),                 # before the ask: no effect
+            mark(25, 60, "type=x actor=PM target=Owner status=WAITING"),
+            mark(26, 60, "type=x actor=PM target=Owner status=WAITING", "first"),
+            mark(26, 30, "type=x actor=PM target=Owner status=BLOCKED", "second"),         # latest on a thread wins
+            mark(27, 60, "type=x actor=PM target=Owner status=WAITING"),                  # PR closed before the ask
+            mark(28, 60, "type=x actor=PM target=Owner status=WAITING"),
+            comment(28, NOW - 50, "<!-- activity: type=x actor=PM target=Owner status=APPROVED-->"),  # no space
+            mark(29, 60, "type=x actor=PM target=Owner target=PM status=WAITING"),        # first field counts
+        ]
+        pulls = [{"number": 27, "closed_at": iso(NOW - 999), "merged_at": None}]
+        pending = {item.reference: item for item in mon.owner_pending(comments, pulls)}
+        self.assertEqual(sorted(pending), ["#20", "#22", "#25", "#26", "#27", "#29"])
+        self.assertEqual((pending["#26"].status, pending["#26"].summary), ("BLOCKED", "second 26"))
+        many = [mon.OwnerPending(NOW - i, f"#{i}", "WAITING", "x") for i in range(7, 0, -1)]
+        lines = mon.office_lines([], pending=many)
+        self.assertEqual(sum(line.startswith("★") for line in lines), mon.OWNER_SHOWN + 1)
+        self.assertIn("…另有 2 筆", lines[mon.OWNER_SHOWN + 1])
+        narrow = mon.office_view([], width=3, pending=many[:1])
+        self.assertTrue(narrow[1][0].startswith("★"))
+
+    def test_owner_requests_outlive_the_comment_window_until_settled(self):
+        ask = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
+        answer = "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->\nok"
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=FakeRun((0, [comment(9, NOW - 30, ask)]), (0, [])),
+                                      clock=lambda: NOW)
+            source.refresh()
+            self.assertEqual([item.reference for item in source.pending], ["#9"])
+            self.assertIn("等你決定：看最近 12 小時", source.scope)
+            source.runner = FakeRun((0, []), (0, []))       # the ask has aged out of the window
+            source.refresh(force=True)
+            self.assertEqual([item.reference for item in source.pending], ["#9"])
+            source.runner = FakeRun((0, [comment(9, NOW - 5, answer)]), (0, []))
+            source.refresh(force=True)
+            self.assertEqual(source.pending, [])
+        row = mon.OfficeRow("codex 主對話", mon.IDLE, "x", 1.0, 0, key="codex:T1", main=True)
+        self.assertIn(source.scope, mon.office_lines([row], pending=[], scope=source.scope)[-1])
+
+    def test_branch_prs_leave_out_forks(self):
+        pulls = [{"number": 1, "head": {"ref": "fix/a", "repo": {"full_name": "o/r"}}, "state": "open"},
+                 {"number": 2, "head": {"ref": "fix/a", "repo": {"full_name": "fork/r"}},
+                  "state": "closed", "merged_at": None},
+                 {"number": 3, "head": {"ref": "fix/b", "repo": None}, "state": "closed", "merged_at": None}]
+        self.assertEqual(mon.branch_prs(pulls, "o/r"), {"fix/a": (1, "OPEN")})
+        self.assertEqual(mon.branch_prs(pulls, "O/R"), {"fix/a": (1, "OPEN")})   # names compare case-insensitively
+
+    def test_source_keeps_owner_pending_with_its_events(self):
+        body = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
+        run = FakeRun((0, [comment(9, NOW - 30, body)]), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=run, clock=lambda: NOW)
+            source.refresh()
+        self.assertEqual([item.reference for item in source.pending], ["#9"])
+
     def test_background_refresh_never_blocks_and_runs_once_per_interval(self):
         import threading
         gate = threading.Event()
@@ -852,6 +1005,206 @@ DISPATCH = {   # the Owner's switches as of 2026-10-23
     "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
     "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
 }
+POLICY_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+
+
+def policy(workers):
+    """A whole worker-dispatch.json the llmtool gate accepts: every Worker
+    present with reason and evidence; `workers` overrides entries (None drops one)."""
+    entry = {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22",
+             "reason": "test", "evidence": POLICY_EVIDENCE}
+    full = {key: dict(entry) for key in sorted(mon.DISPATCH_WORKERS)}
+    for key, item in workers.items():
+        if item is None:
+            full.pop(key, None)
+        elif type(item) is dict and key in full:
+            full[key] = {**full[key], **item}
+        else:
+            full[key] = item
+    return {"schema_version": 1, "workers": full}
+
+
+class _GateMixin:
+    """Loads the llmtool gate from this checkout for the agreement tests."""
+
+    @classmethod
+    def setUpClass(cls):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool")
+        sys.path.insert(0, root)
+        try:
+            from llmtool import worker_dispatch
+        finally:
+            sys.path.remove(root)
+        # Never compare against some other installed llmtool.
+        if not os.path.realpath(worker_dispatch.__file__).startswith(os.path.realpath(root) + os.sep):
+            raise AssertionError(f"llmtool gate loaded from {worker_dispatch.__file__}")
+        cls.gate = staticmethod(worker_dispatch._parse_policy)
+        cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
+            worker_dispatch._read_policy_file(Path(path))))
+
+
+class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
+    """The monitor's reading of worker-dispatch.json must match the llmtool
+    gate it describes: whatever the gate refuses, the monitor never shows as
+    a usable switch."""
+
+    def agree(self, raw: bytes):
+        try:
+            self.gate(raw)
+            accepted = True
+        except Exception:
+            accepted = False
+        switches, problem = mon.worker_dispatch(raw)
+        self.assertEqual(problem == "", accepted, raw[:200])
+        return accepted
+
+    def test_repository_policy_is_accepted_by_both(self):
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool", "worker-dispatch.json")
+        with open(path, "rb") as handle:
+            self.assertTrue(self.agree(handle.read()))
+
+    def test_every_mutation_is_judged_the_same_way(self):
+        ref = POLICY_EVIDENCE + "#issuecomment-6373198827"
+        good = {"task_id": "5fd1be3ee96e42678fe1dac75a9b697a", "owner_assignment_ref": ref}
+        cases = {
+            "valid": {},
+            "decided_by PM": {"agy": {"decided_by": "PM"}},
+            "unknown switch": {"agy": {"dispatch": "MAYBE"}},
+            "lower-case switch": {"agy": {"dispatch": "allowed"}},
+            "evidence not #289": {"company-gw": {"evidence": "https://example.com/x"}},
+            "evidence PR 283": {"company-gw": {"evidence": "https://github.com/davidcatcat/davidcattoolsproject/pull/283"}},
+            "missing worker": {"agy": None},
+            "extra worker": {"codex-reviewer-agent": {"dispatch": "ALLOWED", "decided_by": "Owner",
+                                                      "decided_at": "2026-10-22", "reason": "r",
+                                                      "evidence": POLICY_EVIDENCE}},
+            "empty reason": {"agy": {"reason": ""}},
+            "long reason": {"agy": {"reason": "x" * 513}},
+            "bad date": {"agy": {"decided_at": "2026-02-30"}},
+            "short date": {"agy": {"decided_at": "2026-1-2"}},
+            "extra field": {"agy": {"note": "x"}},
+            "assignment ok": {"claude-developer": {"owner_assignments": [good]}},
+            "assignment bad id": {"claude-developer": {"owner_assignments": [dict(good, task_id="x")]}},
+            "assignment bad ref": {"claude-developer": {"owner_assignments": [
+                dict(good, owner_assignment_ref=POLICY_EVIDENCE)]}},
+            "assignment duplicate": {"claude-developer": {"owner_assignments": [good, good]}},
+            "assignment same task, other ref": {"claude-developer": {"owner_assignments": [
+                good, dict(good, owner_assignment_ref=ref.replace("6373198827", "6373198828"))]}},
+            "assignments not a list": {"claude-developer": {"owner_assignments": {}}},
+            "assignments null": {"claude-developer": {"owner_assignments": None}},
+            "unhashable switch": {"agy": {"dispatch": []}},
+            "object switch": {"agy": {"dispatch": {}}},
+            "date not a string": {"agy": {"decided_at": 20261022}},
+        }
+        for label, change in cases.items():
+            with self.subTest(label):
+                self.agree(json.dumps(policy(change)).encode())
+        whole = json.dumps(policy({}))
+        raws = {
+            "duplicate key": whole.replace('"workers": {', '"workers": {"agy": {}, ', 1),
+            "schema 2": whole.replace('"schema_version": 1', '"schema_version": 2'),
+            "schema true": whole.replace('"schema_version": 1', '"schema_version": true'),
+            "schema 1.0": whole.replace('"schema_version": 1', '"schema_version": 1.0'),
+            "extra top key": whole[:-1] + ', "x": 1}',
+            "NaN": whole.replace('"schema_version": 1', '"schema_version": NaN'),
+            "not json": "{not json",
+            "empty": "",
+        }
+        for label, raw in raws.items():
+            with self.subTest(label):
+                self.agree(raw.encode())
+        self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
+
+    def test_size_is_checked_on_the_bytes_too(self):
+        # The gate's reader refuses > 64 KiB; the local-ref fallback has only
+        # the monitor's own byte check, so it must hold on its own.
+        many = [{"task_id": f"{i:032x}", "owner_assignment_ref": POLICY_EVIDENCE + f"#issuecomment-{i + 1}"}
+                for i in range(700)]
+        raw = json.dumps(policy({"claude-developer": {"owner_assignments": many}})).encode()
+        self.assertGreater(len(raw), 64 * 1024)
+        self.gate(raw)   # schema-valid: only the size is wrong
+        self.assertEqual(mon.worker_dispatch(raw)[1], "invalid")
+
+
+class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
+    """The same agreement for how the file itself is read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def agree_file(self, path):
+        try:
+            self.gate_file(path)
+            accepted = True
+        except Exception:
+            accepted = False
+        raw, _ = mon.load_dispatch("/nonexistent", path)
+        switches, problem = mon.worker_dispatch(raw)
+        self.assertEqual(problem == "", accepted, path)
+        return accepted
+
+    def test_file_shapes_are_judged_the_same_way(self):
+        base = Path(self.tmp.name)
+        good = base / "good.json"
+        good.write_text(json.dumps(policy({})), encoding="utf-8")
+        self.assertTrue(self.agree_file(str(good)))
+        (base / "link.json").symlink_to(good)
+        os.link(good, base / "hard.json")   # good now has two links as well
+        (base / "dir.json").mkdir()
+        os.mkfifo(base / "fifo.json")
+        (base / "tiny.json").write_bytes(b"{")
+        many = [{"task_id": f"{i:032x}", "owner_assignment_ref": POLICY_EVIDENCE + f"#issuecomment-{i + 1}"}
+                for i in range(700)]
+        (base / "big.json").write_text(json.dumps(policy({"claude-developer": {"owner_assignments": many}})),
+                                       encoding="utf-8")
+        self.assertGreater((base / "big.json").stat().st_size, 64 * 1024)
+        for name in ("link.json", "hard.json", "good.json", "dir.json", "fifo.json", "tiny.json", "big.json"):
+            with self.subTest(name):
+                self.assertFalse(self.agree_file(str(base / name)))   # every one refused, never blocks
+        self.assertEqual(mon.worker_dispatch(mon.load_dispatch("/nonexistent", str(base / "dir.json"))[0])[1],
+                         "rejected")
+
+    def test_missing_canonical_file_falls_back_to_a_labelled_local_ref_only(self):
+        raw, source = mon.load_dispatch(self.tmp.name, os.path.join(self.tmp.name, "absent.json"))
+        self.assertEqual((raw, source), (None, ""))   # an explicit path never falls back
+        repo = Path(self.tmp.name) / "repo"
+        policy_file = repo / "tools" / "llmtool" / "worker-dispatch.json"
+        policy_file.parent.mkdir(parents=True)
+        committed = json.dumps(policy({})).encode()
+        policy_file.write_bytes(committed)
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for argv in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "p"]):
+            subprocess.run(["git", "-C", str(repo), *argv], check=True, env=env,
+                           capture_output=True)
+        canonical = str(repo)
+
+        def load():
+            mon._dispatch_cache.clear()
+            raw, source = mon.load_dispatch(canonical)
+            return mon.worker_dispatch(raw)[1], source
+        self.assertEqual(load(), ("", "派工檔"))
+        policy_file.unlink()   # missing: the labelled local main ref
+        problem, source = load()
+        self.assertEqual(problem, "")
+        self.assertIn("本機 main", source)
+        self.assertIn("可能不是最新", source)
+        outside = Path(self.tmp.name) / "outside.json"
+        outside.write_bytes(committed)
+        for plant in (lambda: policy_file.symlink_to(outside), lambda: os.link(outside, policy_file),
+                      lambda: policy_file.mkdir()):
+            with self.subTest(plant=plant):
+                plant()
+                try:
+                    self.assertEqual(load(), ("rejected", "派工檔"))   # refused, no fallback
+                finally:   # a failed case must not break the next plant()
+                    (policy_file.rmdir if policy_file.is_dir() and not policy_file.is_symlink()
+                     else policy_file.unlink)()
+
+    def test_roster_workers_are_gate_workers(self):
+        self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
 
 
 class OfficeViewTests(unittest.TestCase):
@@ -872,8 +1225,7 @@ class OfficeViewTests(unittest.TestCase):
     def _write_dispatch(self, workers, raw=None):
         path = Path(self.canonical) / "tools" / "llmtool" / "worker-dispatch.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(raw if raw is not None else
-                        json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        path.write_text(raw if raw is not None else json.dumps(policy(workers)), encoding="utf-8")
         return path
 
     def _register(self, task_id, root, **fields):
@@ -920,10 +1272,46 @@ class OfficeViewTests(unittest.TestCase):
                 self._register("wp-1", str(self.task), last_verified_at=value, state=7,
                                trusted_agent_id={"x": 1})
                 self.assertIn("wp-1", mon.registered_tasks(self.canonical))
-                state, agent, _, _ = mon.registry_details(self.canonical)["wp-1"]
+                state, agent, _, _, _ = mon.registry_details(self.canonical)["wp-1"]
                 self.assertEqual((state, agent), ("?", ""))
                 lines = mon.d6_task_lines(self.canonical, [], mon.time.time())
                 self.assertEqual(len(lines), 1)   # placed by its write time
+
+    def test_d6_records_still_in_progress_after_their_pr_ended_are_flagged(self):
+        stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
+        roots = {}
+        for name in ("recent-merged", "recent-open", "recent-retired", "old-closed", "old-plain"):
+            roots[name] = Path(self.tmp.name) / name
+            roots[name].mkdir()
+        self._register("recent-merged", str(roots["recent-merged"]), branch="fix/a",
+                       last_verified_at=stamp(60))
+        self._register("recent-open", str(roots["recent-open"]), branch="fix/b",
+                       state="REVIEW_PENDING", last_verified_at=stamp(60))
+        self._register("recent-retired", str(roots["recent-retired"]), branch="fix/c",
+                       state="RETIRE_READY", last_verified_at=stamp(60))
+        self._register("old-closed", str(roots["old-closed"]), branch="docs/d",
+                       state="REPAIR", last_verified_at=stamp(3 * 86400))
+        self._register("old-plain", str(roots["old-plain"]), branch="docs/e",
+                       last_verified_at=stamp(3 * 86400))
+        pulls = [{"number": 211, "head": {"ref": "fix/a"}, "merged_at": iso(self.NOW - 999), "state": "closed"},
+                 {"number": 212, "head": {"ref": "fix/b"}, "merged_at": None, "state": "open"},
+                 {"number": 213, "head": {"ref": "fix/c"}, "merged_at": iso(self.NOW - 999), "state": "closed"},
+                 {"number": 214, "head": {"ref": "docs/d"}, "merged_at": None, "state": "closed"},
+                 {"number": "x", "head": {"ref": "docs/e"}, "state": "closed"},
+                 {"number": 215, "head": {"ref": "bad ref; rm"}, "state": "closed"}]
+        prs = mon.branch_prs(pulls)
+        self.assertEqual(prs, {"fix/a": (211, "MERGED"), "fix/b": (212, "OPEN"),
+                               "fix/c": (213, "MERGED"), "docs/d": (214, "CLOSED")})
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs)
+        by_task = {next(t for t in roots if f"  {t} " in line): line for line in lines if not line.startswith("⚠")}
+        self.assertIn("⚠ PR #211 已合併，登記還是進行中", by_task["recent-merged"])
+        self.assertNotIn("⚠", by_task["recent-open"])      # its PR is still open
+        self.assertNotIn("⚠", by_task["recent-retired"])   # not an in-progress state
+        self.assertEqual(lines[-1], "⚠ 另有 1 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉：old-closed")
+        shown = mon.d6_lines([f"line {i}" for i in range(20)] + [lines[-1]])
+        self.assertEqual((len(shown), shown[-1]), (17, lines[-1]))   # 15 tasks, then the summary
+        # Without GitHub nothing is flagged.
+        self.assertFalse(any("⚠" in line for line in mon.d6_task_lines(self.canonical, [], self.NOW)))
 
     def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
@@ -1625,8 +2013,8 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(mon, "codex_rows", side_effect=fake):
             self.rows([run])
             self.assertEqual(seen["calls"], [-60.0])
-            self.rows([])
-            self.assertIsNone(seen["calls"])
+            self.rows([])   # the table was read: nothing is running
+            self.assertEqual(seen["calls"], [])
 
     def test_monitor_version_from_git(self):
         def run(results):
@@ -1900,14 +2288,15 @@ class OfficeViewTests(unittest.TestCase):
         self._write_dispatch({}, raw="{not json")
         rows = self.by_name(self.rows())
         self.assertEqual(rows["agy"].detail, mon.DISPATCH_PROBLEMS["invalid"])
-        self._write_dispatch({"agy": {"dispatch": "MAYBE", "decided_by": "Owner",
-                                      "decided_at": "2026-10-22"},
-                              "company-gw": DISPATCH["company-gw"]})
-        rows = self.by_name(self.rows())
-        self.assertEqual((rows["agy"].state, rows["agy"].detail),
-                         (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["entry"]))
-        self.assertEqual(rows["opencode developer"].detail, mon.DISPATCH_PROBLEMS["absent"])
-        self.assertEqual(rows["公司 gw"].state, mon.IDLE)
+        # The llmtool gate is all or nothing: one bad entry refuses every Worker.
+        for bad in ({"agy": {"dispatch": "MAYBE"}}, {"agy": {"decided_by": "PM"}},
+                    {"opencode-developer": None}, {"codex-reviewer-agent": DISPATCH["agy"]}):
+            with self.subTest(bad=bad):
+                self._write_dispatch(bad)
+                rows = self.by_name(self.rows())
+                for name in ("opencode developer", "agy", "公司 gw"):
+                    self.assertEqual((rows[name].state, rows[name].detail.split("；")[0]),
+                                     (mon.UNCHECKED, mon.DISPATCH_PROBLEMS["rejected"]))
 
     def _opencode_db(self, sessions, messages=()):
         db = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "opencode.db"
@@ -1962,7 +2351,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def _dispatch(self, workers):
         path = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "worker-dispatch.json"
-        path.write_text(json.dumps({"schema_version": 1, "workers": workers}), encoding="utf-8")
+        path.write_text(json.dumps(policy(workers)), encoding="utf-8")
         return str(path)
 
     def test_owner_pause_switch_wins_over_live_evidence(self):
@@ -1975,8 +2364,6 @@ class OfficeViewTests(unittest.TestCase):
                                    "decided_at": "2026-10-22", "reason": "quota"},
             "agy": {"dispatch": "PAUSED", "decided_by": "Owner", "decided_at": "2026-10-22"},
             "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
-            "codex-reviewer-agent": {"dispatch": "bogus", "decided_by": "Owner",
-                                     "decided_at": "2026-10-22"},
         })
         tui = mon.Process(30, 1, 30, "05:00", "S+", "OpenCode CLI", "opencode", "")
         rows = self.by_name(mon.office_rows([tui], self.NOW, codex_root=str(self.codex),
@@ -1989,7 +2376,6 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
-        self.assertNotIn("codex reviewer agent", rows)   # an invalid extra entry names no row
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
                                               canonical=self.canonical,

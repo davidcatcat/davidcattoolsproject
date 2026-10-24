@@ -3,7 +3,6 @@
 import copy
 import getpass
 import warnings
-from pathlib import Path
 
 from .config import (
     DEFAULTS, _apply_user, _provider_name, _read_yaml, _timeout_seconds, _validate,
