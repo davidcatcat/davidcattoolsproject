@@ -1534,6 +1534,16 @@ class OfficeViewTests(unittest.TestCase):
         state, _, _ = mon.track_one_shot({}, [query], 1000.0)
         self.assertEqual(state, {})
 
+    def test_review_target_reads_the_pr_a_call_fetches(self):
+        self.assertEqual(mon._review_target('review_diff="$(gh -R o/r pr diff 309)" claude --print'),
+                         ("309", ""))
+        self.assertEqual(mon._review_target("gh pr view #12 --json files; head abc1234"), ("12", "abc1234"))
+        self.assertEqual(mon._review_target("see https://github.com/o/r/pull/77/files"), ("77", ""))
+        # The prompt may cite other PRs; the fetched one is under review.
+        self.assertEqual(mon._review_target("context: PR #298 merged. gh pr diff 309"), ("309", ""))
+        self.assertEqual(mon._review_target("Review PR #5 at head abc1234"), ("5", "abc1234"))
+        self.assertEqual(mon._review_target("gh issue view 289"), ("", ""))
+
     def test_review_call_without_a_live_process_has_ended(self):
         review = mon.OfficeRow("claude 單次呼叫", mon.WORKING, "審 PR #9 @abc1234（單次呼叫執行中）",
                                360.0, 30, key="review", kind="subagent")

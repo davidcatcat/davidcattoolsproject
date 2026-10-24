@@ -1963,9 +1963,17 @@ def _file_reply(path: str, since: float | None) -> str | None:
     return item["result"] if type(item.get("result")) is str else ""
 
 
+# A review call usually fetches the diff itself, e.g.
+# `gh -R owner/repo pr diff 309` or a .../pull/309 URL.
+REVIEW_PR_FETCH = re.compile(r"\bpr\s+(?:diff|view|checkout)\s+(?:-R\s+\S+\s+)?#?(\d{1,6})\b"
+                             r"|/pull/(\d{1,6})\b")
+
+
 def _review_target(text: str) -> tuple[str, str]:
-    pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
-    return (pr.group(1) if pr else "", head.group(1)[:7] if head else "")
+    """The PR the call fetches wins over one its prompt merely mentions."""
+    fetched, pr, head = REVIEW_PR_FETCH.search(text), REVIEW_PR.search(text), REVIEW_HEAD.search(text)
+    number = next((group for group in fetched.groups() if group), "") if fetched else ""
+    return (number or (pr.group(1) if pr else ""), head.group(1)[:7] if head else "")
 
 
 def _result_text(text: str) -> str:
