@@ -705,12 +705,18 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("/pulls?", run.calls[2][0][4])
         self.assertEqual(len(source.events), 124)
         self.assertNotIn("留言太多", source.status)
-        full = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []))
+        full = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, page(900, 1)), (0, []))
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=full, clock=lambda: NOW)
             source.refresh()
-        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 1)
+        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 2)
+        self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
         self.assertIn("只讀了最新 500 則", source.status)
+        exact = FakeRun(*([(0, page(1, 100))] * mon.GITHUB_PAGES), (0, []), (0, []))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
+            source.refresh()
+        self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
 
     def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
         first = [comment(1, NOW - 30, "a")]
@@ -927,8 +933,6 @@ class _GateMixin:
         cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
             worker_dispatch._read_policy_file(Path(path))))
 
-
-
 class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
     """The monitor's reading of worker-dispatch.json must match the llmtool
     gate it describes: whatever the gate refuses, the monitor never shows as
@@ -1082,9 +1086,11 @@ class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
                       lambda: policy_file.mkdir()):
             with self.subTest(plant=plant):
                 plant()
-                self.assertEqual(load(), ("rejected", "派工檔"))   # refused, no fallback
-                (policy_file.rmdir if policy_file.is_dir() and not policy_file.is_symlink()
-                 else policy_file.unlink)()
+                try:
+                    self.assertEqual(load(), ("rejected", "派工檔"))   # refused, no fallback
+                finally:   # a failed case must not break the next plant()
+                    (policy_file.rmdir if policy_file.is_dir() and not policy_file.is_symlink()
+                     else policy_file.unlink)()
 
     def test_roster_workers_are_gate_workers(self):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
@@ -1860,8 +1866,8 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(mon, "codex_rows", side_effect=fake):
             self.rows([run])
             self.assertEqual(seen["calls"], [-60.0])
-            self.rows([])
-            self.assertIsNone(seen["calls"])
+            self.rows([])   # the table was read: nothing is running
+            self.assertEqual(seen["calls"], [])
 
     def test_monitor_version_from_git(self):
         def run(results):
