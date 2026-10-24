@@ -2135,6 +2135,19 @@ class OfficeViewTests(unittest.TestCase):
         ])
         self.assertEqual(verdicts, {("283", "18538d5"): [(self.NOW - 850, "PASS")],
                                     ("999", "18538d5"): [(self.NOW - 820, "FAIL")]})
+        # an edited comment counts from its last edit
+        edited = dict(comment(283, 850, "**Verdict: FAIL** head 18538d5"), updated_at=stamp(100))
+        self.assertEqual(mon.review_verdicts([edited]), {("283", "18538d5"): [(self.NOW - 100, "FAIL")]})
+        # a forked subagent starts with a copy of the PM's history stamped with the
+        # fork time: only calls after its own first task_started are its own
+        fork = [{"type": "session_meta", "payload": {"id": "S9", "forked_from_id": "T1"}},
+                {"timestamp": ts(50), "type": "response_item", "payload": events[0][1]},
+                {"timestamp": ts(50), "type": "event_msg", "payload": {"type": "task_started"}},
+                {"timestamp": ts(40), "type": "response_item",
+                 "payload": call("f1", "claude -p 'Review PR #287 head 2222222bbbb'")}]
+        self._write(self.codex / day / "rollout-fork.jsonl", fork, age=5)
+        self.assertEqual([call[1:] for call in mon.codex_reviews(
+            str(self.codex / day / "rollout-fork.jsonl"), self.NOW)], [("287", "2222222")])
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
         with patch.object(mon, "_one_shot_runs", return_value=[run]):

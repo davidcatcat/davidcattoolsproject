@@ -2109,7 +2109,10 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         return []
     cache = _review_cache.get(path)
     if cache is None or size < cache["offset"]:
-        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": [], "carry": b""}
+        # A forked thread (a subagent) starts with a copy of its parent's history,
+        # stamped with the fork time; its own work starts at its first task_started.
+        cache = {"offset": max(0, size - REVIEW_SCAN), "calls": [], "carry": b"",
+                 "copied": _forked(path)}
         _review_cache[path] = cache
     try:
         with open(path, "rb") as handle:
@@ -2124,6 +2127,9 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     if first and data and not data.startswith(b"{"):
         lines = lines[1:]
     for raw in lines:
+        if cache["copied"]:
+            cache["copied"] = b'"task_started"' not in raw
+            continue
         if b"custom_tool_call" not in raw:
             continue
         try:
@@ -2143,6 +2149,16 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     return list(cache["calls"])
 
 
+def _forked(path: str) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            meta = json.loads(handle.readline(1 << 20))
+    except (OSError, ValueError):
+        return False
+    payload = meta.get("payload") if type(meta) is dict else None
+    return type(payload) is dict and bool(payload.get("forked_from_id"))
+
+
 def forget_reviews(paths) -> None:
     """Drop cached review state for threads no longer scanned."""
     for path in [path for path in _review_cache if path not in paths]:
@@ -2151,7 +2167,8 @@ def forget_reviews(paths) -> None:
 
 def review_verdicts(comments) -> dict:
     """{(pr, head7): [(time, verdict)]} from verdicts trusted accounts posted on
-    PRs: a verdict line plus the head it was given for. Pure; no I/O."""
+    PRs: a verdict line plus the head it was given for, timed by the comment's
+    last edit. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
@@ -2161,7 +2178,8 @@ def review_verdicts(comments) -> dict:
         head = REVIEW_HEAD.search(body) if verdict else None
         if head:
             found.setdefault((number, head.group(1)[:7].lower()), []).append(
-                (_github_time(comment.get("created_at")), verdict.group(1)))
+                (max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at"))),
+                 verdict.group(1)))
     return found
 
 
