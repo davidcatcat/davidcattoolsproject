@@ -2104,11 +2104,6 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(self._calls([a, b], [], verdicts)[0],
                          {"審 PR #9 @abc1234：CHANGES_REQUIRED": mon.DONE,
                           f"審 PR #8 @abc1234：{mon.NO_VERDICT}": mon.DONE})
-        # a verdict's row ages from the verdict, so a long review still shows its result
-        late = self._call(7, mon.OFFICE_DONE_WINDOW + 600.0)
-        verdicts[("7", "abc1234")] = [(self.NOW - 60, "PASS")]
-        rows = self._calls([late], [], verdicts)[0]
-        self.assertEqual(rows, {"審 PR #7 @abc1234：PASS": mon.DONE})
 
     def test_office_rows_reads_live_call_start_times(self):
         run = mon.Process(40, 5718, 40, "01:00", "S", "Claude Code CLI", "claude", "Codex APP-SERVER 5718")
@@ -2213,6 +2208,8 @@ class OfficeViewTests(unittest.TestCase):
             (800, call("c2", 'const r = await tools.exec_command({cmd:"review_dir=$(mktemp -d)\\n'
                              'cd \\"$review_dir\\"\\ngh pr diff 285 | claude -p --output-format json '
                              '\'Review PR #285, head c40c80acae77147190684a1ea8b66d744378ff41.\'"})')),
+            # a review longer than the done window still shows its verdict
+            (mon.OFFICE_DONE_WINDOW + 600, call("l1", "claude -p 'Review PR #281 head 281818a'")),
             (70, call("v1", "claude -p 'Review PR #282 head 2828282, run unittest -v'")),   # -v in the prompt
             (60, call("b1", "claude --resume abc -p 'status of PR #286'")),   # names no head
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),   # prose
@@ -2236,10 +2233,19 @@ class OfficeViewTests(unittest.TestCase):
             comment(283, 840, "**Verdict: FAIL** at head 18538d5", who="NONE"),   # untrusted
             comment(283, 830, "The earlier verdict: FAIL was stale; head 18538d5"),   # not a verdict line
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
+            comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
+        verdicts_281 = verdicts.pop(("281", "281818a"))
         self.assertEqual(verdicts, {("283", "18538d5"): [(self.NOW - 850, "PASS")],
-                                    ("283", "18538d5"[:7]): [(self.NOW - 850, "PASS")],
                                     ("999", "18538d5"): [(self.NOW - 820, "FAIL")]})
+        # one head per verdict: the first commit id in the comment, never the old side
+        # of a range nor an all-digit run id; a later mention of an earlier round is not it
+        self.assertEqual(mon.review_verdicts([
+            comment(283, 9, "**Verdict: PASS** at head 18538d5, delta `349c6f5..18538d5`"),
+            comment(284, 9, "Re-review of 4949c6f..28538d5 (run 40108628981)\n**Verdict: FAIL**"),
+            comment(273, 9, "## Review — PR #273 @ `71b2408`\n**Verdict: PASS**\nRound 1 was FIX on `e1685bd`"),
+        ]), {("283", "18538d5"): [(self.NOW - 9, "PASS")], ("284", "28538d5"): [(self.NOW - 9, "FAIL")],
+             ("273", "71b2408"): [(self.NOW - 9, "PASS")]})
         # the head may be named anywhere in the comment, in any wording
         self.assertIn(("311", "ec73d4d"), mon.review_verdicts([comment(
             311, 10, "**Verdict: PASS**\nExact head submitted: `ec73d4d1a2b3c4d5`")]))
@@ -2261,6 +2267,7 @@ class OfficeViewTests(unittest.TestCase):
             str(self.codex / day / "rollout-fork.jsonl"), self.NOW)], [("287", "2222222")])
         run = mon.Process(40, 5718, 40, "00:20", "S", "Claude Code CLI", "claude",
                           "Codex APP-SERVER 5718")
+        verdicts[("281", "281818a")] = verdicts_281
         with patch.object(mon, "_one_shot_runs", return_value=[run]):
             rows = mon.office_rows([run], self.NOW, codex_root=str(self.codex),
                                    claude_root=str(self.claude), canonical=self.canonical,
@@ -2268,6 +2275,7 @@ class OfficeViewTests(unittest.TestCase):
                                    verdicts=verdicts)
         reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
         self.assertEqual(reviews, {"審 PR #283 @18538d5：PASS": mon.DONE,
+                                   "審 PR #281 @281818a：PASS": mon.DONE,
                                    f"審 PR #285 @c40c80a：{mon.NO_VERDICT}": mon.DONE,
                                    f"審 PR #282 @2828282：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})

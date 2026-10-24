@@ -2233,24 +2233,26 @@ def forget_reviews(paths) -> None:
         _review_cache.pop(path, None)
 
 
-COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
+# A commit id has a hex letter (run ids and dates are all digits) and is not the
+# old side of an `old..new` range.
+COMMIT_ID = re.compile(r"\b(?=[0-9]*[a-fA-F])[0-9a-fA-F]{7,40}\b(?!\.\.)")
 
 
 def review_verdicts(comments) -> dict:
     """{(pr, head7): [(time, verdict)]} from verdicts trusted accounts posted on
-    PRs: a verdict line, listed under every commit id the comment names, timed
-    by the comment's last edit. Pure; no I/O."""
+    PRs: a verdict line, for the first commit id the comment names (its heading
+    or verdict line names the reviewed head before any other), timed by the
+    comment's last edit. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
             continue
         body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
         verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
-        if verdict is None:
-            continue
-        when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
-        for head in {token[:7].lower() for token in COMMIT_ID.findall(body)}:
-            found.setdefault((number, head), []).append((when, verdict.group(1)))
+        head = verdict and COMMIT_ID.search(body)
+        if head:
+            when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
+            found.setdefault((number, head.group(0)[:7].lower()), []).append((when, verdict.group(1)))
     return found
 
 
