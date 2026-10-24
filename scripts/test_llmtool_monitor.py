@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -907,10 +908,8 @@ def policy(workers):
     return {"schema_version": 1, "workers": full}
 
 
-class DispatchGateAgreementTests(unittest.TestCase):
-    """The monitor's reading of worker-dispatch.json must match the llmtool
-    gate it describes: whatever the gate refuses, the monitor never shows as
-    a usable switch."""
+class _GateMixin:
+    """Loads the llmtool gate from this checkout for the agreement tests."""
 
     @classmethod
     def setUpClass(cls):
@@ -922,10 +921,18 @@ class DispatchGateAgreementTests(unittest.TestCase):
         finally:
             sys.path.remove(root)
         # Never compare against some other installed llmtool.
-        assert os.path.realpath(worker_dispatch.__file__).startswith(os.path.realpath(root) + os.sep)
+        if not os.path.realpath(worker_dispatch.__file__).startswith(os.path.realpath(root) + os.sep):
+            raise AssertionError(f"llmtool gate loaded from {worker_dispatch.__file__}")
         cls.gate = staticmethod(worker_dispatch._parse_policy)
         cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
             worker_dispatch._read_policy_file(Path(path))))
+
+
+
+class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
+    """The monitor's reading of worker-dispatch.json must match the llmtool
+    gate it describes: whatever the gate refuses, the monitor never shows as
+    a usable switch."""
 
     def agree(self, raw: bytes):
         try:
@@ -967,6 +974,8 @@ class DispatchGateAgreementTests(unittest.TestCase):
             "assignment bad ref": {"claude-developer": {"owner_assignments": [
                 dict(good, owner_assignment_ref=POLICY_EVIDENCE)]}},
             "assignment duplicate": {"claude-developer": {"owner_assignments": [good, good]}},
+            "assignment same task, other ref": {"claude-developer": {"owner_assignments": [
+                good, dict(good, owner_assignment_ref=ref.replace("6373198827", "6373198828"))]}},
             "assignments not a list": {"claude-developer": {"owner_assignments": {}}},
             "assignments null": {"claude-developer": {"owner_assignments": None}},
             "unhashable switch": {"agy": {"dispatch": []}},
@@ -986,15 +995,24 @@ class DispatchGateAgreementTests(unittest.TestCase):
             "NaN": whole.replace('"schema_version": 1', '"schema_version": NaN'),
             "not json": "{not json",
             "empty": "",
-            "too big": whole[:-1] + ', "pad": "' + "x" * (64 * 1024) + '"}',
         }
         for label, raw in raws.items():
             with self.subTest(label):
                 self.agree(raw.encode())
         self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
 
+    def test_size_is_checked_on_the_bytes_too(self):
+        # The gate's reader refuses > 64 KiB; the local-ref fallback has only
+        # the monitor's own byte check, so it must hold on its own.
+        many = [{"task_id": f"{i:032x}", "owner_assignment_ref": POLICY_EVIDENCE + f"#issuecomment-{i + 1}"}
+                for i in range(700)]
+        raw = json.dumps(policy({"claude-developer": {"owner_assignments": many}})).encode()
+        self.assertGreater(len(raw), 64 * 1024)
+        self.gate(raw)   # schema-valid: only the size is wrong
+        self.assertEqual(mon.worker_dispatch(raw)[1], "invalid")
 
-class DispatchFileAgreementTests(DispatchGateAgreementTests):
+
+class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
     """The same agreement for how the file itself is read."""
 
     def setUp(self):
@@ -1035,7 +1053,38 @@ class DispatchFileAgreementTests(DispatchGateAgreementTests):
 
     def test_missing_canonical_file_falls_back_to_a_labelled_local_ref_only(self):
         raw, source = mon.load_dispatch(self.tmp.name, os.path.join(self.tmp.name, "absent.json"))
-        self.assertEqual((raw, source), (None, ""))
+        self.assertEqual((raw, source), (None, ""))   # an explicit path never falls back
+        repo = Path(self.tmp.name) / "repo"
+        policy_file = repo / "tools" / "llmtool" / "worker-dispatch.json"
+        policy_file.parent.mkdir(parents=True)
+        committed = json.dumps(policy({})).encode()
+        policy_file.write_bytes(committed)
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        for argv in (["init", "-q", "-b", "main"], ["add", "-A"],
+                     ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "p"]):
+            subprocess.run(["git", "-C", str(repo), *argv], check=True, env=env,
+                           capture_output=True)
+        canonical = str(repo)
+
+        def load():
+            mon._dispatch_cache.clear()
+            raw, source = mon.load_dispatch(canonical)
+            return mon.worker_dispatch(raw)[1], source
+        self.assertEqual(load(), ("", "派工檔"))
+        policy_file.unlink()   # missing: the labelled local main ref
+        problem, source = load()
+        self.assertEqual(problem, "")
+        self.assertIn("本機 main", source)
+        self.assertIn("可能不是最新", source)
+        outside = Path(self.tmp.name) / "outside.json"
+        outside.write_bytes(committed)
+        for plant in (lambda: policy_file.symlink_to(outside), lambda: os.link(outside, policy_file),
+                      lambda: policy_file.mkdir()):
+            with self.subTest(plant=plant):
+                plant()
+                self.assertEqual(load(), ("rejected", "派工檔"))   # refused, no fallback
+                (policy_file.rmdir if policy_file.is_dir() and not policy_file.is_symlink()
+                 else policy_file.unlink)()
 
     def test_roster_workers_are_gate_workers(self):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)

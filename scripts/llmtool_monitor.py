@@ -941,7 +941,7 @@ MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
-GITHUB_LIMIT = 16 << 20   # one page of 100 long comments stays well inside
+GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
 
