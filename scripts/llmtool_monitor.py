@@ -465,7 +465,10 @@ class Monitor:
                 state, changes = office_events(self.office_state, office)
                 new += [(stamp, kind, text) for kind, text in changes]
                 self.office, self.office_state, self.office_error = office, state, None
-                if not self.stale and script_digest() not in (self.digest, "?"):
+                digest = script_digest()
+                if self.digest == "?":
+                    self.digest = digest   # unreadable at start: the first real read is the baseline
+                elif not self.stale and digest not in (self.digest, "?"):
                     self.stale = True
                     new.append((stamp, "!", f"監控程式已更新，這個畫面還是舊版（{self.version}），請按 q 後重開"))
                 try:
@@ -1278,7 +1281,7 @@ def monitor_version() -> str:
         return found.stdout.strip() if found.returncode == 0 else ""
 
     try:
-        same = git("hash-object", "--", SCRIPT_PATH) == git("rev-parse", f"HEAD:{rel}")
+        same = git("hash-object", "--no-filters", "--", SCRIPT_PATH) == git("rev-parse", f"HEAD:{rel}")
         commit = git("log", "-1", "--format=%h %cd", "--date=format:%m-%d %H:%M", "--", rel)
     except (OSError, subprocess.SubprocessError):
         same, commit = False, ""
@@ -1963,16 +1966,25 @@ def _file_reply(path: str, since: float | None) -> str | None:
     return item["result"] if type(item.get("result")) is str else ""
 
 
-# A review call usually fetches the diff itself, e.g.
-# `gh -R owner/repo pr diff 309` or a .../pull/309 URL.
-REVIEW_PR_FETCH = re.compile(r"\bpr\s+(?:diff|view|checkout)\s+(?:-R\s+\S+\s+)?#?(\d{1,6})\b"
-                             r"|/pull/(\d{1,6})\b")
+# A review call usually fetches the diff itself, e.g. `gh -R owner/repo pr
+# diff 309`, `gh pr view https://github.com/o/r/pull/309` or `gh api
+# repos/o/r/pulls/309`. A bare URL is only a citation, not a fetch.
+REVIEW_PR_FETCH = re.compile(
+    r"\bgh\b[^\n]*?\bpr\s+(?:diff|view|checkout)\s+(?:(?:-R|--repo)[=\s]+\S+\s+)?"
+    r"(?:\S*/pull/)?#?(\d{1,6})\b"
+    r"|\bgh\s+api\s+\S*/pulls/(\d{1,6})\b")
+EMBEDDED_DIFF = re.compile(r"^diff --git ", re.M)
 
 
 def _review_target(text: str) -> tuple[str, str]:
-    """The PR the call fetches wins over one its prompt merely mentions."""
-    fetched, pr, head = REVIEW_PR_FETCH.search(text), REVIEW_PR.search(text), REVIEW_HEAD.search(text)
-    number = next((group for group in fetched.groups() if group), "") if fetched else ""
+    """The PR the call fetches wins over one its prompt merely mentions. An
+    inlined diff is the material under review, so nothing in it counts, and
+    fetches that disagree fall back to the prompt's own "PR #N"."""
+    cut = EMBEDDED_DIFF.search(text)
+    text = text[:cut.start()] if cut else text
+    pr, head = REVIEW_PR.search(text), REVIEW_HEAD.search(text)
+    fetched = {next(group for group in found if group) for found in REVIEW_PR_FETCH.findall(text)}
+    number = fetched.pop() if len(fetched) == 1 else ""
     return (number or (pr.group(1) if pr else ""), head.group(1)[:7] if head else "")
 
 
@@ -2147,12 +2159,35 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[OfficeRow]:
 
 
 CALL_GRACE = 15.0   # seconds a recorded one-shot call may run before its process is seen
+CALL_SLACK = 5.0    # process start times are whole seconds; the call is recorded first
+
+
+def _ended_calls(subs, live_calls) -> set:
+    """Review rows the record shows running whose process is gone. Each row,
+    newest first, claims the unclaimed live call that started closest after
+    it; a call cannot have started before its own record, so a row with
+    nothing left to claim has ended (the PM never read its result). A row
+    younger than CALL_GRACE may not have spawned yet and is left alone."""
+    starts = sorted(live_calls)
+    ended = set()
+    rows = sorted((sub for _, sub in subs if sub.key == "review" and sub.state == WORKING
+                   and sub.age is not None), key=lambda sub: sub.age)
+    for sub in rows:
+        began = -sub.age   # relative to now, like the process starts
+        match = next((start for start in starts if start >= began - CALL_SLACK), None)
+        if match is not None:
+            starts.remove(match)
+        elif sub.age > CALL_GRACE:
+            ended.add(id(sub))
+    return ended
 
 
 def codex_rows(now: float, root: str | None = None,
-               canonical: str | None = None, live_calls: int | None = None) -> list[OfficeRow]:
-    """live_calls: Codex-started one-shot claude processes running now, or
-    None when the process table was not read."""
+               canonical: str | None = None,
+               live_calls: list[float] | None = None) -> list[OfficeRow]:
+    """live_calls: how many seconds ago each Codex-started one-shot claude
+    process now running started (as negative offsets from now), or None when
+    the process table was not read."""
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
@@ -2192,14 +2227,7 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
         subs += [(key if kind == "main" else None, review) for review in reviews]
     forget_reviews(scanned)
     if live_calls is not None:
-        # A call the record still shows running, with no matching process
-        # alive, has ended; the PM just never read its result. The oldest go
-        # first, and a call younger than CALL_GRACE may not have spawned yet.
-        busy = sorted((sub for _, sub in subs if sub.key == "review" and sub.state == WORKING
-                       and (sub.age or 0.0) > CALL_GRACE), key=lambda sub: -(sub.age or 0.0))
-        young = sum(sub.key == "review" and sub.state == WORKING and (sub.age or 0.0) <= CALL_GRACE
-                    for _, sub in subs)
-        ended = {id(sub) for sub in busy[:max(0, len(busy) - max(0, live_calls - young))]}
+        ended = _ended_calls(subs, live_calls)
         subs = [(parent, replace(sub, state=DONE, detail=sub.detail.replace(
                     "（單次呼叫執行中）", "：程序已結束，PM 沒讀結果")) if id(sub) in ended else sub)
                 for parent, sub in subs]
@@ -2900,7 +2928,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                                  entry.get("statusUpdatedAt"), entry.get("name"),
                                  answerer(owners.get(pid, "")))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
-    calls = len(_one_shot_runs(processes, sessions)) if processes else None
+    calls = ([-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
+             if processes else None)
     rows = codex_rows(now, codex_root, canonical, calls) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.
