@@ -2279,16 +2279,19 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[tuple]:
     return rows
 
 
-def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts, now: float) -> OfficeRow:
-    """An ended call shows the first verdict posted on its PR after it started
-    that names its head, aged from that verdict. The call knows its own head,
-    so no comment has to be read for which head it is about; later rounds that
-    mention this head come after its own verdict. Every Reviewer route is read
-    the same way."""
+def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts, now: float,
+                   until: float | None = None) -> OfficeRow:
+    """An ended call shows the first verdict posted on its PR after it started,
+    and before the next call for the same PR and head started (until), that
+    names its head, aged from that verdict. The call knows its own head, so no
+    comment has to be read for which head it is about; later rounds that
+    mention this head come after its own verdict, and a retry's verdict belongs
+    to the retry. Every Reviewer route is read the same way."""
     if not pr:
         return replace(row, state=DONE, detail=row.detail.replace("（單次呼叫執行中）", "：已結束"))
     posted = sorted(item[:2] for item in (verdicts or {}).get(pr, [])
-                    if item[0] >= when - CALL_SLACK and sha.lower() in item[2])
+                    if item[0] >= when - CALL_SLACK and (until is None or item[0] < until)
+                    and sha.lower() in item[2])
     outcome = posted[0][1] if posted else UNREAD_VERDICT if verdicts is None else NO_VERDICT
     age = max(0.0, now - posted[0][0]) if posted else row.age
     return replace(row, state=DONE, outcome=outcome, age=min(age, row.age),
@@ -2370,8 +2373,14 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
     # A call has ended once its process is gone; without the process table it
     # is shown running until it is too old to matter.
     ended = _ended_calls(subs, live_calls) if live_calls is not None else set()
-    subs = [(parent, _review_result(sub, *calls[id(sub)], verdicts, now) if id(sub) in ended else sub)
-            for parent, sub in subs]
+    starts: dict = {}
+    for pr, sha, when in calls.values():
+        starts.setdefault((pr, sha), []).append(when)
+
+    def until(pr, sha, when):   # when the next call for this PR and head started
+        return min((start for start in starts[(pr, sha)] if start > when), default=None)
+    subs = [(parent, _review_result(sub, *calls[id(sub)], verdicts, now, until(*calls[id(sub)]))
+             if id(sub) in ended else sub) for parent, sub in subs]
     subs = [(parent, sub) for parent, sub in subs if sub.key != "review"
             or (sub.age or 0.0) <= (OFFICE_STALL if sub.state == WORKING else OFFICE_DONE_WINDOW)]
     rows = []

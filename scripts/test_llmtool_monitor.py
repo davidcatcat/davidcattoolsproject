@@ -2105,6 +2105,16 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(self._calls([a, b], [], verdicts)[0],
                          {"審 PR #9 @abc1234：CHANGES_REQUIRED": mon.DONE,
                           f"審 PR #8 @abc1234：{mon.NO_VERDICT}": mon.DONE})
+        # a retry for the same PR and head owns the verdict posted after it started
+        retry = self._call(9, 60.0)
+        verdicts["9"].append((self.NOW - 30, "PASS", head))
+        self.assertEqual(self._calls([a, retry], [], verdicts)[0],
+                         {"審 PR #9 @abc1234：CHANGES_REQUIRED": mon.DONE,
+                          "審 PR #9 @abc1234：PASS": mon.DONE})
+        verdicts["9"] = [(self.NOW - 30, "PASS", head)]
+        self.assertEqual(self._calls([a, retry], [], verdicts)[0],
+                         {f"審 PR #9 @abc1234：{mon.NO_VERDICT}": mon.DONE,
+                          "審 PR #9 @abc1234：PASS": mon.DONE})
 
     def test_office_rows_reads_live_call_start_times(self):
         run = mon.Process(40, 5718, 40, "01:00", "S", "Claude Code CLI", "claude", "Codex APP-SERVER 5718")
@@ -2236,15 +2246,19 @@ class OfficeViewTests(unittest.TestCase):
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
             comment(281, 60, "**Verdict: PASS** at exact head 281818a"),
         ])
-        self.assertEqual(sorted(verdicts), ["281", "283", "999"])
+        # only trusted verdict lines are kept, each with every id its comment names
+        self.assertEqual(verdicts, {
+            "283": [(self.NOW - 850, "PASS", frozenset({"18538d5"}))],
+            "999": [(self.NOW - 820, "FAIL", frozenset({"18538d5"}))],
+            "281": [(self.NOW - 60, "PASS", frozenset({"281818a"}))]})
 
         # a call's verdict is the first one posted on its PR after it started that
         # names its head, however the comment is worded
-        def outcome(pr, head, started, *posts):
+        def outcome(pr, head, started, *posts, retry=None):
             row = mon.OfficeRow("claude reviewer", mon.WORKING, f"審 PR #{pr} @{head}（單次呼叫執行中）",
                                 started, 30, key="review")
-            return mon._review_result(row, pr, head, self.NOW - started,
-                                      mon.review_verdicts(list(posts)), self.NOW).outcome
+            return mon._review_result(row, pr, head, self.NOW - started, mon.review_verdicts(list(posts)),
+                                      self.NOW, None if retry is None else self.NOW - retry).outcome
         own = comment(283, 500, "**Verdict: FAIL** at head 349c6f5")
         delta = comment(283, 100, "**Verdict: PASS** at head 18538d5, delta `349c6f5..18538d5`")
         self.assertEqual(outcome("283", "349c6f5", 900, own, delta), "FAIL")   # its own, not the next round
@@ -2255,6 +2269,14 @@ class OfficeViewTests(unittest.TestCase):
             311, 10, "**Verdict: PASS**\nExact head submitted: `ec73d4d1a2b3c4d5`")), "PASS")
         self.assertEqual(outcome("283", "18538d5", 300, comment(283, 400, "**Verdict: FAIL** head 18538d5")),
                          mon.NO_VERDICT)   # posted before the call started
+        self.assertEqual(outcome("283", "18538d5", 300, comment(283, 100, "**Verdict: FAIL** head 28538d5")),
+                         mon.NO_VERDICT)   # names another head
+        self.assertEqual(outcome("283", "18538d5", 300, comment(283, 100, "**Verdict: FAIL** head 18538d5",
+                                                                 who="NONE")), mon.NO_VERDICT)   # untrusted
+        # a failed call does not take the verdict of a retry for the same head
+        retried = comment(283, 100, "**Verdict: PASS** head 18538d5")
+        self.assertEqual(outcome("283", "18538d5", 300, retried, retry=200), mon.NO_VERDICT)
+        self.assertEqual(outcome("283", "18538d5", 200, retried), "PASS")
         edited = dict(comment(283, 850, "**Verdict: FAIL** head 18538d5"), updated_at=stamp(100))
         self.assertEqual(outcome("283", "18538d5", 300, edited), "FAIL")   # counts from its last edit
         # a forked subagent starts with a copy of the PM's history, its turns included,
