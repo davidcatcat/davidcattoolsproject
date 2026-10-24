@@ -462,8 +462,8 @@ class Monitor:
                 self.office, self.office_state, self.office_error = office, state, None
                 try:
                     self.d6 = d6_task_lines(canonical_root(), office, time.time())
-                except Exception:  # optional, like task evidence
-                    pass
+                except Exception:  # optional, like task evidence; never show a stale list
+                    self.d6 = []
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1346,13 +1346,31 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
             continue
         ref = record.get("session_ref")
         found[task_id] = (root, ref if type(ref) is str else "")
-        state, agent = record.get("state"), record.get("trusted_agent_id")
-        details[task_id] = (state if type(state) is str and CODE_TEXT.fullmatch(state) else "?",
-                            agent if type(agent) is str and AGENT_ID.fullmatch(agent) else "",
-                            _github_time(record.get("last_verified_at")) or file_st.st_mtime)
+        details[task_id] = _d6_detail(record, file_st.st_mtime)
     _registry_cache.clear()
     _registry_cache[registry] = (stamp, found, details)
     return found
+
+
+def _d6_detail(record: dict, written: float) -> tuple[str, str, float, float]:
+    """(state, bound agent id, recorded update, file write) for the task list;
+    malformed fields fall back, so a bad record never drops the task's placement."""
+    state, agent = record.get("state"), record.get("trusted_agent_id")
+    try:
+        verified = _github_time(record.get("last_verified_at"))
+    except (OverflowError, OSError, ValueError):
+        verified = 0.0
+    return (state if type(state) is str and CODE_TEXT.fullmatch(state) else "?",
+            agent if type(agent) is str and AGENT_ID.fullmatch(agent) else "",
+            verified or written, written)
+
+
+def registry_details(canonical: str) -> dict:
+    """{task id: (state, agent, recorded update, file write)} for the tasks
+    registered_tasks admits."""
+    registered_tasks(canonical)
+    cached = _registry_cache.get(os.path.join(canonical, ".git", "llmtool-worktrees"))
+    return cached[2] if cached else {}
 
 
 D6_STATES = {   # D6 record state -> plain words
@@ -1367,15 +1385,16 @@ def d6_task_lines(canonical: str, office: list, now: float) -> list[str]:
     """Locked D6 tasks whose record changed in the last 24 hours, newest first,
     each with the live session working in its root, if any. Only the task id,
     state, bound agent id and time are read; free-text dispositions are not."""
-    registered_tasks(canonical)
-    cached = next(iter(_registry_cache.values()), None)
-    details = cached[2] if cached else {}
+    details = registry_details(canonical)
     live = {}
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
-    recent = sorted(((task_id, *info) for task_id, info in details.items()
-                     if now - info[2] <= D6_WINDOW), key=lambda item: -item[3])
+    # A recorded time in the future would pin a task on top: use the write time.
+    stamped = ((task_id, state, agent, verified if verified <= now + 300 else written)
+               for task_id, (state, agent, verified, written) in details.items())
+    recent = sorted((item for item in stamped if now - item[3] <= D6_WINDOW),
+                    key=lambda item: -item[3])
     width = max((len(item[0]) for item in recent), default=0)
     lines = []
     for task_id, state, agent, when in recent:
@@ -1650,21 +1669,35 @@ TURN_TIME_MAX = 1 << 32   # seconds; anything later is not a real turn time
 def open_codex_history(path: str):
     """Read-only connection to Codex's turn history, or None.
 
-    Only the user's own regular file is opened (no symlink, FIFO or device,
-    which could redirect the read or block open() past SQLite's timeout).
-    Codex keeps the database in WAL mode; it is opened only while its -shm
-    file exists (Codex running), so a read-only open never has to create
-    state files in ~/.codex."""
+    Only the user's own regular files are opened (no symlink, FIFO or device,
+    which could redirect the read or block open() past SQLite's timeout), and
+    no side file is ever created. Codex keeps the database in WAL mode:
+    - while its -wal and -shm files both exist (Codex has it open), a plain
+      read-only open uses them;
+    - when neither exists, every change is already in the main file, so it is
+      opened immutable: no locks, no -wal or -shm;
+    - with only one of them, it is skipped.
+    Residual: Codex creating or removing them between this check and the
+    read is not prevented; an immutable read that meets a concurrent write
+    fails with an SQLite error, which drops the database for that refresh."""
     try:
         info = os.lstat(path)
-        shm = os.lstat(path + "-shm")
     except OSError:
         return None
-    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
-            or not stat.S_ISREG(shm.st_mode) or shm.st_uid != os.getuid()):
+    sides = []
+    for suffix in ("-wal", "-shm"):
+        try:
+            sides.append(os.lstat(path + suffix))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return None
+    if len(sides) == 1 or any(not stat.S_ISREG(f.st_mode) or f.st_uid != os.getuid()
+                              for f in [info, *sides]):
         return None
+    mode = "mode=ro" if sides else "mode=ro&immutable=1"
     try:
-        return sqlite3.connect(f"file:{urllib.parse.quote(path)}?mode=ro", uri=True, timeout=0.2)
+        return sqlite3.connect(f"file:{urllib.parse.quote(path)}?{mode}", uri=True, timeout=0.2)
     except sqlite3.Error:
         return None
 
@@ -1673,13 +1706,18 @@ def _turn_time(value) -> int | None:
     return value if type(value) is int and 0 < value < TURN_TIME_MAX else None
 
 
-def codex_turn(db, thread_id) -> tuple | None:
-    """(status, started, completed) of a thread's newest turn, or None."""
+def codex_turn(history: dict, thread_id) -> tuple | None:
+    """(status, started, completed) of a thread's newest turn, or None.
+    history: {"db": connection or None}; after one error (a lock wait that
+    timed out, say) the rest of this refresh does without it."""
+    db = history.get("db")
     if db is None or type(thread_id) is not str:
         return None
     try:
         found = db.execute(CODEX_TURN_SQL, (thread_id,)).fetchone()
     except sqlite3.Error:
+        history["db"] = None
+        db.close()
         return None
     if not found or found[0] not in TURN_STATES:
         return None
@@ -1694,7 +1732,7 @@ def _clock(seconds: float) -> str:
         return "--:--"
 
 
-def _codex_row(path: str, now: float, canonical: str, db=None):
+def _codex_row(path: str, now: float, canonical: str, history: dict | None = None):
     meta = _jsonl_head(path)
     payload = meta.get("payload") if type(meta) is dict else None
     if type(payload) is not dict:
@@ -1712,9 +1750,11 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
         inner = item.get("payload")
         kind = inner.get("type") if type(inner) is dict else None
         if item.get("type") == "event_msg" and kind in TURN_MARKERS:
-            last, marked = kind, _github_time(str(item.get("timestamp") or "")[:19] + "Z")
+            last, marked = kind, _github_time(str(item.get("timestamp") or "")[:19] + "Z") or 0.0
     if last is None:
         last = _codex_turn_marker(path)
+    # An untimed marker is no newer than the file's last write.
+    marked = marked or (now - age if last is not None else 0.0)
     subagent = payload.get("thread_source") == "subagent"
     if last in ("task_complete", "turn_aborted"):
         state = DONE if subagent else IDLE
@@ -1722,25 +1762,29 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
         state = WORKING if age <= OFFICE_STALL else STALLED
     else:
         state = WORKING if age <= OFFICE_BUSY else IDLE
-    turn = codex_turn(db, payload.get("id"))
-    since, failed = "", False
+    turn = codex_turn(history or {}, payload.get("id"))
+    since, failed, interrupted = "", False, False
     if turn is not None:
         status, began, ended = turn
-        # Codex's own turn record beats the session-file markers, unless the
-        # file holds a timed marker newer than that record (the DB lags).
-        recorded = (began if status == "inProgress" else ended) or 0
-        if marked > recorded:
+        # Codex's own turn record beats the session-file markers, except when
+        # they disagree about whether a turn is running and the marker is
+        # later than the recorded turn's start: then the file has seen a turn
+        # the record has not caught up with (a start marker of that same turn
+        # carries its start second, so it never wins).
+        agree = (last == "task_started") == (status == "inProgress")
+        if last is not None and not agree and marked > (began or ended or 0):
             turn = None
     if turn is not None:
         if status == "inProgress":
             state = WORKING if age <= OFFICE_STALL else STALLED
             since = f"（這輪 {_clock(began)} 起）" if began else ""
         else:
-            failed = status == "failed"
+            failed, interrupted = status == "failed", status == "interrupted"
             # A failed turn needs a look even in a subagent; an interrupted
             # one was stopped on purpose.
             state = ATTENTION if failed else DONE if subagent else IDLE
-            if ended and ended <= now:
+            # Idle since the turn ended, unless the file was written later.
+            if ended and ended <= now and now - age <= ended + 5:
                 age = now - ended
             word = {"completed": "結束", "failed": "失敗", "interrupted": "被中斷"}[status]
             since = f"（上一輪 {_clock(ended)} {word}）" if ended else f"（上一輪{word}）"
@@ -1762,7 +1806,8 @@ def _codex_row(path: str, now: float, canonical: str, db=None):
         return ("sub", payload.get("parent_thread_id"),
                 OfficeRow(_who("codex", role, nick), state,
                           (_humanize(stem) if stem else "（未命名工作）") +
-                          (f"（task {task}）" if task else "") + ("（上一輪失敗）" if failed else ""),
+                          (f"（task {task}）" if task else "") + ("（上一輪失敗）" if failed else
+                                                          "（上一輪被中斷）" if interrupted else ""),
                           age, 20,
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
@@ -2059,22 +2104,22 @@ def codex_rows(now: float, root: str | None = None,
     for day in days:
         paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
     mains, subs, scanned, actions = {}, [], set(), {}
-    db = open_codex_history(CODEX_HISTORY)
+    history = {"db": open_codex_history(CODEX_HISTORY)}
     try:
-        return _codex_rows(now, sorted(paths), canonical, db, mains, subs, scanned, actions)
+        return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions)
     finally:
-        if db is not None:
-            db.close()
+        if history["db"] is not None:
+            history["db"].close()
 
 
-def _codex_rows(now, paths, canonical, db, mains, subs, scanned, actions) -> list[OfficeRow]:
+def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions) -> list[OfficeRow]:
     for path in paths:
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
                 continue
         except OSError:
             continue
-        found = _codex_row(path, now, canonical, db)
+        found = _codex_row(path, now, canonical, history)
         if found is None:
             continue
         scanned.add(path)
@@ -2773,11 +2818,16 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     sessions = os.path.join(os.path.dirname(
         CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
     owners = {p.pid: p.owner if type(p.owner) is str else "" for p in processes}
-    # Who must answer a waiting CLI: the Codex PM that launched it, else the
-    # person at its terminal.
+    # Who must answer a waiting CLI: the Codex PM that launched it, you when
+    # no agent did (your own terminal), else whatever agent started it.
+    def answerer(owner: str) -> str:
+        if owner.startswith("Codex"):
+            return "PM（Codex）"
+        return "你" if not owner else f"啟動它的 {family(owner)}"
+
     live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
                                  entry.get("statusUpdatedAt"), entry.get("name"),
-                                 "PM（Codex）" if owners.get(pid, "").startswith("Codex") else "你")
+                                 answerer(owners.get(pid, "")))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
