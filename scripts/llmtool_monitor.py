@@ -1230,6 +1230,7 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
+CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
 CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1590,7 +1591,33 @@ def _codex_action(tail: list, canonical: str) -> str:
     return ""
 
 
-def _codex_row(path: str, now: float, canonical: str):
+# Codex's own record of each turn: status and start/end time only. Item and
+# message columns are never selected.
+CODEX_TURN_SQL = ("SELECT status, started_at, completed_at FROM thread_turns "
+                  "WHERE thread_id = ? ORDER BY rollout_ordinal DESC LIMIT 1")
+TURN_STATES = frozenset({"inProgress", "completed", "failed", "interrupted"})
+
+
+def codex_turn(db, thread_id) -> tuple | None:
+    """(status, started, completed) of a thread's newest turn, or None."""
+    if db is None or type(thread_id) is not str:
+        return None
+    try:
+        found = db.execute(CODEX_TURN_SQL, (thread_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    if not found or found[0] not in TURN_STATES:
+        return None
+    status, started, completed = found
+    return (status, started if type(started) is int else None,
+            completed if type(completed) is int else None)
+
+
+def _clock(seconds: float) -> str:
+    return time.strftime("%H:%M", time.localtime(seconds))
+
+
+def _codex_row(path: str, now: float, canonical: str, db=None):
     meta = _jsonl_head(path)
     payload = meta.get("payload") if type(meta) is dict else None
     if type(payload) is not dict:
@@ -1618,6 +1645,20 @@ def _codex_row(path: str, now: float, canonical: str):
         state = WORKING if age <= OFFICE_STALL else STALLED
     else:
         state = WORKING if age <= OFFICE_BUSY else IDLE
+    turn = codex_turn(db, payload.get("id"))
+    since = ""
+    if turn is not None:
+        # Codex's own turn record beats the guess from session-file markers.
+        status, began, ended = turn
+        if status == "inProgress":
+            state = WORKING if age <= OFFICE_STALL else STALLED
+            since = f"（這輪 {_clock(began)} 起）" if began else ""
+        else:
+            state = DONE if subagent else ATTENTION if status == "failed" else IDLE
+            if ended and ended <= now:
+                age = now - ended
+            word = {"completed": "結束", "failed": "失敗", "interrupted": "被中斷"}[status]
+            since = f"（上一輪 {_clock(ended)} {word}）" if ended else f"（上一輪{word}）"
     if subagent:
         # Codex names a spawned agent "/root/<short_task_name>"; anything else
         # could carry a private path, so it is shown as unnamed.
@@ -1643,7 +1684,8 @@ def _codex_row(path: str, now: float, canonical: str):
                           evidence="codex 紀錄"))
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
-    since = f"（{time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）" if started else ""
+    if not since and started:
+        since = f"（對話 {time.strftime('%m-%d %H:%M', time.localtime(started))} 開始）"
     tui = payload.get("originator") == "codex-tui"
     if place[0] == "task":   # a registered D6 root belongs to its one Developer
         return ("main", payload.get("id"),
@@ -1930,13 +1972,25 @@ def codex_rows(now: float, root: str | None = None,
     for day in days:
         paths += glob.glob(os.path.join(root, day, "rollout-*.jsonl"))
     mains, subs, scanned, actions = {}, [], set(), {}
-    for path in sorted(paths):
+    try:
+        db = sqlite3.connect(f"file:{CODEX_HISTORY}?mode=ro", uri=True, timeout=0.2)
+    except sqlite3.Error:
+        db = None
+    try:
+        return _codex_rows(now, sorted(paths), canonical, db, mains, subs, scanned, actions)
+    finally:
+        if db is not None:
+            db.close()
+
+
+def _codex_rows(now, paths, canonical, db, mains, subs, scanned, actions) -> list[OfficeRow]:
+    for path in paths:
         try:
             if now - os.path.getmtime(path) > OFFICE_WINDOW:
                 continue
         except OSError:
             continue
-        found = _codex_row(path, now, canonical)
+        found = _codex_row(path, now, canonical, db)
         if found is None:
             continue
         scanned.add(path)
@@ -1955,7 +2009,8 @@ def codex_rows(now: float, root: str | None = None,
             busy = [sub.detail for parent, sub in subs if parent == key and sub.state == WORKING]
             detail = (
                 f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
-                else (actions.get(key) or "處理中") if row.state == WORKING
+                else (actions.get(key) or "處理中") if row.state in (WORKING, STALLED)
+                else "上一輪失敗，要看 Codex 畫面" if row.state == ATTENTION
                 else "等待下一個指示") + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
@@ -1967,7 +2022,7 @@ SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 
 def claude_rows(now: float, root: str | None = None,
                 canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
-    """live: {session id: (status, waitingFor, since ms, name)} that running CLIs report in
+    """live: {session id: (status, waitingFor, since ms, name, who answers)} that running CLIs report in
     their own registry; it beats any guess from the session file."""
     root = CLAUDE_PROJECTS if root is None else root
     canonical = canonical or canonical_root()
@@ -2011,12 +2066,13 @@ def claude_rows(now: float, root: str | None = None,
             continue
         state = WORKING if age <= OFFICE_BUSY else IDLE
         sid = os.path.basename(path)[:-len(".jsonl")]
-        status, waiting, since, name = (live or {}).get(sid, (None, None, None, None))
+        status, waiting, since, name, who = (live or {}).get(sid, (None,) * 5)
         suffix = f"（{task}）" if task else ""
         if status == "waiting":
             # Stopped at a prompt only a person or its driving agent can answer.
             state = ATTENTION
-            detail = ("等人確認權限" if waiting == "permission prompt" else "等人回覆") + suffix
+            detail = (("等人確認權限" if waiting == "permission prompt" else "等人回覆")
+                      + f"，要{who}回" + suffix)
         elif status == "busy":
             state = WORKING
             if age > OFFICE_BUSY and _awaiting_model(tail):
@@ -2541,7 +2597,7 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
             gone.add(row.key)
         else:
             out.append(replace(row, state=CLOSED, detail="推測 Codex CLI 已關閉" + (
-                row.detail[row.detail.rfind("（"):] if row.detail.endswith("開始）") else "")))
+                row.detail[row.detail.rfind("（"):] if row.detail.endswith("）") else "")))
     return [row for row in out if row.group not in gone]
 
 
@@ -2627,9 +2683,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     canonical = canonical or canonical_root()
     sessions = os.path.join(os.path.dirname(
         CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
+    owners = {p.pid: p.owner for p in processes}
+    # Who must answer a waiting CLI: the Codex PM that launched it, else the
+    # person at its terminal.
     live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
-                                 entry.get("statusUpdatedAt"), entry.get("name"))
-            for entry in (_claude_registered(sessions, processes) or {}).values()}
+                                 entry.get("statusUpdatedAt"), entry.get("name"),
+                                 "PM（Codex）" if owners.get(pid, "").startswith("Codex") else "你")
+            for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
     rows = codex_rows(now, codex_root, canonical) + claude_rows(now, claude_root, canonical, live)
     # Each running CLI is attached to one thread; with npm, the launcher and
     # its binary are one CLI.

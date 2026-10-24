@@ -29,7 +29,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -907,6 +907,36 @@ class OfficeViewTests(unittest.TestCase):
     def by_name(self, rows):
         return {row.name: row for row in rows}
 
+    def test_codex_turn_record_beats_session_markers(self):
+        db_path = self.codex.parent / "history.sqlite"
+        db = sqlite3.connect(db_path)
+        db.execute("create table thread_turns(thread_id, turn_id, rollout_ordinal, status, "
+                   "error_json, started_at, completed_at)")
+        db.commit()
+        clock = lambda seconds: mon.time.strftime("%H:%M", mon.time.localtime(seconds))
+        cases = (
+            ("inProgress", int(self.NOW) - 600, None,
+             (mon.WORKING, f"（這輪 {clock(self.NOW - 600)} 起）", 5.0)),
+            ("completed", int(self.NOW) - 3000, int(self.NOW) - 1200,
+             (mon.IDLE, f"等待下一個指示（上一輪 {clock(self.NOW - 1200)} 結束）", 1200.0)),
+            ("failed", int(self.NOW) - 3000, int(self.NOW) - 1200,
+             (mon.ATTENTION, f"上一輪失敗，要看 Codex 畫面（上一輪 {clock(self.NOW - 1200)} 失敗）", 1200.0)),
+        )
+        for ordinal, (status, began, ended, want) in enumerate(cases):
+            with self.subTest(status):
+                db.execute("insert into thread_turns values('T1', ?, ?, ?, 'ERROR-SECRET', ?, ?)",
+                           (f"u{ordinal}", ordinal, status, began, ended))
+                db.commit()
+                self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
+                            ["task_started", "task_complete"], age=5)
+                with patch.object(mon, "CODEX_HISTORY", str(db_path)):
+                    row = self.by_name(self.rows())["codex 主對話"]
+                self.assertEqual(row.state, want[0])
+                self.assertTrue(row.detail.endswith(want[1]), row.detail)
+                self.assertEqual(row.age, want[2])
+                self.assertNotIn("SECRET", row.detail)
+        db.close()
+
     def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                            "originator": "codex-tui"}, ["task_started", "task_complete"], age=180)
@@ -1144,7 +1174,7 @@ class OfficeViewTests(unittest.TestCase):
         sessions = self.claude.parent / "sessions"
         sessions.mkdir()
         cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
-        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限（task wp-1）", 1200.0)),
+        for status, waiting, want in (("waiting", "permission prompt", (mon.ATTENTION, "等人確認權限，要你回（task wp-1）", 1200.0)),
                                       ("idle", None, (mon.IDLE, "task wp-1", 1200.0)),
                                       ("busy", None, (mon.WORKING, "等模型回覆（task wp-1）", 300.0))):
             with self.subTest(status):
@@ -1156,6 +1186,13 @@ class OfficeViewTests(unittest.TestCase):
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
                 self.assertEqual((row.state, row.detail, row.age),
                                  (want[0], want[1] + "｜session s dev-r4", want[2]))
+        driven = mon.Process(41, 5718, 41, "05:00", "Ss+", "Claude Code CLI", "claude",
+                             "Codex APP-SERVER 5718")
+        (sessions / "41.json").write_text(json.dumps(
+            {"pid": 41, "sessionId": "s", "status": "waiting", "waitingFor": "permission prompt"}),
+            encoding="utf-8")
+        row = self.by_name(self.rows([driven]))["claude developer（互動）"]
+        self.assertTrue(row.detail.startswith("等人確認權限，要PM（Codex）回"), row.detail)
 
     def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
