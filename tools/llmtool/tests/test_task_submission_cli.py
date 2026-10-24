@@ -2,6 +2,7 @@ import io
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1464,6 +1465,85 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
                 self.assertNotIn(marker, json.dumps(saved))
 
+    def test_mode_metadata_patch_is_rejected_without_persistence(self):
+        # This text-proposal route never applies a patch, so the checks below
+        # pin non-persistence. Real artifact collection is covered on the
+        # opencode direct route, where the Developer edits a live worktree.
+        target = 'sample.py'
+        patch_text = (
+            f'diff --git a/{target} b/{target}\n'
+            'index 1111111..2222222 100644\n'
+            'old mode 100644\n'
+            'new mode 100755\n'
+            f'--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n'
+        )
+        source = self.executor_root / target
+        source.chmod(0o644)
+        original = source.read_bytes()
+        task = self._pm_task_with_assignment()
+        client = FakeClient(Reply(patch_text, {
+            'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
+        }))
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._delegate_args(
+                task, read_path=[target], write_path=[target]))
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(result['developer']['artifact'])
+        self.assertNotIn('new mode 100755', output.getvalue())
+        # The rejected proposal was never applied to the tree.
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o644)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(saved['developer']['artifact'])
+        self.assertNotIn('new mode 100755', json.dumps(saved))
+
+    def test_opencode_mode_change_artifact_is_rejected_and_never_recorded(self):
+        # The real artifact on this route is the git diff of the live D6 root,
+        # so a Developer that both edits a file and flips its executable bit
+        # produces mode metadata plus a valid hunk: the accepted-before-fix shape.
+        target = 'sample.py'
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            (self.executor_root / target).write_text('VALUE = 2\n')
+            (self.executor_root / target).chmod(0o755)
+            return DirectResult(0, 'ses_Mode0001', 'Updated fixture and mode.',
+                {'prompt_tokens': 18, 'completion_tokens': 9, 'total_tokens': 27},
+                'CLI_REPORTED', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.0.32',
+                10, 1, 'b' * 64)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(code, 1, output.getvalue())
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(developer['artifact'])
+        self.assertEqual(developer['usage']['total_tokens'], 27)
+        # The route rejects the artifact but does not revert the worktree.
+        self.assertEqual(stat.S_IMODE((self.executor_root / target).stat().st_mode), 0o755)
+        self.assertNotIn('new mode 100755', output.getvalue())
+        stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(stored['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(stored['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(stored['developer']['artifact'])
+
     def test_provider_unavailable_is_durable_and_not_fallen_back(self):
         task = self._pm_task_with_assignment()
         args = self._delegate_args(task)
@@ -1700,10 +1780,11 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
                        'rename to tools/llmtool/renamed.py\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'path outside write_paths': (good.replace(target, 'tools/llmtool/other.py'),
                                          'DEVELOPER_OUTPUT_OUT_OF_SCOPE'),
-            # Pinned as found, not endorsed: a mode change rides along with a
-            # real hunk (see #290); changing this verdict is a deliberate decision.
+            # A mode change is rejected even when it rides along with a real
+            # hunk: text Developer routes never change executable bits (#290).
             'mode change with a hunk': (header.replace('--- a/', 'old mode 100644\nnew mode 100755\n--- a/', 1)
-                                        + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n', None),
+                                        + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n',
+                                        'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'hunk count off by one': (
                 header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
@@ -1723,6 +1804,99 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         example = system.split('Exact format example:\n', 1)[1]
         example = example[:example.index('Every hunk header')]
         self.assertIsNone(submission_cli._developer_output_rejection(example, ['example.py']))
+
+
+class ModeMetadataRejectionTests(unittest.TestCase):
+    """#290: permission/mode metadata is never accepted on a text Developer route.
+
+    A text Developer patch may not change executable bits, so every documented
+    mode-metadata shape is rejected by the strict parser before screening,
+    persistence or application. Ordinary textual diffs keep their verdict."""
+
+    TARGET = 'tools/llmtool/example.py'
+    SECOND = 'tools/llmtool/second.py'
+
+    def _section(self, path=None, *, metadata=(), hunk=True):
+        path = self.TARGET if path is None else path
+        parts = [f'diff --git a/{path} b/{path}\n', *metadata,
+                 f'--- a/{path}\n+++ b/{path}\n']
+        if hunk:
+            parts.append('@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n')
+        return ''.join(parts)
+
+    def test_mode_metadata_shapes_are_rejected(self):
+        clean = self._section()
+        cases = {
+            'executable bit added with a hunk': self._section(
+                metadata=('index 1111111..2222222 100644\n', 'old mode 100644\n',
+                          'new mode 100755\n')),
+            'executable bit removed with a hunk': self._section(
+                metadata=('old mode 100755\n', 'new mode 100644\n')),
+            'mode change before the index line': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n',
+                          'index 1111111..2222222\n')),
+            'mode change without a hunk': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n'), hunk=False),
+            'solo old mode': self._section(metadata=('old mode 100644\n',)),
+            'solo new mode': self._section(metadata=('new mode 100755\n',)),
+            'new file mode': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                'new file mode 100644\n'
+                f'--- /dev/null\n+++ b/{self.TARGET}\n@@ -0,0 +1 @@\n+new\n'),
+            'deleted file mode': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                'deleted file mode 100644\n'
+                f'--- a/{self.TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'),
+            'mode change in a later section': clean + self._section(
+                path=self.SECOND, metadata=('old mode 100644\n', 'new mode 100755\n')),
+            'mode change in an earlier section': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n')) + self._section(
+                path=self.SECOND),
+            'mode metadata with CRLF line endings': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n')).replace(
+                    '\n', '\r\n'),
+            'mode metadata after the file headers': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                f'--- a/{self.TARGET}\n+++ b/{self.TARGET}\n'
+                'old mode 100644\nnew mode 100755\n'
+                '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n'),
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertEqual(
+                    submission_cli._developer_output_rejection(
+                        text, [self.TARGET, self.SECOND]),
+                    'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+    def test_rejection_is_caused_by_the_mode_metadata_alone(self):
+        rejection = submission_cli._developer_output_rejection
+        indexed = self._section(metadata=('index 1111111..2222222 100644\n',))
+        mode_change = self._section(
+            metadata=('index 1111111..2222222 100644\n', 'old mode 100644\n',
+                      'new mode 100755\n'))
+        self.assertEqual(mode_change.replace('old mode 100644\nnew mode 100755\n', ''),
+                         indexed)
+        self.assertIsNone(rejection(indexed, [self.TARGET]))
+        self.assertEqual(rejection(mode_change, [self.TARGET]),
+                         'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+    def test_ordinary_text_diffs_and_scope_checks_are_unchanged(self):
+        rejection = submission_cli._developer_output_rejection
+        plain = self._section()
+        indexed = self._section(metadata=('index 1111111..2222222 100644\n',))
+        two_files = self._section() + self._section(path=self.SECOND)
+        self.assertIsNone(rejection(plain, [self.TARGET]))
+        self.assertIsNone(rejection(indexed, [self.TARGET]))
+        self.assertIsNone(rejection(two_files, [self.TARGET, self.SECOND]))
+        self.assertEqual(rejection(two_files, [self.TARGET]),
+                         'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        # Parser rejection precedes the scope verdict, so a mode change fails
+        # closed even when its path is outside the allowlist.
+        self.assertEqual(
+            rejection(self._section(metadata=('old mode 100644\n',
+                                              'new mode 100755\n')),
+                      ['tools/llmtool/other.py']),
+            'DEVELOPER_OUTPUT_INVALID_DIFF')
 
 
 class DispatcherGitTimeoutTests(unittest.TestCase):
