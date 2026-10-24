@@ -1580,6 +1580,47 @@ class TaskSubmissionCLITests(unittest.TestCase):
         saved = backing.get(task['task_id'])
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
+    def test_interrupted_after_durable_claim_is_not_completed_or_replayed(self):
+        task = self._pm_task_with_assignment()
+        backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+        class InterruptAfterClaimStore:
+            def get(self, task_id):
+                return backing.get(task_id)
+
+            def compare_and_update(self, task_id, **kwargs):
+                result = backing.compare_and_update(task_id, **kwargs)
+                if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
+                    # Model a process interruption at the exact durable-claim boundary,
+                    # before config resolution, client creation, or provider execution.
+                    raise SystemExit(77)
+                return result
+
+            def update(self, task_id, **kwargs):
+                return backing.update(task_id, **kwargs)
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                return backing.append_dispatch_audit(task_id, entry, expected=expected)
+
+        args = self._delegate_args(task)
+        client = FakeClient(Reply('unused', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client) as factory:
+            with self.assertRaises(SystemExit) as interrupted:
+                run_task_delegate(args, store=InterruptAfterClaimStore())
+            self.assertEqual(interrupted.exception.code, 77)
+            pending = backing.get(task['task_id'])
+            self.assertEqual(pending['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(pending['completion']['state'], 'WAITING_EXECUTOR')
+            factory.assert_not_called()
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+        self.assertEqual(client.calls, [])
+
     def test_mismatched_diff_headers_and_fake_empty_diff_are_rejected(self):
         task_target = 'tools/llmtool/tests/test_task_submission_cli.py'
         bad_artifacts = (
