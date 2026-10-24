@@ -2231,6 +2231,41 @@ class OfficeViewTests(unittest.TestCase):
             (539, {"type": "custom_tool_call_output", "call_id": "h1", "output": [
                 {"type": "input_text", "text": "--- 1 ---"}, {"type": "input_text", "text": "23: --x"},
                 {"type": "input_text", "text": "--- 2 ---"}, {"type": "input_text", "text": "a b"}]}),
+            # the PM's own wrapper {"rev": exec result, "runs": other tool}: the reply under "rev"
+            (530, call("w1", 'const r = await tools.exec_command({cmd:"gh pr diff 300 | claude -p '
+                             '--output-format json \'Review PR #300 exact head ddddddd4444.\'"})')),
+            (529, dict(out('{"session_id":88475,"output":""}'), call_id="w1")),
+            (520, call("w2", "const [rev,runs] = await Promise.all([tools.write_stdin({session_id:88475}), "
+                             "tools.mcp__github_runs({})]); text(JSON.stringify({rev,runs}))")),
+            (519, dict(out(json.dumps({"rev": {"exit_code": 0, "output": json.dumps(
+                {"type": "result", "session_id": "8b02ea99", "is_error": False,
+                 "result": "**Verdict: PASS** at exact head `ddddddd4444` PR #300"})},
+                "runs": {"structuredContent": {"workflow_runs": []}}})), call_id="w2")),
+            # labelled parts "REVIEW\n..." and "CI\n...": the one with a verdict is the call's
+            (510, call("l1", 'const r = await tools.exec_command({cmd:"claude -p \'Review PR #301 '
+                             'HEAD eeeeeee5555\'"}); text(r.output); text(`SESSION_ID=${r.session_id}`)')),
+            (509, {"type": "custom_tool_call_output", "call_id": "l1", "output": [
+                {"type": "input_text", "text": ""}, {"type": "input_text", "text": "SESSION_ID=19969"}]}),
+            (500, call("l2", "const [review,run] = await Promise.all([tools.write_stdin({session_id:19969}), "
+                             "tools.gh_runs({})]); text(\"REVIEW\\n\"+review.output); text(\"CI\\n\"+run)")),
+            (499, {"type": "custom_tool_call_output", "call_id": "l2", "output": [
+                {"type": "input_text", "text": "REVIEW\n**Verdict: CHANGES_REQUIRED** (bound to HEAD "
+                                               "`eeeeeee5555`)\n"},
+                {"type": "input_text", "text": 'CI\n{"workflow_runs":[{"status":"in_progress"}]}'}]}),
+            # the PM's claude was not logged in; another, a path that is not a program
+            (490, call("n1", 'const r = await tools.exec_command({cmd:"claude -p \'Review PR #302 '
+                             'head fffffff6666\'"}); text(r.output); text(`SESSION_ID=${r.session_id}`)')),
+            (489, {"type": "custom_tool_call_output", "call_id": "n1", "output": [
+                {"type": "input_text", "text": ""}, {"type": "input_text", "text": "SESSION_ID=66628"}]}),
+            (480, call("n2", "const [review,run] = await Promise.all([tools.write_stdin({session_id:66628}), "
+                             "tools.gh_runs({})]); text(\"REVIEW\\n\"+review.output); text(\"RUNS\\n\"+run)")),
+            (479, {"type": "custom_tool_call_output", "call_id": "n2", "output": [
+                {"type": "input_text", "text": "REVIEW\nNot logged in · Please run /login\n"},
+                {"type": "input_text", "text": 'RUNS\n{"workflow_runs":[]}'}]}),
+            (470, call("x1", 'const r = await tools.exec_command({cmd:"/x/claude/2.1/claude -p '
+                             '\'Review PR #303 head 0000000aaaa1\'"})')),
+            (469, dict(out('{"exit_code":127,"output":"zsh:1: not a directory: /x/claude/2.1/claude\\n"}'),
+                       call_id="x1")),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
             (44, call("c7", "const note=`see claude --print in the docs`;")),
@@ -2264,6 +2299,10 @@ class OfficeViewTests(unittest.TestCase):
                                    "審 PR #297 @aaaaaaa：CHANGES_REQUIRED": mon.DONE,
                                    f"審 PR #298 @bbbbbbb：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #299 @ccccccc：PASS": mon.DONE,
+                                   "審 PR #300 @ddddddd：PASS": mon.DONE,
+                                   "審 PR #301 @eeeeeee：CHANGES_REQUIRED": mon.DONE,
+                                   f"審 PR #302 @fffffff：{mon.NOT_LOGGED_IN_TEXT}": mon.DONE,
+                                   f"審 PR #303 @0000000：{mon.NOT_FOUND_TEXT}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))

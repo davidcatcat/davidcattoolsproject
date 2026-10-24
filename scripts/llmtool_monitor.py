@@ -2085,6 +2085,10 @@ TIMED_OUT = re.compile(r'"exit_code":124\b|\bexit_code=124\b|^EXIT[ =]124$', re.
 NO_VERDICT, OVER_BUDGET_TEXT = "結束但沒有判定（可能呼叫失敗）", "超過預算上限，沒有判定"
 AMBIGUOUS = "結果無法對應（同一次輸出裡有多個指令的結果）"
 TIMED_OUT_TEXT = "逾時被中止，沒有判定"
+NOT_LOGGED_IN = re.compile(r"^Not logged in\b", re.M)
+NOT_LOGGED_IN_TEXT = "claude 沒有登入，沒有判定"
+NOT_FOUND = re.compile(r'"exit_code":127\b|\bexit_code=127\b|^EXIT[ =]127$', re.M)   # shell: no such program
+NOT_FOUND_TEXT = "找不到 claude 程式，沒有判定"
 SCRIPT_FAILED = "PM 的呼叫腳本出錯，claude 沒有回覆"
 MISMATCH = "回覆的 PR／版本跟呼叫時不同"
 _review_cache: dict = {}
@@ -2160,27 +2164,37 @@ def _review_target(text: str) -> tuple[str, str]:
 
 
 def _result_text(text: str) -> str:
-    """The command's own output from one exec result: a JSON result object's
-    "output" string (also inside a Promise.allSettled "value"), the reply of a
-    `claude --print --output-format json` the PM polled to its end, else the text."""
+    """The command's own output from one exec result: the reply of a `claude
+    --print --output-format json` the PM polled to its end, else a JSON result
+    object's "output" string (also inside a Promise.allSettled "value"), else the text."""
+    reply = _nested_reply(text)
+    if reply is not None:
+        return reply
     item = _json_object(text)
     if type(item) is dict and type(item.get("value")) is dict:
         item = item["value"]
-    if type(item) is dict and type(item.get("output")) is str:
-        text = item["output"]
-        item = _json_object(text)
-    return _claude_reply(item) if _is_claude_reply(item) else text
+    return item["output"] if type(item) is dict and type(item.get("output")) is str else text
+
+
+def _nested_reply(item, depth: int = 0) -> str | None:
+    """The `--output-format json` Claude reply in one exec result: bare, as an
+    exec result's "output" string, or under any key of the PM's own wrapper
+    such as {"rev": {...}, "runs": {...}}; None when there is none."""
+    if type(item) is str:
+        item = _json_object(item)
+    if _is_claude_reply(item):
+        return _claude_reply(item)
+    if type(item) is not dict or depth >= 3:
+        return None
+    for value in item.values():
+        found = _nested_reply(value, depth + 1) if type(value) in (dict, str) else None
+        if found is not None:
+            return found
+    return None
 
 
 def _polled_reply(text: str) -> bool:
-    """Whether one exec result is a `--output-format json` Claude reply, bare
-    or as the "output" of an exec result (also inside a Promise.allSettled "value")."""
-    item = _json_object(text)
-    if type(item) is dict and type(item.get("value")) is dict:
-        item = item["value"]
-    if type(item) is dict and type(item.get("output")) is str:
-        item = _json_object(item["output"])
-    return _is_claude_reply(item)
+    return _nested_reply(text) is not None
 
 
 def _json_object(text: str):
@@ -2207,15 +2221,17 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     # A polled `--output-format json` reply has no exit marker: the reply itself
     # shows the run ended.
     if not direct and not any(EXITED.search(text) for text in parts) and not any(
-            REVIEW_VERDICT.search(text) or _polled_reply(text) for text in results):
+            REVIEW_VERDICT.search(text) or _polled_reply(text) or NOT_LOGGED_IN.search(text)
+            for text in results):
         return None
     if any(text.startswith("Script failed") for text in parts):
         return SCRIPT_FAILED   # the PM's exec script broke before claude answered
     # The PM may poll the call together with other commands: a single Claude
-    # reply among their outputs is this call's.
-    replies = [text for text in results if _polled_reply(text)]
-    if len(results) > 1 and len(replies) == 1:
-        results = replies
+    # reply, else a single verdict or login refusal, among their outputs is this call's.
+    for mine in (_polled_reply, REVIEW_VERDICT.search, NOT_LOGGED_IN.search):
+        found = [text for text in results if mine(text)]
+        if len(results) > 1 and len(found) == 1:
+            results = found
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
@@ -2231,6 +2247,10 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     if verdict is None:
         if any(map(OVER_BUDGET.search, parts)):
             return OVER_BUDGET_TEXT
+        if any(map(NOT_LOGGED_IN.search, parts)):
+            return NOT_LOGGED_IN_TEXT
+        if any(map(NOT_FOUND.search, parts)):
+            return NOT_FOUND_TEXT
         return TIMED_OUT_TEXT if any(map(TIMED_OUT.search, parts)) else NO_VERDICT
     # A delta review names the old head too: the reply matches when the PR and
     # head the call named are among those it mentions.
