@@ -31,6 +31,9 @@ SECRET = 'DG1_SYNTHETIC_SECRET'
 # for scheduling margin. Existing product assertions expire BEFORE this guard;
 # the guard cannot make a failed 5s termination assertion pass.
 FIXTURE_LIFETIME = 2 * (10 + 20 + 5 + 5)
+# The process-state probes use the ps on PATH. A sandboxed CI job cannot run
+# the setuid /bin/ps, so the Mac CI puts a plain copy first (Issue #99).
+PS = shutil.which('ps') or '/bin/ps'
 
 
 class TUISignalOwnershipTests(unittest.TestCase):
@@ -204,7 +207,7 @@ def _bootstrap(function):
 def _zombie_only_group(pgid, known_pids, pinned_pid=None):
     """Read complete membership, not just the previously captured descendants."""
     try:
-        result = subprocess.run(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
+        result = subprocess.run([PS, '-A', '-o', 'pid=,pgid=,stat='],
                                 capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
@@ -447,7 +450,7 @@ class CLIProviderLifecycleTests(unittest.TestCase):
     def states(pids):
         # PID 1 may delay zombie reaping on CI. A zombie cannot execute; never
         # mistake kill(pid, 0) alone for a surviving/running process.
-        result = subprocess.run(['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=', '-p',
+        result = subprocess.run([PS, '-o', 'pid=,ppid=,pgid=,stat=', '-p',
                                  ','.join(map(str, pids))], capture_output=True, text=True,
                                 timeout=5)
         if result.returncode not in (0, 1) or result.stderr:
@@ -855,7 +858,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
                         patch.object(subprocess, 'run', return_value=inventory) as probe:
                     self.permission_cleanup(path)
                     kill.assert_called_once_with(123, signal.SIGKILL)
-                    probe.assert_called_once_with(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
+                    probe.assert_called_once_with([PS, '-A', '-o', 'pid=,pgid=,stat='],
                                                   capture_output=True, text=True, timeout=5)
 
     def test_darwin_permission_rejects_live_unknown_and_unverifiable_groups(self):
@@ -872,7 +875,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             'changed-group': Mock(returncode=0, stderr='', stdout='123 456 Z\n124 123 Z\n'),
             'ps-failed': Mock(returncode=1, stderr='', stdout='123 123 Z\n'),
             'ps-warning': Mock(returncode=0, stderr='synthetic warning', stdout='123 123 Z\n'),
-            'timeout': subprocess.TimeoutExpired('/bin/ps', 5),
+            'timeout': subprocess.TimeoutExpired(PS, 5),
             'unavailable': OSError('synthetic unavailable'),
         }
         for path in ('watchdog', 'fixture'):

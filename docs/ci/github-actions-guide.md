@@ -4,7 +4,7 @@
 
 Owner 決定保持 Private repository、不再使用付費 GitHub-hosted Runner。正式舊 workflow `llmtool CI`、`nlf CI`、控制分支 `ai-loop helper CI` 已在 GitHub 設為 `disabled_manually`；[最後一筆 llmtool Ubuntu run 40113971497](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113971497) 已取消。這是止費狀態，並非新 CI PASS。Mac smoke [40113489740](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113489740) 只證明 Runner 連線與 Python 3.13.3 可啟動，未證明安全隔離。
 
-本候選新增 `llmtool-mac-ci.yml`，刪除舊 `llmtool-ci.yml` 檔案；舊 workflow ID 必須保持 disabled，絕不可為了測試新候選而重啟。新 job `check (macOS 3.13)` 指定 `[self-hosted, macOS, X64, local-mac-ci]`，預設還受 repository variable `MAC_CI_ENABLED == 'true'` 阻擋。即使有人先啟用新 workflow，未設變數時 skipped job 是 **NOT_RUN，不是 PASS**，task completion 亦不接受。僅在 Runner 專用非管理員帳號、個人憑證／SSH／VPN／其他 Agent worktree 隔離，以及正式 Security 審查通過後，PM 才可啟用新 workflow 和該變數並驗證 PR source HEAD。原 Runner 已下線；它以個人帳號執行、可能共用 VPN 的問題仍未解除，不可用來跑 PR 程式碼。
+本候選新增 `llmtool-mac-ci.yml`，刪除舊 `llmtool-ci.yml` 檔案；舊 workflow ID 必須保持 disabled，絕不可為了測試新候選而重啟。新 job `check (macOS 3.13)` 指定 `[self-hosted, macOS, X64, local-mac-ci]`，並受 repository variable `MAC_CI_ENABLED == 'true'` 控制（Kill switch）；未設或非 `true` 時 job skipped，是 **NOT_RUN，不是 PASS**，task completion 亦不接受。Runner 以 Owner 本人帳號執行，因此 Runner 服務必須以 [tools/mac-runner](../../tools/mac-runner/README.md) 的 macOS sandbox 啟動：Job 無法讀取家目錄（SSH／AWS／VPN 設定、其他 Agent worktree）、共用暫存目錄與 Keychain，無法寫 Runner 以外位置，也無法經 launchctl／open／Apple Events 跳出沙箱；每個 Job 開始前的 Runner hook 會確認沙箱有效，並只接受本 repo、本人帳號、非 fork 的 PR 與 main push。網路（含 VPN）仍未隔離，這是殘餘風險；更強的解法是 Runner 專用非管理員帳號（需 sudo，Owner 決定）。
 
 | 驗證範圍 | 遷移候選狀態 | 驗收解讀 |
 | --- | --- | --- |
