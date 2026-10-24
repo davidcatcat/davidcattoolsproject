@@ -3,10 +3,10 @@ name: llmtool Mac CI
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
 # main keeps its post-merge run; workflow_dispatch is the manual check for a
-# ref without a PR. Jobs run on the Owner's Mac only inside the runner
-# sandbox from tools/mac-runner (installed outside the repo, so a PR cannot
-# turn it off); its job-started hook fails any job from an unsandboxed
-# runner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
+# ref without a PR. Jobs run on the Owner's Mac as the dedicated non-admin
+# account from tools/mac-runner (installed outside the repo, so a PR cannot
+# turn it off); its job-started hook fails any job from a runner running as
+# the Owner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
 # anything but 'true' skips the job, and a skipped job is NOT_RUN, not PASS.
 on:
   push:
@@ -179,12 +179,6 @@ jobs:
                           path.chmod(0o600)
           print('Verifier checks: 12/12 PASS; no skips')
           PY
-      # The sandboxed job cannot run the setuid /bin/ps the process-lifecycle
-      # tests use; put the kern.proc reader from tools/mac-runner first.
-      - name: Sandbox-compatible ps
-        run: |
-          echo "$GITHUB_WORKSPACE/tools/mac-runner/bin" >> "$GITHUB_PATH"
-          "$GITHUB_WORKSPACE/tools/mac-runner/bin/ps" -o pid=,ppid=,pgid=,stat= -p $$
       - name: Offline canonical checks
         run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
       - name: Monitor script checks
