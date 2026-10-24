@@ -11,6 +11,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from dataclasses import replace
 from pathlib import Path
 
 _PATH = Path(__file__).with_name("llmtool_monitor.py")
@@ -1532,6 +1533,26 @@ class OfficeViewTests(unittest.TestCase):
         self.assertFalse(any(row.name == "claude 單次呼叫" for row in self.rows([query])))
         state, _, _ = mon.track_one_shot({}, [query], 1000.0)
         self.assertEqual(state, {})
+
+    def test_review_call_without_a_live_process_has_ended(self):
+        review = mon.OfficeRow("claude 單次呼叫", mon.WORKING, "審 PR #9 @abc1234（單次呼叫執行中）",
+                               360.0, 30, key="review", kind="subagent")
+        newer = replace(review, age=30.0, detail="審 PR #8 @def5678（單次呼叫執行中）")
+        live = mon.Process(40, 5718, 40, "00:30", "S", "Claude Code CLI", "claude",
+                           "Codex APP-SERVER 5718")
+        other = mon.Process(7, 1, 7, "01:00", "S", "Codex APP-SERVER", "codex", "")
+        with patch.object(mon, "codex_rows", return_value=[review, newer]):
+            rows = self.rows([live, other])
+        calls = {row.detail: row.state for row in rows if row.key == "review"}
+        self.assertEqual(calls, {"審 PR #9 @abc1234：程序已結束，PM 沒讀結果": mon.DONE,
+                                 "審 PR #8 @def5678（單次呼叫執行中）": mon.WORKING})
+        self.assertFalse(any("看不出是哪個對話" in row.detail for row in rows))
+
+    def test_monitor_names_its_version_and_notices_new_code(self):
+        self.assertTrue(mon.monitor_version())
+        with patch.object(mon, "script_digest", return_value="aaaaaaa"):
+            monitor = mon.Monitor()
+        self.assertEqual((monitor.digest, monitor.stale), ("aaaaaaa", False))
 
     def test_short_one_shot_run_stays_visible_as_done_after_it_exits(self):
         run = mon.Process(40, 5718, 40, "00:05", "S", "Claude Code CLI", "claude",
