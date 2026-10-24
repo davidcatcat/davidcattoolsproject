@@ -17,12 +17,14 @@ on:
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-mac-ci.yml'
+      - 'tools/mac-runner/**'
   pull_request:
     paths:
       - 'tools/llmtool/**'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-mac-ci.yml'
+      - 'tools/mac-runner/**'
   workflow_dispatch:
 
 permissions:
