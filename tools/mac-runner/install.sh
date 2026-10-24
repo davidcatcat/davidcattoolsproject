@@ -137,8 +137,10 @@ EOF
 chmod 0644 "$pf_daemon"
 launchctl bootout system "$pf_daemon" 2>/dev/null || true
 launchctl bootstrap system "$pf_daemon"
-for _ in $(seq 1 10); do pfctl -a "$anchor" -s rules 2>/dev/null | grep -q "user = $account" && break; sleep 1; done
-pfctl -a "$anchor" -s rules 2>/dev/null | grep -q "user = $account" || fail "pf rules not loaded"
+# pfctl lists the account by uid ("user = 450").
+uid=$(id -u "$account")
+for _ in $(seq 1 10); do pfctl -a "$anchor" -s rules 2>/dev/null | grep -q "user = $uid\$" && break; sleep 1; done
+pfctl -a "$anchor" -s rules 2>/dev/null | grep -q "user = $uid\$" || fail "pf rules not loaded"
 pfctl -s info 2>/dev/null | grep -q 'Status: Enabled' || fail "pf is not enabled"
 # Proof on a private address the Owner can reach: the LAN gateway.
 gateway=$(route -n get default 2>/dev/null | awk '/gateway:/ {print $2}')
