@@ -91,8 +91,12 @@ rsync -a --delete --exclude '/_work' --exclude '/_diag' --exclude '/_home' --exc
   --exclude '/.path' --exclude '/.service' "$src/" "$dst/"
 cp "$src/bin/runsvc.sh" "$dst/runsvc.sh"   # the runner's own, unchanged template
 # Root owns everything except ghrunner's own folders (kept on a re-run).
-find "$dst" \( -path "$dst/_work" -o -path "$dst/_tmp" -o -path "$dst/_diag" \) -prune -o \
-  -exec chown root:wheel {} + -exec chmod go-w {} +
+# rsync copied the Owner's modes (the source folder is 0700), so everything
+# is made readable, and folders and programs usable, by ghrunner; only the
+# credential files below stay private.
+find "$dst" \( -path "$dst/_work" -o -path "$dst/_tmp" -o -path "$dst/_diag" -o -path "$dst/.runner" \
+  -o -path "$dst/.credentials" -o -path "$dst/.credentials_rsaparams" \) -prune -o \
+  -exec chown root:wheel {} + -exec chmod a+rX,go-w {} +
 chmod 0755 "$dst/runsvc.sh"
 for file in .runner .credentials .credentials_rsaparams; do
   if test -f "$dst/$file"; then chown "$account:$account" "$dst/$file"; chmod 0600 "$dst/$file"; fi
