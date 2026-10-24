@@ -2210,6 +2210,27 @@ class OfficeViewTests(unittest.TestCase):
                                        "total_cost_usd": 0, "is_error": True,
                                        "subtype": "error_during_execution"})),
                        call_id="a2")),
+            # polled inside Promise.allSettled with other commands: the one Claude reply,
+            # nested in its exec result's "output", is this call's
+            (560, call("g1", 'const r = await tools.exec_command({cmd:"gh pr diff 299 | claude -p '
+                             '--output-format json \'Review PR #299 at HEAD ccccccc3333.\'"})')),
+            (559, dict(out('{"session_id":52168,"output":""}'), call_id="g1")),
+            (550, call("g2", "const r = await Promise.allSettled([tools.write_stdin({session_id:52168}), "
+                             "tools.exec_command({cmd:'gh run view 1'})]); for (const x of r) "
+                             "text(JSON.stringify(x.value))")),
+            (549, {"type": "custom_tool_call_output", "call_id": "g2", "output": [
+                {"type": "input_text", "text": "--- 1 ---"},
+                {"type": "input_text", "text": json.dumps({"exit_code": 0, "output": json.dumps(
+                    {"type": "result", "session_id": "35fc5e9f", "is_error": False,
+                     "result": "# Review PR #299 head ccccccc3333\n**Verdict: PASS**"})})},
+                {"type": "input_text", "text": "--- 2 ---"},
+                {"type": "input_text", "text": '{"exit_code":0,"output":"{\\"conclusion\\":\\"\\"}"}'}]}),
+            # looking up `claude -p --help` is not a call
+            (540, call("h1", 'const r = await Promise.allSettled([tools.exec_command({cmd:"claude -p '
+                             '--help | rg -n \\"max-budget\\""}), tools.exec_command({cmd:"ls"})])')),
+            (539, {"type": "custom_tool_call_output", "call_id": "h1", "output": [
+                {"type": "input_text", "text": "--- 1 ---"}, {"type": "input_text", "text": "23: --x"},
+                {"type": "input_text", "text": "--- 2 ---"}, {"type": "input_text", "text": "a b"}]}),
             # prose quoting the command is not a call
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),
             (44, call("c7", "const note=`see claude --print in the docs`;")),
@@ -2242,6 +2263,7 @@ class OfficeViewTests(unittest.TestCase):
                                    f"審 PR #296 @9999999：{mon.SCRIPT_FAILED}": mon.DONE,
                                    "審 PR #297 @aaaaaaa：CHANGES_REQUIRED": mon.DONE,
                                    f"審 PR #298 @bbbbbbb：{mon.NO_VERDICT}": mon.DONE,
+                                   "審 PR #299 @ccccccc：PASS": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))

@@ -2050,6 +2050,19 @@ CLAUDE_CALL = re.compile(
     r"(?:^|[\n;(\"']|&&|\|\||\|\s|\$\(|=\s*`)\s*(?:timeout\s+\d+[smhd]?\s+)?"
     r"(?:[\w./~-]*/)?claude\b"
     r"[^|;&\n]{0,80}?(?:--print\b|\s-p(?:\s|$)|'--print'|\"--print\")", re.M)
+# `claude -p --help` / `--version` only prints usage: it is not a call.
+CLAUDE_INFO = re.compile(r"\s(?:--help|-h|--version|-v)(?=[\s\"'|;&)]|$)")
+
+
+def _claude_call(text: str):
+    """The first `claude --print` call in text, skipping usage lookups."""
+    for found in CLAUDE_CALL.finditer(text):
+        command = re.split(r"[|;&\n]|\\n", text[found.end():found.end() + 400], maxsplit=1)[0]
+        if not CLAUDE_INFO.search(text[found.start():found.end()] + command):
+            return found
+    return None
+
+
 STDIN_POLL = re.compile(r"write_stdin\(\{\s*session_id\s*:\s*(\d{1,9})")
 # A verdict counts only as its own line ("**Verdict: FAIL**", "## Review Verdict:
 # PASS"), not inside a sentence quoting an earlier one.
@@ -2083,7 +2096,7 @@ RESULT_FILE = re.compile(r"(?<![\d&>])>\s*(/[\w./+-]{1,200})")
 
 
 def _review_file(text: str) -> str:
-    found = CLAUDE_CALL.search(text)
+    found = _claude_call(text)
     if found is None:
         return ""
     command = re.split(r"\n|\\n", text[found.start():found.start() + 4096], maxsplit=1)[0]
@@ -2150,18 +2163,24 @@ def _result_text(text: str) -> str:
     """The command's own output from one exec result: a JSON result object's
     "output" string (also inside a Promise.allSettled "value"), the reply of a
     `claude --print --output-format json` the PM polled to its end, else the text."""
-    if text.lstrip().startswith("{"):
-        try:
-            item = json.loads(text)
-        except ValueError:
-            return text
-        if type(item) is dict and type(item.get("value")) is dict:
-            item = item["value"]
-        if type(item) is dict and type(item.get("output")) is str:
-            return item["output"]
-        if _is_claude_reply(item):
-            return _claude_reply(item)
-    return text
+    item = _json_object(text)
+    if type(item) is dict and type(item.get("value")) is dict:
+        item = item["value"]
+    if type(item) is dict and type(item.get("output")) is str:
+        text = item["output"]
+        item = _json_object(text)
+    return _claude_reply(item) if _is_claude_reply(item) else text
+
+
+def _polled_reply(text: str) -> bool:
+    """Whether one exec result is a `--output-format json` Claude reply, bare
+    or as the "output" of an exec result (also inside a Promise.allSettled "value")."""
+    item = _json_object(text)
+    if type(item) is dict and type(item.get("value")) is dict:
+        item = item["value"]
+    if type(item) is dict and type(item.get("output")) is str:
+        item = _json_object(item["output"])
+    return _is_claude_reply(item)
 
 
 def _json_object(text: str):
@@ -2188,11 +2207,15 @@ def _review_outcome(origin: tuple, parts: list[str], direct: bool) -> str | None
     # A polled `--output-format json` reply has no exit marker: the reply itself
     # shows the run ended.
     if not direct and not any(EXITED.search(text) for text in parts) and not any(
-            REVIEW_VERDICT.search(text) or _is_claude_reply(_json_object(text))
-            for text in results):
+            REVIEW_VERDICT.search(text) or _polled_reply(text) for text in results):
         return None
     if any(text.startswith("Script failed") for text in parts):
         return SCRIPT_FAILED   # the PM's exec script broke before claude answered
+    # The PM may poll the call together with other commands: a single Claude
+    # reply among their outputs is this call's.
+    replies = [text for text in results if _polled_reply(text)]
+    if len(results) > 1 and len(replies) == 1:
+        results = replies
     if len(results) > 1:
         return AMBIGUOUS
     head = _result_text(results[0])[:1500] if results else ""
@@ -2259,7 +2282,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         kind, call = payload.get("type"), payload.get("call_id")
         if kind == "custom_tool_call":
             text = str(payload.get("input") or "")
-            if CLAUDE_CALL.search(text):
+            if _claude_call(text):
                 cache["calls"][call] = (when,) + _review_target(text) + (_review_file(text),)
             found = STDIN_POLL.search(text)
             if found:
