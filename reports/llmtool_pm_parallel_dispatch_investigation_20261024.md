@@ -107,11 +107,11 @@ PM 沒有持續平行派工，主因不在個別判斷錯誤，而是下面三�
 - 沒有啟動 Codex Goals，沒有設任何目標，也沒有派工。
 - 沒有對任何 session 送指令，也沒有回應 R4 的權限確認。
 - PM 對話內容只讀了 Owner 訊息的時間和內容摘要，用來對時間軸；沒有讀模型輸出和工具輸出。Codex 資料庫只讀了輪次的狀態和時間，以及 subagent 的名稱和路徑。
-- 數字來自 Owner 這台 Mac 的本機紀錄，時間都是 Asia/Taipei，查詢時間到 13:15 為止。
+- §1–§5 的 Session 與時間軸資料來自 Owner 這台 Mac 的本機紀錄，時間都是 Asia/Taipei，查詢時間到 13:15；§6.5 的唯讀版本/help/資料表查證約在 13:20。沒有讀取模型輸出或 Provider 憑證。
 
 ## 6. 補充（2026-10-24，Owner 與 Coordinator 討論後）
 
-Owner 已同意採用「(c) + (d)」方向，並要求把下列內容補進本報告。本節只記錄方向和查證結果，不改任何正式執行設定，不啟動 Goals，也不派工。
+依 Owner 與 Coordinator 的討論紀錄，採用「(c) + (d)」作為**架構方向**。這項方向決定不等於實作授權、Worker 派工、Goals 實驗授權或正式啟用；本節只記錄方向、待驗證假設與本機查證，不改正式設定、不啟動 Goals、不派工。實作仍須依現行 dispatch、D6、資料、預算、審查與 CI Gate 取得對應 Task 授權。
 
 ### 6.1 問題要拆成三個環節，不能三選一
 
@@ -125,32 +125,34 @@ Owner 已同意採用「(c) + (d)」方向，並要求把下列內容補進本�
 | 環節 | 負責 | 採用方向 |
 |---|---|---|
 | 工作執行 | Developer | (c) 非互動執行，用任務級工具白名單 |
-| 結果回傳 | Developer → llmtool Core | 結果、權限等待、完成都當作事件，綁定 Task ID、Run ID 和原 Session，持久化並去重 |
+| 結果回傳 | Developer → llmtool Core | 結果、完成及互動 Session 的權限等待作為事件，綁定 Task ID、Run ID 和原 Session，持久化並去重；非互動工具拒絕則回傳 `TOOL_DENIED` 結果，不形成等待事件 |
 | PM 接續 | llmtool Core → 原 PM | (d) Core 收到可信事件後恢復原 PM，由 PM 自己決定下一步 |
 
 初版的 (a) 定時送「繼續」不採用，因為有空轉、重複觸發和浪費 token 的風險。(b) 由 Owner 或 Coordinator 定時叫醒也不採用，因為等於繼續人工傳話。只做 (c) 也不夠：Developer 交回的結果，還是需要有東西讓已結束的 PM 重新開始。
 
 ### 6.2 (c) Developer 非互動執行
 
-- Developer 改用非互動模式，例如 `claude -p --permission-mode dontAsk --allowedTools …`。白名單外的操作會**直接被拒絕**，不會無限等待。
-- 白名單**依任務**訂在 Task Contract 裡：寫明可用的工具、可寫的路徑，以及可執行的指令樣式。
+- Developer 改用非互動模式，例如 `claude -p --permission-mode dontAsk --allowedTools …`。預期白名單外操作會以拒絕結果結束，但本報告只查到 CLI help 列出相關選項，未驗證拒絕行為；不得把它當成既有保證。
+- 白名單**依任務**訂在 Task Contract 裡：寫明可用的工具、可寫的路徑，以及可執行的指令樣式。這些是最小權限規則，不是作業系統層的 containment；D6、程序隔離與資料邊界仍須獨立驗證。
 - **不能**全面放行 Shell（例如整個 `Bash`），**不能**用 `bypassPermissions`，也不能用任何跳過權限檢查的參數。
 - 被拒絕的操作要記成可辨識的結果（例如 `TOOL_DENIED` 加上工具名稱），透過結果回傳交給 PM。由 PM 決定要補白名單、改做法還是升級給 Owner；Developer 自己不能放寬。
-- 要注意：白名單太窄時，Developer 會從「卡住」變成「失敗」。例如 R4 需要啟動 codex app-server 和跑 shell，這類任務要先列出最小指令集再派工。
+- 要注意：白名單太窄時，Developer 會從「卡住」變成「失敗」。例如 R4 需要啟動 codex app-server 和跑 shell，這類任務要先列出最小指令集再派工。上述拒絕、回傳與程序限制目前都尚未由本報告的查證驗收。
 
 ### 6.3 (d) llmtool Core 接收可信事件後恢復原 PM
 
 - Core 只做**確定性**的事件處理：
   - 驗證事件來源和 Task/Run/Session 綁定。
   - 持久化並去重。
-  - 找到原 PM 的 thread，用 Codex app-server 的 thread 恢復與 `turn/start` 介面送出一則結構化事件訊息。
+  - 找到原 PM 的 thread，嘗試用 Codex app-server 的 thread 恢復與 `turn/start` 介面送出一則結構化事件訊息；本機查證沒有驗證此介面在目標版本可用，須列為實作前相容性 Gate。
 - Core **不做 AI 判斷**：要不要審查、修復、改派，全部由被恢復的 PM 依 `pm-continuation.md` 決定。
 - 這**不是第二套 Supervisor**，原因有三：
   - 它只在收到事件時動作，不定時輪詢 PM。
   - 它不選工作、不派工。
   - 它不繞過 dispatch、D6、審查或 CI 的任何 Gate。
-- 同一事件只能叫醒一次（去重）。事件內容只帶狀態碼和識別碼，不帶模型輸出。
-- 這個方向原本就寫在 Roadmap 的 A11c WP3，不是新需求（見 §6.5）。
+- **目標投遞語意（尚未實作或驗證）：** durable inbox 採 at-least-once 投遞，不宣稱 exactly-once wake。每個來源事件需有穩定且唯一的 `event_id`，並綁定 Task ID、Run ID、Session ID、事件種類與來源序號；同一 `event_id` 若 payload 不同則拒絕並保留診斷資料。
+- Core 先持久化為 `PENDING`，再嘗試喚醒原 PM。`turn/start` 被接受只代表 transport 已接收，不是事件 ACK。只有原 PM 依 `event_id` 持久化消費結果後回傳同 ID receipt，Core 才能標為 `ACKED`。若決策要求派工，PM 必須先持久化綁定該 `event_id` 的 dispatch intent；重播時只能恢復／對帳同一 intent 與 Task ID，不能建立第二次派工。若 intent 的執行結果不明，事件維持未 ACK 並對帳原 Task/Run，不可猜成功或另開新工作。
+- 程序重啟時只對 durable inbox 中未 ACK 的事件做有上限的 reconciliation，不做週期性 PM polling。PM 忙碌時維持 `PENDING`，等原 turn 結束後單一序列送達；thread 暫不可用時保留事件並做有上限的重試，耗盡後標 `BLOCKED` 但不得刪除或視為 ACK。這些語意仍須經故障注入驗收。
+- 事件內容只帶狀態碼和識別碼，不帶模型輸出。R3/R4 的對應是 Roadmap 內既有方向；本文件仍只提出實作映射，不授予實作權限。
 
 ### 6.4 #308：PM 過度擴張「不得修改」的限制
 
@@ -179,29 +181,38 @@ Goals 可能讓 PM 在目標未完成時自己開下一輪，但有三點必須�
 2. **遇到外部等待會不會正確停止**：等外部事件時，Goal 應該進入 `blocked` 並記錄原因，不是自己判斷成 `complete`，也不是無限重試。
 3. **能不能安全接續**：外部事件到了以後（例如透過 §6.3 的 `turn/start`），Goal 能不能從原 thread 接續，而且不重做已完成的步驟、不重複派工。
 
-實驗條件：
-- 在**隔離的 Codex thread** 跑，用合成任務和 loopback mock，不接正式 PM、不碰正式 D6 或 GitHub。
-- 必須設 `token_budget` 上限。
+候選實驗條件（**尚未取得執行授權**）：
+- 使用與正式環境分離的 `CODEX_HOME`/profile、隔離 thread、合成任務與 loopback mock；不得改共享設定、讀寫正式 PM state、連正式 D6/GitHub 或使用真實 Provider。
+- 提議單次總 token budget 上限為 **10,000 tokens**；這只是供審批的方案值，不是目前授權或已花費額度。啟動前需另有 Owner 核准的 Issue/Task Contract，列出隔離方式、實際 budget 與停止條件。
 - 記錄每一輪的開始時間、結束時間、狀態和 token 用量。
 
-結果出來前，**不在正式 PM 上啟用 Goals**。即使 Goals 可行，它也只取代「PM 自己接續」這一段；Developer 結果回傳仍然要靠 §6.3 的 Core 事件。
+實驗結果出來前不得在正式 PM 啟用 Goals；即使候選實驗通過，production enablement 仍需獨立 Owner 決策與相應驗收。Goals 只可能協助「PM 自己接續」；Developer 結果回傳仍需 §6.3 的 Core 事件。
 
 ### 6.7 對照 A11c WP3 R1–R5（避免重複規劃、重複實作）
 
-依 `tools/llmtool/ROADMAP.md`（main），WP3「automatic continuation」標為 INCOMPLETE：
+依 `tools/llmtool/ROADMAP.md`（main），WP3「automatic continuation」標為 INCOMPLETE。下表是**候選對照**，不是 Owner 核准的實作切分或授權；(c) Developer 非互動與工具白名單不屬於 R1–R5：
 
 | WP3 缺口 | Roadmap 現況 | 本報告的對應 | 備註 |
 |---|---|---|---|
-| R1 自動派 Reviewer | #285 已合併，但 adapter 仍是 opt-in，沒有正式環境 E2E；#297 已合併 Reviewer dispatch gate | 不新增；§6.3 的事件喚醒讓 PM 能接著派 | 不重做 R1 |
-| R2 FAIL 自動退回原 Developer | 未完成；PM 決策有持久化，但迴圈不是自動的 | §6.2 的拒絕或失敗結果、§6.3 的喚醒是 R2 的前提 | #120 的 R2 repair-intent 工作沿用 |
-| R3 Reviewer 結果出來後恢復 PM | 未完成；`task complete` 仍需呼叫端觸發 | **§6.3 就是 R3** | 實作放在 R3，不另開 |
-| R4 自動接收 Worker 完成事件 | 未驗證；已合併的 callback 狀態不能證明原生事件訂閱或即時喚醒 | **§6.1 的「結果回傳」就是 R4**；權限等待也要當成事件 | 不另開 |
-| R5 Worker 可用狀態保存 | Roadmap 寫未實作，但 #298（Persist bounded worker availability observations）已在 2026-10-23 合併 | 不新增 | Roadmap 這一列可能還沒更新，要由 PM 核對 |
+| R1 自動派 Reviewer | #285 已合併，但 adapter 仍是 opt-in，沒有正式環境 E2E；#297 已合併 Reviewer dispatch gate | Core 喚醒可能讓 PM 接著派 Reviewer | 候選依賴；不代表 R1 production E2E 完成 |
+| R2 FAIL 自動退回原 Developer | 未完成；PM 決策有持久化，但迴圈不是自動的 | TOOL_DENIED/FAIL 事件與 Core 喚醒可能是候選前提 | #120 既有 repair-intent 工作依其 Task Contract 推進 |
+| R3 Reviewer 結果出來後恢復 PM | 未完成；`task complete` 仍需呼叫端觸發 | §6.3 的 Core 喚醒方向與 R3 相關 | 候選映射；尚未核准實作 |
+| R4 自動接收 Worker 完成事件 | 未驗證；已合併的 callback 狀態不能證明原生事件訂閱或即時喚醒 | §6.1 的結果／完成事件方向與 R4 相關；互動 Session 權限等待可另作事件來源，非互動拒絕則是 TOOL_DENIED | 候選映射；不宣稱已驗收 |
+| R5 Worker 可用狀態保存 | #298 bounded observation storage 已合併；Roadmap 狀態更新另列工作 | 不新增 R5 實作 | storage 已合併不等於 live collection/dispatch integration 驗收 |
 
-所以本報告**不提出新的工作包**：
-- (c) 的非互動執行和白名單，掛在派工 Gate 和 Task Contract 底下，作為 R2/R4 的執行前提。
-- (d) 的事件喚醒就是 R3/R4。
-- Goals 實驗是 R3 的一個候選做法，結果出來後再決定要不要採用。
-- §4 第 2–4 項的 PM 規則文字修補，可以併進 `pm-continuation.md` 的一般維護，不必另開 Issue。
+本報告**不授權新工作包或改變既有 Task Contract**。以下僅為待 Owner/PM 依現行 Gate 審核的候選映射：
+- (c) 非互動 Developer 與工具白名單在 WP3 R1–R5 之外，需獨立確定範圍與授權。
+- (d) 事件喚醒可與 R3/R4 既有缺口對照；具體放置、Issue 與實作範圍仍須依既有 Task/Owner 授權確認。
+- Goals 實驗是候選方案；本報告未取得實驗執行或 production enablement 授權。
+- §4 第 2–4 項 PM 規則文字修改仍需依適用的變更流程，不由本報告預先授權。
 
-剩下要在真實 Mac 驗收的項目：多任務同時進行時的背景接續、權限等待或被拒絕的事件回傳，以及同一事件不會重複喚醒 PM。
+尚待實際驗收的項目包括：多任務背景接續、事件持久化與 ACK、程序重啟重播、busy/unavailable thread 恢復，以及重播同一事件不會重複派工。
+
+### 6.8 決議、授權與交付狀態
+
+| 面向 | 狀態 |
+|---|---|
+| Owner 採納的架構方向 | (c)+(d) 如 §6.1 所述；本報告記錄方向，不等於實作核准。 |
+| 實作授權 | 本報告沒有提供；須有明確 Owner-approved Issue/Task Contract 並通過既有 D6、dispatch、budget、data、review 與 CI gates。 |
+| 已實作 | 本報告描述的非互動 Developer 啟動改造、Core event inbox/ACK/replay 與 Goals 實驗：無。 |
+| Live verified | 上述路線：無。§6.5 僅為 local read-only version/help/database inspection。 |
