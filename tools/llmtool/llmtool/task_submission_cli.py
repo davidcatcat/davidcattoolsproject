@@ -648,15 +648,18 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     }
 
     def git(*args, input_data=None):
-        result = subprocess.run(
-            ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
-             '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
-             '-C', str(dispatcher_root), *args],
-            env=git_env, input=input_data, stdin=(None if input_data is not None
-                                                 else subprocess.DEVNULL),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, check=False,
-        )
+        try:
+            result = subprocess.run(
+                ['/usr/bin/git', '--no-optional-locks', '--no-replace-objects',
+                 '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+                 '-C', str(dispatcher_root), *args],
+                env=git_env, input=input_data, stdin=(None if input_data is not None
+                                                     else subprocess.DEVNULL),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, check=False, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            raise ValueError('dispatcher Git preflight failed') from None
         if result.returncode or result.stderr:
             raise ValueError('dispatcher Git preflight failed')
         return result.stdout

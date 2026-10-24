@@ -492,5 +492,37 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(list(self.tasks.iterdir()), [])
 
 
+class GitTimeoutTests(unittest.TestCase):
+    """A stuck git lookup stops with a stable code instead of hanging."""
+
+    def _timeout(self, *args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0] if args else "git", kwargs.get("timeout"))
+
+    def test_read_only_lookup_times_out_as_git_unavailable(self):
+        with patch.object(lifecycle.subprocess, "run", side_effect=self._timeout) as run:
+            with self.assertRaises(lifecycle.LifecycleError) as raised:
+                lifecycle._run_git(Path("/"), "rev-parse", "HEAD")
+        self.assertEqual(raised.exception.code, "D6_GIT_UNAVAILABLE")
+        self.assertEqual(run.call_args.kwargs["timeout"], lifecycle.GIT_TIMEOUT_SECONDS)
+
+    def test_repository_changes_are_not_timed(self):
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(lifecycle.subprocess, "run", return_value=done) as run:
+            lifecycle._run_git(Path("/"), "worktree", "lock", "/x", check=False, timeout=None)
+        self.assertIsNone(run.call_args.kwargs["timeout"])
+
+    def test_dispatcher_git_preflight_times_out_as_bootstrap_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            trusted = root / "tools" / "llmtool" / "scripts" / "d6_worktree_lifecycle.py"
+            with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", root), \
+                    patch.object(lifecycle, "__file__", str(trusted)), \
+                    patch.object(lifecycle.subprocess, "run", side_effect=self._timeout) as run:
+                with self.assertRaises(lifecycle.LifecycleError) as raised:
+                    lifecycle._trusted_dispatcher_git()
+        self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_UNAVAILABLE")
+        self.assertEqual(run.call_args.kwargs["timeout"], lifecycle.GIT_TIMEOUT_SECONDS)
+
+
 if __name__ == "__main__":
     unittest.main()
