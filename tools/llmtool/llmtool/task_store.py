@@ -1442,7 +1442,10 @@ class TaskStore:
             except LLMToolError:
                 raise
             except OSError as exc:
-                code = ('TASK_STORE_INVALID' if exc.errno == errno.ELOOP
+                # A symlink, directory or other non-file at the lock path is
+                # planted state, not an unavailable store.
+                code = ('TASK_STORE_INVALID'
+                        if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO, errno.EOPNOTSUPP)
                         else 'TASK_STORE_UNAVAILABLE')
                 _fail(code)
 
@@ -1535,6 +1538,8 @@ class TaskStore:
                     except OSError:
                         pass
             finally:
-                if lock_fd is not None:
-                    os.close(lock_fd)
-                os.close(directory)
+                try:
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+                finally:
+                    os.close(directory)

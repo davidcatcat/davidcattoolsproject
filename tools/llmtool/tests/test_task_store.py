@@ -260,6 +260,9 @@ class TaskStoreTests(unittest.TestCase):
             '        print("WAITING", flush=True)\n'
             '        raise\n'
             'task_store.fcntl.flock = observed_flock\n'
+            # A stalled parent must not turn the waiter into BUSY; that path
+            # has its own test.
+            'task_store.TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 30\n'
             'print("READY", flush=True)\n'
             'TaskStore(sys.argv[1]).update(sys.argv[2], state="PM_UNAVAILABLE", '
             'error_code="PROVIDER_TIMEOUT")\n'
@@ -329,6 +332,9 @@ class TaskStoreTests(unittest.TestCase):
             '        while not os.path.exists(owner_release): time.sleep(0.005)\n'
             '    return result\n'
             'task_store.fcntl.flock = observed_flock\n'
+            # A stalled parent must not turn the waiter into BUSY; that path
+            # has its own test.
+            'task_store.TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 30\n'
             'try:\n'
             '    TaskStore(root).compare_and_update(task_id, expected={"state": "PM_PENDING"}, '
             'state="PM_UNAVAILABLE", error_code="PROVIDER_TIMEOUT")\n'
@@ -437,6 +443,88 @@ class TaskStoreTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0.08)
         self.assertLess(elapsed, 1.0)
         self.assertEqual(self.store.get(value['task_id'])['state'], value['state'])
+
+    def test_planted_lock_paths_are_refused_without_touching_them(self):
+        value = record()
+        self.store.create(value)
+        lock = self.root / ('.' + value['task_id'] + '.json.lock')
+        outside = Path(self.temp.name) / 'outside-target'
+
+        def symlink():
+            outside.write_bytes(b'outside')
+            outside.chmod(0o600)
+            lock.symlink_to(outside)
+
+        def dangling():
+            lock.symlink_to(Path(self.temp.name) / 'missing-target')
+
+        def hardlink():
+            outside.write_bytes(b'outside')
+            outside.chmod(0o600)
+            os.link(outside, lock)
+
+        def loose_mode():
+            lock.write_bytes(b'')
+            lock.chmod(0o644)
+
+        def fifo():
+            os.mkfifo(lock, 0o600)
+
+        def directory():
+            lock.mkdir(mode=0o700)
+
+        cases = (('symlink', symlink), ('dangling symlink', dangling), ('hardlink', hardlink),
+                 ('mode 0644', loose_mode), ('fifo', fifo), ('directory', directory))
+        for label, plant in cases:
+            with self.subTest(label):
+                plant()
+                before = self.store.get(value['task_id'])
+                started = time.monotonic()
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(value['task_id'], state='PM_UNAVAILABLE',
+                                      error_code='PROVIDER_TIMEOUT')
+                self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertEqual(self.store.get(value['task_id']), before)
+                self.assertFalse((Path(self.temp.name) / 'missing-target').exists())
+                if outside.exists():
+                    self.assertEqual(outside.read_bytes(), b'outside')
+                    self.assertEqual(stat.S_IMODE(outside.stat().st_mode), 0o600)
+                if lock.is_dir() and not lock.is_symlink():
+                    lock.rmdir()
+                else:
+                    lock.unlink()
+                if outside.exists():
+                    outside.unlink()
+
+    def test_lock_owned_by_another_user_is_refused(self):
+        value = record()
+        self.store.create(value)
+        lock_name = '.' + value['task_id'] + '.json.lock'
+        original_open, original_fstat = os.open, os.fstat
+        lock_fd = []
+
+        def remember(path, flags, *args, **kwargs):
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == lock_name:
+                lock_fd.append(fd)
+            return fd
+
+        def foreign_owner(fd):
+            info = original_fstat(fd)
+            if lock_fd and fd == lock_fd[0]:
+                fields = list(info)
+                fields[stat.ST_UID] = os.getuid() + 1
+                return os.stat_result(fields)
+            return info
+
+        with patch.object(task_store_module.os, 'open', side_effect=remember), \
+                patch.object(task_store_module.os, 'fstat', side_effect=foreign_owner):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.update(value['task_id'], state='PM_UNAVAILABLE',
+                                  error_code='PROVIDER_TIMEOUT')
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+        self.assertNotEqual(self.store.get(value['task_id'])['state'], 'PM_UNAVAILABLE')
 
     def test_lock_open_and_fstat_errors_are_safe_and_close_descriptors(self):
         value = record()

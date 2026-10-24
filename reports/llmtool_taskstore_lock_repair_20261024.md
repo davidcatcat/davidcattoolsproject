@@ -69,8 +69,43 @@ Codex reached its usage limit at 15:08 after the Developer turn above had comple
 - **New tests.**
   - `test_concurrent_lock_create_enoent_is_retried`: one injected `ENOENT` is followed by a successful update, and both attempts keep `O_CREAT|O_NOFOLLOW`.
   - `test_persistent_lock_create_enoent_is_bounded_and_unavailable`: with the deadline set to 0.1 s, the call returns `UNAVAILABLE` within 1 s, the message leaks no detail, and the record is unchanged.
-- **Verification after the repair.**
+- **Verification after the repair** (before review round 1).
   - `tests.test_task_store` and `tests.test_task_submission_cli` together: 66/66 OK.
   - The same stress harness: 0 failures in 150 runs.
   - The full suite was rerun; its result is in the PR.
 - **Follow-up (outside this allowlist).** Any other store that creates its lock file through `dir_fd` may have the same race.
+
+## Formal review round 1 (PR #316 head `faab373`): FAIL, and repairs
+
+The PR base is main `a2c11a7`; main was merged in so CI tests the merge result. The focused counts above (17 + 2) predate the tests below.
+
+Blocking QA findings, now fixed:
+
+1. **Required test (5) only half-asserted.** The interrupted-claim test now also runs the real completion path, `run_task_complete`. It must return 1 and never call the PM. The task must stay `PM_RESPONDED`, the Developer claim `DEVELOPER_PENDING`, and the completion `WAITING_EXECUTOR`/`NOT_STARTED` with no PM response. The completion path records only the missing gate. A second dispatch is still refused.
+2. **No tests for planted lock paths.** A new table test covers six cases: a symlink, a dangling symlink, a hardlink, mode 0644, a FIFO and a directory.
+   - Each case must fail with `TASK_STORE_INVALID` in under 1 s.
+   - The record, the outside target's content and mode, and the missing symlink target must all stay untouched.
+   - A separate test covers a lock owned by another user (`fstat` patched).
+   - Because of this test, the open now classifies `EISDIR`, `ENXIO` and `EOPNOTSUPP` as `INVALID` (planted state), the same as `ELOOP`.
+
+Advisories taken:
+- **Child lock deadline.** The two multi-process tests set the child's lock deadline to 30 s, so a stalled parent cannot turn the waiter into BUSY. BUSY keeps its own bounded test.
+- **Descriptor cleanup.** If closing the lock fd raises, the directory fd is still closed.
+
+Verification requests:
+- **Nothing else deletes lock files.** No TaskStore code unlinks, renames or garbage-collects `.<id>.json.lock`. The only unlinks are of temporary record files.
+- **No directory scans.** TaskStore has no `listdir`/`scandir`/`glob` over the store directory, so the now-persistent lock entries are never scanned.
+- **One constructor form.** `TaskStoreConflict` is constructed only as `TaskStoreConflict()`.
+
+**Rollout note (PM acknowledgement required).** The old `O_EXCL` protocol and the new `flock` protocol must not run against the same task store at the same time.
+- An old llmtool treats the now-persistent lock file as permanently held, so its updates fail with BUSY or CONFLICT.
+- A new llmtool can `flock` a file that an old process created under `O_EXCL`. The two then lose mutual exclusion.
+- Every llmtool install and worktree venv that shares `~/.local/state/llmtool/tasks` must therefore be upgraded together, with no old-version writer running during the switch.
+- Old zero-length 0600 lock files left behind by a dead old writer are simply reused by the new code. This unblocks tasks that were stuck.
+
+Not taken (recorded):
+- A umask that strips owner bits makes the lock INVALID. This fails closed; no `fchmod` was added.
+- The CLI does not print `task_store_code`.
+- The `select()`-on-text-pipe helper and the SIGKILL-while-waiting variant are unchanged.
+
+Verification after the round-1 repairs: full `tools/llmtool` suite **2106 tests OK** (skipped 2), macOS, CPython 3.13, `-B`. The CAS stress repro under CPU load had 0 failures in 100 runs.

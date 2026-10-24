@@ -21,7 +21,8 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
-                                         _provider_route_binding, run_task_delegate,
+                                         _provider_route_binding, run_task_complete,
+                                         run_task_delegate,
                                          run_task_opencode_delegate,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
@@ -1616,6 +1617,23 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(pending['developer']['state'], 'DEVELOPER_PENDING')
             self.assertEqual(pending['completion']['state'], 'WAITING_EXECUTOR')
             factory.assert_not_called()
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+            # The ambiguous claim cannot be completed either: the completion
+            # path refuses (it records only the missing gate), never calls the
+            # PM, and the claim stays pending, so a later dispatch is still refused.
+            complete = Namespace(task_id=task['task_id'], executor_task=args.executor_task,
+                                 reviewer_task=None, pr=None)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run_task_complete(complete, store=backing), 1)
+            after = backing.get(task['task_id'])
+            self.assertEqual(after['state'], 'PM_RESPONDED')
+            self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+            self.assertEqual(after['completion']['pm_dispatch'], 'NOT_STARTED')
+            self.assertIsNone(after['completion']['pm_response'])
+            self.assertTrue(after['completion']['missing_gates'])
             with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
                 run_task_delegate(args, store=backing)
             factory.assert_not_called()
