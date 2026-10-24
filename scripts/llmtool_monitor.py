@@ -2113,7 +2113,9 @@ def _claude_call(text: str):
     """The first `claude --print` call in text, skipping usage lookups."""
     for found in CLAUDE_CALL.finditer(text):
         command = re.split(r"[|;&\n]|\\n", text[found.end():found.end() + 400], maxsplit=1)[0]
-        if not CLAUDE_INFO.search(text[found.start():found.end()] + command):
+        call = text[found.start():found.end()]
+        flags = re.split(r"[\"'`]", call[call.find("claude"):] + command, maxsplit=1)[0]
+        if not CLAUDE_INFO.search(flags):   # a -v or -h inside the prompt is not a flag
             return found
     return None
 
@@ -2163,7 +2165,8 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     cache = _review_cache.get(path)
     if cache is None or size < cache["offset"]:
         # A forked thread (a subagent) starts with a copy of its parent's history,
-        # stamped with the fork time; its own work starts at its first task_started.
+        # parent turns included, all stamped with the fork time. Turn ids grow with
+        # time, so its own work starts at the first turn not older than the thread.
         cache = {"offset": max(0, size - REVIEW_SCAN), "calls": [], "carry": b"",
                  "copied": _forked(path)}
         _review_cache[path] = cache
@@ -2181,7 +2184,8 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
         lines = lines[1:]
     for raw in lines:
         if cache["copied"]:
-            cache["copied"] = b'"task_started"' not in raw
+            if b'"task_started"' in raw:
+                cache["copied"] = _turn_id(raw) < cache["copied"] and cache["copied"]
             continue
         if b"custom_tool_call" not in raw:
             continue
@@ -2202,14 +2206,25 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
     return list(cache["calls"])
 
 
-def _forked(path: str) -> bool:
+def _forked(path: str) -> str:
+    """The thread's own id when it was forked from another thread, else ""."""
     try:
         with open(path, "rb") as handle:
             meta = json.loads(handle.readline(1 << 20))
     except (OSError, ValueError):
-        return False
+        return ""
     payload = meta.get("payload") if type(meta) is dict else None
-    return type(payload) is dict and bool(payload.get("forked_from_id"))
+    if type(payload) is not dict or not payload.get("forked_from_id"):
+        return ""
+    return str(payload.get("id") or "") or "~"   # no own id: treat everything as copied
+
+
+def _turn_id(raw: bytes) -> str:
+    try:
+        payload = json.loads(raw).get("payload")
+    except (ValueError, AttributeError):
+        return ""
+    return str(payload.get("turn_id") or "") if type(payload) is dict else ""
 
 
 def forget_reviews(paths) -> None:
@@ -2218,21 +2233,24 @@ def forget_reviews(paths) -> None:
         _review_cache.pop(path, None)
 
 
+COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
+
+
 def review_verdicts(comments) -> dict:
     """{(pr, head7): [(time, verdict)]} from verdicts trusted accounts posted on
-    PRs: a verdict line plus the head it was given for, timed by the comment's
-    last edit. Pure; no I/O."""
+    PRs: a verdict line, listed under every commit id the comment names, timed
+    by the comment's last edit. Pure; no I/O."""
     found: dict = {}
     for comment in comments if type(comments) is list else []:
         if type(comment) is not dict or comment.get("author_association") not in TRUSTED_ASSOCIATION:
             continue
         body, number = comment.get("body"), _issue_number(comment.get("issue_url"))
         verdict = REVIEW_VERDICT.search(body) if type(body) is str and number else None
-        head = REVIEW_HEAD.search(body) if verdict else None
-        if head:
-            found.setdefault((number, head.group(1)[:7].lower()), []).append(
-                (max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at"))),
-                 verdict.group(1)))
+        if verdict is None:
+            continue
+        when = max(_github_time(comment.get("created_at")), _github_time(comment.get("updated_at")))
+        for head in {token[:7].lower() for token in COMMIT_ID.findall(body)}:
+            found.setdefault((number, head), []).append((when, verdict.group(1)))
     return found
 
 
@@ -2252,8 +2270,6 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[tuple]:
     rows = []
     for when, pr, sha in codex_reviews(path, now):
         age = max(0.0, now - when)
-        if age > max(OFFICE_STALL, OFFICE_DONE_WINDOW):
-            continue
         bound = bool(pr and sha)
         label = _review_label(pr, sha) if bound else "單次呼叫（呼叫裡沒寫 PR 和版本）"
         rows.append((OfficeRow("claude reviewer" if bound else "claude 單次呼叫", WORKING,
@@ -2264,15 +2280,17 @@ def _review_rows(path: str, now: float, parent: OfficeRow) -> list[tuple]:
     return rows
 
 
-def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts) -> OfficeRow:
+def _review_result(row: OfficeRow, pr: str, sha: str, when: float, verdicts, now: float) -> OfficeRow:
     """An ended call shows the newest verdict posted on GitHub for its PR and
-    head since the call started; every Reviewer route is read the same way."""
+    head since the call started, aged from that verdict; every Reviewer route
+    is read the same way."""
     if not pr:
         return replace(row, state=DONE, detail=row.detail.replace("（單次呼叫執行中）", "：已結束"))
     posted = sorted(item for item in (verdicts or {}).get((pr, sha.lower()), [])
                     if item[0] >= when - CALL_SLACK)
     outcome = posted[-1][1] if posted else UNREAD_VERDICT if verdicts is None else NO_VERDICT
-    return replace(row, state=DONE, outcome=outcome,
+    age = max(0.0, now - posted[-1][0]) if posted else row.age
+    return replace(row, state=DONE, outcome=outcome, age=min(age, row.age),
                    detail=row.detail.replace("（單次呼叫執行中）", f"：{outcome}"),
                    evidence="codex 紀錄（呼叫）＋GitHub 結論" if posted else row.evidence)
 
@@ -2351,9 +2369,10 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
     # A call has ended once its process is gone; without the process table it
     # is shown running until it is too old to matter.
     ended = _ended_calls(subs, live_calls) if live_calls is not None else set()
-    subs = [(parent, _review_result(sub, *calls[id(sub)], verdicts) if id(sub) in ended else sub)
-            for parent, sub in subs
-            if id(sub) in ended or id(sub) not in calls or (sub.age or 0.0) <= OFFICE_STALL]
+    subs = [(parent, _review_result(sub, *calls[id(sub)], verdicts, now) if id(sub) in ended else sub)
+            for parent, sub in subs]
+    subs = [(parent, sub) for parent, sub in subs if sub.key != "review"
+            or (sub.age or 0.0) <= (OFFICE_STALL if sub.state == WORKING else OFFICE_DONE_WINDOW)]
     rows = []
     for key, row in mains.items():
         if row.main:

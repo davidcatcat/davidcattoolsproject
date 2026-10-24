@@ -2104,6 +2104,11 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(self._calls([a, b], [], verdicts)[0],
                          {"審 PR #9 @abc1234：CHANGES_REQUIRED": mon.DONE,
                           f"審 PR #8 @abc1234：{mon.NO_VERDICT}": mon.DONE})
+        # a verdict's row ages from the verdict, so a long review still shows its result
+        late = self._call(7, mon.OFFICE_DONE_WINDOW + 600.0)
+        verdicts[("7", "abc1234")] = [(self.NOW - 60, "PASS")]
+        rows = self._calls([late], [], verdicts)[0]
+        self.assertEqual(rows, {"審 PR #7 @abc1234：PASS": mon.DONE})
 
     def test_office_rows_reads_live_call_start_times(self):
         run = mon.Process(40, 5718, 40, "01:00", "S", "Claude Code CLI", "claude", "Codex APP-SERVER 5718")
@@ -2208,6 +2213,7 @@ class OfficeViewTests(unittest.TestCase):
             (800, call("c2", 'const r = await tools.exec_command({cmd:"review_dir=$(mktemp -d)\\n'
                              'cd \\"$review_dir\\"\\ngh pr diff 285 | claude -p --output-format json '
                              '\'Review PR #285, head c40c80acae77147190684a1ea8b66d744378ff41.\'"})')),
+            (70, call("v1", "claude -p 'Review PR #282 head 2828282, run unittest -v'")),   # -v in the prompt
             (60, call("b1", "claude --resume abc -p 'status of PR #286'")),   # names no head
             (45, call("c6", "gh pr comment 288 --body 'shows `claude --print/-p` reviews'")),   # prose
             (40, call("c5", "claude --version 2>&1 | head -5; pgrep -alf 'claude -p|claude --print'")),
@@ -2232,15 +2238,22 @@ class OfficeViewTests(unittest.TestCase):
             comment(999, 820, "**Verdict: FAIL** head 18538d5"),                   # another PR
         ])
         self.assertEqual(verdicts, {("283", "18538d5"): [(self.NOW - 850, "PASS")],
+                                    ("283", "18538d5"[:7]): [(self.NOW - 850, "PASS")],
                                     ("999", "18538d5"): [(self.NOW - 820, "FAIL")]})
+        # the head may be named anywhere in the comment, in any wording
+        self.assertIn(("311", "ec73d4d"), mon.review_verdicts([comment(
+            311, 10, "**Verdict: PASS**\nExact head submitted: `ec73d4d1a2b3c4d5`")]))
         # an edited comment counts from its last edit
         edited = dict(comment(283, 850, "**Verdict: FAIL** head 18538d5"), updated_at=stamp(100))
         self.assertEqual(mon.review_verdicts([edited]), {("283", "18538d5"): [(self.NOW - 100, "FAIL")]})
-        # a forked subagent starts with a copy of the PM's history stamped with the
-        # fork time: only calls after its own first task_started are its own
-        fork = [{"type": "session_meta", "payload": {"id": "S9", "forked_from_id": "T1"}},
+        # a forked subagent starts with a copy of the PM's history, its turns included,
+        # stamped with the fork time: only calls from its own first turn on are its own
+        started = lambda turn: {"timestamp": ts(50), "type": "event_msg",
+                                "payload": {"type": "task_started", "turn_id": turn}}
+        fork = [{"type": "session_meta", "payload": {"id": "01b0-fork", "forked_from_id": "T1"}},
+                started("01a0-parent-turn"),
                 {"timestamp": ts(50), "type": "response_item", "payload": events[0][1]},
-                {"timestamp": ts(50), "type": "event_msg", "payload": {"type": "task_started"}},
+                started("01b1-own-turn"),
                 {"timestamp": ts(40), "type": "response_item",
                  "payload": call("f1", "claude -p 'Review PR #287 head 2222222bbbb'")}]
         self._write(self.codex / day / "rollout-fork.jsonl", fork, age=5)
@@ -2256,6 +2269,7 @@ class OfficeViewTests(unittest.TestCase):
         reviews = {row.detail: row.state for row in rows if row.name == "claude reviewer"}
         self.assertEqual(reviews, {"審 PR #283 @18538d5：PASS": mon.DONE,
                                    f"審 PR #285 @c40c80a：{mon.NO_VERDICT}": mon.DONE,
+                                   f"審 PR #282 @2828282：{mon.NO_VERDICT}": mon.DONE,
                                    "審 PR #284 @1ee2f21（單次呼叫執行中）": mon.WORKING})
         self.assertTrue(all(row.task.startswith("PR #") and row.role == "reviewer"
                             for row in rows if row.name == "claude reviewer"))
