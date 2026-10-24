@@ -2,14 +2,22 @@
 
 This module never applies a patch or writes Git state. A D6 registry record is a
 cooperative local provenance source; it is not a same-UID security boundary.
+
+Stable Reviewer completion codes: ``REVIEW_DISPATCH_BINDING_INVALID`` covers
+invalid dispatch intents; ``REVIEW_RECEIPT_INVALID``,
+``REVIEW_RECEIPT_BINDING_MISMATCH``, and ``REVIEW_RECEIPT_DIGEST_MISMATCH``
+cover invalid or mismatched handoff/return receipts; ``REVIEW_REPAIR_BINDING_INVALID``,
+``REVIEW_REPAIR_BINDING_MISMATCH``, and ``REVIEW_REPAIR_DIGEST_MISMATCH`` cover
+invalid or mismatched deterministic repair-intent envelopes. JSON-bound values
+are restricted to finite JSON scalars and containers no deeper than 64 levels.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import wraps
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -51,25 +59,45 @@ def _stop(code):
     raise error from None
 
 
-_EXPECTED_VALIDATION_ERRORS = (
-    AttributeError, KeyError, OverflowError, RecursionError, TypeError,
-    UnicodeError, ValueError,
-)
-
-
-def _stable_errors(code):
-    """Map expected malformed-value failures to a stable public error code."""
-    def decorate(function):
-        @wraps(function)
-        def checked(*args, **kwargs):
-            try:
-                return function(*args, **kwargs)
-            except LLMToolError:
-                raise
-            except _EXPECTED_VALIDATION_ERRORS:
+def _canonical_json_bytes(value, code):
+    """Serialize a bounded JSON tree, mapping only encoding failures to code."""
+    stack = [(value, 0, False)]
+    ancestors = set()
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            ancestors.remove(id(item))
+            continue
+        if depth > 64:
+            _stop(code)
+        item_type = type(item)
+        if item_type is dict or item_type is list:
+            identity = id(item)
+            if identity in ancestors:
                 _stop(code)
-        return checked
-    return decorate
+            ancestors.add(identity)
+            stack.append((item, depth, True))
+            if item_type is dict:
+                entries = list(item.items())
+                if any(type(key) is not str for key, _ in entries):
+                    _stop(code)
+                stack.extend((child, depth + 1, False)
+                             for _, child in reversed(entries))
+            else:
+                stack.extend((child, depth + 1, False)
+                             for child in reversed(item))
+        elif item_type is float:
+            if not math.isfinite(item):
+                _stop(code)
+        elif item is None or item_type in (str, int, bool):
+            continue
+        else:
+            _stop(code)
+    try:
+        return json.dumps(value, ensure_ascii=True, sort_keys=True,
+                          separators=(',', ':'), allow_nan=False).encode('utf-8')
+    except (TypeError, ValueError, OverflowError, RecursionError, UnicodeError):
+        _stop(code)
 
 
 def _unique_pairs(pairs):
@@ -125,12 +153,11 @@ def review_dispatch_intent(*, task_id, run_id, contract_digest, developer_task_i
         'repair_round': repair_round,
         'state': 'REQUESTED',
     }
-    value['intent_sha256'] = hashlib.sha256(json.dumps(
-        value, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    value['intent_sha256'] = hashlib.sha256(_canonical_json_bytes(
+        value, 'REVIEW_DISPATCH_BINDING_INVALID')).hexdigest()
     return value
 
 
-@_stable_errors('REVIEW_DISPATCH_BINDING_INVALID')
 def validate_review_dispatch_intent(intent):
     fields = {
         'schema_version', 'dispatch_id', 'task_id', 'run_id', 'contract_digest',
@@ -142,9 +169,10 @@ def validate_review_dispatch_intent(intent):
         _stop('REVIEW_DISPATCH_BINDING_INVALID')
     value = dict(intent)
     claimed = value.pop('intent_sha256')
-    actual = hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode()).hexdigest()
-    if (claimed != actual or intent['schema_version'] != 1 or intent['state'] != 'REQUESTED' or
+    actual = hashlib.sha256(_canonical_json_bytes(
+        value, 'REVIEW_DISPATCH_BINDING_INVALID')).hexdigest()
+    if (claimed != actual or type(intent['schema_version']) is not int or
+            intent['schema_version'] != 1 or intent['state'] != 'REQUESTED' or
             type(intent['dispatch_id']) is not str or
             re.fullmatch(r'[0-9a-f]{32}', intent['dispatch_id']) is None):
         _stop('REVIEW_DISPATCH_DIGEST_MISMATCH')
@@ -188,12 +216,11 @@ def review_dispatch_blocked(intent, code='REVIEW_ADAPTER_UNAVAILABLE'):
         'findings_sha256': None,
         'provenance': 'LOCAL_NO_ADAPTER',
     }
-    receipt['receipt_sha256'] = hashlib.sha256(json.dumps(
-        receipt, ensure_ascii=True, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    receipt['receipt_sha256'] = hashlib.sha256(_canonical_json_bytes(
+        receipt, 'REVIEW_RECEIPT_INVALID')).hexdigest()
     return receipt
 
 
-@_stable_errors('REVIEW_RECEIPT_INVALID')
 def review_handoff_record(intent, receipt):
     """Build a received Reviewer outcome and deterministic PM next step."""
     validate_review_dispatch_receipt(intent, receipt)
@@ -210,7 +237,8 @@ def review_handoff_record(intent, receipt):
 
 
 def review_return_decision_allowed(verdict, repair_round, decision):
-    if type(repair_round) is not int or repair_round not in (0, 1):
+    if (type(verdict) is not str or type(decision) is not str or
+            type(repair_round) is not int or repair_round not in (0, 1)):
         return False
     if verdict == 'PASS':
         allowed = ('CONTINUE_INTEGRATION_GATES', 'STOP')
@@ -225,14 +253,20 @@ def review_return_decision_allowed(verdict, repair_round, decision):
     return decision in allowed
 
 
-@_stable_errors('REVIEW_RECEIPT_INVALID')
 def review_return_record(handoff, *, state='PENDING', response=None,
                          recommendation=None, usage=None, error_code=None):
     """Build the durable, bounded return of a source-bound receipt to its PM."""
-    if type(handoff) is not dict or handoff.get('dispatch_state') != 'RECEIVED':
+    if type(handoff) is not dict or set(handoff) != {
+            'intent', 'dispatch_state', 'receipt', 'next_step', 'error_code'}:
+        _stop('REVIEW_RECEIPT_INVALID')
+    if handoff['dispatch_state'] != 'RECEIVED':
         _stop('REVIEW_RECEIPT_INVALID')
     receipt = handoff.get('receipt')
     if type(receipt) is not dict:
+        _stop('REVIEW_RECEIPT_INVALID')
+    expected_handoff = review_handoff_record(handoff['intent'], receipt)
+    if (_canonical_json_bytes(expected_handoff, 'REVIEW_RECEIPT_INVALID') !=
+            _canonical_json_bytes(handoff, 'REVIEW_RECEIPT_INVALID')):
         _stop('REVIEW_RECEIPT_INVALID')
     states = {
         'PENDING': ('NOT_STARTED', None),
@@ -242,7 +276,7 @@ def review_return_record(handoff, *, state='PENDING', response=None,
         'UNAVAILABLE': ('UNAVAILABLE', error_code),
         'OUTCOME_UNKNOWN': ('UNKNOWN', error_code),
     }
-    if state not in states:
+    if type(state) is not str or state not in states:
         _stop('REVIEW_RECEIPT_INVALID')
     dispatch, expected_error = states[state]
     if state in ('UNAVAILABLE', 'OUTCOME_UNKNOWN') and (
@@ -281,12 +315,10 @@ def review_return_record(handoff, *, state='PENDING', response=None,
         'pm_response': response, 'pm_recommendation': recommendation,
         'pm_usage': usage, 'pm_error_code': expected_error,
     }
-    json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(',', ':'),
-               allow_nan=False)
+    _canonical_json_bytes(record, 'REVIEW_RECEIPT_INVALID')
     return record
 
 
-@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_return_record(record, handoff):
     if type(record) is not dict or set(record) != {
             'state', 'receipt_sha256', 'next_step', 'pm_dispatch', 'pm_response',
@@ -296,12 +328,12 @@ def validate_review_return_record(record, handoff):
     expected = review_return_record(handoff, state=state,
         response=record['pm_response'], recommendation=record['pm_recommendation'],
         usage=record['pm_usage'], error_code=record['pm_error_code'])
-    if expected != record:
+    if (_canonical_json_bytes(expected, 'REVIEW_RECEIPT_INVALID') !=
+            _canonical_json_bytes(record, 'REVIEW_RECEIPT_INVALID')):
         _stop('REVIEW_RECEIPT_INVALID')
     return record
 
 
-@_stable_errors('REVIEW_REPAIR_BINDING_INVALID')
 def review_repair_intent(handoff, review_return):
     """Build a deterministic, source-bound request for the one allowed repair.
 
@@ -309,60 +341,60 @@ def review_repair_intent(handoff, review_return):
     caller must separately enforce at-most-once consumption and recheck the
     original Task/Worker authority before any future execution.
     """
-    try:
-        if type(handoff) is not dict or set(handoff) != {
-                'intent', 'dispatch_state', 'receipt', 'next_step', 'error_code'}:
-            _stop('REVIEW_REPAIR_BINDING_INVALID')
-        expected_handoff = review_handoff_record(handoff['intent'], handoff['receipt'])
-        if expected_handoff != handoff:
-            _stop('REVIEW_REPAIR_BINDING_INVALID')
-        validate_review_return_record(review_return, handoff)
-        intent = handoff['intent']
-        receipt = handoff['receipt']
-        recommendation = review_return['pm_recommendation']
-        if (review_return['state'] != 'RETURNED' or
-                review_return['pm_dispatch'] != 'RETURNED' or
-                review_return['next_step'] != 'RETURN_TO_DEVELOPER_ONCE' or
-                type(recommendation) is not dict or
-                set(recommendation) != {'decision', 'summary'} or
-                recommendation.get('decision') != 'RETURN_TO_DEVELOPER' or
-                type(recommendation.get('summary')) is not str or
-                not recommendation['summary'] or
-                len(recommendation['summary'].encode('utf-8')) > 2048 or
-                intent['repair_round'] != 0 or receipt['verdict'] != 'FAIL'):
-            _stop('REVIEW_REPAIR_BINDING_INVALID')
-        payload = {
-            'schema_version': 1,
-            'task_id': intent['task_id'],
-            'run_id': intent['run_id'],
-            'contract_digest': intent['contract_digest'],
-            'source_sha': intent['source_sha'],
-            'result_head': intent['result_head'],
-            'diff_sha256': intent['diff_sha256'],
-            'changed_paths': list(intent['changed_paths']),
-            'developer_task_id': intent['developer_task_id'],
-            'developer_identity': intent['developer_identity'],
-            'developer_session_ref': intent['developer_session_ref'],
-            'review_dispatch_id': intent['dispatch_id'],
-            'review_receipt_sha256': receipt['receipt_sha256'],
-            'prior_repair_round': 0,
-            'repair_round': 1,
-            'decision': 'RETURN_TO_DEVELOPER',
-            'state': 'REQUESTED',
-        }
-        canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True,
-                               separators=(',', ':'), allow_nan=False).encode('utf-8')
-        payload['repair_intent_id'] = hashlib.sha256(
-            b'llmtool/review-repair-intent/v1\0' + canonical).hexdigest()
-        payload['intent_sha256'] = hashlib.sha256(json.dumps(
-            payload, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
-        return payload
-    except (KeyError, TypeError, UnicodeError, AttributeError):
+    if type(handoff) is not dict or set(handoff) != {
+            'intent', 'dispatch_state', 'receipt', 'next_step', 'error_code'}:
         _stop('REVIEW_REPAIR_BINDING_INVALID')
+    expected_handoff = review_handoff_record(handoff['intent'], handoff['receipt'])
+    if (_canonical_json_bytes(expected_handoff, 'REVIEW_REPAIR_BINDING_INVALID') !=
+            _canonical_json_bytes(handoff, 'REVIEW_REPAIR_BINDING_INVALID')):
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    validate_review_return_record(review_return, handoff)
+    intent = handoff['intent']
+    receipt = handoff['receipt']
+    recommendation = review_return['pm_recommendation']
+    if (review_return['state'] != 'RETURNED' or
+            review_return['pm_dispatch'] != 'RETURNED' or
+            review_return['next_step'] != 'RETURN_TO_DEVELOPER_ONCE' or
+            type(recommendation) is not dict or
+            set(recommendation) != {'decision', 'summary'} or
+            recommendation.get('decision') != 'RETURN_TO_DEVELOPER' or
+            type(recommendation.get('summary')) is not str or
+            not recommendation['summary'] or
+            intent['repair_round'] != 0 or receipt['verdict'] != 'FAIL'):
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    try:
+        summary_bytes = recommendation['summary'].encode('utf-8')
+    except UnicodeEncodeError:
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    if len(summary_bytes) > 2048:
+        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    payload = {
+        'schema_version': 1,
+        'task_id': intent['task_id'],
+        'run_id': intent['run_id'],
+        'contract_digest': intent['contract_digest'],
+        'source_sha': intent['source_sha'],
+        'result_head': intent['result_head'],
+        'diff_sha256': intent['diff_sha256'],
+        'changed_paths': list(intent['changed_paths']),
+        'developer_task_id': intent['developer_task_id'],
+        'developer_identity': intent['developer_identity'],
+        'developer_session_ref': intent['developer_session_ref'],
+        'review_dispatch_id': intent['dispatch_id'],
+        'review_receipt_sha256': receipt['receipt_sha256'],
+        'prior_repair_round': 0,
+        'repair_round': 1,
+        'decision': 'RETURN_TO_DEVELOPER',
+        'state': 'REQUESTED',
+    }
+    canonical = _canonical_json_bytes(payload, 'REVIEW_REPAIR_BINDING_INVALID')
+    payload['repair_intent_id'] = hashlib.sha256(
+        b'llmtool/review-repair-intent/v1\0' + canonical).hexdigest()
+    payload['intent_sha256'] = hashlib.sha256(_canonical_json_bytes(
+        payload, 'REVIEW_REPAIR_BINDING_INVALID')).hexdigest()
+    return payload
 
 
-@_stable_errors('REVIEW_REPAIR_BINDING_INVALID')
 def validate_review_repair_intent(repair_intent, handoff, review_return):
     """Validate an envelope against its exact persisted Reviewer/PM inputs."""
     fields = {
@@ -378,16 +410,13 @@ def validate_review_repair_intent(repair_intent, handoff, review_return):
     claimed_digest = value.pop('intent_sha256')
     if type(claimed_digest) is not str or _HEX64.fullmatch(claimed_digest) is None:
         _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
-    try:
-        actual_digest = hashlib.sha256(json.dumps(
-            value, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
-    except (TypeError, ValueError, OverflowError, UnicodeError, RecursionError):
-        _stop('REVIEW_REPAIR_BINDING_INVALID')
+    actual_digest = hashlib.sha256(_canonical_json_bytes(
+        value, 'REVIEW_REPAIR_BINDING_INVALID')).hexdigest()
     if claimed_digest != actual_digest:
         _stop('REVIEW_REPAIR_DIGEST_MISMATCH')
     expected = review_repair_intent(handoff, review_return)
-    if expected != repair_intent:
+    if (_canonical_json_bytes(expected, 'REVIEW_REPAIR_BINDING_INVALID') !=
+            _canonical_json_bytes(repair_intent, 'REVIEW_REPAIR_BINDING_INVALID')):
         _stop('REVIEW_REPAIR_BINDING_MISMATCH')
     return repair_intent
 
@@ -420,7 +449,6 @@ def review_handoff_not_dispatched(intent, receipt):
             'next_step': 'WAIT_FOR_REVIEWER', 'error_code': None}
 
 
-@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_handoff_record(record, *, task_id, run_id, contract_digest,
                                    developer_task_id, developer_identity,
                                    developer_session_ref, source_sha, result_head,
@@ -460,7 +488,8 @@ def validate_review_handoff_record(record, *, task_id, run_id, contract_digest,
         expected_record = review_handoff_record(intent, receipt)
     else:
         _stop('REVIEW_RECEIPT_INVALID')
-    if expected_record != record:
+    if (_canonical_json_bytes(expected_record, 'REVIEW_RECEIPT_INVALID') !=
+            _canonical_json_bytes(record, 'REVIEW_RECEIPT_INVALID')):
         _stop('REVIEW_RECEIPT_INVALID')
     return record
 
@@ -476,7 +505,6 @@ def normalize_review_handoff_record(record, **binding):
     return review_handoff_record(record['intent'], receipt)
 
 
-@_stable_errors('REVIEW_RECEIPT_INVALID')
 def validate_review_dispatch_receipt(intent, receipt):
     """Validate a typed-in-process Reviewer adapter result against the intent.
 
@@ -502,8 +530,8 @@ def validate_review_dispatch_receipt(intent, receipt):
     validate_review_dispatch_intent(intent)
     value = dict(receipt)
     claimed = value.pop('receipt_sha256')
-    actual = hashlib.sha256(json.dumps(value, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode()).hexdigest()
+    actual = hashlib.sha256(_canonical_json_bytes(
+        value, 'REVIEW_RECEIPT_INVALID')).hexdigest()
     if claimed != actual:
         _stop('REVIEW_RECEIPT_DIGEST_MISMATCH')
     packet_digest = None if legacy else receipt['review_packet_digest']
