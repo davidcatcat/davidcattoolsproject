@@ -5,10 +5,16 @@ x86_64, 4 vCPU / 8 GiB) run [llmtool Linux CI](../../.github/workflows/llmtool-l
 (Issue #99). They are set up on the host, not by a workflow, so a PR cannot
 turn the checks off.
 
-| Runner | Account | Folder | Label | Job |
-|---|---|---|---|---|
-| `ec2-self-runner` (id 24) | `ghrunner` | `/home/ghrunner/actions-runner` | `local-ec2-linux-ci` | Python 3.14 |
-| `ec2-self-runner-2` (id 25) | `ghrunner2` | `/home/ghrunner2/actions-runner` | `local-ec2-linux-ci-trial-2` | Python 3.9 |
+| Runner | Account | Folder | Label |
+|---|---|---|---|
+| `ec2-self-runner` (id 24) | `ghrunner` | `/home/ghrunner/actions-runner` | `local-ec2-linux-ci` |
+| `ec2-self-runner-2` (id 25) | `ghrunner2` | `/home/ghrunner2/actions-runner` | `local-ec2-linux-ci` |
+
+Either runner takes any job: Python 3.14 on every PR and main push, and
+Python 3.9 when the workflow is started by hand on main with `python39`
+before a release (Owner 2026-10-25). Two jobs (two PRs, or 3.14 and 3.9)
+run at the same time; on 10-25 the pair took 7.5 minutes against 14.75 in
+a row on one runner.
 
 Each account is non-admin, in its own group only, with a `700` home; neither
 can read the other's folder or credential. Python 3.14 is the distro package
