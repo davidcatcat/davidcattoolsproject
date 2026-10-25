@@ -92,23 +92,23 @@ class TaskCompletionTests(unittest.TestCase):
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
                                   workflow=None, runs=None, jobs=None):
-        workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-ci.yml',
-                                'name': 'llmtool CI', 'state': 'active'}
+        workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-mac-ci.yml',
+                                'name': 'llmtool Mac CI', 'state': 'active'}
         check_runs = checks['check_runs']
         for check in check_runs:
             check.setdefault('app', {'id': 15368, 'slug': 'github-actions',
                                      'name': 'GitHub Actions'})
         by_name = {check['name']: check for check in check_runs}
-        jobs = jobs or {'total_count': 2, 'jobs': [
-            {'id': index + 10, 'run_id': 100, 'name': name,
+        jobs = jobs or {'total_count': 1, 'jobs': [
+            {'id': index + 10, 'run_id': 100, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                'check-runs/' + str(by_name.get(name, {}).get('id', 1000 + index))),
              'status': by_name.get(name, {}).get('status', 'completed'),
              'conclusion': by_name.get(name, {}).get('conclusion', 'success')}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         runs = runs or {'total_count': 1, 'workflow_runs': [{
             'id': 100, 'run_number': 5, 'run_attempt': 1, 'workflow_id': workflow['id'],
-            'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+            'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
         return [pr, reviews, workflow, runs, jobs, checks]
@@ -561,15 +561,20 @@ class TaskCompletionTests(unittest.TestCase):
                    'user': {'login': 'reviewer-user'},
                    'submitted_at': '2026-10-21T10:00:00Z',
                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' + binding_line}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         api = self._github_response_sequence(result_sha, pr, review, checks)
         with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
         self.assertEqual(evidence['evidence']['review_task_id'], '1' * 32)
         self.assertTrue(evidence['evidence']['review_binding_verified'])
+        self.assertEqual(evidence['evidence']['required_checks'], ['check (macOS 3.13)'])
+        self.assertEqual(evidence['evidence']['not_run_checks'], [
+            {'name': 'Linux Python 3.9', 'status': 'NOT_RUN'},
+            {'name': 'Linux Python 3.14', 'status': 'NOT_RUN'},
+            {'name': 'Windows CI', 'status': 'NOT_RUN'}])
         self.assertEqual(evidence['missing_gates'], [])
         with patch('llmtool.task_completion._github_get',
                    side_effect=self._github_response_sequence(result_sha, pr, review, checks)):
@@ -601,10 +606,10 @@ class TaskCompletionTests(unittest.TestCase):
                     'user': {'login': 'reviewer-user'},
                     'submitted_at': '2026-10-21T10:00:00Z',
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' + wrong}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
@@ -640,9 +645,9 @@ class TaskCompletionTests(unittest.TestCase):
                    'submitted_at': '2026-10-21T10:00:00Z',
                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                            self._review_binding(head=result_sha)}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, review, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(
@@ -671,7 +676,7 @@ class TaskCompletionTests(unittest.TestCase):
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
         checks = {'total_count': 1, 'check_runs': [
-            {'id': 1, 'name': 'check (3.9)', 'head_sha': '8' * 40,
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': '8' * 40,
              'status': 'completed', 'conclusion': 'success'}]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks)):
@@ -694,13 +699,11 @@ class TaskCompletionTests(unittest.TestCase):
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
         for status, conclusion in (('completed', 'failure'), ('queued', None)):
-            checks = {'total_count': 3, 'check_runs': [
-                {'id': 1, 'name': 'check (3.9)', 'head_sha': result_sha,
+            checks = {'total_count': 2, 'check_runs': [
+                {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
                  'status': 'completed', 'conclusion': 'success'},
-                {'id': 3, 'name': 'check (3.9)', 'head_sha': result_sha,
-                 'status': status, 'conclusion': conclusion},
-                {'id': 2, 'name': 'check (3.14)', 'head_sha': result_sha,
-                 'status': 'completed', 'conclusion': 'success'}]}
+                {'id': 3, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+                 'status': status, 'conclusion': conclusion}]}
             with self.subTest(newer_status=status), \
                  patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                        result_sha, pr, reviews, checks)):
@@ -723,12 +726,12 @@ class TaskCompletionTests(unittest.TestCase):
                     'submitted_at': '2026-10-21T10:00:00Z',
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         wrong_workflow = {'id': 42, 'path': '.github/workflows/other.yml',
-                          'name': 'llmtool CI', 'state': 'active'}
+                          'name': 'llmtool Mac CI', 'state': 'active'}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks, workflow=wrong_workflow)):
             with self.assertRaises(LLMToolError) as rejected:
@@ -742,6 +745,30 @@ class TaskCompletionTests(unittest.TestCase):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertIn('REQUIRED_CI_MISSING', evidence['missing_gates'])
         self.assertEqual(evidence['evidence']['successful_checks'], [])
+
+    def test_ci_rejects_wrong_runner_and_legacy_linux_check(self):
+        result_sha = 'a' * 40
+        pr_number = 10
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[4]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+            with self.assertRaises(LLMToolError) as rejected:
+                task_completion._collect_ci_evidence(
+                    pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
+
+        legacy_checks = {'total_count': 1, 'check_runs': [
+            {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
+        api[4]['jobs'][0]['name'] = 'check (3.9)'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+            evidence = task_completion._collect_ci_evidence(
+                pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(evidence['successful_checks'], [])
 
     def test_ci_selects_latest_exact_pull_request_workflow_run_and_attempt(self):
         result_sha, _ = self._make_result()
@@ -760,24 +787,24 @@ class TaskCompletionTests(unittest.TestCase):
                             self._review_binding(head=result_sha)}]
         runs = {'total_count': 2, 'workflow_runs': [
             {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
             {'id': 101, 'run_number': 5, 'run_attempt': 2, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        jobs = {'total_count': 2, 'jobs': [
-            {'id': 11 + index, 'run_id': 101, 'name': name,
+        jobs = {'total_count': 1, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                f'check-runs/{21 + index}'),
              'status': 'completed', 'conclusion': 'success'}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
-        checks = {'total_count': 2, 'check_runs': [
+            for index, name in enumerate(('check (macOS 3.13)',))]}
+        checks = {'total_count': 1, 'check_runs': [
             {'id': 21 + index, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success',
              'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         api = self._github_response_sequence(result_sha, pr, reviews, checks,
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api) as github_get:
@@ -785,7 +812,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evidence['evidence']['ci_run_id'], 101)
         self.assertEqual(evidence['evidence']['ci_run_attempt'], 2)
         self.assertEqual(evidence['evidence']['ci_check_ids'],
-                         {'check (3.9)': 21, 'check (3.14)': 22})
+                         {'check (macOS 3.13)': 21})
         self.assertEqual(evidence['missing_gates'], [])
         self.assertIn('actions/runs/101/attempts/2/jobs?per_page=100',
                       github_get.call_args_list[4].args[0])
@@ -807,24 +834,24 @@ class TaskCompletionTests(unittest.TestCase):
                             self._review_binding(head=result_sha)}]
         runs = {'total_count': 2, 'workflow_runs': [
             {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
             {'id': 101, 'run_number': 5, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'failure',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        jobs = {'total_count': 2, 'jobs': [
-            {'id': 11 + index, 'run_id': 101, 'name': name,
+        jobs = {'total_count': 1, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                f'check-runs/{21 + index}'),
              'status': 'completed', 'conclusion': 'failure'}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
-        checks = {'total_count': 2, 'check_runs': [
+            for index, name in enumerate(('check (macOS 3.13)',))]}
+        checks = {'total_count': 1, 'check_runs': [
             {'id': 21 + index, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'failure',
              'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         api = self._github_response_sequence(result_sha, pr, reviews, checks,
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api):
@@ -2077,8 +2104,8 @@ class TaskCompletionTests(unittest.TestCase):
              'review_task_id': task['task_id'], 'review_run_id': task['run_id'],
              'review_contract_digest': task['task_binding']['contract_digest'],
              'review_binding_verified': True, 'reviewer_task_id': 'reviewer-task',
-             'required_checks': ['check (3.9)', 'check (3.14)'],
-             'successful_checks': ['check (3.9)', 'check (3.14)'], 'ci_head_sha': '7' * 40},
+             'required_checks': ['check (macOS 3.13)'],
+             'successful_checks': ['check (macOS 3.13)'], 'ci_head_sha': '7' * 40},
              'missing_gates': []}
         return git, tests, gh
 
