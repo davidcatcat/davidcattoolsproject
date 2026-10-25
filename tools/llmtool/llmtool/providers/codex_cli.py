@@ -42,7 +42,10 @@ class CodexCLIProvider:
 
     @staticmethod
     def validate_options(options):
-        if not isinstance(options, dict) or options:
+        if (not isinstance(options, dict) or
+                set(options) - {"reasoning_effort"} or
+                ("reasoning_effort" in options and options["reasoning_effort"] not in
+                 ("minimal", "low", "medium", "high", "xhigh"))):
             raise LLMToolError("unsupported codex-cli provider_options")
 
     @staticmethod

@@ -1,0 +1,323 @@
+"""Bounded Codex CLI Developer invocation for one registered D6 task."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import selectors
+import shutil
+import subprocess
+import tempfile
+import time
+
+from . import worker_dispatch
+from .errors import LLMToolError
+from .providers.cli_lifecycle import CLIProcessLifecycle
+
+MAX_WALL_CLOCK_SECONDS = 600
+MAX_OUTPUT_BYTES = 1024 * 1024
+MAX_STDERR_BYTES = 64 * 1024
+MAX_PROMPT_BYTES = 64 * 1024
+_THREAD_ID = re.compile(r'[0-9a-fA-F-]{16,64}\Z')
+_EFFORT = re.compile(r'(?:minimal|low|medium|high|xhigh)\Z')
+
+
+class DirectCodexError(LLMToolError):
+    def __init__(self, code, *, attempted=False, process_exit_code=None,
+                 stdout_sha256=None, elapsed_ms=None, cleanup_status='UNKNOWN',
+                 native_session_id=None, usage=None):
+        super().__init__('Codex Developer execution unavailable; details omitted')
+        self.direct_codex_code = code
+        self.attempted = attempted
+        self.process_exit_code = process_exit_code
+        self.stdout_sha256 = stdout_sha256
+        self.elapsed_ms = elapsed_ms
+        self.cleanup_status = cleanup_status
+        self.native_session_id = native_session_id
+        self.usage = usage
+
+
+@dataclass(frozen=True)
+class DirectResult:
+    status: str
+    summary: str
+    tests: tuple
+    self_review: str
+    blocked_reason: str | None
+    exit_code: int
+    thread_id: str
+    stdout_sha256: str
+    elapsed_ms: int
+    cleanup_status: str
+    usage: dict | None
+
+
+def _fail(code):
+    raise DirectCodexError(code)
+
+
+def _thread_from_events(raw):
+    """Accept the actual Codex JSONL thread.started event only."""
+    found = None
+    first = True
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line, object_pairs_hook=_unique_keys,
+                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            if type(event) is not dict:
+                return None
+            if first and event.get('type') != 'thread.started':
+                return None
+            first = False
+            if event.get('type') == 'thread.started':
+                current = event.get('thread_id')
+                if type(current) is not str or not _THREAD_ID.fullmatch(current):
+                    return None
+                if found is not None and current != found:
+                    return None
+                found = current
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    return found
+
+
+def _result_from_events(raw):
+    thread_id = None
+    final = None
+    usage = None
+    first = True
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line, object_pairs_hook=_unique_keys,
+                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            if type(event) is not dict:
+                _fail('CODEX_EVENT_INVALID')
+            if first and event.get('type') != 'thread.started':
+                _fail('CODEX_THREAD_ID_MISSING')
+            first = False
+            if event.get('type') == 'thread.started':
+                current = event.get('thread_id')
+                if type(current) is not str or not _THREAD_ID.fullmatch(current) or (thread_id and current != thread_id):
+                    _fail('CODEX_THREAD_ID_INVALID')
+                thread_id = current
+            elif event.get('type') == 'item.completed':
+                item = event.get('item')
+                if type(item) is dict and item.get('type') == 'agent_message':
+                    if type(item.get('text')) is not str or final is not None:
+                        _fail('CODEX_FINAL_MESSAGE_INVALID')
+                    final = item['text']
+            elif event.get('type') == 'turn.completed':
+                candidate = event.get('usage')
+                if type(candidate) is dict:
+                    prompt_tokens = candidate.get('input_tokens')
+                    completion_tokens = candidate.get('output_tokens')
+                    if (type(prompt_tokens) is int and prompt_tokens >= 0 and
+                            type(completion_tokens) is int and completion_tokens >= 0):
+                        usage = {'prompt_tokens': prompt_tokens,
+                                 'completion_tokens': completion_tokens,
+                                 'total_tokens': prompt_tokens + completion_tokens}
+    except DirectCodexError:
+        raise
+    except (UnicodeError, ValueError, RecursionError):
+        _fail('CODEX_EVENT_INVALID')
+    if thread_id is None:
+        _fail('CODEX_THREAD_ID_MISSING')
+    if final is None:
+        _fail('CODEX_FINAL_MESSAGE_MISSING')
+    try:
+        obj = json.loads(final, object_pairs_hook=_unique_keys,
+                         parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+    except (ValueError, TypeError, RecursionError):
+        _fail('CODEX_FINAL_JSON_INVALID')
+    fields = {'status', 'summary', 'tests', 'self_review', 'blocked_reason'}
+    try:
+        invalid = (type(obj) is not dict or set(obj) != fields or
+            obj.get('status') not in ('DONE', 'BLOCKED') or
+            type(obj.get('summary')) is not str or len(obj['summary'].encode('utf-8')) > 8192 or
+            type(obj.get('tests')) is not list or len(obj['tests']) > 32 or
+            any(type(item) is not str or len(item.encode('utf-8')) > 1024 for item in obj['tests']) or
+            type(obj.get('self_review')) is not str or len(obj['self_review'].encode('utf-8')) > 8192 or
+            (obj.get('blocked_reason') is not None and
+             (type(obj['blocked_reason']) is not str or len(obj['blocked_reason'].encode('utf-8')) > 2048)))
+    except (UnicodeError, TypeError, KeyError):
+        invalid = True
+    if invalid:
+        _fail('CODEX_FINAL_JSON_INVALID')
+    if (obj['status'] == 'BLOCKED') != (obj['blocked_reason'] is not None):
+        _fail('CODEX_FINAL_JSON_INVALID')
+    return thread_id, obj, usage
+
+
+def _unique_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+
+
+def _environment(tmpdir):
+    env = {name: os.environ[name] for name in (
+        'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
+        'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if name in os.environ}
+    for name in ('HOME', 'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
+        if name in env and (not os.path.isabs(env[name]) or any(ord(c) < 32 for c in env[name])):
+            _fail('CODEX_ENV_INVALID')
+    env['TMPDIR'] = tmpdir
+    return env
+
+
+def validate_profile(model, effort):
+    if (type(model) is not str or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', model) or
+            type(effort) is not str or not _EFFORT.fullmatch(effort)):
+        _fail('CODEX_PROFILE_INVALID')
+    return model, effort
+
+
+def _argv(executable, root, model, effort):
+    model, effort = validate_profile(model, effort)
+    args = [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
+            '--ignore-user-config', '--ignore-rules', '--ephemeral', '--strict-config',
+            '--color', 'never', '--json', '--model', model,
+            '-c', 'model_reasoning_effort=' + effort,
+            '--sandbox', 'workspace-write', '--cd', str(root), '-']
+    settings = (
+        'web_search="disabled"', 'features.multi_agent=false', 'features.hooks=false',
+        'features.apps=false', 'features.memories=false', 'features.remote_plugin=false',
+        'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
+        'allow_login_shell=false', 'model_reasoning_summary="none"',
+        'hide_agent_reasoning=true', 'show_raw_agent_reasoning=false',
+    )
+    for setting in settings:
+        args.extend(('-c', setting))
+    return args
+
+
+def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_id,
+        prelaunch_validate=None, timeout=MAX_WALL_CLOCK_SECONDS):
+    root = Path(root).resolve(strict=True)
+    if type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
+        _fail('CODEX_PROMPT_INVALID')
+    if type(timeout) not in (int, float) or not 0 < timeout <= MAX_WALL_CLOCK_SECONDS:
+        _fail('CODEX_BUDGET_INVALID')
+    executable = shutil.which('codex')
+    if executable is None or not os.path.isabs(executable):
+        _fail('CODEX_RUNTIME_UNAVAILABLE')
+    started = time.monotonic()
+    deadline = started + timeout
+    output, errors = bytearray(), bytearray()
+    process = None
+    lifecycle = CLIProcessLifecycle('codex-direct-developer', deadline=deadline + 5)
+    lifecycle.__enter__()
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-codex-direct-') as tmpdir:
+            os.chmod(tmpdir, 0o700)
+            env = _environment(tmpdir)
+            try:
+                if prelaunch_validate is not None and prelaunch_validate() is not True:
+                    _fail('CODEX_D6_BINDING_CHANGED')
+                worker_dispatch.authorize_dispatch(
+                    dispatch_store, dispatch_task_id, 'codex-developer', 'DISPATCH')
+                process = subprocess.Popen(
+                    _argv(executable, root, model, reasoning_effort), cwd=str(root), env=env,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    bufsize=0, shell=False, close_fds=True, start_new_session=True)
+                lifecycle.own(process)
+            except worker_dispatch.WorkerDispatchDenied as exc:
+                raise DirectCodexError(exc.dispatch_code) from None
+            except DirectCodexError:
+                raise
+            except Exception:
+                _fail('CODEX_RUNTIME_UNAVAILABLE')
+            selector = selectors.DefaultSelector()
+            try:
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
+                selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+                selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+                payload = prompt.encode('utf-8')
+                offset = 0
+                while selector.get_map():
+                    lifecycle.check()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _fail('CODEX_TIMEOUT')
+                    for key, _ in selector.select(min(remaining, 0.1)):
+                        if key.data == 'stdin':
+                            try:
+                                if offset < len(payload):
+                                    offset += os.write(key.fileobj.fileno(), payload[offset:offset + 8192])
+                                else:
+                                    selector.unregister(key.fileobj)
+                                    key.fileobj.close()
+                            except (BrokenPipeError, OSError):
+                                selector.unregister(key.fileobj)
+                                key.fileobj.close()
+                        else:
+                            chunk = os.read(key.fileobj.fileno(), 8192)
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            target, cap = ((output, MAX_OUTPUT_BYTES) if key.data == 'stdout'
+                                           else (errors, MAX_STDERR_BYTES))
+                            if len(target) + len(chunk) > cap:
+                                _fail('CODEX_OUTPUT_TOO_LARGE' if key.data == 'stdout'
+                                      else 'CODEX_STDERR_TOO_LARGE')
+                            target.extend(chunk)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _fail('CODEX_TIMEOUT')
+                process.wait(timeout=remaining)
+            finally:
+                selector.close()
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+        if process.returncode != 0:
+            _fail('CODEX_EXIT_NONZERO')
+        thread_id, result, usage = _result_from_events(bytes(output))
+        lifecycle.stop()
+        cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
+        lifecycle.__exit__(None, None, None)
+        return DirectResult(result['status'], result['summary'], tuple(result['tests']),
+                            result['self_review'], result['blocked_reason'], process.returncode,
+                            thread_id, hashlib.sha256(output).hexdigest(),
+                            max(0, int((time.monotonic() - started) * 1000)),
+                            cleanup_status, usage)
+    except DirectCodexError as exc:
+        lifecycle.stop()
+        exc.attempted = process is not None
+        exc.process_exit_code = process.returncode if process is not None else None
+        exc.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
+        exc.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        exc.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
+        exc.native_session_id = _thread_from_events(bytes(output))
+        lifecycle.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    except BaseException as exc:
+        lifecycle.stop()
+        try:
+            exc._llmtool_direct_codex_execution = {
+                'native_session_id': _thread_from_events(bytes(output)),
+                'process_exit_code': process.returncode if process is not None else None,
+                'stdout_sha256': hashlib.sha256(output).hexdigest() if output else None,
+                'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
+                'cleanup_status': 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN',
+            }
+        except Exception:
+            pass
+        lifecycle.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+
