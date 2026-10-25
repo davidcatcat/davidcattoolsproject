@@ -160,7 +160,7 @@ the local Mac, llmtool runtime or VPN and does not prove automatic Cloud dispatc
    or auto-merge main.
 
 This **does not** activate llmtool F2 Git mutation, the native M2 autonomous
-cycle, Codex Integrator wake/resume, or a second scheduler/daemon. Follow
+cycle, Integrator wake/resume, or a second scheduler/daemon. Follow
 [safe-git](../../skills/safe-git/SKILL.md) and
 [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Cloud setup:
 https://help.openai.com/en/articles/20001545-using-codex-cloud.
