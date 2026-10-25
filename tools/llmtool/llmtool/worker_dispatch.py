@@ -22,7 +22,7 @@ MAX_REPAIR_PER_ASSIGNMENT = 1
 MAX_RECOVERY_PER_ASSIGNMENT = 1
 WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer',
+    'company-gw', 'claude-reviewer', 'codex-reviewer',
 ))
 DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((

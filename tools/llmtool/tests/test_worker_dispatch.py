@@ -76,6 +76,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)
         self.assertTrue(worker_dispatch.evaluate('claude-reviewer').allowed)
+        self.assertTrue(worker_dispatch.evaluate('codex-reviewer').allowed)
         self.assertEqual(worker_dispatch.evaluate('claude-developer').reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
@@ -276,6 +277,26 @@ class WorkerDispatchTests(unittest.TestCase):
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
                          'WORKER_POLICY_INVALID')
+
+    def test_codex_reviewer_switch_is_owner_bound_and_fails_closed(self):
+        entry = self.policy['workers']['codex-reviewer']
+        self.assertEqual(entry['decided_by'], 'Owner')
+        self.assertEqual(entry['decided_at'], '2026-10-25')
+        self.assertEqual(
+            entry['evidence'],
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-6397242605')
+        self._set_state('codex-reviewer', 'PAUSED')
+        self.assertEqual(worker_dispatch.evaluate('codex-reviewer').reason_code,
+                         'OWNER_PAUSED')
+        self.assertTrue(worker_dispatch.evaluate('claude-reviewer').allowed)
+        # A missing codex-reviewer entry is an invalid policy for every Worker.
+        del self.policy['workers']['codex-reviewer']
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        for worker in ('codex-reviewer', 'claude-reviewer', 'codex-developer'):
+            self.assertEqual(worker_dispatch.evaluate(worker).reason_code,
+                             'WORKER_POLICY_INVALID')
+        self.assertEqual(worker_dispatch.worker_key_for('codex-reviewer'), None)
 
     def test_taskstore_denies_direct_assignment_and_persists_blocked_audit(self):
         self._set_state('opencode-developer', 'PAUSED')
