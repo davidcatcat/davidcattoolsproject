@@ -1535,6 +1535,18 @@ class OfficeRow:
     authority: str = ""   # who set a dispatch switch: Owner | PM
     outcome: str = ""     # a finished one-shot review: verdict word or why it has none
     alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
+    sid: str = ""         # short session id shown after the name, to match a window's /status
+
+
+def _shown(row: "OfficeRow") -> str:
+    return f"{row.name} {row.sid}" if row.sid else row.name
+
+
+def _codex_sid(thread_id) -> str:
+    """Codex thread ids are UUIDv7: the leading digits are a timestamp shared by
+    threads started within the same minute, so the random tail tells them apart."""
+    found = re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-([0-9a-f]{12})", str(thread_id or ""))
+    return found.group(1)[-8:] if found else ""
 
 
 def _who(agent: str, role: str, nick: str = "") -> str:
@@ -2153,7 +2165,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
                           role=role, task=f"task {task}" if task else "",
-                          evidence="codex 紀錄"))
+                          evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))))
     if state == DONE and age > OFFICE_DONE_WINDOW:
         return None
     key = f"codex:{payload.get('id')}"
@@ -2165,16 +2177,17 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         return ("main", payload.get("id"),
                 OfficeRow("codex developer", state, _place_label(place), age, 10, key=key,
                           tui=tui, role="developer", task=f"task {place[1]}",
-                          evidence="codex 紀錄"))
+                          evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
                 OfficeRow("codex 對話", state, _place_label(place),
-                          age, 10, key=key, tui=tui, evidence="codex 紀錄"))
+                          age, 10, key=key, tui=tui, evidence="codex 紀錄",
+                          sid=_codex_sid(payload.get("id"))))
     # The canonical checkout is the Integrator's under D6, but nothing records
     # which thread holds that role, so none is claimed.
     return ("main", payload.get("id"),
             OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
-                      evidence="codex 紀錄"),
+                      evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))),
             _codex_action(tail, canonical) if state == WORKING
             else "上一輪失敗，要看 Codex 畫面" if failed else "")
 
@@ -2686,14 +2699,13 @@ def claude_rows(now: float, root=None,
             # The name and id its launcher gave it: what a PM looks for to
             # find the window that needs an answer.
             name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
-            # Short id first: it survives when a narrow screen cuts the line.
-            detail += f"｜session {sid[:8]}{' ' + name if name else ''}"
+            detail += f"｜{name}" if name else ""
         # A session moved to the background keeps running without a terminal.
         mode = "背景" if kind == "bg" else "互動"
         rows.append(OfficeRow(f"claude {role}（{mode}）" if role else f"claude {mode}",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              task=task, evidence="claude 紀錄", cli=first == "cli"))
+                              task=task, evidence="claude 紀錄", cli=first == "cli", sid=sid[:8]))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -3918,16 +3930,16 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
             legend.append(f"派工狀態讀自{source}")
             rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
     alerts = _review_alerts(rows)
-    alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
+    alerts += [f"{_shown(row)}：{row.alert}" for row in rows if row.alert]
     # In full (wrapped, not cut): the session name at the end is how a PM
     # finds the window that needs an answer.
-    alerts += [f"{row.name}（{row.state}，{_short_ago(row.age)}）{row.detail}"
+    alerts += [f"{_shown(row)}（{row.state}，{_short_ago(row.age)}）{row.detail}"
                for row in rows if row.state in ALERT_STATES and not row.alert]
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
     tree = _tree(rows if expand else _fold_done(rows))
-    name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    name_cols = max(_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—") + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
     longest = max([_width(row.detail) for _, row in tree if row.detail] or [0])
@@ -3942,7 +3954,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         # In the TUI a long detail continues on the next lines under itself.
         pieces = [row.detail] if width is None else _wrap(row.detail, detail_cols)
         when = _short_ago(row.age)
-        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{pieces[0]}"
+        line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         out.append((line.rstrip(), _row_style(row.state)))

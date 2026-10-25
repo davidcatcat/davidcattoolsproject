@@ -1657,6 +1657,23 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("codex 主對話", rows)
         self.assertNotIn("codex subagent Bacon", rows)   # leaves with the PM that started it
 
+    def test_rows_show_the_short_session_id_after_the_name(self):
+        self._write(self.claude / "proj" / "8db9ba20-da22-4c36-ba78-9cd68605cc09.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"}], age=60)
+        # Codex ids are UUIDv7: threads of the same minute share the head, so the tail is shown.
+        for name, tid in (("a", "01a173c3-2b86-7600-963f-8f9addaf5381"),
+                          ("b", "01a173c3-55f9-7bb2-8aeb-da71da18fd15")):
+            self._codex(name, {"id": tid, "cwd": str(self.task), "thread_source": "user",
+                               "originator": "codex_exec"}, ["task_started"], age=30)
+        rows = self.rows()
+        self.assertEqual(sorted(row.sid for row in rows if row.name == "codex developer"),
+                         ["da18fd15", "ddaf5381"])
+        claude = self.by_name(rows)["claude 互動"]
+        self.assertEqual(claude.sid, "8db9ba20")
+        lines = mon.office_lines(rows)
+        self.assertTrue(any(line.startswith("claude 互動 8db9ba20 ") for line in lines), lines)
+        self.assertEqual(mon._codex_sid("not-a-uuid PROMPT-SECRET"), "")
+
     def test_finished_codex_exec_run_is_done_then_leaves(self):
         meta = {"id": "E1", "cwd": str(self.task), "thread_source": "user", "originator": "codex_exec"}
         self._codex("exec", meta, ["task_started", "task_complete"], age=600)
@@ -1892,8 +1909,8 @@ class OfficeViewTests(unittest.TestCase):
                      "statusUpdatedAt": (self.NOW - 1200) * 1000, "name": "dev-r4"}),
                     encoding="utf-8")
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
-                self.assertEqual((row.state, row.detail, row.age),
-                                 (want[0], want[1] + "｜session s dev-r4", want[2]))
+                self.assertEqual((row.state, row.detail, row.age, row.sid),
+                                 (want[0], want[1] + "｜dev-r4", want[2], "s"))
         driven = mon.Process(41, 5718, 41, "05:00", "Ss+", "Claude Code CLI", "claude",
                              "Codex APP-SERVER 5718")
         (sessions / "41.json").write_text(json.dumps(
