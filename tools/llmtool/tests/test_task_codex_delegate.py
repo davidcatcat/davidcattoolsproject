@@ -35,7 +35,8 @@ class CodexDelegateTests(unittest.TestCase):
         # reader's fixed environment while supplying this test process's valid
         # temporary directory so stderr remains a meaningful failure signal.
         env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'HOME': os.environ['HOME'],
-            'TMPDIR': os.environ['TMPDIR'], 'GIT_CONFIG_NOSYSTEM': '1',
+            'TMPDIR': os.environ.get('TMPDIR') or tempfile.gettempdir(),
+            'GIT_CONFIG_NOSYSTEM': '1',
             'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
             'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
             'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
