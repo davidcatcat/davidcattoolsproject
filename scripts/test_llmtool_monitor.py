@@ -32,7 +32,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -54,6 +54,9 @@ class ClassifyTests(unittest.TestCase):
             "/u/lib/node_modules/@kilocode/cli/bin/.kilo": "Kilo CLI",
             "/u/.kilo/bin/kilo run --agent a": "Kilo CLIENT",
             "claude": "Claude Code CLI",
+            "/u/.local/bin/claude daemon run --origin transient": "Claude Code daemon",
+            "claude bg-pty-host --bg-pty-host /tmp/d/s.pty.sock 200 50": "Claude Code daemon",
+            "claude bg-spare --bg-spare /tmp/d/s.claim.sock": "Claude Code background session",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
             "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
             "/Users/x/.local/bin/agy": "AGY CLI",
@@ -1654,6 +1657,19 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("codex 主對話", rows)
         self.assertNotIn("codex subagent Bacon", rows)   # leaves with the PM that started it
 
+    def test_finished_codex_exec_run_is_done_then_leaves(self):
+        meta = {"id": "E1", "cwd": str(self.task), "thread_source": "user", "originator": "codex_exec"}
+        self._codex("exec", meta, ["task_started", "task_complete"], age=600)
+        self.assertEqual(self.by_name(self.rows())["codex developer"].state, mon.DONE)
+        self._codex("exec", meta, ["task_started"], age=60)
+        self.assertEqual(self.by_name(self.rows())["codex developer"].state, mon.WORKING)
+        self._codex("exec", meta, ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
+        self.assertNotIn("codex developer", self.by_name(self.rows()))
+        # In the canonical checkout it is not waiting for a next instruction.
+        self._codex("exec", dict(meta, cwd=self.canonical), ["task_started", "task_complete"], age=600)
+        row = self.by_name(self.rows())["codex 主對話"]
+        self.assertEqual((row.state, row.detail[:3]), (mon.DONE, "已結束"))
+
     def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
         self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                             "originator": "codex-tui"}, ["task_started", "turn_aborted"], age=90)
@@ -1933,6 +1949,58 @@ class OfficeViewTests(unittest.TestCase):
         rows = {row.detail: row.state for row in self.rows([cli, other])}
         self.assertEqual(rows["title recent"], mon.IDLE)
         self.assertNotIn("Old sub", rows)
+        # The background daemon, its terminal hosts and an unclaimed spare hold
+        # no session, so they keep no closed session alive.
+        helpers = [mon.Process(50, 1, 50, "05:00", "S", "Claude Code daemon", "claude", ""),
+                   mon.Process(51, 50, 50, "05:00", "S", "Claude Code daemon", "claude", ""),
+                   mon.Process(52, 51, 50, "05:00", "S", "Claude Code background session", "claude",
+                               "Claude Code daemon 51")]
+        rows = {row.detail: row.state for row in self.rows([cli, *helpers])}
+        self.assertEqual(rows["推測 Claude CLI 已關閉（title recent）"], mon.CLOSED)
+
+    def test_claude_sessions_of_every_account_are_shown(self):
+        other = self.claude.parent / "claude-account2" / "projects"
+        self._write(self.claude / "proj" / "a.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "default account"}], age=60)
+        self._write(other / "proj" / "b.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "second account"}], age=60)
+        self._write(other / "proj" / "c.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "moved to background"}], age=60)
+        for top, pid, sid, kind in ((self.claude, 41, "a", None), (other, 42, "b", None),
+                                    (other, 43, "c", "bg")):
+            (top.parent / "sessions").mkdir(exist_ok=True)
+            (top.parent / "sessions" / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": sid, "status": "idle", "kind": kind}), encoding="utf-8")
+        procs = [mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(42, 1, 42, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(43, 7, 7, "05:00", "S", "Claude Code background session", "claude",
+                             "Claude Code daemon 7")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=[str(self.claude), str(other)], canonical=self.canonical)
+        got = {row.detail.split("｜")[0]: (row.name, row.state) for row in rows if row.kind != "worker"}
+        self.assertEqual(got, {"default account": ("claude 互動", mon.IDLE),
+                               "second account": ("claude 互動", mon.IDLE),
+                               "moved to background": ("claude 背景", mon.IDLE)})
+        # By default every ~/.claude-* account is read next to ~/.claude.
+        with patch.object(mon, "CLAUDE_PROJECTS", str(self.claude)), \
+                patch.object(mon, "CLAUDE_OTHER_PROJECTS", str(self.claude.parent / "claude-*" / "projects")):
+            self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])
+            (self.claude.parent / "claude-alias").symlink_to(self.claude.parent / "claude-account2")
+            self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])   # read once
+        # A file another account's crashed CLI left for a reused PID loses to
+        # the running CLI's fresh one.
+        stale = other.parent / "sessions" / "41.json"
+        stale.write_text(json.dumps({"pid": 41, "sessionId": "b"}), encoding="utf-8")
+        os.utime(stale, (self.NOW - 3600, self.NOW - 3600))
+        os.utime(self.claude.parent / "sessions" / "41.json", (self.NOW - 5, self.NOW - 5))
+        found = mon._claude_registered(mon.claude_sessions([str(self.claude), str(other)]), procs)
+        self.assertEqual(found[41]["sessionId"], "a")
+        # The daemon is infrastructure: listed, not counted as an agent.
+        daemon = mon.Process(7, 1, 7, "05:00", "S", "Claude Code daemon", "claude", "")
+        self.assertEqual(mon.summary(procs + [daemon], []), "Claude 3")
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [
