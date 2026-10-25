@@ -2586,7 +2586,7 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             detail = (
                 f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                 else (actions.get(key) or "處理中") if row.state in (WORKING, STALLED)
-                else actions.get(key) or "等待下一個指示") + row.detail
+                else actions.get(key) or ("已結束" if row.state == DONE else "等待下一個指示")) + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
@@ -2600,7 +2600,13 @@ def claude_roots(root=None) -> list[str]:
     each ~/.claude-* config directory. root: one directory or a list of them."""
     if root is not None:
         return [root] if isinstance(root, str) else list(root)
-    return [CLAUDE_PROJECTS] + sorted(glob.glob(CLAUDE_OTHER_PROJECTS))
+    roots, seen = [], set()
+    for top in [CLAUDE_PROJECTS] + sorted(glob.glob(CLAUDE_OTHER_PROJECTS)):
+        real = os.path.realpath(top)   # a ~/.claude-* symlink to another account is read once
+        if real not in seen:
+            seen.add(real)
+            roots.append(top)
+    return roots
 
 
 def claude_sessions(root=None) -> list[str]:
@@ -3545,13 +3551,18 @@ def _claude_registered(sessions, processes: list[Process]) -> dict[int, dict] | 
         if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
             continue
         try:
-            with open(os.path.join(directory, name), "rb") as handle:
+            path = os.path.join(directory, name)
+            written = os.path.getmtime(path)
+            with open(path, "rb") as handle:
                 entry = json.loads(handle.read(64 << 10))
         except (OSError, ValueError):
             continue
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
-            found[int(pid)] = entry
-    return found
+            # A crashed CLI of another account can leave a file for a PID the
+            # OS has since reused: the running CLI keeps its own file fresh.
+            if int(pid) not in found or written > found[int(pid)][0]:
+                found[int(pid)] = (written, entry)
+    return {pid: entry for pid, (_, entry) in found.items()}
 
 
 def _claude_live_sessions(sessions, processes: list[Process]) -> tuple[set, int] | None:

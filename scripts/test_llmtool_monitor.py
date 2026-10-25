@@ -1665,6 +1665,10 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(self.by_name(self.rows())["codex developer"].state, mon.WORKING)
         self._codex("exec", meta, ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
         self.assertNotIn("codex developer", self.by_name(self.rows()))
+        # In the canonical checkout it is not waiting for a next instruction.
+        self._codex("exec", dict(meta, cwd=self.canonical), ["task_started", "task_complete"], age=600)
+        row = self.by_name(self.rows())["codex 主對話"]
+        self.assertEqual((row.state, row.detail[:3]), (mon.DONE, "已結束"))
 
     def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
         self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
@@ -1984,6 +1988,16 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(mon, "CLAUDE_PROJECTS", str(self.claude)), \
                 patch.object(mon, "CLAUDE_OTHER_PROJECTS", str(self.claude.parent / "claude-*" / "projects")):
             self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])
+            (self.claude.parent / "claude-alias").symlink_to(self.claude.parent / "claude-account2")
+            self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])   # read once
+        # A file another account's crashed CLI left for a reused PID loses to
+        # the running CLI's fresh one.
+        stale = other.parent / "sessions" / "41.json"
+        stale.write_text(json.dumps({"pid": 41, "sessionId": "b"}), encoding="utf-8")
+        os.utime(stale, (self.NOW - 3600, self.NOW - 3600))
+        os.utime(self.claude.parent / "sessions" / "41.json", (self.NOW - 5, self.NOW - 5))
+        found = mon._claude_registered(mon.claude_sessions([str(self.claude), str(other)]), procs)
+        self.assertEqual(found[41]["sessionId"], "a")
         # The daemon is infrastructure: listed, not counted as an agent.
         daemon = mon.Process(7, 1, 7, "05:00", "S", "Claude Code daemon", "claude", "")
         self.assertEqual(mon.summary(procs + [daemon], []), "Claude 3")
