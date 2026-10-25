@@ -55,8 +55,17 @@ _FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
 _V2_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
               _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
               *_FIELDS_V2_WITH_DISPATCH_AUDIT)
-FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit', 'completion_events'))
+FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
+    'dispatch_audit', 'completion_events', 'completion_event_tombstones'))
 MAX_COMPLETION_EVENTS = 32
+# Retention: when the event list is full, the oldest ACKED event is compacted
+# into a tombstone that keeps its identity and stream position, so an acked
+# event is never recreated or re-delivered. Only unacknowledged events can
+# fill the list; that is the visible COMPLETION_EVENT_LIMIT state.
+MAX_COMPLETION_TOMBSTONES = 256
+_COMPLETION_TOMBSTONE_FIELDS = frozenset((
+    'event_id', 'source', 'session_id', 'sequence', 'acked_at',
+))
 _COMPLETION_EVENT_FIELDS = frozenset((
     'event_id', 'task_id', 'run_id', 'pm_session_id', 'session_id', 'source', 'source_sha',
     'sequence', 'payload_sha256', 'state', 'received_at', 'consumed_at',
@@ -295,12 +304,41 @@ def _validate_completion_events(record):
             _fail('COMPLETION_EVENT_INVALID')
 
 
+def _validate_completion_tombstones(record):
+    tombstones = record.get('completion_event_tombstones', [])
+    if (type(tombstones) is not list or len(tombstones) > MAX_COMPLETION_TOMBSTONES or
+            ('completion_event_tombstones' in record and not tombstones)):
+        _fail('COMPLETION_EVENT_INVALID')
+    live = {event['event_id'] for event in record['completion_events']}
+    positions = {(event['source'], event['session_id'], event['sequence'])
+                 for event in record['completion_events']}
+    for tombstone in tombstones:
+        if (type(tombstone) is not dict or set(tombstone) != _COMPLETION_TOMBSTONE_FIELDS or
+                not _safe_identifier(tombstone['event_id'], TASK_ID) or
+                tombstone['event_id'] in live or
+                tombstone['source'] not in _COMPLETION_SOURCES or
+                type(tombstone['session_id']) is not str or
+                re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9:_-]{0,127}',
+                             tombstone['session_id']) is None or
+                type(tombstone['sequence']) is not int or
+                not 0 <= tombstone['sequence'] <= 10**9):
+            _fail('COMPLETION_EVENT_INVALID')
+        _completion_timestamp(tombstone['acked_at'])
+        position = (tombstone['source'], tombstone['session_id'], tombstone['sequence'])
+        if position in positions:
+            _fail('COMPLETION_EVENT_INVALID')
+        live.add(tombstone['event_id'])
+        positions.add(position)
+
+
 def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (*_V2_SHAPES, *(shape | frozenset(('completion_events',))
-                             for shape in _V2_SHAPES))) or
+                             for shape in _V2_SHAPES),
+              *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
+                for shape in _V2_SHAPES))) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -312,6 +350,7 @@ def _validate(record):
         _fail()
     if 'completion_events' in record:
         _validate_completion_events(record)
+        _validate_completion_tombstones(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
@@ -1272,7 +1311,7 @@ class TaskStore:
 
     def create(self, record):
         if (type(record) is not dict or 'dispatch_audit' in record or
-                'completion_events' in record):
+                'completion_events' in record or 'completion_event_tombstones' in record):
             _fail()
         record = dict(record)
         developer = record.get('developer')
@@ -1363,11 +1402,22 @@ class TaskStore:
             if current['schema_version'] != 2 or current['run_id'] != run_id:
                 _fail('COMPLETION_EVENT_BINDING_MISMATCH')
             events = current.get('completion_events', [])
+            tombstones = current.get('completion_event_tombstones', [])
+            for tombstone in tombstones:
+                if tombstone['event_id'] == event_id:
+                    # Already delivered, acknowledged and compacted: never recreate.
+                    if (tombstone['source'] != source or
+                            tombstone['session_id'] != session_id):
+                        _fail('COMPLETION_EVENT_CONFLICT')
+                    return self._completion_result(
+                        dict(tombstone, task_id=task_id, state='ACKED', compacted=True),
+                        False)
             for existing in events:
                 if existing['event_id'] == event_id:
                     if any(existing[key] != value for key, value in binding.items()):
                         _fail('COMPLETION_EVENT_CONFLICT')
                     return self._completion_result(existing, False)
+            for existing in events + tombstones:
                 if (existing['source'] == source and
                         existing['session_id'] == session_id and
                         existing['sequence'] == sequence):
@@ -1376,16 +1426,30 @@ class TaskStore:
                         existing['session_id'] == session_id and
                         existing['sequence'] > sequence):
                     _fail('COMPLETION_EVENT_SEQUENCE_INVALID')
+            events = list(events)
+            tombstones = list(tombstones)
             if len(events) >= MAX_COMPLETION_EVENTS:
-                _fail('COMPLETION_EVENT_LIMIT')
+                oldest = next((index for index, existing in enumerate(events)
+                               if existing['state'] == 'ACKED'), None)
+                if oldest is None:
+                    # Every stored event is still unacknowledged; nothing may be
+                    # dropped. The PM must ack delivered events first.
+                    _fail('COMPLETION_EVENT_LIMIT')
+                evicted = events.pop(oldest)
+                tombstones.append({key: evicted[key] for key in
+                                   _COMPLETION_TOMBSTONE_FIELDS})
+                tombstones = tombstones[-MAX_COMPLETION_TOMBSTONES:]
             event = dict(binding, pm_session_id=current['pm_session_id'],
                          state='PENDING', received_at=self._completion_now(),
                          consumed_at=None, pm_decision_sha256=None,
                          acked_at=None, dispatch_intent=None)
+            changes = {'completion_events': events + [event]}
+            if tombstones:
+                changes['completion_event_tombstones'] = tombstones
             try:
                 self._update(task_id,
                     expected={'record_sha256': current['record_sha256']},
-                    changes={'completion_events': events + [event]},
+                    changes=changes,
                     trusted_completion_events=True)
                 return self._completion_result(event, True)
             except TaskStoreConflict:
@@ -1774,7 +1838,8 @@ class TaskStore:
                 trusted_completion_events=False):
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
-        if 'completion_events' in changes and not trusted_completion_events:
+        if (('completion_events' in changes or 'completion_event_tombstones' in changes)
+                and not trusted_completion_events):
             _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'

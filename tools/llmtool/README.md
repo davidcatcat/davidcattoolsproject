@@ -767,6 +767,13 @@ the Task, Run and evidence digest, so re-verifying the same evidence never creat
 second event, and a READY Task whose event write was interrupted gets its event on
 the next inbox read. Events and acknowledgements dispatch nothing; any later dispatch
 still goes through its own one-shot claim.
+A Task keeps at most 32 events. When the list is full, the oldest acknowledged event is
+compacted into a tombstone that keeps its ID and stream position (at most 256), so it is
+still never recreated. If all 32 are unacknowledged, the inbox reports `status:
+ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
+`ACK_DELIVERED_EVENTS_THEN_READ_INBOX` (`--wait` returns at once); acknowledging the
+delivered events and reading again records the new result. Other failures to record an
+event are listed under `blocked` with action `RETRY_INBOX`.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI

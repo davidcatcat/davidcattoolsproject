@@ -14,6 +14,11 @@ Delivery rules:
   ACKED events are never returned again.
 - A READY Task whose event is missing (for example after a crash between the
   state write and the event write) is reconciled on the next inbox read.
+- Retention: a Task keeps at most 32 events. When it is full, the oldest ACKED
+  event is compacted into a tombstone (ID and stream position kept, at most
+  256), so it is still never recreated. If all 32 are unacknowledged, the new
+  result is reported under ``blocked`` with COMPLETION_EVENT_LIMIT; acking the
+  delivered events and reading the inbox again records it.
 """
 
 import hashlib
@@ -118,12 +123,13 @@ def record_ready_event(store, task_id):
         if handoff is None:
             return None
         binding = _handoff_event(record, handoff)
-        events = record.get('completion_events', [])
-        existing = next((event for event in events
+        known = (record.get('completion_events', []) +
+                 record.get('completion_event_tombstones', []))
+        existing = next((event for event in known
                          if event['event_id'] == binding['event_id']), None)
         if existing is not None:
             return existing
-        stream = [event['sequence'] for event in events
+        stream = [event['sequence'] for event in known
                   if (event['source'], event['session_id']) ==
                   (binding['source'], binding['session_id'])]
         try:
@@ -134,7 +140,15 @@ def record_ready_event(store, task_id):
             if getattr(exc, 'task_store_error_code', None) not in (
                     'COMPLETION_EVENT_CONFLICT', 'COMPLETION_EVENT_SEQUENCE_INVALID'):
                 raise
-    raise LLMToolError('completion event could not be recorded; retry later')
+    error = LLMToolError('completion event could not be recorded; retry later')
+    error.task_store_error_code = 'COMPLETION_EVENT_BUSY'
+    raise error
+
+
+# What the PM should do when a READY result could not be turned into an event.
+_BLOCKED_ACTIONS = {
+    'COMPLETION_EVENT_LIMIT': 'ACK_DELIVERED_EVENTS_THEN_READ_INBOX',
+}
 
 
 def _session_records(store, session_key):
@@ -158,15 +172,24 @@ def read_inbox(store, session_key):
     from .task_submission_cli import _active_pm_handoff
 
     records, unreadable = _session_records(store, session_key)
-    events = []
+    events, blocked = [], []
     for record in records:
         if _active_pm_handoff(record) is not None:
             try:
                 record_ready_event(store, record['task_id'])
                 record = store.get(record['task_id'])
-            except LLMToolError:
-                # Still deliver what is already durable; the next read retries.
-                unreadable += 1
+            except LLMToolError as exc:
+                # Deliver what is already durable and report why the newest
+                # result has no event yet; the next read retries.
+                code = getattr(exc, 'task_store_error_code', None) or \
+                    'COMPLETION_EVENT_UNAVAILABLE'
+                blocked.append({
+                    'task_id': record['task_id'], 'code': code,
+                    'unacknowledged_event_count': sum(
+                        event['state'] != 'ACKED'
+                        for event in record.get('completion_events', [])),
+                    'action': _BLOCKED_ACTIONS.get(code, 'RETRY_INBOX'),
+                })
         handoff = _active_pm_handoff(record)
         current = None if handoff is None else _handoff_event(record, handoff)['event_id']
         for event in record.get('completion_events', []):
@@ -179,7 +202,9 @@ def read_inbox(store, session_key):
                 'pm_recovery': recovery(record),
             })
     events.sort(key=lambda event: (event['received_at'], event['task_id'], event['sequence']))
-    return {'pm_session_id': session_key, 'events': events,
+    return {'pm_session_id': session_key,
+            'status': 'ATTENTION' if blocked or unreadable else 'OK',
+            'events': events, 'blocked': blocked,
             'unreadable_task_count': unreadable}
 
 
@@ -190,8 +215,8 @@ def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
     deadline = clock() + timeout
     while True:
         inbox = read_inbox(store, session_key)
-        if inbox['events'] or not wait or clock() >= deadline:
-            inbox['timed_out'] = bool(wait and not inbox['events'])
+        if inbox['events'] or inbox['blocked'] or not wait or clock() >= deadline:
+            inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked'])
             return inbox
         sleep(max(0.0, min(poll, deadline - clock())))
 

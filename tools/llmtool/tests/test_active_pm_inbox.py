@@ -4,8 +4,10 @@ Everything is offline. A Claude Code session is represented only by its local
 transcript file under a temporary CLAUDE_CONFIG_DIR.
 """
 
+import hashlib
 import json
 import os
+import threading
 import uuid
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -14,6 +16,7 @@ from unittest.mock import patch
 import unittest
 
 from llmtool import active_pm_inbox
+from llmtool import task_store as task_store_module
 from llmtool.cli import main
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
@@ -289,6 +292,238 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(view['completion']['state'], 'WAITING_EXECUTOR')
         self.assertEqual(self._inbox()['events'], [])
+
+    # Retention and the event cap ------------------------------------------
+
+    def _fill(self, task, count, *, ack=False):
+        """Store ``count`` unrelated events on ``task`` (optionally acknowledged)."""
+        pm = 'pm-' + self.session
+        ids = []
+        for sequence in range(count):
+            event_id = uuid.uuid4().hex
+            self.store.record_completion_event(
+                task['task_id'], event_id=event_id, run_id=task['run_id'],
+                session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+                sequence=sequence, payload_sha256=hashlib.sha256(
+                    event_id.encode()).hexdigest())
+            if ack:
+                self._ack(event_id)
+            ids.append(event_id)
+        return ids
+
+    def test_full_list_of_acked_events_compacts_oldest_and_still_delivers(self):
+        task = self._ready_task()
+        cap = task_store_module.MAX_COMPLETION_EVENTS
+        filler = self._fill(task, cap, ack=True)
+        code, view = self._complete(task)
+        self.assertEqual(code, 0)
+        saved = self.store.get(task['task_id'])
+        self.assertEqual(len(saved['completion_events']), cap)
+        (tombstone,) = saved['completion_event_tombstones']
+        self.assertEqual(tombstone['event_id'], filler[0])
+        inbox = self._inbox()
+        self.assertEqual(inbox['status'], 'OK')
+        self.assertEqual(inbox['blocked'], [])
+        (event,) = inbox['events']
+        self.assertIs(event['current'], True)
+        # A compacted, acked event is never recreated or re-delivered.
+        replay = self.store.record_completion_event(
+            task['task_id'], event_id=filler[0], run_id=task['run_id'],
+            session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+            sequence=cap + 5, payload_sha256='f' * 64)
+        self.assertIs(replay['created'], False)
+        self.assertIs(replay['event']['compacted'], True)
+        self.assertEqual(len(self.store.get(task['task_id'])['completion_events']), cap)
+        # Stream positions of compacted events cannot be reused.
+        with self.assertRaises(LLMToolError):
+            self.store.record_completion_event(
+                task['task_id'], event_id=uuid.uuid4().hex, run_id=task['run_id'],
+                session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+                sequence=0, payload_sha256='e' * 64)
+
+    def test_full_list_of_unacked_events_is_a_visible_blocked_state_with_recovery(self):
+        task = self._ready_task()
+        cap = task_store_module.MAX_COMPLETION_EVENTS
+        filler = self._fill(task, cap)
+        code, view = self._complete(task)
+        self.assertEqual(code, 0)  # the evidence itself is durable
+        self.assertEqual(view['completion']['state'], 'PM_EVIDENCE_READY')
+        inbox = self._inbox(wait=True, timeout=30,
+                            sleep=lambda seconds: self.fail('blocked must return at once'))
+        self.assertEqual(inbox['status'], 'ATTENTION')
+        self.assertIs(inbox['timed_out'], False)
+        self.assertEqual(inbox['blocked'], [{
+            'task_id': task['task_id'], 'code': 'COMPLETION_EVENT_LIMIT',
+            'unacknowledged_event_count': cap,
+            'action': 'ACK_DELIVERED_EVENTS_THEN_READ_INBOX'}])
+        self.assertEqual(len(inbox['events']), cap)
+        self.assertFalse(any(event['current'] for event in inbox['events']))
+        with self.assertRaises(LLMToolError) as limit:
+            self.store.record_completion_event(
+                task['task_id'], event_id=uuid.uuid4().hex, run_id=task['run_id'],
+                session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+                sequence=cap, payload_sha256='e' * 64)
+        self.assertEqual(limit.exception.task_store_error_code, 'COMPLETION_EVENT_LIMIT')
+        # Recovery: ack what was delivered, then read again.
+        self._ack(filler[0])
+        inbox = self._inbox()
+        self.assertEqual(inbox['blocked'], [])
+        self.assertEqual(inbox['status'], 'OK')
+        current = [event for event in inbox['events'] if event['current']]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(len(inbox['events']), cap)
+
+    def test_tombstones_are_bounded_and_store_only(self):
+        task = self._ready_task()
+        with patch.object(task_store_module, 'MAX_COMPLETION_EVENTS', 2), \
+                patch.object(task_store_module, 'MAX_COMPLETION_TOMBSTONES', 1):
+            ids = self._fill(task, 4, ack=True)
+            saved = self.store.get(task['task_id'])
+        self.assertEqual([event['event_id'] for event in saved['completion_events']], ids[2:])
+        self.assertEqual([item['event_id'] for item in saved['completion_event_tombstones']],
+                         [ids[1]])
+        with self.assertRaises(LLMToolError) as forged:
+            self.store.update(task['task_id'], completion_event_tombstones=[])
+        self.assertEqual(forged.exception.task_store_error_code,
+                         'COMPLETION_EVENT_MUTATION_FORBIDDEN')
+        with self.assertRaises(LLMToolError):
+            TaskStore(self.base / 'copy').create(
+                {**saved, 'completion_events': None})
+
+    # Concurrency ----------------------------------------------------------
+
+    def test_two_completions_racing_on_one_task_store_one_event(self):
+        task = self._ready_task()
+        git, tests, _ = self._mock_complete_evidence(task)
+        barrier = threading.Barrier(2)
+        outcomes = []
+
+        def collect(**kwargs):
+            barrier.wait(timeout=10)
+            return git
+
+        def run():
+            try:
+                outcomes.append(run_task_complete(Namespace(task_id=task['task_id'],
+                    executor_task=self.task_id, reviewer_task=None, pr=None),
+                    store=TaskStore(self.store.root)))
+            except LLMToolError:
+                outcomes.append('CONFLICT')
+
+        forbidden = AssertionError('no provider call')
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                   side_effect=collect), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                   return_value=tests), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=forbidden), \
+             redirect_stdout(StringIO()):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(30)
+        self.assertIn(0, outcomes)
+        self.assertEqual(len(outcomes), 2)
+        saved = self.store.get(task['task_id'])
+        self.assertEqual(saved['completion']['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(len(saved['completion_events']), 1)
+        self.assertEqual(len(self._inbox()['events']), 1)
+
+    def test_concurrent_event_writers_neither_duplicate_nor_lose_events(self):
+        task = self._ready_task()
+        with patch('llmtool.active_pm_inbox.record_ready_event',
+                   side_effect=LLMToolError('defer event')):
+            self._complete(task)
+        barrier = threading.Barrier(4)
+        errors = []
+
+        def ready_event():
+            barrier.wait(timeout=10)
+            try:
+                active_pm_inbox.record_ready_event(TaskStore(self.store.root),
+                                                   task['task_id'])
+            except LLMToolError as exc:
+                errors.append(exc)
+
+        def other_event(sequence):
+            barrier.wait(timeout=10)
+            event_id = uuid.uuid4().hex
+            try:
+                TaskStore(self.store.root).record_completion_event(
+                    task['task_id'], event_id=event_id, run_id=task['run_id'],
+                    session_id='ses_Other' + str(sequence), source='HOST_WORKER',
+                    source_sha='a' * 40, sequence=0, payload_sha256='d' * 64)
+            except LLMToolError as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=ready_event) for _ in range(2)]
+        threads += [threading.Thread(target=other_event, args=(n,)) for n in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        self.assertEqual(errors, [])
+        events = self.store.get(task['task_id'])['completion_events']
+        self.assertEqual(len(events), 3)
+        self.assertEqual(sum(event['source'] == 'DIRECT_D6_DEVELOPER' for event in events), 1)
+
+    # Session-file checks ----------------------------------------------------
+
+    def test_session_file_must_be_a_regular_file_owned_by_the_user(self):
+        target = self.base / 'elsewhere.jsonl'
+        target.write_text('{}\n')
+        linked = str(uuid.uuid4())
+        path = active_pm_inbox.claude_session_file(linked, str(self.pm_cwd))
+        path.symlink_to(target)
+        with self.assertRaises(LLMToolError):
+            active_pm_inbox.observe_claude_session(linked, str(self.pm_cwd))
+        directory = str(uuid.uuid4())
+        active_pm_inbox.claude_session_file(directory, str(self.pm_cwd)).mkdir()
+        with self.assertRaises(LLMToolError):
+            active_pm_inbox.observe_claude_session(directory, str(self.pm_cwd))
+        with patch('llmtool.active_pm_inbox.os.getuid', return_value=os.getuid() + 1), \
+                self.assertRaises(LLMToolError):
+            active_pm_inbox.observe_claude_session(self.session, str(self.pm_cwd))
+        self.assertEqual(active_pm_inbox.observe_claude_session(
+            self.session, str(self.pm_cwd)), str(self.pm_cwd))
+
+    def test_session_lookup_needs_an_absolute_configuration_directory(self):
+        for environ in ({}, {'HOME': ''}, {'CLAUDE_CONFIG_DIR': 'relative/claude'},
+                        {'HOME': 'relative-home'}):
+            with self.subTest(environ=environ), \
+                    patch.dict(os.environ, environ, clear=True), \
+                    self.assertRaises(LLMToolError):
+                active_pm_inbox.observe_claude_session(self.session, str(self.pm_cwd))
+        home = self.base / 'only-home'
+        native = str(uuid.uuid4())
+        with patch.dict(os.environ, {'HOME': str(home)}, clear=True):
+            path = active_pm_inbox.claude_session_file(native, str(self.pm_cwd))
+            self.assertEqual(path.parents[2], home / '.claude')
+            path.parent.mkdir(parents=True)
+            path.write_text('{}\n')
+            self.assertEqual(active_pm_inbox.observe_claude_session(
+                native, str(self.pm_cwd)), str(self.pm_cwd))
+
+    def test_cwd_encoding_matches_claude_code_project_directories(self):
+        base = active_pm_inbox.claude_session_file('x', '/').parent.parent
+        cases = {
+            '/Users/me/git/repo': '-Users-me-git-repo',
+            '/Users/me/.local/share/w-x': '-Users-me--local-share-w-x',
+            '/a/b.c_d e/\u00e9~x': '-a-b-c-d-e---x',
+            '/': '-',
+        }
+        for cwd, encoded in cases.items():
+            with self.subTest(cwd=cwd):
+                self.assertEqual(active_pm_inbox.claude_session_file('x', cwd),
+                                 base / encoded / 'x.jsonl')
+        # The stored and looked-up directory is the normalized absolute path.
+        (self.pm_cwd / 'sub').mkdir()
+        dotted = str(self.pm_cwd) + '/sub/../.'
+        self.assertEqual(active_pm_inbox.observe_claude_session(self.session, dotted),
+                         str(self.pm_cwd))
+        self.assertEqual(self._record_pm(cwd=dotted)['pm_provenance']['pm_cwd'],
+                         str(self.pm_cwd))
 
     def test_cli_inbox_and_ack_round_trip(self):
         home = self.base / 'home'
