@@ -106,7 +106,7 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
     'DEVELOPER_OUTPUT_SENSITIVE', 'DEVELOPER_OUTPUT_INVALID_TEXT',
-    'DEVELOPER_OUTPUT_TOO_LARGE',
+    'DEVELOPER_OUTPUT_TOO_LARGE', 'DEVELOPER_OUTPUT_IGNORED_FILES',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
 _PM_PROVENANCE_FIELDS = frozenset((
@@ -596,7 +596,8 @@ def _validate(record):
                 _fail()
             if (developer['provider_profile'] == 'codex' and
                     (developer['provider_type'] not in (None, 'codex-cli') or
-                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['backend_session_semantics'] not in
+                        ('NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                      developer['max_tokens'] is not None)):
                 _fail()
             if (developer['provider_profile'] == 'claude' and
@@ -608,14 +609,19 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] != 'opencode' or
+                    if (developer['provider_profile'] not in ('opencode', 'codex') or
                             type(execution) is not dict or
                             set(execution) != _DIRECT_EXECUTION_FIELDS or
-                            execution['status'] not in ('SUCCEEDED', 'FAILED', 'UNKNOWN') or
+                            execution['status'] not in (
+                                ('SUCCEEDED', 'FAILED', 'UNKNOWN')
+                                if developer['provider_profile'] == 'opencode' else
+                                ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT')) or
                             (execution['native_session_id'] is not None and
                              (type(execution['native_session_id']) is not str or
-                              re.fullmatch(r'ses_[A-Za-z0-9]{1,100}',
-                                           execution['native_session_id']) is None)) or
+                              re.fullmatch(
+                                  r'ses_[A-Za-z0-9]{1,100}' if developer['provider_profile'] == 'opencode'
+                                  else r'[0-9a-fA-F-]{16,64}',
+                                  execution['native_session_id']) is None)) or
                             (execution['process_exit_code'] is not None and
                              (type(execution['process_exit_code']) is not int or
                               not -127 <= execution['process_exit_code'] <= 255)) or
@@ -638,13 +644,14 @@ def _validate(record):
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
                         _fail()
-                    if execution['status'] == 'SUCCEEDED' and (
+                    if execution['status'] in ('SUCCEEDED', 'DONE') and (
                             execution['native_session_id'] is None or
                             execution['process_exit_code'] != 0 or
                             execution['stdout_sha256'] is None or
-                            execution['source_bytes'] is None or
-                            execution['source_file_count'] is None or
-                            execution['source_manifest_sha256'] is None or
+                            (developer['provider_profile'] == 'opencode' and
+                             (execution['source_bytes'] is None or
+                              execution['source_file_count'] is None or
+                              execution['source_manifest_sha256'] is None)) or
                             execution['cleanup_status'] != 'CONFIRMED'):
                         _fail()
                     source_observation = (execution['source_bytes'],
@@ -726,7 +733,11 @@ def _validate(record):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
-                    usage is not None or developer['error_code'] is None):
+                    developer['error_code'] is None or
+                    (usage is not None and
+                     (developer['provider_profile'] != 'codex' or
+                      type(developer.get('execution')) is not dict or
+                      developer['execution'].get('usage_source') != 'CLI_REPORTED'))):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
@@ -736,7 +747,7 @@ def _validate(record):
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
                 if dev_state == 'DEVELOPER_RESPONDED' and (
-                        type(execution) is not dict or execution['status'] != 'SUCCEEDED' or
+                        type(execution) is not dict or execution['status'] not in ('SUCCEEDED', 'DONE') or
                         execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
                     _fail()
                 if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
@@ -760,7 +771,7 @@ def _validate(record):
                     'WAITING_PM': 'NOT_STARTED', 'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] != 'opencode' or
+                if (developer['provider_profile'] not in ('opencode', 'codex') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or
