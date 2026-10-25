@@ -759,6 +759,18 @@ class TaskCompletionTests(unittest.TestCase):
                 task_completion._collect_ci_evidence(
                     pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
+        for name in ('davidproject-self-action-3', 'davidproject-self-action-2 ', ''):
+            api = self._github_response_sequence(result_sha, {}, [], checks)
+            api[4]['jobs'][0]['runner_name'] = name
+            with self.subTest(runner=name), \
+                    patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+                with self.assertRaises(LLMToolError):
+                    task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[4]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:]):
+            second = task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(second['successful_checks'], ['check (macOS 3.13)'])
 
         legacy_checks = {'total_count': 1, 'check_runs': [
             {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,

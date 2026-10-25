@@ -45,7 +45,8 @@ _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
 _REQUIRED_CHECKS = frozenset(('check (macOS 3.13)',))
 _NOT_RUN_CHECKS = ('Linux Python 3.9', 'Linux Python 3.14', 'Windows CI')
-_CI_RUNNER_NAME = 'davidproject-self-action'
+# The Owner's Mac self-hosted runners (Issue #99); no other runner is trusted.
+_CI_RUNNER_NAMES = frozenset(('davidproject-self-action', 'davidproject-self-action-2'))
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 _CI_WORKFLOW_PATH = '.github/workflows/llmtool-mac-ci.yml'
 _CI_WORKFLOW_NAME = 'llmtool Mac CI'
@@ -1513,7 +1514,7 @@ def _collect_ci_evidence(*, pr_number, result_sha):
             r'https://api\.github\.com/repos/davidcatcat/davidcattoolsproject/'
             r'check-runs/([1-9][0-9]{0,18})', check_url))
         if (name in required_jobs or job.get('run_id') != run_id or
-                job.get('runner_name') != _CI_RUNNER_NAME or
+                job.get('runner_name') not in _CI_RUNNER_NAMES or
                 type(job.get('id')) is not int or job['id'] <= 0 or
                 check_id_match is None):
             _stop('CI_WORKFLOW_JOBS_INVALID')
