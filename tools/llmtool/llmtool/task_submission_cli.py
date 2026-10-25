@@ -525,7 +525,7 @@ def _ignored_file_fingerprints(root):
             # An unstable inventory cannot establish a safe baseline.
             raise LLMToolError('ignored-file inventory is unstable') from None
         fingerprints[entry] = (info.st_mode & 0o170000, info.st_size,
-                               info.st_mtime_ns, info.st_ino)
+                               info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
     return fingerprints
 
 

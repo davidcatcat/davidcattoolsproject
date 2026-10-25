@@ -209,8 +209,10 @@ def validate_profile(model, effort):
     return model, effort
 
 
-def _argv(executable, root, model, effort):
+def _argv(executable, root, model, effort, *, pycache_prefix):
     model, effort = validate_profile(model, effort)
+    if type(pycache_prefix) is not str or not os.path.isabs(pycache_prefix):
+        _fail('CODEX_ENV_INVALID')
     args = [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--strict-config',
             '--color', 'never', '--json', '--model', model,
@@ -221,6 +223,7 @@ def _argv(executable, root, model, effort):
         'features.apps=false', 'features.memories=false', 'features.remote_plugin=false',
         'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
         'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"',
+        'shell_environment_policy.set.PYTHONPYCACHEPREFIX=' + json.dumps(pycache_prefix),
         'allow_login_shell=false', 'model_reasoning_summary="none"',
         'hide_agent_reasoning=true', 'show_raw_agent_reasoning=false',
     )
@@ -267,7 +270,8 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                     raise DirectCodexError(exc.dispatch_code) from None
                 try:
                     process = subprocess.Popen(
-                        _argv(executable, root, model, reasoning_effort), cwd=str(root), env=env,
+                        _argv(executable, root, model, reasoning_effort,
+                              pycache_prefix=tmpdir), cwd=str(root), env=env,
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         bufsize=0, shell=False, close_fds=True, start_new_session=True)
                     lifecycle.own(process)

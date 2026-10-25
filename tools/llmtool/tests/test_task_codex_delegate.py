@@ -58,7 +58,7 @@ class CodexDelegateTests(unittest.TestCase):
         (self.repo / '.gitignore').write_text('*.pyc\n__pycache__/\n')
         llmtool = self.repo / 'tools' / 'llmtool'
         llmtool.mkdir(parents=True)
-        (llmtool / '.gitignore').write_text('*.pyc\n/.d6-bootstrap-report.json\n')
+        (llmtool / '.gitignore').write_text('*.pyc\n/.venv/\n/.d6-bootstrap-report.json\n')
         report = {'result': 'PASS', 'task_id': 'executor-task-1',
             'root_realpath': str(self.root), 'head_sha': None,
             'tooling_sha': None, 'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'}
@@ -116,7 +116,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.store.create(task)
         return task
 
-    def _fake_codex(self, *, ignored=False, bytecode=False):
+    def _fake_codex(self, *, ignored=False, bytecode=False, overwrite_ignored=None):
         final = {'status': 'DONE', 'summary': 'updated', 'tests': [],
                  'self_review': 'checked', 'blocked_reason': None}
         events = '\n'.join((
@@ -134,6 +134,14 @@ class CodexDelegateTests(unittest.TestCase):
             ignored_path = (str(ignored) if isinstance(ignored, (str, Path)) else
                             str(self.root / 'tools' / 'llmtool' / 'unittest.pyc'))
             script_body += 'Path(' + repr(ignored_path) + ").write_bytes(b'forged-bytecode')\n"
+        if overwrite_ignored is not None:
+            script_body += (
+                'import time\n'
+                'ignored_path = Path(' + repr(str(overwrite_ignored)) + ')\n'
+                'before = ignored_path.stat()\n'
+                'time.sleep(0.02)\n'
+                "ignored_path.write_bytes(b'forged module path!!')\n"
+                'os.utime(ignored_path, ns=(before.st_atime_ns, before.st_mtime_ns))\n')
         if bytecode:
             probe = "import src"
             script_body += (
@@ -148,8 +156,10 @@ class CodexDelegateTests(unittest.TestCase):
         script.chmod(0o700)
         return script
 
-    def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None):
-        self._fake_codex(ignored=ignored, bytecode=bytecode)
+    def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
+                  overwrite_ignored=None):
+        self._fake_codex(ignored=ignored, bytecode=bytecode,
+                         overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
             read_path=['src.py'], write_path=['src.py'],
@@ -191,6 +201,24 @@ class CodexDelegateTests(unittest.TestCase):
         task = self._task()
         result, saved, _callback = self._dispatch(task, ignored=str(ignored_path))
         self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_IGNORED_FILES')
+
+    def test_same_size_venv_overwrite_with_restored_mtime_is_rejected(self):
+        ignored_path = (self.root / 'tools' / 'llmtool' / '.venv' / 'lib' /
+                        'site-packages' / 'forged.pth')
+        ignored_path.parent.mkdir(parents=True)
+        original = b'baseline module path'
+        ignored_path.write_bytes(original)
+        baseline = ignored_path.stat()
+        task = self._task()
+        result, saved, _callback = self._dispatch(
+            task, overwrite_ignored=str(ignored_path))
+        changed = ignored_path.stat()
+        self.assertEqual(ignored_path.stat().st_size, len(original))
+        self.assertEqual(changed.st_mtime_ns, baseline.st_mtime_ns)
+        self.assertNotEqual(changed.st_ctime_ns, baseline.st_ctime_ns)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
         self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_IGNORED_FILES')
 
     def test_child_test_python_does_not_create_ignored_bytecode(self):

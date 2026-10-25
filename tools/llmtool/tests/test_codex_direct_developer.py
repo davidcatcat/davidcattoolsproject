@@ -43,8 +43,12 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         ))
 
     def write_fake(self, body, *, delay=0, delay_after_output=0, descendant_marker=None):
-        script = "#!/usr/bin/env python3\nimport os,sys,time\n"
+        script = "#!/usr/bin/env python3\nimport json,os,sys,time\n"
         script += f"open({str(self.invoked)!r},'w').write('yes')\n"
+        script += (
+            'expected_cache = "shell_environment_policy.set.PYTHONPYCACHEPREFIX=" + '
+            'json.dumps(os.environ["TMPDIR"])\n'
+            'assert expected_cache in sys.argv\n')
         if descendant_marker:
             script += (
                 'pid=os.fork()\n'
@@ -73,13 +77,16 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.usage, {'prompt_tokens': 13, 'completion_tokens': 8,
                                         'total_tokens': 21})
         self.assertTrue(self.invoked.exists())
-        argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high')
+        argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
+                            pycache_prefix='/tmp/codex-direct-cache')
         self.assertIn('--sandbox', argv)
         self.assertIn('workspace-write', argv)
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertIn('features.remote_plugin=false', argv)
         self.assertIn('shell_environment_policy.inherit="none"', argv)
         self.assertIn('shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"', argv)
+        self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
+                      argv)
 
     def test_blocked_final_is_recorded_as_blocked(self):
         final = dict(self.final, status='BLOCKED', blocked_reason='cannot safely edit')
