@@ -52,6 +52,13 @@
       "decided_at": "2026-10-23",
       "reason": "fixed formal Reviewer; use a separate read-only context",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848"
+    },
+    "codex-reviewer": {
+      "dispatch": "ALLOWED",
+      "decided_by": "Owner",
+      "decided_at": "2026-10-25",
+      "reason": "advisory/cross review of Claude Developer changes per Owner; does not replace the formal Claude Reviewer gate",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6397242605"
     }
   }
 }

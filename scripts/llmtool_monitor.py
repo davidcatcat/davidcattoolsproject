@@ -3222,6 +3222,7 @@ RECORD_STATES = {   # llmtool task / completion state -> plain words
     "PM_UNAVAILABLE": "PM 無法使用",
     "WAITING_EXECUTOR": "等執行者接手",
     "WAITING_PM": "等 PM",
+    "PM_EVIDENCE_READY": "結果已備妥，等 PM 讀取",
 }
 LLMTOOL_RECORD_WINDOW = 12 * 3600
 
@@ -3275,8 +3276,9 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
     return sorted(found, reverse=True)
 
 
-# Codex reviewers are not a standing Worker: the Codex PM spawns reviewer
-# subagents itself (Owner 2026-10-23), and those appear under the PM.
+# Codex reviewers are not a standing Worker: they run as sessions the PM starts
+# and appear under it. The `codex-reviewer` dispatch switch (Owner 2026-10-25)
+# gates them but gets no roster row of its own.
 WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     ("opencode developer", "opencode-developer", 50),
     ("agy", "agy", 60),
@@ -3294,7 +3296,7 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 # Worker. The monitor applies the same rules so it never shows a switch the
 # gate would refuse; a test checks both agree.
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
-                              "company-gw", "claude-reviewer"})
+                              "company-gw", "claude-reviewer", "codex-reviewer"})
 DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
                    frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
                               "owner_assignments"}))

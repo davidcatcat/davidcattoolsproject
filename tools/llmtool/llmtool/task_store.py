@@ -726,12 +726,14 @@ def _validate(record):
                     'pm_dispatch', 'pm_response', 'pm_recommendation',
                     'pm_usage', 'pm_error_code'))
                 states = ('WAITING_EXECUTOR', 'VERIFYING_EXECUTOR', 'WAITING_PM',
+                          'PM_EVIDENCE_READY',
                           'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED',
                           'PM_UNAVAILABLE', 'PM_OUTCOME_UNKNOWN')
                 dispatch_for_state = {
                     'WAITING_EXECUTOR': 'NOT_STARTED',
                     'VERIFYING_EXECUTOR': 'NOT_STARTED',
-                    'WAITING_PM': 'NOT_STARTED', 'PM_DISPATCHING': 'CLAIMED',
+                    'WAITING_PM': 'NOT_STARTED', 'PM_EVIDENCE_READY': 'NOT_STARTED',
+                    'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
                 if (developer['provider_profile'] != 'opencode' or
@@ -768,12 +770,20 @@ def _validate(record):
                         callback['pm_response'] is not None or
                         callback['pm_recommendation'] is not None):
                     _fail()
-                if callback['state'] == 'WAITING_PM' and (
+                if callback['state'] in ('WAITING_PM', 'PM_EVIDENCE_READY') and (
                         callback['pm_dispatch'] != 'NOT_STARTED' or
                         callback['pm_response'] is not None or
                         callback['pm_recommendation'] is not None or missing):
                     _fail()
-                if callback['state'] in ('WAITING_PM', 'PM_DISPATCHING',
+                # Evidence ready for a live-runtime PM: only a record-pm Task has
+                # no provider profile, and nothing about a PM call is recorded.
+                if callback['state'] == 'PM_EVIDENCE_READY' and (
+                        'pm_provenance' not in record or
+                        callback['pm_usage'] is not None or
+                        callback['pm_error_code'] is not None or
+                        'review_handoff' in callback):
+                    _fail()
+                if callback['state'] in ('WAITING_PM', 'PM_EVIDENCE_READY', 'PM_DISPATCHING',
                         'PM_RETURNED', 'PM_RESPONSE_REJECTED', 'PM_UNAVAILABLE',
                         'PM_OUTCOME_UNKNOWN'):
                     result = evidence.get('result')
@@ -918,7 +928,7 @@ def _validate(record):
                 if type(completion) is not dict or set(completion) != fields:
                     _fail()
             if completion is not None and (completion['state'] not in ('WAITING_EXECUTOR',
-                    'WAITING_REVIEW', 'WAITING_CI', 'WAITING_PM',
+                    'WAITING_REVIEW', 'WAITING_CI', 'WAITING_PM', 'PM_EVIDENCE_READY',
                     'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED', 'PM_UNAVAILABLE',
                     'PM_OUTCOME_UNKNOWN') or
                     completion['pm_dispatch'] not in ('NOT_STARTED', 'CLAIMED',
@@ -930,6 +940,7 @@ def _validate(record):
                     'WAITING_REVIEW': 'NOT_STARTED',
                     'WAITING_CI': 'NOT_STARTED',
                     'WAITING_PM': 'NOT_STARTED',
+                    'PM_EVIDENCE_READY': 'NOT_STARTED',
                     'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED',
                     'PM_RESPONSE_REJECTED': 'RETURNED',
@@ -939,6 +950,15 @@ def _validate(record):
                 if completion['pm_dispatch'] != dispatch_for_state[completion['state']]:
                     _fail()
                 if completion['state'] == 'WAITING_PM' and completion['missing_gates']:
+                    _fail()
+                # Evidence ready for a live-runtime PM (record-pm): no provider
+                # profile exists, so no PM call, reply, usage or error is recorded.
+                if completion['state'] == 'PM_EVIDENCE_READY' and (
+                        'pm_provenance' not in record or completion['missing_gates'] or
+                        completion['pm_response'] is not None or
+                        completion['pm_recommendation'] is not None or
+                        completion['pm_usage'] is not None or
+                        completion['pm_error_code'] is not None):
                     _fail()
                 if completion['state'] in ('WAITING_EXECUTOR', 'WAITING_REVIEW', 'WAITING_CI') and (
                         completion['pm_dispatch'] != 'NOT_STARTED' or
@@ -972,7 +992,8 @@ def _validate(record):
                         evidence['execution_mode'] not in ('DIRECT_D6', 'HOST_WORKER')):
                     _fail()
             if completion is not None and completion['state'] in (
-                    'WAITING_PM', 'PM_DISPATCHING', 'PM_RETURNED', 'PM_RESPONSE_REJECTED',
+                    'WAITING_PM', 'PM_EVIDENCE_READY', 'PM_DISPATCHING', 'PM_RETURNED',
+                    'PM_RESPONSE_REJECTED',
                     'PM_UNAVAILABLE', 'PM_OUTCOME_UNKNOWN'):
                 if (type(evidence) is not dict or
                         not {'task_id', 'run_id', 'contract_digest', 'result', 'tests',

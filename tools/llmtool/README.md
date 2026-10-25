@@ -729,6 +729,11 @@ WAITING_CI. Only a complete evidence packet is sent to the original PM profile;
 the PM response is persisted as a recommendation and grants no execution or Git
 permission. If the original PM is unavailable, complete evidence remains in
 WAITING_PM. Ambiguous provider outcomes are not retried automatically.
+A Task recorded with `task record-pm` has no PM provider profile: completion never
+resolves or calls one. Complete evidence is stored as PM_EVIDENCE_READY, and
+`task show` adds `active_pm_handoff` with the same bounded packet and instructions a
+provider PM would receive, for the active PM runtime to read. All evidence gates
+are unchanged.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI
