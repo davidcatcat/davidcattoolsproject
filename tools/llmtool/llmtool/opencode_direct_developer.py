@@ -8,6 +8,7 @@ and the current configured auth location; this module never reads credential dat
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -46,7 +47,8 @@ class DirectOpenCodeError(LLMToolError):
     def __init__(self, code, *, attempted=False, cleanup_status='UNKNOWN',
                  process_exit_code=None, stdout_sha256=None, elapsed_ms=None,
                  source_bytes=None, source_file_count=None,
-                 source_manifest_sha256=None):
+                 source_manifest_sha256=None, task_id=None, run_id=None,
+                 started_at=None, ended_at=None, native_session_id=None):
         super().__init__('OpenCode Developer execution unavailable; details omitted')
         self.direct_opencode_code = code
         self.attempted = attempted
@@ -57,6 +59,11 @@ class DirectOpenCodeError(LLMToolError):
         self.source_bytes = source_bytes
         self.source_file_count = source_file_count
         self.source_manifest_sha256 = source_manifest_sha256
+        self.task_id = task_id
+        self.run_id = run_id
+        self.started_at = started_at
+        self.ended_at = ended_at
+        self.native_session_id = native_session_id
 
 
 @dataclass(frozen=True)
@@ -73,10 +80,90 @@ class DirectResult:
     source_bytes: int
     source_file_count: int
     source_manifest_sha256: str
+    task_id: str | None = None
+    run_id: str | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
 
 
 def _reject(code):
     raise DirectOpenCodeError(code)
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+
+_DENIAL_CODES = frozenset(('TOOL_DENIED', 'PERMISSION_DENIED',
+                           'PermissionDeniedError', 'PermissionRejectedError'))
+
+
+def _tool_denied(event):
+    """Recognize only structured refusal markers, never provider prose."""
+    if type(event) is not dict:
+        return False
+    if event.get('type') in ('permission.asked', 'permission_requested'):
+        # This route has no interactive approval channel.
+        return True
+    error = event.get('error')
+    part = event.get('part')
+    state = part.get('state') if type(part) is dict else None
+    if event.get('type') == 'tool_use' and type(state) is dict:
+        if state.get('status') in ('denied', 'rejected'):
+            return True
+        error = state.get('error')
+    return (type(error) is dict and
+            (type(error.get('code')) is str and error['code'] in _DENIAL_CODES or
+             type(error.get('name')) is str and error['name'] in _DENIAL_CODES))
+
+
+def _has_structured_tool_denial(raw):
+    """Inspect a failed CLI result without retaining or returning its content."""
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if line and _tool_denied(json.loads(line)):
+                return True
+    except (UnicodeError, ValueError, RecursionError):
+        return False
+    return False
+
+
+def _observed_native_session(raw):
+    """Return a single syntactically valid CLI session ID, or UNKNOWN."""
+    sid = None
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line)
+            if type(event) is not dict:
+                return None
+            current = event.get('sessionID')
+            if current is None:
+                continue
+            if (type(current) is not str or _SESSION.fullmatch(current) is None or
+                    (sid is not None and sid != current)):
+                return None
+            sid = current
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    return sid
+
+
+def _observed_run_id(store, task_id):
+    """Read an existing TaskStore binding when the caller supplies that interface."""
+    getter = getattr(store, 'get', None)
+    if not callable(getter):
+        return None
+    try:
+        record = getter(task_id)
+    except Exception:
+        _reject('OPENCODE_D6_BINDING_CHANGED')
+    if (type(record) is not dict or record.get('task_id') != task_id or
+            type(record.get('run_id')) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', record['run_id']) is None):
+        _reject('OPENCODE_D6_BINDING_CHANGED')
+    return record['run_id']
 
 
 def _valid_paths(root, read_paths, write_paths):
@@ -298,6 +385,8 @@ def parse_json_events(raw):
             _reject('OPENCODE_OUTPUT_INVALID')
         if type(event) is not dict:
             _reject('OPENCODE_OUTPUT_INVALID')
+        if _tool_denied(event):
+            _reject('TOOL_DENIED')
         if event.get('type') == 'error':
             _reject('OPENCODE_PROVIDER_FAILED')
         event_type = event.get('type')
@@ -423,6 +512,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     config_text = json.dumps(config, ensure_ascii=True, sort_keys=True,
                              separators=(',', ':'), allow_nan=False)
     started = time.monotonic()
+    started_at = None
+    run_id = None
     work_deadline = started + timeout_seconds
     cleanup_deadline = work_deadline + 3
     stdout, stderr = bytearray(), bytearray()
@@ -458,11 +549,13 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                             dispatch_store, dispatch_task_id, 'opencode-developer', 'DISPATCH')
                     except worker_dispatch.WorkerDispatchDenied as exc:
                         raise DirectOpenCodeError(exc.dispatch_code) from None
+                    run_id = _observed_run_id(dispatch_store, dispatch_task_id)
                     try:
                         process = subprocess.Popen(argv, cwd=str(root), env=env,
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, bufsize=0, shell=False,
                             close_fds=True, start_new_session=True)
+                        started_at = _utc_now()
                         lifecycle.own(process)
                     except Exception:
                         _reject('OPENCODE_RUNTIME_UNAVAILABLE')
@@ -474,6 +567,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
                     offset = 0
+                    complete_stdout = 0
                     while selector.get_map():
                         lifecycle.check()
                         remaining = work_deadline - time.monotonic()
@@ -502,6 +596,13 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                 _reject('OPENCODE_OUTPUT_TOO_LARGE' if key.data == 'stdout'
                                         else 'OPENCODE_STDERR_TOO_LARGE')
                             destination.extend(chunk)
+                            if key.data == 'stdout':
+                                end = stdout.rfind(b'\n')
+                                if end >= complete_stdout:
+                                    complete = bytes(stdout[complete_stdout:end + 1])
+                                    complete_stdout = end + 1
+                                    if _has_structured_tool_denial(complete):
+                                        _reject('TOOL_DENIED')
                     _await_exit_without_reap(process, deadline=work_deadline)
                 finally:
                     if selector is not None:
@@ -526,6 +627,11 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
             exc.source_bytes = source_bytes
             exc.source_file_count = source_file_count
             exc.source_manifest_sha256 = source_manifest_sha256
+            exc.task_id = dispatch_task_id
+            exc.run_id = run_id
+            exc.started_at = started_at
+            exc.ended_at = _utc_now() if started_at is not None else None
+            exc.native_session_id = _observed_native_session(bytes(stdout))
             raise
         except BaseException as exc:
             cleanup = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
@@ -539,11 +645,17 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     'source_bytes': source_bytes,
                     'source_file_count': source_file_count,
                     'source_manifest_sha256': source_manifest_sha256,
+                    'task_id': dispatch_task_id,
+                    'run_id': run_id,
+                    'started_at': started_at,
+                    'ended_at': _utc_now() if started_at is not None else None,
+                    'native_session_id': _observed_native_session(bytes(stdout)),
                 }
             except Exception:
                 pass
             raise
     elapsed = max(0, int((time.monotonic() - started) * 1000))
+    ended_at = _utc_now() if started_at is not None else None
     raw = bytes(stdout)
     if cleanup != 'CONFIRMED':
         exc = DirectOpenCodeError('OPENCODE_CLEANUP_UNKNOWN', attempted=True,
@@ -552,7 +664,10 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,
                                   source_file_count=source_file_count,
-                                  source_manifest_sha256=source_manifest_sha256)
+                                  source_manifest_sha256=source_manifest_sha256,
+                                  task_id=dispatch_task_id, run_id=run_id,
+                                  started_at=started_at, ended_at=ended_at,
+                                  native_session_id=_observed_native_session(raw))
         raise exc
     if process is None or process.returncode is None:
         raise DirectOpenCodeError('OPENCODE_EXIT_UNKNOWN', attempted=process is not None,
@@ -560,14 +675,22 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,
                                   source_file_count=source_file_count,
-                                  source_manifest_sha256=source_manifest_sha256)
+                                  source_manifest_sha256=source_manifest_sha256,
+                                  task_id=dispatch_task_id, run_id=run_id,
+                                  started_at=started_at, ended_at=ended_at,
+                                  native_session_id=_observed_native_session(raw))
     if process.returncode != 0:
-        raise DirectOpenCodeError('OPENCODE_PROVIDER_FAILED', attempted=True,
+        raise DirectOpenCodeError(
+                                  'TOOL_DENIED' if _has_structured_tool_denial(raw)
+                                  else 'OPENCODE_PROVIDER_FAILED', attempted=True,
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,
                                   source_file_count=source_file_count,
-                                  source_manifest_sha256=source_manifest_sha256)
+                                  source_manifest_sha256=source_manifest_sha256,
+                                  task_id=dispatch_task_id, run_id=run_id,
+                                  started_at=started_at, ended_at=ended_at,
+                                  native_session_id=_observed_native_session(raw))
     try:
         session_id, text, usage = parse_json_events(raw)
     except DirectOpenCodeError as exc:
@@ -579,8 +702,14 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         exc.source_bytes = source_bytes
         exc.source_file_count = source_file_count
         exc.source_manifest_sha256 = source_manifest_sha256
+        exc.task_id = dispatch_task_id
+        exc.run_id = run_id
+        exc.started_at = started_at
+        exc.ended_at = ended_at
+        exc.native_session_id = _observed_native_session(raw)
         raise
     return DirectResult(process.returncode, session_id, text, usage,
                         'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                         hashlib.sha256(raw).hexdigest(), elapsed, cleanup, version,
-                        source_bytes, source_file_count, source_manifest_sha256)
+                        source_bytes, source_file_count, source_manifest_sha256,
+                        dispatch_task_id, run_id, started_at, ended_at)

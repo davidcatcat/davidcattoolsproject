@@ -2,6 +2,7 @@ import io
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,7 +22,8 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
-                                         _provider_route_binding, run_task_delegate,
+                                         _provider_route_binding, run_task_complete,
+                                         run_task_delegate,
                                          run_task_opencode_delegate,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
@@ -35,10 +37,10 @@ def config(provider_type='codex-cli', model='gpt-6-luna'):
     }, 'generation': {'temperature': 0, 'max_tokens': 128}}
 
 
-def codex_pm_config():
+def codex_developer_config():
     return {
-        'active_provider': 'codex-pm',
-        'providers': {'codex-pm': {
+        'active_provider': 'codex-developer',
+        'providers': {'codex-developer': {
             'type': 'codex-cli', 'model': 'gpt-6-luna', 'timeout_seconds': 30,
             'provider_options': {},
         }},
@@ -576,10 +578,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['pm_assignment']['route'], 'opencode')
         self.assertEqual(saved['pm_assignment']['risk'], 'LOW')
         self.assertEqual(saved['pm_provider_profile'], 'active-pm-runtime')
-        self.assertEqual(saved['pm_provider_type'], 'codex-cli')
+        self.assertEqual(saved['pm_provider_type'], 'active-pm-runtime')
         self.assertIsNone(saved['pm_model'])
         self.assertEqual(saved['pm_route_binding'], {
-            'type': 'codex-cli', 'model': None, 'base_url': None})
+            'type': 'active-pm-runtime', 'model': None, 'base_url': None})
         self.assertEqual(saved['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
         self.assertIsNone(saved['native_session_id'])
@@ -612,12 +614,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         'response': good_response}),
             json.dumps({'request': 'Build feature',
                         'response': 'Bearer abcdefghijklmnop'}),
-            json.dumps({'request': 'Build feature', 'response': json.dumps({
-                'schema_version': 1, 'summary': 'Duplicate fields.',
-                'developer_assignment': {'route': 'opencode', 'route': 'codex',
-                    'risk': 'LOW', 'goal': 'Do one task.',
-                    'acceptance': ['A test passes.']},
-            })}),
+            json.dumps({'request': 'Build feature', 'response':
+                '{"schema_version":1,"summary":"Duplicate fields.",'
+                '"developer_assignment":{"route":"opencode","route":"codex",'
+                '"risk":"LOW","goal":"Do one task.",'
+                '"acceptance":["A test passes."]}}'}),
         )
         for raw in cases:
             with self.subTest(raw=raw[:40]):
@@ -627,6 +628,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     run_task_record_pm(Namespace(stdin_json=True), store=store,
                                        input_stream=io.StringIO(raw))
                 self.assertFalse(store.root.exists())
+
+    def test_record_pm_accepts_codex_low_risk_and_refuses_other_routes_or_risk(self):
+        for route, risk, expected in (
+                ('codex', 'LOW', True), ('opencode', 'LOW', True),
+                ('company-gw', 'LOW', False), ('none', 'LOW', False),
+                ('codex', 'OTHER', False)):
+            with self.subTest(route=route, risk=risk):
+                response = json.dumps({
+                    'schema_version': 1, 'summary': 'Bounded.',
+                    'developer_assignment': {
+                        'route': route, 'risk': risk, 'goal': 'Do one task.',
+                        'acceptance': ['A test passes.'],
+                    },
+                })
+                envelope = json.dumps({'request': 'Build feature', 'response': response})
+                store = TaskStore(Path(self.temp.name).resolve() /
+                                  ('route-' + route + '-' + risk))
+                if expected:
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(run_task_record_pm(
+                            Namespace(stdin_json=True), store=store,
+                            input_stream=io.StringIO(envelope)), 0)
+                    record_path = next(store.root.glob('*.json'))
+                    self.assertEqual(store.get(record_path.stem)['pm_assignment']['route'],
+                                     route)
+                else:
+                    with self.assertRaises(LLMToolError):
+                        run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                           input_stream=io.StringIO(envelope))
+                    self.assertFalse(store.root.exists())
 
     def _pm_task_with_assignment(self):
         acceptance = ['new test passes']
@@ -1083,7 +1114,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         patch_text = ('diff --git a/sample.py b/sample.py\n'
                       '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
                       '-VALUE = 1\n+VALUE = 2\n')
-        codex_config = codex_pm_config()
+        codex_config = codex_developer_config()
         output = io.StringIO()
         args = self._codex_delegate_args(task)
         bind_executor_task = submission_cli.task_completion.bind_executor_task
@@ -1102,13 +1133,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(code, 0, output.getvalue())
         result = json.loads(output.getvalue())
         developer = result['developer']
-        self.assertEqual(resolve.call_args.args, ('codex-pm',))
+        self.assertEqual(resolve.call_args.args, ('codex-developer',))
         self.assertEqual(bind_executor.call_count, 2)
         complete.assert_called_once()
         client = complete.call_args.args[0]
         messages = complete.call_args.args[1]
         self.assertIsInstance(client, CodexCLIProvider)
-        self.assertEqual(client.provider, codex_config['providers']['codex-pm'])
+        self.assertEqual(client.provider, codex_config['providers']['codex-developer'])
         capabilities = get_provider_capabilities('codex-cli').to_dict()
         self.assertFalse(capabilities['code_edit'])
         self.assertFalse(capabilities['shell'])
@@ -1149,6 +1180,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
+        task = self._pm_task_with_codex_assignment()
+        output = io.StringIO()
+        snapshot = Namespace(root=str(self.executor_root),
+                             common_dir=self.executor_common_dir,
+                             branch='feat/test-executor', head=self.executor_head)
+        registration = Namespace(
+            task_id='executor-task-1', trusted_agent_id='executor-agent-1',
+            session_ref='Executor Session 1', native_session_id=None,
+            root=str(self.executor_root), common_dir=self.executor_common_dir,
+            branch='feat/test-executor')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             return_value=(registration, snapshot)), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      side_effect=LLMToolError(
+                          'requested provider profile is not defined')) as resolve, \
+                patch('llmtool.task_submission_cli.create_client',
+                      side_effect=AssertionError('unconfigured profile must not create client')), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task))
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        resolve.assert_called_once_with('codex-developer', require_configured=True)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_PROFILE_UNAVAILABLE')
+        self.assertIsNone(result['developer']['model'])
+
     def test_codex_d6_revalidation_failure_blocks_provider_call(self):
         task = self._pm_task_with_codex_assignment()
         original_bind = submission_cli.task_completion.bind_executor_task
@@ -1163,7 +1224,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=codex_pm_config()), \
+                      return_value=codex_developer_config()), \
                 patch('llmtool.task_submission_cli.api_key',
                       side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
                 patch.object(submission_cli.task_completion, 'bind_executor_task',
@@ -1194,7 +1255,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.task_submission_cli.resolve_profile_config',
-                              return_value=codex_pm_config()), \
+                              return_value=codex_developer_config()), \
                         patch('llmtool.task_submission_cli.api_key',
                               side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
                         patch('llmtool.task_submission_cli.create_client',
@@ -1309,7 +1370,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         system_prompt = client.calls[0][0]['content']
         self.assertIn('Do not use Markdown fences', system_prompt)
         self.assertIn('diff --git a/example.py b/example.py', system_prompt)
-        self.assertIn('@@ -1 +1 @@\n-old\n+new', system_prompt)
+        self.assertIn('@@ -1,3 +1,3 @@\n unchanged line\n-old\n+new\n unchanged line', system_prompt)
+        self.assertIn('creating, deleting or renaming files is not supported', system_prompt)
+        self.assertIn('The first line must be the diff --git header', system_prompt)
+        self.assertIn('blank lines', system_prompt)
+        self.assertIn('Copy context lines verbatim', system_prompt)
         developer_packet = json.loads(client.calls[0][1]['content'])
         self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
         self.assertEqual(developer_packet['acceptance'], ['new test passes'])
@@ -1459,6 +1524,85 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
                 self.assertNotIn(marker, json.dumps(saved))
 
+    def test_mode_metadata_patch_is_rejected_without_persistence(self):
+        # This text-proposal route never applies a patch, so the checks below
+        # pin non-persistence. Real artifact collection is covered on the
+        # opencode direct route, where the Developer edits a live worktree.
+        target = 'sample.py'
+        patch_text = (
+            f'diff --git a/{target} b/{target}\n'
+            'index 1111111..2222222 100644\n'
+            'old mode 100644\n'
+            'new mode 100755\n'
+            f'--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n'
+        )
+        source = self.executor_root / target
+        source.chmod(0o644)
+        original = source.read_bytes()
+        task = self._pm_task_with_assignment()
+        client = FakeClient(Reply(patch_text, {
+            'prompt_tokens': 20, 'completion_tokens': 25, 'total_tokens': 45,
+        }))
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._delegate_args(
+                task, read_path=[target], write_path=[target]))
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(result['developer']['artifact'])
+        self.assertNotIn('new mode 100755', output.getvalue())
+        # The rejected proposal was never applied to the tree.
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(source.stat().st_mode), 0o644)
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(saved['developer']['artifact'])
+        self.assertNotIn('new mode 100755', json.dumps(saved))
+
+    def test_opencode_mode_change_artifact_is_rejected_and_never_recorded(self):
+        # The real artifact on this route is the git diff of the live D6 root,
+        # so a Developer that both edits a file and flips its executable bit
+        # produces mode metadata plus a valid hunk: the accepted-before-fix shape.
+        target = 'sample.py'
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            (self.executor_root / target).write_text('VALUE = 2\n')
+            (self.executor_root / target).chmod(0o755)
+            return DirectResult(0, 'ses_Mode0001', 'Updated fixture and mode.',
+                {'prompt_tokens': 18, 'completion_tokens': 9, 'total_tokens': 27},
+                'CLI_REPORTED', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.0.32',
+                10, 1, 'b' * 64)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(code, 1, output.getvalue())
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(developer['artifact'])
+        self.assertEqual(developer['usage']['total_tokens'], 27)
+        # The route rejects the artifact but does not revert the worktree.
+        self.assertEqual(stat.S_IMODE((self.executor_root / target).stat().st_mode), 0o755)
+        self.assertNotIn('new mode 100755', output.getvalue())
+        stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(stored['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(stored['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(stored['developer']['artifact'])
+
     def test_provider_unavailable_is_durable_and_not_fallen_back(self):
         task = self._pm_task_with_assignment()
         args = self._delegate_args(task)
@@ -1580,6 +1724,64 @@ class TaskSubmissionCLITests(unittest.TestCase):
         saved = backing.get(task['task_id'])
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
+    def test_interrupted_after_durable_claim_is_not_completed_or_replayed(self):
+        task = self._pm_task_with_assignment()
+        backing = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+        class InterruptAfterClaimStore:
+            def get(self, task_id):
+                return backing.get(task_id)
+
+            def compare_and_update(self, task_id, **kwargs):
+                result = backing.compare_and_update(task_id, **kwargs)
+                if kwargs.get('developer', {}).get('state') == 'DEVELOPER_PENDING':
+                    # Model a process interruption at the exact durable-claim boundary,
+                    # before config resolution, client creation, or provider execution.
+                    raise SystemExit(77)
+                return result
+
+            def update(self, task_id, **kwargs):
+                return backing.update(task_id, **kwargs)
+
+            def append_dispatch_audit(self, task_id, entry, *, expected=None):
+                return backing.append_dispatch_audit(task_id, entry, expected=expected)
+
+        args = self._delegate_args(task)
+        client = FakeClient(Reply('unused', {}))
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client) as factory:
+            with self.assertRaises(SystemExit) as interrupted:
+                run_task_delegate(args, store=InterruptAfterClaimStore())
+            self.assertEqual(interrupted.exception.code, 77)
+            pending = backing.get(task['task_id'])
+            self.assertEqual(pending['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(pending['completion']['state'], 'WAITING_EXECUTOR')
+            factory.assert_not_called()
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+            # The ambiguous claim cannot be completed either: the completion
+            # path refuses (it records only the missing gate), never calls the
+            # PM, and the claim stays pending, so a later dispatch is still refused.
+            complete = Namespace(task_id=task['task_id'], executor_task=args.executor_task,
+                                 reviewer_task=None, pr=None)
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(run_task_complete(complete, store=backing), 1)
+            after = backing.get(task['task_id'])
+            self.assertEqual(after['state'], 'PM_RESPONDED')
+            self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+            self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+            self.assertEqual(after['completion']['pm_dispatch'], 'NOT_STARTED')
+            self.assertIsNone(after['completion']['pm_response'])
+            self.assertTrue(after['completion']['missing_gates'])
+            with self.assertRaisesRegex(LLMToolError, 'duplicate dispatch refused'):
+                run_task_delegate(args, store=backing)
+            factory.assert_not_called()
+        self.assertEqual(client.calls, [])
+
     def test_mismatched_diff_headers_and_fake_empty_diff_are_rejected(self):
         task_target = 'tools/llmtool/tests/test_task_submission_cli.py'
         bad_artifacts = (
@@ -1608,6 +1810,167 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
                 self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
                 self.assertIsNone(result['developer']['artifact'])
+
+
+class DeveloperOutputShapeMatrixTests(unittest.TestCase):
+    """#290 / #315 P2-2: the local verdict for common model output shapes,
+    pinned offline (no provider call). Any later relaxation of the strict
+    validator must change this table deliberately."""
+
+    def test_common_output_shapes(self):
+        rejection = submission_cli._developer_output_rejection
+        target = 'tools/llmtool/example.py'
+        header = f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
+        good = header + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n'
+        shapes = {
+            'git diff': (good, None),
+            'leading blank line': ('\n' + good, 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'markdown fence': ('```diff\n' + good + '```\n', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'no diff --git header': (good[len(header.split('\n')[0]) + 1:],
+                                     'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'blank context without its space': (
+                header + '@@ -1,4 +1,4 @@\n keep\n\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'prose after the diff': (good + 'Done.\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'closing fence after the diff': (good + '```\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'deleted file': (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
+                             f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
+                             'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'rename': (f'diff --git a/{target} b/tools/llmtool/renamed.py\nrename from {target}\n'
+                       'rename to tools/llmtool/renamed.py\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'path outside write_paths': (good.replace(target, 'tools/llmtool/other.py'),
+                                         'DEVELOPER_OUTPUT_OUT_OF_SCOPE'),
+            # A mode change is rejected even when it rides along with a real
+            # hunk: text Developer routes never change executable bits (#290).
+            'mode change with a hunk': (header.replace('--- a/', 'old mode 100644\nnew mode 100755\n--- a/', 1)
+                                        + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n',
+                                        'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'hunk count off by one': (
+                header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                         f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
+                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
+        }
+        for label, (text, expected) in shapes.items():
+            with self.subTest(label):
+                self.assertEqual(rejection(text, [target]), expected)
+
+    def test_prompt_example_itself_passes_the_validator(self):
+        task = {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'pm_session_id': 'pm-x',
+                'task_binding': {'contract_digest': 'c' * 64}}
+        system = submission_cli._developer_prompt(
+            task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
+            acceptance=['ok'], context='', pm_goal='g')[0]['content']
+        example = system.split('Exact format example:\n', 1)[1]
+        example = example[:example.index('Every hunk header')]
+        self.assertIsNone(submission_cli._developer_output_rejection(example, ['example.py']))
+
+
+class ModeMetadataRejectionTests(unittest.TestCase):
+    """#290: permission/mode metadata is never accepted on a text Developer route.
+
+    A text Developer patch may not change executable bits, so every documented
+    mode-metadata shape is rejected by the strict parser before screening,
+    persistence or application. Ordinary textual diffs keep their verdict."""
+
+    TARGET = 'tools/llmtool/example.py'
+    SECOND = 'tools/llmtool/second.py'
+
+    def _section(self, path=None, *, metadata=(), hunk=True):
+        path = self.TARGET if path is None else path
+        parts = [f'diff --git a/{path} b/{path}\n', *metadata,
+                 f'--- a/{path}\n+++ b/{path}\n']
+        if hunk:
+            parts.append('@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n')
+        return ''.join(parts)
+
+    def test_mode_metadata_shapes_are_rejected(self):
+        clean = self._section()
+        cases = {
+            'executable bit added with a hunk': self._section(
+                metadata=('index 1111111..2222222 100644\n', 'old mode 100644\n',
+                          'new mode 100755\n')),
+            'executable bit removed with a hunk': self._section(
+                metadata=('old mode 100755\n', 'new mode 100644\n')),
+            'mode change before the index line': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n',
+                          'index 1111111..2222222\n')),
+            'mode change without a hunk': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n'), hunk=False),
+            'solo old mode': self._section(metadata=('old mode 100644\n',)),
+            'solo new mode': self._section(metadata=('new mode 100755\n',)),
+            'new file mode': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                'new file mode 100644\n'
+                f'--- /dev/null\n+++ b/{self.TARGET}\n@@ -0,0 +1 @@\n+new\n'),
+            'deleted file mode': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                'deleted file mode 100644\n'
+                f'--- a/{self.TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'),
+            'mode change in a later section': clean + self._section(
+                path=self.SECOND, metadata=('old mode 100644\n', 'new mode 100755\n')),
+            'mode change in an earlier section': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n')) + self._section(
+                path=self.SECOND),
+            'mode metadata with CRLF line endings': self._section(
+                metadata=('old mode 100644\n', 'new mode 100755\n')).replace(
+                    '\n', '\r\n'),
+            'mode metadata after the file headers': (
+                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
+                f'--- a/{self.TARGET}\n+++ b/{self.TARGET}\n'
+                'old mode 100644\nnew mode 100755\n'
+                '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n'),
+        }
+        for label, text in cases.items():
+            with self.subTest(label):
+                self.assertEqual(
+                    submission_cli._developer_output_rejection(
+                        text, [self.TARGET, self.SECOND]),
+                    'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+    def test_rejection_is_caused_by_the_mode_metadata_alone(self):
+        rejection = submission_cli._developer_output_rejection
+        indexed = self._section(metadata=('index 1111111..2222222 100644\n',))
+        mode_change = self._section(
+            metadata=('index 1111111..2222222 100644\n', 'old mode 100644\n',
+                      'new mode 100755\n'))
+        self.assertEqual(mode_change.replace('old mode 100644\nnew mode 100755\n', ''),
+                         indexed)
+        self.assertIsNone(rejection(indexed, [self.TARGET]))
+        self.assertEqual(rejection(mode_change, [self.TARGET]),
+                         'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+    def test_ordinary_text_diffs_and_scope_checks_are_unchanged(self):
+        rejection = submission_cli._developer_output_rejection
+        plain = self._section()
+        indexed = self._section(metadata=('index 1111111..2222222 100644\n',))
+        two_files = self._section() + self._section(path=self.SECOND)
+        self.assertIsNone(rejection(plain, [self.TARGET]))
+        self.assertIsNone(rejection(indexed, [self.TARGET]))
+        self.assertIsNone(rejection(two_files, [self.TARGET, self.SECOND]))
+        self.assertEqual(rejection(two_files, [self.TARGET]),
+                         'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        # Parser rejection precedes the scope verdict, so a mode change fails
+        # closed even when its path is outside the allowlist.
+        self.assertEqual(
+            rejection(self._section(metadata=('old mode 100644\n',
+                                              'new mode 100755\n')),
+                      ['tools/llmtool/other.py']),
+            'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+
+class DispatcherGitTimeoutTests(unittest.TestCase):
+    def test_dispatcher_git_preflight_timeout_is_a_preflight_failure(self):
+        def timeout(*args, **kwargs):
+            raise subprocess.TimeoutExpired('git', kwargs.get('timeout'))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(os.path.realpath(tmp))
+            trusted = root / 'tools' / 'llmtool' / 'llmtool' / 'task_submission_cli.py'
+            with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', root), \
+                    patch.object(submission_cli, '__file__', str(trusted)), \
+                    patch.object(submission_cli.subprocess, 'run', side_effect=timeout) as run:
+                with self.assertRaisesRegex(ValueError, 'dispatcher Git preflight failed'):
+                    submission_cli._trusted_d6_helper_source()
+        self.assertEqual(run.call_args.kwargs['timeout'], 120)
 
 
 if __name__ == '__main__':

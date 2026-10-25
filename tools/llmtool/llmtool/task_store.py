@@ -5,12 +5,14 @@ ledger. A task's logical PM session is an llmtool identifier; it is not a claim
 that the selected provider exposes a resumable native session.
 """
 
+import errno
 import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,7 +52,21 @@ _V2_BASE_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
                    _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE)
 _FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
     shape | frozenset(('dispatch_audit',)) for shape in _V2_BASE_SHAPES)
-FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit',))
+_V2_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
+              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
+              *_FIELDS_V2_WITH_DISPATCH_AUDIT)
+FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset(('dispatch_audit', 'completion_events'))
+MAX_COMPLETION_EVENTS = 32
+_COMPLETION_EVENT_FIELDS = frozenset((
+    'event_id', 'task_id', 'run_id', 'pm_session_id', 'session_id', 'source', 'source_sha',
+    'sequence', 'payload_sha256', 'state', 'received_at', 'consumed_at',
+    'pm_decision_sha256', 'acked_at', 'dispatch_intent',
+))
+_COMPLETION_INTENT_FIELDS = frozenset((
+    'intent_id', 'intent_sha256', 'state', 'persisted_at',
+    'receipt_sha256', 'confirmed_at',
+))
+_COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _DISPATCH_AUDIT_FIELDS = frozenset((
     'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
@@ -78,7 +94,7 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
     'DEVELOPER_OUTPUT_SENSITIVE', 'DEVELOPER_OUTPUT_INVALID_TEXT',
-    'DEVELOPER_OUTPUT_TOO_LARGE',
+    'DEVELOPER_OUTPUT_TOO_LARGE', 'DEVELOPER_OUTPUT_IGNORED_FILES',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
 _PM_PROVENANCE_FIELDS = frozenset((
@@ -94,6 +110,8 @@ WORKER_AVAILABILITY_NAME = '.worker-availability.json'
 WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
 WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
+TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
+TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'claude-reviewer',
@@ -115,11 +133,29 @@ _WORKER_AVAILABILITY_FIELDS = frozenset((
 
 
 def _fail(code='TASK_STORE_INVALID'):
-    raise LLMToolError('task store unavailable; details omitted') from None
+    safe_code = code if (type(code) is str and
+                         re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', code)) else 'TASK_STORE_INVALID'
+    if safe_code == 'TASK_STORE_BUSY':
+        category = 'BUSY'
+    elif safe_code == 'TASK_STORE_CONFLICT':
+        category = 'CONFLICT'
+    elif safe_code.endswith('UNAVAILABLE'):
+        category = 'UNAVAILABLE'
+    else:
+        category = 'INVALID'
+    error = LLMToolError('task store unavailable; details omitted')
+    error.task_store_code = category
+    error.task_store_error_code = safe_code
+    raise error from None
 
 
 class TaskStoreConflict(LLMToolError):
     """A compare-and-update precondition lost to another task writer."""
+
+    def __init__(self, message='developer assignment already exists; duplicate dispatch refused'):
+        super().__init__(message)
+        self.task_store_code = 'CONFLICT'
+        self.task_store_error_code = 'TASK_STORE_CONFLICT'
 
 
 def new_id():
@@ -144,13 +180,108 @@ def _safe_identifier(value, pattern):
     return type(value) is str and pattern.fullmatch(value) is not None
 
 
+def _completion_timestamp(value):
+    if type(value) is not str:
+        _fail('COMPLETION_EVENT_INVALID')
+    try:
+        stamp = datetime.strptime(value, '%Y-%m-%dT%H:%M:%SZ')
+    except ValueError:
+        _fail('COMPLETION_EVENT_INVALID')
+    if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != value:
+        _fail('COMPLETION_EVENT_INVALID')
+    return stamp
+
+
+def _validate_completion_events(record):
+    events = record['completion_events']
+    if (record['schema_version'] != 2 or type(events) is not list or
+            len(events) > MAX_COMPLETION_EVENTS):
+        _fail('COMPLETION_EVENT_INVALID')
+    ids, sequences, last_sequence = set(), set(), {}
+    for event in events:
+        if (type(event) is not dict or set(event) != _COMPLETION_EVENT_FIELDS or
+                not _safe_identifier(event['event_id'], TASK_ID) or
+                event['event_id'] in ids or
+                event['task_id'] != record['task_id'] or
+                event['run_id'] != record['run_id'] or
+                event['pm_session_id'] != record['pm_session_id'] or
+                type(event['session_id']) is not str or
+                re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9:_-]{0,127}',
+                             event['session_id']) is None or
+                type(event['source']) is not str or
+                event['source'] not in _COMPLETION_SOURCES or
+                type(event['source_sha']) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', event['source_sha']) is None or
+                type(event['sequence']) is not int or
+                not 0 <= event['sequence'] <= 10**9 or
+                type(event['payload_sha256']) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', event['payload_sha256']) is None or
+                event['state'] not in ('PENDING', 'PM_CONSUMED', 'ACKED')):
+            _fail('COMPLETION_EVENT_INVALID')
+        ids.add(event['event_id'])
+        sequence_key = (event['source'], event['session_id'], event['sequence'])
+        if sequence_key in sequences:
+            _fail('COMPLETION_EVENT_INVALID')
+        sequences.add(sequence_key)
+        stream = (event['source'], event['session_id'])
+        if event['sequence'] <= last_sequence.get(stream, -1):
+            _fail('COMPLETION_EVENT_INVALID')
+        last_sequence[stream] = event['sequence']
+        received_at = _completion_timestamp(event['received_at'])
+        if event['state'] == 'PENDING':
+            if (event['consumed_at'] is not None or
+                    event['pm_decision_sha256'] is not None or
+                    event['acked_at'] is not None or
+                    event['dispatch_intent'] is not None):
+                _fail('COMPLETION_EVENT_INVALID')
+        else:
+            consumed_at = _completion_timestamp(event['consumed_at'])
+            if consumed_at < received_at:
+                _fail('COMPLETION_EVENT_INVALID')
+            if (type(event['pm_decision_sha256']) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', event['pm_decision_sha256']) is None):
+                _fail('COMPLETION_EVENT_INVALID')
+            if event['state'] == 'ACKED':
+                if _completion_timestamp(event['acked_at']) < consumed_at:
+                    _fail('COMPLETION_EVENT_INVALID')
+            elif event['acked_at'] is not None:
+                _fail('COMPLETION_EVENT_INVALID')
+        intent = event['dispatch_intent']
+        if intent is not None:
+            if (type(intent) is not dict or set(intent) != _COMPLETION_INTENT_FIELDS or
+                    not _safe_identifier(intent['intent_id'], TASK_ID) or
+                    type(intent['intent_sha256']) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', intent['intent_sha256']) is None or
+                    intent['state'] not in ('UNKNOWN', 'CONFIRMED')):
+                _fail('COMPLETION_EVENT_INVALID')
+            persisted_at = _completion_timestamp(intent['persisted_at'])
+            if persisted_at < consumed_at:
+                _fail('COMPLETION_EVENT_INVALID')
+            if intent['state'] == 'UNKNOWN':
+                if (intent['receipt_sha256'] is not None or
+                        intent['confirmed_at'] is not None):
+                    _fail('COMPLETION_EVENT_INVALID')
+            else:
+                if (type(intent['receipt_sha256']) is not str or
+                        re.fullmatch(r'[0-9a-f]{64}', intent['receipt_sha256']) is None):
+                    _fail('COMPLETION_EVENT_INVALID')
+                if _completion_timestamp(intent['confirmed_at']) < persisted_at:
+                    _fail('COMPLETION_EVENT_INVALID')
+        if (event['state'] == 'ACKED' and intent is not None and
+                intent['state'] != 'CONFIRMED'):
+            _fail('COMPLETION_EVENT_INVALID')
+        if (event['state'] == 'ACKED' and intent is not None and
+                _completion_timestamp(event['acked_at']) <
+                _completion_timestamp(intent['confirmed_at'])):
+            _fail('COMPLETION_EVENT_INVALID')
+
+
 def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
-             (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
-              _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
-              *_FIELDS_V2_WITH_DISPATCH_AUDIT)) or
+             (*_V2_SHAPES, *(shape | frozenset(('completion_events',))
+                             for shape in _V2_SHAPES))) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -160,6 +291,8 @@ def _validate(record):
             type(record['state']) is not str or record['state'] not in STATES or
             type(record['created_at']) is not str or type(record['updated_at']) is not str):
         _fail()
+    if 'completion_events' in record:
+        _validate_completion_events(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
@@ -356,17 +489,18 @@ def _validate(record):
                     provenance['session_restored'] is not False or
                     provenance['automatic_callback'] is not False or
                     record['pm_provider_profile'] != 'active-pm-runtime' or
-                    record['pm_provider_type'] != 'codex-cli' or
+                    record['pm_provider_type'] not in ('active-pm-runtime', 'codex-cli') or
                     record['pm_model'] is not None or
                     record['pm_route_binding'] != {
-                        'type': 'codex-cli', 'model': None, 'base_url': None} or
+                        'type': record['pm_provider_type'], 'model': None, 'base_url': None} or
                     record['backend_session_semantics'] != 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL' or
                     record['native_session_id'] is not None or
                     record['state'] != 'PM_RESPONDED' or
                     record['request'] is None or not record['response'] or
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
-                    type(assignment) is not dict or assignment.get('route') != 'opencode' or
+                    type(assignment) is not dict or
+                    assignment.get('route') not in ('opencode', 'codex') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -437,7 +571,8 @@ def _validate(record):
                 _fail()
             if (developer['provider_profile'] == 'codex' and
                     (developer['provider_type'] not in (None, 'codex-cli') or
-                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
+                     developer['backend_session_semantics'] not in
+                        ('NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                      developer['max_tokens'] is not None)):
                 _fail()
             if (developer['provider_profile'] == 'claude' and
@@ -449,14 +584,19 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] != 'opencode' or
+                    if (developer['provider_profile'] not in ('opencode', 'codex') or
                             type(execution) is not dict or
                             set(execution) != _DIRECT_EXECUTION_FIELDS or
-                            execution['status'] not in ('SUCCEEDED', 'FAILED', 'UNKNOWN') or
+                            execution['status'] not in (
+                                ('SUCCEEDED', 'FAILED', 'UNKNOWN')
+                                if developer['provider_profile'] == 'opencode' else
+                                ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT')) or
                             (execution['native_session_id'] is not None and
                              (type(execution['native_session_id']) is not str or
-                              re.fullmatch(r'ses_[A-Za-z0-9]{1,100}',
-                                           execution['native_session_id']) is None)) or
+                              re.fullmatch(
+                                  r'ses_[A-Za-z0-9]{1,100}' if developer['provider_profile'] == 'opencode'
+                                  else r'[0-9a-fA-F-]{16,64}',
+                                  execution['native_session_id']) is None)) or
                             (execution['process_exit_code'] is not None and
                              (type(execution['process_exit_code']) is not int or
                               not -127 <= execution['process_exit_code'] <= 255)) or
@@ -479,13 +619,14 @@ def _validate(record):
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
                         _fail()
-                    if execution['status'] == 'SUCCEEDED' and (
+                    if execution['status'] in ('SUCCEEDED', 'DONE') and (
                             execution['native_session_id'] is None or
                             execution['process_exit_code'] != 0 or
                             execution['stdout_sha256'] is None or
-                            execution['source_bytes'] is None or
-                            execution['source_file_count'] is None or
-                            execution['source_manifest_sha256'] is None or
+                            (developer['provider_profile'] == 'opencode' and
+                             (execution['source_bytes'] is None or
+                              execution['source_file_count'] is None or
+                              execution['source_manifest_sha256'] is None)) or
                             execution['cleanup_status'] != 'CONFIRMED'):
                         _fail()
                     source_observation = (execution['source_bytes'],
@@ -567,7 +708,11 @@ def _validate(record):
                 _fail()
             if dev_state == 'DEVELOPER_OUTCOME_UNKNOWN' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
-                    usage is not None or developer['error_code'] is None):
+                    developer['error_code'] is None or
+                    (usage is not None and
+                     (developer['provider_profile'] != 'codex' or
+                      type(developer.get('execution')) is not dict or
+                      developer['execution'].get('usage_source') != 'CLI_REPORTED'))):
                 _fail()
             if dev_state == 'DEVELOPER_RESPONDED' and (
                     developer['provider_type'] is None or artifact is None or
@@ -577,7 +722,7 @@ def _validate(record):
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
                 if dev_state == 'DEVELOPER_RESPONDED' and (
-                        type(execution) is not dict or execution['status'] != 'SUCCEEDED' or
+                        type(execution) is not dict or execution['status'] not in ('SUCCEEDED', 'DONE') or
                         execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
                     _fail()
                 if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
@@ -601,7 +746,7 @@ def _validate(record):
                     'WAITING_PM': 'NOT_STARTED', 'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] != 'opencode' or
+                if (developer['provider_profile'] not in ('opencode', 'codex') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or
@@ -1095,7 +1240,8 @@ class TaskStore:
         return record
 
     def create(self, record):
-        if type(record) is not dict or 'dispatch_audit' in record:
+        if (type(record) is not dict or 'dispatch_audit' in record or
+                'completion_events' in record):
             _fail()
         record = dict(record)
         developer = record.get('developer')
@@ -1134,6 +1280,185 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    @staticmethod
+    def _completion_now():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+            '+00:00', 'Z')
+
+    @staticmethod
+    def _completion_hex(value, length):
+        return type(value) is str and re.fullmatch(
+            r'[0-9a-f]{' + str(length) + r'}', value) is not None
+
+    @staticmethod
+    def _completion_result(event, created):
+        # A persisted UNKNOWN intent is never returned as permission to replay.
+        return {'event': json.loads(json.dumps(event)), 'created': created}
+
+    def record_completion_event(self, task_id, *, event_id, run_id, session_id,
+                                source, source_sha, sequence, payload_sha256):
+        """Persist a terminal event before any wake; identical replay is inert.
+
+        The caller verifies the terminal source separately. This storage API
+        grants no Worker dispatch or PM wake authority.
+        """
+        if (not self._completion_hex(event_id, 32) or
+                not self._completion_hex(run_id, 32) or
+                type(session_id) is not str or
+                re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9:_-]{0,127}', session_id) is None or
+                type(source) is not str or source not in _COMPLETION_SOURCES or
+                not self._completion_hex(source_sha, 40) or
+                type(sequence) is not int or not 0 <= sequence <= 10**9 or
+                not self._completion_hex(payload_sha256, 64)):
+            _fail('COMPLETION_EVENT_INVALID')
+        binding = dict(event_id=event_id, task_id=task_id, run_id=run_id,
+                       session_id=session_id, source=source, source_sha=source_sha,
+                       sequence=sequence, payload_sha256=payload_sha256)
+        for _ in range(5):
+            current = self.get(task_id)
+            if current['schema_version'] != 2 or current['run_id'] != run_id:
+                _fail('COMPLETION_EVENT_BINDING_MISMATCH')
+            events = current.get('completion_events', [])
+            for existing in events:
+                if existing['event_id'] == event_id:
+                    if any(existing[key] != value for key, value in binding.items()):
+                        _fail('COMPLETION_EVENT_CONFLICT')
+                    return self._completion_result(existing, False)
+                if (existing['source'] == source and
+                        existing['session_id'] == session_id and
+                        existing['sequence'] == sequence):
+                    _fail('COMPLETION_EVENT_CONFLICT')
+                if (existing['source'] == source and
+                        existing['session_id'] == session_id and
+                        existing['sequence'] > sequence):
+                    _fail('COMPLETION_EVENT_SEQUENCE_INVALID')
+            if len(events) >= MAX_COMPLETION_EVENTS:
+                _fail('COMPLETION_EVENT_LIMIT')
+            event = dict(binding, pm_session_id=current['pm_session_id'],
+                         state='PENDING', received_at=self._completion_now(),
+                         consumed_at=None, pm_decision_sha256=None,
+                         acked_at=None, dispatch_intent=None)
+            try:
+                self._update(task_id,
+                    expected={'record_sha256': current['record_sha256']},
+                    changes={'completion_events': events + [event]},
+                    trusted_completion_events=True)
+                return self._completion_result(event, True)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def _change_completion_event(self, task_id, event_id, pm_session_id, change):
+        if (not self._completion_hex(event_id, 32) or
+                not _safe_identifier(pm_session_id, SESSION_ID)):
+            _fail('COMPLETION_EVENT_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            if current['pm_session_id'] != pm_session_id:
+                _fail('COMPLETION_EVENT_BINDING_MISMATCH')
+            events = current.get('completion_events', [])
+            position = next((index for index, event in enumerate(events)
+                             if event['event_id'] == event_id), None)
+            if position is None:
+                _fail('COMPLETION_EVENT_NOT_FOUND')
+            event = dict(events[position])
+            changed = change(event)
+            if not changed:
+                return self._completion_result(event, False)
+            updated = list(events)
+            updated[position] = event
+            try:
+                self._update(task_id,
+                    expected={'record_sha256': current['record_sha256']},
+                    changes={'completion_events': updated},
+                    trusted_completion_events=True)
+                return self._completion_result(event, True)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def consume_completion_event(self, task_id, event_id, *, pm_session_id,
+                                 pm_decision_sha256):
+        """Persist original-PM consumption before an event may be ACKed."""
+        if not self._completion_hex(pm_decision_sha256, 64):
+            _fail('COMPLETION_EVENT_INVALID')
+        def change(event):
+            if event['state'] != 'PENDING':
+                if event['pm_decision_sha256'] == pm_decision_sha256:
+                    return False
+                _fail('COMPLETION_EVENT_CONFLICT')
+            event.update(state='PM_CONSUMED', consumed_at=self._completion_now(),
+                         pm_decision_sha256=pm_decision_sha256)
+            return True
+        return self._change_completion_event(task_id, event_id, pm_session_id, change)
+
+    def prepare_completion_dispatch_intent(self, task_id, event_id, *, intent_id,
+                                           intent_sha256, pm_session_id):
+        """Persist one nonreplayable intent before an external dispatch call."""
+        if (not self._completion_hex(intent_id, 32) or
+                not self._completion_hex(intent_sha256, 64)):
+            _fail('COMPLETION_EVENT_INVALID')
+        def change(event):
+            if event['state'] != 'PM_CONSUMED':
+                _fail('COMPLETION_EVENT_STATE_INVALID')
+            prior = event['dispatch_intent']
+            if prior is not None:
+                if (prior['intent_id'] == intent_id and
+                        prior['intent_sha256'] == intent_sha256):
+                    return False
+                _fail('COMPLETION_EVENT_CONFLICT')
+            event['dispatch_intent'] = dict(
+                intent_id=intent_id, intent_sha256=intent_sha256,
+                state='UNKNOWN', persisted_at=self._completion_now(),
+                receipt_sha256=None, confirmed_at=None)
+            return True
+        return self._change_completion_event(task_id, event_id, pm_session_id, change)
+
+    def confirm_completion_dispatch(self, task_id, event_id, *, intent_id,
+                                    receipt_sha256, pm_session_id):
+        """Attach a verified receipt; UNKNOWN never authorizes a retry."""
+        if (not self._completion_hex(intent_id, 32) or
+                not self._completion_hex(receipt_sha256, 64)):
+            _fail('COMPLETION_EVENT_INVALID')
+        def change(event):
+            intent = event['dispatch_intent']
+            if intent is None or intent['intent_id'] != intent_id:
+                _fail('COMPLETION_EVENT_BINDING_MISMATCH')
+            if intent['state'] == 'CONFIRMED':
+                if intent['receipt_sha256'] == receipt_sha256:
+                    return False
+                _fail('COMPLETION_EVENT_CONFLICT')
+            event['dispatch_intent'] = dict(intent, state='CONFIRMED',
+                                            receipt_sha256=receipt_sha256,
+                                            confirmed_at=self._completion_now())
+            return True
+        return self._change_completion_event(task_id, event_id, pm_session_id, change)
+
+    def ack_completion_event(self, task_id, event_id, *, pm_session_id,
+                             pm_decision_sha256):
+        """ACK only a durably consumed event with no unresolved dispatch."""
+        if not self._completion_hex(pm_decision_sha256, 64):
+            _fail('COMPLETION_EVENT_INVALID')
+        def change(event):
+            if event['pm_decision_sha256'] != pm_decision_sha256:
+                _fail('COMPLETION_EVENT_BINDING_MISMATCH')
+            if event['state'] == 'ACKED':
+                return False
+            intent = event['dispatch_intent']
+            if (event['state'] != 'PM_CONSUMED' or
+                    (intent is not None and intent['state'] != 'CONFIRMED')):
+                _fail('COMPLETION_EVENT_STATE_INVALID')
+            event.update(state='ACKED', acked_at=self._completion_now())
+            return True
+        return self._change_completion_event(task_id, event_id, pm_session_id, change)
+
+    def unacked_completion_events(self, task_id):
+        """Read pending and uncertain events after process restart."""
+        record = self.get(task_id)
+        return [json.loads(json.dumps(event))
+                for event in record.get('completion_events', [])
+                if event['state'] != 'ACKED']
 
     @staticmethod
     def _worker_timestamp(value, *, now=None, allow_future=False):
@@ -1233,10 +1558,22 @@ class TaskStore:
 
     @staticmethod
     def _lock_worker_availability(directory, *, exclusive):
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
-            lock_fd = os.open(WORKER_AVAILABILITY_LOCK_NAME,
-                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                              0o600, dir_fd=directory)
+            while True:
+                try:
+                    lock_fd = os.open(
+                        WORKER_AVAILABILITY_LOCK_NAME,
+                        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        0o600, dir_fd=directory)
+                    break
+                except FileNotFoundError:
+                    # macOS can report ENOENT when concurrent openat(O_CREAT)
+                    # calls create this lock. Retry only within the same
+                    # bounded wait used for TaskStore update locks.
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             info = os.fstat(lock_fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                     stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
@@ -1390,28 +1727,61 @@ class TaskStore:
                 continue
         _fail('TASK_STORE_BUSY')
 
-    def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False):
+    def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
+                trusted_completion_events=False):
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
+        if 'completion_events' in changes and not trusted_completion_events:
+            _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
+        lock_fd = None
         locked = False
+        deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
             try:
-                lock_fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                                  0o600, dir_fd=directory)
-            except FileExistsError:
-                if expected is not None:
-                    raise TaskStoreConflict(
-                        'developer assignment already exists; duplicate dispatch refused') from None
-                _fail('TASK_STORE_BUSY')
-            os.close(lock_fd)
-            locked = True
+                while True:
+                    try:
+                        lock_fd = os.open(
+                            lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                            0o600, dir_fd=directory)
+                        break
+                    except FileNotFoundError:
+                        # macOS can fail an openat(O_CREAT) with ENOENT while
+                        # another process creates the same name; the next
+                        # attempt opens that file. Bounded by the lock wait.
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                info = os.fstat(lock_fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                        stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                    _fail('TASK_STORE_INVALID')
+            except LLMToolError:
+                raise
+            except OSError as exc:
+                # A symlink, directory or other non-file at the lock path is
+                # planted state, not an unavailable store.
+                code = ('TASK_STORE_INVALID'
+                        if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO, errno.EOPNOTSUPP)
+                        else 'TASK_STORE_UNAVAILABLE')
+                _fail(code)
+
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    locked = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _fail('TASK_STORE_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                except OSError:
+                    _fail('TASK_STORE_UNAVAILABLE')
             current = self._read_at(directory, task_id)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
-                raise TaskStoreConflict(
-                    'developer assignment already exists; duplicate dispatch refused')
+                raise TaskStoreConflict() from None
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 prior_audit = list(current.get('dispatch_audit', []))
@@ -1479,9 +1849,15 @@ class TaskStore:
             current['record_sha256'] = _digest(current)
             return self._write(current, create=False)
         finally:
-            if locked:
+            try:
+                if locked:
+                    try:
+                        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+            finally:
                 try:
-                    os.unlink(lock, dir_fd=directory)
-                except OSError:
-                    pass
-            os.close(directory)
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+                finally:
+                    os.close(directory)

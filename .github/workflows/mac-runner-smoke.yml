@@ -1,0 +1,25 @@
+
+name: Mac Runner Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Mac Runner Connectivity
+    runs-on: [self-hosted, macOS, X64]
+    timeout-minutes: 5
+
+    steps:
+      - name: Check Mac environment
+        shell: bash
+        run: |
+          echo "Runner: $RUNNER_NAME"
+          sw_vers
+          uname -m
+          python3 --version
+          git --version
+          echo "MAC_RUNNER_SMOKE_PASS"

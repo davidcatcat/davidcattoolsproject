@@ -395,12 +395,13 @@ active_provider: local-codex
 
 Select it with `llmtool ask --provider local-codex 'your question'`, or make it active in user
 config. `llmtool configure` skips HTTP endpoint and API-key prompts for this type. Non-null
-`base_url`, `api_key`, and `api_key_env` are rejected. `provider_options` must be an empty mapping;
-executable, cwd, approval, sandbox, and arbitrary CLI fields are rejected. Model identifiers
-must match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`. Temperature/max_tokens are stored but neither
-sent nor enforced. Only `chat` is true: large-context workflows, reasoning control, streaming,
-code editing, shell, and Git are not exposed. Model window size alone does not establish
-large-context workflow support. This version does not expose a tested reasoning-option mapping.
+`base_url`, `api_key`, and `api_key_env` are rejected. `provider_options` may contain only
+`reasoning_effort`, with one of `low`, `medium`, `high`, or `xhigh`; it maps to the CLI setting
+`model_reasoning_effort`. Executable, cwd, approval, sandbox, and arbitrary CLI fields are
+rejected. Model identifiers must match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`.
+Temperature/max_tokens are stored but neither
+sent nor enforced. Only `chat` is true: large-context workflows, streaming, code editing, shell,
+and Git are not exposed. Model window size alone does not establish large-context workflow support.
 
 Each request creates an empty, private temporary cwd under `/tmp` (fallback `/var/tmp`), outside
 the caller's repository. Inherited `TMPDIR` cannot redirect it into the project. Both subprocess
@@ -694,6 +695,11 @@ Provider uses one ephemeral CLI call and has no native resumable Session ID;
 `task show` retrieves the recorded Task and response but does not resume a model
 conversation, dispatch a Developer, run tests, or continue work in the background.
 
+`task record-pm --stdin-json` records a decision from the active PM runtime without invoking a
+provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
+LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as
+`active-pm-runtime` and does not claim a Codex or Claude native session ID.
+
 ### Bounded company Developer proposal and D6 completion evidence
 
 `task delegate` can request a bounded company-gw code proposal for a PM-assigned
@@ -701,6 +707,12 @@ low-risk task. It reads the current root, branch, source HEAD and Executor ident
 from the registered D6 record; do not supply a SHA as an identity claim. The
 company provider returns a diff proposal only. An already authorized Executor
 must apply it and run the allowed checks in its registered worktree.
+
+For `task delegate --provider codex`, llmtool resolves the explicitly configured
+`codex-developer` profile (`type: codex-cli`) and records that profile's model. It never uses
+`codex-pm` as a fallback; if `codex-developer` is missing, the Developer is recorded as
+`DEVELOPER_UNAVAILABLE` with `DEVELOPER_PROFILE_UNAVAILABLE`. The Codex CLI provider accepts the
+same four optional `reasoning_effort` values described above.
 
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
@@ -737,6 +749,23 @@ workflow is not yet automatic. Registry and API facts are fail-closed evidence
 sources, not protection against malicious same-user tampering. Company proposal and
 PM-return live provider journeys still require their separately authorized runtime
 acceptance.
+
+Codex can use the same registered D6 direct Developer lifecycle with
+`task delegate TASK_ID --provider codex --mode direct ...`; the default
+`--mode proposal` preserves its text-proposal route. Direct mode requires the
+`codex-developer` `codex-cli` profile, uses its model and reasoning-effort setting,
+and invokes Codex CLI's own `codex exec --json` agent loop with workspace-write
+sandboxing, bounded output and a wall-clock limit. It records the CLI thread ID as
+the Developer native session, checks the resulting diff against `--write-path`,
+persists the typed execution outcome and sends a successful bounded result through
+the existing original-PM callback. Codex's requested self-review and test report
+are used during the invocation but are not retained in the durable Developer record;
+llmtool independently rechecks the D6 diff and runs its
+bounded test gate before the PM callback. BLOCKED, malformed or ambiguous results
+are retained without automatic retry.
+
+The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
+prompt scope only, and Codex may read other files available to its process.
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。

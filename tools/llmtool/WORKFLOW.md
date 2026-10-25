@@ -99,7 +99,8 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 1. ChatGPT Coordinator discusses owner goals, architecture and product decisions.
    For a complex approved work package, produce **one initial handoff** for the
-   **existing canonical Codex Integrator (= PM Agent + Integration Manager)**.
+   **canonical Integrator (= PM Agent + Integration Manager)**, which is Claude
+   since 2026-10-25 (formerly the Codex Integrator; see AGENTS.md).
 2. Integrator/PM decides when to use a local subagent, a distinct Worker or a
    bounded Company LLM Developer route through llmtool, and chooses dependencies,
    validation and bounded repairs. **llmtool executes an approved route/plan and records status,
@@ -159,7 +160,7 @@ the local Mac, llmtool runtime or VPN and does not prove automatic Cloud dispatc
    or auto-merge main.
 
 This **does not** activate llmtool F2 Git mutation, the native M2 autonomous
-cycle, Codex Integrator wake/resume, or a second scheduler/daemon. Follow
+cycle, Integrator wake/resume, or a second scheduler/daemon. Follow
 [safe-git](../../skills/safe-git/SKILL.md) and
 [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Cloud setup:
 https://help.openai.com/en/articles/20001545-using-codex-cloud.
