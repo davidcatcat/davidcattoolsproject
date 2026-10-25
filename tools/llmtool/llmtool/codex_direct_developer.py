@@ -156,6 +156,32 @@ def _result_from_events(raw):
     return thread_id, obj, usage
 
 
+def _usage_from_events(raw):
+    """Retain valid usage observations even when the CLI turn times out."""
+    usage = None
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line, object_pairs_hook=_unique_keys,
+                               parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            if type(event) is not dict or event.get('type') != 'turn.completed':
+                continue
+            candidate = event.get('usage')
+            if type(candidate) is not dict:
+                continue
+            prompt_tokens = candidate.get('input_tokens')
+            completion_tokens = candidate.get('output_tokens')
+            if (type(prompt_tokens) is int and prompt_tokens >= 0 and
+                    type(completion_tokens) is int and completion_tokens >= 0):
+                usage = {'prompt_tokens': prompt_tokens,
+                         'completion_tokens': completion_tokens,
+                         'total_tokens': prompt_tokens + completion_tokens}
+    except (UnicodeError, ValueError, RecursionError):
+        return usage
+    return usage
+
+
 def _unique_keys(pairs):
     result = {}
     for key, value in pairs:
@@ -225,66 +251,78 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             try:
                 if prelaunch_validate is not None and prelaunch_validate() is not True:
                     _fail('CODEX_D6_BINDING_CHANGED')
-                worker_dispatch.authorize_dispatch(
-                    dispatch_store, dispatch_task_id, 'codex-developer', 'DISPATCH')
-                process = subprocess.Popen(
-                    _argv(executable, root, model, reasoning_effort), cwd=str(root), env=env,
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    bufsize=0, shell=False, close_fds=True, start_new_session=True)
-                lifecycle.own(process)
-            except worker_dispatch.WorkerDispatchDenied as exc:
-                raise DirectCodexError(exc.dispatch_code) from None
-            except DirectCodexError:
-                raise
-            except Exception:
-                _fail('CODEX_RUNTIME_UNAVAILABLE')
-            selector = selectors.DefaultSelector()
-            try:
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    os.set_blocking(stream.fileno(), False)
-                selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
-                selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
-                selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
-                payload = prompt.encode('utf-8')
-                offset = 0
-                while selector.get_map():
-                    lifecycle.check()
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        _fail('CODEX_TIMEOUT')
-                    for key, _ in selector.select(min(remaining, 0.1)):
-                        if key.data == 'stdin':
-                            try:
-                                if offset < len(payload):
-                                    offset += os.write(key.fileobj.fileno(), payload[offset:offset + 8192])
-                                else:
+                try:
+                    worker_dispatch.authorize_dispatch(
+                        dispatch_store, dispatch_task_id, 'codex-developer', 'DISPATCH')
+                except worker_dispatch.WorkerDispatchDenied as exc:
+                    raise DirectCodexError(exc.dispatch_code) from None
+                try:
+                    process = subprocess.Popen(
+                        _argv(executable, root, model, reasoning_effort), cwd=str(root), env=env,
+                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        bufsize=0, shell=False, close_fds=True, start_new_session=True)
+                    lifecycle.own(process)
+                except OSError:
+                    _fail('CODEX_RUNTIME_UNAVAILABLE')
+                selector = selectors.DefaultSelector()
+                try:
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        os.set_blocking(stream.fileno(), False)
+                    selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
+                    selector.register(process.stdout, selectors.EVENT_READ, 'stdout')
+                    selector.register(process.stderr, selectors.EVENT_READ, 'stderr')
+                    payload = prompt.encode('utf-8')
+                    offset = 0
+                    while selector.get_map():
+                        lifecycle.check()
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timeout_error = DirectCodexError('CODEX_TIMEOUT')
+                            timeout_error.usage = _usage_from_events(bytes(output))
+                            raise timeout_error
+                        for key, _ in selector.select(min(remaining, 0.1)):
+                            if key.data == 'stdin':
+                                try:
+                                    if offset < len(payload):
+                                        offset += os.write(key.fileobj.fileno(), payload[offset:offset + 8192])
+                                    else:
+                                        selector.unregister(key.fileobj)
+                                        key.fileobj.close()
+                                except (BrokenPipeError, OSError):
                                     selector.unregister(key.fileobj)
                                     key.fileobj.close()
-                            except (BrokenPipeError, OSError):
-                                selector.unregister(key.fileobj)
-                                key.fileobj.close()
-                        else:
-                            chunk = os.read(key.fileobj.fileno(), 8192)
-                            if not chunk:
-                                selector.unregister(key.fileobj)
-                                continue
-                            target, cap = ((output, MAX_OUTPUT_BYTES) if key.data == 'stdout'
-                                           else (errors, MAX_STDERR_BYTES))
-                            if len(target) + len(chunk) > cap:
-                                _fail('CODEX_OUTPUT_TOO_LARGE' if key.data == 'stdout'
-                                      else 'CODEX_STDERR_TOO_LARGE')
-                            target.extend(chunk)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _fail('CODEX_TIMEOUT')
-                process.wait(timeout=remaining)
-            finally:
-                selector.close()
-                for stream in (process.stdin, process.stdout, process.stderr):
-                    try:
-                        stream.close()
-                    except OSError:
-                        pass
+                            else:
+                                chunk = os.read(key.fileobj.fileno(), 8192)
+                                if not chunk:
+                                    selector.unregister(key.fileobj)
+                                    continue
+                                target, cap = ((output, MAX_OUTPUT_BYTES) if key.data == 'stdout'
+                                               else (errors, MAX_STDERR_BYTES))
+                                if len(target) + len(chunk) > cap:
+                                    _fail('CODEX_OUTPUT_TOO_LARGE' if key.data == 'stdout'
+                                          else 'CODEX_STDERR_TOO_LARGE')
+                                target.extend(chunk)
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timeout_error = DirectCodexError('CODEX_TIMEOUT')
+                        timeout_error.usage = _usage_from_events(bytes(output))
+                        raise timeout_error
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    timeout_error = DirectCodexError('CODEX_TIMEOUT')
+                    timeout_error.usage = _usage_from_events(bytes(output))
+                    raise timeout_error from None
+                finally:
+                    selector.close()
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
+            except BaseException:
+                # Keep TMPDIR alive until the owned child has stopped using it.
+                lifecycle.stop()
+                raise
         if process.returncode != 0:
             _fail('CODEX_EXIT_NONZERO')
         thread_id, result, usage = _result_from_events(bytes(output))
@@ -304,6 +342,8 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         exc.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         exc.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
         exc.native_session_id = _thread_from_events(bytes(output))
+        if exc.usage is None:
+            exc.usage = _usage_from_events(bytes(output))
         lifecycle.__exit__(type(exc), exc, exc.__traceback__)
         raise
     except BaseException as exc:

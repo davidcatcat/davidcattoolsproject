@@ -759,9 +759,13 @@ sandboxing, bounded output and a wall-clock limit. It records the CLI thread ID 
 the Developer native session, checks the resulting diff against `--write-path`,
 persists the typed execution outcome and sends a successful bounded result through
 the existing original-PM callback. Codex's requested self-review and test report
-are Developer evidence; llmtool independently rechecks the D6 diff and runs its
+are used during the invocation but are not retained in the durable Developer record;
+llmtool independently rechecks the D6 diff and runs its
 bounded test gate before the PM callback. BLOCKED, malformed or ambiguous results
 are retained without automatic retry.
+
+The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
+prompt scope only, and Codex may read other files available to its process.
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。

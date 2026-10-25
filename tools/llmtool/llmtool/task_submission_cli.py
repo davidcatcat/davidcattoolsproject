@@ -508,6 +508,14 @@ def _developer_output_rejection(value, write_paths):
     return None
 
 
+def _ignored_output_rejection(root, before):
+    current = set(task_completion._git(root,
+        ('ls-files', '--others', '--ignored', '--exclude-standard', '-z'),
+        limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0'))
+    current.discard(b'')
+    return 'DEVELOPER_OUTPUT_IGNORED_FILES' if current - before else None
+
+
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
                       pm_goal, developer_route='company-gw'):
     packet = {
@@ -1194,7 +1202,15 @@ def run_task_codex_delegate(args, *, store):
                 raise LLMToolError('D6 or Git identity changed before Codex launch')
             return True
         validate_binding()
-        _bootstrap_registered_d6(registration)
+        try:
+            _bootstrap_registered_d6(registration)
+        except opencode_direct_developer.DirectOpenCodeError as exc:
+            raise codex_direct_developer.DirectCodexError(
+                exc.direct_opencode_code) from None
+        ignored_before = set(task_completion._git(registration.root,
+            ('ls-files', '--others', '--ignored', '--exclude-standard', '-z'),
+            limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0'))
+        ignored_before.discard(b'')
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
@@ -1213,8 +1229,9 @@ def run_task_codex_delegate(args, *, store):
             execution={'status': execution_status, 'native_session_id': exc.native_session_id,
                 'process_exit_code': exc.process_exit_code, 'stdout_sha256': exc.stdout_sha256,
                 'elapsed_ms': exc.elapsed_ms, 'cleanup_status': exc.cleanup_status,
-                'usage_source': 'UNKNOWN', 'source_bytes': None,
-                'source_file_count': None, 'source_manifest_sha256': None})
+                'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None}, usage=exc.usage)
         saved = store.update(task['task_id'], developer=developer)
         _print(_task_view(saved))
         return 1
@@ -1252,16 +1269,22 @@ def run_task_codex_delegate(args, *, store):
             raise LLMToolError('Codex outcome is ambiguous and could not be persisted') from None
         _print(_task_view(saved))
         return 1
+    execution = {'status': 'DONE' if result.status == 'DONE' else 'BLOCKED',
+        'native_session_id': result.thread_id, 'process_exit_code': result.exit_code,
+        'stdout_sha256': result.stdout_sha256, 'elapsed_ms': result.elapsed_ms,
+        'cleanup_status': result.cleanup_status,
+        'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None}
     try:
-        after_registration, after = task_completion.bind_executor_task(
-            registration.task_id, expected_common_dir=registration.common_dir,
-            root=registration.root)
-        if after_registration != registration or after != snapshot:
-            raise LLMToolError('Codex D6 identity changed during execution')
+        after_registration = task_completion.read_d6_registration(
+            registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)
-        if (after.root != registration.root or after.common_dir != registration.common_dir or
+        if (after_registration != registration or after.root != registration.root or
+                after.common_dir != registration.common_dir or
                 after.branch != registration.branch or after.head != snapshot.head):
-            raise LLMToolError('Codex changed the registered Git identity')
+            raise LLMToolError('Codex D6 identity changed during execution')
+        ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
         untracked = task_completion._git(registration.root,
             ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
         if untracked:
@@ -1277,17 +1300,11 @@ def run_task_codex_delegate(args, *, store):
             changed_paths = [path for path in changed_paths if path]
         except Exception:
             raise LLMToolError('Codex changed-path evidence is unavailable') from None
-        rejection = ('DEVELOPER_OUTPUT_OUT_OF_SCOPE'
+        rejection = (ignored_rejection if ignored_rejection is not None else
+                     'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
                      if any(path not in write_paths for path in changed_paths) else None)
         if result.status == 'DONE' and rejection is None:
             rejection = _developer_output_rejection(artifact, write_paths)
-        execution = {'status': 'DONE' if result.status == 'DONE' else 'BLOCKED',
-            'native_session_id': result.thread_id, 'process_exit_code': result.exit_code,
-            'stdout_sha256': result.stdout_sha256, 'elapsed_ms': result.elapsed_ms,
-            'cleanup_status': result.cleanup_status,
-            'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
-            'source_bytes': None, 'source_file_count': None,
-            'source_manifest_sha256': None}
         if rejection is not None:
             developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=rejection,
                              execution=execution, usage=result.usage)
@@ -1306,7 +1323,17 @@ def run_task_codex_delegate(args, *, store):
                 'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
-    saved = store.update(task['task_id'], developer=developer)
+    try:
+        saved = store.update(task['task_id'], developer=developer)
+    except Exception:
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
+            artifact_sha256=None, error_code='CODEX_RESULT_PERSISTENCE_REJECTED',
+            execution={**execution, 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'},
+            usage=None)
+        try:
+            saved = store.update(task['task_id'], developer=developer)
+        except Exception:
+            raise LLMToolError('Codex result was observed but could not be persisted') from None
     if developer['state'] == 'DEVELOPER_RESPONDED':
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     _print(_task_view(saved))
@@ -1759,6 +1786,27 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 executor_native_session_id=reviewer_independence_session,
                 reviewer_task_id=args.reviewer_task,
                 common_dir=git_evidence['common_dir'])
+            if (developer.get('provider_profile') == 'codex' and
+                    type(direct_execution) is dict and
+                    direct_execution.get('status') == 'DONE'):
+                try:
+                    reviewer_registration = task_completion.read_d6_registration(
+                        args.reviewer_task, git_evidence['common_dir'])
+                    reviewer_native = reviewer_registration.native_session_id
+                    executor_native = initial.get('executor_native_session_id')
+                    codex_native = direct_execution.get('native_session_id')
+                    if (executor_native in (None, 'UNKNOWN') or
+                            codex_native in (None, 'UNKNOWN') or
+                            (reviewer_native not in (None, 'UNKNOWN') and
+                             reviewer_native in (executor_native, codex_native))):
+                        github['missing_gates'] = sorted(set(
+                            github['missing_gates'] +
+                            ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                        github['evidence']['formal_review_state'] = 'UNVERIFIED'
+                except LLMToolError:
+                    # The primary collector already records unavailable D6
+                    # registration as a fail-closed reviewer gate.
+                    pass
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
     except LLMToolError as exc:

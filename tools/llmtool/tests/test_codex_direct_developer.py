@@ -42,7 +42,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             '',
         ))
 
-    def write_fake(self, body, *, delay=0, descendant_marker=None):
+    def write_fake(self, body, *, delay=0, delay_after_output=0, descendant_marker=None):
         script = "#!/usr/bin/env python3\nimport os,sys,time\n"
         script += f"open({str(self.invoked)!r},'w').write('yes')\n"
         if descendant_marker:
@@ -55,6 +55,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         if delay:
             script += f'time.sleep({delay!r})\n'
         script += f"sys.stdout.write({body!r});sys.stdout.flush()\n"
+        if delay_after_output:
+            script += f'time.sleep({delay_after_output!r})\n'
         self.fake.write_text(script, encoding='utf-8')
         self.fake.chmod(0o700)
 
@@ -104,6 +106,16 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertLess(time.monotonic() - began, 3)
         time.sleep(1.1)
         self.assertFalse(marker.exists())
+
+    def test_wait_timeout_keeps_observed_thread_usage_and_digest(self):
+        self.write_fake(self.events(self.final), delay_after_output=2)
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake(timeout=0.8)
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_TIMEOUT')
+        self.assertEqual(caught.exception.native_session_id, self.THREAD)
+        self.assertEqual(caught.exception.usage, {
+            'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21})
+        self.assertRegex(caught.exception.stdout_sha256, r'^[0-9a-f]{64}$')
 
     def test_paused_dispatch_is_refused_before_codex_launch(self):
         self.invoked.unlink(missing_ok=True)
