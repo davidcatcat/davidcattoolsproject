@@ -96,6 +96,18 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
+_DEVELOPER_SHAPES = (
+    _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
+    _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+    _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+    _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+)
+_DEVELOPER_EXTENSION_SHAPES = tuple(
+    shape | extension for shape in _DEVELOPER_SHAPES
+    for extension in (frozenset(('normalizations',)),
+                      frozenset(('rejected_output_capture',)),
+                      frozenset(('normalizations', 'rejected_output_capture')))
+)
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
@@ -578,13 +590,7 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (
-                _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS,
-                _DEVELOPER_CALLBACK_FIELDS,
-                _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
-                _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
-                _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
-            )
+            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
@@ -621,6 +627,25 @@ def _validate(record):
                 ref = developer['owner_assignment_ref']
                 if (developer['provider_profile'] != 'claude' or
                         type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
+                    _fail()
+            if 'normalizations' in developer:
+                tokens = developer['normalizations']
+                if (developer['state'] != 'DEVELOPER_RESPONDED' or
+                        type(tokens) is not list or len(tokens) > 4 or
+                        any(token not in ('OUTER_FENCE_STRIPPED', 'DIFF_HEADER_ADDED',
+                                          'BARE_BLANK_CONTEXT_SPACED',
+                                          'HUNK_COUNTS_RECOUNTED') for token in tokens) or
+                        len(tokens) != len(set(tokens))):
+                    _fail()
+            if 'rejected_output_capture' in developer:
+                capture = developer['rejected_output_capture']
+                if (developer['state'] != 'DEVELOPER_OUTPUT_REJECTED' or
+                        type(capture) is not dict or set(capture) != {'ref', 'sha256'} or
+                        type(capture['ref']) is not str or
+                        re.fullmatch(r'rejected-developer-output/[0-9a-f]{32}-[0-9a-f]{16}\.txt',
+                                     capture['ref']) is None or
+                        type(capture['sha256']) is not str or
+                        re.fullmatch(r'[0-9a-f]{64}', capture['sha256']) is None):
                     _fail()
             if (developer['provider_profile'] == 'company-gw' and
                     (developer['provider_type'] not in (None, 'openai-compatible') or
