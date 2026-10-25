@@ -489,17 +489,18 @@ def _validate(record):
                     provenance['session_restored'] is not False or
                     provenance['automatic_callback'] is not False or
                     record['pm_provider_profile'] != 'active-pm-runtime' or
-                    record['pm_provider_type'] != 'codex-cli' or
+                    record['pm_provider_type'] not in ('active-pm-runtime', 'codex-cli') or
                     record['pm_model'] is not None or
                     record['pm_route_binding'] != {
-                        'type': 'codex-cli', 'model': None, 'base_url': None} or
+                        'type': record['pm_provider_type'], 'model': None, 'base_url': None} or
                     record['backend_session_semantics'] != 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL' or
                     record['native_session_id'] is not None or
                     record['state'] != 'PM_RESPONDED' or
                     record['request'] is None or not record['response'] or
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
-                    type(assignment) is not dict or assignment.get('route') != 'opencode' or
+                    type(assignment) is not dict or
+                    assignment.get('route') not in ('opencode', 'codex') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {

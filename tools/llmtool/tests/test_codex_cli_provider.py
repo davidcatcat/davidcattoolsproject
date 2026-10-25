@@ -365,10 +365,26 @@ else:
                     self.complete()
                 self.assertNotIn("SECRET_TOKEN", str(caught.exception))
 
+    def test_reasoning_effort_allowlist_argv_and_reply_metadata(self):
+        for effort in ("low", "medium", "high", "xhigh"):
+            with self.subTest(effort=effort):
+                reply = self.complete(provider_options={"reasoning_effort": effort})
+                argv = self.captured()["argv"]
+                setting = 'model_reasoning_effort="' + effort + '"'
+                setting_index = next(index for index, item in enumerate(argv)
+                                     if item == "-c" and argv[index + 1] == setting)
+                self.assertLess(setting_index, argv.index("--model"))
+                self.assertEqual(reply.metadata["model"], "test-model")
+                self.assertEqual(reply.metadata["reasoning_effort"], effort)
+
     def test_unsupported_options_fail_before_spawn(self):
-        for options in ({"reasoning_effort": "high"}, {"tools": []}, [], None):
+        for options in ({"reasoning_effort": "none"},
+                        {"reasoning_effort": "MEDIUM"},
+                        {"reasoning_effort": None},
+                        {"reasoning_effort": "high", "tools": []},
+                        {"tools": []}, [], None):
             with self.subTest(options=options), patch("subprocess.Popen") as spawn:
-                with self.assertRaisesRegex(LLMToolError, "unsupported codex-cli provider_options"):
+                with self.assertRaises(LLMToolError):
                     self.complete(provider_options=options)
                 spawn.assert_not_called()
 

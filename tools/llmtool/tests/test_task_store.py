@@ -680,9 +680,9 @@ class TaskStoreTests(unittest.TestCase):
         value.update(
             schema_version=2,
             pm_provider_profile='active-pm-runtime',
-            pm_provider_type='codex-cli',
+            pm_provider_type='active-pm-runtime',
             pm_model=None,
-            pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+            pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
             backend_session_semantics='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
             state='PM_RESPONDED',
             response='{"schema_version":1,"summary":"Ready.","developer_assignment":'
@@ -711,6 +711,15 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
 
+    def test_legacy_codex_pm_runtime_records_remain_readable(self):
+        value = self._active_pm_record()
+        value['pm_provider_type'] = 'codex-cli'
+        value['pm_route_binding'] = {
+            'type': 'codex-cli', 'model': None, 'base_url': None}
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_provider_type'], 'codex-cli')
+
     def test_active_pm_provenance_rejects_false_or_incomplete_claims(self):
         mutations = (
             lambda record: record['pm_provenance'].__setitem__('provider_invoked', True),
@@ -720,6 +729,8 @@ class TaskStoreTests(unittest.TestCase):
                 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
             lambda record: record.__setitem__('pm_assignment', {
                 **record['pm_assignment'], 'risk': 'OTHER'}),
+            lambda record: record.__setitem__('pm_assignment', {
+                **record['pm_assignment'], 'route': 'company-gw'}),
             lambda record: record.pop('pm_provenance'),
         )
         for mutate in mutations:

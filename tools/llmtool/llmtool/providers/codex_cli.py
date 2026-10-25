@@ -43,10 +43,13 @@ class CodexCLIProvider:
     @staticmethod
     def validate_options(options):
         if (not isinstance(options, dict) or
-                set(options) - {"reasoning_effort"} or
-                ("reasoning_effort" in options and options["reasoning_effort"] not in
-                 ("minimal", "low", "medium", "high", "xhigh"))):
+                set(options) - {"reasoning_effort"}):
             raise LLMToolError("unsupported codex-cli provider_options")
+        effort = options.get("reasoning_effort")
+        if ("reasoning_effort" in options and
+                effort not in ("low", "medium", "high", "xhigh")):
+            raise LLMToolError(
+                "codex-cli reasoning_effort must be low, medium, high, or xhigh")
 
     @staticmethod
     def validate_ready(provider):
@@ -156,6 +159,9 @@ class CodexCLIProvider:
             'hide_agent_reasoning=true',
             'show_raw_agent_reasoning=false',
         )
+        effort = self.provider.get("provider_options", {}).get("reasoning_effort")
+        if effort is not None:
+            settings += ('model_reasoning_effort="' + effort + '"',)
         for setting in settings:
             argv.extend(("-c", setting))
         model = self.provider.get("model")
@@ -327,4 +333,7 @@ class CodexCLIProvider:
         if isinstance(model, str) and model and all(
                 char.isalnum() or char in "._:/-" for char in model):
             metadata["model"] = model
+        effort = self.provider.get("provider_options", {}).get("reasoning_effort")
+        if effort is not None:
+            metadata["reasoning_effort"] = effort
         return Reply(content, metadata)

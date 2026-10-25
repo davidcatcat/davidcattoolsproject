@@ -148,7 +148,7 @@ def _provider_route_binding(provider):
 def _pm_assignment(response):
     """Parse an optional structured recommendation; never infer it from prose."""
     try:
-        value = json.loads(response)
+        value = _strict_json_object(response)
         if (type(value) is not dict or
                 set(value) != {'schema_version', 'summary', 'developer_assignment'} or
                 type(value['schema_version']) is not int or value['schema_version'] != 1):
@@ -214,9 +214,9 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] != 'opencode' or
+    if (assignment is None or assignment['route'] not in ('opencode', 'codex') or
             assignment['risk'] != 'LOW'):
-        raise LLMToolError('PM response must recommend one low-risk OpenCode assignment')
+        raise LLMToolError('PM response must recommend one low-risk OpenCode or Codex assignment')
     return request, response, assignment
 
 
@@ -1418,8 +1418,19 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
-        profile = 'company-gw' if args.provider == 'company-gw' else 'codex-pm'
-        config = resolve_profile_config(profile, require_configured=True)
+        profile = ('company-gw' if args.provider == 'company-gw' else
+                   'codex-developer')
+        try:
+            config = resolve_profile_config(profile, require_configured=True)
+        except Exception as exc:
+            if (args.provider == 'codex' and
+                    str(exc) == 'requested provider profile is not defined'):
+                developer.update(state='DEVELOPER_UNAVAILABLE',
+                                 error_code='DEVELOPER_PROFILE_UNAVAILABLE')
+                saved = store.update(task['task_id'], developer=developer)
+                _print(_task_view(saved))
+                return 1
+            raise
         provider = selected_provider(config)
         if args.provider == 'company-gw':
             if provider.get('type') != 'openai-compatible':
@@ -1592,12 +1603,12 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
     contract = _contract(task_id, digest)
     record = _record(
         task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
-        state='PM_RESPONDED', provider_type='codex-cli', model=None,
+        state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
         backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
         contract=contract,
     )
     record.update(
-        pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+        pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
         response=response, usage=None, error_code=None, pm_assignment=assignment,
         pm_provenance={
             'source': 'ACTIVE_PM_RUNTIME',

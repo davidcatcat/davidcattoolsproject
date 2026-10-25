@@ -131,10 +131,11 @@ class ProviderIntegrationTests(unittest.TestCase):
     def test_cross_provider_fields_rejected_even_on_inactive_profiles(self):
         cases = []
         for name in ("local-claude", "local-codex"):
+            invalid_reasoning = ("none" if name == "local-codex" else "low")
             cases.extend((name, field, value) for field, value in (
                 ("base_url", "https://secret.example"), ("api_key", "SECRET"),
                 ("api_key_env", "SECRET_ENV"), ("provider_options", {"enable_thinking": False}),
-                ("provider_options", {"reasoning_effort": "low"})))
+                ("provider_options", {"reasoning_effort": invalid_reasoning})))
         cases.extend([
             ("openai-main", "base_url", "https://secret.example"),
             ("openai-main", "provider_options", {"enable_thinking": False}),
@@ -150,6 +151,11 @@ class ProviderIntegrationTests(unittest.TestCase):
             with self.subTest(name=name, field=field, value=value), self.assertRaises(LLMToolError) as error:
                 self.resolve({"provider": "local-claude"})
             self.assertNotIn("SECRET", str(error.exception))
+
+        profiles = copy.deepcopy(PROFILES)
+        profiles["local-codex"]["provider_options"] = {"reasoning_effort": "low"}
+        self.write_config(profiles)
+        self.resolve({"provider": "local-claude"})
 
     def test_config_show_redacts_all_profiles_without_credential_lookup(self):
         profiles = copy.deepcopy(PROFILES)
