@@ -10,7 +10,7 @@ import sys
 REPO = 'davidcatcat/davidcattoolsproject'
 OWNER = 'davidcatcat'
 IDENTITIES = {'ec2-self-runner': 'ghrunner', 'ec2-self-runner-2': 'ghrunner2'}
-BRANCHES = {'refs/heads/main', 'refs/heads/feat/issue99-ec2-linux-ci-20261025'}
+BRANCHES = {'refs/heads/main'}
 
 def reject(reason):
     print('::error::EC2 host admission refused: ' + reason)
@@ -32,7 +32,7 @@ need(runner in IDENTITIES, 'runner identity')
 need(pwd.getpwuid(os.geteuid()).pw_name == IDENTITIES[runner], 'service account')
 need(os.environ.get('GITHUB_REPOSITORY') == REPO, 'repository')
 need(os.environ.get('GITHUB_ACTOR') == OWNER, 'actor')
-need(os.environ.get('GITHUB_TRIGGERING_ACTOR', OWNER) == OWNER, 'triggering actor')
+need(os.environ.get('GITHUB_TRIGGERING_ACTOR') == OWNER, 'triggering actor')
 need(re.fullmatch(r'[0-9a-f]{40}', os.environ.get('GITHUB_SHA', '')) is not None, 'commit SHA')
 workflow_ref = os.environ.get('GITHUB_WORKFLOW_REF', '')
 need(workflow_ref.startswith(REPO + '/.github/workflows/llmtool-linux-ci.yml@'), 'workflow')

@@ -17,24 +17,28 @@ can read the other's folder or credential. Python 3.14 is the distro package
 ## Host files
 
 Each service `actions.runner.davidcatcat-davidcattoolsproject.<runner>.service`
-has these drop-ins in `/etc/systemd/system/<service>.d/`:
+has drop-ins in `/etc/systemd/system/<service>.d/` that together set:
 
 ```ini
-[Service]                      # IMDS: no AWS metadata or credentials for jobs
-IPAddressDeny=169.254.0.0/16
+[Service]
+IPAddressDeny=169.254.0.0/16       # IMDS: no AWS metadata or credentials for jobs
 IPAddressDeny=fd00:ec2::254/128
 Restart=always
 RestartSec=5s
-
-[Service]                      # 20-admission.conf
 Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=/opt/llmtool-ci/job-started.sh
+KillMode=control-group             # stop or a crash ends every process of the service
 ```
+
+The files are `10-imds-deny.conf` + `15-restart.conf` (runner 1) or
+`10-security-restart.conf` (runner 2), then `20-admission.conf` and
+`30-killmode.conf` on both. With the generated unit's `KillMode=process`, a
+killed service left an orphan listener holding the runner's GitHub session.
 
 `/opt/llmtool-ci/` (root-owned, `0755`) holds [job-started.sh](job-started.sh),
 which the runner requires to end in `.sh`, and [job-started.py](job-started.py),
 the checks. Every job must be `llmtool-linux-ci.yml` from the Owner on this
-repository, on the runner's own account, from `main`, a listed branch or an
-Owner PR into `main`. Anything else fails before checkout.
+repository, on the runner's own account, pushed or started by hand on `main`,
+or an Owner PR into `main`. Anything else fails before checkout.
 `python3 -B -m unittest discover -s tools/ec2-runner` tests it offline.
 
 To update the hook, copy both files to `/opt/llmtool-ci/` as root, keeping
