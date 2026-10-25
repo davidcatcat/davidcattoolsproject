@@ -391,12 +391,20 @@ class LifecycleReviewerBindingTests(unittest.TestCase):
             self.assertEqual(lifecycle._main(['--resume-task-id', 'x', '--resume-root', '/x',
                                               '--github-login', 'davidcatcat']), 1)
         resume.assert_not_called()
+        # Bad values are rejected before any filesystem access, so this holds
+        # on runners where the default canonical root does not exist.
+        missing_root = tempfile.TemporaryDirectory()
+        self.addCleanup(missing_root.cleanup)
+        repo_root = ['--repo-root', str(Path(missing_root.name) / 'missing')]
         for bad in (['--github-login', 'bad login'], ['--github-login', 'a' * 40],
                     ['--native-session-id', 'x\ny'], ['--native-session-id', '']):
-            with self.subTest(bad=bad), patch.object(lifecycle, '_run_git') as git, \
-                    redirect_stderr(StringIO()):
-                self.assertEqual(lifecycle._main(base + bad), 1)
-            git.assert_not_called()
+            for root in ([], repo_root):
+                with self.subTest(bad=bad, root=root), \
+                        patch.object(lifecycle, '_run_git') as git, \
+                        redirect_stderr(StringIO()) as err:
+                    self.assertEqual(lifecycle._main(base + root + bad), 1)
+                git.assert_not_called()
+                self.assertIn('D6_TASK_INPUT_INVALID', err.getvalue())
 
     def test_created_reviewer_record_is_readable_by_task_complete(self):
         import test_d6_worktree_lifecycle as d6

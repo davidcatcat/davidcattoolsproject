@@ -397,9 +397,10 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
     ``github_login`` and ``native_session_id`` are optional bindings that
     ``task complete`` needs for a Reviewer (and a natively pinned Executor).
     """
-    canonical_root = Path(canonical_root).resolve(strict=True)
     workspace_root = Path(workspace_root)
     uid = os.getuid()
+    # Pure input checks run before any filesystem access, so a bad value is
+    # D6_TASK_INPUT_INVALID even where the canonical root does not exist.
     if (not TASK_ID_RE.fullmatch(task_id or "") or
             not AGENT_RE.fullmatch(agent_id or "") or
             not session_ref or len(session_ref) > 256 or
@@ -413,6 +414,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
              (not native_session_id or len(native_session_id) > 256 or
               any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)))):
         _stop("D6_TASK_INPUT_INVALID")
+    canonical_root = Path(canonical_root).resolve(strict=True)
     if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     if _run_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
