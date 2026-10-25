@@ -1,0 +1,162 @@
+name: llmtool Linux CI
+
+# Linux Python CI on the Owner's EC2 (Issue #99): 3.14 is the daily Linux
+# version and 3.9 the oldest pyproject.toml declares (requires-python >=3.9);
+# both run the full offline suite. Each job is pinned to one of the two
+# persistent runners, so the two run at the same time. Each runner runs
+# under its own non-admin account with the instance metadata service blocked
+# for its service; the root-owned job-started hook on the host
+# (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
+# not this workflow, from the Owner, on this repository. The boundary step
+# below is a second check, not the only one. LINUX_CI_ENABLED is the kill
+# switch: anything but 'true' skips the jobs, and a skipped job is NOT_RUN,
+# not PASS. Windows is not covered here (NOT_RUN).
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tools/llmtool/**'
+      - '.github/workflows/llmtool-linux-ci.yml'
+      - 'tools/ec2-runner/**'
+  pull_request:
+    paths:
+      - 'tools/llmtool/**'
+      - '.github/workflows/llmtool-linux-ci.yml'
+      - 'tools/ec2-runner/**'
+  workflow_dispatch:
+    inputs:
+      one_runner:
+        description: 'Run both jobs on ec2-self-runner, one after the other (timing comparison)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: check (Linux ${{ matrix.python }})
+    if: >-
+      vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.14'
+            label: local-ec2-linux-ci
+          - python: '3.9'
+            label: local-ec2-linux-ci-trial-2
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+      - ${{ inputs.one_runner && 'local-ec2-linux-ci' || matrix.label }}
+    timeout-minutes: 40
+    env:
+      PYTHON_VERSION: ${{ matrix.python }}
+    steps:
+      # Trusted inline checks only, before any repository code is checked out.
+      - name: Check EC2 runner boundary
+        shell: bash
+        run: |
+          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
+          case "$RUNNER_NAME" in
+            ec2-self-runner) account=ghrunner ;;
+            ec2-self-runner-2) account=ghrunner2 ;;
+            *) fail "unexpected runner" ;;
+          esac
+          user=$(id -un) || fail "cannot identify job user"
+          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          groups=$(id -nG) || fail "cannot identify job groups"
+          test "$groups" = "$account" || fail "job user has extra groups: $groups"
+          python=/usr/bin/python$PYTHON_VERSION
+          test -x "$python" || fail "no $python on this host"
+          "$python" -B - <<'PY'
+          import os
+          from pathlib import Path
+          import socket
+          import sys
+
+          if '%d.%d' % sys.version_info[:2] != os.environ['PYTHON_VERSION']:
+              raise SystemExit('EC2 runner boundary failed: wrong Python')
+          credential_names = (
+              'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+          )
+          if any(name in os.environ for name in credential_names):
+              raise SystemExit('EC2 runner boundary failed: AWS credential environment present')
+          if (Path.home() / '.aws').exists():
+              raise SystemExit('EC2 runner boundary failed: job home has AWS configuration')
+          for address in ('169.254.169.254', 'fd00:ec2::254'):
+              try:
+                  with socket.create_connection((address, 80), timeout=2):
+                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
+              except OSError:
+                  pass
+          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
+          PY
+          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+      # Test the PR's own head commit, not GitHub's temporary merge commit, as
+      # the Mac CI does, so a run is exact evidence for the SHA it reports.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source revision
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
+      # A job-owned venv in RUNNER_TEMP; the host's Python is never changed.
+      # setuptools is pinned to meet pyproject's build requirement (>=68), so
+      # the wheel/sdist packaging test runs on both versions: 3.9's bundled
+      # setuptools is too old and 3.14's venv has none.
+      - name: Install llmtool
+        shell: bash
+        run: |
+          "/usr/bin/python$PYTHON_VERSION" -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet setuptools==80.9.0
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --requirement tools/llmtool/requirements-ci.txt
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --no-deps -e tools/llmtool
+          echo "JOB_PYTHON=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
+      - name: Offline canonical checks
+        run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+      - name: Host admission checks
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s tools/ec2-runner -p 'test_*.py'
+      - name: Working tree is clean
+        shell: bash
+        run: |
+          status=$(git status --porcelain)
+          if [ -n "$status" ]; then
+            echo "::error::the CI run changed tracked files or left untracked files:"
+            printf '%s\n' "$status"
+            exit 1
+          fi
+          echo "working tree clean"
