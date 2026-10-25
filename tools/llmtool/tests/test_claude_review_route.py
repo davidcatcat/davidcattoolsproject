@@ -173,6 +173,11 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
             'FIX status': self._head(status='FIX'),
             'FAIL status': self._head(status='FAIL'),
             'Codex FIX': self._head(actor='Codex', status='FIX'),
+            'leading space on marker': ' ' + self._head(),
+            'trailing space on marker': self._head().replace(' -->\n', ' --> \n', 1),
+            'leading space on Verdict line': self._head().replace('\nVerdict:', '\n Verdict:', 1),
+            'trailing space on Verdict line': self._head() + ' ',
+            'tab before Verdict line': self._head().replace('\nVerdict:', '\n\tVerdict:', 1),
         }.items():
             with self.subTest(label):
                 result = self._collect([accept(head)])
@@ -188,6 +193,11 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         codex_fix = self._comment(self._head(actor='Codex', status='FIX'),
                                   comment_id=3, at='2026-10-25T12:00:00Z')
         result = self._collect([accept(self._head()), codex_fix])
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        # A padded Codex PASS is not the advisory standard form, so it fails closed.
+        padded_codex = self._comment(' ' + self._head(actor='Codex'),
+                                     comment_id=4, at='2026-10-25T12:00:00Z')
+        result = self._collect([accept(self._head()), padded_codex])
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
 
     def test_comments_that_are_not_bound_reviewer_verdicts_are_ignored(self):

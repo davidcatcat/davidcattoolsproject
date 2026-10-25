@@ -1675,12 +1675,15 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         if (type(login) is not str or reviewer_login is None or
                 login.casefold() != reviewer_login.casefold() or type(body) is not str):
             continue
-        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        raw_lines = [line for line in body.splitlines() if line.strip()]
+        lines = [line.strip() for line in raw_lines]
         if (not lines or not _VERDICT_ACTIVITY.fullmatch(lines[0]) or
                 (binding_line not in lines and result_sha not in body)):
             continue
-        marker = _VERDICT_MARKER.fullmatch(lines[0])
-        status = None if len(lines) < 2 else _VERDICT_STATUS.fullmatch(lines[1])
+        # A padded marker or Verdict line is still a disposition for this
+        # HEAD, but only the verbatim standard lines can be the standard form.
+        marker = _VERDICT_MARKER.fullmatch(raw_lines[0])
+        status = None if len(raw_lines) < 2 else _VERDICT_STATUS.fullmatch(raw_lines[1])
         standard = (marker is not None and status is not None and
                     status.group(1) == marker.group(2) and status.group(2) == result_sha)
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
