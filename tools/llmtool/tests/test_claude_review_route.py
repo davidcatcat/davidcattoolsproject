@@ -25,7 +25,12 @@ from llmtool import task_completion
 import test_task_completion as fixtures
 
 ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
-VERDICT = '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->'
+
+
+def verdict_head(head, status='PASS', actor='Claude', version='v1'):
+    """First two lines of the standard formal verdict comment."""
+    return (f'<!-- activity: type=review_verdict actor={actor} target=PM status={status} -->\n'
+            f'Verdict: {status} | Version: {version} | HEAD: {head}')
 
 
 class FakeGhTests(unittest.TestCase):
@@ -128,6 +133,9 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
              'status': 'completed', 'conclusion': 'success'}]}
         self.binding = self.f._review_binding(head=self.result_sha)
 
+    def _head(self, **kwargs):
+        return verdict_head(self.result_sha, **kwargs)
+
     def _comment(self, body, *, comment_id=1, at='2026-10-25T10:00:00Z', login='davidcatcat'):
         return {'id': comment_id, 'user': {'login': login}, 'created_at': at, 'body': body}
 
@@ -141,7 +149,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         return result
 
     def test_bound_verdict_comment_is_accepted(self):
-        body = '\n'.join((VERDICT, 'Verdict: PASS', ACCEPT, self.binding))
+        body = '\n'.join((self._head(), ACCEPT, self.binding))
         result = self._collect([self._comment('PM note, not a verdict', comment_id=1),
                                 self._comment(body, comment_id=2)])
         self.assertEqual(result['missing_gates'], [])
@@ -152,15 +160,45 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         self.assertEqual(evidence['review_commit_sha'], self.result_sha)
         self.assertTrue(evidence['review_binding_verified'])
 
+    def test_only_the_exact_standard_claude_pass_form_accepts(self):
+        accept = lambda head: self._comment('\n'.join((head, ACCEPT, self.binding)))
+        self.assertEqual(self._collect([accept(self._head())])['missing_gates'], [])
+        for label, head in {
+            'no version line': '<!-- activity: type=review_verdict actor=Claude target=PM '
+                               'status=PASS -->\nVerdict: PASS | HEAD: ' + self.result_sha,
+            'status mismatch': self._head().replace('Verdict: PASS', 'Verdict: FIX'),
+            'unknown actor': self._head(actor='OpenCode'),
+            'extra marker field': self._head().replace('status=PASS', 'status=PASS extra=1'),
+            'version zero': self._head(version='v0'),
+            'FIX status': self._head(status='FIX'),
+            'FAIL status': self._head(status='FAIL'),
+            'Codex FIX': self._head(actor='Codex', status='FIX'),
+        }.items():
+            with self.subTest(label):
+                result = self._collect([accept(head)])
+                self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+                self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        # Advisory Codex PASS neither accepts nor overrides a Claude PASS.
+        codex_pass = self._comment('\n'.join((self._head(actor='Codex'), ACCEPT, self.binding)),
+                                   comment_id=2, at='2026-10-25T11:00:00Z')
+        self.assertIn('FORMAL_REVIEW_MISSING', self._collect([codex_pass])['missing_gates'])
+        result = self._collect([accept(self._head()), codex_pass])
+        self.assertEqual(result['missing_gates'], [])
+        # A later standard Codex FIX does override it.
+        codex_fix = self._comment(self._head(actor='Codex', status='FIX'),
+                                  comment_id=3, at='2026-10-25T12:00:00Z')
+        result = self._collect([accept(self._head()), codex_fix])
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+
     def test_comments_that_are_not_bound_reviewer_verdicts_are_ignored(self):
         other_head = self.f._review_binding(head='f' * 40)
         cases = {
             'no activity line': '\n'.join((ACCEPT, self.binding)),
-            'activity not first': '\n'.join(('hello', VERDICT, ACCEPT, self.binding)),
+            'activity not first': '\n'.join(('hello', self._head(), ACCEPT, self.binding)),
             'other activity type': '\n'.join((
                 '<!-- activity: type=review_gate actor=PM target=PR-10 status=PASS -->',
                 ACCEPT, self.binding)),
-            'other head': '\n'.join((VERDICT, ACCEPT, other_head)),
+            'other head': '\n'.join((verdict_head('f' * 40), ACCEPT, other_head)),
         }
         for label, body in cases.items():
             with self.subTest(label):
@@ -168,15 +206,15 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
                 self.assertIn('FORMAL_REVIEW_MISSING', result['missing_gates'])
                 self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
         with self.subTest('other login'):
-            body = '\n'.join((VERDICT, ACCEPT, self.binding))
+            body = '\n'.join((self._head(), ACCEPT, self.binding))
             result = self._collect([self._comment(body, login='someone-else')])
             self.assertIn('FORMAL_REVIEW_MISSING', result['missing_gates'])
 
     def test_verdict_without_accept_marker_or_binding_is_not_accepted(self):
-        result = self._collect([self._comment('\n'.join((VERDICT, 'Verdict: FIX', self.binding)))])
+        result = self._collect([self._comment('\n'.join((self._head(status='FIX'), self.binding)))])
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
         result = self._collect([self._comment(
-            '\n'.join((VERDICT, ACCEPT, 'HEAD: ' + self.result_sha)))])
+            '\n'.join((self._head(), ACCEPT, 'HEAD: ' + self.result_sha)))])
         self.assertIn('FORMAL_REVIEW_BINDING_MISMATCH', result['missing_gates'])
         self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
 
@@ -185,12 +223,12 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
                          {'contract_digest': '9' * 64}):
             other = self.f._review_binding(head=self.result_sha, **override)
             with self.subTest(override=override):
-                result = self._collect([self._comment('\n'.join((VERDICT, ACCEPT, other)))])
+                result = self._collect([self._comment('\n'.join((self._head(), ACCEPT, other)))])
                 self.assertIn('FORMAL_REVIEW_BINDING_MISMATCH', result['missing_gates'])
                 self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
 
     def test_latest_reviewer_disposition_wins(self):
-        accept = self._comment('\n'.join((VERDICT, ACCEPT, self.binding)),
+        accept = self._comment('\n'.join((self._head(), ACCEPT, self.binding)),
                                comment_id=1, at='2026-10-25T10:00:00Z')
         fix = self._comment('\n'.join((
             '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->',
@@ -222,14 +260,14 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
         self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
         # Even two acceptances at the same second are not ordered, so not accepted.
-        accept = self._comment('\n'.join((VERDICT, ACCEPT, self.binding)), at=at)
+        accept = self._comment('\n'.join((self._head(), ACCEPT, self.binding)), at=at)
         result = self._collect([accept], reviews=approved)
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
 
     def test_shared_login_comment_is_accepted_only_through_a_distinct_d6_reviewer(self):
         # Documents the limitation: any agent using the shared account can post
         # this exact comment. The only control is the D6 Reviewer record.
-        body = '\n'.join((VERDICT, ACCEPT, self.binding))
+        body = '\n'.join((self._head(), ACCEPT, self.binding))
         self.assertEqual(self._collect([self._comment(body)])['missing_gates'], [])
         api = self.f._github_response_sequence(self.result_sha, self.pr, [], self.checks,
                                                comments=[self._comment(body)])
@@ -252,7 +290,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         self.assertIn('FORMAL_REVIEW_MISSING', result['missing_gates'])
 
     def test_independence_and_comment_shape_gates_still_apply(self):
-        body = '\n'.join((VERDICT, ACCEPT, self.binding))
+        body = '\n'.join((self._head(), ACCEPT, self.binding))
         result = self._collect([self._comment(body)],
                                executor_session_ref='claude-reviewer-session')
         self.assertIn('REVIEWER_D6_SESSION_NOT_INDEPENDENT', result['missing_gates'])
@@ -275,7 +313,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         store.create(task)
         binding = self.f._review_binding(task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'], head=self.result_sha)
-        comments = [self._comment('\n'.join((VERDICT, ACCEPT, binding)))]
+        comments = [self._comment('\n'.join((self._head(), ACCEPT, binding)))]
         api = self.f._github_response_sequence(self.result_sha, self.pr, [], self.checks,
                                                comments=comments)
         git = {'task_id': task['task_id'], 'run_id': task['run_id'],

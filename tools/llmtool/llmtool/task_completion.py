@@ -57,6 +57,12 @@ _REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
 _GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
 # The leading `<!-- activity: ... -->` line every verdict post starts with.
 _VERDICT_ACTIVITY = re.compile(r'<!-- activity: (?:[^>]* )?type=review_verdict(?: [^>]*)? -->')
+# The one standard formal verdict format: skills/ai-team-delivery/formal-verdict.md.
+_VERDICT_MARKER = re.compile(
+    r'<!-- activity: type=review_verdict actor=(Claude|Codex) target=PM status=(PASS|FIX|FAIL) -->')
+_VERDICT_STATUS = re.compile(
+    r'Verdict: (PASS|FIX|FAIL) \| Version: v[1-9][0-9]{0,3} \| HEAD: ([0-9a-f]{40})')
+_FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 _GITHUB_API_PATH = re.compile(r'(?!/)(?!.*\.\.)[A-Za-z0-9_./?=&-]{1,256}\Z')
 
 
@@ -1673,17 +1679,28 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         if (not lines or not _VERDICT_ACTIVITY.fullmatch(lines[0]) or
                 (binding_line not in lines and result_sha not in body)):
             continue
+        marker = _VERDICT_MARKER.fullmatch(lines[0])
+        status = None if len(lines) < 2 else _VERDICT_STATUS.fullmatch(lines[1])
+        standard = (marker is not None and status is not None and
+                    status.group(1) == marker.group(2) and status.group(2) == result_sha)
+        if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
+            continue  # Advisory Codex PASS neither accepts nor supersedes.
+        # Anything else that claims to be a verdict for this HEAD is a
+        # disposition; only the exact standard Claude PASS form accepts.
+        accepted = (standard and marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
+                    _FORMAL_ACCEPT in lines and binding_line in lines)
         if type(comment.get('id')) is not int:
             _stop('REVIEW_EVIDENCE_INVALID')
         key = (_review_time(comment, 'created_at'), comment['id'])
         if verdict is None or key > verdict[0]:
-            verdict = (key, comment)
+            verdict = (key, comment, accepted)
     review_source = None if review is None else 'PR_REVIEW'
     # Equal timestamps across the two endpoints give no reliable order.
     ordering_ambiguous = (verdict is not None and review is not None and
                           verdict[0][0] == _review_time(review))
     if verdict is not None and (review is None or verdict[0][0] > _review_time(review)):
-        review = {'state': 'VERDICT_COMMENT', 'commit_id': result_sha, 'body': verdict[1]['body'],
+        review = {'state': 'VERDICT_COMMENT' if verdict[2] else 'VERDICT_COMMENT_NOT_ACCEPTED',
+                  'commit_id': result_sha, 'body': verdict[1]['body'],
                   'user': {'login': verdict[1]['user']['login']}}
         review_source = 'PR_COMMENT'
     formal_marker = re.compile(r'(?im)^\s*FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\s*$')

@@ -27,7 +27,7 @@ For OpenCode Host/Worker jobs, D8 authorizes the PM to admit qualifying tasks wi
 
 The Developer implements the bounded packet, runs relevant deterministic checks, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode must complete a qualified, actually-free different-model pre-review. If no qualified route is available, record the concrete limitation and mark that OpenCode task BLOCKED; the PM should route unrelated authorized work while resolving the missing gate. Pre-review is not independent acceptance.
 
-Submit one consolidated exact-SHA candidate to the fixed Claude formal Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. Use a separate read-only Reviewer Session/context, distinct from the Developer; a Claude Developer Agent must not formally review its own changes. Codex Reviewer output may provide advisory/pre-review feedback only and does not replace the Claude formal gate under current authority. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
+Submit one consolidated exact-SHA candidate to the fixed Claude formal Reviewer with contract, diff, test results, CI provenance and applicable runtime evidence. Use a separate read-only Reviewer Session/context, distinct from the Developer; a Claude Developer Agent must not formally review its own changes. Codex Reviewer output may provide advisory/pre-review feedback only and does not replace the Claude formal gate under current authority. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue, using the [formal verdict comment](formal-verdict.md) format; before merge the PM verifies the Reviewer's D6 record. On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
@@ -88,6 +88,7 @@ Use the task admission fields above. An OpenCode-authored Host/containment chang
 
 - [Current repository authority](../../AGENTS.md)
 - [PM Continuation Contract](pm-continuation.md)
+- [Formal verdict comment](formal-verdict.md)
 - [Roadmap](../../tools/llmtool/ROADMAP.md)
 - [llmtool development workflow](../../tools/llmtool/WORKFLOW.md), for Cloud handoff or Mac/Cloud verification
 - [safe-git](../safe-git/SKILL.md)
