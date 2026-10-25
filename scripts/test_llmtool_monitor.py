@@ -2611,8 +2611,8 @@ class OfficeViewTests(unittest.TestCase):
              "pull_requests": [{"number": 343}], "run_started_at": "2026-10-25T11:57:00Z"},
             {"id": 8, "status": "queued", "name": "llmtool Mac CI", "head_sha": "b" * 40,
              "pull_requests": [{"number": 341}], "created_at": "2026-10-25T11:58:00Z"}]}),
-            lambda run: {"jobs": [{"status": "in_progress",
-                                   "runner_name": "davidproject-self-action-2"}]})
+            lambda run: {"jobs": [{"status": "in_progress", "runner_name": "davidproject-self-action-2"}
+                                  if run == 7 else {"status": "queued"}]})
         where = {30: roots[0], 40: roots[1]}
         rows = mon.runner_rows([one, two, job], now, roots, where.get,
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci)
@@ -2981,6 +2981,32 @@ class GitHubRunnerTests(unittest.TestCase):
         reads = sum("runs/3/jobs" in call for call in gh.calls)
         source.refresh(force=True)
         self.assertEqual((reads, sum("runs/3/jobs" in call for call in gh.calls)), (1, 1))
+
+    def test_a_queued_run_with_one_job_already_running_names_that_job(self):
+        # GitHub calls the run "queued" while its 3.9 job waits, though 3.14 runs.
+        runs = {"workflow_runs": [{"id": 5, "status": "queued", "name": "llmtool Linux CI",
+                                   "head_sha": "e" * 40, "pull_requests": [{"number": 346}],
+                                   "created_at": iso(NOW - 300)}]}
+        jobs = {"jobs": [
+            {"name": "check (Linux 3.14)", "status": "in_progress", "started_at": iso(NOW - 120),
+             "runner_name": "ec2-llmtool-01", "labels": ["self-hosted", "Linux", "ec2-llmtool"]},
+            {"name": "check (Linux 3.9)", "status": "queued",
+             "labels": ["self-hosted", "Linux", "ec2-llmtool"]}]}
+        source, _ = self.source([("actions/runners", (0, {"runners": [self.linux("ec2-llmtool-01", busy=True)]})),
+                                 ("runs/5/jobs", (0, jobs)), ("actions/runs?", (0, runs))])
+        row, = mon.github_runner_rows(source.ci_view, NOW, (), source.ci_runs)
+        self.assertEqual(row.detail, "執行中：llmtool Linux CI（PR #346 @eeeeeee）：check (Linux 3.14)"
+                                     "（已執行 2 分鐘）；Linux；標籤 ec2-llmtool；排隊中、它可以接 1 個："
+                                     "llmtool Linux CI（PR #346 @eeeeeee）：check (Linux 3.9)")
+        # The run still counts once as waiting, for the Mac row's queue line.
+        self.assertEqual([(run[0], run[3]) for run in source.ci_runs],
+                         [("in_progress", "ec2-llmtool-01"), ("queued", None)])
+        run = [("in_progress", "x", NOW, None, 5)]
+        named = lambda jobs: [entry[0] for entry in mon.ci_runner_names(run, lambda _: jobs)]
+        self.assertEqual(named({"jobs": [{"status": "queued"}]}), ["queued"])   # nothing runs yet
+        self.assertEqual(named({"jobs": [{"status": "in_progress", "runner_name": "r"}]}), ["in_progress"])
+        self.assertEqual(named({"jobs": []}), ["in_progress"])   # nothing to go by: the run's word
+        self.assertEqual(named(None), ["in_progress"])           # unreadable: the same
 
     def test_queued_work_is_attributed_only_by_labels_and_unregistered_shows_nothing(self):
         source, _ = self.source(self.ci([self.MAC, self.linux("ec2-llmtool-01", label="other")]))
