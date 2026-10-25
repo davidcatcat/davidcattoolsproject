@@ -956,7 +956,7 @@ GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
-CI_JOB_READS = 5   # job lists read per refresh for finished or queued runs (finished ones are cached)
+CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
@@ -1302,15 +1302,12 @@ class GitHubSource:
             jobs_of = lambda run: self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
-                active = ci_runs(payload)
-                self.ci_runs = ci_runner_names(active, jobs_of)
+                queued = []
+                self.ci_runs = ci_runner_names(ci_runs(payload), jobs_of, queued)
                 done = ci_finished_runs(payload)
                 self._finished = {run: self._finished[run] for run, _ in done if run in self._finished}
                 for run, text in [item for item in done if item[0] not in self._finished][:CI_JOB_READS]:
                     self._finished[run] = ci_finished_jobs(jobs_of(run), text)
-                queued = []
-                for run in [run for run in active if run[0] != "in_progress"][:CI_JOB_READS]:
-                    queued += ci_queued_jobs(jobs_of(run[4]), run[1])
             except errors:
                 self.ci_runs = None
                 queued = []
@@ -2340,25 +2337,37 @@ def ci_finished_runs(payload) -> list:
             if type(run) is dict and run.get("status") == "completed" and type(run.get("id")) is int]
 
 
-def ci_runner_names(runs: list, jobs_of) -> list:
-    """Fill in which runner runs each running workflow: one entry per
-    in-progress job, so a run with jobs on two runners shows on both."""
+def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
+    """Fill in which runner runs each unfinished workflow: one entry per
+    in-progress job, so a run with jobs on two runners shows on both. Job
+    states decide, not the run's: GitHub calls a run "queued" while any of
+    its jobs waits, even with another job already running. The run itself
+    stays listed while it has jobs waiting; those go to `queued`
+    (ci_queued_jobs())."""
     named = []
     for status, text, started, runner, run_id in runs:
-        jobs = []
-        if status == "in_progress" and type(run_id) is int:
+        jobs, waiting = [], status != "in_progress"
+        if type(run_id) is int:
             try:
-                jobs = [job for job in jobs_of(run_id).get("jobs") or [] if type(job) is dict
-                        and job.get("status") == "in_progress" and job.get("runner_name")]
+                payload = jobs_of(run_id)
+                found = [job for job in payload.get("jobs") or [] if type(job) is dict]
             except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError):
-                jobs = []
+                found = None
+            if found is not None:
+                jobs = [job for job in found if job.get("status") == "in_progress" and job.get("runner_name")]
+                waiting = any(job.get("status") in CI_ACTIVE and job.get("status") != "in_progress"
+                              for job in found) or (waiting and not found)
+                if queued is not None:
+                    queued += ci_queued_jobs(payload, text)
         for job in jobs:
             job_name = str(job.get("name") or "")[:40]
-            named.append((status, text + (f"：{job_name}" if job_name else ""),
+            named.append(("in_progress", text + (f"：{job_name}" if job_name else ""),
                           _github_time(job.get("started_at")) or started,
                           str(job["runner_name"]), run_id))
         if not jobs:
             named.append((status, text, started, runner, run_id))
+        elif waiting:
+            named.append(("queued", text, started, None, run_id))
     return named
 
 
