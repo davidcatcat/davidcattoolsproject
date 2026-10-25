@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -25,6 +27,7 @@ from . import codex_direct_developer
 from . import worker_dispatch
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
+from .developer_output_normalize import normalize_developer_output
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
@@ -609,8 +612,8 @@ def _patch_paths(patch):
     return paths
 
 
-def _developer_output_rejection(value, write_paths):
-    """Classify rejected output using local checks only; never return provider text."""
+def _strict_developer_output_rejection(value, write_paths):
+    """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
@@ -634,6 +637,104 @@ def _developer_output_rejection(value, write_paths):
     if not paths.issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
     return None
+
+
+def _developer_normalized_output(value, write_paths):
+    """Preserve valid input exactly; normalize only rejected salvageable shapes."""
+    original_rejection = _strict_developer_output_rejection(value, write_paths)
+    if original_rejection is None:
+        return value, (), None
+    if original_rejection not in ('DEVELOPER_OUTPUT_INVALID_ENVELOPE',
+                                 'DEVELOPER_OUTPUT_INVALID_DIFF'):
+        return None, (), original_rejection
+    normalized, tokens = normalize_developer_output(value, write_paths)
+    if normalized == value or not tokens:
+        return None, (), original_rejection
+    if len(normalized.encode('utf-8', 'replace')) > RESPONSE_LIMIT:
+        return None, (), 'DEVELOPER_OUTPUT_TOO_LARGE'
+    if _strict_developer_output_rejection(normalized, write_paths) is not None:
+        return None, (), original_rejection
+    return normalized, tokens, None
+
+
+def _developer_output_rejection(value, write_paths, *, normalize=False):
+    """Classify output strictly unless a text-proposal route opts into salvage."""
+    if not normalize:
+        return _strict_developer_output_rejection(value, write_paths)
+    return _developer_normalized_output(value, write_paths)[2]
+
+
+_CAPTURE_SECRET_PATTERNS = (
+    re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----', re.S),
+    re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+               r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}\b'),
+    re.compile(r'\b(?:bearer|basic)\s+\S+', re.I),
+    re.compile(r'(?i)(["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+               r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)'),
+    re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'),
+    re.compile(r'\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@[^\s/]+', re.I),
+)
+
+
+def _redact_rejected_output(value):
+    """Redact recognizable credentials; conservatively replace unclassified sensitive text."""
+    if type(value) is not str:
+        return '[REDACTED_NON_TEXT_OUTPUT]\n'
+    text = value
+    for pattern in _CAPTURE_SECRET_PATTERNS:
+        text = pattern.sub('[REDACTED]', text)
+    if _emitted_sensitive(text):
+        return '[REDACTED_SENSITIVE_OUTPUT]\n'
+    return text
+
+
+def _capture_rejected_output(store, task_id, value):
+    """Persist a bounded owner-private, redacted diagnostic capture; return ref and digest."""
+    text = _redact_rejected_output(value)
+    raw = text.encode('utf-8', 'replace')
+    truncated = len(raw) > RESPONSE_LIMIT
+    if truncated:
+        marker = b'\n[TRUNCATED]\n'
+        prefix = raw[:RESPONSE_LIMIT - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
+        raw = prefix + marker
+    store._ensure_root()
+    parent = store.root / 'rejected-developer-output'
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = parent.lstat()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise LLMToolError('private rejected-output capture unavailable')
+    name = task_id + '-' + secrets.token_hex(8) + '.txt'
+    path = parent / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        raise LLMToolError('private rejected-output capture unavailable') from None
+    return {'ref': 'rejected-developer-output/' + name,
+            'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def _persist_developer_output_rejection(store, task_id, developer, error_code,
+                                        usage, value, **fields):
+    """Persist the rejection even if its optional private diagnostic capture fails."""
+    try:
+        capture = _capture_rejected_output(store, task_id, value)
+    except Exception:
+        capture = None
+    developer.pop('rejected_output_capture', None)
+    developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=error_code,
+                     usage=None if usage is None else dict(usage), **fields)
+    if capture is not None:
+        developer['rejected_output_capture'] = capture
+    return store.update(task_id, developer=developer)
 
 
 def _ignored_file_fingerprints(root):
@@ -1169,13 +1270,14 @@ def run_task_opencode_delegate(args, *, store):
             ('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames',
              snapshot.head, '--'), limit=64 * 1024)
         artifact = artifact_raw.decode('utf-8', 'strict')
-        rejection = _developer_output_rejection(artifact, write_paths)
+        rejection = _developer_output_rejection(artifact, write_paths, normalize=False)
         execution = _direct_execution(result)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact,
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
-                usage=result.usage, error_code=rejection, execution=execution)
+                execution=execution)
         else:
             developer.update(state='DEVELOPER_RESPONDED',
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
@@ -1463,8 +1565,9 @@ def run_task_codex_delegate(args, *, store):
         if result.status == 'DONE' and rejection is None:
             rejection = _developer_output_rejection(artifact, write_paths)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=rejection,
-                             execution=execution, usage=result.usage)
+            developer.update(execution=execution)
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact)
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
                              execution=execution, usage=result.usage)
@@ -1679,17 +1782,16 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    rejection_code = _developer_output_rejection(result.content, write_paths)
+    artifact, normalization_tokens, rejection_code = _developer_normalized_output(
+        result.content, write_paths)
     if rejection_code is not None:
-        developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                         error_code=rejection_code,
-                         usage=None if usage is None else dict(usage))
-        saved = store.update(task['task_id'], developer=developer)
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, rejection_code, usage, result.content)
         _print(_task_view(saved))
         return 1
-    artifact = result.content
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                       artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                      normalizations=list(normalization_tokens),
                       usage=None if usage is None else dict(usage), error_code=None)
     try:
         saved = store.update(task['task_id'], developer=developer)
