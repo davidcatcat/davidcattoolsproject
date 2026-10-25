@@ -373,22 +373,65 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(len(current), 1)
         self.assertEqual(len(inbox['events']), cap)
 
-    def test_tombstones_are_bounded_and_store_only(self):
+    def test_tombstone_history_is_never_dropped_and_full_history_is_visible(self):
         task = self._ready_task()
         with patch.object(task_store_module, 'MAX_COMPLETION_EVENTS', 2), \
                 patch.object(task_store_module, 'MAX_COMPLETION_TOMBSTONES', 1):
-            ids = self._fill(task, 4, ack=True)
+            ids = self._fill(task, 3, ack=True)
             saved = self.store.get(task['task_id'])
-        self.assertEqual([event['event_id'] for event in saved['completion_events']], ids[2:])
-        self.assertEqual([item['event_id'] for item in saved['completion_event_tombstones']],
-                         [ids[1]])
+            self.assertEqual([event['event_id'] for event in saved['completion_events']],
+                             ids[1:])
+            self.assertEqual([item['event_id']
+                              for item in saved['completion_event_tombstones']], [ids[0]])
+            # A further event would need a second tombstone: refused, not evicted.
+            with self.assertRaises(LLMToolError) as full:
+                self.store.record_completion_event(
+                    task['task_id'], event_id=uuid.uuid4().hex, run_id=task['run_id'],
+                    session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+                    sequence=3, payload_sha256='e' * 64)
+            self.assertEqual(full.exception.task_store_error_code,
+                             'COMPLETION_EVENT_HISTORY_LIMIT')
+            # Replaying the compacted event is still inert (no re-delivery).
+            replay = self.store.record_completion_event(
+                task['task_id'], event_id=ids[0], run_id=task['run_id'],
+                session_id='ses_Filler', source='HOST_WORKER', source_sha='a' * 40,
+                sequence=9, payload_sha256='f' * 64)
+            self.assertIs(replay['created'], False)
+            self.assertIs(replay['event']['compacted'], True)
+            # A repeat ack of the compacted event is the same idempotent success.
+            again = self._ack(ids[0])
+            self.assertIs(again['acknowledged_now'], False)
+            self.assertEqual(again['event']['state'], 'ACKED')
+            self.assertEqual(again['task_id'], task['task_id'])
+            # The READY result cannot be recorded: shown, never silently lost.
+            code, _ = self._complete(task)
+            self.assertEqual(code, 0)
+            inbox = self._inbox(wait=True, timeout=30,
+                                sleep=lambda seconds: self.fail('must return at once'))
+            self.assertEqual(inbox['status'], 'ATTENTION')
+            self.assertEqual(inbox['events'], [])
+            self.assertEqual(inbox['blocked'], [{
+                'task_id': task['task_id'], 'code': 'COMPLETION_EVENT_HISTORY_LIMIT',
+                'unacknowledged_event_count': 0, 'action': 'START_NEW_TASK_OR_RUN'}])
+            after = self.store.get(task['task_id'])
+            self.assertEqual(after['completion_events'], saved['completion_events'])
+            self.assertEqual(after['completion_event_tombstones'],
+                             saved['completion_event_tombstones'])
+
+    def test_tombstones_are_store_only(self):
+        task = self._ready_task()
+        self._fill(task, task_store_module.MAX_COMPLETION_EVENTS + 1, ack=True)
+        saved = self.store.get(task['task_id'])
+        self.assertEqual(len(saved['completion_event_tombstones']), 1)
         with self.assertRaises(LLMToolError) as forged:
             self.store.update(task['task_id'], completion_event_tombstones=[])
         self.assertEqual(forged.exception.task_store_error_code,
                          'COMPLETION_EVENT_MUTATION_FORBIDDEN')
         with self.assertRaises(LLMToolError):
             TaskStore(self.base / 'copy').create(
-                {**saved, 'completion_events': None})
+                {key: value for key, value in saved.items()
+                 if key not in ('completion_events', 'record_sha256')} |
+                {'completion_event_tombstones': saved['completion_event_tombstones']})
 
     # Concurrency ----------------------------------------------------------
 
@@ -487,6 +530,34 @@ class ActivePMInboxTests(unittest.TestCase):
             active_pm_inbox.observe_claude_session(self.session, str(self.pm_cwd))
         self.assertEqual(active_pm_inbox.observe_claude_session(
             self.session, str(self.pm_cwd)), str(self.pm_cwd))
+
+    def test_symlinked_directories_in_the_session_path_are_refused(self):
+        real = self.base / 'real-projects'
+        for level in ('project', 'projects', 'config'):
+            native = str(uuid.uuid4())
+            path = active_pm_inbox.claude_session_file(native, str(self.pm_cwd))
+            target = real / level / native
+            target.mkdir(parents=True)
+            (target / path.name).write_text('{}\n')
+            config = self.base / ('config-' + level)
+            env = {'CLAUDE_CONFIG_DIR': str(config)}
+            with self.subTest(level=level), patch.dict(os.environ, env):
+                path = active_pm_inbox.claude_session_file(native, str(self.pm_cwd))
+                if level == 'project':
+                    path.parent.parent.mkdir(parents=True)
+                    path.parent.symlink_to(target)
+                elif level == 'projects':
+                    config.mkdir()
+                    (target / path.parent.name).mkdir()
+                    (target / path.parent.name / path.name).write_text('{}\n')
+                    path.parent.parent.symlink_to(target)
+                else:
+                    (target / 'projects' / path.parent.name).mkdir(parents=True)
+                    (target / 'projects' / path.parent.name / path.name).write_text('{}\n')
+                    config.symlink_to(target)
+                self.assertTrue(path.exists())  # reachable only through the symlink
+                with self.assertRaises(LLMToolError):
+                    active_pm_inbox.observe_claude_session(native, str(self.pm_cwd))
 
     def test_session_lookup_needs_an_absolute_configuration_directory(self):
         for environ in ({}, {'HOME': ''}, {'CLAUDE_CONFIG_DIR': 'relative/claude'},

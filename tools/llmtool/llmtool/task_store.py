@@ -61,7 +61,9 @@ MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
 # event is never recreated or re-delivered. Only unacknowledged events can
-# fill the list; that is the visible COMPLETION_EVENT_LIMIT state.
+# fill the list; that is the visible COMPLETION_EVENT_LIMIT state. Tombstones
+# are never dropped: once they are full, the Task records no further events
+# (COMPLETION_EVENT_HISTORY_LIMIT) and later results need a new Task or Run.
 MAX_COMPLETION_TOMBSTONES = 256
 _COMPLETION_TOMBSTONE_FIELDS = frozenset((
     'event_id', 'source', 'session_id', 'sequence', 'acked_at',
@@ -1435,10 +1437,12 @@ class TaskStore:
                     # Every stored event is still unacknowledged; nothing may be
                     # dropped. The PM must ack delivered events first.
                     _fail('COMPLETION_EVENT_LIMIT')
+                if len(tombstones) >= MAX_COMPLETION_TOMBSTONES:
+                    # Dropping dedupe memory could re-deliver an acked event.
+                    _fail('COMPLETION_EVENT_HISTORY_LIMIT')
                 evicted = events.pop(oldest)
                 tombstones.append({key: evicted[key] for key in
                                    _COMPLETION_TOMBSTONE_FIELDS})
-                tombstones = tombstones[-MAX_COMPLETION_TOMBSTONES:]
             event = dict(binding, pm_session_id=current['pm_session_id'],
                          state='PENDING', received_at=self._completion_now(),
                          consumed_at=None, pm_decision_sha256=None,

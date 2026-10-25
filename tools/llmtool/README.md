@@ -701,7 +701,9 @@ LOW-risk `opencode` or `codex` Developer assignments. The record identifies its 
 `active-pm-runtime` and does not claim a Codex or Claude native session ID.
 A Claude Code PM adds `--pm-session-id SESSION_UUID` (and `--pm-cwd DIR`, default the
 current directory). llmtool refuses the record unless this user's Claude Code transcript
-for that session and directory exists (under `$CLAUDE_CONFIG_DIR` or `~/.claude`). It then
+for that session and directory exists (under `$CLAUDE_CONFIG_DIR` or `~/.claude`), with the
+configuration, `projects` and project directories and the file all owned by the user
+and none of them a symlink. It then
 stores the PM session as `pm-SESSION_UUID`, records `pm_runtime: claude-code`, the session
 UUID and directory, and `task show` lists `pm_recovery` (`claude --resume SESSION_UUID`
 in that directory). The file check shows the session exists locally; it does not prove the
@@ -768,8 +770,11 @@ second event, and a READY Task whose event write was interrupted gets its event 
 the next inbox read. Events and acknowledgements dispatch nothing; any later dispatch
 still goes through its own one-shot claim.
 A Task keeps at most 32 events. When the list is full, the oldest acknowledged event is
-compacted into a tombstone that keeps its ID and stream position (at most 256), so it is
-still never recreated. If all 32 are unacknowledged, the inbox reports `status:
+compacted into a tombstone that keeps its ID and stream position, so it is still never
+recreated, and acknowledging it again returns the same success. Tombstones are never
+dropped: once a Task holds 256, it records no further events and the inbox lists the
+result under `blocked` with `COMPLETION_EVENT_HISTORY_LIMIT` and action
+`START_NEW_TASK_OR_RUN`. If all 32 are unacknowledged, the inbox reports `status:
 ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
 `ACK_DELIVERED_EVENTS_THEN_READ_INBOX` (`--wait` returns at once); acknowledging the
 delivered events and reading again records the new result. Other failures to record an

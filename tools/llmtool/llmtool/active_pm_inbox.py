@@ -18,7 +18,10 @@ Delivery rules:
   event is compacted into a tombstone (ID and stream position kept, at most
   256), so it is still never recreated. If all 32 are unacknowledged, the new
   result is reported under ``blocked`` with COMPLETION_EVENT_LIMIT; acking the
-  delivered events and reading the inbox again records it.
+  delivered events and reading the inbox again records it. Tombstones are
+  never dropped: when 256 are held, the Task records no more events and the
+  result is reported with COMPLETION_EVENT_HISTORY_LIMIT (start a new Task or
+  Run).
 """
 
 import hashlib
@@ -75,12 +78,18 @@ def observe_claude_session(native_session_id, cwd, environ=None):
             not os.path.isdir(cwd)):
         raise LLMToolError('PM working directory is invalid')
     path = claude_session_file(native_session_id, cwd, environ)
-    try:
-        info = path.lstat()
-    except OSError:
-        raise LLMToolError('Claude Code PM session was not found for this directory') from None
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
-        raise LLMToolError('Claude Code PM session file is not a regular user file')
+    # Every component from the configuration directory down must be this
+    # user's real directory or file; a symlink anywhere is refused.
+    for component, regular in ((path.parents[2], False), (path.parents[1], False),
+                               (path.parent, False), (path, True)):
+        try:
+            info = component.lstat()
+        except OSError:
+            raise LLMToolError(
+                'Claude Code PM session was not found for this directory') from None
+        kind = stat.S_ISREG(info.st_mode) if regular else stat.S_ISDIR(info.st_mode)
+        if not kind or info.st_uid != os.getuid():
+            raise LLMToolError('Claude Code PM session path is not a plain user path')
     return cwd
 
 
@@ -148,6 +157,7 @@ def record_ready_event(store, task_id):
 # What the PM should do when a READY result could not be turned into an event.
 _BLOCKED_ACTIONS = {
     'COMPLETION_EVENT_LIMIT': 'ACK_DELIVERED_EVENTS_THEN_READ_INBOX',
+    'COMPLETION_EVENT_HISTORY_LIMIT': 'START_NEW_TASK_OR_RUN',
 }
 
 
@@ -231,6 +241,14 @@ def ack(store, event_id, session_key):
             char not in '0123456789abcdef' for char in event_id):
         raise LLMToolError('event ID must be 32 lowercase hex characters')
     records, _ = _session_records(store, session_key)
+    for record in records:
+        tombstone = next((item for item in record.get('completion_event_tombstones', [])
+                          if item['event_id'] == event_id), None)
+        if tombstone is not None:
+            # Compaction keeps only ACKED events: this ack already happened.
+            return {'event': dict(tombstone, task_id=record['task_id'], state='ACKED',
+                                  compacted=True),
+                    'task_id': record['task_id'], 'acknowledged_now': False}
     owner = next((record for record in records
                   if any(event['event_id'] == event_id
                          for event in record.get('completion_events', []))), None)
