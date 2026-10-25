@@ -69,7 +69,13 @@ For every review conclusion (including a rereview), publish a **new** GitHub com
 
 For other GitHub activity posts, begin the post with whole-line `<!-- activity: type=… actor=… target=… status=… -->` markers when the monitor needs them. The [monitor source](../../scripts/llmtool_monitor.py) defines allowed marker values: for a `BLOCKED` review verdict, its current `review_verdict` marker supports `status=UNKNOWN` (not `status=BLOCKED`); the visible verdict line still reads `Verdict: BLOCKED`.
 
-**Publishing a GitHub comment is not a wake-up.** A dispatch is delivered only when an observed receipt exists: the Worker run, an ACK or the target Session actually starting. Without one, record the dispatch as `DISPATCHED` with delivery `UNKNOWN`. Never record it as delivered or as started.
+**Sending is not delivery.** A CLI exit code (including `claude --bg` exiting 0 or printing `backgrounded`), a GitHub comment and a SendMessage `success` show only that a dispatch was sent. A dispatch is delivered only when an observed start receipt exists:
+
+- a background Claude session: `claude agents --json` shows it `busy` and its transcript holds a first action made after the dispatch (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
+- a Codex session: its session ID plus its first event;
+- any other Worker: the Worker run or an ACK.
+
+Confirm the receipt within 2 minutes of dispatch. Until then record the dispatch as `DISPATCHED` with delivery `UNKNOWN`, and never record or tell the Owner that the Worker is delivered, started or working. While waiting for the result, also watch the Worker's state (`claude_bg_dispatch.py watch` for a Claude session); a `blocked` or `waiting` Worker, or one that is gone, is handled at once under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
 
 ## What the skills own and what the runtime owns
 
