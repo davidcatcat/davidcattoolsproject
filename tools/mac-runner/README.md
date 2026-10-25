@@ -42,7 +42,8 @@ The same isolation with nothing shared: its own account `ghrunner2`, folder
 released runner tarball verified by SHA-256 and a one-hour token from the
 Owner's `gh`), LaunchDaemon and pf anchor `com.apple/ghrunner2`. Both
 runners carry `local-mac-ci`, so GitHub gives each a job; `task_completion`
-trusts exactly these two runner names. The Mac has 8 GB of memory: keep the
+trusts exactly these two runner names. If a registration fails after GitHub
+accepted the name, remove the offline runner in GitHub before re-running. The Mac has 8 GB of memory: keep the
 second runner only if two jobs at once finish sooner without timeouts. To
 stop it: `sudo bash tools/mac-runner/install.sh --account ghrunner2
 --runner davidproject-self-action-2 --uninstall`, then remove the offline

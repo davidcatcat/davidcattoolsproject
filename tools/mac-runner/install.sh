@@ -40,8 +40,16 @@ while test $# -gt 0; do
     *) src_arg=$1; shift ;;
   esac
 done
-[[ "$account" =~ ^ghrunner[0-9]*$ ]] || fail "account must be ghrunner or ghrunnerN"
-[[ "$runner" =~ ^davidproject-self-action(-[0-9]+)?$ ]] || fail "unexpected runner name $runner"
+# One fixed pairing: ghrunner runs davidproject-self-action (copied from the
+# Owner's runner); ghrunnerN runs davidproject-self-action-N (registered new).
+[[ "$account" =~ ^ghrunner([2-9])?$ ]] || fail "account must be ghrunner or ghrunner2..9"
+number=${account#ghrunner}
+test "$runner" = "davidproject-self-action${number:+-$number}" ||
+  fail "$account runs davidproject-self-action${number:+-$number}, not $runner"
+if test -z "$uninstall"; then
+  if test -n "$number" && test "$mode" != register; then fail "$account needs --register"; fi
+  if test -z "$number" && test "$mode" = register; then fail "ghrunner is copied, not registered"; fi
+fi
 label=actions.runner.davidcatcat-davidcattoolsproject.$runner
 daemon=/Library/LaunchDaemons/$label.plist
 pf_label=local.$account.pf
@@ -119,20 +127,27 @@ if test "$mode" = copy; then
     --exclude '/isolation' --exclude '/*.tar.gz' --exclude '/runsvc.sh' --exclude '/.env' \
     --exclude '/.path' --exclude '/.service' "$src/" "$dst/"
 elif ! test -f "$dst/.runner"; then
-  # Extracted and configured as the account (config.sh refuses root); the
-  # one-hour registration token comes from the Owner's gh and is passed in
-  # the environment, never on a command line.
+  # Extracted and configured as the account (config.sh refuses root). The
+  # one-hour registration token comes from the Owner's gh and reaches
+  # config.sh only through the environment: no command line (any account can
+  # list command lines) ever holds it. If GitHub accepted the name but the
+  # run failed, remove the offline runner in GitHub before retrying.
   install -d -m 0700 -o "$account" -g "$account" "$dst"
   install -m 0600 -o "$account" -g "$account" "$src/$tarball_name" "$dst/$tarball_name"
   sudo -u "$account" /usr/bin/tar -xzf "$dst/$tarball_name" -C "$dst"
   rm -f "$dst/$tarball_name"
-  token=$(sudo -u "$owner" gh api -X POST "repos/$repo/actions/runners/registration-token" --jq .token) ||
+  ACTIONS_RUNNER_INPUT_TOKEN=$(sudo -u "$owner" gh api -X POST \
+    "repos/$repo/actions/runners/registration-token" --jq .token) ||
     fail "the Owner's gh could not get a registration token"
-  sudo -u "$account" env HOME="$home" ACTIONS_RUNNER_INPUT_TOKEN="$token" /bin/bash -c \
+  export ACTIONS_RUNNER_INPUT_TOKEN
+  sudo --preserve-env=ACTIONS_RUNNER_INPUT_TOKEN -H -u "$account" /bin/bash -c \
     'cd "$1" && ./config.sh --unattended --url "https://github.com/$2" --name "$3" \
        --labels local-mac-ci --work _work --disableupdate' _ "$dst" "$repo" "$runner" ||
     fail "registration of $runner failed"
-  unset token
+  if grep -rqF -- "$ACTIONS_RUNNER_INPUT_TOKEN" "$dst/_diag" "$dst/.runner" 2>/dev/null; then
+    fail "the registration token was written to a log; remove $dst/_diag and check GitHub"
+  fi
+  unset ACTIONS_RUNNER_INPUT_TOKEN
 fi
 cp "$dst/bin/runsvc.sh" "$dst/runsvc.sh"   # the runner's own, unchanged template
 # Root owns everything except ghrunner's own folders (kept on a re-run).
