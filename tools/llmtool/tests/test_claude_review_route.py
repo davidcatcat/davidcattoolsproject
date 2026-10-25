@@ -210,6 +210,47 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         self.assertEqual(result['missing_gates'], [])
         self.assertEqual(result['evidence']['review_source'], 'PR_COMMENT')
 
+    def test_same_timestamp_review_and_comment_fail_closed(self):
+        at = '2026-10-25T10:00:00Z'
+        approved = [{'state': 'APPROVED', 'commit_id': self.result_sha,
+                     'user': {'login': 'davidcatcat'}, 'submitted_at': at,
+                     'body': '\n'.join((ACCEPT, self.binding))}]
+        fix = self._comment('\n'.join((
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=FIX -->',
+            'Verdict: FIX | HEAD: ' + self.result_sha)), at=at)
+        result = self._collect([fix], reviews=approved)
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        # Even two acceptances at the same second are not ordered, so not accepted.
+        accept = self._comment('\n'.join((VERDICT, ACCEPT, self.binding)), at=at)
+        result = self._collect([accept], reviews=approved)
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+
+    def test_shared_login_comment_is_accepted_only_through_a_distinct_d6_reviewer(self):
+        # Documents the limitation: any agent using the shared account can post
+        # this exact comment. The only control is the D6 Reviewer record.
+        body = '\n'.join((VERDICT, ACCEPT, self.binding))
+        self.assertEqual(self._collect([self._comment(body)])['missing_gates'], [])
+        api = self.f._github_response_sequence(self.result_sha, self.pr, [], self.checks,
+                                               comments=[self._comment(body)])
+        with patch('llmtool.task_completion._github_get', side_effect=api), \
+                self.assertRaises(LLMToolError) as caught:
+            task_completion.collect_github_evidence(
+                **self.f._github_kwargs(self.result_sha, reviewer_task_id='no-reviewer'))
+        self.assertEqual(caught.exception.completion_code, 'REVIEWER_D6_REGISTRY_UNAVAILABLE')
+        result = self._collect([self._comment(body)], executor_identity='claude-reviewer')
+        self.assertIn('REVIEWER_D6_SESSION_NOT_INDEPENDENT', result['missing_gates'])
+        self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        result = self._collect([self._comment(body)],
+                               executor_native_session_id='native-reviewer')
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', result['missing_gates'])
+        self.f._write_registration('reviewer-task', 'claude-reviewer', 'claude-reviewer-session',
+            self.reviewer_root, 'review/branch', self.result_sha, self.result_sha,
+            native_session_id='native-reviewer', state='REVIEW_PENDING')
+        result = self._collect([self._comment(body)])
+        self.assertIn('REVIEWER_ACTOR_D6_BINDING_MISSING', result['missing_gates'])
+        self.assertIn('FORMAL_REVIEW_MISSING', result['missing_gates'])
+
     def test_independence_and_comment_shape_gates_still_apply(self):
         body = '\n'.join((VERDICT, ACCEPT, self.binding))
         result = self._collect([self._comment(body)],

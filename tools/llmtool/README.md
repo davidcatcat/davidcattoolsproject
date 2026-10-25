@@ -755,8 +755,14 @@ with 100 or more conversation comments fails closed. The D6 independence, native
 reviewer worktree HEAD and exact-head CI gates are unchanged. Create the separate read-only
 Reviewer worktree at the result HEAD with the optional lifecycle bindings
 `--github-login LOGIN --native-session-id SESSION_ID` (a Claude Reviewer can be started with
-`claude --session-id SESSION_ID`). One shared login is not identity proof; independence still
-rests on the distinct D6 agent, Session and native Session records.
+`claude --session-id SESSION_ID`). A PR review and a verdict comment with the same timestamp
+have no reliable order and are not accepted. Limitation: with one OS user and one shared
+GitHub account, nothing binds a comment (or a PR review) to the Reviewer Session, so any agent
+using that account could post a bound acceptance. This gate enforces process discipline, not
+adversarial independence; the remaining control is the distinct D6 Reviewer record (agent,
+Session, native Session and worktree at the result HEAD), and, like the registry, it is not
+protection against same-user tampering. A separate Reviewer GitHub identity would be needed
+for a real authorship binding.
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。

@@ -1651,9 +1651,13 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     # verdict as a PR conversation comment; its latest bound one is its
     # current disposition unless a newer PR review supersedes it. A later
     # verdict that names this HEAD without the binding line still supersedes
-    # an earlier acceptance and then fails the binding gate. The shared login
-    # proves nothing about independence; that rests only on the D6 Reviewer
-    # record (distinct agent, Session and native Session) checked below.
+    # an earlier acceptance and then fails the binding gate.
+    # Limitation: under one OS user and one shared GitHub account, nothing
+    # binds a comment (or a PR review) to the Reviewer Session; any agent
+    # with that account could post a bound ACCEPT. This gate is process
+    # discipline, not adversarial independence, like the D6 registry itself.
+    # The control that remains is the D6 Reviewer record (distinct agent,
+    # Session and native Session, worktree at this HEAD) checked below.
     comments = _github_get(f'issues/{pr_number}/comments?per_page=100')
     if type(comments) is not list or len(comments) >= 100 or any(
             type(comment) is not dict for comment in comments):
@@ -1675,6 +1679,9 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         if verdict is None or key > verdict[0]:
             verdict = (key, comment)
     review_source = None if review is None else 'PR_REVIEW'
+    # Equal timestamps across the two endpoints give no reliable order.
+    ordering_ambiguous = (verdict is not None and review is not None and
+                          verdict[0][0] == _review_time(review))
     if verdict is not None and (review is None or verdict[0][0] > _review_time(review)):
         review = {'state': 'VERDICT_COMMENT', 'commit_id': result_sha, 'body': verdict[1]['body'],
                   'user': {'login': verdict[1]['user']['login']}}
@@ -1692,6 +1699,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     if review is not None and not review_binding_verified:
         missing.append('FORMAL_REVIEW_BINDING_MISMATCH')
     if any(item[1].get('state') == 'CHANGES_REQUESTED' for item in latest.values()):
+        missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
+    if ordering_ambiguous:
         missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
     if (reviewer.trusted_agent_id == executor_identity or
             reviewer.session_ref == 'UNKNOWN' or reviewer.session_ref == '' or
