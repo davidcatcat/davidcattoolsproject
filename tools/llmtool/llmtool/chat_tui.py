@@ -25,7 +25,8 @@ KEY_HELP = """Keys
   Ctrl-J, Esc Enter     Insert newline (multiline message); paste keeps newlines
   Up/Down               Move in input; on first/last line recall earlier inputs
   /                     Command picker (existing commands only): type to filter, Up/Down
-                        choose, Enter completes the draft (a second Enter runs it),
+                        choose, Enter completes the draft to the choice without running it
+                        (a draft already equal to the choice runs, as without the picker),
                         Esc closes the picker; Esc Enter still inserts a newline
   Tab, Shift-Tab        Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
@@ -339,7 +340,11 @@ class ChatTUI:
         self._set_menu([])
 
     def accept_menu(self):
-        """Enter with the picker open: complete the draft; True if Enter was consumed."""
+        """Enter with the picker open; True if Enter was consumed.
+
+        Enter only completes a draft that differs from the chosen suggestion and never
+        runs it. A draft the user already typed in full runs as it would with no picker.
+        """
         if not self.menu_items:
             return False
         _label, fill, _summary = self.menu_items[self.menu_index]
@@ -527,6 +532,7 @@ class ChatTUI:
             self.app.exit(result=0)
 
     def request_quit(self):
+        self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.
         if self.busy:
             if not self.quit_pending:
                 self.quit_pending = True
@@ -539,6 +545,7 @@ class ChatTUI:
         """Defer process-signal exit until any owned CLI child is cleaned up."""
         if self._received_signal is None:
             self._received_signal = signum
+        self.close_menu()
         if self.busy:
             self.quit_pending = True
             self.app.invalidate()

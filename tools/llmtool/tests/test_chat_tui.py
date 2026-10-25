@@ -19,9 +19,12 @@ from llmtool.providers.base import Reply
 from llmtool.providers.cli_lifecycle import tui_cli_signal_scope
 
 try:
+    from prompt_toolkit.application.current import set_app
     from prompt_toolkit.data_structures import Size
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
     from prompt_toolkit.utils import get_cwidth
     HAVE_TOOLKIT = True
 except ImportError:  # Optional extra; fallback tests below still run.
@@ -434,16 +437,30 @@ class WidgetTests(Base):
         self.factory.assert_not_called()
         self.assertNotIn('> /skill', ui.conversation.text)
 
-    def test_picker_task_completion_and_escape_dismiss(self):
+    def test_picker_task_completion(self):
         ui, _ = self.drive(['/task su', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
                             lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
-        async def escape_timeout(ui):
-            # A lone Esc waits ttimeoutlen (0.5s, input parser) then timeoutlen (0.4s) = ~0.9s.
-            await asyncio.sleep(1.3)
-        ui, _ = self.drive(['/he', '\x1b', escape_timeout,
-                            lambda ui: self.assertEqual(ui.menu_items, []),
-                            lambda ui: self.assertEqual(ui.input.text, '/he')])
+
+    def test_picker_lone_escape_closes_on_key_timeout_flush(self):
+        """No wall-clock wait: feed Esc, then the same flush the timeoutlen timer sends."""
+        # Private name, imported here so a rename fails this test instead of skipping all.
+        from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+
+        def lone_escape(ui):
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.Escape, '\x1b'))
+                processor.process_keys()
+                # Esc may still start Esc Enter (newline), so the picker waits.
+                self.assertEqual([c[0] for c in ui.menu_items], ['/help'])
+                processor.feed(timeout_flush)
+                processor.process_keys()
+            self.assertEqual(ui.menu_items, [])
+            self.assertEqual(ui.input.text, '/he')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/he', lone_escape])
+        self.factory.assert_not_called()
 
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
@@ -468,11 +485,36 @@ class WidgetTests(Base):
     def test_help_documents_the_slash_picker(self):
         self.assertIn('Esc closes the picker', chat_tui.KEY_HELP)
 
-    def test_picker_enter_on_complete_command_runs_it_and_chat_unaffected(self):
+    def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
+        # Rule: Enter only completes a draft that differs from the chosen suggestion and
+        # never runs it; a draft the user already typed in full runs as with no picker.
+        def completed_not_run(ui):
+            self.assertEqual(ui.input.text, '/status')
+            self.assertNotIn('connectivity', ui.conversation.text)
+        ui, _ = self.drive(['/s', '\r', completed_not_run, '\r', self.idle])
+        self.assertIn('connectivity: not probed', ui.conversation.text)
         ui, _ = self.drive(['/status\r', '/zzz\r', 'plain chat\r', self.idle])
         self.assertIn('connectivity: not probed', ui.conversation.text)
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.assertEqual(self.client.complete.call_count, 1)
+
+    def test_picker_closed_and_esc_timeout_restored_on_ctrl_c_and_signals(self):
+        def menu_open(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+        ui, result = self.drive(['/s', menu_open, '\x03'])
+        self.assertEqual(result, 0)
+        self.assertEqual(ui.menu_items, [])
+        self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                ui, result = self.drive(['/s', menu_open,
+                                         lambda ui, signum=signum: ui._handle_signal(signum)])
+                self.assertEqual(result, 0)
+                self.assertEqual(ui._received_signal, signum)
+                self.assertEqual(ui.menu_items, [])
+                self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.factory.assert_not_called()
 
     def test_picker_closed_for_recalled_history_and_multiline(self):
         ui, _ = self.drive(['/status\r', '/help\r', '\x1b[A',
