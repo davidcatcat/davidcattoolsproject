@@ -722,10 +722,12 @@ when the old/new paths match, bare blank hunk lines become context lines, and
 hunk counts are recalculated from the body. The accepted Task result records
 only fixed normalization tokens. Mode changes, renames, binary patches,
 multiple fences, mixed prose, and out-of-scope paths are not normalized into
-acceptance. Any rejected output is stored only in the owner-private task state
-directory as a redacted, 64 KiB-bounded diagnostic file; the Task record keeps
-its relative reference and SHA-256, never the rejected text. The CLI does not
-print the capture or include it in evidence packets.
+acceptance. Rejected company-gw and Codex text proposals, plus collected direct
+Codex diffs that fail output validation, are stored only in the owner-private
+task state directory as a redacted, 64 KiB-bounded diagnostic file; the Task
+record keeps its relative reference and SHA-256, never the rejected text. The
+CLI does not print the capture or include it in evidence packets. Output that
+cannot be safely collected is not captured.
 
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,

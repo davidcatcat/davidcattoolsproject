@@ -1860,7 +1860,9 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
     validator must change this table deliberately."""
 
     def test_common_output_shapes(self):
-        rejection = submission_cli._developer_output_rejection
+        def rejection(text, paths):
+            return submission_cli._developer_output_rejection(
+                text, paths, normalize=True)
         target = 'tools/llmtool/example.py'
         header = f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
         good = header + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n'
@@ -1917,7 +1919,8 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         }
         for label, (text, expected) in cases.items():
             with self.subTest(label=label):
-                self.assertEqual(submission_cli._developer_output_rejection(text, [target]),
+                self.assertEqual(submission_cli._developer_output_rejection(
+                                     text, [target], normalize=True),
                                  expected)
 
     def test_prompt_example_itself_passes_the_validator(self):

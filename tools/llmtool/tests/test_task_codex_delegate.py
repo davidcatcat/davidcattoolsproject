@@ -1,3 +1,4 @@
+import io
 import hashlib
 import json
 import os
@@ -5,6 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from argparse import Namespace
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -158,7 +160,7 @@ class CodexDelegateTests(unittest.TestCase):
         return script
 
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
-                  overwrite_ignored=None):
+                  overwrite_ignored=None, malformed_diff=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
@@ -168,18 +170,41 @@ class CodexDelegateTests(unittest.TestCase):
         original_cwd = os.getcwd()
         try:
             os.chdir(self.root)
+            git_reader = self._completion_git
+            def read_git(root, args, *, limit=1024 * 1024):
+                if (malformed_diff is not None and tuple(args[:2]) ==
+                        ('diff', '--binary')):
+                    return malformed_diff.encode('utf-8')
+                return git_reader(root, args, limit=limit)
             with patch.dict(os.environ, {'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}), \
                     patch('llmtool.task_submission_cli._codex_developer_profile',
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \
                     patch('llmtool.task_submission_cli._bootstrap_registered_d6',
                           side_effect=bootstrap_error), \
                     patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'), \
-                    patch.object(task_completion, '_git', side_effect=self._completion_git), \
+                    patch.object(task_completion, '_git', side_effect=read_git), \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event', return_value=0) as callback:
                 result = run_task_codex_delegate(args, store=self.store)
         finally:
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
+
+    def test_direct_codex_rejects_malformed_hunk_strictly_and_captures_it(self):
+        task = self._task()
+        raw = ('diff --git a/src.py b/src.py\n'
+               '--- a/src.py\n+++ b/src.py\n'
+               '@@ -1,1 +1,2 @@\n\n+VALUE = 2\n')
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result, saved, _callback = self._dispatch(task, malformed_diff=raw)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertIsNone(saved['developer']['artifact'])
+        capture = saved['developer']['rejected_output_capture']
+        captured = (self.store.root / capture['ref']).read_text(encoding='utf-8')
+        self.assertEqual(captured, raw)
+        self.assertNotIn(raw, output.getvalue())
 
     def test_dirty_registered_worktree_keeps_identity_and_runs_callback(self):
         task = self._task()

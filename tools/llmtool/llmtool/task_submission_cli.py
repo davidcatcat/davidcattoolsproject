@@ -529,8 +529,8 @@ def _developer_normalized_output(value, write_paths):
     return normalized, tokens, None
 
 
-def _developer_output_rejection(value, write_paths, *, normalize=True):
-    """Classify output after strict validation and narrowly scoped salvage."""
+def _developer_output_rejection(value, write_paths, *, normalize=False):
+    """Classify output strictly unless a text-proposal route opts into salvage."""
     if not normalize:
         return _strict_developer_output_rejection(value, write_paths)
     return _developer_normalized_output(value, write_paths)[2]
@@ -1437,8 +1437,9 @@ def run_task_codex_delegate(args, *, store):
         if result.status == 'DONE' and rejection is None:
             rejection = _developer_output_rejection(artifact, write_paths)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=rejection,
-                             execution=execution, usage=result.usage)
+            developer.update(execution=execution)
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact)
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
                              execution=execution, usage=result.usage)

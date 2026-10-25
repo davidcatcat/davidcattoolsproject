@@ -37,10 +37,11 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
     def test_opencode_strict_mode_does_not_normalize(self):
         missing_header = (f'--- a/{self.PATH}\n+++ b/{self.PATH}\n'
                           '@@ -1,9 +1,9 @@\n-old\n+new\n')
-        self.assertIsNone(_developer_output_rejection(missing_header, [self.PATH]))
         self.assertEqual(
-            _developer_output_rejection(missing_header, [self.PATH], normalize=False),
+            _developer_output_rejection(missing_header, [self.PATH]),
             'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        self.assertIsNone(_developer_output_rejection(
+            missing_header, [self.PATH], normalize=True))
 
     def test_fence_refuses_edge_prose_and_prose_inside(self):
         diff = self.HEADER + '@@ -1 +1 @@\n-old\n+new\n'
