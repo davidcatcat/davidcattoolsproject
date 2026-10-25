@@ -1,11 +1,13 @@
 name: llmtool Linux CI
 
-# Linux Python CI on the Owner's EC2 (Issue #99): 3.14 is the daily Linux
-# version and 3.9 the oldest pyproject.toml declares (requires-python >=3.9);
-# both run the full offline suite. Each job is pinned to one of the two
-# persistent runners, so the two run at the same time. Each runner runs
-# under its own non-admin account with the instance metadata service blocked
-# for its service; the root-owned job-started hook on the host
+# Linux Python CI on the Owner's EC2 (Issue #99): 3.14, the daily Linux
+# version, runs the full offline suite on every PR and main push. 3.9, the
+# oldest pyproject.toml declares (requires-python >=3.9), runs only before a
+# release: start this workflow by hand on main with `python39` (Owner
+# 2026-10-25). Both runners carry the same label, so either takes a job and
+# two jobs run at the same time. Each runner runs under its own non-admin
+# account with the instance metadata service blocked for its service; the
+# root-owned job-started hook on the host
 # (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
 # not this workflow, from the Owner, on this repository. The boundary step
 # below is a second check, not the only one. LINUX_CI_ENABLED is the kill
@@ -26,8 +28,8 @@ on:
       - 'tools/ec2-runner/**'
   workflow_dispatch:
     inputs:
-      one_runner:
-        description: 'Run both jobs on ec2-self-runner, one after the other (timing comparison)'
+      python39:
+        description: 'Pre-release check: also run the full suite on Python 3.9'
         type: boolean
         default: false
 
@@ -48,16 +50,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - python: '3.14'
-            label: local-ec2-linux-ci
-          - python: '3.9'
-            label: local-ec2-linux-ci-trial-2
-    runs-on:
-      - self-hosted
-      - Linux
-      - X64
-      - ${{ inputs.one_runner && 'local-ec2-linux-ci' || matrix.label }}
+        python: ${{ fromJSON(inputs.python39 && '["3.14", "3.9"]' || '["3.14"]') }}
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     timeout-minutes: 40
     env:
       PYTHON_VERSION: ${{ matrix.python }}
