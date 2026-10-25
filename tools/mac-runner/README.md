@@ -32,6 +32,22 @@ After installing, run the **Mac Runner Smoke Test** workflow and check the
 job log shows `runner isolation: dedicated account ghrunner` and
 `runner admission: ...`.
 
+## A second runner (`davidproject-self-action-2`, trial)
+
+    sudo bash tools/mac-runner/install.sh --account ghrunner2 \
+      --runner davidproject-self-action-2 --register
+
+The same isolation with nothing shared: its own account `ghrunner2`, folder
+`/Users/ghrunner2/actions-runner`, registration (a new one, from the
+released runner tarball verified by SHA-256 and a one-hour token from the
+Owner's `gh`), LaunchDaemon and pf anchor `com.apple/ghrunner2`. Both
+runners carry `local-mac-ci`, so GitHub gives each a job; `task_completion`
+trusts exactly these two runner names. The Mac has 8 GB of memory: keep the
+second runner only if two jobs at once finish sooner without timeouts. To
+stop it: `sudo bash tools/mac-runner/install.sh --account ghrunner2
+--runner davidproject-self-action-2 --uninstall`, then remove the offline
+runner under GitHub → Settings → Actions → Runners.
+
 ## Residual risk
 
 - Every account can list other processes' command lines (`/bin/ps` is
