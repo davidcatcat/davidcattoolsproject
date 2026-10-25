@@ -591,6 +591,21 @@ def _capture_rejected_output(store, task_id, value):
             'sha256': hashlib.sha256(raw).hexdigest()}
 
 
+def _persist_developer_output_rejection(store, task_id, developer, error_code,
+                                        usage, value, **fields):
+    """Persist the rejection even if its optional private diagnostic capture fails."""
+    try:
+        capture = _capture_rejected_output(store, task_id, value)
+    except Exception:
+        capture = None
+    developer.pop('rejected_output_capture', None)
+    developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=error_code,
+                     usage=None if usage is None else dict(usage), **fields)
+    if capture is not None:
+        developer['rejected_output_capture'] = capture
+    return store.update(task_id, developer=developer)
+
+
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
                       pm_goal, developer_route='company-gw'):
     packet = {
@@ -1091,12 +1106,11 @@ def run_task_opencode_delegate(args, *, store):
         rejection = _developer_output_rejection(artifact, write_paths, normalize=False)
         execution = _direct_execution(result)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact,
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
-                usage=result.usage, error_code=rejection, execution=execution,
-                rejected_output_capture=_capture_rejected_output(
-                    store, task['task_id'], artifact))
+                execution=execution)
         else:
             developer.update(state='DEVELOPER_RESPONDED',
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
@@ -1312,12 +1326,8 @@ def run_task_delegate(args, *, store=None):
     artifact, normalization_tokens, rejection_code = _developer_normalized_output(
         result.content, write_paths)
     if rejection_code is not None:
-        capture = _capture_rejected_output(store, task['task_id'], result.content)
-        developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                         error_code=rejection_code,
-                         usage=None if usage is None else dict(usage),
-                         rejected_output_capture=capture)
-        saved = store.update(task['task_id'], developer=developer)
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, rejection_code, usage, result.content)
         _print(_task_view(saved))
         return 1
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,

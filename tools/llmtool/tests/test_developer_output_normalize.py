@@ -42,15 +42,50 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
             _developer_output_rejection(missing_header, [self.PATH], normalize=False),
             'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
 
-    def test_fence_can_have_edge_prose_but_not_prose_inside(self):
+    def test_fence_refuses_edge_prose_and_prose_inside(self):
         diff = self.HEADER + '@@ -1 +1 @@\n-old\n+new\n'
+        prose_edges = 'Here is the change:\n```diff\n' + diff + '```\nDone.'
+        unchanged, tokens = normalize_developer_output(prose_edges, [self.PATH])
+        self.assertEqual(unchanged, prose_edges)
+        self.assertEqual(tokens, ())
+        self.assertEqual(_developer_output_rejection(prose_edges, [self.PATH]),
+                         'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
         normalized, tokens = normalize_developer_output(
-            'Here is the change:\n```diff\n' + diff + '```\nDone.', [self.PATH])
+            '\n```diff\n\n' + diff + '\n\n```\n', [self.PATH])
         self.assertIn('OUTER_FENCE_STRIPPED', tokens)
         self.assertIsNone(_developer_output_rejection(normalized, [self.PATH]))
         inside, _ = normalize_developer_output('```diff\nintro\n' + diff + '```',
                                                [self.PATH])
         self.assertEqual(inside, '```diff\nintro\n' + diff + '```')
+
+    def test_header_recovery_refuses_a_second_file_header_pair(self):
+        headerless_two_file = (
+            '--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n'
+            '--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-p\n+q\n')
+        normalized, tokens = normalize_developer_output(headerless_two_file, ['a.py'])
+        self.assertEqual(normalized, headerless_two_file)
+        self.assertEqual(tokens, ())
+        self.assertEqual(_developer_output_rejection(headerless_two_file, ['a.py']),
+                         'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+
+        section_then_headerless_pair = (
+            'diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n'
+            '@@ -1 +1 @@\n-x\n+y\n'
+            '--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n-p\n+q\n')
+        normalized, tokens = normalize_developer_output(section_then_headerless_pair, ['a.py'])
+        self.assertEqual(normalized, section_then_headerless_pair)
+        self.assertEqual(tokens, ())
+        self.assertEqual(_developer_output_rejection(section_then_headerless_pair, ['a.py']),
+                         'DEVELOPER_OUTPUT_INVALID_DIFF')
+
+    def test_nonstandard_line_separators_and_carriage_returns_are_not_normalized(self):
+        separator_in_added_line = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\u2028extra\n')
+        crlf = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n').replace('\n', '\r\n')
+        for raw in (separator_in_added_line, crlf):
+            with self.subTest(raw=repr(raw[-30:])):
+                normalized, tokens = normalize_developer_output(raw, [self.PATH])
+                self.assertEqual(normalized, raw)
+                self.assertEqual(tokens, ())
 
     def test_recounts_hunks_in_each_in_scope_file_section(self):
         second = 'tools/llmtool/second.py'

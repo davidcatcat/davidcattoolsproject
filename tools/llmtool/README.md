@@ -716,7 +716,8 @@ same four optional `reasoning_effort` values described above.
 
 Company-gw and Codex text proposals receive a small conservative normalization
 before the unchanged strict unified-diff and write-scope checks: one outer
-Markdown diff fence can be removed, a missing `diff --git` line can be restored
+Markdown diff fence can be removed only when all text outside it is whitespace;
+a missing `diff --git` line can be restored
 when the old/new paths match, bare blank hunk lines become context lines, and
 hunk counts are recalculated from the body. The accepted Task result records
 only fixed normalization tokens. Mode changes, renames, binary patches,

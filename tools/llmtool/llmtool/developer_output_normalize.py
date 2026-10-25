@@ -25,11 +25,16 @@ def normalize_developer_output(value, write_paths):
     """
     if type(value) is not str or not value or len(value.encode('utf-8', 'ignore')) > 64 * 1024:
         return value, ()
+    if any(char in value for char in ('\r', '\u2028', '\u2029', '\x85',
+                                      '\x1c', '\x1d', '\x1e')):
+        return value, ()
     text = value
     tokens = []
-    lines = text.splitlines()
+    lines = text.split('\n')
+    if text.endswith('\n'):
+        lines.pop()
 
-    # Permit one fenced block, with optional prose around that block only.
+    # Permit one fenced block only when all text outside it is whitespace.
     fence_lines = [i for i, line in enumerate(lines) if line.strip().startswith('```')]
     if fence_lines:
         if len(fence_lines) != 2:
@@ -38,13 +43,15 @@ def normalize_developer_output(value, write_paths):
         opening = lines[first].strip()
         if opening not in ('```', '```diff') or lines[last].strip() != '```':
             return value, ()
+        if any(line.strip() for line in lines[:first] + lines[last + 1:]):
+            return value, ()
         inner = lines[first + 1:last]
-        # The fenced remainder itself must be a single diff candidate. Prose
-        # outside is allowed only because there is exactly one complete fence.
         text = '\n'.join(inner)
         tokens.append('OUTER_FENCE_STRIPPED')
 
-    lines = text.splitlines()
+    lines = text.split('\n')
+    if text.endswith('\n'):
+        lines.pop()
     if fence_lines:
         while lines and not lines[0].strip():
             lines.pop(0)
@@ -68,6 +75,21 @@ def normalize_developer_output(value, write_paths):
     else:
         # Header recovery is deliberately limited to one otherwise complete file diff.
         sections = [lines]
+
+    # Do not let header recovery or hunk recounting absorb another file's
+    # ---/+++ headers as deletion/addition lines. A header-looking pair inside
+    # a hunk is ambiguous too, so leave the original text for strict rejection.
+    for section in sections:
+        file_header_pairs = 0
+        inside_hunk = False
+        for index, line in enumerate(section):
+            if _HUNK.fullmatch(line):
+                inside_hunk = True
+            if (index + 1 < len(section) and _FILE_OLD.fullmatch(line) and
+                    _FILE_NEW.fullmatch(section[index + 1])):
+                file_header_pairs += 1
+                if inside_hunk or file_header_pairs > 1:
+                    return value, ()
 
     output = []
     for section in sections:

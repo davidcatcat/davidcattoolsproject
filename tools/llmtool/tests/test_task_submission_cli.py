@@ -1832,6 +1832,27 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn(b'[TRUNCATED]', raw)
         self.assertEqual(hashlib.sha256(raw).hexdigest(), capture['sha256'])
 
+    def test_capture_failure_still_persists_rejection_state(self):
+        class Store:
+            def update(self, task_id, developer):
+                self.task_id = task_id
+                self.developer = dict(developer)
+                return {'developer': dict(developer)}
+
+        store = Store()
+        developer = {'state': 'DEVELOPER_DISPATCHING', 'usage': None}
+        usage = {'prompt_tokens': 3, 'completion_tokens': 4, 'total_tokens': 7}
+        with patch('llmtool.task_submission_cli._capture_rejected_output',
+                   side_effect=OSError('disk unavailable')):
+            saved = submission_cli._persist_developer_output_rejection(
+                store, 'a' * 32, developer, 'DEVELOPER_OUTPUT_INVALID_DIFF', usage,
+                'invalid proposal')
+        self.assertEqual(store.task_id, 'a' * 32)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertEqual(saved['developer']['usage'], usage)
+        self.assertNotIn('rejected_output_capture', saved['developer'])
+
 
 class DeveloperOutputShapeMatrixTests(unittest.TestCase):
     """#290 / #315 P2-2: the local verdict for common model output shapes,
