@@ -101,6 +101,25 @@ _PM_PROVENANCE_FIELDS = frozenset((
     'source', 'provider_invoked', 'native_session_id_status', 'usage_status',
     'session_restored', 'automatic_callback',
 ))
+# Recovery identity of the live PM runtime that recorded a Task (#352 G6).
+_PM_SESSION_FIELDS = frozenset(('pm_runtime', 'pm_native_session_id', 'pm_cwd'))
+PM_NATIVE_SESSION_ID = re.compile(
+    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+
+
+def _valid_pm_session_binding(record, provenance):
+    """A declared PM session must be a well-formed, observed Claude Code session."""
+    if not _PM_SESSION_FIELDS.issubset(provenance):
+        return provenance['native_session_id_status'] == 'UNAVAILABLE'
+    native = provenance['pm_native_session_id']
+    cwd = provenance['pm_cwd']
+    return (provenance['pm_runtime'] == 'claude-code' and
+            provenance['native_session_id_status'] == 'LOCAL_SESSION_FILE_OBSERVED' and
+            type(native) is str and PM_NATIVE_SESSION_ID.fullmatch(native) is not None and
+            record['pm_session_id'] == 'pm-' + native and
+            type(cwd) is str and 1 <= len(cwd) <= 1024 and cwd.startswith('/') and
+            os.path.normpath(cwd) == cwd and
+            not any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd))
 
 # R5 technical observations live inside the existing TaskStore root. They are
 # evidence only: this registry is deliberately separate from worker-dispatch.json
@@ -481,10 +500,12 @@ def _validate(record):
                 response_assignment = response_object.get('developer_assignment')
             except Exception:
                 _fail()
-            if (type(provenance) is not dict or set(provenance) != _PM_PROVENANCE_FIELDS or
+            if (type(provenance) is not dict or
+                    set(provenance) not in (_PM_PROVENANCE_FIELDS,
+                                            _PM_PROVENANCE_FIELDS | _PM_SESSION_FIELDS) or
                     provenance['source'] != 'ACTIVE_PM_RUNTIME' or
                     provenance['provider_invoked'] is not False or
-                    provenance['native_session_id_status'] != 'UNAVAILABLE' or
+                    not _valid_pm_session_binding(record, provenance) or
                     provenance['usage_status'] != 'UNKNOWN' or
                     provenance['session_restored'] is not False or
                     provenance['automatic_callback'] is not False or
@@ -1274,6 +1295,18 @@ class TaskStore:
                     raise denial
                 return saved
         return self._write(record, create=True)
+
+    def task_ids(self):
+        """List stored Task IDs (names only; each record is validated on read)."""
+        directory = self._dirfd()
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            _fail('TASK_STORE_UNAVAILABLE')
+        finally:
+            os.close(directory)
+        return sorted(name[:-5] for name in names
+                      if name.endswith('.json') and _safe_identifier(name[:-5], TASK_ID))
 
     def get(self, task_id):
         directory = self._dirfd()

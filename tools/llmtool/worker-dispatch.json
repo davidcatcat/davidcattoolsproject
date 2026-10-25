@@ -57,7 +57,7 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-10-25",
-      "reason": "advisory/cross review of Claude Developer changes per Owner; does not replace the formal Claude Reviewer gate",
+      "reason": "formal Reviewer for Claude Developer and Claude PM changes (cross-family pairing, AGENTS.md Formal Reviewer); separate read-only context",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6397242605"
     }
   }

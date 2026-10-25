@@ -18,6 +18,7 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, TaskStoreConflict, new_id
+from . import active_pm_inbox
 from . import task_completion
 from . import opencode_direct_developer
 from . import worker_dispatch
@@ -446,6 +447,11 @@ def _task_view(record):
     handoff = _active_pm_handoff(record)
     if handoff is not None:
         view['active_pm_handoff'] = handoff
+    if 'completion_events' in record:
+        view['completion_events'] = record['completion_events']
+    pm_recovery = active_pm_inbox.recovery(record)
+    if pm_recovery is not None:
+        view['pm_recovery'] = pm_recovery
     return view
 
 
@@ -457,6 +463,24 @@ def add_task_submission_parsers(actions):
         'record-pm', help='Record an active PM runtime decision without invoking a provider')
     record_pm.add_argument('--stdin-json', action='store_true', required=True,
                            help='read one bounded JSON object with request and response from stdin')
+    record_pm.add_argument('--pm-session-id',
+                           help='Claude Code session UUID of this PM; its local transcript must exist')
+    record_pm.add_argument('--pm-runtime', choices=('claude-code',),
+                           help='PM runtime that owns --pm-session-id (default claude-code)')
+    record_pm.add_argument('--pm-cwd',
+                           help='working directory of the PM session (default: current directory)')
+    inbox = actions.add_parser(
+        'inbox', help='Read unacknowledged completion events for one active PM session')
+    inbox.add_argument('--pm-session', required=True,
+                       help='Claude Code session UUID (or stored pm- session ID)')
+    inbox.add_argument('--wait', action='store_true',
+                       help='block until an event exists or the timeout passes')
+    inbox.add_argument('--timeout', type=int, default=540,
+                       help='seconds to wait with --wait (0-3600, default 540)')
+    ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
+    ack.add_argument('event_id', help='32-character event ID from task inbox')
+    ack.add_argument('--pm-session', required=True,
+                     help='Claude Code session UUID (or stored pm- session ID)')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
@@ -1425,14 +1449,28 @@ def run_task_submit(args, *, store=None, stdout=None):
 
 def run_task_record_pm(args, *, store=None, input_stream=None):
     """Persist a real active-PM decision; this path never resolves or calls a provider."""
-    del args  # The required flag is enforced by argparse; no caller text is trusted from argv.
     store = TaskStore() if store is None else store
+    native_session = getattr(args, 'pm_session_id', None)
+    runtime = getattr(args, 'pm_runtime', None)
+    cwd = getattr(args, 'pm_cwd', None)
+    session = None
+    if native_session is None:
+        if runtime is not None or cwd is not None:
+            raise LLMToolError('--pm-runtime/--pm-cwd require --pm-session-id')
+    else:
+        # The transcript must exist before anything is read or stored.
+        session = {'pm_runtime': runtime or 'claude-code',
+                   'pm_native_session_id': native_session,
+                   'pm_cwd': active_pm_inbox.observe_claude_session(
+                       native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = new_id(), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
-        task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
+        task_id, run_id,
+        'pm-' + (new_id() if session is None else session['pm_native_session_id']),
+        'active-pm-runtime', prompt,
         state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
         backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
         contract=contract,
@@ -1443,10 +1481,12 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
         pm_provenance={
             'source': 'ACTIVE_PM_RUNTIME',
             'provider_invoked': False,
-            'native_session_id_status': 'UNAVAILABLE',
+            'native_session_id_status': ('UNAVAILABLE' if session is None
+                                         else 'LOCAL_SESSION_FILE_OBSERVED'),
             'usage_status': 'UNKNOWN',
             'session_restored': False,
             'automatic_callback': False,
+            **({} if session is None else session),
         },
     )
     try:
@@ -1456,6 +1496,31 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
         raise LLMToolError('active PM outcome could not be saved; details omitted') from None
     _print(_task_view(saved))
     return 0
+
+
+def run_task_inbox(args, *, store=None, stdout=None, sleep=None):
+    """Return this PM session's unacknowledged completion events (JSON)."""
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    kwargs = {} if sleep is None else {'sleep': sleep}
+    _print(active_pm_inbox.wait_inbox(store, key, wait=args.wait, timeout=args.timeout,
+                                      **kwargs), stdout=stdout)
+    return 0
+
+
+def run_task_ack(args, *, store=None, stdout=None):
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    _print(active_pm_inbox.ack(store, args.event_id, key), stdout=stdout)
+    return 0
+
+
+def _record_ready_event(store, task_id):
+    """Best effort: `task inbox` reconciles a READY Task whose event is missing."""
+    try:
+        active_pm_inbox.record_ready_event(store, task_id)
+    except LLMToolError:
+        pass
 
 
 def run_task_show(args, *, store=None, stdout=None):
@@ -1622,9 +1687,10 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                  'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
                  'pm_recommendation': None, 'pm_usage': None,
                  'pm_error_code': None}
-        saved = store.compare_and_update(task['task_id'],
+        store.compare_and_update(task['task_id'],
             expected={'completion': completion}, completion=ready)
-        _print(_task_view(saved))
+        _record_ready_event(store, task['task_id'])
+        _print(_task_view(store.get(task['task_id'])))
         return 0
     before_claim = {**completion, 'state': 'PM_DISPATCHING',
                     'reviewer_task_id': args.reviewer_task,
@@ -2351,6 +2417,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
             _persist_direct_callback(store, task, developer, ready)
         except Exception:
             raise LLMToolError('verified direct result could not be persisted') from None
+        _record_ready_event(store, task_id)
         _print(_task_view(store.get(task_id)))
         return 0
     before_claim = {**callback, 'state': 'PM_DISPATCHING',

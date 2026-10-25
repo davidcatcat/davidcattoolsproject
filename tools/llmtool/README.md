@@ -699,6 +699,13 @@ conversation, dispatch a Developer, run tests, or continue work in the backgroun
 provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
 LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as
 `active-pm-runtime` and does not claim a Codex or Claude native session ID.
+A Claude Code PM adds `--pm-session-id SESSION_UUID` (and `--pm-cwd DIR`, default the
+current directory). llmtool refuses the record unless this user's Claude Code transcript
+for that session and directory exists (under `$CLAUDE_CONFIG_DIR` or `~/.claude`). It then
+stores the PM session as `pm-SESSION_UUID`, records `pm_runtime: claude-code`, the session
+UUID and directory, and `task show` lists `pm_recovery` (`claude --resume SESSION_UUID`
+in that directory). The file check shows the session exists locally; it does not prove the
+caller is that session.
 
 ### Bounded company Developer proposal and D6 completion evidence
 
@@ -746,6 +753,20 @@ resolves or calls one. Complete evidence is stored as PM_EVIDENCE_READY, and
 `task show` adds `active_pm_handoff` with the same bounded packet and instructions a
 provider PM would receive, for the active PM runtime to read. All evidence gates
 are unchanged.
+
+Reaching PM_EVIDENCE_READY also stores one completion event in the Task's existing
+event list. `llmtool task inbox --pm-session SESSION [--wait] [--timeout N]` prints, as
+JSON, every unacknowledged event of Tasks recorded by that PM session, with the
+handoff. With `--wait` it blocks (polling the store; no daemon) until an event exists or
+the timeout (default 540 s, at most 3600 s) passes, then returns an empty list. A PM
+runs it as a background command and reads events when it returns.
+`llmtool task ack EVENT_ID --pm-session SESSION` marks an event received; repeating it
+changes nothing. Events survive PM absence and restart: unacknowledged events are
+returned on every read, acknowledged events never again. The event ID is derived from
+the Task, Run and evidence digest, so re-verifying the same evidence never creates a
+second event, and a READY Task whose event write was interrupted gets its event on
+the next inbox read. Events and acknowledgements dispatch nothing; any later dispatch
+still goes through its own one-shot claim.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI
