@@ -37,10 +37,10 @@ def config(provider_type='codex-cli', model='gpt-6-luna'):
     }, 'generation': {'temperature': 0, 'max_tokens': 128}}
 
 
-def codex_pm_config():
+def codex_developer_config():
     return {
-        'active_provider': 'codex-pm',
-        'providers': {'codex-pm': {
+        'active_provider': 'codex-developer',
+        'providers': {'codex-developer': {
             'type': 'codex-cli', 'model': 'gpt-6-luna', 'timeout_seconds': 30,
             'provider_options': {},
         }},
@@ -578,10 +578,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['pm_assignment']['route'], 'opencode')
         self.assertEqual(saved['pm_assignment']['risk'], 'LOW')
         self.assertEqual(saved['pm_provider_profile'], 'active-pm-runtime')
-        self.assertEqual(saved['pm_provider_type'], 'codex-cli')
+        self.assertEqual(saved['pm_provider_type'], 'active-pm-runtime')
         self.assertIsNone(saved['pm_model'])
         self.assertEqual(saved['pm_route_binding'], {
-            'type': 'codex-cli', 'model': None, 'base_url': None})
+            'type': 'active-pm-runtime', 'model': None, 'base_url': None})
         self.assertEqual(saved['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
         self.assertIsNone(saved['native_session_id'])
@@ -614,12 +614,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         'response': good_response}),
             json.dumps({'request': 'Build feature',
                         'response': 'Bearer abcdefghijklmnop'}),
-            json.dumps({'request': 'Build feature', 'response': json.dumps({
-                'schema_version': 1, 'summary': 'Duplicate fields.',
-                'developer_assignment': {'route': 'opencode', 'route': 'codex',
-                    'risk': 'LOW', 'goal': 'Do one task.',
-                    'acceptance': ['A test passes.']},
-            })}),
+            json.dumps({'request': 'Build feature', 'response':
+                '{"schema_version":1,"summary":"Duplicate fields.",'
+                '"developer_assignment":{"route":"opencode","route":"codex",'
+                '"risk":"LOW","goal":"Do one task.",'
+                '"acceptance":["A test passes."]}}'}),
         )
         for raw in cases:
             with self.subTest(raw=raw[:40]):
@@ -629,6 +628,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     run_task_record_pm(Namespace(stdin_json=True), store=store,
                                        input_stream=io.StringIO(raw))
                 self.assertFalse(store.root.exists())
+
+    def test_record_pm_accepts_codex_low_risk_and_refuses_other_routes_or_risk(self):
+        for route, risk, expected in (
+                ('codex', 'LOW', True), ('opencode', 'LOW', True),
+                ('company-gw', 'LOW', False), ('none', 'LOW', False),
+                ('codex', 'OTHER', False)):
+            with self.subTest(route=route, risk=risk):
+                response = json.dumps({
+                    'schema_version': 1, 'summary': 'Bounded.',
+                    'developer_assignment': {
+                        'route': route, 'risk': risk, 'goal': 'Do one task.',
+                        'acceptance': ['A test passes.'],
+                    },
+                })
+                envelope = json.dumps({'request': 'Build feature', 'response': response})
+                store = TaskStore(Path(self.temp.name).resolve() /
+                                  ('route-' + route + '-' + risk))
+                if expected:
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(run_task_record_pm(
+                            Namespace(stdin_json=True), store=store,
+                            input_stream=io.StringIO(envelope)), 0)
+                    record_path = next(store.root.glob('*.json'))
+                    self.assertEqual(store.get(record_path.stem)['pm_assignment']['route'],
+                                     route)
+                else:
+                    with self.assertRaises(LLMToolError):
+                        run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                           input_stream=io.StringIO(envelope))
+                    self.assertFalse(store.root.exists())
 
     def _pm_task_with_assignment(self):
         acceptance = ['new test passes']
@@ -1085,7 +1114,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         patch_text = ('diff --git a/sample.py b/sample.py\n'
                       '--- a/sample.py\n+++ b/sample.py\n@@ -1 +1 @@\n'
                       '-VALUE = 1\n+VALUE = 2\n')
-        codex_config = codex_pm_config()
+        codex_config = codex_developer_config()
         output = io.StringIO()
         args = self._codex_delegate_args(task)
         bind_executor_task = submission_cli.task_completion.bind_executor_task
@@ -1104,13 +1133,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(code, 0, output.getvalue())
         result = json.loads(output.getvalue())
         developer = result['developer']
-        self.assertEqual(resolve.call_args.args, ('codex-pm',))
+        self.assertEqual(resolve.call_args.args, ('codex-developer',))
         self.assertEqual(bind_executor.call_count, 2)
         complete.assert_called_once()
         client = complete.call_args.args[0]
         messages = complete.call_args.args[1]
         self.assertIsInstance(client, CodexCLIProvider)
-        self.assertEqual(client.provider, codex_config['providers']['codex-pm'])
+        self.assertEqual(client.provider, codex_config['providers']['codex-developer'])
         capabilities = get_provider_capabilities('codex-cli').to_dict()
         self.assertFalse(capabilities['code_edit'])
         self.assertFalse(capabilities['shell'])
@@ -1151,6 +1180,36 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
+        task = self._pm_task_with_codex_assignment()
+        output = io.StringIO()
+        snapshot = Namespace(root=str(self.executor_root),
+                             common_dir=self.executor_common_dir,
+                             branch='feat/test-executor', head=self.executor_head)
+        registration = Namespace(
+            task_id='executor-task-1', trusted_agent_id='executor-agent-1',
+            session_ref='Executor Session 1', native_session_id=None,
+            root=str(self.executor_root), common_dir=self.executor_common_dir,
+            branch='feat/test-executor')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot), \
+                patch.object(submission_cli.task_completion, 'bind_executor_task',
+                             return_value=(registration, snapshot)), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      side_effect=LLMToolError(
+                          'requested provider profile is not defined')) as resolve, \
+                patch('llmtool.task_submission_cli.create_client',
+                      side_effect=AssertionError('unconfigured profile must not create client')), \
+                redirect_stdout(output):
+            code = run_task_delegate(self._codex_delegate_args(task))
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        resolve.assert_called_once_with('codex-developer', require_configured=True)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_PROFILE_UNAVAILABLE')
+        self.assertIsNone(result['developer']['model'])
+
     def test_codex_d6_revalidation_failure_blocks_provider_call(self):
         task = self._pm_task_with_codex_assignment()
         original_bind = submission_cli.task_completion.bind_executor_task
@@ -1165,7 +1224,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
-                      return_value=codex_pm_config()), \
+                      return_value=codex_developer_config()), \
                 patch('llmtool.task_submission_cli.api_key',
                       side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
                 patch.object(submission_cli.task_completion, 'bind_executor_task',
@@ -1196,7 +1255,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 output = io.StringIO()
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
                         patch('llmtool.task_submission_cli.resolve_profile_config',
-                              return_value=codex_pm_config()), \
+                              return_value=codex_developer_config()), \
                         patch('llmtool.task_submission_cli.api_key',
                               side_effect=AssertionError('Codex CLI credentials must remain CLI-owned')), \
                         patch('llmtool.task_submission_cli.create_client',
