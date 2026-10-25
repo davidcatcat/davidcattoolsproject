@@ -1,0 +1,84 @@
+name: llmtool Linux CI PoC
+
+# Evidence-only first run on the Owner's EC2 runner. This branch-scoped push
+# trigger is removed or redesigned before any production Linux CI rollout.
+on:
+  push:
+    branches:
+      - feat/issue99-ec2-linux-ci-20261025
+    paths:
+      - .github/workflows/llmtool-linux-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: smoke (Linux Python 3.9)
+    if: github.repository == 'davidcatcat/davidcattoolsproject' && github.actor == 'davidcatcat'
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    timeout-minutes: 8
+    steps:
+      # Run only trusted inline checks before any repository code is checked out.
+      - name: Check EC2 runner boundary
+        shell: bash
+        run: |
+          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
+          test "$RUNNER_NAME" = ec2-self-runner || fail "unexpected runner"
+          user=$(id -un) || fail "cannot identify job user"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          test "$user" != david.s || fail "job runs as the Owner's login"
+          groups=$(id -nG) || fail "cannot identify job groups"
+          case " $groups " in
+            *" wheel "*|*" sudo "*) fail "job user has an admin group" ;;
+          esac
+          python3 -B - <<'PY'
+          import os
+          from pathlib import Path
+          import socket
+          import sys
+
+          if sys.version_info[:2] != (3, 9):
+              raise SystemExit('EC2 runner boundary failed: Python is not 3.9')
+          credential_names = (
+              'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE',
+          )
+          if any(name in os.environ for name in credential_names):
+              raise SystemExit('EC2 runner boundary failed: AWS credential environment present')
+          if (Path.home() / '.aws').exists():
+              raise SystemExit('EC2 runner boundary failed: job home has AWS configuration')
+          for address in ('169.254.169.254', 'fd00:ec2::254'):
+              try:
+                  with socket.create_connection((address, 80), timeout=2):
+                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
+              except OSError:
+                  pass
+          print('EC2_RUNNER_BOUNDARY_PASS')
+          print('Python ' + sys.version.split()[0])
+          PY
+          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Source revision
+        shell: bash
+        run: |
+          test "$GITHUB_REF" = refs/heads/feat/issue99-ec2-linux-ci-20261025
+          head=$(git rev-parse HEAD)
+          test "$head" = "$GITHUB_SHA"
+          echo "tested source HEAD: $head"
+      - name: Python 3.9 repository smoke
+        shell: bash
+        run: |
+          PYTHONPATH=tools/llmtool python3 -B -m unittest discover \
+            -s tools/llmtool/tests -p test_errors.py -v
+      - name: Working tree is clean
+        shell: bash
+        run: |
+          test -z "$(git status --porcelain)" || {
+            echo '::error::the smoke test changed the checkout'
+            exit 1
+          }
+          echo 'working tree clean'
