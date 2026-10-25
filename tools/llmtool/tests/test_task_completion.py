@@ -92,23 +92,23 @@ class TaskCompletionTests(unittest.TestCase):
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
                                   workflow=None, runs=None, jobs=None):
-        workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-ci.yml',
-                                'name': 'llmtool CI', 'state': 'active'}
+        workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-mac-ci.yml',
+                                'name': 'llmtool Mac CI', 'state': 'active'}
         check_runs = checks['check_runs']
         for check in check_runs:
             check.setdefault('app', {'id': 15368, 'slug': 'github-actions',
                                      'name': 'GitHub Actions'})
         by_name = {check['name']: check for check in check_runs}
-        jobs = jobs or {'total_count': 2, 'jobs': [
-            {'id': index + 10, 'run_id': 100, 'name': name,
+        jobs = jobs or {'total_count': 1, 'jobs': [
+            {'id': index + 10, 'run_id': 100, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                'check-runs/' + str(by_name.get(name, {}).get('id', 1000 + index))),
              'status': by_name.get(name, {}).get('status', 'completed'),
              'conclusion': by_name.get(name, {}).get('conclusion', 'success')}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         runs = runs or {'total_count': 1, 'workflow_runs': [{
             'id': 100, 'run_number': 5, 'run_attempt': 1, 'workflow_id': workflow['id'],
-            'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+            'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
         return [pr, reviews, workflow, runs, jobs, checks]
@@ -561,15 +561,20 @@ class TaskCompletionTests(unittest.TestCase):
                    'user': {'login': 'reviewer-user'},
                    'submitted_at': '2026-10-21T10:00:00Z',
                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' + binding_line}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         api = self._github_response_sequence(result_sha, pr, review, checks)
         with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
         self.assertEqual(evidence['evidence']['review_task_id'], '1' * 32)
         self.assertTrue(evidence['evidence']['review_binding_verified'])
+        self.assertEqual(evidence['evidence']['required_checks'], ['check (macOS 3.13)'])
+        self.assertEqual(evidence['evidence']['not_run_checks'], [
+            {'name': 'Linux Python 3.9', 'status': 'NOT_RUN'},
+            {'name': 'Linux Python 3.14', 'status': 'NOT_RUN'},
+            {'name': 'Windows CI', 'status': 'NOT_RUN'}])
         self.assertEqual(evidence['missing_gates'], [])
         with patch('llmtool.task_completion._github_get',
                    side_effect=self._github_response_sequence(result_sha, pr, review, checks)):
@@ -601,10 +606,10 @@ class TaskCompletionTests(unittest.TestCase):
                     'user': {'login': 'reviewer-user'},
                     'submitted_at': '2026-10-21T10:00:00Z',
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' + wrong}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
@@ -640,9 +645,9 @@ class TaskCompletionTests(unittest.TestCase):
                    'submitted_at': '2026-10-21T10:00:00Z',
                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                            self._review_binding(head=result_sha)}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, review, checks)):
             result = task_completion.collect_github_evidence(**self._github_kwargs(
@@ -671,7 +676,7 @@ class TaskCompletionTests(unittest.TestCase):
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
         checks = {'total_count': 1, 'check_runs': [
-            {'id': 1, 'name': 'check (3.9)', 'head_sha': '8' * 40,
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': '8' * 40,
              'status': 'completed', 'conclusion': 'success'}]}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks)):
@@ -694,13 +699,11 @@ class TaskCompletionTests(unittest.TestCase):
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
         for status, conclusion in (('completed', 'failure'), ('queued', None)):
-            checks = {'total_count': 3, 'check_runs': [
-                {'id': 1, 'name': 'check (3.9)', 'head_sha': result_sha,
+            checks = {'total_count': 2, 'check_runs': [
+                {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
                  'status': 'completed', 'conclusion': 'success'},
-                {'id': 3, 'name': 'check (3.9)', 'head_sha': result_sha,
-                 'status': status, 'conclusion': conclusion},
-                {'id': 2, 'name': 'check (3.14)', 'head_sha': result_sha,
-                 'status': 'completed', 'conclusion': 'success'}]}
+                {'id': 3, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+                 'status': status, 'conclusion': conclusion}]}
             with self.subTest(newer_status=status), \
                  patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                        result_sha, pr, reviews, checks)):
@@ -723,12 +726,12 @@ class TaskCompletionTests(unittest.TestCase):
                     'submitted_at': '2026-10-21T10:00:00Z',
                     'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                             self._review_binding(head=result_sha)}]
-        checks = {'total_count': 2, 'check_runs': [
+        checks = {'total_count': 1, 'check_runs': [
             {'id': i, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}
-            for i, name in enumerate(('check (3.9)', 'check (3.14)'), 1)]}
+            for i, name in enumerate(('check (macOS 3.13)',), 1)]}
         wrong_workflow = {'id': 42, 'path': '.github/workflows/other.yml',
-                          'name': 'llmtool CI', 'state': 'active'}
+                          'name': 'llmtool Mac CI', 'state': 'active'}
         with patch('llmtool.task_completion._github_get', side_effect=self._github_response_sequence(
                 result_sha, pr, reviews, checks, workflow=wrong_workflow)):
             with self.assertRaises(LLMToolError) as rejected:
@@ -742,6 +745,42 @@ class TaskCompletionTests(unittest.TestCase):
             evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
         self.assertIn('REQUIRED_CI_MISSING', evidence['missing_gates'])
         self.assertEqual(evidence['evidence']['successful_checks'], [])
+
+    def test_ci_rejects_wrong_runner_and_legacy_linux_check(self):
+        result_sha = 'a' * 40
+        pr_number = 10
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[4]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+            with self.assertRaises(LLMToolError) as rejected:
+                task_completion._collect_ci_evidence(
+                    pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
+        for name in ('davidproject-self-action-3', 'davidproject-self-action-2 ', ''):
+            api = self._github_response_sequence(result_sha, {}, [], checks)
+            api[4]['jobs'][0]['runner_name'] = name
+            with self.subTest(runner=name), \
+                    patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+                with self.assertRaises(LLMToolError):
+                    task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[4]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:]):
+            second = task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(second['successful_checks'], ['check (macOS 3.13)'])
+
+        legacy_checks = {'total_count': 1, 'check_runs': [
+            {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
+        api[4]['jobs'][0]['name'] = 'check (3.9)'
+        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+            evidence = task_completion._collect_ci_evidence(
+                pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(evidence['successful_checks'], [])
 
     def test_ci_selects_latest_exact_pull_request_workflow_run_and_attempt(self):
         result_sha, _ = self._make_result()
@@ -760,24 +799,24 @@ class TaskCompletionTests(unittest.TestCase):
                             self._review_binding(head=result_sha)}]
         runs = {'total_count': 2, 'workflow_runs': [
             {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
             {'id': 101, 'run_number': 5, 'run_attempt': 2, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        jobs = {'total_count': 2, 'jobs': [
-            {'id': 11 + index, 'run_id': 101, 'name': name,
+        jobs = {'total_count': 1, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                f'check-runs/{21 + index}'),
              'status': 'completed', 'conclusion': 'success'}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
-        checks = {'total_count': 2, 'check_runs': [
+            for index, name in enumerate(('check (macOS 3.13)',))]}
+        checks = {'total_count': 1, 'check_runs': [
             {'id': 21 + index, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success',
              'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         api = self._github_response_sequence(result_sha, pr, reviews, checks,
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api) as github_get:
@@ -785,7 +824,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evidence['evidence']['ci_run_id'], 101)
         self.assertEqual(evidence['evidence']['ci_run_attempt'], 2)
         self.assertEqual(evidence['evidence']['ci_check_ids'],
-                         {'check (3.9)': 21, 'check (3.14)': 22})
+                         {'check (macOS 3.13)': 21})
         self.assertEqual(evidence['missing_gates'], [])
         self.assertIn('actions/runs/101/attempts/2/jobs?per_page=100',
                       github_get.call_args_list[4].args[0])
@@ -807,24 +846,24 @@ class TaskCompletionTests(unittest.TestCase):
                             self._review_binding(head=result_sha)}]
         runs = {'total_count': 2, 'workflow_runs': [
             {'id': 100, 'run_number': 4, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]},
             {'id': 101, 'run_number': 5, 'run_attempt': 1, 'workflow_id': 42,
-             'path': '.github/workflows/llmtool-ci.yml', 'event': 'pull_request',
+             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
              'head_sha': result_sha, 'status': 'completed', 'conclusion': 'failure',
              'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        jobs = {'total_count': 2, 'jobs': [
-            {'id': 11 + index, 'run_id': 101, 'name': name,
+        jobs = {'total_count': 1, 'jobs': [
+            {'id': 11 + index, 'run_id': 101, 'name': name, 'runner_name': 'davidproject-self-action',
              'check_run_url': ('https://api.github.com/repos/davidcatcat/davidcattoolsproject/'
                                f'check-runs/{21 + index}'),
              'status': 'completed', 'conclusion': 'failure'}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
-        checks = {'total_count': 2, 'check_runs': [
+            for index, name in enumerate(('check (macOS 3.13)',))]}
+        checks = {'total_count': 1, 'check_runs': [
             {'id': 21 + index, 'name': name, 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'failure',
              'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}
-            for index, name in enumerate(('check (3.9)', 'check (3.14)'))]}
+            for index, name in enumerate(('check (macOS 3.13)',))]}
         api = self._github_response_sequence(result_sha, pr, reviews, checks,
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api):
@@ -2077,8 +2116,8 @@ class TaskCompletionTests(unittest.TestCase):
              'review_task_id': task['task_id'], 'review_run_id': task['run_id'],
              'review_contract_digest': task['task_binding']['contract_digest'],
              'review_binding_verified': True, 'reviewer_task_id': 'reviewer-task',
-             'required_checks': ['check (3.9)', 'check (3.14)'],
-             'successful_checks': ['check (3.9)', 'check (3.14)'], 'ci_head_sha': '7' * 40},
+             'required_checks': ['check (macOS 3.13)'],
+             'successful_checks': ['check (macOS 3.13)'], 'ci_head_sha': '7' * 40},
              'missing_gates': []}
         return git, tests, gh
 
@@ -2285,15 +2324,109 @@ class TaskCompletionTests(unittest.TestCase):
                 'decision': 'STOP', 'summary': 'PM stopped the workflow.'
             })['next_step'], 'STOP')
         failed_handoff = task_completion.review_handoff_record(failed_intent, failed)
-        self.assertEqual(task_completion.review_return_record(failed_handoff,
+        failed_return = task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'
-            })['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+            })
+        self.assertEqual(failed_return['next_step'], 'RETURN_TO_DEVELOPER_ONCE')
+        with patch.object(task_completion.subprocess, 'Popen',
+                          side_effect=AssertionError('repair intent must not launch')):
+            repair_intent = task_completion.review_repair_intent(
+                failed_handoff, failed_return)
+            self.assertEqual(task_completion.review_repair_intent(
+                failed_handoff, failed_return), repair_intent)
+            self.assertIs(task_completion.validate_review_repair_intent(
+                repair_intent, failed_handoff, failed_return), repair_intent)
+        self.assertEqual(repair_intent['task_id'], failed_intent['task_id'])
+        self.assertEqual(repair_intent['run_id'], failed_intent['run_id'])
+        self.assertEqual(repair_intent['contract_digest'], failed_intent['contract_digest'])
+        self.assertEqual(repair_intent['source_sha'], failed_intent['source_sha'])
+        self.assertEqual(repair_intent['result_head'], failed_intent['result_head'])
+        self.assertEqual(repair_intent['diff_sha256'], failed_intent['diff_sha256'])
+        self.assertEqual(repair_intent['changed_paths'], failed_intent['changed_paths'])
+        self.assertEqual(repair_intent['developer_task_id'], failed_intent['developer_task_id'])
+        self.assertEqual(repair_intent['developer_identity'], failed_intent['developer_identity'])
+        self.assertEqual(repair_intent['developer_session_ref'],
+                         failed_intent['developer_session_ref'])
+        self.assertEqual(repair_intent['review_dispatch_id'], failed_intent['dispatch_id'])
+        self.assertEqual(repair_intent['review_receipt_sha256'], failed['receipt_sha256'])
+        self.assertEqual((repair_intent['prior_repair_round'], repair_intent['repair_round']),
+                         (0, 1))
+        self.assertEqual(repair_intent['decision'], 'RETURN_TO_DEVELOPER')
+        self.assertEqual(repair_intent['state'], 'REQUESTED')
+
+        stale = dict(repair_intent, source_sha='8' * 40)
+        stale.pop('intent_sha256')
+        stale['intent_sha256'] = hashlib.sha256(json.dumps(
+            stale, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        with self.assertRaisesRegex(LLMToolError, 'details omitted') as caught:
+            task_completion.validate_review_repair_intent(
+                stale, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        bad_digest = dict(repair_intent, state='CONSUMED')
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                bad_digest, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_DIGEST_MISMATCH')
+
+        forged_id = dict(repair_intent, repair_intent_id='0' * 64)
+        forged_id.pop('intent_sha256')
+        forged_id['intent_sha256'] = hashlib.sha256(json.dumps(
+            forged_id, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                forged_id, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        unserializable = dict(repair_intent, schema_version=object())
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                unserializable, failed_handoff, failed_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
+        pending_return = task_completion.review_return_record(failed_handoff)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, pending_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+        stopped_return = task_completion.review_return_record(failed_handoff,
+            state='RETURNED', response='{}', recommendation={
+                'decision': 'STOP', 'summary': 'PM stopped the repair.'})
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(failed_handoff, stopped_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_INVALID')
+
+        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
+        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
+        for other_handoff, other_return in (
+                (passed_handoff, task_completion.review_return_record(
+                    passed_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'No repair.'})),
+                (repaired_handoff, task_completion.review_return_record(
+                    repaired_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'STOP', 'summary': 'Repair limit reached.'})),
+                (blocked_handoff, task_completion.review_return_record(
+                    blocked_handoff, state='RETURNED', response='{}', recommendation={
+                        'decision': 'WAIT_FOR_REVIEWER', 'summary': 'No review result.'})),
+        ):
+            with self.subTest(verdict=other_handoff['receipt']['verdict'],
+                              repair_round=other_handoff['intent']['repair_round']):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_completion.review_repair_intent(other_handoff, other_return)
+                self.assertEqual(caught.exception.completion_code,
+                                 'REVIEW_REPAIR_BINDING_INVALID')
         self.assertEqual(task_completion.review_return_record(failed_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'STOP', 'summary': 'PM stopped after the failure.'
             })['next_step'], 'STOP')
-        blocked_handoff = task_completion.review_handoff_record(intent, blocked)
         self.assertEqual(task_completion.review_return_record(blocked_handoff,
             state='RETURNED', response='{}', recommendation={
                 'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Reviewer is blocked.'
@@ -2316,7 +2449,6 @@ class TaskCompletionTests(unittest.TestCase):
             reject(passed_handoff, decision)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'WAIT_FOR_REVIEWER'):
             reject(failed_handoff, decision)
-        repaired_handoff = task_completion.review_handoff_record(repaired_intent, repaired)
         for decision in ('CONTINUE_INTEGRATION_GATES', 'RETURN_TO_DEVELOPER',
                          'WAIT_FOR_REVIEWER'):
             reject(repaired_handoff, decision)
@@ -2347,6 +2479,136 @@ class TaskCompletionTests(unittest.TestCase):
             separators=(',', ':')).encode()).hexdigest()
         with self.assertRaises(LLMToolError):
             task_completion.validate_review_dispatch_receipt(passed_intent, forged)
+
+    def test_malformed_circular_and_deep_handoff_return_inputs_have_stable_errors(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        blocked = task_completion.review_dispatch_blocked(intent)
+
+        circular_intent = dict(intent)
+        circular_intent['developer_identity'] = circular_intent
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_intent(circular_intent)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_DISPATCH_BINDING_INVALID')
+
+        deep_value = []
+        cursor = deep_value
+        for _ in range(65):
+            nested = []
+            cursor.append(nested)
+            cursor = nested
+        deep_receipt = dict(blocked, reviewer_identity=deep_value)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_dispatch_receipt(intent, deep_receipt)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        handoff = task_completion.review_handoff_record(intent, blocked)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record({'dispatch_state': 'RECEIVED'})
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record(handoff, state=[])
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_return_record({'state': 'RETURNED'}, handoff)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        cyclic_usage = {}
+        cyclic_usage['self'] = cyclic_usage
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_return_record(
+                handoff, state='RETURNED', response='{}',
+                recommendation={'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+                usage=cyclic_usage)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        circular_return = {
+            'state': 'RETURNED', 'receipt_sha256': blocked['receipt_sha256'],
+            'next_step': 'WAIT_FOR_REVIEWER', 'pm_dispatch': 'RETURNED',
+            'pm_response': '{}',
+            'pm_recommendation': {'decision': 'WAIT_FOR_REVIEWER', 'summary': 'Waiting.'},
+            'pm_usage': None,
+            'pm_error_code': None,
+        }
+        circular_return['pm_recommendation']['self'] = circular_return
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_return_record(circular_return, handoff)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_RECEIPT_INVALID')
+
+        cyclic_handoff = dict(handoff)
+        cyclic_handoff['intent'] = cyclic_handoff
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.review_repair_intent(cyclic_handoff, {})
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_DISPATCH_BINDING_INVALID')
+
+    def test_json_boundary_maps_only_expected_serialization_errors(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        for exception in (TypeError, ValueError, OverflowError, RecursionError,
+                          UnicodeError):
+            with self.subTest(exception=exception.__name__):
+                with patch.object(task_completion.json, 'dumps', side_effect=exception):
+                    with self.assertRaises(LLMToolError) as caught:
+                        task_completion.validate_review_dispatch_intent(intent)
+                self.assertEqual(caught.exception.completion_code,
+                                 'REVIEW_DISPATCH_BINDING_INVALID')
+
+        with patch.object(task_completion.json, 'dumps',
+                          side_effect=AssertionError('unexpected encoder failure')):
+            with self.assertRaisesRegex(AssertionError, 'unexpected encoder failure'):
+                task_completion.validate_review_dispatch_intent(intent)
+
+    def test_repair_intent_rejects_numeric_type_confusion_and_bad_digest_shape(self):
+        intent = task_completion.review_dispatch_intent(
+            task_id='1' * 32, run_id='2' * 32, contract_digest='3' * 64,
+            developer_task_id='developer-task', developer_identity='developer-agent',
+            developer_session_ref='developer-session', source_sha='4' * 40,
+            result_head=None, diff_sha256='5' * 64, changed_paths=['src/a.py'])
+        receipt = {
+            'schema_version': 2, 'dispatch_id': intent['dispatch_id'],
+            'task_id': intent['task_id'], 'run_id': intent['run_id'],
+            'contract_digest': intent['contract_digest'], 'source_sha': intent['source_sha'],
+            'result_head': intent['result_head'], 'diff_sha256': intent['diff_sha256'],
+            'developer_task_id': intent['developer_task_id'],
+            'reviewer_task_id': 'reviewer-task', 'reviewer_identity': 'reviewer-agent',
+            'reviewer_session_ref': 'reviewer-session', 'review_packet_digest': '6' * 64,
+            'verdict': 'FAIL', 'security': 'PASS', 'functional': 'FAIL',
+            'execution_status': 'SUCCEEDED', 'code': 'REVIEW_COMPLETED',
+            'findings_sha256': '7' * 64, 'provenance': 'TRUSTED_REVIEW_ADAPTER',
+        }
+        receipt['receipt_sha256'] = hashlib.sha256(json.dumps(
+            receipt, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        handoff = task_completion.review_handoff_record(intent, receipt)
+        review_return = task_completion.review_return_record(
+            handoff, state='RETURNED', response='{}', recommendation={
+                'decision': 'RETURN_TO_DEVELOPER', 'summary': 'One bounded repair.'})
+        repair_intent = task_completion.review_repair_intent(handoff, review_return)
+
+        noncanonical = dict(repair_intent, schema_version=True)
+        noncanonical.pop('intent_sha256')
+        noncanonical['intent_sha256'] = hashlib.sha256(json.dumps(
+            noncanonical, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(
+                noncanonical, handoff, review_return)
+        self.assertEqual(caught.exception.completion_code,
+                         'REVIEW_REPAIR_BINDING_MISMATCH')
+
+        bad_digest = dict(repair_intent, intent_sha256=True)
+        with self.assertRaises(LLMToolError) as caught:
+            task_completion.validate_review_repair_intent(bad_digest, handoff, review_return)
+        self.assertEqual(caught.exception.completion_code, 'REVIEW_REPAIR_DIGEST_MISMATCH')
 
 
 if __name__ == '__main__':

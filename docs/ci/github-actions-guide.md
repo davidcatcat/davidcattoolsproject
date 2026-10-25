@@ -1,12 +1,31 @@
 # GitHub Actions Guide — 本 Repo 的 CI 行為契約
 
+## Issue #99 Mac 遷移候選（2026-10-25，尚未驗收）
+
+Owner 決定保持 Private repository、不再使用付費 GitHub-hosted Runner。正式舊 workflow `llmtool CI`、`nlf CI`、控制分支 `ai-loop helper CI` 已在 GitHub 設為 `disabled_manually`；[最後一筆 llmtool Ubuntu run 40113971497](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113971497) 已取消。這是止費狀態，並非新 CI PASS。Mac smoke [40113489740](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113489740) 只證明 Runner 連線與 Python 3.13.3 可啟動，未證明安全隔離。
+
+本候選新增 `llmtool-mac-ci.yml`，刪除舊 `llmtool-ci.yml` 檔案；舊 workflow ID 必須保持 disabled，絕不可為了測試新候選而重啟。新 job `check (macOS 3.13)` 指定 `[self-hosted, macOS, X64, local-mac-ci]`，並受 repository variable `MAC_CI_ENABLED == 'true'` 控制（Kill switch）；未設或非 `true` 時 job skipped，是 **NOT_RUN，不是 PASS**，task completion 亦不接受。Runner 改以專用、隱藏、非管理員的 macOS 帳號 `ghrunner` 執行（[tools/mac-runner](../../tools/mac-runner/README.md)，`sudo bash tools/mac-runner/install.sh`）：Job 讀不到 Owner 家目錄（SSH／AWS／VPN 設定、其他 Agent worktree）與 Owner 的 Keychain，改不到 Runner 程式與 hook，pf 擋住它連往私有網段（公司 VPN／區網）；每個 Job 開始前的 Runner hook 確認以專用帳號執行，並只接受本 repo、本人帳號、非 fork 的 PR 與 main push。公開網路與 loopback 仍可連，列為殘餘風險。先前在 Owner 帳號內用 macOS sandbox 的做法，因 Runner 的 TLS 需要 Keychain 服務而無法同時擋住 Owner 的 token，已放棄。
+
+| 驗證範圍 | 遷移候選狀態 | 驗收解讀 |
+| --- | --- | --- |
+| macOS X64，Python 3.13 | 本機靜態／步驟測試中；GitHub PR CI **NOT_RUN** | 只有新 workflow 在已隔離 Runner 上對確切 PR HEAD 成功，才可視為 PASS |
+| Linux Python 3.9／3.14 | **NOT_RUN** | 不繼承舊 workflow 的歷史 PASS |
+| Windows CI | **NOT_RUN** | 不繼承舊 nlf Job 的歷史 PASS |
+| nlf Linux／macOS／Windows、ai-loop 控制分支 | 已停用，**NOT_RUN** | 後續須分別審查；不可影響 WP3 的正在執行工作 |
+
+新 llmtool job 保留原 PR source SHA／事件 Base 祖先驗證、12 個安全 verifier 負向測試、完整 `make -C tools/llmtool check`、monitor 測試及 clean-tree gate。`task_completion.py` 只接受新 workflow 的確切 PR HEAD、GitHub Actions app／check-run ID、`davidproject-self-action` runner 名稱與單一 Mac job 成功；Linux／Windows 以 `NOT_RUN` 記錄。Private repository 的 Rulesets／Branch Protection／Required Checks API 目前回傳方案限制 403，因此 PM／Integrator 必須以程式內的 fail-closed gate、獨立 Claude Reviewer、實機 Mac CI 與確切 SHA 人工核對阻擋不合格合併，不可把 API 不可用說成保護規則已配置。
+
+回滾時先停用新 workflow 並將 `MAC_CI_ENABLED` 取消或設為 false，保留舊 workflow disabled；修復候選經新 PR／審查／Mac 驗收後再啟用。回滾不得恢復 Ubuntu、Windows 或付費 macOS Job。切換後逐筆檢查所有 active workflow、每個新 run 的 runner 名稱與 GitHub Usage／Billing；帳單 USD 在取得官方資料前記為 **UNKNOWN**。
+
+以下章節保留 PR #100 當時的歷史契約，不能當作 2026-10-25 遷移完成證據。
+
 ## 哪些 Workflow 是哪個範圍？
 
 | Workflow | 使用情境 | 不能隨意更動的證據 |
 | --- | --- | --- |
-| [`llmtool-ci.yml`](../../.github/workflows/llmtool-ci.yml) | llmtool feature PR 與 main Push；手動 `workflow_dispatch` 作補救 | Python 3.9 + 3.14 各自完整測試，來源 HEAD／Base 檢查 |
-| [`nlf-ci.yml`](../../.github/workflows/nlf-ci.yml) | nlf Go 測試與平台驗證 | 既有 Linux／macOS／Windows／race／fuzz 等驗證 |
-| ai-loop helper CI（在 `automation/ai-loop` 控制分支） | 候選控制器 PR、正式可執行控制分支的 Push | Immutable candidate、獨立 Security/QA、Mac acceptance，promotion Push 不可隨意去除 |
+| [`llmtool-mac-ci.yml`](../../.github/workflows/llmtool-mac-ci.yml) | 遷移候選：llmtool feature PR 與 main Push；手動 `workflow_dispatch` 作補救 | Mac Python 3.13、來源 HEAD／Base 檢查；正式 CI 尚 NOT_RUN |
+| [`nlf-ci.yml`](../../.github/workflows/nlf-ci.yml) | 歷史 nlf Go 測試與平台驗證；目前 disabled | Linux／macOS／Windows／race／fuzz 均 NOT_RUN |
+| ai-loop helper CI（在 `automation/ai-loop` 控制分支） | 歷史控制器 PR／Push CI；目前 disabled | WP3 的既有驗收不得沿用舊綠燈，須另行處理 |
 
 本文件以 **PR #100 合併後 main** 為基準（`2cd337e082a3b152d862e16346b9e191a5570d25`）。對後續版本應以該 SHA 的實際 YAML 和最新要求為準，不能只引用這份摘要。
 
