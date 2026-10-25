@@ -718,6 +718,185 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(previous_v2['task_id']), saved)
         self.assertNotIn('pm_provenance', saved)
 
+    @staticmethod
+    def _completion_event(value, *, event_id=None, sequence=0):
+        return dict(event_id=event_id or new_id(), run_id=value['run_id'],
+                    session_id='ses_Test123', source='DIRECT_D6_DEVELOPER',
+                    source_sha='a' * 40, sequence=sequence,
+                    payload_sha256='b' * 64)
+
+    def test_completion_event_persists_before_wake_and_replays_idempotently(self):
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        first = self.store.record_completion_event(value['task_id'], **args)
+        self.assertTrue(first['created'])
+        self.assertEqual(first['event']['state'], 'PENDING')
+        with self.assertRaises(LLMToolError) as generic_mutation:
+            self.store.update(value['task_id'], completion_events=[])
+        self.assertEqual(generic_mutation.exception.task_store_error_code,
+                         'COMPLETION_EVENT_MUTATION_FORBIDDEN')
+        self.assertEqual(TaskStore(self.root).unacked_completion_events(
+            value['task_id']), [first['event']])
+        replay = TaskStore(self.root).record_completion_event(value['task_id'], **args)
+        self.assertFalse(replay['created'])
+        self.assertEqual(replay['event'], first['event'])
+        self.assertEqual(len(self.store.get(value['task_id'])['completion_events']), 1)
+        with self.assertRaises(LLMToolError) as changed_payload:
+            self.store.record_completion_event(value['task_id'],
+                **{**args, 'payload_sha256': 'c' * 64})
+        self.assertEqual(changed_payload.exception.task_store_error_code,
+                         'COMPLETION_EVENT_CONFLICT')
+        with self.assertRaises(LLMToolError) as changed_id_same_sequence:
+            self.store.record_completion_event(value['task_id'],
+                **{**args, 'event_id': new_id()})
+        self.assertEqual(changed_id_same_sequence.exception.task_store_error_code,
+                         'COMPLETION_EVENT_CONFLICT')
+        second = self._completion_event(value, sequence=2)
+        self.store.record_completion_event(value['task_id'], **second)
+        with self.assertRaises(LLMToolError) as out_of_order:
+            self.store.record_completion_event(value['task_id'],
+                **self._completion_event(value, sequence=1))
+        self.assertEqual(out_of_order.exception.task_store_error_code,
+                         'COMPLETION_EVENT_SEQUENCE_INVALID')
+
+    def test_completion_ack_requires_persisted_pm_consumption_and_confirmed_intent(self):
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        event_id = args['event_id']
+        pm = value['pm_session_id']
+        self.store.record_completion_event(value['task_id'], **args)
+        with self.assertRaises(LLMToolError) as wrong_pm:
+            self.store.consume_completion_event(value['task_id'], event_id,
+                pm_session_id='pm-not-the-original', pm_decision_sha256='c' * 64)
+        self.assertEqual(wrong_pm.exception.task_store_error_code,
+                         'COMPLETION_EVENT_BINDING_MISMATCH')
+        with self.assertRaises(LLMToolError):
+            self.store.ack_completion_event(value['task_id'], event_id,
+                                            pm_session_id=pm, pm_decision_sha256='c' * 64)
+        consumed = self.store.consume_completion_event(
+            value['task_id'], event_id, pm_session_id=pm, pm_decision_sha256='c' * 64)
+        self.assertEqual(consumed['event']['state'], 'PM_CONSUMED')
+        self.assertFalse(TaskStore(self.root).consume_completion_event(
+            value['task_id'], event_id, pm_session_id=pm,
+            pm_decision_sha256='c' * 64)['created'])
+        intent_id = new_id()
+        intent = self.store.prepare_completion_dispatch_intent(
+            value['task_id'], event_id, intent_id=intent_id,
+            intent_sha256='d' * 64, pm_session_id=pm)
+        self.assertTrue(intent['created'])
+        self.assertEqual(intent['event']['dispatch_intent']['state'], 'UNKNOWN')
+        with self.assertRaises(LLMToolError) as refused_replay:
+            self.store.prepare_completion_dispatch_intent(
+                value['task_id'], event_id, intent_id=new_id(),
+                intent_sha256='e' * 64, pm_session_id=pm)
+        self.assertEqual(refused_replay.exception.task_store_error_code,
+                         'COMPLETION_EVENT_CONFLICT')
+        self.assertFalse(TaskStore(self.root).prepare_completion_dispatch_intent(
+            value['task_id'], event_id, intent_id=intent_id,
+            intent_sha256='d' * 64, pm_session_id=pm)['created'])
+        with self.assertRaises(LLMToolError):
+            self.store.ack_completion_event(value['task_id'], event_id,
+                                            pm_session_id=pm, pm_decision_sha256='c' * 64)
+        self.assertEqual(TaskStore(self.root).unacked_completion_events(
+            value['task_id'])[0]['dispatch_intent']['state'], 'UNKNOWN')
+        confirmed = self.store.confirm_completion_dispatch(
+            value['task_id'], event_id, intent_id=intent_id,
+            receipt_sha256='f' * 64, pm_session_id=pm)
+        self.assertEqual(confirmed['event']['dispatch_intent']['state'], 'CONFIRMED')
+        self.assertFalse(self.store.confirm_completion_dispatch(
+            value['task_id'], event_id, intent_id=intent_id,
+            receipt_sha256='f' * 64, pm_session_id=pm)['created'])
+        acked = self.store.ack_completion_event(value['task_id'], event_id,
+                                                pm_session_id=pm,
+                                                pm_decision_sha256='c' * 64)
+        self.assertEqual(acked['event']['state'], 'ACKED')
+        self.assertEqual(TaskStore(self.root).unacked_completion_events(
+            value['task_id']), [])
+        self.assertFalse(self.store.ack_completion_event(
+            value['task_id'], event_id, pm_session_id=pm,
+            pm_decision_sha256='c' * 64)['created'])
+
+    def test_completion_persist_failures_preserve_previous_transition(self):
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        pm = value['pm_session_id']
+        prior = self.store.get(value['task_id'])
+        with patch('llmtool.task_store.os.replace', side_effect=OSError('private detail')):
+            with self.assertRaises(LLMToolError):
+                self.store.record_completion_event(value['task_id'], **args)
+        self.assertEqual(self.store.get(value['task_id']), prior)
+        self.store.record_completion_event(value['task_id'], **args)
+        self.store.consume_completion_event(value['task_id'], args['event_id'],
+                                            pm_session_id=pm,
+                                            pm_decision_sha256='c' * 64)
+        consumed = self.store.get(value['task_id'])
+        with patch('llmtool.task_store.os.replace', side_effect=OSError('private detail')):
+            with self.assertRaises(LLMToolError):
+                self.store.prepare_completion_dispatch_intent(
+                    value['task_id'], args['event_id'],
+                    intent_id=new_id(), intent_sha256='d' * 64, pm_session_id=pm)
+        self.assertEqual(TaskStore(self.root).get(value['task_id']), consumed)
+        intent_id = new_id()
+        self.store.prepare_completion_dispatch_intent(
+            value['task_id'], args['event_id'],
+            intent_id=intent_id, intent_sha256='d' * 64, pm_session_id=pm)
+        intent_pending = self.store.get(value['task_id'])
+        with patch('llmtool.task_store.os.replace', side_effect=OSError('private detail')):
+            with self.assertRaises(LLMToolError):
+                self.store.confirm_completion_dispatch(
+                    value['task_id'], args['event_id'], intent_id=intent_id,
+                    receipt_sha256='e' * 64, pm_session_id=pm)
+        self.assertEqual(TaskStore(self.root).get(value['task_id']), intent_pending)
+        self.store.confirm_completion_dispatch(
+            value['task_id'], args['event_id'], intent_id=intent_id,
+            receipt_sha256='e' * 64, pm_session_id=pm)
+        confirmed = self.store.get(value['task_id'])
+        with patch('llmtool.task_store.os.replace', side_effect=OSError('private detail')):
+            with self.assertRaises(LLMToolError):
+                self.store.ack_completion_event(value['task_id'], args['event_id'],
+                    pm_session_id=pm, pm_decision_sha256='c' * 64)
+        self.assertEqual(TaskStore(self.root).get(value['task_id']), confirmed)
+
+    def test_completion_concurrent_duplicate_reconciles_without_second_event(self):
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        other = TaskStore(self.root)
+        original = self.store._update
+        first = True
+        def concurrent_writer(*call_args, **call_kwargs):
+            nonlocal first
+            if first:
+                first = False
+                other.record_completion_event(value['task_id'], **args)
+                raise TaskStoreConflict()
+            return original(*call_args, **call_kwargs)
+        with patch.object(self.store, '_update', side_effect=concurrent_writer):
+            result = self.store.record_completion_event(value['task_id'], **args)
+        self.assertFalse(result['created'])
+        self.assertEqual(len(self.store.get(value['task_id'])['completion_events']), 1)
+
+    def test_completion_identity_and_legacy_schema_fail_closed(self):
+        legacy = record()
+        self.store.create(legacy)
+        with self.assertRaises(LLMToolError):
+            self.store.record_completion_event(legacy['task_id'],
+                **self._completion_event(legacy))
+        value = self._active_pm_record()
+        self.store.create(value)
+        args = self._completion_event(value)
+        with self.assertRaises(LLMToolError) as mismatch:
+            self.store.record_completion_event(value['task_id'],
+                **{**args, 'run_id': new_id()})
+        self.assertEqual(mismatch.exception.task_store_error_code,
+                         'COMPLETION_EVENT_BINDING_MISMATCH')
+        with self.assertRaises(LLMToolError):
+            self.store.record_completion_event(value['task_id'],
+                **{**args, 'session_id': '../other'})
+
 
 if __name__ == '__main__':
     unittest.main()
