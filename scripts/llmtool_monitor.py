@@ -56,6 +56,8 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
+# Infrastructure processes: listed, but not counted as agents.
+HELPER_ROLES = frozenset({"Claude Code daemon"})
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,14 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
         # command that starts no model session (a PM polls `agents` often).
         if args and (args[0] in CLAUDE_COMMANDS or args[0] in ("--version", "-v", "--help", "-h")):
             return "Claude Code CLI command"
+        # The background-session daemon and its terminal hosts run no model
+        # session of their own.
+        if args and args[0] in ("daemon", "bg-pty-host"):
+            return "Claude Code daemon"
+        # A pre-started background session: it names its session in the CLI
+        # registry once a session is moved into it, and is idle until then.
+        if args and args[0] == "bg-spare":
+            return "Claude Code background session"
         return "Claude Code CLI"
     if exe == "Claude":
         # The desktop app's helpers live under "Claude Helper.app".
@@ -320,7 +330,7 @@ def running_stages(tasks: list) -> int:
 def summary(processes: list[Process], lingering: list) -> str:
     counts: dict[str, int] = {}
     for p in processes:
-        if not p.role.startswith(" "):
+        if not p.role.startswith(" ") and p.role.replace(" (zombie)", "") not in HELPER_ROLES:
             counts[family(p.role)] = counts.get(family(p.role), 0) + 1
     order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "Actions runner", "other")
     text = "  ".join(f"{k} {counts[k]}" for k in order if k in counts) or "no agent process"
@@ -1445,14 +1455,16 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
 # are never shown. A role is named only when a record binds it (a D6 registry
-# root or session_ref, or a PM call naming a PR and head); otherwise no role is
+# root or session_ref, a PM call naming a PR and head, or a Claude session its
+# launcher named claude-pm / claude-reviewer / claude-developer[-…]); otherwise no role is
 # claimed and the row says only who it is.
 import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CLAUDE_PROJECTS = os.path.expanduser("~/.claude/projects")
-CLAUDE_SESSIONS = os.path.join(os.path.dirname(CLAUDE_PROJECTS), "sessions")
+# Further accounts each run from their own CLAUDE_CONFIG_DIR, e.g. ~/.claude-account2.
+CLAUDE_OTHER_PROJECTS = os.path.expanduser("~/.claude-*/projects")
 SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_PATH = os.path.abspath(__file__)
 
@@ -1524,6 +1536,18 @@ class OfficeRow:
     authority: str = ""   # who set a dispatch switch: Owner | PM
     outcome: str = ""     # a finished one-shot review: verdict word or why it has none
     alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
+    sid: str = ""         # short session id shown after the name, to match a window's /status
+
+
+def _shown(row: "OfficeRow") -> str:
+    return f"{row.name} {row.sid}" if row.sid else row.name
+
+
+def _codex_sid(thread_id) -> str:
+    """Codex thread ids are UUIDv7: the leading digits are a timestamp shared by
+    threads started within the same minute, so the random tail tells them apart."""
+    found = re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-([0-9a-f]{12})", str(thread_id or ""))
+    return found.group(1)[-8:] if found else ""
 
 
 def _who(agent: str, role: str, nick: str = "") -> str:
@@ -2072,8 +2096,11 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     # An untimed marker is no newer than the file's last write.
     marked = marked or (now - age if last is not None else 0.0)
     subagent = payload.get("thread_source") == "subagent"
+    # A `codex exec` run exits after its one turn: once that turn ends it is
+    # finished work, not a member waiting for the next instruction.
+    finishes = subagent or payload.get("originator") == "codex_exec"
     if last in ("task_complete", "turn_aborted"):
-        state = DONE if subagent else IDLE
+        state = DONE if finishes else IDLE
     elif last == "task_started":
         state = WORKING if age <= OFFICE_STALL else STALLED
     else:
@@ -2098,7 +2125,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
             failed, interrupted = status == "failed", status == "interrupted"
             # A failed turn needs a look even in a subagent; an interrupted
             # one was stopped on purpose.
-            state = ATTENTION if failed else DONE if subagent else IDLE
+            state = ATTENTION if failed else DONE if finishes else IDLE
             # Idle since the turn ended, unless the file was written later.
             if ended and ended <= now and now - age <= ended + 5:
                 age = now - ended
@@ -2139,7 +2166,9 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
                           key=f"codex:{payload.get('id')}",
                           group=f"codex:{payload.get('parent_thread_id')}", kind="subagent",
                           role=role, task=f"task {task}" if task else "",
-                          evidence="codex 紀錄"))
+                          evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))))
+    if state == DONE and age > OFFICE_DONE_WINDOW:
+        return None
     key = f"codex:{payload.get('id')}"
     started = _github_time(str(payload.get("timestamp") or "")[:19] + "Z")
     if not since and started:
@@ -2149,16 +2178,17 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         return ("main", payload.get("id"),
                 OfficeRow("codex developer", state, _place_label(place), age, 10, key=key,
                           tui=tui, role="developer", task=f"task {place[1]}",
-                          evidence="codex 紀錄"))
+                          evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
                 OfficeRow("codex 對話", state, _place_label(place),
-                          age, 10, key=key, tui=tui, evidence="codex 紀錄"))
+                          age, 10, key=key, tui=tui, evidence="codex 紀錄",
+                          sid=_codex_sid(payload.get("id"))))
     # The canonical checkout is the Integrator's under D6, but nothing records
     # which thread holds that role, so none is claimed.
     return ("main", payload.get("id"),
             OfficeRow("codex 主對話", state, since, age, 0, key=key, tui=tui, main=True,
-                      evidence="codex 紀錄"),
+                      evidence="codex 紀錄", sid=_codex_sid(payload.get("id"))),
             _codex_action(tail, canonical) if state == WORKING
             else "上一輪失敗，要看 Codex 畫面" if failed else "")
 
@@ -2570,23 +2600,44 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             detail = (
                 f"指揮 {len(busy)} 個進行中的 subagent：" + "、".join(busy[:3]) if busy
                 else (actions.get(key) or "處理中") if row.state in (WORKING, STALLED)
-                else actions.get(key) or "等待下一個指示") + row.detail
+                else actions.get(key) or ("已結束" if row.state == DONE else "等待下一個指示")) + row.detail
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
 
 
 SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# The role a launcher assigns in the session name (`claude --name claude-reviewer`).
+SESSION_ROLE = re.compile(r"claude-(pm|reviewer|developer)(?:-[A-Za-z0-9._-]+)?")
 
 
-def claude_rows(now: float, root: str | None = None,
+def claude_roots(root=None) -> list[str]:
+    """Project directories of every local Claude account: the default one plus
+    each ~/.claude-* config directory. root: one directory or a list of them."""
+    if root is not None:
+        return [root] if isinstance(root, str) else list(root)
+    roots, seen = [], set()
+    for top in [CLAUDE_PROJECTS] + sorted(glob.glob(CLAUDE_OTHER_PROJECTS)):
+        real = os.path.realpath(top)   # a ~/.claude-* symlink to another account is read once
+        if real not in seen:
+            seen.add(real)
+            roots.append(top)
+    return roots
+
+
+def claude_sessions(root=None) -> list[str]:
+    """The CLI registry directory next to each account's projects directory."""
+    return [os.path.join(os.path.dirname(top), "sessions") for top in claude_roots(root)]
+
+
+def claude_rows(now: float, root=None,
                 canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
-    """live: {session id: (status, waitingFor, since ms, name, who answers)} that running CLIs report in
-    their own registry; it beats any guess from the session file."""
-    root = CLAUDE_PROJECTS if root is None else root
+    """live: {session id: (status, waitingFor, since ms, name, who answers, kind)} that running CLIs
+    report in their own registry; it beats any guess from the session file."""
     canonical = canonical or canonical_root()
     rows = []
-    for path in sorted(glob.glob(os.path.join(root, "*", "*.jsonl"))):
+    for path in sorted(path for top in claude_roots(root)
+                       for path in glob.glob(os.path.join(top, "*", "*.jsonl"))):
         try:
             age = max(0.0, now - os.path.getmtime(path))
         except OSError:
@@ -2625,7 +2676,7 @@ def claude_rows(now: float, root: str | None = None,
             continue
         state = WORKING if age <= OFFICE_BUSY else IDLE
         sid = os.path.basename(path)[:-len(".jsonl")]
-        status, waiting, since, name, who = (live or {}).get(sid, (None,) * 5)
+        status, waiting, since, name, who, kind = (live or {}).get(sid, (None,) * 6)
         suffix = f"（{task}）" if task else ""
         if status == "waiting":
             # Stopped at a prompt only a person or its driving agent can answer.
@@ -2651,12 +2702,17 @@ def claude_rows(now: float, root: str | None = None,
             # The name and id its launcher gave it: what a PM looks for to
             # find the window that needs an answer.
             name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
-            # Short id first: it survives when a narrow screen cuts the line.
-            detail += f"｜session {sid[:8]}{' ' + name if name else ''}"
-        rows.append(OfficeRow(f"claude {role}（互動）" if role else "claude 互動",
+            detail += f"｜{name}" if name else ""
+            # The launcher's name is the record that binds a role outside D6.
+            named = SESSION_ROLE.fullmatch(name)
+            role = named.group(1) if named else role
+        # A session moved to the background keeps running without a terminal.
+        mode = "背景" if kind == "bg" else "互動"
+        rows.append(OfficeRow(f"claude {role}（{mode}）" if role else f"claude {mode}",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              task=task, evidence="claude 紀錄", cli=first == "cli"))
+                              task=task, evidence="claude 紀錄", cli=first == "cli",
+                              sid=sid[:8] if re.fullmatch(r"[0-9a-f-]{8}", sid[:8]) else ""))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -3449,7 +3505,7 @@ def track_one_shot(state: dict, processes: list[Process], now: float,
     state, [(duration_s, seconds_since_end)] for runs that ended within the
     done window, and one log line per run that just ended. Memory only."""
     state = {pid: list(item) for pid, item in state.items()}
-    live = {p.pid: p for p in _one_shot_runs(processes, sessions or CLAUDE_SESSIONS)}
+    live = {p.pid: p for p in _one_shot_runs(processes, sessions or claude_sessions())}
     for pid, proc in live.items():
         if pid not in state or state[pid][2] is not None:   # new, or a reused PID
             state[pid] = [now - (_elapsed_seconds(proc.elapsed) or 0.0), now, None]
@@ -3492,43 +3548,57 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
     return [row for row in out if row.group not in gone]
 
 
-def _claude_registered(sessions: str, processes: list[Process]) -> dict[int, dict] | None:
+CLAUDE_CLI_ROLES = ("Claude Code CLI", "Claude Code CLI (node launcher)")
+
+
+def _claude_registered(sessions, processes: list[Process]) -> dict[int, dict] | None:
     """Registry entry of each running Claude CLI that names its session in the
-    CLI's own <pid>.json file. None when there is no registry to read."""
-    try:
-        names = os.listdir(sessions)
-    except OSError:
+    CLI's own <pid>.json file. sessions: one registry directory or a list, one
+    per account. None when there is no registry to read."""
+    names, readable = [], False
+    for directory in [sessions] if isinstance(sessions, str) else sessions:
+        try:
+            names += [(directory, name) for name in os.listdir(directory)]
+        except OSError:
+            continue
+        readable = True
+    if not readable:
         return None
     pids = {p.pid for p in processes
-            if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
+            if p.role in CLAUDE_CLI_ROLES + ("Claude Code background session",)}
     found = {}
-    for name in names:
+    for directory, name in names:
         pid = name[:-len(".json")]
         if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
             continue
         try:
-            with open(os.path.join(sessions, name), "rb") as handle:
+            path = os.path.join(directory, name)
+            written = os.path.getmtime(path)
+            with open(path, "rb") as handle:
                 entry = json.loads(handle.read(64 << 10))
         except (OSError, ValueError):
             continue
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
-            found[int(pid)] = entry
-    return found
+            # A crashed CLI of another account can leave a file for a PID the
+            # OS has since reused: the running CLI keeps its own file fresh.
+            if int(pid) not in found or written > found[int(pid)][0]:
+                found[int(pid)] = (written, entry)
+    return {pid: entry for pid, (_, entry) in found.items()}
 
 
-def _claude_live_sessions(sessions: str, processes: list[Process]) -> tuple[set, int] | None:
+def _claude_live_sessions(sessions, processes: list[Process]) -> tuple[set, int] | None:
     """Session ids of running Claude CLIs, from the CLI's own <pid>.json
     registry, plus how many running CLIs have no readable entry. None when
-    there is no registry to read, so nothing is judged closed."""
+    there is no registry to read, so nothing is judged closed. An unnamed
+    background session is a spare holding no session yet, so it keeps none."""
     found = _claude_registered(sessions, processes)
     if found is None:
         return None
-    pids = {p.pid for p in processes
-            if p.role in ("Claude Code CLI", "Claude Code CLI (node launcher)")}
+    pids = {p.pid for p in processes if p.role in CLAUDE_CLI_ROLES}
     return {entry["sessionId"] for entry in found.values()}, len(pids - set(found))
 
 
-def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
+def _one_shot_runs(processes: list[Process], sessions) -> list[Process]:
     """Claude CLIs started by Codex that keep no session: an interactive
     session Codex drives registers itself and is shown from its own record."""
     registered = _claude_registered(sessions, processes) or {}
@@ -3536,7 +3606,7 @@ def _one_shot_runs(processes: list[Process], sessions: str) -> list[Process]:
             and str(p.owner or "").startswith("Codex") and p.pid not in registered]
 
 
-def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
+def _closed_claude_cli(rows: list[OfficeRow], sessions,
                        processes: list[Process]) -> list[OfficeRow]:
     """An interactive CLI session whose process has exited still leaves its
     record behind. Each running CLI names its session in the registry; a CLI
@@ -3563,7 +3633,7 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions: str,
 
 
 def office_rows(processes: list[Process], now: float | None = None, *,
-                codex_root: str | None = None, claude_root: str | None = None,
+                codex_root: str | None = None, claude_root=None,
                 canonical: str | None = None,
                 opencode_db: str | None = None, kilo_db: str | None = None,
                 cwd_of=process_cwd,
@@ -3575,19 +3645,19 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 ci_view: CiView | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
-    sessions = os.path.join(os.path.dirname(
-        CLAUDE_PROJECTS if claude_root is None else claude_root), "sessions")
+    sessions = claude_sessions(claude_root)
     owners = {p.pid: p.owner if type(p.owner) is str else "" for p in processes}
     # Who must answer a waiting CLI: the Codex PM that launched it, you when
-    # no agent did (your own terminal), else whatever agent started it.
+    # no agent did (your own terminal or a background session), else whatever
+    # agent started it.
     def answerer(owner: str) -> str:
         if owner.startswith("Codex"):
             return "PM（Codex）"
-        return "你" if not owner else f"啟動它的 {family(owner)}"
+        return "你" if not owner or owner.startswith("Claude Code daemon") else f"啟動它的 {family(owner)}"
 
     live = {entry["sessionId"]: (entry.get("status"), entry.get("waitingFor"),
                                  entry.get("statusUpdatedAt"), entry.get("name"),
-                                 answerer(owners.get(pid, "")))
+                                 answerer(owners.get(pid, "")), entry.get("kind"))
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
     # Monitor.poll builds the office only after the process table was read,
     # so an empty list means nothing is running, not "unknown".
@@ -3869,16 +3939,16 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
             legend.append(f"派工狀態讀自{source}")
             rows = [replace(row, detail=row.detail.replace(note, "", 1)) for row in rows]
     alerts = _review_alerts(rows)
-    alerts += [f"{row.name}：{row.alert}" for row in rows if row.alert]
+    alerts += [f"{_shown(row)}：{row.alert}" for row in rows if row.alert]
     # In full (wrapped, not cut): the session name at the end is how a PM
     # finds the window that needs an answer.
-    alerts += [f"{row.name}（{row.state}，{_short_ago(row.age)}）{row.detail}"
+    alerts += [f"{_shown(row)}（{row.state}，{_short_ago(row.age)}）{row.detail}"
                for row in rows if row.state in ALERT_STATES and not row.alert]
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
     tree = _tree(rows if expand else _fold_done(rows))
-    name_cols = max(_width(prefix + row.name) for prefix, row in tree if prefix != "—") + 2
+    name_cols = max(_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—") + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
     longest = max([_width(row.detail) for _, row in tree if row.detail] or [0])
@@ -3893,7 +3963,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         # In the TUI a long detail continues on the next lines under itself.
         pieces = [row.detail] if width is None else _wrap(row.detail, detail_cols)
         when = _short_ago(row.age)
-        line = f"{_pad(prefix + row.name, name_cols)}{_pad(row.state, 8)}{pieces[0]}"
+        line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
         out.append((line.rstrip(), _row_style(row.state)))
@@ -3914,7 +3984,8 @@ def office_lines(rows: list[OfficeRow], error: str | None = None,
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
     """Log lines for members whose state changed since the previous poll."""
-    new = {f"{row.name}|{row.detail}": row.state for row in rows}
+    # The short session id keeps two sessions with the same name and detail apart.
+    new = {f"{_shown(row)}|{row.detail}": row.state for row in rows}
     events = []
     for key, state in new.items():
         before = old.get(key)

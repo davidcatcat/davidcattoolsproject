@@ -47,6 +47,7 @@ HIGH_RISK_FILES = frozenset({
     "tools/llmtool/llmtool/git_intel.py",
     "tools/llmtool/llmtool/opencode_foreground_host.py",
     "tools/llmtool/llmtool/opencode_direct_developer.py",
+    "tools/llmtool/llmtool/codex_direct_developer.py",
     "tools/llmtool/llmtool/opencode_native_credential.py",
     "tools/llmtool/llmtool/opencode_worker.py",
     "tools/llmtool/llmtool/review_authority.py",
