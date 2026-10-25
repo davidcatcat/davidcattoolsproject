@@ -1986,19 +1986,20 @@ class OfficeViewTests(unittest.TestCase):
     def test_launcher_named_claude_session_shows_its_role(self):
         for sid, name in (("r", "claude-reviewer"), ("p", "claude-pm"),
                           ("d", "claude-developer-ui"), ("x", "claude-reviewers"),
-                          ("y", "reviewer")):
+                          ("y", "reviewer"), ("u", "claude-ui"), ("q", "claude-developer-g8")):
             self._write(self.claude / "proj" / f"{sid}.jsonl", [
                 {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
                 {"type": "ai-title", "aiTitle": f"title {sid}"}], age=60)
         (self.claude.parent / "sessions").mkdir(exist_ok=True)
         for pid, sid, name in ((61, "r", "claude-reviewer"), (62, "p", "claude-pm"),
                                (63, "d", "claude-developer-ui"), (64, "x", "claude-reviewers"),
-                               (65, "y", "reviewer")):
+                               (65, "y", "reviewer"), (66, "u", "claude-ui"),
+                               (67, "q", "claude-developer-g8")):
             (self.claude.parent / "sessions" / f"{pid}.json").write_text(json.dumps(
                 {"pid": pid, "sessionId": sid, "status": "idle", "name": name,
                  "kind": "bg" if sid == "r" else None}), encoding="utf-8")
         procs = [mon.Process(pid, 1, pid, "05:00", "S+", "Claude Code CLI", "claude", "")
-                 for pid in (62, 63, 64, 65)]
+                 for pid in (62, 63, 64, 65, 66, 67)]
         procs.append(mon.Process(61, 7, 7, "05:00", "S", "Claude Code background session",
                                  "claude", "Claude Code daemon 7"))
         rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
@@ -2007,7 +2008,9 @@ class OfficeViewTests(unittest.TestCase):
         # Only an exact claude-<role>[-suffix] name binds a role; anything else stays unnamed.
         self.assertEqual(got, {"title r": ("claude reviewer（背景）", "reviewer"),
                                "title p": ("claude pm（互動）", "pm"),
-                               "title d": ("claude developer（互動）", "developer"),
+                               "title d": ("claude ui（互動）", "ui"),
+                               "title u": ("claude ui（互動）", "ui"),
+                               "title q": ("claude developer（互動）", "developer"),
                                "title x": ("claude 互動", ""),
                                "title y": ("claude 互動", "")})
 
