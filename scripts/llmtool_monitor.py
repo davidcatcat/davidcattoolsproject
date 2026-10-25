@@ -2693,15 +2693,25 @@ def kilo_rows(processes: list[Process], now: float, canonical: str,
 
 def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical: str,
               cwd_of, prefix: str, client_role: str, base: int, note: str) -> list[OfficeRow]:
+    def running(item):
+        return now - item[2] <= OFFICE_STALL and (item[3] is None or item[2] - item[3] > 2.0)
+    cwds = {proc.pid: cwd_of(proc.pid) for proc in procs}
+    reals = {pid: os.path.realpath(cwd) if cwd else None for pid, cwd in cwds.items()}
+    own = {pid: next((item for item in sessions if real and os.path.realpath(item[0]) == real), None)
+           for pid, real in reals.items()}
+    # A CLI may work in another folder (e.g. a D6 task worktree) than the one
+    # it was opened in. A running session no CLI's folder claims belongs to the
+    # one CLI without a running session of its own; with several, none is guessed.
+    claimed = {os.path.realpath(item[0]) for item in own.values() if item is not None}
+    stray = [item for item in sessions if running(item) and os.path.realpath(item[0]) not in claimed]
+    free = [pid for pid, item in own.items() if item is None or not running(item)]
+    if stray and len(free) == 1:
+        own[free[0]] = stray[0]
     rows = []
     for number, proc in enumerate(procs, 1):
-        cwd = cwd_of(proc.pid)
-        real = os.path.realpath(cwd) if cwd else None
-        latest = next((item for item in sessions if real and os.path.realpath(item[0]) == real),
-                      None)
-        busy = (latest is not None and now - latest[2] <= OFFICE_STALL and
-                (latest[3] is None or latest[2] - latest[3] > 2.0))
-        where = _where(cwd, canonical)
+        cwd, latest = cwds[proc.pid], own[proc.pid]
+        busy = latest is not None and running(latest)
+        where = _where(latest[0] if busy else cwd, canonical)
         name = f"{prefix} {'worker' if proc.role == client_role else 'cli'} #{number}"
         if busy:
             detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
@@ -2775,12 +2785,24 @@ def _runner_log(root: str) -> list:
         return []
     lines = []
     for name in names[-10:]:
+        # The log folder belongs to the runner account, whose jobs could put a
+        # link, FIFO or device there: open without following or blocking,
+        # read only a regular file, and at most its last OFFICE_TAIL bytes.
         try:
-            with open(os.path.join(root, "_diag", name), "rb") as handle:
-                handle.seek(max(0, os.fstat(handle.fileno()).st_size - OFFICE_TAIL))
-                text = handle.read().decode("utf-8", "replace")
+            fd = os.open(os.path.join(root, "_diag", name),
+                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             continue
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            os.lseek(fd, max(0, info.st_size - OFFICE_TAIL), os.SEEK_SET)
+            text = os.read(fd, OFFICE_TAIL).decode("utf-8", "replace")
+        except OSError:
+            continue
+        finally:
+            os.close(fd)
         for found in RUNNER_LOG.finditer(text):
             when = datetime.strptime(found.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
             lines.append((when.timestamp(), found.group(2).strip()))

@@ -2498,6 +2498,11 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(idle.detail, "閒置，等工作；已開 1 小時；上一個工作：check (macOS 3.13) 失敗"
                                       f"（40 分鐘前）；日誌：{root}/_diag")
         self.assertNotIn("啟動", idle.detail)
+        # A job may plant a FIFO or a link under a log name: skipped, never read.
+        os.mkfifo(os.path.join(root, "_diag", "Runner_20261025-115900-utc.log"))
+        os.symlink("/dev/zero", os.path.join(root, "_diag", "Runner_20261025-115901-utc.log"))
+        again, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
+        self.assertEqual(again.detail, idle.detail)
 
     def test_runner_restarts_unsandboxed_and_stopped_are_flagged(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
@@ -2544,6 +2549,26 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["agy cli #2"].state, mon.IDLE)
         self.assertTrue(rows["agy cli #2"].detail.startswith("位置不明："))
         self.assertEqual(rows["agy cli #3"].state, mon.UNCHECKED)
+
+    def test_cli_working_in_another_folder_gets_its_running_session(self):
+        now = self.NOW
+        task = str(self.task)
+        cli = mon.Process(40, 1, 40, "30:00", "S+", "OpenCode CLI", "opencode", "")
+        other = mon.Process(41, 1, 41, "30:00", "S+", "OpenCode CLI", "opencode", "")
+        running = (task, "Issue 271 fix", now - 10, now - 1800)   # updated after it went idle
+        done = (task, "old", now - 10, now - 10)
+        row, = mon._cli_rows([cli], [running], now, self.canonical, {40: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual(row.state, mon.WORKING)
+        self.assertTrue(row.detail.startswith("task wp-1：Issue 271 fix"), row.detail)
+        row, = mon._cli_rows([cli], [done], now, self.canonical, {40: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual(row.state, mon.IDLE)
+        # Two CLIs without their own session: which one works there is not guessed.
+        rows = mon._cli_rows([cli, other], [running], now, self.canonical,
+                             {40: self.canonical, 41: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual([r.state for r in rows], [mon.IDLE, mon.IDLE])
 
     def test_each_opencode_cli_gets_its_own_row_with_place_and_state(self):
         ms = lambda age: int((self.NOW - age) * 1000)
