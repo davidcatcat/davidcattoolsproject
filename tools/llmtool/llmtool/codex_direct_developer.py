@@ -60,6 +60,35 @@ def _fail(code):
     raise DirectCodexError(code)
 
 
+def adapter_error_code(exc, prefix='CODEX_ADAPTER_'):
+    """Stable, content-free error code naming an unexpected exception.
+
+    A D6/Git binding stop keeps its own completion code; anything else is
+    named by its exception class. Messages, paths and prompt text never
+    reach the code.
+    """
+    code = getattr(exc, 'completion_code', None)
+    if type(code) is not str or not re.fullmatch(r'[A-Z0-9_]{1,48}', code):
+        code = re.sub(r'(?<=[a-z0-9])(?=[A-Z])', '_', type(exc).__name__).upper()
+        code = re.sub(r'[^A-Z0-9_]', '_', code) or 'EXCEPTION'
+    return (prefix + code)[:64]
+
+
+# Codex runs its shell commands with no inherited environment, so the command
+# PATH is explicit: the registered worktree's llmtool virtualenv first (the
+# ENV-2 bootstrapped interpreter the Task's tests need), then fixed system
+# directories. Without it every command fails with "command not found".
+_SYSTEM_COMMAND_PATH = ('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin')
+
+
+def _command_path(root):
+    venv_bin = Path(root) / 'tools' / 'llmtool' / '.venv' / 'bin'
+    entries = list(_SYSTEM_COMMAND_PATH)
+    if venv_bin.is_dir() and not venv_bin.is_symlink():
+        entries.insert(0, str(venv_bin))
+    return ':'.join(entries)
+
+
 def _thread_from_events(raw):
     """Accept the actual Codex JSONL thread.started event only."""
     found = None
@@ -209,9 +238,14 @@ def validate_profile(model, effort):
     return model, effort
 
 
-def _argv(executable, root, model, effort, *, pycache_prefix):
+def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None):
     model, effort = validate_profile(model, effort)
     if type(pycache_prefix) is not str or not os.path.isabs(pycache_prefix):
+        _fail('CODEX_ENV_INVALID')
+    command_path = _command_path(root) if command_path is None else command_path
+    if (type(command_path) is not str or not command_path or
+            any(not os.path.isabs(entry) or any(ord(c) < 32 for c in entry)
+                for entry in command_path.split(':'))):
         _fail('CODEX_ENV_INVALID')
     args = [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral', '--strict-config',
@@ -224,6 +258,7 @@ def _argv(executable, root, model, effort, *, pycache_prefix):
         'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
         'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"',
         'shell_environment_policy.set.PYTHONPYCACHEPREFIX=' + json.dumps(pycache_prefix),
+        'shell_environment_policy.set.PATH=' + json.dumps(command_path),
         'allow_login_shell=false', 'model_reasoning_summary="none"',
         'hide_agent_reasoning=true', 'show_raw_agent_reasoning=false',
     )
@@ -261,8 +296,15 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             os.chmod(tmpdir, 0o700)
             env = _environment(tmpdir)
             try:
-                if prelaunch_validate is not None and prelaunch_validate() is not True:
-                    _fail('CODEX_D6_BINDING_CHANGED')
+                if prelaunch_validate is not None:
+                    try:
+                        valid = prelaunch_validate()
+                    except DirectCodexError:
+                        raise
+                    except Exception:
+                        valid = False
+                    if valid is not True:
+                        _fail('CODEX_D6_BINDING_CHANGED')
                 try:
                     worker_dispatch.authorize_dispatch(
                         dispatch_store, dispatch_task_id, 'codex-developer', 'DISPATCH')
@@ -274,9 +316,12 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                               pycache_prefix=tmpdir), cwd=str(root), env=env,
                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         bufsize=0, shell=False, close_fds=True, start_new_session=True)
-                    lifecycle.own(process)
                 except OSError:
                     _fail('CODEX_RUNTIME_UNAVAILABLE')
+                try:
+                    lifecycle.own(process)
+                except LLMToolError:
+                    _fail('CODEX_PROCESS_OWNERSHIP_UNKNOWN')
                 selector = selectors.DefaultSelector()
                 try:
                     for stream in (process.stdin, process.stdout, process.stderr):
@@ -346,17 +391,23 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                             thread_id, hashlib.sha256(output).hexdigest(),
                             max(0, int((time.monotonic() - started) * 1000)),
                             cleanup_status, usage)
-    except DirectCodexError as exc:
+    except Exception as exc:
         close_lifecycle(type(exc), exc, exc.__traceback__)
-        exc.attempted = process is not None
-        exc.process_exit_code = process.returncode if process is not None else None
-        exc.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
-        exc.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
-        exc.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
-        exc.native_session_id = _thread_from_events(bytes(output))
-        if exc.usage is None:
-            exc.usage = _usage_from_events(bytes(output))
-        raise
+        # An unexpected exception still becomes a typed, fail-closed result
+        # with the observed process facts, never a bare adapter UNKNOWN.
+        error = (exc if isinstance(exc, DirectCodexError) else
+                 DirectCodexError(adapter_error_code(exc)))
+        error.attempted = process is not None
+        error.process_exit_code = process.returncode if process is not None else None
+        error.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
+        error.elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        error.cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
+        error.native_session_id = _thread_from_events(bytes(output))
+        if error.usage is None:
+            error.usage = _usage_from_events(bytes(output))
+        if error is exc:
+            raise
+        raise error from None
     except BaseException as exc:
         close_lifecycle(type(exc), exc, exc.__traceback__)
         try:

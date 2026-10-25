@@ -265,6 +265,122 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_UNAVAILABLE')
         callback.assert_not_called()
 
+    def _rebootstrap(self, **registry_changes):
+        """Act like ENV-2: write a fresh report and rewrite the registry PASS marker."""
+        registry_path = Path(self.common_dir) / 'llmtool-worktrees' / 'executor-task-1.json'
+        report_path = self.root / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+
+        def bootstrap(_registration):
+            report = json.loads(report_path.read_text())
+            report['elapsed_ms'] = report.get('elapsed_ms', 0) + 1
+            report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) +
+                            '\n').encode()
+            report_path.write_bytes(report_bytes)
+            registry = json.loads(registry_path.read_text())
+            registry['env2_pass_marker']['report_sha256'] = hashlib.sha256(
+                report_bytes).hexdigest()
+            registry.update(registry_changes)
+            registry_path.write_text(json.dumps(registry))
+            registry_path.chmod(0o600)
+        return bootstrap
+
+    def test_bootstrap_rewritten_pass_marker_still_launches_codex(self):
+        # Regression (#352 G5): ENV-2 rewrites the PASS marker on every
+        # bootstrap; the pre-launch binding check must not treat that as an
+        # identity change and swallow it as CODEX_ADAPTER_UNKNOWN.
+        task = self._task()
+        result, saved, callback = self._dispatch(task, bootstrap_error=self._rebootstrap())
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(saved['developer']['execution']['status'], 'DONE')
+        callback.assert_called_once()
+
+    def test_bootstrap_that_changes_d6_identity_is_typed_before_launch(self):
+        task = self._task()
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run') as codex_run:
+            result, saved, callback = self._dispatch(
+                task, bootstrap_error=self._rebootstrap(session_ref='other-session'))
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_D6_BINDING_CHANGED')
+        codex_run.assert_not_called()
+        callback.assert_not_called()
+
+    def test_bootstrap_without_a_valid_pass_marker_is_typed_before_launch(self):
+        task = self._task()
+        marker = {'schema_version': 1, 'result': 'FAIL'}
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run') as codex_run:
+            result, saved, _callback = self._dispatch(
+                task, bootstrap_error=self._rebootstrap(env2_pass_marker=marker))
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_ENV2_MARKER_INVALID')
+        codex_run.assert_not_called()
+
+    def test_unexpected_route_exception_keeps_a_stable_class_code(self):
+        task = self._task()
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                   side_effect=RuntimeError('prompt text and /private/path')):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                result, saved, callback = self._dispatch(task)
+        self.assertEqual(result, 1)
+        developer = saved['developer']
+        # Still fail-closed (no resend), but no longer an opaque adapter UNKNOWN.
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'CODEX_ADAPTER_RUNTIME_ERROR')
+        self.assertNotIn('prompt text', json.dumps(saved))
+        self.assertNotIn('/private/path', output.getvalue())
+        callback.assert_not_called()
+
+    def test_adapter_exception_after_launch_is_recorded_with_facts_and_unknown_status(self):
+        task = self._task()
+        with patch('llmtool.codex_direct_developer._result_from_events',
+                   side_effect=KeyError('prompt text')):
+            with redirect_stdout(io.StringIO()):
+                result, saved, callback = self._dispatch(task)
+        self.assertEqual(result, 1)
+        developer = saved['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'CODEX_ADAPTER_KEY_ERROR')
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        self.assertEqual(developer['execution']['process_exit_code'], 0)
+        self.assertEqual(developer['execution']['native_session_id'],
+                         '12345678-1234-4234-8234-123456789abc')
+        callback.assert_not_called()
+
+    def test_misuse_refusals_name_the_failed_condition(self):
+        task = self._task()
+        base = dict(task_id=task['task_id'], selection_source='PM',
+            acceptance=['src.py is changed'], executor_task='executor-task-1',
+            read_path=['src.py'], write_path=['src.py'],
+            egress_basis='approved bounded fixture')
+        cases = (
+            ('context', dict(base, context_stdin=True), str(self.root), '--context-stdin'),
+            ('acceptance', dict(base, acceptance=['src.py changed']), str(self.root),
+             'exactly'),
+            ('cwd', base, str(self.repo), 'registered D6 root'),
+        )
+        for label, values, cwd, needle in cases:
+            with self.subTest(label):
+                original = os.getcwd()
+                os.chdir(cwd)
+                try:
+                    with self.assertRaises(task_completion.LLMToolError) as refused:
+                        run_task_codex_delegate(Namespace(**values), store=self.store)
+                finally:
+                    os.chdir(original)
+                self.assertIn(needle, str(refused.exception))
+                self.assertIsNone(self.store.get(task['task_id'])['developer'])
+        with self.subTest('pyyaml'):
+            from llmtool.task_submission_cli import _codex_developer_profile
+            with patch('llmtool.task_submission_cli.yaml_module',
+                       side_effect=task_completion.LLMToolError('PyYAML is required')):
+                with self.assertRaises(task_completion.LLMToolError) as refused:
+                    _codex_developer_profile()
+            self.assertIn('PyYAML', str(refused.exception))
+            self.assertIn('.venv/bin/python', str(refused.exception))
+
     def test_ignored_baseline_failure_is_unavailable_before_launch(self):
         task = self._task()
         with patch('llmtool.task_submission_cli._ignored_file_fingerprints',

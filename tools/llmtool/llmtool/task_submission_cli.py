@@ -1,5 +1,6 @@
 """Direct user submission to one explicitly selected PM provider profile."""
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -15,7 +16,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .chat import reply_usage
-from .config import api_key, resolve_profile_config, selected_provider
+from .config import api_key, resolve_profile_config, selected_provider, yaml_module
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
@@ -1360,17 +1361,29 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
 
 
 def _codex_developer_profile():
+    # Each refusal names the condition that failed; none echoes config values.
+    try:
+        yaml_module()
+    except LLMToolError:
+        raise LLMToolError(
+            'codex-developer profile cannot be read: PyYAML is missing from this Python; '
+            'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
     try:
         profile = resolve_profile_config('codex-developer', require_configured=True)
         provider = selected_provider(profile)
-        options = provider.get('provider_options', {})
-        if provider.get('type') != 'codex-cli' or type(provider.get('model')) is not str:
-            raise ValueError()
-        effort = options.get('reasoning_effort', 'high')
-        codex_direct_developer.validate_profile(provider['model'], effort)
-        return provider, effort
     except Exception:
-        raise LLMToolError('codex-developer profile is missing or invalid') from None
+        raise LLMToolError('codex-developer profile is missing or invalid in the llmtool '
+                           'user config (~/.config/llmtool/config.yaml)') from None
+    options = provider.get('provider_options', {})
+    if (provider.get('type') != 'codex-cli' or type(provider.get('model')) is not str or
+            type(options) is not dict):
+        raise LLMToolError('codex-developer profile must be type codex-cli with a model')
+    effort = options.get('reasoning_effort', 'high')
+    try:
+        codex_direct_developer.validate_profile(provider['model'], effort)
+    except LLMToolError:
+        raise LLMToolError('codex-developer profile model or reasoning_effort is invalid') from None
+    return provider, effort
 
 
 def run_task_codex_delegate(args, *, store):
@@ -1382,20 +1395,30 @@ def run_task_codex_delegate(args, *, store):
     if task['developer'] is not None:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     if getattr(args, 'context_stdin', False):
-        raise LLMToolError('Codex direct reads only its registered D6 task scope')
+        raise LLMToolError('Codex direct takes no --context-stdin: it reads only its registered '
+                           'D6 task scope (Task Contract goal, --acceptance and allowed paths)')
     pm_assignment = task['pm_assignment']
     if args.selection_source == 'PM':
         if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'codex' or
-                pm_assignment.get('risk') != 'LOW' or
-                args.acceptance != pm_assignment.get('acceptance')):
+                pm_assignment.get('risk') != 'LOW'):
             raise LLMToolError('no validated low-risk Codex recommendation from the selected PM')
+        if args.acceptance != pm_assignment.get('acceptance'):
+            raise LLMToolError('--acceptance must repeat the acceptance recorded by task '
+                               'record-pm exactly (same items, same order)')
     task_completion.validate_task_binding(
         stored_binding=task.get('task_binding'), task_id=task.get('task_id'),
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
-    snapshot = task_completion.collect_git_snapshot(os.getcwd())
-    registration, snapshot = task_completion.bind_executor_task(
-        args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    try:
+        snapshot = task_completion.collect_git_snapshot(os.getcwd())
+        registration, snapshot = task_completion.bind_executor_task(
+            args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    except LLMToolError as exc:
+        raise LLMToolError(
+            'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
+                exc, prefix='') + '): run it with the current directory at the registered '
+            'D6 root of --executor-task, on its registered branch and HEAD, with a clean '
+            'tree') from None
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -1459,12 +1482,31 @@ def run_task_codex_delegate(args, *, store):
             if current_registration != registration or current_snapshot != snapshot:
                 raise LLMToolError('D6 or Git identity changed before Codex launch')
             return True
-        validate_binding()
+        try:
+            validate_binding()
+        except Exception:
+            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED') from None
         try:
             _bootstrap_registered_d6(registration)
         except opencode_direct_developer.DirectOpenCodeError as exc:
             raise codex_direct_developer.DirectCodexError(
                 exc.direct_opencode_code) from None
+        # ENV-2 rewrites the registry PASS marker on every bootstrap, so the
+        # binding read before it is stale. Re-read it once: only the marker may
+        # change, and it must be a PASS for this exact root and HEAD. Every
+        # later check compares against this refreshed binding.
+        try:
+            refreshed, current_snapshot = task_completion.bind_executor_task(
+                registration.task_id, expected_common_dir=registration.common_dir,
+                root=registration.root)
+            task_completion.validate_env2_pass_marker(
+                refreshed, expected_root=registration.root, current_head=snapshot.head)
+        except Exception:
+            raise codex_direct_developer.DirectCodexError('CODEX_ENV2_MARKER_INVALID') from None
+        if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
+                registration or current_snapshot != snapshot):
+            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED')
+        registration = refreshed
         try:
             ignored_before = _ignored_file_fingerprints(registration.root)
         except Exception:
@@ -1481,8 +1523,11 @@ def run_task_codex_delegate(args, *, store):
         _print(_task_view(saved))
         return 1
     except codex_direct_developer.DirectCodexError as exc:
+        # An adapter exception after launch says nothing about how Codex ended.
         execution_status = ('TIMEOUT' if exc.direct_codex_code == 'CODEX_TIMEOUT' else
-                             'FAILED' if exc.attempted else 'UNKNOWN')
+                             'FAILED' if exc.attempted and
+                             not exc.direct_codex_code.startswith('CODEX_ADAPTER_') else
+                             'UNKNOWN')
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN' if exc.attempted else 'DEVELOPER_UNAVAILABLE',
             provider_type='codex-cli', model=provider['model'], error_code=exc.direct_codex_code,
             execution={'status': execution_status, 'native_session_id': exc.native_session_id,
@@ -1514,9 +1559,12 @@ def run_task_codex_delegate(args, *, store):
         except Exception:
             pass
         raise
-    except Exception:
+    except Exception as exc:
+        # Fail closed (no automatic resend), but keep a stable, content-free
+        # code naming what failed instead of one opaque adapter UNKNOWN.
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
-            model=provider['model'], error_code='CODEX_ADAPTER_UNKNOWN',
+            model=provider['model'],
+            error_code=codex_direct_developer.adapter_error_code(exc),
             execution={'status': 'UNKNOWN', 'native_session_id': None,
                 'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
                 'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',

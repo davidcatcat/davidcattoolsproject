@@ -820,6 +820,30 @@ are retained without automatic retry.
 The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
 prompt scope only, and Codex may read other files available to its process.
 
+How to run direct mode, and what each refusal means:
+
+- Run it with llmtool's virtualenv Python (`tools/llmtool/.venv/bin/python -B -m
+  llmtool ...`); without PyYAML the `codex-developer` profile cannot be read and the
+  refusal says so.
+- Run it with the current directory at the registered D6 root of `--executor-task`,
+  on its registered branch and HEAD with a clean tree. Otherwise the refusal names the
+  failed binding code (for example `D6_SOURCE_BINDING_MISMATCH`).
+- With `--selection-source PM`, every `--acceptance` must repeat the acceptance that
+  `task record-pm` recorded, exactly and in the same order.
+- Direct mode takes no `--context-stdin`. Codex reads only the Task Contract goal,
+  `--acceptance` and the allowed paths, so put any background the Developer needs
+  in the PM's recorded goal or acceptance.
+
+Before launch, llmtool runs the ENV-2 bootstrap for the D6 root. Bootstrap rewrites
+the registry PASS marker, so llmtool rereads the D6 binding once afterwards: only
+that marker may change, and it must be a PASS for the same root and HEAD
+(`CODEX_ENV2_MARKER_INVALID` or `CODEX_D6_BINDING_CHANGED` otherwise, before Codex
+starts). Codex runs its shell commands with no inherited environment and an explicit
+`PATH`: the worktree's `tools/llmtool/.venv/bin` first, then fixed system
+directories. An unexpected failure stays fail-closed with no automatic resend, and
+is recorded with a stable code that names the binding stop or exception class
+(`CODEX_ADAPTER_<NAME>`, never message or prompt text).
+
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
 同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。
