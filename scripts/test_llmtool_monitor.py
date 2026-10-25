@@ -555,7 +555,8 @@ class FakeRun:
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
-        code, payload = self.responses.pop(0)
+        # Calls beyond the scripted ones (the runner list, CI) fail like a 404.
+        code, payload = self.responses.pop(0) if self.responses else (1, b"")
         out = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
         return __import__("types").SimpleNamespace(returncode=code, stdout=out)
 
@@ -690,7 +691,7 @@ class GitHubActivityTests(unittest.TestCase):
     def test_ci_runs_are_read_only_while_a_runner_is_here_and_never_break_the_source(self):
         runs = {"workflow_runs": [{"status": "in_progress", "name": "llmtool Mac CI",
                                    "head_sha": "a" * 40, "pull_requests": [{"number": 7}]}]}
-        fake = FakeRun((0, []), (0, []), (0, runs))
+        fake = FakeRun((0, []), (0, []), (0, {"runners": []}), (0, runs))
         source = mon.GitHubSource("o/r", runner=fake, clock=lambda: NOW)
         source.want_ci = True
         source.refresh()
@@ -711,7 +712,7 @@ class GitHubActivityTests(unittest.TestCase):
             source = mon.GitHubSource("o/r", runner=run, clock=clock)
             source.refresh()
             source.refresh()                      # within the refresh window: no new call
-            self.assertEqual(len(run.calls), 2)
+            self.assertEqual(len(run.calls), 3)   # comments, pulls, the runner list
             for argv, kwargs in run.calls:
                 self.assertEqual(argv[:4], ["/opt/gh", "api", "-X", "GET"])
                 self.assertTrue(argv[4].startswith("repos/o/r/"))
@@ -738,7 +739,7 @@ class GitHubActivityTests(unittest.TestCase):
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source = mon.GitHubSource("o/r", runner=full, clock=lambda: NOW)
             source.refresh()
-        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 2)
+        self.assertEqual(len(full.calls), mon.GITHUB_PAGES + 3)
         self.assertIn("per_page=1&page=501", full.calls[mon.GITHUB_PAGES][0][4])
         self.assertIn("只讀了最新 500 則", source.status)
         self.assertEqual(len(source.events), 500)   # the probe's item (#900) never lands
@@ -755,7 +756,7 @@ class GitHubActivityTests(unittest.TestCase):
             source = mon.GitHubSource("o/r", runner=exact, clock=lambda: NOW)
             source.refresh()
         self.assertNotIn("留言太多", source.status)   # exactly 500: nothing was cut
-        self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 2)
+        self.assertEqual(len(exact.calls), mon.GITHUB_PAGES + 3)
         self.assertIn("per_page=1&page=501", exact.calls[mon.GITHUB_PAGES][0][4])
 
     def test_comment_page_failures_keep_old_events_and_duplicates_show_once(self):
@@ -881,11 +882,11 @@ class GitHubActivityTests(unittest.TestCase):
             source.refresh_in_background()           # in flight / not due: no second thread
             gate.set()
             source._thread.join(5)
-        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(len(run.calls), 3)
         self.assertEqual([e.reference for e in source.events], ["#6"])
         self.assertIn("每 30 秒", source.status)
         lines = mon.activity_lines([], github=source, background=True)   # not due yet
-        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(len(run.calls), 3)
         self.assertIn("GitHub #6：新留言 — bg", lines[0])
 
     def test_missing_gh_and_bad_repo_fail_closed(self):
@@ -929,7 +930,7 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--github"]), 0)
-        self.assertEqual(len(run.calls), 2)
+        self.assertEqual(len(run.calls), 3)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
         self.assertIn("GitHub #4：新留言 — hello", out.getvalue())
@@ -2617,6 +2618,8 @@ class OfficeViewTests(unittest.TestCase):
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci)
         self.assertEqual([(r.name, r.state) for r in rows],
                          [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING)])
+        # Their GitHub names, so the GitHub runner rows leave them out.
+        self.assertEqual([r.key for r in rows], ["davidproject-self-action", "davidproject-self-action-2"])
         self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", rows[0].detail)
         self.assertTrue(rows[1].detail.startswith(
             "執行中：llmtool Mac CI（PR #343 @aaaaaaa）（3 分鐘）；專用帳號 ghrunner2"), rows[1].detail)
@@ -2889,6 +2892,146 @@ class OfficeViewTests(unittest.TestCase):
         common.mkdir(parents=True)
         (self.task / ".git").write_text(f"gitdir: {common}\n", encoding="utf-8")
         self.assertEqual(mon.canonical_root(str(self.task)), self.canonical)
+
+
+class GitHubRunnerTests(unittest.TestCase):
+    """Self-hosted runners off this Mac, from GitHub alone (mock gh api)."""
+
+    MAC = {"name": "davidproject-self-action", "os": "macOS", "status": "online", "busy": True,
+           "labels": [{"name": "self-hosted"}, {"name": "macOS"}, {"name": "local-mac-ci"}]}
+
+    @staticmethod
+    def linux(name, status="online", busy=False, label="ec2-llmtool"):
+        return {"name": name, "os": "Linux", "status": status, "busy": busy,
+                "labels": [{"name": "self-hosted"}, {"name": "Linux"}, {"name": "X64"}, {"name": label}]}
+
+    class Gh:
+        """gh api by path: the first matching route answers; calls are kept."""
+
+        def __init__(self, routes):
+            self.routes, self.calls = routes, []
+
+        def __call__(self, argv, **kwargs):
+            self.calls.append(argv[4])
+            for key, answer in self.routes:
+                if key in argv[4]:
+                    if isinstance(answer, BaseException):
+                        raise answer
+                    code, payload = answer
+                    out = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+                    return __import__("types").SimpleNamespace(
+                        returncode=code, stdout=out if code == 0 else b"",
+                        stderr=out if code else b"")
+            return __import__("types").SimpleNamespace(returncode=1, stdout=b"", stderr=b"")
+
+    def source(self, routes, clock=lambda: NOW):
+        gh = self.Gh([("issues/comments", (0, [])), ("/pulls", (0, []))] + routes)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=gh, clock=clock)
+            source.refresh()
+        return source, gh
+
+    def ci(self, runners):
+        runs = {"workflow_runs": [
+            {"id": 1, "status": "in_progress", "name": "llmtool CI", "head_sha": "a" * 40,
+             "pull_requests": [{"number": 350}], "run_started_at": iso(NOW - 900)},
+            {"id": 2, "status": "queued", "name": "llmtool CI", "head_sha": "b" * 40,
+             "pull_requests": [{"number": 351}], "created_at": iso(NOW - 60)},
+            {"id": 3, "status": "completed", "name": "llmtool CI", "head_sha": "c" * 40,
+             "pull_requests": [{"number": 349}]}]}
+        jobs = {
+            1: [{"name": "check (macOS 3.13)", "status": "in_progress", "started_at": iso(NOW - 600),
+                 "runner_name": "davidproject-self-action"},
+                {"name": "Linux Python Test", "status": "in_progress", "started_at": iso(NOW - 180),
+                 "runner_name": "ec2-llmtool-01"}],
+            2: [{"name": "Linux Python Test", "status": "queued",
+                 "labels": ["self-hosted", "Linux", "ec2-llmtool"]},
+                {"name": "check (macOS 3.13)", "status": "queued", "labels": ["self-hosted", "macOS"]}],
+            3: [{"name": "Linux Python Test", "status": "completed", "conclusion": "failure",
+                 "completed_at": iso(NOW - 1200), "runner_name": "ec2-llmtool-02"}]}
+        return [("actions/runners", (0, {"runners": runners}))] + [
+            (f"actions/runs/{run}/jobs", (0, {"jobs": found})) for run, found in jobs.items()] + [
+            ("actions/runs?", (0, runs))]
+
+    def test_idle_busy_offline_and_several_linux_runners_beside_the_mac(self):
+        source, gh = self.source(self.ci([
+            self.MAC, self.linux("ec2-llmtool-01", busy=True), self.linux("ec2-llmtool-02"),
+            self.linux("ec2-llmtool-03", status="offline")]))
+        self.assertTrue(all(call.startswith("repos/o/r/") for call in gh.calls))
+        rows = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
+        # The Mac runner keeps its own local row; every Linux runner gets one from GitHub.
+        self.assertEqual([(row.name, row.state) for row in rows], [
+            ("linux ci runner ec2-llmtool-01", mon.WORKING),
+            ("linux ci runner ec2-llmtool-02", mon.IDLE),
+            ("linux ci runner ec2-llmtool-03", mon.STOPPED)])
+        busy, idle, offline = rows
+        self.assertEqual(busy.detail, "執行中：llmtool CI（PR #350 @aaaaaaa）：Linux Python Test"
+                                      "（已執行 3 分鐘）；Linux；標籤 ec2-llmtool；排隊中、它可以接 1 個："
+                                      "llmtool CI（PR #351 @bbbbbbb）：Linux Python Test")
+        self.assertEqual((busy.age, busy.alert, busy.evidence), (180.0, "", "GitHub"))
+        self.assertTrue(idle.detail.startswith(
+            "閒置，等工作；Linux；標籤 ec2-llmtool；上一個工作：llmtool CI（PR #349 @ccccccc）："
+            "Linux Python Test 失敗（20 分鐘前）"), idle.detail)
+        self.assertEqual(offline.alert, "CI runner ec2-llmtool-03 離線")
+        self.assertTrue(offline.detail.startswith("離線（排給它的 CI 會等它）；Linux"))
+        # Mac and EC2 run jobs of one workflow at once: each runner names its own job.
+        mac = [run for run in source.ci_runs if run[3] == "davidproject-self-action"]
+        self.assertEqual([run[1] for run in mac], ["llmtool CI（PR #350 @aaaaaaa）：check (macOS 3.13)"])
+        # A finished run's jobs are read once, not on every refresh.
+        reads = sum("runs/3/jobs" in call for call in gh.calls)
+        source.refresh(force=True)
+        self.assertEqual((reads, sum("runs/3/jobs" in call for call in gh.calls)), (1, 1))
+
+    def test_queued_work_is_attributed_only_by_labels_and_unregistered_shows_nothing(self):
+        source, _ = self.source(self.ci([self.MAC, self.linux("ec2-llmtool-01", label="other")]))
+        row, = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
+        self.assertNotIn("排隊", row.detail)   # it lacks the ec2-llmtool label the job asks for
+        source, _ = self.source(self.ci([self.MAC]))   # the EC2 runner is not registered yet
+        self.assertEqual(mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"},
+                                                source.ci_runs), [])
+        self.assertEqual(mon.github_runner_rows(None, NOW), [])   # --no-github: nothing claimed
+
+    def test_api_failures_and_old_data_say_unconfirmed_never_offline(self):
+        for answer, words in (((1, b"gh: Must have admin rights (HTTP 403)"), "沒有權限（HTTP 403）"),
+                              (subprocess.TimeoutExpired("gh", 20), "逾時")):
+            source, _ = self.source([("actions/runners", answer)])
+            row, = mon.github_runner_rows(source.ci_view, NOW)
+            self.assertEqual((row.state, row.alert), (mon.UNCHECKED, f"GitHub runner 清單讀不到（{words}）"))
+            self.assertIn("狀態未確認", row.detail)
+            self.assertTrue(source.status.startswith("GitHub o/r："))   # activity is unaffected
+        # Seen once, then the list fails: the last word is kept, marked 未確認.
+        clock = [NOW]
+        source, gh = self.source(self.ci([self.linux("ec2-llmtool-01")]), clock=lambda: clock[0])
+        gh.routes.insert(0, ("actions/runners", (1, b"HTTP 403")))
+        clock[0] = NOW + 40
+        source.refresh(force=True)
+        row, = mon.github_runner_rows(source.ci_view, clock[0])
+        self.assertEqual(row.state, mon.UNCHECKED)
+        self.assertEqual(row.detail.split("；")[:2],
+                         ["未確認：GitHub 資料 不到 1 分鐘沒更新（沒有權限（HTTP 403））", "上次看到：閒置"])
+        # Data older than a few refreshes is stale even without an error.
+        old = replace(source.ci_view, error="")
+        row, = mon.github_runner_rows(old, NOW + 600)
+        self.assertEqual((row.state, row.alert), (mon.UNCHECKED, ""))
+        self.assertTrue(row.detail.startswith("未確認：GitHub 資料 10 分鐘沒更新；上次看到：閒置"))
+
+    def test_reading_github_never_holds_up_the_screen(self):
+        import threading
+        gate = threading.Event()
+        gh = self.Gh([("issues/comments", (0, [])), ("/pulls", (0, []))]
+                     + self.ci([self.linux("ec2-llmtool-01")]))
+        def slow(argv, **kwargs):
+            gate.wait(5)
+            return gh(argv, **kwargs)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=slow, clock=lambda: NOW)
+            source.refresh_in_background()
+            # gh is still "running": rows are built from what is known, at once.
+            self.assertEqual(mon.github_runner_rows(source.ci_view, NOW, (), source.ci_runs), [])
+            gate.set()
+            source._thread.join(5)
+        self.assertEqual([row.name for row in mon.github_runner_rows(source.ci_view, NOW)],
+                         ["linux ci runner ec2-llmtool-01"])
 
 
 if __name__ == "__main__":
