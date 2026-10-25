@@ -144,7 +144,8 @@ elif ! test -f "$dst/.runner"; then
     'cd "$1" && ./config.sh --unattended --url "https://github.com/$2" --name "$3" \
        --labels local-mac-ci --work _work --disableupdate' _ "$dst" "$repo" "$runner" ||
     fail "registration of $runner failed"
-  if grep -rqF -- "$ACTIONS_RUNNER_INPUT_TOKEN" "$dst/_diag" "$dst/.runner" 2>/dev/null; then
+  # The pattern comes on stdin, not as an argument.
+  if grep -rqF -f - "$dst/_diag" "$dst/.runner" 2>/dev/null <<< "$ACTIONS_RUNNER_INPUT_TOKEN"; then
     fail "the registration token was written to a log; remove $dst/_diag and check GitHub"
   fi
   unset ACTIONS_RUNNER_INPUT_TOKEN
