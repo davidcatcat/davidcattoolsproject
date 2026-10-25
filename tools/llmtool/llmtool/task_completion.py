@@ -1366,12 +1366,14 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
             before['changed_paths'] != changed_paths):
         _stop('TEST_SOURCE_MISMATCH')
     evidence = []
-    with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home:
+    with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home, \
+            tempfile.TemporaryDirectory(prefix='llmtool-task-python-cache-') as pycache:
         for path in eligible:
             env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
                    'LC_ALL': 'C', 'HOME': home,
                    'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
-                   'PYTHONDONTWRITEBYTECODE': '1'}
+                   'PYTHONDONTWRITEBYTECODE': '1',
+                   'PYTHONPYCACHEPREFIX': pycache}
             argv = [sys.executable, '-B', '-m', 'unittest', 'discover',
                     '-s', 'tools/llmtool/tests', '-p', Path(path).name]
             try:

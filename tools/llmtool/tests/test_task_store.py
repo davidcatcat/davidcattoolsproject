@@ -136,6 +136,61 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(refusal['reason_code'], 'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
         self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
 
+    def test_codex_direct_success_persists_native_thread_and_usage(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        saved = self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(saved['developer']['execution']['status'], 'DONE')
+        self.assertEqual(saved['developer']['execution']['native_session_id'],
+                         execution['native_session_id'])
+        self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
+
+    def test_codex_blocked_and_timeout_outcomes_persist_reported_usage(self):
+        usage = {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}
+        for status, error_code, process_exit in (
+                ('BLOCKED', 'CODEX_BLOCKED', 0), ('TIMEOUT', 'CODEX_TIMEOUT', None)):
+            with self.subTest(status=status):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                execution = {'status': status,
+                    'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                    'process_exit_code': process_exit, 'stdout_sha256': 'd' * 64,
+                    'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                    'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None}
+                outcome = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': error_code, 'execution': execution, 'usage': usage}
+                saved = self.store.update(task['task_id'], developer=outcome)
+                self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['developer']['execution']['status'], status)
+                self.assertEqual(saved['developer']['usage'], usage)
+
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
@@ -652,9 +707,9 @@ class TaskStoreTests(unittest.TestCase):
         value.update(
             schema_version=2,
             pm_provider_profile='active-pm-runtime',
-            pm_provider_type='codex-cli',
+            pm_provider_type='active-pm-runtime',
             pm_model=None,
-            pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+            pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
             backend_session_semantics='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
             state='PM_RESPONDED',
             response='{"schema_version":1,"summary":"Ready.","developer_assignment":'
@@ -683,6 +738,15 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
 
+    def test_legacy_codex_pm_runtime_records_remain_readable(self):
+        value = self._active_pm_record()
+        value['pm_provider_type'] = 'codex-cli'
+        value['pm_route_binding'] = {
+            'type': 'codex-cli', 'model': None, 'base_url': None}
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_provider_type'], 'codex-cli')
+
     def test_active_pm_provenance_rejects_false_or_incomplete_claims(self):
         mutations = (
             lambda record: record['pm_provenance'].__setitem__('provider_invoked', True),
@@ -692,6 +756,8 @@ class TaskStoreTests(unittest.TestCase):
                 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
             lambda record: record.__setitem__('pm_assignment', {
                 **record['pm_assignment'], 'risk': 'OTHER'}),
+            lambda record: record.__setitem__('pm_assignment', {
+                **record['pm_assignment'], 'route': 'company-gw'}),
             lambda record: record.pop('pm_provenance'),
         )
         for mutate in mutations:
