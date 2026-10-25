@@ -2977,9 +2977,8 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total, qu
     if starts > 1:
         notes.append(f"近 24 小時啟動 {starts} 次")
     logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
-    readable = os.access(logs, os.R_OK | os.X_OK)
-    notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs)
-                 + ("" if readable else "（這個帳號讀不到）"))
+    if os.access(logs, os.R_OK | os.X_OK):   # a folder the Owner cannot open is no help
+        notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs))
     name = "mac ci runner" + (f" #{number}" if total > 1 else "")
     return OfficeRow(name, state, "；".join(notes), age, 80 + number, kind="worker",
                      evidence="程序", alert=alert)
