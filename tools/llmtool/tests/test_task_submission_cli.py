@@ -1440,7 +1440,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
             self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
 
-    def test_markdown_fenced_company_patch_is_rejected_without_persistence(self):
+    def test_markdown_fenced_company_patch_is_normalized_before_persistence(self):
         target = 'tools/llmtool/tests/test_task_submission_cli.py'
         fenced_patch = (
             '```diff\n'
@@ -1466,23 +1466,23 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     'developer assignment already exists; duplicate dispatch refused'):
                 run_task_delegate(self._delegate_args(task))
 
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 0)
         result = json.loads(output.getvalue())
-        self.assertEqual(result['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
-        self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
-        self.assertIsNone(result['developer']['artifact'])
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertIsNone(result['developer']['error_code'])
+        self.assertIn('OUTER_FENCE_STRIPPED', result['developer']['normalizations'])
+        self.assertNotIn('```', result['developer']['artifact'])
+        self.assertIn('FENCED_PROVIDER_PATCH_SENTINEL', result['developer']['artifact'])
         self.assertEqual(result['developer']['usage']['total_tokens'], 45)
-        self.assertNotIn(fenced_patch, output.getvalue())
-        self.assertNotIn('FENCED_PROVIDER_PATCH_SENTINEL', output.getvalue())
         self.assertEqual(len(client.calls), 1)
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
-        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
-        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
-        self.assertIsNone(saved['developer']['artifact'])
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertIsNone(saved['developer']['error_code'])
+        self.assertIn('OUTER_FENCE_STRIPPED', saved['developer']['normalizations'])
+        self.assertNotIn('```', saved['developer']['artifact'])
         self.assertEqual(saved['developer']['usage']['total_tokens'], 45)
         serialized = json.dumps(saved)
         self.assertNotIn(fenced_patch, serialized)
-        self.assertNotIn('FENCED_PROVIDER_PATCH_SENTINEL', serialized)
 
     def test_rejection_categories_are_durable_without_provider_content(self):
         target = 'tools/llmtool/tests/test_task_submission_cli.py'
@@ -1811,6 +1811,27 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.assertEqual(result['developer']['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
                 self.assertIsNone(result['developer']['artifact'])
 
+    def test_rejected_output_capture_is_private_bounded_redacted_and_not_printed(self):
+        secret = 'sk-' + ('a' * 24)
+        rejected = 'not a diff\napi_key=' + secret + '\n' + ('z' * (70 * 1024))
+        output = io.StringIO()
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        task_id = 'a' * 32
+        with redirect_stdout(output):
+            capture = submission_cli._capture_rejected_output(store, task_id, rejected)
+        self.assertNotIn(secret, output.getvalue())
+        self.assertEqual(set(capture), {'ref', 'sha256'})
+        path = store.root / capture['ref']
+        parent_stat, file_stat = path.parent.stat(), path.stat()
+        self.assertEqual(stat.S_IMODE(parent_stat.st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(file_stat.st_mode), 0o600)
+        raw = path.read_bytes()
+        self.assertLessEqual(len(raw), RESPONSE_LIMIT)
+        self.assertNotIn(secret.encode(), raw)
+        self.assertIn(b'[REDACTED]', raw)
+        self.assertIn(b'[TRUNCATED]', raw)
+        self.assertEqual(hashlib.sha256(raw).hexdigest(), capture['sha256'])
+
 
 class DeveloperOutputShapeMatrixTests(unittest.TestCase):
     """#290 / #315 P2-2: the local verdict for common model output shapes,
@@ -1825,11 +1846,11 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         shapes = {
             'git diff': (good, None),
             'leading blank line': ('\n' + good, 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
-            'markdown fence': ('```diff\n' + good + '```\n', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'markdown fence': ('```diff\n' + good + '```\n', None),
             'no diff --git header': (good[len(header.split('\n')[0]) + 1:],
-                                     'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+                                     None),
             'blank context without its space': (
-                header + '@@ -1,4 +1,4 @@\n keep\n\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                header + '@@ -1,4 +1,4 @@\n keep\n\n-old\n+new\n keep\n', None),
             'prose after the diff': (good + 'Done.\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'closing fence after the diff': (good + '```\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'deleted file': (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
@@ -1845,7 +1866,7 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
                                         + '@@ -1,3 +1,3 @@\n keep\n-old\n+new\n keep\n',
                                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'hunk count off by one': (
-                header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', None),
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
                          'DEVELOPER_OUTPUT_INVALID_DIFF'),
@@ -1853,6 +1874,30 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
                 self.assertEqual(rejection(text, [target]), expected)
+
+    def test_unsafe_shapes_remain_rejected(self):
+        target = 'tools/llmtool/example.py'
+        good = (f'diff --git a/{target} b/{target}\n--- a/{target}\n+++ b/{target}\n'
+                '@@ -1 +1 @@\n-old\n+new\n')
+        cases = {
+            'two fences': ('```diff\n' + good + '```\n```\n' + good + '```',
+                           'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'prose mixed with diff': ('intro\n' + good,
+                                      'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
+            'mode metadata': (good.replace('--- a/', 'old mode 100644\nnew mode 100755\n--- a/', 1),
+                              'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'out of scope': (good.replace(target, 'tools/llmtool/outside.py'),
+                             'DEVELOPER_OUTPUT_OUT_OF_SCOPE'),
+            'rename': (f'diff --git a/{target} b/tools/llmtool/renamed.py\n'
+                       f'rename from {target}\nrename to tools/llmtool/renamed.py\n',
+                       'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'binary': (f'diff --git a/{target} b/{target}\nGIT binary patch\nliteral 2\n',
+                       'DEVELOPER_OUTPUT_INVALID_DIFF'),
+        }
+        for label, (text, expected) in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(submission_cli._developer_output_rejection(text, [target]),
+                                 expected)
 
     def test_prompt_example_itself_passes_the_validator(self):
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32, 'pm_session_id': 'pm-x',

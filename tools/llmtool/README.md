@@ -714,6 +714,18 @@ For `task delegate --provider codex`, llmtool resolves the explicitly configured
 `DEVELOPER_UNAVAILABLE` with `DEVELOPER_PROFILE_UNAVAILABLE`. The Codex CLI provider accepts the
 same four optional `reasoning_effort` values described above.
 
+Company-gw and Codex text proposals receive a small conservative normalization
+before the unchanged strict unified-diff and write-scope checks: one outer
+Markdown diff fence can be removed, a missing `diff --git` line can be restored
+when the old/new paths match, bare blank hunk lines become context lines, and
+hunk counts are recalculated from the body. The accepted Task result records
+only fixed normalization tokens. Mode changes, renames, binary patches,
+multiple fences, mixed prose, and out-of-scope paths are not normalized into
+acceptance. Any rejected output is stored only in the owner-private task state
+directory as a redacted, 64 KiB-bounded diagnostic file; the Task record keeps
+its relative reference and SHA-256, never the rejected text. The CLI does not
+print the capture or include it in evidence packets.
+
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
 binds the actual uncommitted diff to the Task and Run, and runs only bounded tests
