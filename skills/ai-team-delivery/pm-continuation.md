@@ -65,7 +65,9 @@ Record every state transition on the Task's PR or tracking Issue, or in the llmt
 - the evidence, such as an exact SHA, a run ID or a check;
 - the next responsible Agent.
 
-When the monitor needs it, begin the GitHub post with whole-line `<!-- activity: type=… actor=… target=… status=… -->` markers. The [monitor source](../../scripts/llmtool_monitor.py) defines the marker format.
+For every review conclusion (including a rereview), publish a **new** GitHub comment on the Task's PR or tracking Issue. Begin the comment with the monitor-recognized, whole-line `<!-- activity: type=review_verdict actor=… target=… status=… -->` marker(s), using permitted field values. The **first line after those marker(s)** must be `Verdict: PASS | Version: vN | HEAD: <full-commit-sha>`, `Verdict: FAIL | Version: vN | HEAD: <full-commit-sha>`, or `Verdict: BLOCKED | Version: vN | HEAD: <full-commit-sha>`. Increment `vN` each review round, bind `HEAD` to the exact reviewed revision, and identify formal versus advisory review in the body; **never edit or replace an older verdict comment**.
+
+For other GitHub activity posts, begin the post with whole-line `<!-- activity: type=… actor=… target=… status=… -->` markers when the monitor needs them. The [monitor source](../../scripts/llmtool_monitor.py) defines allowed marker values: for a `BLOCKED` review verdict, its current `review_verdict` marker supports `status=UNKNOWN` (not `status=BLOCKED`); the visible verdict line still reads `Verdict: BLOCKED`.
 
 **Publishing a GitHub comment is not a wake-up.** A dispatch is delivered only when an observed receipt exists: the Worker run, an ACK or the target Session actually starting. Without one, record the dispatch as `DISPATCHED` with delivery `UNKNOWN`. Never record it as delivered or as started.
 
