@@ -2705,7 +2705,8 @@ def claude_rows(now: float, root=None,
         rows.append(OfficeRow(f"claude {role}（{mode}）" if role else f"claude {mode}",
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
-                              task=task, evidence="claude 紀錄", cli=first == "cli", sid=sid[:8]))
+                              task=task, evidence="claude 紀錄", cli=first == "cli",
+                              sid=sid[:8] if re.fullmatch(r"[0-9a-f-]{8}", sid[:8]) else ""))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -3975,7 +3976,8 @@ def office_lines(rows: list[OfficeRow], error: str | None = None,
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
     """Log lines for members whose state changed since the previous poll."""
-    new = {f"{row.name}|{row.detail}": row.state for row in rows}
+    # The short session id keeps two sessions with the same name and detail apart.
+    new = {f"{_shown(row)}|{row.detail}": row.state for row in rows}
     events = []
     for key, state in new.items():
         before = old.get(key)

@@ -1673,6 +1673,14 @@ class OfficeViewTests(unittest.TestCase):
         lines = mon.office_lines(rows)
         self.assertTrue(any(line.startswith("claude 互動 8db9ba20 ") for line in lines), lines)
         self.assertEqual(mon._codex_sid("not-a-uuid PROMPT-SECRET"), "")
+        # Two sessions alike but for their id keep separate event keys.
+        one = mon.OfficeRow("claude 互動", mon.IDLE, "fix monitor", 1.0, 30, sid="aaaaaaaa")
+        two = mon.OfficeRow("claude 互動", mon.WORKING, "fix monitor", 1.0, 30, sid="bbbbbbbb")
+        old, _ = mon.office_events({}, [one, two])
+        self.assertEqual(len(old), 2)
+        self.assertEqual(mon.office_events(old, [two, one])[1], [])
+        _, events = mon.office_events(old, [replace(one, state=mon.WORKING), two])
+        self.assertEqual(events, [("+", "claude 互動 aaaaaaaa「fix monitor」：待命 → 工作中")])
 
     def test_finished_codex_exec_run_is_done_then_leaves(self):
         meta = {"id": "E1", "cwd": str(self.task), "thread_source": "user", "originator": "codex_exec"}
@@ -1910,7 +1918,7 @@ class OfficeViewTests(unittest.TestCase):
                     encoding="utf-8")
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
                 self.assertEqual((row.state, row.detail, row.age, row.sid),
-                                 (want[0], want[1] + "｜dev-r4", want[2], "s"))
+                                 (want[0], want[1] + "｜dev-r4", want[2], ""))   # "s" is no session id
         driven = mon.Process(41, 5718, 41, "05:00", "Ss+", "Claude Code CLI", "claude",
                              "Codex APP-SERVER 5718")
         (sessions / "41.json").write_text(json.dumps(
