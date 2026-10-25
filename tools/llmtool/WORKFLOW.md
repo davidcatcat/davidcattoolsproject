@@ -1066,9 +1066,10 @@ task grant and safe-git, not adapter permission to mutate.
 The B contract currently launches a fresh isolated Claude text/no-tools child.
 A future Codex Reviewer transport would be a separate host/session/tool boundary;
 its launch provenance, restrictive tools, route, packet-export policy and
-independence would require separate review before wiring. Under current authority,
-Codex Reviewer output is advisory/pre-review only and cannot replace the fixed
-Claude formal gate. Do not select a reviewer through caller JSON or infer a
+independence would require separate review before wiring. Under current authority
+(AGENTS.md *Formal Reviewer*, 2026-10-25), a Codex Reviewer is the formal Reviewer
+only for Claude Developer and Claude PM changes, and Claude for Codex Developer
+changes; any other review is advisory. Do not select a reviewer through caller JSON or infer a
 provider grant from CLI support. This docs task performs no model launch.
 
 #### Minimal adapter: existing events and one finite worker
