@@ -1704,12 +1704,21 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         if updated != created:
             accepted = False
         key = (max(created, updated), comment['id'])
+        if verdict is None or key[0] > verdict[0][0]:
+            latest_outcomes = {accepted}
+        elif key[0] == verdict[0][0]:
+            latest_outcomes.add(accepted)
         if verdict is None or key > verdict[0]:
             verdict = (key, comment, accepted)
     review_source = None if review is None else 'PR_REVIEW'
-    # Equal timestamps across the two endpoints give no reliable order.
-    ordering_ambiguous = (verdict is not None and review is not None and
-                          verdict[0][0] == _review_time(review))
+    # Equal timestamps give no reliable order: across the two endpoints, or
+    # between an accepting and a non-accepting verdict comment (the id is
+    # creation order, not edit order).
+    ordering_ambiguous = verdict is not None and (
+        len(latest_outcomes) > 1 or
+        (review is not None and verdict[0][0] == _review_time(review)))
+    if ordering_ambiguous:
+        verdict = (verdict[0], verdict[1], False)
     if verdict is not None and (review is None or verdict[0][0] > _review_time(review)):
         review = {'state': 'VERDICT_COMMENT' if verdict[2] else 'VERDICT_COMMENT_NOT_ACCEPTED',
                   'commit_id': result_sha, 'body': verdict[1]['body'],

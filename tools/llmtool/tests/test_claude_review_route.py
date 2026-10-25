@@ -315,6 +315,26 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         result = self._collect([accept], reviews=approved)
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
 
+    def test_same_second_edited_fix_and_new_pass_fail_closed(self):
+        body = '\n'.join((self._head(), ACCEPT, self.binding))
+        # An older FIX edited in the same second a newer PASS was posted: the
+        # PASS has the larger id, but that is creation order, not edit order.
+        fix = self._comment(self._head(status='FIX'), comment_id=1,
+                            at='2026-10-25T09:00:00Z', updated='2026-10-25T10:00:00Z')
+        new_pass = self._comment(body, comment_id=2, at='2026-10-25T10:00:00Z')
+        for comments in ([fix, new_pass], [new_pass, fix]):
+            with self.subTest(order=[c['id'] for c in comments]):
+                result = self._collect(comments)
+                self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+                self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        # Same-second verdicts with the same outcome keep the id order.
+        twin = self._comment(body, comment_id=3, at='2026-10-25T10:00:00Z')
+        self.assertEqual(self._collect([new_pass, twin])['missing_gates'], [])
+        other_fix = self._comment(self._head(status='FIX'), comment_id=4,
+                                  at='2026-10-25T10:00:00Z')
+        result = self._collect([fix, other_fix])
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+
     def test_shared_login_comment_is_accepted_only_through_a_distinct_d6_reviewer(self):
         # Documents the limitation: any agent using the shared account can post
         # this exact comment. The only control is the D6 Reviewer record.
