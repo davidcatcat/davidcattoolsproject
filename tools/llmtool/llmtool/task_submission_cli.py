@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -18,12 +20,14 @@ from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, TaskStoreConflict, new_id
+from . import active_pm_inbox
 from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
+from .developer_output_normalize import normalize_developer_output
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
@@ -68,6 +72,15 @@ _EXECUTOR_RESULT_SYSTEM = (
     'or provider authority. Return one raw JSON object with schema_version=1, '
     'decision, and summary; no prose outside the object.'
 )
+_DIRECT_RESULT_SYSTEM = (
+    'You are the original llmtool PM, receiving a new ephemeral continuation call. '
+    'No native session was resumed. Use only the bounded persisted original request, '
+    'your prior response/assignment, and exact Executor/test evidence. The result is '
+    'an uncommitted worktree diff: result_head is null. Independent review, PR, and CI '
+    'are NOT_STARTED. Choose exactly one: SEND_TO_REVIEW, RETURN_TO_DEVELOPER, '
+    'REASSIGN_DEVELOPER, WAIT_FOR_AUTHORIZATION, or STOP. This is recommendation only; '
+    'it grants no execution, review, Git, PR, merge, spend, or provider authority. '
+    'Return one raw JSON object with schema_version=1, decision, summary, no prose.')
 _REVIEW_RESULT_SYSTEM = (
     'You are the original llmtool PM for this Task. Receive only the bounded, '
     'source-bound Reviewer receipt supplied below. The receipt is not permission '
@@ -305,6 +318,98 @@ def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
     }
 
 
+def _active_pm_runtime(task):
+    """True when the Task's PM is the live runtime recorded by record-pm.
+
+    Such a PM has no provider profile to call back. Its evidence is persisted
+    as PM_EVIDENCE_READY for the runtime to read through ``task show``.
+    """
+    provenance = task.get('pm_provenance')
+    return (type(provenance) is dict and
+            provenance.get('source') == 'ACTIVE_PM_RUNTIME' and
+            provenance.get('provider_invoked') is False and
+            task.get('backend_session_semantics') == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
+
+
+def _pm_assignment_packet(task):
+    assignment = task['pm_assignment']
+    return None if assignment is None else {
+        'route': assignment['route'], 'risk': assignment['risk'],
+        'goal': assignment['goal'], 'acceptance': assignment['acceptance']}
+
+
+def _completion_packet(task, evidence):
+    """Bounded completion summary for the original PM; never code/diff/output."""
+    packet = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
+        'task_request_sha256': task['request_sha256'],
+        'pm_assignment': _pm_assignment_packet(task),
+        'developer': evidence['developer'], 'executor': evidence['executor'],
+        'source_sha': evidence['result']['source_sha'],
+        'result_head': evidence['result']['result_head'],
+        'changed_paths': evidence['result']['changed_paths'],
+        'diff_sha256': evidence['result']['diff_sha256'],
+        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
+                   'source_sha': item['source_sha'],
+                   'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'review_pr_ci': evidence['review_pr_ci'],
+    }
+    if evidence.get('execution_mode') == 'HOST_WORKER':
+        packet['host_worker_receipt'] = evidence['host_worker_receipt']
+    return packet
+
+
+def _direct_result_packet(task, developer, executor_task_id, evidence):
+    """Bounded direct-D6 result summary for the original PM."""
+    result = evidence['result']
+    return {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
+        'original_request': task['request'],
+        'original_pm_response': task['response'],
+        'pm_assignment': _pm_assignment_packet(task),
+        'developer': {'provider': developer['provider_profile'], 'model': developer['model'],
+            'session_id': developer['session_id'], 'usage': developer['usage'],
+            'native_session_id': developer['execution']['native_session_id'],
+            'usage_source': developer['execution']['usage_source']},
+        'executor': {'task_id': executor_task_id, 'identity': evidence['executor_identity'],
+            'session_ref': evidence['executor_session_ref'],
+            'native_session': evidence['executor_native_session']},
+        'source_sha': result['source_sha'], 'result_head': None,
+        'result_mode': 'UNCOMMITTED_WORKTREE',
+        'changed_paths': result['changed_paths'], 'diff_sha256': result['diff_sha256'],
+        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
+            'source_sha': item['source_sha'], 'diff_sha256': item['diff_sha256'],
+            'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'review_pr_ci': evidence['review_pr_ci'],
+    }
+
+
+def _active_pm_handoff(record):
+    """Rebuild, from persisted evidence, exactly what a provider PM would receive."""
+    if record.get('schema_version') != 2 or not _active_pm_runtime(record):
+        return None
+    completion = record.get('completion')
+    developer = record.get('developer')
+    callback = (developer.get('direct_result_callback')
+                if type(developer) is dict else None)
+    if type(callback) is dict and callback.get('state') == 'PM_EVIDENCE_READY':
+        instructions = _DIRECT_RESULT_SYSTEM
+        packet = _direct_result_packet(record, developer, callback['executor_task_id'],
+                                       callback['evidence'])
+    elif type(completion) is dict and completion.get('state') == 'PM_EVIDENCE_READY':
+        evidence = completion['evidence']
+        instructions = (_EXECUTOR_RESULT_SYSTEM
+                        if evidence['review_pr_ci'].get('stage') == 'EXECUTOR_RESULT'
+                        else _COMPLETION_SYSTEM)
+        packet = _completion_packet(record, evidence)
+    else:
+        return None
+    return {'state': 'PM_EVIDENCE_READY', 'provider_invoked': False,
+            'instructions': instructions, 'packet': packet}
+
+
 def _print(value, stdout=None):
     rendered = json.dumps(value, ensure_ascii=True, sort_keys=True,
                           separators=(',', ':'), allow_nan=False)
@@ -343,6 +448,14 @@ def _task_view(record):
                 },
             }
     view['usage_status'] = 'UNKNOWN' if record['usage'] is None else 'REPORTED'
+    handoff = _active_pm_handoff(record)
+    if handoff is not None:
+        view['active_pm_handoff'] = handoff
+    if 'completion_events' in record:
+        view['completion_events'] = record['completion_events']
+    pm_recovery = active_pm_inbox.recovery(record)
+    if pm_recovery is not None:
+        view['pm_recovery'] = pm_recovery
     return view
 
 
@@ -354,6 +467,24 @@ def add_task_submission_parsers(actions):
         'record-pm', help='Record an active PM runtime decision without invoking a provider')
     record_pm.add_argument('--stdin-json', action='store_true', required=True,
                            help='read one bounded JSON object with request and response from stdin')
+    record_pm.add_argument('--pm-session-id',
+                           help='Claude Code session UUID of this PM; its local transcript must exist')
+    record_pm.add_argument('--pm-runtime', choices=('claude-code',),
+                           help='PM runtime that owns --pm-session-id (default claude-code)')
+    record_pm.add_argument('--pm-cwd',
+                           help='working directory of the PM session (default: current directory)')
+    inbox = actions.add_parser(
+        'inbox', help='Read unacknowledged completion events for one active PM session')
+    inbox.add_argument('--pm-session', required=True,
+                       help='Claude Code session UUID (or stored pm- session ID)')
+    inbox.add_argument('--wait', action='store_true',
+                       help='block until an event exists or the timeout passes')
+    inbox.add_argument('--timeout', type=int, default=540,
+                       help='seconds to wait with --wait (0-3600, default 540)')
+    ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
+    ack.add_argument('event_id', help='32-character event ID from task inbox')
+    ack.add_argument('--pm-session', required=True,
+                     help='Claude Code session UUID (or stored pm- session ID)')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
@@ -481,8 +612,8 @@ def _patch_paths(patch):
     return paths
 
 
-def _developer_output_rejection(value, write_paths):
-    """Classify rejected output using local checks only; never return provider text."""
+def _strict_developer_output_rejection(value, write_paths):
+    """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
@@ -506,6 +637,104 @@ def _developer_output_rejection(value, write_paths):
     if not paths.issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
     return None
+
+
+def _developer_normalized_output(value, write_paths):
+    """Preserve valid input exactly; normalize only rejected salvageable shapes."""
+    original_rejection = _strict_developer_output_rejection(value, write_paths)
+    if original_rejection is None:
+        return value, (), None
+    if original_rejection not in ('DEVELOPER_OUTPUT_INVALID_ENVELOPE',
+                                 'DEVELOPER_OUTPUT_INVALID_DIFF'):
+        return None, (), original_rejection
+    normalized, tokens = normalize_developer_output(value, write_paths)
+    if normalized == value or not tokens:
+        return None, (), original_rejection
+    if len(normalized.encode('utf-8', 'replace')) > RESPONSE_LIMIT:
+        return None, (), 'DEVELOPER_OUTPUT_TOO_LARGE'
+    if _strict_developer_output_rejection(normalized, write_paths) is not None:
+        return None, (), original_rejection
+    return normalized, tokens, None
+
+
+def _developer_output_rejection(value, write_paths, *, normalize=False):
+    """Classify output strictly unless a text-proposal route opts into salvage."""
+    if not normalize:
+        return _strict_developer_output_rejection(value, write_paths)
+    return _developer_normalized_output(value, write_paths)[2]
+
+
+_CAPTURE_SECRET_PATTERNS = (
+    re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----', re.S),
+    re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+               r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}\b'),
+    re.compile(r'\b(?:bearer|basic)\s+\S+', re.I),
+    re.compile(r'(?i)(["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+               r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)'),
+    re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'),
+    re.compile(r'\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@[^\s/]+', re.I),
+)
+
+
+def _redact_rejected_output(value):
+    """Redact recognizable credentials; conservatively replace unclassified sensitive text."""
+    if type(value) is not str:
+        return '[REDACTED_NON_TEXT_OUTPUT]\n'
+    text = value
+    for pattern in _CAPTURE_SECRET_PATTERNS:
+        text = pattern.sub('[REDACTED]', text)
+    if _emitted_sensitive(text):
+        return '[REDACTED_SENSITIVE_OUTPUT]\n'
+    return text
+
+
+def _capture_rejected_output(store, task_id, value):
+    """Persist a bounded owner-private, redacted diagnostic capture; return ref and digest."""
+    text = _redact_rejected_output(value)
+    raw = text.encode('utf-8', 'replace')
+    truncated = len(raw) > RESPONSE_LIMIT
+    if truncated:
+        marker = b'\n[TRUNCATED]\n'
+        prefix = raw[:RESPONSE_LIMIT - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
+        raw = prefix + marker
+    store._ensure_root()
+    parent = store.root / 'rejected-developer-output'
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = parent.lstat()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise LLMToolError('private rejected-output capture unavailable')
+    name = task_id + '-' + secrets.token_hex(8) + '.txt'
+    path = parent / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        raise LLMToolError('private rejected-output capture unavailable') from None
+    return {'ref': 'rejected-developer-output/' + name,
+            'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def _persist_developer_output_rejection(store, task_id, developer, error_code,
+                                        usage, value, **fields):
+    """Persist the rejection even if its optional private diagnostic capture fails."""
+    try:
+        capture = _capture_rejected_output(store, task_id, value)
+    except Exception:
+        capture = None
+    developer.pop('rejected_output_capture', None)
+    developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=error_code,
+                     usage=None if usage is None else dict(usage), **fields)
+    if capture is not None:
+        developer['rejected_output_capture'] = capture
+    return store.update(task_id, developer=developer)
 
 
 def _ignored_file_fingerprints(root):
@@ -1041,13 +1270,14 @@ def run_task_opencode_delegate(args, *, store):
             ('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames',
              snapshot.head, '--'), limit=64 * 1024)
         artifact = artifact_raw.decode('utf-8', 'strict')
-        rejection = _developer_output_rejection(artifact, write_paths)
+        rejection = _developer_output_rejection(artifact, write_paths, normalize=False)
         execution = _direct_execution(result)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact,
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
-                usage=result.usage, error_code=rejection, execution=execution)
+                execution=execution)
         else:
             developer.update(state='DEVELOPER_RESPONDED',
                 provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
@@ -1335,8 +1565,9 @@ def run_task_codex_delegate(args, *, store):
         if result.status == 'DONE' and rejection is None:
             rejection = _developer_output_rejection(artifact, write_paths)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=rejection,
-                             execution=execution, usage=result.usage)
+            developer.update(execution=execution)
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact)
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
                              execution=execution, usage=result.usage)
@@ -1551,17 +1782,16 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    rejection_code = _developer_output_rejection(result.content, write_paths)
+    artifact, normalization_tokens, rejection_code = _developer_normalized_output(
+        result.content, write_paths)
     if rejection_code is not None:
-        developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                         error_code=rejection_code,
-                         usage=None if usage is None else dict(usage))
-        saved = store.update(task['task_id'], developer=developer)
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, rejection_code, usage, result.content)
         _print(_task_view(saved))
         return 1
-    artifact = result.content
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                       artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                      normalizations=list(normalization_tokens),
                       usage=None if usage is None else dict(usage), error_code=None)
     try:
         saved = store.update(task['task_id'], developer=developer)
@@ -1651,14 +1881,28 @@ def run_task_submit(args, *, store=None, stdout=None):
 
 def run_task_record_pm(args, *, store=None, input_stream=None):
     """Persist a real active-PM decision; this path never resolves or calls a provider."""
-    del args  # The required flag is enforced by argparse; no caller text is trusted from argv.
     store = TaskStore() if store is None else store
+    native_session = getattr(args, 'pm_session_id', None)
+    runtime = getattr(args, 'pm_runtime', None)
+    cwd = getattr(args, 'pm_cwd', None)
+    session = None
+    if native_session is None:
+        if runtime is not None or cwd is not None:
+            raise LLMToolError('--pm-runtime/--pm-cwd require --pm-session-id')
+    else:
+        # The transcript must exist before anything is read or stored.
+        session = {'pm_runtime': runtime or 'claude-code',
+                   'pm_native_session_id': native_session,
+                   'pm_cwd': active_pm_inbox.observe_claude_session(
+                       native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = new_id(), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
-        task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
+        task_id, run_id,
+        'pm-' + (new_id() if session is None else session['pm_native_session_id']),
+        'active-pm-runtime', prompt,
         state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
         backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
         contract=contract,
@@ -1669,10 +1913,12 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
         pm_provenance={
             'source': 'ACTIVE_PM_RUNTIME',
             'provider_invoked': False,
-            'native_session_id_status': 'UNAVAILABLE',
+            'native_session_id_status': ('UNAVAILABLE' if session is None
+                                         else 'LOCAL_SESSION_FILE_OBSERVED'),
             'usage_status': 'UNKNOWN',
             'session_restored': False,
             'automatic_callback': False,
+            **({} if session is None else session),
         },
     )
     try:
@@ -1682,6 +1928,31 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
         raise LLMToolError('active PM outcome could not be saved; details omitted') from None
     _print(_task_view(saved))
     return 0
+
+
+def run_task_inbox(args, *, store=None, stdout=None, sleep=None):
+    """Return this PM session's unacknowledged completion events (JSON)."""
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    kwargs = {} if sleep is None else {'sleep': sleep}
+    _print(active_pm_inbox.wait_inbox(store, key, wait=args.wait, timeout=args.timeout,
+                                      **kwargs), stdout=stdout)
+    return 0
+
+
+def run_task_ack(args, *, store=None, stdout=None):
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    _print(active_pm_inbox.ack(store, args.event_id, key), stdout=stdout)
+    return 0
+
+
+def _record_ready_event(store, task_id):
+    """Best effort: `task inbox` reconciles a READY Task whose event is missing."""
+    try:
+        active_pm_inbox.record_ready_event(store, task_id)
+    except LLMToolError:
+        pass
 
 
 def run_task_show(args, *, store=None, stdout=None):
@@ -1706,7 +1977,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     direct_callback = (task.get('developer') or {}).get('direct_result_callback')
     if (executor_result_only and type(direct_callback) is dict and
             direct_callback.get('executor_task_id') == args.executor_task and
-            direct_callback.get('state') == 'WAITING_PM' and
+            direct_callback.get('state') in ('WAITING_PM', 'PM_EVIDENCE_READY') and
             direct_callback.get('pm_dispatch') == 'NOT_STARTED' and
             direct_callback.get('evidence', {}).get('verification_state') == 'READY'):
         # Public recovery route after a pre-call PM configuration/setup failure.
@@ -1726,7 +1997,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
             task.get('developer') is None or completion is None or
             completion['executor_task_id'] != args.executor_task or
-            task.get('pm_route_binding') is None):
+            (task.get('pm_route_binding') is None and not _active_pm_runtime(task))):
         raise LLMToolError('task completion binding is unavailable')
     if completion['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED'):
         raise LLMToolError('original PM request already claimed or completed; replay refused')
@@ -1860,30 +2131,24 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
 
     # Never export code/diff/output. The PM receives only screened identifiers,
     # statuses and hashes needed to reason about this exact Task/Run.
-    packet = {
-        'task_id': task['task_id'], 'run_id': task['run_id'],
-        'task_contract_digest': task['task_binding']['contract_digest'],
-        'task_request_sha256': task['request_sha256'],
-        'pm_assignment': (None if task['pm_assignment'] is None else {
-            'route': task['pm_assignment']['route'],
-            'risk': task['pm_assignment']['risk'],
-            'goal': task['pm_assignment']['goal'],
-            'acceptance': task['pm_assignment']['acceptance'],
-        }),
-        'developer': evidence['developer'], 'executor': evidence['executor'],
-        'source_sha': evidence['result']['source_sha'],
-        'result_head': evidence['result']['result_head'],
-        'changed_paths': evidence['result']['changed_paths'],
-        'diff_sha256': evidence['result']['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-                   'source_sha': item['source_sha'],
-                   'output_sha256': item['output_sha256']} for item in evidence['tests']],
-        'review_pr_ci': evidence['review_pr_ci'],
-    }
-    if evidence['execution_mode'] == 'HOST_WORKER':
-        packet['host_worker_receipt'] = evidence['host_worker_receipt']
+    packet = _completion_packet(task, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     _screen_text(content, 16 * 1024)
+    if _active_pm_runtime(task):
+        # The PM is the live runtime that recorded this Task (record-pm). There is
+        # no provider profile to call, and none is resolved: persist the verified
+        # evidence for that runtime to read with `task show` (#352 G6).
+        ready = {**completion, 'state': 'PM_EVIDENCE_READY',
+                 'reviewer_task_id': args.reviewer_task,
+                 'evidence': evidence, 'missing_gates': [],
+                 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                 'pm_recommendation': None, 'pm_usage': None,
+                 'pm_error_code': None}
+        store.compare_and_update(task['task_id'],
+            expected={'completion': completion}, completion=ready)
+        _record_ready_event(store, task['task_id'])
+        _print(_task_view(store.get(task['task_id'])))
+        return 0
     before_claim = {**completion, 'state': 'PM_DISPATCHING',
                     'reviewer_task_id': args.reviewer_task,
                     'evidence': evidence, 'missing_gates': [],
@@ -2428,7 +2693,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
             developer.get('artifact') is None or developer.get('execution') is None or
             developer['execution'].get('status') not in ('SUCCEEDED', 'DONE') or
             developer['execution'].get('process_exit_code') != 0 or
-            task.get('pm_route_binding') is None):
+            (task.get('pm_route_binding') is None and not _active_pm_runtime(task))):
         raise LLMToolError('direct Executor result callback is unavailable')
     task_completion.validate_task_binding(
         stored_binding=task['task_binding'], task_id=task['task_id'],
@@ -2570,7 +2835,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         developer = task['developer']
         callback = developer['direct_result_callback']
         evidence = callback['evidence']
-    elif callback['state'] == 'WAITING_PM' and evidence.get('verification_state') == 'READY':
+    elif (callback['state'] in ('WAITING_PM', 'PM_EVIDENCE_READY') and
+          evidence.get('verification_state') == 'READY'):
         # A configuration failure may be retried, but tests and provider calls
         # are never replayed. Revalidate the same live diff and file snapshot.
         try:
@@ -2596,32 +2862,21 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         raise LLMToolError('direct Executor callback is not in a retryable state')
 
     result = evidence['result']
-    packet = {
-        'task_id': task['task_id'], 'run_id': task['run_id'],
-        'task_contract_digest': task['task_binding']['contract_digest'],
-        'original_request': task['request'],
-        'original_pm_response': task['response'],
-        'pm_assignment': (None if task['pm_assignment'] is None else {
-            'route': task['pm_assignment']['route'], 'risk': task['pm_assignment']['risk'],
-            'goal': task['pm_assignment']['goal'],
-            'acceptance': task['pm_assignment']['acceptance']}),
-        'developer': {'provider': developer['provider_profile'], 'model': developer['model'],
-            'session_id': developer['session_id'], 'usage': developer['usage'],
-            'native_session_id': developer['execution']['native_session_id'],
-            'usage_source': developer['execution']['usage_source']},
-        'executor': {'task_id': executor_task_id, 'identity': evidence['executor_identity'],
-            'session_ref': evidence['executor_session_ref'],
-            'native_session': evidence['executor_native_session']},
-        'source_sha': result['source_sha'], 'result_head': None,
-        'result_mode': 'UNCOMMITTED_WORKTREE',
-        'changed_paths': result['changed_paths'], 'diff_sha256': result['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-            'source_sha': item['source_sha'], 'diff_sha256': item['diff_sha256'],
-            'output_sha256': item['output_sha256']} for item in evidence['tests']],
-        'review_pr_ci': evidence['review_pr_ci'],
-    }
+    packet = _direct_result_packet(task, developer, executor_task_id, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     _screen_text(content, 64 * 1024)
+    if _active_pm_runtime(task):
+        # No provider profile exists for a live-runtime PM (#352 G6): keep the
+        # verified result durable for `task show` and never resolve a profile.
+        ready = {**callback, 'state': 'PM_EVIDENCE_READY',
+                 'pm_dispatch': 'NOT_STARTED', 'pm_error_code': None}
+        try:
+            _persist_direct_callback(store, task, developer, ready)
+        except Exception:
+            raise LLMToolError('verified direct result could not be persisted') from None
+        _record_ready_event(store, task_id)
+        _print(_task_view(store.get(task_id)))
+        return 0
     before_claim = {**callback, 'state': 'PM_DISPATCHING',
                     'pm_dispatch': 'CLAIMED', 'pm_error_code': None}
     try:
@@ -2674,18 +2929,9 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         _persist_direct_callback_drift(store, task, developer, before_claim,
                                        'WORKTREE_CHANGED_BEFORE_PM_CALL')
         return 1
-    system = (
-        'You are the original llmtool PM, receiving a new ephemeral continuation call. '
-        'No native session was resumed. Use only the bounded persisted original request, '
-        'your prior response/assignment, and exact Executor/test evidence. The result is '
-        'an uncommitted worktree diff: result_head is null. Independent review, PR, and CI '
-        'are NOT_STARTED. Choose exactly one: SEND_TO_REVIEW, RETURN_TO_DEVELOPER, '
-        'REASSIGN_DEVELOPER, WAIT_FOR_AUTHORIZATION, or STOP. This is recommendation only; '
-        'it grants no execution, review, Git, PR, merge, spend, or provider authority. '
-        'Return one raw JSON object with schema_version=1, decision, summary, no prose.')
     try:
         reply = client.complete([
-            {'role': 'system', 'content': system},
+            {'role': 'system', 'content': _DIRECT_RESULT_SYSTEM},
             {'role': 'user', 'content': content},
         ])
     except (KeyboardInterrupt, CLIHostTermination) as exc:
