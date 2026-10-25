@@ -449,6 +449,8 @@ class Monitor:
                                     + (f": {last.name} {stage_state(last)}" if last else ": not started")))
         self.tasks, self.task_map = tasks, {t.directory: t for t in tasks}
         self.one_shot, finished, ended = track_one_shot(self.one_shot, result.processes, time.time())
+        if self.github is not None:
+            self.github.want_ci = any(p.role == "Actions runner" for p in result.processes)
         new += [(stamp, "i", text) for text in ended]
         if time.monotonic() >= self.office_due:
             # Session scans, tails, sqlite and AGY lookups are the costly part of a
@@ -461,6 +463,7 @@ class Monitor:
             try:
                 office = office_rows(result.processes, finished_runs=finished,
                                      verdicts=self.github.verdicts if self.github else None,
+                                     ci=self.github.ci_runs if self.github else None,
                                      runner_root=RUNNER_ROOT)
             except Exception as exc:  # never break process monitoring, but never show stale rows
                 message = type(exc).__name__
@@ -1175,6 +1178,8 @@ class GitHubSource:
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
+        self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
+        self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.status = "GitHub：尚未讀取"
         self.fetched = None   # monotonic time of the last attempt
 
@@ -1249,6 +1254,11 @@ class GitHubSource:
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
+            if self.want_ci:   # optional: a failure only hides the CI names
+                try:
+                    self.ci_runs = ci_runs(self._get(f"repos/{self.repo}/actions/runs?per_page=30"))
+                except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+                    self.ci_runs = None
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
@@ -2241,6 +2251,30 @@ def forget_reviews(paths) -> None:
 COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 
 
+CI_ACTIVE = ("in_progress", "queued", "waiting", "pending", "requested")
+
+
+def ci_runs(payload) -> list:
+    """Workflow runs not finished yet, oldest first: (status, text, started).
+    The text says which workflow and what it tests (PR and head, or branch)."""
+    found = []
+    for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []:
+        if type(run) is not dict or run.get("status") not in CI_ACTIVE:
+            continue
+        sha = str(run.get("head_sha") or "")[:7]
+        prs = [pr.get("number") for pr in run.get("pull_requests") or [] if type(pr) is dict]
+        where = (f"PR #{prs[0]}" if prs and type(prs[0]) is int
+                 else str(run.get("head_branch") or "?")[:40])
+        name = str(run.get("name") or "?")[:40]
+        try:
+            started = datetime.strptime(str(run.get("run_started_at") or run.get("created_at")),
+                                        "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            started = None
+        found.append((run["status"], f"{name}（{where} @{sha}）", started))
+    return sorted(found, key=lambda run: run[2] or 0)
+
+
 def review_verdicts(comments) -> dict:
     """{pr: [(time, verdict, ids)]} from verdicts trusted accounts posted on
     PRs: a verdict line, the 7-character prefixes of every commit-like id the
@@ -2797,7 +2831,8 @@ def _runner_log(root: str) -> list:
 
 
 def runner_rows(processes: list[Process], now: float, root: str | None = None,
-                cwd_of=process_cwd, isolation=process_isolation) -> list[OfficeRow]:
+                cwd_of=process_cwd, isolation=process_isolation,
+                ci: list | None = None) -> list[OfficeRow]:
     """The self-hosted GitHub Actions runner (Issue #99): running or not, kept
     apart from this account or not, its current or last job, restarts and
     where its logs are. A stopped runner is looked for only in `root`; nothing
@@ -2832,19 +2867,27 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
         if worker is not None:   # the job process is the evidence; the log only names it
             state = WORKING
             ran = _elapsed_seconds(worker.elapsed)
+            running = [text for status, text, _ in ci or [] if status == "in_progress"]
             minutes = f"（{max(1, int(ran // 60))} 分鐘）" if ran is not None else ""
-            notes.insert(0, f"執行中：{jobs[-1][1]}{minutes}" if jobs else f"執行中{minutes}（看不到工作名稱）")
+            name = running[0] if running else jobs[-1][1] if jobs else ""
+            notes.insert(0, f"執行中：{name}{minutes}" if name else f"執行中{minutes}（看不到工作名稱）")
         else:
             state = IDLE
             notes.insert(0, "閒置，等工作")
         if age is not None and age >= 60:
             notes.append(f"已開 {_ago(age)[:-1]}")
+        if worker is not None and ran is not None:
+            age = ran   # the row's time is this job's, not the runner's uptime
     busy = state == WORKING
     if alert and listener is not None:
         state = ATTENTION   # like 公司 gw: a row with a problem never looks idle
     if ends and not busy:
         when, name, result = ends[-1]
         notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
+    waiting = [text for status, text, _ in ci or [] if status != "in_progress"]
+    if waiting:
+        notes.append(f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
+                     + ("…" if len(waiting) > 3 else ""))
     if starts > 1:
         notes.append(f"近 24 小時啟動 {starts} 次")
     logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
@@ -3255,7 +3298,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 llmtool_tasks: str | None = None,
                 finished_runs: list | None = None,
                 verdicts: dict | None = None,
-                runner_root: str | None = None) -> list[OfficeRow]:
+                runner_root: str | None = None, ci: list | None = None) -> list[OfficeRow]:
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     sessions = os.path.join(os.path.dirname(
@@ -3304,7 +3347,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                               f"由 Codex 啟動，已結束（跑了約 {max(1, int(duration))} 秒，"
                               "看不出在做什麼）", since_end, 30, kind="subagent", evidence="程序"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
-    rows += agy + runner_rows(processes, now, runner_root, cwd_of)
+    rows += agy + runner_rows(processes, now, runner_root, cwd_of, ci=ci)
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
