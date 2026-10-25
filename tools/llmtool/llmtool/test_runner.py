@@ -223,15 +223,21 @@ def run_plan(base_sha, *, cwd=None, dependency_tests=(), log_dir=None,
         }
     observed_test_commands = [item for item in execution
                               if item["kind"] in ("L1", "L2", "L3")]
-    if observed_test_commands and any(
-            item["counts"]["tests_run"] == 0 for item in observed_test_commands):
+    # A command that reported no observed test cannot prove the selected tests
+    # ran, so the plan must not end in a success exit code either. L0 static
+    # checks are not test commands and never trigger this on their own.
+    no_tests_observed = bool(observed_test_commands) and any(
+        item["counts"]["tests_run"] == 0 for item in observed_test_commands)
+    if no_tests_observed:
         summary["reported_status"] = "NO_TESTS_OBSERVED"
     worktree_clean = not _git(root, "status", "--porcelain", "--untracked-files=all").strip()
     return {"plan": plan, "summary": summary, "execution": execution,
             "source_binding": ("HEAD_COMMIT" if worktree_clean else
                                "HEAD_PLUS_UNCOMMITTED_WORKTREE_CONTENT_UNBOUND"),
             "log_directory": str(run_dir), "head_sha": head,
-            "exit_status": (0 if all(item["exit_status"] == 0 for item in execution) else 1)}
+            "exit_status": (0 if not no_tests_observed
+                            and all(item["exit_status"] == 0 for item in execution)
+                            else 1)}
 
 
 def main(argv=None):
