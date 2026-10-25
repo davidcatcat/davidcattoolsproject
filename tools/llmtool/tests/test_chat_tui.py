@@ -414,6 +414,71 @@ class WidgetTests(Base):
                             '\x1b[A', lambda ui: self.assertEqual(ui.input.text, '/status')])
         self.factory.assert_not_called()
 
+    def test_slash_picker_lists_only_existing_commands(self):
+        labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
+        self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
+                                  '/exit', '/quit', '/task submit', '/task show'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
+        self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
+        self.assertEqual(chat_tui.slash_matches('hello'), [])
+        self.assertEqual(chat_tui.slash_matches('/nope'), [])
+        self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
+
+    def test_picker_completes_draft_without_executing(self):
+        def open_menu(ui):
+            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill'])
+        ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/skill '),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertNotIn('> /skill', ui.conversation.text)])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /skill', ui.conversation.text)
+
+    def test_picker_task_completion_and_escape_dismiss(self):
+        ui, _ = self.drive(['/task su', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
+                            lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
+        async def escape_timeout(ui):
+            # A lone Esc waits ttimeoutlen (0.5s, input parser) then timeoutlen (0.4s) = ~0.9s.
+            await asyncio.sleep(1.3)
+        ui, _ = self.drive(['/he', '\x1b', escape_timeout,
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertEqual(ui.input.text, '/he')])
+
+    def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
+        def open_menu(ui):
+            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill'])
+        ui, _ = self.drive(['/s', open_menu, '\x1b\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/s\n'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /s', ui.conversation.text)
+        self.assertNotIn('unknown chat command', ui.conversation.text.lower())
+        self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+        self.assertEqual(chat_tui.ESC_SEQUENCE_TIMEOUT, 0.4)
+        # Esc and Enter delivered as separate chunks within the timeout behave the same.
+        ui, _ = self.drive(['/s', '\x1b', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/s\n'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /s', ui.conversation.text)
+
+    def test_help_documents_the_slash_picker(self):
+        self.assertIn('Esc closes the picker', chat_tui.KEY_HELP)
+
+    def test_picker_enter_on_complete_command_runs_it_and_chat_unaffected(self):
+        ui, _ = self.drive(['/status\r', '/zzz\r', 'plain chat\r', self.idle])
+        self.assertIn('connectivity: not probed', ui.conversation.text)
+        self.assertIn('unknown chat command', ui.conversation.text.lower())
+        self.assertEqual(self.client.complete.call_count, 1)
+
+    def test_picker_closed_for_recalled_history_and_multiline(self):
+        ui, _ = self.drive(['/status\r', '/help\r', '\x1b[A',
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            '\x1b[A', lambda ui: self.assertEqual(ui.input.text, '/status')])
+        ui, _ = self.drive(['/s\n',
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+
     def test_help_toggle_and_help_command_are_offline(self):
         def help_shown(ui):
             self.assertTrue(ui.show_help)

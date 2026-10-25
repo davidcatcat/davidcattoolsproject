@@ -24,6 +24,8 @@ KEY_HELP = """Keys
   Enter                 Send message (or run /command)
   Ctrl-J, Esc Enter     Insert newline (multiline message); paste keeps newlines
   Up/Down               Move in input; on first/last line recall earlier inputs
+  /                     Type / for a command picker: Up/Down choose, Enter completes the draft
+                        (a second Enter runs it), Esc closes the picker
   Tab, Shift-Tab        Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
   F1                    Toggle this help (shown in place of the conversation)
@@ -33,6 +35,34 @@ A request in progress cannot be cancelled; exit waits for it to finish or time o
 Formal task commands (separate from ordinary chat)
   /task submit --provider PROFILE REQUEST
   /task show TASK_ID"""
+
+# Existing commands only: (label shown, text a completion puts in the draft, summary).
+# Picking one edits the input draft; it never runs the command.
+SLASH_COMMANDS = (
+    ("/help", "/help", "Show commands"),
+    ("/status", "/status", "Show provider, model, skill, turns and status"),
+    ("/provider", "/provider ", "List profiles or switch provider"),
+    ("/skill", "/skill ", "List skills, select one, or clear"),
+    ("/clear", "/clear", "Clear conversation"),
+    ("/history", "/history", "Show user/assistant turns"),
+    ("/exit", "/exit", "Exit"),
+    ("/quit", "/quit", "Exit"),
+    ("/task submit", "/task submit --provider ", "Submit a task: --provider PROFILE REQUEST"),
+    ("/task show", "/task show ", "Show a task by TASK_ID"),
+)
+MENU_LIMIT = 5
+ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
+
+
+def slash_matches(text):
+    """Commands matching a one-line slash draft: prefix matches first, then substring."""
+    if "\n" in text or not text.startswith("/"):
+        return []
+    query = text.lower()
+    prefix = [c for c in SLASH_COMMANDS if c[0].startswith(query)]
+    inside = [c for c in SLASH_COMMANDS if c not in prefix and len(query) > 2 and query[1:] in c[0]]
+    return (prefix + inside)[:MENU_LIMIT]
+
 
 FAILED = "llmtool: chat terminal UI failed; details omitted"
 _TOOLKIT_MODULES = (
@@ -129,6 +159,8 @@ class ChatTUI:
         self.show_help = False
         self.worker = None
         self.worker_kind = None
+        self.menu_items = []
+        self.menu_index = 0
         self._loop = None
         self._received_signal = None
         self.conversation = TextArea(
@@ -146,12 +178,22 @@ class ChatTUI:
                              wrap_lines=True, style="class:help",
                              height=Dimension(min=1, weight=1))
         showing_help = Condition(lambda: self.show_help)
+        menu_active = Condition(lambda: bool(self.menu_items))
+        # Opened only by typed/pasted insertion, so recalled history never opens it
+        # and Up/Down keep recalling input history when the menu is closed.
+        self.input.buffer.on_text_insert += lambda _buffer: self._refresh_menu(True)
+        self.input.buffer.on_text_changed += lambda _buffer: self._refresh_menu(False)
+        self.menu_window = Window(
+            FormattedTextControl(self.menu_text), style="class:menu",
+            height=lambda: Dimension.exact(max(1, len(self.menu_items))), wrap_lines=False)
         self.rule_window = Window(height=1, char="-", style="class:rule")
         self.status_window = Window(FormattedTextControl(self.status_text), style="class:status",
                                    height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation, filter=~showing_help),
                        ConditionalContainer(self.help, filter=showing_help),
-                       self.rule_window, self.input, self.status_window],
+                       self.rule_window,
+                       ConditionalContainer(self.menu_window, filter=menu_active),
+                       self.input, self.status_window],
                       height=Dimension(min=1, weight=1))
 
         keys = KeyBindings()
@@ -159,7 +201,22 @@ class ChatTUI:
 
         @keys.add("enter", filter=input_focused)
         def _submit(event):
-            self.submit()
+            if not self.accept_menu():
+                self.submit()
+
+        @keys.add("up", filter=input_focused & menu_active, eager=True)
+        def _menu_up(event):
+            self.move_menu(-1)
+
+        @keys.add("down", filter=input_focused & menu_active, eager=True)
+        def _menu_down(event):
+            self.move_menu(1)
+
+        # Not eager: an eager lone Esc would fire before Esc Enter (newline) is recognised,
+        # closing the picker and letting the Enter submit. Lone Esc fires after the timeout.
+        @keys.add("escape", filter=input_focused & menu_active)
+        def _menu_close(event):
+            self.close_menu()
 
         @keys.add("c-j", filter=input_focused)
         @keys.add("escape", "enter", filter=input_focused)
@@ -194,7 +251,12 @@ class ChatTUI:
         self.app = Application(
             layout=Layout(root, focused_element=self.input), key_bindings=keys, full_screen=True,
             mouse_support=False, refresh_interval=0.5, input=input, output=output,
-            style=Style.from_dict({"status": "reverse", "help": "italic", "rule": "fg:ansibrightblack"}))
+            style=Style.from_dict({"status": "reverse", "help": "italic", "rule": "fg:ansibrightblack",
+                                   "menu": "bg:ansibrightblack fg:ansiwhite",
+                                   "menu.current": "reverse"}))
+        # prompt_toolkit waits timeoutlen (1s) after a lone Esc in case Esc Enter follows;
+        # that made dismissing the picker feel stuck. Scoped to this Application only.
+        self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -240,6 +302,48 @@ class ChatTUI:
             "F1",
         ]
         return " | ".join(parts)
+
+    def menu_text(self):
+        rows = []
+        for index, (label, _fill, summary) in enumerate(self.menu_items):
+            style = "class:menu.current" if index == self.menu_index else "class:menu"
+            rows.append((style, " %-14s %s " % (label, summary)))
+            rows.append(("", "\n"))
+        return rows[:-1]
+
+    # -- slash-command picker (suggests and completes the draft; never executes) ----
+    def _refresh_menu(self, typed):
+        if not typed and not self.menu_items:
+            return
+        buffer = self.input.buffer
+        text = buffer.text
+        if buffer.cursor_position != len(text) or self.busy:
+            items = []
+        else:
+            items = slash_matches(text)
+        if items != self.menu_items:
+            self.menu_index = 0
+        self.menu_items = items
+
+    def move_menu(self, direction):
+        if self.menu_items:
+            self.menu_index = (self.menu_index + direction) % len(self.menu_items)
+
+    def close_menu(self):
+        self.menu_items = []
+        self.menu_index = 0
+
+    def accept_menu(self):
+        """Enter with the picker open: complete the draft; True if Enter was consumed."""
+        if not self.menu_items:
+            return False
+        _label, fill, _summary = self.menu_items[self.menu_index]
+        text = self.input.text
+        self.close_menu()
+        if text in (fill, fill.rstrip()):
+            return False  # Draft already is this command; Enter submits it as typed.
+        self.input.buffer.set_document(self._Document(fill, len(fill)))
+        return True
 
     def append(self, text):
         """Add untrusted text; follow new output only if the caret was at the end."""
