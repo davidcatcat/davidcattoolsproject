@@ -694,7 +694,7 @@ class GitHubActivityTests(unittest.TestCase):
         source = mon.GitHubSource("o/r", runner=fake, clock=lambda: NOW)
         source.want_ci = True
         source.refresh()
-        self.assertEqual([status for status, _, _ in source.ci_runs], ["in_progress"])
+        self.assertEqual([run[0] for run in source.ci_runs], ["in_progress"])
         self.assertEqual(fake.calls[-1][0][:4], [fake.calls[-1][0][0], "api", "-X", "GET"])
         self.assertIn("actions/runs", fake.calls[-1][0][4])
         broken = mon.GitHubSource("o/r", runner=FakeRun((0, []), (0, []), (1, b"")),
@@ -2535,6 +2535,11 @@ class OfficeViewTests(unittest.TestCase):
         sandboxed, = mon.runner_rows([listener], now, None, {30: root}.get, {30: "沙箱"}.get)
         self.assertEqual((sandboxed.state, sandboxed.alert), (mon.IDLE, ""))
         self.assertNotIn("啟動", idle.detail)
+        # A job may plant a FIFO or a link under a log name: skipped, never read.
+        os.mkfifo(os.path.join(root, "_diag", "Runner_20261025-115900-utc.log"))
+        os.symlink("/dev/zero", os.path.join(root, "_diag", "Runner_20261025-115901-utc.log"))
+        again, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
+        self.assertEqual(again.detail, idle.detail)
 
     def test_runner_restarts_unisolated_and_stopped_are_flagged(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
@@ -2587,6 +2592,61 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(rows["agy cli #2"].state, mon.IDLE)
         self.assertTrue(rows["agy cli #2"].detail.startswith("位置不明："))
         self.assertEqual(rows["agy cli #3"].state, mon.UNCHECKED)
+
+    def test_two_runners_get_a_row_each_with_their_own_job_and_one_queue(self):
+        now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
+        base = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        roots = []
+        for account in ("ghrunner", "ghrunner2"):
+            root = base / account / "actions-runner"
+            (root / "_diag").mkdir(parents=True)
+            roots.append(str(root))
+        self.enterContext(patch.object(os.path, "expanduser", return_value="/nonexistent-home"))
+        one = mon.Process(30, 1, 30, "01:00:00", "S", "Actions runner", "Runner.Listener")
+        two = mon.Process(40, 1, 40, "05:00", "S", "Actions runner", "Runner.Listener")
+        job = mon.Process(41, 40, 40, "03:00", "S", "Actions runner job", "Runner.Worker")
+        ci = mon.ci_runner_names(mon.ci_runs({"workflow_runs": [
+            {"id": 7, "status": "in_progress", "name": "llmtool Mac CI", "head_sha": "a" * 40,
+             "pull_requests": [{"number": 343}], "run_started_at": "2026-10-25T11:57:00Z"},
+            {"id": 8, "status": "queued", "name": "llmtool Mac CI", "head_sha": "b" * 40,
+             "pull_requests": [{"number": 341}], "created_at": "2026-10-25T11:58:00Z"}]}),
+            lambda run: {"jobs": [{"status": "in_progress",
+                                   "runner_name": "davidproject-self-action-2"}]})
+        where = {30: roots[0], 40: roots[1]}
+        rows = mon.runner_rows([one, two, job], now, roots, where.get,
+                               {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci)
+        self.assertEqual([(r.name, r.state) for r in rows],
+                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING)])
+        self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", rows[0].detail)
+        self.assertTrue(rows[1].detail.startswith(
+            "執行中：llmtool Mac CI（PR #343 @aaaaaaa）（3 分鐘）；專用帳號 ghrunner2"), rows[1].detail)
+        self.assertNotIn("排隊", rows[1].detail)
+        self.assertTrue(rows[1].detail.endswith(f"日誌：{roots[1]}/_diag"))
+        # Runner 2 stopped: its own row says so; runner 1 is unaffected.
+        rows = mon.runner_rows([one], now, roots, where.get, {30: "專用帳號 ghrunner"}.get, ci=[])
+        self.assertEqual([(r.name, r.state) for r in rows],
+                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.STOPPED)])
+        self.assertEqual(rows[1].alert, "CI runner davidproject-self-action-2 沒在跑")
+
+    def test_cli_working_in_another_folder_gets_its_running_session(self):
+        now = self.NOW
+        task = str(self.task)
+        cli = mon.Process(40, 1, 40, "30:00", "S+", "OpenCode CLI", "opencode", "")
+        other = mon.Process(41, 1, 41, "30:00", "S+", "OpenCode CLI", "opencode", "")
+        running = (task, "Issue 271 fix", now - 10, now - 1800)   # updated after it went idle
+        done = (task, "old", now - 10, now - 10)
+        row, = mon._cli_rows([cli], [running], now, self.canonical, {40: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual(row.state, mon.WORKING)
+        self.assertTrue(row.detail.startswith("task wp-1：Issue 271 fix"), row.detail)
+        row, = mon._cli_rows([cli], [done], now, self.canonical, {40: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual(row.state, mon.IDLE)
+        # Two CLIs without their own session: which one works there is not guessed.
+        rows = mon._cli_rows([cli, other], [running], now, self.canonical,
+                             {40: self.canonical, 41: self.canonical}.get,
+                             "opencode", "OpenCode CLIENT", 50, "")
+        self.assertEqual([r.state for r in rows], [mon.IDLE, mon.IDLE])
 
     def test_each_opencode_cli_gets_its_own_row_with_place_and_state(self):
         ms = lambda age: int((self.NOW - age) * 1000)
