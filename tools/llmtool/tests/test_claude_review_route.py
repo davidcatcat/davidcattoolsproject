@@ -271,6 +271,25 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         earlier = self._comment(body, comment_id=0, at='2026-10-25T09:00:00Z')
         result = self._collect([earlier, edited])
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        # An older FIX edited after a newer PASS is ordered by its edit time,
+        # so it supersedes that PASS; also against a PR review in between.
+        fix = self._comment(self._head(status='FIX'), comment_id=1,
+                            at='2026-10-25T09:00:00Z', updated='2026-10-25T12:00:00Z')
+        newer_pass = self._comment(body, comment_id=2, at='2026-10-25T10:00:00Z')
+        for comments in ([fix, newer_pass], [newer_pass, fix]):
+            with self.subTest(order=[c['id'] for c in comments]):
+                result = self._collect(comments)
+                self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+                self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        approved = [{'state': 'APPROVED', 'commit_id': self.result_sha,
+                     'user': {'login': 'davidcatcat'}, 'submitted_at': '2026-10-25T11:00:00Z',
+                     'body': '\n'.join((ACCEPT, self.binding))}]
+        result = self._collect([fix], reviews=approved)
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        self.assertEqual(result['evidence']['review_source'], 'PR_COMMENT')
+        # An unedited later PASS still wins over the edited FIX.
+        latest_pass = self._comment(body, comment_id=3, at='2026-10-25T13:00:00Z')
+        self.assertEqual(self._collect([fix, latest_pass])['missing_gates'], [])
         # A missing or malformed edit time fails closed.
         for updated in (None, 'not-a-time'):
             with self.subTest(updated=updated):

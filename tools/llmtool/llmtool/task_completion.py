@@ -1696,11 +1696,14 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     _FORMAL_ACCEPT in lines and binding_line in lines)
         if type(comment.get('id')) is not int:
             _stop('REVIEW_EVIDENCE_INVALID')
-        key = (_review_time(comment, 'created_at'), comment['id'])
+        created = _review_time(comment, 'created_at')
+        updated = _review_time(comment, 'updated_at')
         # Verdicts are never edited; an edited one is a disposition that
-        # cannot accept, so a FIX rewritten as PASS fails closed.
-        if _review_time(comment, 'updated_at') != key[0]:
+        # cannot accept and is ordered by its last change, so it supersedes
+        # any PASS posted before that edit.
+        if updated != created:
             accepted = False
+        key = (max(created, updated), comment['id'])
         if verdict is None or key > verdict[0]:
             verdict = (key, comment, accepted)
     review_source = None if review is None else 'PR_REVIEW'
