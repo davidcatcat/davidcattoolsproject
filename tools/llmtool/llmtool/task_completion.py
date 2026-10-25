@@ -23,12 +23,12 @@ from pathlib import Path
 import re
 import secrets
 import selectors
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-import urllib.request
 from datetime import datetime, timezone
 
 from .errors import LLMToolError
@@ -54,6 +54,10 @@ _GITHUB_ACTIONS_APP_ID = 15368
 _TEST_PATH = re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z')
 _REVIEW_ID = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _REVIEW_VERDICTS = frozenset(('PASS', 'FAIL', 'BLOCKED'))
+_GH_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'
+# The leading `<!-- activity: ... -->` line every verdict post starts with.
+_VERDICT_ACTIVITY = re.compile(r'<!-- activity: (?:[^>]* )?type=review_verdict(?: [^>]*)? -->')
+_GITHUB_API_PATH = re.compile(r'(?!/)(?!.*\.\.)[A-Za-z0-9_./?=&-]{1,256}\Z')
 
 
 def _stop(code):
@@ -1417,25 +1421,61 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
 
 
 def _github_get(path):
-    url = 'https://api.github.com/repos/davidcatcat/davidcattoolsproject/' + path
-    request = urllib.request.Request(url, headers={
-        'Accept': 'application/vnd.github+json',
-        'User-Agent': 'llmtool-task-completion/1',
-        'X-GitHub-Api-Version': '2022-11-28',
-    }, method='GET')
-    # Do not forward ambient credentials or proxy credentials from this process.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=8) as response:
-            if response.status != 200:
-                _stop('GITHUB_EVIDENCE_UNAVAILABLE')
-            raw = response.read(1024 * 1024 + 1)
-    except LLMToolError:
-        raise
-    except Exception:
+    # The repository is private, so an anonymous request always gets 404. Read
+    # through the signed-in GitHub CLI: llmtool never sees its credential, and
+    # ambient token/proxy variables from this process are not forwarded.
+    if type(path) is not str or not _GITHUB_API_PATH.fullmatch(path):
         _stop('GITHUB_EVIDENCE_UNAVAILABLE')
-    if len(raw) > 1024 * 1024:
-        _stop('GITHUB_EVIDENCE_TOO_LARGE')
+    gh = shutil.which('gh', path=_GH_PATH)
+    if gh is None:
+        _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+    env = {'PATH': _GH_PATH, 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
+           'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    argv = [gh, 'api', '--method', 'GET',
+            '-H', 'Accept: application/vnd.github+json',
+            '-H', 'X-GitHub-Api-Version: 2022-11-28',
+            'repos/davidcatcat/davidcattoolsproject/' + path]
+    try:
+        process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
+            close_fds=True, start_new_session=True)
+    except OSError:
+        _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+    raw = bytearray()
+    deadline = time.monotonic() + 8
+    selector = selectors.DefaultSelector()
+    try:
+        os.set_blocking(process.stdout.fileno(), False)
+        selector.register(process.stdout, selectors.EVENT_READ)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+            for key, _ in selector.select(min(remaining, .1)):
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif len(raw) + len(chunk) > 1024 * 1024:
+                    _stop('GITHUB_EVIDENCE_TOO_LARGE')
+                else:
+                    raw.extend(chunk)
+        code = process.wait(timeout=max(0, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired):
+        _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+    finally:
+        selector.close()
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, 9)
+            except OSError:
+                process.kill()
+            process.wait()
+        process.stdout.close()
+    if code != 0:
+        _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+    raw = bytes(raw)
     try:
         return json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
                           parse_constant=lambda _: _stop('GITHUB_EVIDENCE_INVALID'))
@@ -1443,8 +1483,8 @@ def _github_get(path):
         _stop('GITHUB_EVIDENCE_INVALID')
 
 
-def _review_time(review):
-    submitted = review.get('submitted_at')
+def _review_time(review, field='submitted_at'):
+    submitted = review.get(field)
     if type(submitted) is not str:
         _stop('REVIEW_EVIDENCE_INVALID')
     try:
@@ -1604,16 +1644,50 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         if previous is None or submitted_at > previous[0]:
             latest[key] = (submitted_at, candidate)
     reviewer_login = reviewer.github_login
+    binding_line = _review_binding_line(task_id, run_id, contract_digest, result_sha)
     review = None if reviewer_login is None else latest.get(reviewer_login.casefold(), (None, None))[1]
+    # GitHub refuses APPROVE from a PR's own author, and every agent here posts
+    # as the same account. The Reviewer therefore publishes its exact-HEAD
+    # verdict as a PR conversation comment; its latest bound one is its
+    # current disposition unless a newer PR review supersedes it. A later
+    # verdict that names this HEAD without the binding line still supersedes
+    # an earlier acceptance and then fails the binding gate. The shared login
+    # proves nothing about independence; that rests only on the D6 Reviewer
+    # record (distinct agent, Session and native Session) checked below.
+    comments = _github_get(f'issues/{pr_number}/comments?per_page=100')
+    if type(comments) is not list or len(comments) >= 100 or any(
+            type(comment) is not dict for comment in comments):
+        _stop('REVIEW_EVIDENCE_INVALID')
+    verdict = None
+    for comment in comments:
+        login = (comment.get('user') or {}).get('login')
+        body = comment.get('body')
+        if (type(login) is not str or reviewer_login is None or
+                login.casefold() != reviewer_login.casefold() or type(body) is not str):
+            continue
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if (not lines or not _VERDICT_ACTIVITY.fullmatch(lines[0]) or
+                (binding_line not in lines and result_sha not in body)):
+            continue
+        if type(comment.get('id')) is not int:
+            _stop('REVIEW_EVIDENCE_INVALID')
+        key = (_review_time(comment, 'created_at'), comment['id'])
+        if verdict is None or key > verdict[0]:
+            verdict = (key, comment)
+    review_source = None if review is None else 'PR_REVIEW'
+    if verdict is not None and (review is None or verdict[0][0] > _review_time(review)):
+        review = {'state': 'VERDICT_COMMENT', 'commit_id': result_sha, 'body': verdict[1]['body'],
+                  'user': {'login': verdict[1]['user']['login']}}
+        review_source = 'PR_COMMENT'
     formal_marker = re.compile(r'(?im)^\s*FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\s*$')
     review_body = '' if review is None or type(review.get('body')) is not str else review['body']
     body_lines = {line.strip() for line in review_body.splitlines()}
-    review_binding_verified = _review_binding_line(
-        task_id, run_id, contract_digest, result_sha) in body_lines
+    review_binding_verified = binding_line in body_lines
+    accepting_states = ('APPROVED', 'VERDICT_COMMENT')
     missing = []
     if review is None:
         missing.append('FORMAL_REVIEW_MISSING')
-    elif review.get('state') != 'APPROVED' or not formal_marker.search(review_body):
+    elif review.get('state') not in accepting_states or not formal_marker.search(review_body):
         missing.append('FORMAL_REVIEW_NOT_ACCEPTED')
     if review is not None and not review_binding_verified:
         missing.append('FORMAL_REVIEW_BINDING_MISMATCH')
@@ -1653,7 +1727,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         'REVIEWER_ACTOR_D6_BINDING_MISMATCH',
         'REVIEWER_D6_HEAD_MISMATCH', 'REVIEWER_D6_HEAD_UNAVAILABLE',
     }
-    reviewer_bound = (review is not None and review.get('state') == 'APPROVED' and
+    reviewer_bound = (review is not None and review.get('state') in accepting_states and
                       bool(formal_marker.search(review_body)) and review_binding_verified and
                       not reviewer_gates.intersection(missing))
     ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
@@ -1665,6 +1739,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'review_actor': None if review is None else review['user']['login'].casefold(),
             'reviewer_github_login': None if reviewer.github_login is None else reviewer.github_login.casefold(),
             'review_commit_sha': None if review is None else review['commit_id'],
+            'review_source': review_source,
             'reviewer_d6_identity': reviewer.trusted_agent_id,
             'reviewer_task_id': reviewer_task_id,
             'reviewer_session_ref': reviewer.session_ref,

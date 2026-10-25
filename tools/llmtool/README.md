@@ -738,6 +738,26 @@ sources, not protection against malicious same-user tampering. Company proposal 
 PM-return live provider journeys still require their separately authorized runtime
 acceptance.
 
+**Formal Claude Reviewer verdict for `task complete` (Issue #352).** The repository is
+private, so `task complete` reads PR, review, comment and check data through the signed-in
+`gh` CLI (`gh api --method GET` on fixed repository paths, 8s and 1 MiB per read). llmtool
+never reads the credential, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and proxy variables
+are not forwarded. Every agent publishes as the same GitHub account and GitHub refuses
+APPROVE from a PR's own author, so the formal Reviewer may publish its verdict as a PR
+conversation comment instead of a PR review. Such a comment counts only when it is posted by
+the Reviewer D6 record's `github_login`, its first non-empty line is an
+`<!-- activity: ... type=review_verdict ... -->` marker, and it contains the binding line
+`LLMTOOL-REVIEW-BINDING v1 task=TASK run=RUN contract=DIGEST head=RESULT_HEAD`. It is
+accepted only with a line exactly `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT`. The latest
+Reviewer disposition wins: a later verdict comment that names the result HEAD without the
+binding or acceptance line, or a later PR review, supersedes an earlier acceptance. A PR
+with 100 or more conversation comments fails closed. The D6 independence, native-session,
+reviewer worktree HEAD and exact-head CI gates are unchanged. Create the separate read-only
+Reviewer worktree at the result HEAD with the optional lifecycle bindings
+`--github-login LOGIN --native-session-id SESSION_ID` (a Claude Reviewer can be started with
+`claude --session-id SESSION_ID`). One shared login is not identity proof; independence still
+rests on the distinct D6 agent, Session and native Session records.
+
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
 同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。
