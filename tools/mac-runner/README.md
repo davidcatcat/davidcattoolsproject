@@ -15,7 +15,7 @@ cannot be nested to treat jobs differently from the runner.
 
 | Part | What it does |
 | --- | --- |
-| `ghrunner` account | Own group (not `staff`, not `admin`), hidden, no shell, no password. |
+| `ghrunner` account | Own group (not `staff`, not `admin`), hidden, no shell, no password. Its home is 0750 with group `admin`, so the Owner can read the runner's logs; `_work`, `_tmp` and the credential stay ghrunner-only. |
 | Owner's home | `chmod o-rwx` (the macOS default 750), so other accounts cannot read it. |
 | `/Users/ghrunner/actions-runner` | Copy of the configured runner. Owned by root; `ghrunner` owns only `_work`, `_tmp`, `_diag` (group `admin`, so the Owner reads logs) and its own credential. |
 | `isolation/probe.sh` | Fails unless it runs as an account other than the Owner, outside `admin`/`staff`, that cannot read the Owner's home or write the runner folder, and whose packets to the LAN gateway are dropped (the pf block is in place). |
@@ -31,6 +31,23 @@ checks the probe and the admission rules.
 After installing, run the **Mac Runner Smoke Test** workflow and check the
 job log shows `runner isolation: dedicated account ghrunner` and
 `runner admission: ...`.
+
+## A second runner (`davidproject-self-action-2`, trial)
+
+    sudo bash tools/mac-runner/install.sh --account ghrunner2 \
+      --runner davidproject-self-action-2 --register
+
+The same isolation with nothing shared: its own account `ghrunner2`, folder
+`/Users/ghrunner2/actions-runner`, registration (a new one, from the
+released runner tarball verified by SHA-256 and a one-hour token from the
+Owner's `gh`), LaunchDaemon and pf anchor `com.apple/ghrunner2`. Both
+runners carry `local-mac-ci`, so GitHub gives each a job; `task_completion`
+trusts exactly these two runner names. If a registration fails after GitHub
+accepted the name, remove the offline runner in GitHub before re-running. The Mac has 8 GB of memory: keep the
+second runner only if two jobs at once finish sooner without timeouts. To
+stop it: `sudo bash tools/mac-runner/install.sh --account ghrunner2
+--runner davidproject-self-action-2 --uninstall`, then remove the offline
+runner under GitHub → Settings → Actions → Runners.
 
 ## Residual risk
 
