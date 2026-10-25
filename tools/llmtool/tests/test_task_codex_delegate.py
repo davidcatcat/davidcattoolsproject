@@ -55,6 +55,7 @@ class CodexDelegateTests(unittest.TestCase):
         self._git('config', 'user.name', 'Fixture', cwd=self.repo)
         self._git('config', 'user.email', 'fixture@example.invalid', cwd=self.repo)
         (self.repo / 'src.py').write_text('VALUE = 1\n')
+        (self.repo / '.gitignore').write_text('*.pyc\n__pycache__/\n')
         llmtool = self.repo / 'tools' / 'llmtool'
         llmtool.mkdir(parents=True)
         (llmtool / '.gitignore').write_text('*.pyc\n/.d6-bootstrap-report.json\n')
@@ -63,7 +64,7 @@ class CodexDelegateTests(unittest.TestCase):
             'tooling_sha': None, 'cache_fingerprint': 'cpython3.13-darwin-arm64-012345abcdef'}
         report_path = llmtool / '.d6-bootstrap-report.json'
         report_path.write_text('{}\n')
-        self._git('add', 'src.py', 'tools/llmtool/.gitignore', cwd=self.repo)
+        self._git('add', '.gitignore', 'src.py', 'tools/llmtool/.gitignore', cwd=self.repo)
         self._git('commit', '-m', 'fixture base', cwd=self.repo)
         self.source_sha = self._git('rev-parse', 'HEAD', cwd=self.repo)
         self._git('worktree', 'add', '-b', 'feat/codex-delegate', str(self.root),
@@ -115,7 +116,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.store.create(task)
         return task
 
-    def _fake_codex(self, *, ignored=False):
+    def _fake_codex(self, *, ignored=False, bytecode=False):
         final = {'status': 'DONE', 'summary': 'updated', 'tests': [],
                  'self_review': 'checked', 'blocked_reason': None}
         events = '\n'.join((
@@ -127,18 +128,28 @@ class CodexDelegateTests(unittest.TestCase):
                 'input_tokens': 2, 'output_tokens': 3}}), ''))
         script = self.bin / 'codex'
         source_path = str(self.root / 'src.py')
-        script_body = ('#!' + os.sys.executable + '\nfrom pathlib import Path\nimport sys\n' +
+        script_body = ('#!' + os.sys.executable + '\nfrom pathlib import Path\nimport os,sys\n' +
             'Path(' + repr(source_path) + ").write_text('VALUE = 2\\n')\n")
         if ignored:
-            ignored_path = str(self.root / 'tools' / 'llmtool' / 'unittest.pyc')
+            ignored_path = (str(ignored) if isinstance(ignored, (str, Path)) else
+                            str(self.root / 'tools' / 'llmtool' / 'unittest.pyc'))
             script_body += 'Path(' + repr(ignored_path) + ").write_bytes(b'forged-bytecode')\n"
+        if bytecode:
+            probe = "import src"
+            script_body += (
+                'import subprocess\n'
+                'env = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}\n'
+                'if any(x == \'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"\' for x in sys.argv):\n'
+                ' env["PYTHONDONTWRITEBYTECODE"] = "1"\n'
+                'subprocess.run([sys.executable, "-c", ' + repr(probe) + '], cwd=' +
+                repr(source_path.rsplit('/', 1)[0]) + ', env=env, check=True)\n')
         script_body += 'sys.stdout.write(' + repr(events) + ')\nsys.stdout.flush()\n'
         script.write_text(script_body, encoding='utf-8')
         script.chmod(0o700)
         return script
 
-    def _dispatch(self, task, *, ignored=False):
-        self._fake_codex(ignored=ignored)
+    def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None):
+        self._fake_codex(ignored=ignored, bytecode=bytecode)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
             read_path=['src.py'], write_path=['src.py'],
@@ -149,7 +160,8 @@ class CodexDelegateTests(unittest.TestCase):
             with patch.dict(os.environ, {'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}), \
                     patch('llmtool.task_submission_cli._codex_developer_profile',
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \
-                    patch('llmtool.task_submission_cli._bootstrap_registered_d6'), \
+                    patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                          side_effect=bootstrap_error), \
                     patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'), \
                     patch.object(task_completion, '_git', side_effect=self._completion_git), \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event', return_value=0) as callback:
@@ -172,6 +184,84 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
         self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_IGNORED_FILES')
+
+    def test_modified_existing_ignored_file_is_typed_output_rejection(self):
+        ignored_path = self.root / 'tools' / 'llmtool' / 'existing.pyc'
+        ignored_path.write_bytes(b'old ignored contents')
+        task = self._task()
+        result, saved, _callback = self._dispatch(task, ignored=str(ignored_path))
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_IGNORED_FILES')
+
+    def test_child_test_python_does_not_create_ignored_bytecode(self):
+        task = self._task()
+        result, saved, callback = self._dispatch(task, bytecode=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        callback.assert_called_once()
+        self.assertFalse((self.root / '__pycache__').exists())
+
+    def test_bootstrap_environment_failure_is_unavailable_and_typed(self):
+        from llmtool.opencode_direct_developer import DirectOpenCodeError
+        task = self._task()
+        result, saved, callback = self._dispatch(
+            task, bootstrap_error=DirectOpenCodeError('ENV_BOOTSTRAP_UNAVAILABLE'))
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_UNAVAILABLE')
+        callback.assert_not_called()
+
+    def test_ignored_baseline_failure_is_unavailable_before_launch(self):
+        task = self._task()
+        with patch('llmtool.task_submission_cli._ignored_file_fingerprints',
+                   side_effect=OSError('fixture inventory failure')), \
+                patch('llmtool.task_submission_cli.codex_direct_developer.run') as codex_run:
+            result, saved, callback = self._dispatch(task)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'],
+                         'CODEX_IGNORED_BASELINE_UNAVAILABLE')
+        codex_run.assert_not_called()
+        callback.assert_not_called()
+
+    def test_reviewer_native_independence_fails_closed(self):
+        from llmtool.task_submission_cli import _reviewer_native_session_independent
+        for values in (("executor", "executor", "codex"),
+                       ("codex", "executor", "codex"),
+                       ("reviewer", None, "codex"),
+                       ("reviewer", "executor", None),
+                       (None, "executor", "codex")):
+            with self.subTest(values=values):
+                self.assertFalse(_reviewer_native_session_independent(*values))
+        self.assertTrue(_reviewer_native_session_independent(
+            'reviewer', 'executor', 'codex'))
+
+    def test_host_test_gate_uses_fresh_cache_prefix_outside_worktree(self):
+        test_path = 'tools/llmtool/tests/test_codex_direct_developer.py'
+        source_sha = 'a' * 40
+        diff_sha = 'b' * 64
+        snapshot = {'diff_sha256': diff_sha, 'changed_paths': [test_path]}
+        original_popen = subprocess.Popen
+        observed = {}
+
+        def launch_child(argv, **kwargs):
+            cache_path = Path(kwargs['env']['PYTHONPYCACHEPREFIX'])
+            observed.update(argv=argv, cache_path=cache_path)
+            self.assertTrue(cache_path.is_dir())
+            self.assertNotIn(self.root, cache_path.parents)
+            self.assertEqual(list(cache_path.iterdir()), [])
+            return original_popen([os.sys.executable, '-c', "print('child ran')"], **kwargs)
+
+        with patch.object(task_completion, '_worktree_snapshot',
+                          side_effect=[snapshot, snapshot]), \
+                patch.object(task_completion.subprocess, 'Popen', side_effect=launch_child):
+            evidence = task_completion.run_bounded_worktree_tests(
+                root=self.root, source_sha=source_sha, diff_sha256=diff_sha,
+                changed_paths=[test_path], read_paths=[test_path], write_paths=[test_path])
+        self.assertTrue(any(arg == '-B' for arg in observed['argv']))
+        self.assertFalse(observed['cache_path'].exists())
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]['exit_code'], 0)
 
 
 if __name__ == '__main__':

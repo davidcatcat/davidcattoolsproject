@@ -79,6 +79,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertIn('features.remote_plugin=false', argv)
         self.assertIn('shell_environment_policy.inherit="none"', argv)
+        self.assertIn('shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"', argv)
 
     def test_blocked_final_is_recorded_as_blocked(self):
         final = dict(self.final, status='BLOCKED', blocked_reason='cannot safely edit')

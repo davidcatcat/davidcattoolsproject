@@ -508,12 +508,40 @@ def _developer_output_rejection(value, write_paths):
     return None
 
 
-def _ignored_output_rejection(root, before):
-    current = set(task_completion._git(root,
+def _ignored_file_fingerprints(root):
+    """Fingerprint bounded ignored paths so replacement and in-place writes count."""
+    entries = task_completion._git(root,
         ('ls-files', '--others', '--ignored', '--exclude-standard', '-z'),
-        limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0'))
-    current.discard(b'')
-    return 'DEVELOPER_OUTPUT_IGNORED_FILES' if current - before else None
+        limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0')
+    entries = [entry for entry in entries if entry]
+    if len(entries) > 10000:
+        raise LLMToolError('ignored-file inventory exceeds the supported bound')
+    fingerprints = {}
+    root_bytes = os.fsencode(root)
+    for entry in entries:
+        try:
+            info = os.lstat(os.path.join(root_bytes, entry))
+        except OSError:
+            # An unstable inventory cannot establish a safe baseline.
+            raise LLMToolError('ignored-file inventory is unstable') from None
+        fingerprints[entry] = (info.st_mode & 0o170000, info.st_size,
+                               info.st_mtime_ns, info.st_ino)
+    return fingerprints
+
+
+def _ignored_output_rejection(root, before):
+    current = _ignored_file_fingerprints(root)
+    return ('DEVELOPER_OUTPUT_IGNORED_FILES'
+            if any(before.get(path) != fingerprint
+                   for path, fingerprint in current.items()) or
+               any(path not in current for path in before) else None)
+
+
+def _reviewer_native_session_independent(reviewer, executor, codex):
+    return (reviewer not in (None, 'UNKNOWN') and
+            executor not in (None, 'UNKNOWN') and
+            codex not in (None, 'UNKNOWN') and
+            reviewer != executor and reviewer != codex)
 
 
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
@@ -1207,10 +1235,11 @@ def run_task_codex_delegate(args, *, store):
         except opencode_direct_developer.DirectOpenCodeError as exc:
             raise codex_direct_developer.DirectCodexError(
                 exc.direct_opencode_code) from None
-        ignored_before = set(task_completion._git(registration.root,
-            ('ls-files', '--others', '--ignored', '--exclude-standard', '-z'),
-            limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0'))
-        ignored_before.discard(b'')
+        try:
+            ignored_before = _ignored_file_fingerprints(registration.root)
+        except Exception:
+            raise codex_direct_developer.DirectCodexError(
+                'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
@@ -1795,10 +1824,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                     reviewer_native = reviewer_registration.native_session_id
                     executor_native = initial.get('executor_native_session_id')
                     codex_native = direct_execution.get('native_session_id')
-                    if (executor_native in (None, 'UNKNOWN') or
-                            codex_native in (None, 'UNKNOWN') or
-                            (reviewer_native not in (None, 'UNKNOWN') and
-                             reviewer_native in (executor_native, codex_native))):
+                    if not _reviewer_native_session_independent(
+                            reviewer_native, executor_native, codex_native):
                         github['missing_gates'] = sorted(set(
                             github['missing_gates'] +
                             ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))

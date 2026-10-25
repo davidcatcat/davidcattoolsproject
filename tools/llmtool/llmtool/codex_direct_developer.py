@@ -220,6 +220,7 @@ def _argv(executable, root, model, effort):
         'web_search="disabled"', 'features.multi_agent=false', 'features.hooks=false',
         'features.apps=false', 'features.memories=false', 'features.remote_plugin=false',
         'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
+        'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"',
         'allow_login_shell=false', 'model_reasoning_summary="none"',
         'hide_agent_reasoning=true', 'show_raw_agent_reasoning=false',
     )
@@ -244,6 +245,14 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     process = None
     lifecycle = CLIProcessLifecycle('codex-direct-developer', deadline=deadline + 5)
     lifecycle.__enter__()
+    lifecycle_closed = False
+
+    def close_lifecycle(kind=None, value=None, traceback=None):
+        nonlocal lifecycle_closed
+        if not lifecycle_closed:
+            lifecycle_closed = True
+            lifecycle.__exit__(kind, value, traceback)
+
     try:
         with tempfile.TemporaryDirectory(prefix='llmtool-codex-direct-') as tmpdir:
             os.chmod(tmpdir, 0o700)
@@ -319,23 +328,22 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                             stream.close()
                         except OSError:
                             pass
-            except BaseException:
+            except BaseException as exc:
                 # Keep TMPDIR alive until the owned child has stopped using it.
-                lifecycle.stop()
+                close_lifecycle(type(exc), exc, exc.__traceback__)
                 raise
         if process.returncode != 0:
             _fail('CODEX_EXIT_NONZERO')
         thread_id, result, usage = _result_from_events(bytes(output))
-        lifecycle.stop()
+        close_lifecycle()
         cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
-        lifecycle.__exit__(None, None, None)
         return DirectResult(result['status'], result['summary'], tuple(result['tests']),
                             result['self_review'], result['blocked_reason'], process.returncode,
                             thread_id, hashlib.sha256(output).hexdigest(),
                             max(0, int((time.monotonic() - started) * 1000)),
                             cleanup_status, usage)
     except DirectCodexError as exc:
-        lifecycle.stop()
+        close_lifecycle(type(exc), exc, exc.__traceback__)
         exc.attempted = process is not None
         exc.process_exit_code = process.returncode if process is not None else None
         exc.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
@@ -344,10 +352,9 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         exc.native_session_id = _thread_from_events(bytes(output))
         if exc.usage is None:
             exc.usage = _usage_from_events(bytes(output))
-        lifecycle.__exit__(type(exc), exc, exc.__traceback__)
         raise
     except BaseException as exc:
-        lifecycle.stop()
+        close_lifecycle(type(exc), exc, exc.__traceback__)
         try:
             exc._llmtool_direct_codex_execution = {
                 'native_session_id': _thread_from_events(bytes(output)),
@@ -358,6 +365,5 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             }
         except Exception:
             pass
-        lifecycle.__exit__(type(exc), exc, exc.__traceback__)
         raise
 
