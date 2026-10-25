@@ -464,7 +464,7 @@ class Monitor:
                 office = office_rows(result.processes, finished_runs=finished,
                                      verdicts=self.github.verdicts if self.github else None,
                                      ci=self.github.ci_runs if self.github else None,
-                                     runner_root=RUNNER_ROOT)
+                                     runner_root=runner_roots())
             except Exception as exc:  # never break process monitoring, but never show stale rows
                 message = type(exc).__name__
                 if message != self.office_error:
@@ -1256,7 +1256,9 @@ class GitHubSource:
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
             if self.want_ci:   # optional: a failure only hides the CI names
                 try:
-                    self.ci_runs = ci_runs(self._get(f"repos/{self.repo}/actions/runs?per_page=30"))
+                    self.ci_runs = ci_runner_names(
+                        ci_runs(self._get(f"repos/{self.repo}/actions/runs?per_page=30")),
+                        lambda run: self._get(f"repos/{self.repo}/actions/runs/{run}/jobs"))
                 except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
                     self.ci_runs = None
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -2255,7 +2257,8 @@ CI_ACTIVE = ("in_progress", "queued", "waiting", "pending", "requested")
 
 
 def ci_runs(payload) -> list:
-    """Workflow runs not finished yet, oldest first: (status, text, started).
+    """Workflow runs not finished yet, oldest first: (status, text, started,
+    runner, run id); runner is None until ci_runner_names() fills it in.
     The text says which workflow and what it tests (PR and head, or branch)."""
     found = []
     for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []:
@@ -2271,8 +2274,23 @@ def ci_runs(payload) -> list:
                                         "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
             started = None
-        found.append((run["status"], f"{name}（{where} @{sha}）", started))
+        found.append((run["status"], f"{name}（{where} @{sha}）", started, None, run.get("id")))
     return sorted(found, key=lambda run: run[2] or 0)
+
+
+def ci_runner_names(runs: list, jobs_of) -> list:
+    """Fill in which runner runs each running workflow (its in-progress job)."""
+    named = []
+    for status, text, started, runner, run_id in runs:
+        if status == "in_progress" and type(run_id) is int:
+            try:
+                jobs = jobs_of(run_id).get("jobs") or []
+                runner = next((job.get("runner_name") for job in jobs if type(job) is dict
+                               and job.get("status") == "in_progress"), None)
+            except (OSError, ValueError, RuntimeError, AttributeError, subprocess.SubprocessError):
+                runner = None
+        named.append((status, text, started, runner, run_id))
+    return named
 
 
 def review_verdicts(comments) -> dict:
@@ -2797,6 +2815,24 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
 # ran from the Owner's ~/git/actions-runner.
 RUNNER_ROOT = ("/Users/ghrunner/actions-runner" if os.path.isdir("/Users/ghrunner")
                else os.path.expanduser("~/git/actions-runner"))
+RUNNER_ACCOUNT = re.compile(r"ghrunner([2-9])?")   # tools/mac-runner pairing
+
+
+def runner_roots() -> list:
+    """Every installed runner: one /Users/ghrunnerN/actions-runner each, else
+    the Owner's old ~/git/actions-runner."""
+    homes = sorted(glob.glob("/Users/ghrunner*"))
+    found = [f"{home}/actions-runner" for home in homes
+             if RUNNER_ACCOUNT.fullmatch(os.path.basename(home))]
+    return found or [RUNNER_ROOT]
+
+
+def process_user(pid: int) -> str | None:
+    try:
+        return subprocess.run(["/bin/ps", "-o", "user=", "-p", str(pid)], capture_output=True,
+                              text=True, timeout=2, check=False).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
 RUNNER_LOG = re.compile(r"WRITE LINE: (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z: (.+)")
 RUNNER_RESULTS = {"Succeeded": "成功", "Failed": "失敗", "Canceled": "取消"}
 RUNNER_LOGS = re.compile(r"Runner_\d{8}-\d{6}-utc\.log")
@@ -2852,44 +2888,72 @@ def _runner_log(root: str) -> list:
     return lines
 
 
-def runner_rows(processes: list[Process], now: float, root: str | None = None,
+def runner_rows(processes: list[Process], now: float, root=None,
                 cwd_of=process_cwd, isolation=process_isolation,
-                ci: list | None = None) -> list[OfficeRow]:
-    """The self-hosted GitHub Actions runner (Issue #99): running or not, kept
-    apart from this account or not, its current or last job, restarts and
-    where its logs are. A stopped runner is looked for only in `root`; nothing
-    is shown without a running or configured runner."""
-    listener = next((p for p in processes if p.role == "Actions runner"), None)
-    root = (cwd_of(listener.pid) if listener else None) or root
-    if root is None or (listener is None and not os.path.isfile(os.path.join(root, ".runner"))):
-        return []
+                ci: list | None = None, user_of=process_user) -> list[OfficeRow]:
+    """One row per self-hosted GitHub Actions runner (Issue #99): running or
+    not, kept apart from this account or not, its current or last job,
+    restarts and where its logs are; the CI queue on the first row. `root` is
+    the folder (or list of folders) where a stopped runner is looked for."""
+    roots = [root] if isinstance(root, str) else list(root or [])
+    listeners = sorted((p for p in processes if p.role == "Actions runner"), key=lambda p: p.pid)
+    found = []   # (root, listener or None)
+    for listener in listeners:
+        user = user_of(listener.pid) or ""
+        home = f"/Users/{user}/actions-runner" if RUNNER_ACCOUNT.fullmatch(user) else None
+        place = cwd_of(listener.pid) or home or (roots[0] if len(listeners) == 1 and roots else None)
+        if place:
+            found.append((place, listener))
+    seen = {os.path.realpath(place) for place, _ in found}
+    found += [(place, None) for place in roots if os.path.realpath(place) not in seen
+              and (os.path.isfile(os.path.join(place, ".runner"))
+                   or RUNNER_ACCOUNT.fullmatch(os.path.basename(os.path.dirname(place)) or ""))]
+    found.sort(key=lambda item: item[0])
+    rows = []
+    for number, (place, listener) in enumerate(found, 1):
+        rows.append(_runner_row(place, listener, processes, now, isolation, ci or [],
+                                number, len(found), queue=number == 1))
+    return rows
+
+
+def _runner_name(place: str) -> str:
+    found = RUNNER_ACCOUNT.fullmatch(os.path.basename(os.path.dirname(place)))
+    return ("davidproject-self-action" + (f"-{found.group(1)}" if found.group(1) else "")
+            if found else "")
+
+
+def _runner_row(root, listener, processes, now, isolation, ci, number, total, queue):
     lines = _runner_log(root)
     starts = sum(text == "Listening for Jobs" and now - when < 86400 for when, text in lines)
     jobs = [(when, text[len("Running job: "):]) for when, text in lines if text.startswith("Running job: ")]
     ends = [(when, found.group(1), found.group(2)) for when, text in lines
             if (found := re.fullmatch(r"Job (.+) completed with result: (\w+)", text))]
-    notes, alert = [], ""
+    runner = _runner_name(root)
+    notes, alert, ran = [], "", None
+    label = "CI runner" + (f" {runner}" if total > 1 and runner else "")
     if listener is None:
         state, age = STOPPED, None
         notes.append("沒在跑（GitHub 上的 CI 會排隊等它）")
-        alert = "CI runner 沒在跑"
+        alert = f"{label} 沒在跑"
     else:
         age = _elapsed_seconds(listener.elapsed)
         kept = isolation(listener.pid)
         if kept == "":
             hooked = os.path.isfile(os.path.join(root, "isolation", "job-started.sh"))
-            alert = ("CI runner 用你的帳號在跑（可能是手動 ./run.sh）："
+            alert = (f"{label} 用你的帳號在跑（可能是手動 ./run.sh）："
                      + ("每個 CI 工作都會被拒" if hooked else "CI 工作沒有隔離"))
             notes.append("沒有隔離")
         elif kept is None:
             notes.append("無法確認是否隔離")
         else:
             notes.append(kept)
-        worker = next((p for p in processes if p.role == "Actions runner job"), None)
+        worker = next((p for p in processes if p.role == "Actions runner job"
+                       and p.ppid == listener.pid), None)
         if worker is not None:   # the job process is the evidence; the log only names it
             state = WORKING
             ran = _elapsed_seconds(worker.elapsed)
-            running = [text for status, text, _ in ci or [] if status == "in_progress"]
+            running = [run[1] for run in ci if run[0] == "in_progress"
+                       and (run[3] == runner or (total == 1 and run[3] is None))]
             minutes = f"（{max(1, int(ran // 60))} 分鐘）" if ran is not None else ""
             name = running[0] if running else jobs[-1][1] if jobs else ""
             notes.insert(0, f"執行中：{name}{minutes}" if name else f"執行中{minutes}（看不到工作名稱）")
@@ -2906,7 +2970,7 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
     if ends and not busy:
         when, name, result = ends[-1]
         notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
-    waiting = [text for status, text, _ in ci or [] if status != "in_progress"]
+    waiting = [run[1] for run in ci if run[0] != "in_progress"] if queue else []
     if waiting:
         notes.append(f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
                      + ("…" if len(waiting) > 3 else ""))
@@ -2916,8 +2980,9 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
     readable = os.access(logs, os.R_OK | os.X_OK)
     notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs)
                  + ("" if readable else "（這個帳號讀不到）"))
-    return [OfficeRow("mac ci runner", state, "；".join(notes), age, 80, kind="worker",
-                      evidence="程序", alert=alert)]
+    name = "mac ci runner" + (f" #{number}" if total > 1 else "")
+    return OfficeRow(name, state, "；".join(notes), age, 80 + number, kind="worker",
+                     evidence="程序", alert=alert)
 
 
 LLMTOOL_TASKS = os.path.expanduser("~/.local/state/llmtool/tasks")
