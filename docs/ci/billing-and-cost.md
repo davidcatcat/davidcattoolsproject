@@ -1,5 +1,11 @@
 # Actions Billing & Cost — 計費及節費決策
 
+## 2026-10-25 Owner 決策與止費狀態
+
+Private repository 保持不變，付費 GitHub-hosted Runner 不再使用。`llmtool CI`、`nlf CI` 與 `ai-loop helper CI` 的 GitHub workflow 狀態已設為 `disabled_manually`；最後已啟動的 [llmtool run 40113971497](https://github.com/davidcatcat/davidcattoolsproject/actions/runs/40113971497) 已取消。新的 Mac self-hosted workflow 在 Runner 隔離及正式審查前不執行 PR 程式碼。Linux Python 3.9／3.14、Windows 與停用的 nlf／ai-loop 正式 CI 均為 **NOT_RUN**。止費後的「沒有新付費執行」及實際 USD 仍須用 GitHub Runs/Jobs 與 Usage/Billing 逐筆確認；目前 USD 為 **UNKNOWN**，不能從 workflow disabled 推算為零費用。
+
+以下節費推算與保留 Matrix 的討論是 2026-10-11 的歷史決策；2026-10-25 Owner 決策已取代當時繼續使用 GitHub-hosted Matrix 的前提。
+
 > 本頁區分 Runner 用量、分鐘取整的**工程估算**與 GitHub 帳單的實際 USD 費用。以 GitHub Billing 頁面、當時的 SKU 價格和帳期為準。
 
 ## 2026-10 事件背景
