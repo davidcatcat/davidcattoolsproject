@@ -23,6 +23,8 @@
 
 ## 第一個已驗證案例
 
+2026-10-25 的 Issue #99 Mac Self-hosted Runner 遷移候選與目前 **NOT_RUN** 的平台覆蓋，見 [GitHub Actions Guide](github-actions-guide.md#issue-99-mac-遷移候選2026-10-25尚未驗收)；該候選尚未構成正式 Mac CI 或安全驗收。
+
 - [Issue #99：CI 節費與設計審查](https://github.com/davidcatcat/davidcattoolsproject/issues/99)
 - [PR #100：修復 Push/PR 重複執行與 source HEAD 驗證](https://github.com/davidcatcat/davidcattoolsproject/pull/100)
 - 合併至 main：`2cd337e082a3b152d862e16346b9e191a5570d25`（2026-10-11）。
