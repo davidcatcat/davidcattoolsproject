@@ -750,6 +750,23 @@ sources, not protection against malicious same-user tampering. Company proposal 
 PM-return live provider journeys still require their separately authorized runtime
 acceptance.
 
+Codex can use the same registered D6 direct Developer lifecycle with
+`task delegate TASK_ID --provider codex --mode direct ...`; the default
+`--mode proposal` preserves its text-proposal route. Direct mode requires the
+`codex-developer` `codex-cli` profile, uses its model and reasoning-effort setting,
+and invokes Codex CLI's own `codex exec --json` agent loop with workspace-write
+sandboxing, bounded output and a wall-clock limit. It records the CLI thread ID as
+the Developer native session, checks the resulting diff against `--write-path`,
+persists the typed execution outcome and sends a successful bounded result through
+the existing original-PM callback. Codex's requested self-review and test report
+are used during the invocation but are not retained in the durable Developer record;
+llmtool independently rechecks the D6 diff and runs its
+bounded test gate before the PM callback. BLOCKED, malformed or ambiguous results
+are retained without automatic retry.
+
+The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
+prompt scope only, and Codex may read other files available to its process.
+
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
 同時提供 positional 與 --file，或明確輸入加上 POSIX pipe/socket 當下已排入的非空資料，會在設定／provider 存取前報錯。

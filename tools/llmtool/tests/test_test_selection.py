@@ -90,6 +90,7 @@ class TestSelectionTests(unittest.TestCase):
             "tools/llmtool/llmtool/opencode_worker.py",
             "tools/llmtool/llmtool/opencode_foreground_host.py",
             "tools/llmtool/llmtool/opencode_direct_developer.py",
+            "tools/llmtool/llmtool/codex_direct_developer.py",
             "tools/llmtool/llmtool/opencode_native_credential.py",
             "tools/llmtool/llmtool/review_authority.py",
             "tools/llmtool/llmtool/review_authority_cli.py",
@@ -109,6 +110,7 @@ class TestSelectionTests(unittest.TestCase):
         for path in (
             "tools/llmtool/llmtool/test_output_excerpts.py",
             "tools/llmtool/llmtool/opencode_direct_developer.py",
+            "tools/llmtool/llmtool/codex_direct_developer.py",
         ):
             with self.subTest(path=path):
                 plan = select_test_plan([path])
