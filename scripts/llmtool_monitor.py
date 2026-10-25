@@ -1297,6 +1297,7 @@ class GitHubSource:
             view = replace(view, error=_gh_error(exc))
         else:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
+        self.ci_view = view   # the runners show now; their jobs follow below
         if self.want_ci or view.runners:
             jobs_of = lambda run: self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
             try:
