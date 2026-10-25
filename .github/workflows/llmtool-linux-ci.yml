@@ -6,11 +6,11 @@ name: llmtool Linux CI
 # persistent runners, so the two run at the same time. Each runner runs
 # under its own non-admin account with the instance metadata service blocked
 # for its service; the root-owned job-started hook on the host
-# (/opt/llmtool-ci/job-started.py) refuses any job that is not this workflow,
-# from the Owner, on this repository. The boundary step below is a second
-# check, not the only one. LINUX_CI_ENABLED is the kill switch: anything but
-# 'true' skips the jobs, and a skipped job is NOT_RUN, not PASS. Windows is
-# not covered here (NOT_RUN).
+# (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
+# not this workflow, from the Owner, on this repository. The boundary step
+# below is a second check, not the only one. LINUX_CI_ENABLED is the kill
+# switch: anything but 'true' skips the jobs, and a skipped job is NOT_RUN,
+# not PASS. Windows is not covered here (NOT_RUN).
 on:
   push:
     branches:
@@ -18,10 +18,12 @@ on:
     paths:
       - 'tools/llmtool/**'
       - '.github/workflows/llmtool-linux-ci.yml'
+      - 'tools/ec2-runner/**'
   pull_request:
     paths:
       - 'tools/llmtool/**'
       - '.github/workflows/llmtool-linux-ci.yml'
+      - 'tools/ec2-runner/**'
   workflow_dispatch:
     inputs:
       one_runner:
@@ -132,15 +134,22 @@ jobs:
             fi
           fi
       # A job-owned venv in RUNNER_TEMP; the host's Python is never changed.
+      # setuptools is pinned to meet pyproject's build requirement (>=68), so
+      # the wheel/sdist packaging test runs on both versions: 3.9's bundled
+      # setuptools is too old and 3.14's venv has none.
       - name: Install llmtool
         shell: bash
         run: |
           "/usr/bin/python$PYTHON_VERSION" -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet setuptools==80.9.0
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --requirement tools/llmtool/requirements-ci.txt
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --no-deps -e tools/llmtool
           echo "JOB_PYTHON=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
       - name: Offline canonical checks
         run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+      - name: Host admission checks
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s tools/ec2-runner -p 'test_*.py'
       - name: Working tree is clean
         shell: bash
         run: |
