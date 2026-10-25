@@ -2749,20 +2749,29 @@ def agy_rows(processes: list[Process], canonical: str, cwd_of=process_cwd,
     return rows
 
 
-RUNNER_ROOT = os.path.expanduser("~/git/actions-runner")   # tools/mac-runner default
+# tools/mac-runner installs the runner under its own account; before that it
+# ran from the Owner's ~/git/actions-runner.
+RUNNER_ROOT = ("/Users/ghrunner/actions-runner" if os.path.isdir("/Users/ghrunner")
+               else os.path.expanduser("~/git/actions-runner"))
 RUNNER_LOG = re.compile(r"WRITE LINE: (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z: (.+)")
 RUNNER_RESULTS = {"Succeeded": "成功", "Failed": "失敗", "Canceled": "取消"}
 RUNNER_LOGS = re.compile(r"Runner_\d{8}-\d{6}-utc\.log")
 
 
-def process_sandboxed(pid: int) -> bool | None:
-    """Whether macOS runs the process in a sandbox (sandbox_check); None = unknown."""
+def process_isolation(pid: int) -> str | None:
+    """How a process is kept from this account's data: "專用帳號 <name>" when
+    it runs as another account, "沙箱" inside a macOS sandbox, "" when neither;
+    None = cannot tell."""
     try:
+        out = subprocess.run(["/bin/ps", "-o", "uid=,user=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=2, check=False).stdout.split()
+        if len(out) == 2 and int(out[0]) != os.getuid():
+            return f"專用帳號 {out[1]}"
         import ctypes
         check = ctypes.CDLL("/usr/lib/libSystem.B.dylib").sandbox_check
         check.argtypes, check.restype = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int), ctypes.c_int
-        return {0: False, 1: True}.get(check(pid, None, 0))
-    except (OSError, AttributeError):
+        return {0: "", 1: "沙箱"}.get(check(pid, None, 0))
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
         return None
 
 
@@ -2788,9 +2797,9 @@ def _runner_log(root: str) -> list:
 
 
 def runner_rows(processes: list[Process], now: float, root: str | None = None,
-                cwd_of=process_cwd, sandboxed=process_sandboxed) -> list[OfficeRow]:
-    """The self-hosted GitHub Actions runner (Issue #99): running or not, inside
-    the tools/mac-runner sandbox or not, its current or last job, restarts and
+                cwd_of=process_cwd, isolation=process_isolation) -> list[OfficeRow]:
+    """The self-hosted GitHub Actions runner (Issue #99): running or not, kept
+    apart from this account or not, its current or last job, restarts and
     where its logs are. A stopped runner is looked for only in `root`; nothing
     is shown without a running or configured runner."""
     listener = next((p for p in processes if p.role == "Actions runner"), None)
@@ -2809,14 +2818,16 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
         alert = "CI runner 沒在跑"
     else:
         age = _elapsed_seconds(listener.elapsed)
-        inside = sandboxed(listener.pid)
-        if inside is False:
+        kept = isolation(listener.pid)
+        if kept == "":
             hooked = os.path.isfile(os.path.join(root, "isolation", "job-started.sh"))
-            alert = ("CI runner 不在沙箱裡（可能是手動 ./run.sh）："
+            alert = ("CI runner 用你的帳號在跑（可能是手動 ./run.sh）："
                      + ("每個 CI 工作都會被拒" if hooked else "CI 工作沒有隔離"))
-            notes.append("不在沙箱裡")
-        elif inside is None:
-            notes.append("無法確認是否在沙箱裡")
+            notes.append("沒有隔離")
+        elif kept is None:
+            notes.append("無法確認是否隔離")
+        else:
+            notes.append(kept)
         if any(p.role == "Actions runner job" for p in processes) and jobs:
             state = WORKING
             when, name = jobs[-1]
@@ -2835,7 +2846,9 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
     if starts > 1:
         notes.append(f"近 24 小時啟動 {starts} 次")
     logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
-    notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs))
+    readable = os.access(logs, os.R_OK | os.X_OK)
+    notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs)
+                 + ("" if readable else "（這個帳號讀不到）"))
     return [OfficeRow("mac ci runner", state, "；".join(notes), age, 80, kind="worker",
                       evidence="程序", alert=alert)]
 

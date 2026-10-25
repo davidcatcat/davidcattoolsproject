@@ -2474,7 +2474,7 @@ class OfficeViewTests(unittest.TestCase):
                 f"[x INFO Terminal] WRITE LINE: {when}Z: {text}\n" for when, text in lines))
         return str(root)
 
-    def test_runner_row_shows_job_sandbox_restarts_and_logs(self):
+    def test_runner_row_shows_job_isolation_restarts_and_logs(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
         root = self._runner(
             ("Runner_20261024-090000-utc.log", [("2026-10-24 09:00:05", "Listening for Jobs")]),
@@ -2486,35 +2486,37 @@ class OfficeViewTests(unittest.TestCase):
             ("Worker_20261025-111000-utc.log", [("2026-10-25 11:10:00", "Running job: other")]))
         listener = mon.Process(30, 1, 30, "01:00:00", "S", "Actions runner", "Runner.Listener")
         worker = mon.Process(31, 30, 30, "10:00", "S", "Actions runner job", "Runner.Worker")
-        inside = {30: True}.get
+        inside = {30: "專用帳號 ghrunner"}.get
         busy, = mon.runner_rows([listener, worker], now, None, {30: root}.get, inside)
         self.assertEqual((busy.name, busy.state, busy.age, busy.alert),
                          ("mac ci runner", mon.WORKING, 3600.0, ""))
-        self.assertEqual(busy.detail, f"執行中：Mac Runner Connectivity（10 分鐘）；已開 1 小時；"
-                                      f"日誌：{root}/_diag")
+        self.assertEqual(busy.detail, f"執行中：Mac Runner Connectivity（10 分鐘）；專用帳號 ghrunner；"
+                                      f"已開 1 小時；日誌：{root}/_diag")
         idle, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
         self.assertEqual(idle.state, mon.IDLE)
         # A start more than a day old is not counted; the Worker log is not a runner log.
-        self.assertEqual(idle.detail, "閒置，等工作；已開 1 小時；上一個工作：check (macOS 3.13) 失敗"
-                                      f"（40 分鐘前）；日誌：{root}/_diag")
+        self.assertEqual(idle.detail, "閒置，等工作；專用帳號 ghrunner；已開 1 小時；上一個工作："
+                                      f"check (macOS 3.13) 失敗（40 分鐘前）；日誌：{root}/_diag")
+        sandboxed, = mon.runner_rows([listener], now, None, {30: root}.get, {30: "沙箱"}.get)
+        self.assertEqual((sandboxed.state, sandboxed.alert), (mon.IDLE, ""))
         self.assertNotIn("啟動", idle.detail)
 
-    def test_runner_restarts_unsandboxed_and_stopped_are_flagged(self):
+    def test_runner_restarts_unisolated_and_stopped_are_flagged(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
         root = self._runner(("Runner_20261025-100000-utc.log", [
             ("2026-10-25 10:00:05", "Listening for Jobs"), ("2026-10-25 11:00:05", "Listening for Jobs")]))
         listener = mon.Process(30, 1, 30, "30:00", "S", "Actions runner", "Runner.Listener")
-        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
-        self.assertIn("不在沙箱裡", row.detail)
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: ""}.get)
+        self.assertIn("沒有隔離", row.detail)
         self.assertEqual(row.state, mon.ATTENTION)
         self.assertIn("近 24 小時啟動 2 次", row.detail)
-        self.assertEqual(row.alert, "CI runner 不在沙箱裡（可能是手動 ./run.sh）：CI 工作沒有隔離")
+        self.assertEqual(row.alert, "CI runner 用你的帳號在跑（可能是手動 ./run.sh）：CI 工作沒有隔離")
         os.makedirs(os.path.join(root, "isolation"))
         Path(root, "isolation", "job-started.sh").write_text("")
-        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: ""}.get)
         self.assertTrue(row.alert.endswith("每個 CI 工作都會被拒"))
         row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: None}.get)
-        self.assertIn("無法確認是否在沙箱裡", row.detail)
+        self.assertIn("無法確認是否隔離", row.detail)
         self.assertEqual(row.state, mon.IDLE)
         self.assertEqual(row.alert, "")
         stopped, = mon.runner_rows([], now, root)
@@ -2527,6 +2529,12 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(os.path, "expanduser", return_value=os.path.dirname(root)):
             row, = mon.runner_rows([], now, root)
         self.assertTrue(row.detail.endswith(f"日誌：~/{os.path.basename(root)}/_diag"))
+        os.chmod(os.path.join(root, "_diag"), 0)   # e.g. the runner account's folder
+        try:
+            row, = mon.runner_rows([], now, root)
+        finally:
+            os.chmod(os.path.join(root, "_diag"), 0o755)
+        self.assertTrue(row.detail.endswith("_diag（這個帳號讀不到）"))
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
