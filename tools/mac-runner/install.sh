@@ -76,7 +76,9 @@ for group in admin staff; do
   dsmemberutil checkmembership -U "$account" -G "$group" | grep -q 'is not a member' ||
     fail "$account is (or may be) a member of $group"
 done
-install -d -m 0700 -o "$account" -g "$account" "$home"
+# admin (the Owner) may enter, so the Owner and the monitor can read the
+# runner's logs (_diag); _work, _tmp and the credential stay ghrunner-only.
+install -d -m 0750 -o "$account" -g admin "$home"
 
 # 2. The Owner's home: no access for other accounts (macOS default 750).
 chmod o-rwx "$owner_home"

@@ -15,7 +15,7 @@ cannot be nested to treat jobs differently from the runner.
 
 | Part | What it does |
 | --- | --- |
-| `ghrunner` account | Own group (not `staff`, not `admin`), hidden, no shell, no password. |
+| `ghrunner` account | Own group (not `staff`, not `admin`), hidden, no shell, no password. Its home is 0750 with group `admin`, so the Owner can read the runner's logs; `_work`, `_tmp` and the credential stay ghrunner-only. |
 | Owner's home | `chmod o-rwx` (the macOS default 750), so other accounts cannot read it. |
 | `/Users/ghrunner/actions-runner` | Copy of the configured runner. Owned by root; `ghrunner` owns only `_work`, `_tmp`, `_diag` (group `admin`, so the Owner reads logs) and its own credential. |
 | `isolation/probe.sh` | Fails unless it runs as an account other than the Owner, outside `admin`/`staff`, that cannot read the Owner's home or write the runner folder, and whose packets to the LAN gateway are dropped (the pf block is in place). |
