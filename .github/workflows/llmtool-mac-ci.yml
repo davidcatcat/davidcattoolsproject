@@ -73,6 +73,35 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
+      # Only an exact PR base-to-head change confined to monitor files may
+      # omit the unrelated llmtool suite. A rename lists both old and new
+      # paths; empty, unknown, failed, and non-PR comparisons use full checks.
+      - name: Coverage mode
+        id: coverage
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mode=full
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            paths="$RUNNER_TEMP/changed-paths"
+            if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
+              count=0
+              mode=monitor-only
+              while IFS= read -r -d '' path; do
+                count=$((count + 1))
+                case "$path" in
+                  scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py) ;;
+                  *) mode=full ;;
+                esac
+              done < "$paths"
+              if [ "$count" -eq 0 ]; then
+                mode=full
+              fi
+            fi
+          fi
+          printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+          echo "coverage mode: $mode"
       # Use the Mac's Python 3.13 in a job-owned venv with a copied executable.
       # The trusted-runtime check refuses a group/other-writable interpreter;
       # the copy is checked byte-for-byte without changing the shared Python.
@@ -180,6 +209,7 @@ jobs:
           print('Verifier checks: 12/12 PASS; no skips')
           PY
       - name: Offline canonical checks
+        if: steps.coverage.outputs.mode != 'monitor-only'
         run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
       - name: Monitor script checks
         run: |
